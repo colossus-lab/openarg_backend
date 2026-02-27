@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import json
+import logging
+
+import httpx
+
+from app.domain.ports.source.data_source import CatalogEntry, DownloadedData, IDataSource
+
+logger = logging.getLogger(__name__)
+
+
+class DatosGobArAdapter(IDataSource):
+    def __init__(self, base_url: str = "https://datos.gob.ar/api/3/action") -> None:
+        self._base_url = base_url
+        self._client = httpx.AsyncClient(timeout=60.0)
+
+    @property
+    def portal_name(self) -> str:
+        return "datos_gob_ar"
+
+    async def fetch_catalog(
+        self, limit: int = 100, offset: int = 0
+    ) -> list[CatalogEntry]:
+        url = f"{self._base_url}/package_search"
+        params = {"rows": limit, "start": offset}
+
+        response = await self._client.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+
+        entries = []
+        for pkg in data.get("result", {}).get("results", []):
+            resources = pkg.get("resources", [])
+            for resource in resources:
+                fmt = resource.get("format", "").lower()
+                if fmt not in ("csv", "json", "xlsx", "xls"):
+                    continue
+
+                columns = []
+                if resource.get("attributesDescription"):
+                    try:
+                        attrs = json.loads(resource["attributesDescription"])
+                        columns = list(attrs.keys()) if isinstance(attrs, dict) else []
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                entries.append(
+                    CatalogEntry(
+                        source_id=resource.get("id", ""),
+                        title=pkg.get("title", ""),
+                        description=pkg.get("notes", ""),
+                        organization=pkg.get("organization", {}).get("title", ""),
+                        url=pkg.get("url", f"https://datos.gob.ar/dataset/{pkg.get('name', '')}"),
+                        download_url=resource.get("url", ""),
+                        format=fmt,
+                        tags=[t.get("name", "") for t in pkg.get("tags", [])],
+                        columns=columns,
+                        last_updated=resource.get("last_modified", ""),
+                    )
+                )
+
+        return entries
+
+    async def fetch_catalog_count(self) -> int:
+        url = f"{self._base_url}/package_search"
+        response = await self._client.get(url, params={"rows": 0})
+        response.raise_for_status()
+        data = response.json()
+        return data.get("result", {}).get("count", 0)
+
+    async def download_dataset(self, download_url: str) -> DownloadedData:
+        response = await self._client.get(download_url, follow_redirects=True)
+        response.raise_for_status()
+
+        content_type = response.headers.get("content-type", "")
+        fmt = "csv"
+        if "json" in content_type:
+            fmt = "json"
+        elif "spreadsheet" in content_type or "excel" in content_type:
+            fmt = "xlsx"
+
+        filename = download_url.split("/")[-1] or "dataset"
+
+        return DownloadedData(
+            content=response.content,
+            format=fmt,
+            filename=filename,
+            size_bytes=len(response.content),
+        )

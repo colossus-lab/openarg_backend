@@ -1,0 +1,23 @@
+[postgres]
+USER = "postgres"
+PASSWORD = "postgres"
+DB = "openarg_test"
+HOST = "localhost"
+PORT = 5432
+DRIVER = "psycopg"
+
+[sqla]
+ECHO = false
+POOL_SIZE = 5
+
+[logs]
+LEVEL = "WARNING"
+
+[agents]
+DEFAULT_LLM_PROVIDER = "openai"
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 1536
+
+[scraper]
+DATOS_GOB_AR_BASE_URL = "https://datos.gob.ar/api/3/action"
+CABA_BASE_URL = "https://data.buenosaires.gob.ar/api/3/action"

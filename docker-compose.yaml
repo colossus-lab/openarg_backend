@@ -1,0 +1,134 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: openarg_db
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: >
+      sh -c "alembic -c alembic.ini upgrade head &&
+             uvicorn app.run:make_app --factory --host 0.0.0.0 --port 8080 --loop uvloop"
+    ports:
+      - "8081:8080"
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_CACHE_URL=redis://redis:6379/2
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- WORKERS (Multi-Agent System) ---
+
+  worker-scraper:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    command: celery -A app.infrastructure.celery.app:celery_app worker -Q scraper -c 2 -n scraper@%h
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-collector:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    command: celery -A app.infrastructure.celery.app:celery_app worker -Q collector -c 4 -n collector@%h
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-embedding:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    command: celery -A app.infrastructure.celery.app:celery_app worker -Q embedding -c 8 -n embedding@%h
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-analyst:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    command: celery -A app.infrastructure.celery.app:celery_app worker -Q analyst -c 2 -n analyst@%h
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  flower:
+    image: mher/flower:2.0.0
+    command: celery --broker=redis://redis:6379/0 flower --port=5555
+    ports:
+      - "5556:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  pg_data:
+  redis_data:

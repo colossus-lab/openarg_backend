@@ -1,0 +1,28 @@
+[postgres]
+DRIVER = "psycopg"
+
+[sqla]
+ECHO = false
+ECHO_POOL = false
+POOL_SIZE = 50
+MAX_OVERFLOW = 25
+
+[logs]
+LEVEL = "WARNING"
+
+[security]
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+[agents]
+DEFAULT_LLM_PROVIDER = "anthropic"
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 1536
+MAX_CONCURRENT_COLLECTORS = 20
+SANDBOX_TIMEOUT_SECONDS = 60
+
+[scraper]
+DATOS_GOB_AR_BASE_URL = "https://datos.gob.ar/api/3/action"
+CABA_BASE_URL = "https://data.buenosaires.gob.ar/api/3/action"
+SCRAPE_INTERVAL_HOURS = 6

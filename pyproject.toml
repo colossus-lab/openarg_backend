@@ -1,0 +1,91 @@
+[project]
+name = "openarg"
+version = "0.1.0"
+description = "Inteligencia sobre Datos Abiertos de Argentina - Multi-Agent Backend"
+requires-python = ">=3.12"
+license = "MIT"
+readme = "README.md"
+
+dependencies = [
+    # Web Framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "uvloop>=0.21.0",
+    "orjson>=3.10.0",
+    "websockets>=14.0",
+
+    # Database
+    "sqlalchemy[asyncio]>=2.0.36",
+    "psycopg[binary]>=3.2.0",
+    "alembic>=1.14.0",
+    "pgvector>=0.2.5",
+
+    # DI
+    "dishka>=1.6.0",
+
+    # Workers
+    "celery[redis]>=5.4.0",
+    "redis>=5.0.0",
+
+    # AI / LLM
+    "openai>=1.60.0",
+    "anthropic>=0.40.0",
+    "tiktoken>=0.8.0",
+
+    # Data Processing
+    "pandas>=2.2.0",
+    "httpx>=0.28.0",
+    "aiofiles>=24.1.0",
+
+    # Config
+    "pydantic>=2.10.0",
+    "tomli>=2.0.0;python_version<'3.11'",
+
+    # Security
+    "bcrypt>=4.3.0",
+    "PyJWT[crypto]>=2.10.0",
+
+    # Rate limiting
+    "slowapi>=0.1.9",
+
+    # Utils
+    "structlog>=24.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pre-commit>=4.0.0",
+]
+test = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.28.0",
+    "factory-boy>=3.3.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

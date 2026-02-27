@@ -1,0 +1,33 @@
+[postgres]
+USER = "openarg"
+PASSWORD = "openarg_dev"
+DB = "openarg_db"
+HOST = "postgres"
+PORT = 5432
+DRIVER = "psycopg"
+
+[sqla]
+ECHO = false
+ECHO_POOL = false
+POOL_SIZE = 30
+MAX_OVERFLOW = 15
+
+[logs]
+LEVEL = "INFO"
+
+[security]
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+[agents]
+DEFAULT_LLM_PROVIDER = "anthropic"
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBEDDING_DIMENSIONS = 1536
+MAX_CONCURRENT_COLLECTORS = 10
+SANDBOX_TIMEOUT_SECONDS = 30
+
+[scraper]
+DATOS_GOB_AR_BASE_URL = "https://datos.gob.ar/api/3/action"
+CABA_BASE_URL = "https://data.buenosaires.gob.ar/api/3/action"
+SCRAPE_INTERVAL_HOURS = 12
