@@ -8,6 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
+from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
+from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
+from app.domain.ports.connectors.georef import IGeorefConnector
+from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
+from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
@@ -16,6 +21,12 @@ from app.domain.ports.source.data_source import IDataSource
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdapter
 from app.infrastructure.adapters.chat.chat_repository_sqla import ChatRepositorySQLA
+from app.infrastructure.adapters.connectors.argentina_datos_adapter import ArgentinaDatosAdapter
+from app.infrastructure.adapters.connectors.ckan_search_adapter import CKANSearchAdapter
+from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
+from app.infrastructure.adapters.connectors.georef_adapter import GeorefAdapter
+from app.infrastructure.adapters.connectors.series_tiempo_adapter import SeriesTiempoAdapter
+from app.infrastructure.adapters.connectors.sesiones_adapter import SesionesAdapter
 from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetRepositorySQLA
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
 from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
@@ -153,6 +164,38 @@ class ChatProvider(Provider):
         return ChatRepositorySQLA(session)
 
 
+class ConnectorProvider(Provider):
+    scope = Scope.APP
+
+    @provide
+    def series_tiempo(self, settings: AppSettings) -> ISeriesTiempoConnector:
+        return SeriesTiempoAdapter(base_url=settings.scraper.SERIES_TIEMPO_BASE_URL)
+
+    @provide
+    def argentina_datos(self, settings: AppSettings) -> IArgentinaDatosConnector:
+        return ArgentinaDatosAdapter(base_url=settings.scraper.ARGENTINA_DATOS_BASE_URL)
+
+    @provide
+    def georef(self, settings: AppSettings) -> IGeorefConnector:
+        return GeorefAdapter(base_url=settings.scraper.GEOREF_BASE_URL)
+
+    @provide
+    def ckan_search(self) -> ICKANSearchConnector:
+        return CKANSearchAdapter()
+
+    @provide
+    def sesiones(self) -> ISesionesConnector:
+        adapter = SesionesAdapter()
+        adapter._ensure_loaded()
+        return adapter
+
+    @provide
+    def ddjj(self) -> DDJJAdapter:
+        adapter = DDJJAdapter()
+        adapter._ensure_loaded()
+        return adapter
+
+
 def get_providers() -> Iterable[Provider]:
     return (
         DatabaseProvider(),
@@ -163,6 +206,7 @@ def get_providers() -> Iterable[Provider]:
         SandboxProvider(),
         UserProvider(),
         ChatProvider(),
+        ConnectorProvider(),
     )
 
 

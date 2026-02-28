@@ -53,6 +53,9 @@ class ScraperSettings(BaseModel):
     DATOS_GOB_AR_BASE_URL: str = "https://datos.gob.ar/api/3/action"
     CABA_BASE_URL: str = "https://data.buenosaires.gob.ar/api/3/action"
     SCRAPE_INTERVAL_HOURS: int = 24
+    SERIES_TIEMPO_BASE_URL: str = "https://apis.datos.gob.ar/series/api"
+    ARGENTINA_DATOS_BASE_URL: str = "https://api.argentinadatos.com/v1"
+    GEOREF_BASE_URL: str = "https://apis.datos.gob.ar/georef/api"
 
 
 class OpenAISecrets(BaseModel):

@@ -193,7 +193,10 @@ async def quick_query(
 
     # Search relevant datasets
     query_embedding = await embedding.embed(body.question)
-    results = await vector_search.search_datasets(query_embedding, limit=5)
+    all_results = await vector_search.search_datasets(query_embedding, limit=5)
+
+    # Apply minimum score threshold
+    results = [r for r in all_results if r.score >= 0.30]
 
     if not results:
         result = {"answer": "No encontré datasets relevantes para tu pregunta.", "sources": []}
@@ -251,19 +254,20 @@ async def quick_query(
     has_real_data = bool(sample_data)
 
     system_prompt = (
-        "Sos un analista de datos públicos de Argentina. "
-        "Respondé basándote en los datos disponibles. Respondé en español.\n"
+        "Sos OpenArg, un analista de datos públicos de Argentina entrenado por ColossusLab.tech. "
+        "Respondé de forma breve y conversacional en español argentino. "
+        "Máximo 4-5 oraciones. Destacá el dato más importante primero.\n"
     )
     if has_real_data:
         system_prompt += (
             "Tenés acceso a datos REALES de los datasets (filas de muestra). "
             "Usá esos datos para dar respuestas concretas con números y hechos. "
-            "Si los datos de muestra no son suficientes, mencionalo."
+            "Terminá sugiriendo 2-3 preguntas de seguimiento concretas."
         )
     else:
         system_prompt += (
             "Solo tenés metadata de los datasets (no los datos reales). "
-            "Describí qué información contienen y cómo podrían responder la pregunta."
+            "Describí qué información contienen y sugerí consultas más específicas."
         )
 
     response = await llm.chat(
