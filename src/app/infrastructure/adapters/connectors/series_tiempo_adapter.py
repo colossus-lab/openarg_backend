@@ -8,6 +8,7 @@ import httpx
 
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
+from app.infrastructure.resilience.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -138,29 +139,61 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
 
     async def search(self, query: str, limit: int = 10) -> list[dict]:
         try:
-            resp = await self._client.get(
-                f"{self._base_url}/search",
-                params={"q": query, "limit": limit},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if not data.get("data"):
-                return []
-            return [
-                {
-                    "id": item["field"]["id"],
-                    "title": item["field"].get("title") or item["field"].get("description", ""),
-                    "description": item["field"].get("description", ""),
-                    "units": item["field"].get("units", ""),
-                    "frequency": item["field"].get("frequency", ""),
-                    "dataset_title": item["dataset"].get("title", ""),
-                    "source": item["dataset"].get("source", ""),
-                }
-                for item in data["data"]
-            ]
+            return await self._search_internal(query, limit)
         except Exception:
             logger.warning("Series de Tiempo search failed", exc_info=True)
             return []
+
+    @with_retry(max_retries=2, base_delay=1.0, service_name="series_tiempo")
+    async def _search_internal(self, query: str, limit: int) -> list[dict]:
+        resp = await self._client.get(
+            f"{self._base_url}/search",
+            params={"q": query, "limit": limit},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("data"):
+            return []
+        return [
+            {
+                "id": item["field"]["id"],
+                "title": item["field"].get("title") or item["field"].get("description", ""),
+                "description": item["field"].get("description", ""),
+                "units": item["field"].get("units", ""),
+                "frequency": item["field"].get("frequency", ""),
+                "dataset_title": item["dataset"].get("title", ""),
+                "source": item["dataset"].get("source", ""),
+            }
+            for item in data["data"]
+        ]
+
+    @with_retry(max_retries=2, base_delay=1.0, service_name="series_tiempo")
+    async def _fetch_internal(
+        self,
+        series_ids: list[str],
+        start_date: str | None,
+        end_date: str | None,
+        collapse: str | None,
+        representation: str | None,
+        limit: int,
+    ) -> dict:
+        params: dict[str, str] = {
+            "ids": ",".join(series_ids),
+            "format": "json",
+            "limit": str(limit),
+        }
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        if representation:
+            params["representation_mode"] = representation
+        if collapse:
+            params["collapse"] = collapse
+
+        resp = await self._client.get(f"{self._base_url}/series", params=params)
+        resp.raise_for_status()
+        return resp.json()
 
     async def fetch(
         self,
@@ -172,25 +205,11 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
         limit: int = 1000,
     ) -> DataResult | None:
         try:
-            params: dict[str, str] = {
-                "ids": ",".join(series_ids),
-                "format": "json",
-                "limit": str(limit),
-            }
-            if start_date:
-                params["start_date"] = start_date
-            if end_date:
-                params["end_date"] = end_date
-            if representation:
-                params["representation_mode"] = representation
-            if collapse:
-                params["collapse"] = collapse
+            result = await self._fetch_internal(
+                series_ids, start_date, end_date, collapse, representation, limit
+            )
 
-            resp = await self._client.get(f"{self._base_url}/series", params=params)
-            resp.raise_for_status()
-            result = resp.json()
-
-            if not result.get("data"):
+            if not result or not result.get("data"):
                 return None
 
             meta = result.get("meta", [])

@@ -10,6 +10,7 @@ import httpx
 
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
+from app.infrastructure.resilience.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,7 @@ class CKANSearchAdapter(ICKANSearchConnector):
                 all_results.extend(result)
         return all_results
 
+    @with_retry(max_retries=2, base_delay=1.0, service_name="ckan")
     async def _search_portal(self, portal: dict, query: str, rows: int) -> list[dict]:
         url = f"{portal['base_url']}{portal['api_path']}/package_search"
         resp = await self._client.get(url, params={"q": query, "rows": rows})
@@ -204,6 +206,7 @@ class CKANSearchAdapter(ICKANSearchConnector):
             },
         )
 
+    @with_retry(max_retries=2, base_delay=1.0, service_name="ckan")
     async def _query_datastore_internal(
         self, portal: dict, resource_id: str, q: str | None = None, limit: int = 100
     ) -> list[dict]:

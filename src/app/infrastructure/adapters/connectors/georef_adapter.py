@@ -9,6 +9,7 @@ import httpx
 
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.connectors.georef import IGeorefConnector
+from app.infrastructure.resilience.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +22,22 @@ class GeorefAdapter(IGeorefConnector):
             headers={"User-Agent": "OpenArg/1.0"},
         )
 
+    @with_retry(max_retries=2, base_delay=1.0, service_name="georef")
+    async def _get_entities_internal(
+        self, entity_type: str, params: dict[str, str]
+    ) -> list[dict]:
+        resp = await self._client.get(
+            f"{self._base_url}/{entity_type}", params=params
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get(entity_type, [])
+
     async def _get_entities(
         self, entity_type: str, params: dict[str, str]
     ) -> list[dict]:
         try:
-            resp = await self._client.get(
-                f"{self._base_url}/{entity_type}", params=params
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get(entity_type, [])
+            return await self._get_entities_internal(entity_type, params)
         except Exception:
             logger.warning("Georef %s request failed", entity_type, exc_info=True)
             return []

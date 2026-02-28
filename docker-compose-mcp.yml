@@ -1,0 +1,105 @@
+services:
+  mcp-series-tiempo:
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+      args:
+        MCP_SERVER: series_tiempo_mcp
+        MCP_PORT: "8091"
+    container_name: openarg_mcp_series_tiempo
+    ports:
+      - "8091:8091"
+    environment:
+      - PYTHONPATH=/app/src
+      - MCP_PORT=8091
+      - SERIES_TIEMPO_BASE_URL=https://apis.datos.gob.ar/series/api
+    restart: unless-stopped
+    networks:
+      - openarg_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  mcp-ckan:
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+      args:
+        MCP_SERVER: ckan_mcp
+        MCP_PORT: "8092"
+    container_name: openarg_mcp_ckan
+    ports:
+      - "8092:8092"
+    environment:
+      - PYTHONPATH=/app/src
+      - MCP_PORT=8092
+    restart: unless-stopped
+    networks:
+      - openarg_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  mcp-argentina-datos:
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+      args:
+        MCP_SERVER: argentina_datos_mcp
+        MCP_PORT: "8093"
+    container_name: openarg_mcp_argentina_datos
+    ports:
+      - "8093:8093"
+    environment:
+      - PYTHONPATH=/app/src
+      - MCP_PORT=8093
+      - ARGENTINA_DATOS_BASE_URL=https://api.argentinadatos.com/v1
+    restart: unless-stopped
+    networks:
+      - openarg_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  mcp-sesiones:
+    build:
+      context: .
+      dockerfile: docker/mcp.Dockerfile
+      args:
+        MCP_SERVER: sesiones_mcp
+        MCP_PORT: "8094"
+    container_name: openarg_mcp_sesiones
+    ports:
+      - "8094:8094"
+    environment:
+      - PYTHONPATH=/app/src
+      - MCP_PORT=8094
+      - SESIONES_CHUNKS_DIR=/app/src/app/data/chunks
+    volumes:
+      - ./src/app/data/chunks:/app/src/app/data/chunks:ro
+    restart: unless-stopped
+    networks:
+      - openarg_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8094/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+networks:
+  openarg_network:
+    # Connect to the main docker-compose network so the API can reach MCP servers.
+    # Run: docker compose -f docker-compose.yaml -f docker-compose-mcp.yml up -d
+    # Or use COMPOSE_FILE env var.
+    name: openarg_backend_default
+    external: true

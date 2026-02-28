@@ -1,0 +1,156 @@
+name: Build & Push Docker Images
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - development
+  workflow_dispatch:
+    inputs:
+      build_all:
+        description: 'Build all services (yes/no)'
+        required: false
+        default: 'yes'
+
+env:
+  REGISTRY: ghcr.io
+  REGISTRY_USERNAME: ${{ github.actor }}
+  IMAGE_VERSION: ${{ github.ref_name }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          # Core Services
+          - service: api
+            dockerfile: docker/api.Dockerfile
+            image_name: openarg-backend-api
+
+          - service: worker-scraper
+            dockerfile: docker/worker-scraper.Dockerfile
+            image_name: openarg-backend-worker-scraper
+
+          - service: worker-collector
+            dockerfile: docker/worker-collector.Dockerfile
+            image_name: openarg-backend-worker-collector
+
+          - service: worker-embedding
+            dockerfile: docker/worker-embedding.Dockerfile
+            image_name: openarg-backend-worker-embedding
+
+          - service: worker-analyst
+            dockerfile: docker/worker-analyst.Dockerfile
+            image_name: openarg-backend-worker-analyst
+
+          - service: beat
+            dockerfile: docker/beat.Dockerfile
+            image_name: openarg-backend-beat
+
+          # MCP Servers (4)
+          - service: mcp-series-tiempo
+            dockerfile: docker/mcp.Dockerfile
+            image_name: openarg-backend-mcp-series-tiempo
+            build_args: MCP_SERVER=series_tiempo_mcp
+
+          - service: mcp-ckan
+            dockerfile: docker/mcp.Dockerfile
+            image_name: openarg-backend-mcp-ckan
+            build_args: MCP_SERVER=ckan_mcp
+
+          - service: mcp-argentina-datos
+            dockerfile: docker/mcp.Dockerfile
+            image_name: openarg-backend-mcp-argentina-datos
+            build_args: MCP_SERVER=argentina_datos_mcp
+
+          - service: mcp-sesiones
+            dockerfile: docker/mcp.Dockerfile
+            image_name: openarg-backend-mcp-sesiones
+            build_args: MCP_SERVER=sesiones_mcp
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          sudo apt-get clean || true
+          docker system prune -af --volumes || true
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push - ${{ matrix.service }}
+        timeout-minutes: 30
+        run: |
+          echo "Building ${{ matrix.service }}..."
+
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_BASE="${{ env.REGISTRY }}/${OWNER_LOWER}/${{ matrix.image_name }}"
+          SAFE_REF=$(echo "${{ github.ref_name }}" | tr '/:@' '-' | tr -cd '[:alnum:]_.-')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          PRIMARY_TAG="${IMAGE_BASE}:${SAFE_REF}"
+          TAGS="${PRIMARY_TAG} ${IMAGE_BASE}:sha-${SHORT_SHA}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS} ${IMAGE_BASE}:latest"
+          fi
+
+          docker build \
+            --no-cache \
+            --file ${{ matrix.dockerfile }} \
+            --build-arg APP_ENV=${{ env.IMAGE_VERSION }} \
+            ${{ matrix.build_args && format('--build-arg {0}', matrix.build_args) || '' }} \
+            --tag "$PRIMARY_TAG" \
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            --label org.opencontainers.image.service=${{ matrix.service }} \
+            .
+
+          for tag in $TAGS; do
+            if [ "$tag" != "$PRIMARY_TAG" ]; then
+              docker tag "$PRIMARY_TAG" "$tag"
+            fi
+          done
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            for tag in $TAGS; do
+              docker push "$tag"
+            done
+          fi
+
+          docker rmi $(docker images -q) 2>/dev/null || true
+          docker builder prune -af 2>/dev/null || true
+
+  build-summary:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Build Summary
+        run: |
+          echo "Build Summary"
+          echo "============="
+          echo "Status: ${{ needs.build.result }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo ""
+          echo "Built Services:"
+          echo "  - API"
+          echo "  - 4 Celery Workers (scraper, collector, embedding, analyst)"
+          echo "  - Celery Beat"
+          echo "  - 4 MCP Servers (series_tiempo, ckan, argentina_datos, sesiones)"
+          echo ""
+          echo "Total: 10 Docker images"

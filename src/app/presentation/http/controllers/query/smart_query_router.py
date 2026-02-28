@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -35,7 +35,9 @@ from app.infrastructure.adapters.connectors.query_planner import (
     ANALYSIS_SYSTEM_PROMPT,
     generate_plan,
 )
+from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
+from app.infrastructure.monitoring.metrics import MetricsCollector
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
 
 logger = logging.getLogger(__name__)
@@ -381,6 +383,7 @@ async def smart_query(
     ckan: FromDishka[ICKANSearchConnector],
     sesiones: FromDishka[ISesionesConnector],
     ddjj: FromDishka[DDJJAdapter],
+    semantic_cache: FromDishka[SemanticCache],
     session: FromDishka[MainAsyncSession],
 ) -> dict:
     """
@@ -390,11 +393,23 @@ async def smart_query(
     start_time = time.monotonic()
     cache_key = _cache_key(body.question)
 
-    # 1. Check cache (non-critical)
+    metrics = MetricsCollector()
+
+    # 1. Check cache — semantic cache first, then Redis hash
+    try:
+        sem_cached = await semantic_cache.get(body.question)
+        if sem_cached:
+            metrics.record_cache_hit()
+            return {**sem_cached, "cached": True}
+    except Exception:
+        logger.debug("Semantic cache read failed")
+
     try:
         cached = await cache.get(cache_key)
         if cached and isinstance(cached, dict):
+            metrics.record_cache_hit()
             return {**cached, "cached": True}
+        metrics.record_cache_miss()
     except Exception:
         logger.debug("Cache read failed, proceeding without cache")
 
@@ -415,6 +430,8 @@ async def smart_query(
     # 4. Execute — dispatch each step to the appropriate connector (max 5 steps)
     results: list[DataResult] = []
     for step in plan.steps[:5]:
+        step_start = time.monotonic()
+        connector_name = step.action
         try:
             if step.action == "query_series":
                 data = await _execute_series_step(series, step)
@@ -429,13 +446,16 @@ async def smart_query(
             elif step.action == "query_sesiones":
                 data = await _execute_sesiones_step(sesiones, step)
             elif step.action in ("analyze", "compare", "synthesize"):
-                # These are LLM-level actions handled in the analysis phase, not data steps
                 continue
             else:
                 logger.info("Unknown step action '%s', skipping", step.action)
                 continue
+            step_ms = round((time.monotonic() - step_start) * 1000, 1)
+            metrics.record_connector_call(connector_name, step_ms)
             results.extend(data)
         except Exception:
+            step_ms = round((time.monotonic() - step_start) * 1000, 1)
+            metrics.record_connector_call(connector_name, step_ms, error=True)
             logger.warning("Step %s failed", step.id, exc_info=True)
 
     # 5. Complement with pgvector if no results or generic search
@@ -510,11 +530,14 @@ async def smart_query(
         if r.records  # Only include sources with actual data
     ]
 
+    tokens_used = response.tokens_used or 0
+    metrics.record_tokens_used(tokens_used)
+
     result = {
         "answer": clean_answer,
         "sources": sources,
         "chart_data": charts if charts else None,
-        "tokens_used": response.tokens_used or 0,
+        "tokens_used": tokens_used,
     }
 
     # 8. Update memory (non-blocking, don't fail request)
@@ -557,4 +580,186 @@ async def smart_query(
     except Exception:
         logger.warning("Failed to cache smart query result", exc_info=True)
 
+    # 11. Save to semantic cache (non-critical)
+    try:
+        q_embedding = await embedding.embed(body.question)
+        await semantic_cache.set(body.question, q_embedding, result)
+    except Exception:
+        logger.debug("Semantic cache write failed", exc_info=True)
+
     return result
+
+
+# ── WebSocket streaming endpoint ──────────────────────────────
+
+
+@router.websocket("/ws/smart")
+@inject
+async def ws_smart_query(
+    ws: WebSocket,
+    llm: FromDishka[ILLMProvider],
+    embedding: FromDishka[IEmbeddingProvider],
+    vector_search: FromDishka[IVectorSearch],
+    cache: FromDishka[ICacheService],
+    series: FromDishka[ISeriesTiempoConnector],
+    arg_datos: FromDishka[IArgentinaDatosConnector],
+    georef: FromDishka[IGeorefConnector],
+    ckan: FromDishka[ICKANSearchConnector],
+    sesiones: FromDishka[ISesionesConnector],
+    ddjj: FromDishka[DDJJAdapter],
+) -> None:
+    await ws.accept()
+
+    try:
+        raw = await ws.receive_json()
+        question = raw.get("question", "")
+        conversation_id = raw.get("conversation_id", "")
+
+        if not question:
+            await ws.send_json({"type": "error", "message": "question is required"})
+            await ws.close()
+            return
+
+        # 1. Planning
+        await ws.send_json({"type": "status", "step": "planning"})
+
+        session_id = conversation_id or ""
+        memory = await load_memory(cache, session_id)
+        plan = await generate_plan(llm, question, memory_context=build_memory_context_prompt(memory))
+
+        await ws.send_json({
+            "type": "status",
+            "step": "planned",
+            "intent": plan.intent,
+            "steps_count": len(plan.steps),
+        })
+
+        # 2. Execute steps
+        results: list[DataResult] = []
+        connectors_map = {
+            "query_series": ("series_tiempo", lambda s: _execute_series_step(series, s)),
+            "query_argentina_datos": ("argentina_datos", lambda s: _execute_argentina_datos_step(arg_datos, s)),
+            "query_georef": ("georef", lambda s: _execute_georef_step(georef, s)),
+            "search_ckan": ("ckan", lambda s: _execute_ckan_step(ckan, s)),
+            "query_sesiones": ("sesiones", lambda s: _execute_sesiones_step(sesiones, s)),
+        }
+
+        for step in plan.steps[:5]:
+            if step.action in ("analyze", "compare", "synthesize"):
+                continue
+
+            if step.action == "query_ddjj":
+                await ws.send_json({"type": "status", "step": "executing", "connector": "ddjj"})
+                try:
+                    data = _execute_ddjj_step(ddjj, step)
+                    results.extend(data)
+                except Exception:
+                    logger.warning("WS step ddjj failed", exc_info=True)
+                continue
+
+            entry = connectors_map.get(step.action)
+            if not entry:
+                continue
+
+            connector_name, executor = entry
+            await ws.send_json({"type": "status", "step": "executing", "connector": connector_name})
+            try:
+                data = await executor(step)
+                results.extend(data)
+            except Exception:
+                logger.warning("WS step %s failed", step.action, exc_info=True)
+
+        # 3. Pgvector complement
+        if not results or plan.intent == "busqueda_general":
+            try:
+                query_embedding = await embedding.embed(question)
+                vector_results = await vector_search.search_datasets(query_embedding, limit=5)
+                for vr in vector_results:
+                    if vr.score < 0.30:
+                        continue
+                    results.append(
+                        DataResult(
+                            source=f"pgvector:{vr.portal}",
+                            portal_name=vr.portal,
+                            portal_url="",
+                            dataset_title=vr.title,
+                            format="json",
+                            records=[],
+                            metadata={
+                                "total_records": 0,
+                                "description": vr.description,
+                                "columns": vr.columns,
+                                "score": round(vr.score, 3),
+                            },
+                        )
+                    )
+            except Exception:
+                pass
+
+        # 4. Streaming analysis
+        await ws.send_json({"type": "status", "step": "analyzing"})
+
+        data_context = _build_data_context(results)
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        memory_ctx = build_memory_context_prompt(memory)
+
+        analysis_prompt = (
+            f'PREGUNTA DEL USUARIO: "{plan.query}"\n'
+            f"FECHA ACTUAL: {today}\n"
+            f"INTENCIÓN: {plan.intent}\n\n"
+            f"DATOS RECOLECTADOS:\n{data_context}\n"
+            f"{memory_ctx}\n"
+            "Respondé de forma breve y conversacional. Destacá el dato más importante, "
+            "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
+            "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+        )
+
+        full_text = ""
+        async for chunk in llm.chat_stream(
+            messages=[
+                LLMMessage(role="system", content=ANALYSIS_SYSTEM_PROMPT),
+                LLMMessage(role="user", content=analysis_prompt),
+            ],
+            temperature=0.7,
+            max_tokens=8192,
+        ):
+            full_text += chunk
+            await ws.send_json({"type": "chunk", "content": chunk})
+
+        # 5. Send complete message
+        det_charts = _build_deterministic_charts(results)
+        llm_charts = _extract_llm_charts(full_text)
+        charts = det_charts if det_charts else llm_charts
+        clean_answer = re.sub(r"<!--CHART:.*?-->", "", full_text, flags=re.DOTALL).strip()
+
+        sources = [
+            {
+                "name": r.dataset_title,
+                "url": r.portal_url,
+                "portal": r.portal_name,
+                "accessed_at": r.metadata.get("fetched_at", ""),
+            }
+            for r in results
+            if r.records
+        ]
+
+        await ws.send_json({
+            "type": "complete",
+            "answer": clean_answer,
+            "sources": sources,
+            "chart_data": charts if charts else None,
+        })
+
+    except WebSocketDisconnect:
+        logger.debug("WebSocket client disconnected")
+    except Exception:
+        logger.exception("WebSocket error")
+        try:
+            await ws.send_json({"type": "error", "message": "Internal error"})
+        except Exception:
+            pass
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass

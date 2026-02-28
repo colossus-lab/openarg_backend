@@ -1,0 +1,186 @@
+name: Test Suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for manual run"
+        required: false
+  push:
+    branches: [ main, staging, development ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'alembic.ini'
+      - 'config/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, staging, development ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'alembic.ini'
+      - 'config/**'
+      - '.github/workflows/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    name: Unit Tests
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: openarg_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: |
+        uv pip install -e '.[dev,test]' --system
+
+    - name: Run linting
+      continue-on-error: true
+      run: |
+        ruff check src/ tests/ --fix
+        ruff format src/ tests/ --check
+
+    - name: Run unit tests
+      env:
+        APP_ENV: test
+        DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/openarg_test
+        CELERY_BROKER_URL: redis://localhost:6379/0
+        CELERY_RESULT_BACKEND: redis://localhost:6379/1
+        REDIS_CACHE_URL: redis://localhost:6379/2
+      run: |
+        pytest tests/unit/ -v --maxfail=5 --tb=short
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    name: Integration Tests
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: openarg_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: |
+        uv pip install -e '.[dev,test]' --system
+
+    - name: Run integration tests
+      env:
+        APP_ENV: test
+        DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/openarg_test
+        CELERY_BROKER_URL: redis://localhost:6379/0
+        CELERY_RESULT_BACKEND: redis://localhost:6379/1
+        REDIS_CACHE_URL: redis://localhost:6379/2
+        MCP_SERIES_TIEMPO_URL: http://localhost:8091
+        MCP_CKAN_URL: http://localhost:8092
+        MCP_ARGENTINA_DATOS_URL: http://localhost:8093
+        MCP_SESIONES_URL: http://localhost:8094
+      run: |
+        pytest tests/integration/ -v --maxfail=5 --tb=short
+
+  type-check:
+    runs-on: ubuntu-latest
+    name: Type Checking
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: |
+        uv pip install -e '.[dev,test]' --system
+
+    - name: Run mypy
+      continue-on-error: true
+      run: |
+        mypy src/ --ignore-missing-imports
