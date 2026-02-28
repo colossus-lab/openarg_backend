@@ -55,6 +55,6 @@ class TestAnthropicSecrets:
 class TestAppSettings:
     def test_default_values(self):
         s = AppSettings()
-        assert s.agents.DEFAULT_LLM_PROVIDER == "anthropic"
+        assert s.agents.DEFAULT_LLM_PROVIDER == "gemini"
         assert s.agents.EMBEDDING_DIMENSIONS == 1536
         assert s.scraper.DATOS_GOB_AR_BASE_URL == "https://datos.gob.ar/api/3/action"

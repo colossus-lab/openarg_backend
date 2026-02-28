@@ -18,7 +18,7 @@ def app():
 
 @pytest.fixture
 async def client(app):
-    transport = ASGITransport(app=app)
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
@@ -30,8 +30,6 @@ class TestHealthEndpoint:
         assert response.json()["status"] == "ready"
 
     async def test_health_returns_json(self, client):
-        """Health endpoint should return JSON even if components fail (no DI in test)."""
+        """Health endpoint returns 500 without DI container, which is expected in test."""
         response = await client.get("/health")
-        # Without DI container, this will either return 200 with component data
-        # or 500 due to missing DI - both are valid in test context
         assert response.status_code in (200, 500)
