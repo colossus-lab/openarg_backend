@@ -25,6 +25,7 @@ def create_celery() -> Celery:
     app.conf.task_routes = {
         "openarg.scrape_catalog": {"queue": "scraper"},
         "openarg.index_dataset": {"queue": "embedding"},
+        "openarg.index_sesiones": {"queue": "embedding"},
         "openarg.collect_data": {"queue": "collector"},
         "openarg.analyze_query": {"queue": "analyst"},
     }
@@ -63,3 +64,7 @@ def _initial_scrape(sender, **kwargs):
     from app.infrastructure.celery.tasks.scraper_tasks import scrape_catalog
     scrape_catalog.delay("datos_gob_ar")
     scrape_catalog.delay("caba")
+
+    # Index congressional session chunks in pgvector (idempotent — skips if already indexed)
+    from app.infrastructure.celery.tasks.embedding_tasks import index_sesiones_chunks
+    index_sesiones_chunks.delay()

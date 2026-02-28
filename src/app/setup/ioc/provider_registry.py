@@ -184,13 +184,14 @@ class ConnectorProvider(Provider):
         return CKANSearchAdapter()
 
     @provide
-    def sesiones(self, settings: AppSettings) -> ISesionesConnector:
+    def sesiones(
+        self,
+        settings: AppSettings,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> ISesionesConnector:
         adapter = SesionesAdapter(
-            gemini_api_key=settings.gemini.API_KEY,
-            firebase_project_id=settings.firebase.PROJECT_ID,
-            firebase_database_id=settings.firebase.DATABASE_ID,
-            firebase_client_email=settings.firebase.CLIENT_EMAIL,
-            firebase_private_key=settings.firebase.PRIVATE_KEY,
+            session_factory=session_factory,
+            openai_api_key=settings.openai.API_KEY,
         )
         adapter._ensure_loaded()
         return adapter

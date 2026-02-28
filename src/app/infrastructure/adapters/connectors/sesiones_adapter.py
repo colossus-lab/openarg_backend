@@ -6,6 +6,9 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 
@@ -15,146 +18,98 @@ _CHUNKS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "chunks"
 
 
 class SesionesAdapter(ISesionesConnector):
-    """Congressional session search with Firestore vector search (primary) + local keyword fallback."""
+    """Congressional session search with pgvector (primary) + local keyword fallback."""
 
     def __init__(
         self,
-        gemini_api_key: str = "",
-        firebase_project_id: str = "",
-        firebase_database_id: str = "(default)",
-        firebase_client_email: str = "",
-        firebase_private_key: str = "",
+        session_factory: async_sessionmaker[AsyncSession],
+        openai_api_key: str = "",
     ) -> None:
+        self._session_factory = session_factory
+        self._openai_api_key = openai_api_key
         self._chunks: list[dict] = []
         self._loaded = False
-        self._gemini_api_key = gemini_api_key
-        self._firebase_project_id = firebase_project_id
-        self._firebase_database_id = firebase_database_id
-        self._firebase_client_email = firebase_client_email
-        self._firebase_private_key = firebase_private_key
-        self._firestore_db = None
-        self._firestore_initialized = False
 
-    @property
-    def _firestore_available(self) -> bool:
-        return bool(
-            self._firebase_project_id
-            and self._firebase_client_email
-            and self._firebase_private_key
-            and self._gemini_api_key
-        )
-
-    def _get_firestore_db(self):  # noqa: ANN202
-        """Lazy-init Firestore client (singleton)."""
-        if self._firestore_initialized:
-            return self._firestore_db
-        self._firestore_initialized = True
-
-        if not self._firestore_available:
+    async def _generate_embedding(self, text_input: str) -> list[float] | None:
+        """Generate query embedding using OpenAI text-embedding-3-small."""
+        if not self._openai_api_key:
             return None
-
         try:
-            import firebase_admin
-            from firebase_admin import credentials, firestore
+            import openai
 
-            # Check if already initialized
-            try:
-                app = firebase_admin.get_app("openarg_sesiones")
-            except ValueError:
-                cred = credentials.Certificate({
-                    "type": "service_account",
-                    "project_id": self._firebase_project_id,
-                    "client_email": self._firebase_client_email,
-                    "private_key": self._firebase_private_key,
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                })
-                app = firebase_admin.initialize_app(cred, name="openarg_sesiones")
-
-            self._firestore_db = firestore.client(app, database_id=self._firebase_database_id)
-            logger.info("Firestore initialized for sesiones (project=%s)", self._firebase_project_id)
-            return self._firestore_db
-        except Exception:
-            logger.warning("Failed to initialize Firestore for sesiones", exc_info=True)
-            return None
-
-    async def _generate_embedding(self, text: str) -> list[float] | None:
-        """Generate query embedding using Gemini embedding model."""
-        try:
-            import google.generativeai as genai
-
-            genai.configure(api_key=self._gemini_api_key)
-            result = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=text[:2000],
+            client = openai.OpenAI(api_key=self._openai_api_key)
+            resp = client.embeddings.create(
+                input=[text_input[:2000]],
+                model="text-embedding-3-small",
+                dimensions=1536,
             )
-            # Truncate to 2048 dims to match stored Firestore vectors
-            return result["embedding"][:2048]
+            return resp.data[0].embedding
         except Exception:
-            logger.warning("Failed to generate Gemini embedding for sesiones", exc_info=True)
+            logger.warning("Failed to generate OpenAI embedding for sesiones", exc_info=True)
             return None
 
-    async def _search_firestore(
+    async def _search_pgvector(
         self,
         query: str,
         periodo: int | None = None,
         orador: str | None = None,
         limit: int = 15,
     ) -> list[dict] | None:
-        """Search Firestore using vector similarity (cosine)."""
-        db = self._get_firestore_db()
-        if not db:
-            return None
-
+        """Search sesion_chunks using pgvector cosine similarity."""
         embedding = await self._generate_embedding(query)
         if not embedding:
             return None
 
         try:
-            from google.cloud.firestore_v1.vector import Vector
-            from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
+            embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
-            collection = db.collection("sesiones_chunks")
-
-            # Apply periodo pre-filter if specified
-            base_query = collection
+            periodo_clause = ""
+            params: dict = {"embedding": embedding_str, "limit": limit}
             if periodo is not None:
-                base_query = base_query.where("periodo", "==", periodo)
+                periodo_clause = "AND periodo = :periodo"
+                params["periodo"] = periodo
 
-            vector_query = base_query.find_nearest(
-                vector_field="embedding",
-                query_vector=Vector(embedding),
-                distance_measure=DistanceMeasure.COSINE,
-                limit=limit,
-            )
+            sql = text(f"""
+                SELECT
+                    periodo, reunion, fecha, tipo_sesion, pdf_url,
+                    total_pages, speaker, content,
+                    1 - (embedding <=> CAST(:embedding AS vector)) AS score
+                FROM sesion_chunks
+                WHERE 1=1 {periodo_clause}
+                ORDER BY embedding <=> CAST(:embedding AS vector)
+                LIMIT :limit
+            """)
 
-            docs = vector_query.get()
+            async with self._session_factory() as session:
+                result = await session.execute(sql, params)
+                rows = result.fetchall()
 
-            chunks = []
-            for doc in docs:
-                data = doc.to_dict()
-                chunks.append({
-                    "periodo": data.get("periodo"),
-                    "reunion": data.get("reunion"),
-                    "fecha": data.get("fecha", ""),
-                    "tipoSesion": data.get("tipoSesion", ""),
-                    "pdfUrl": data.get("pdfUrl", ""),
-                    "totalPages": data.get("totalPages", 0),
-                    "speaker": data.get("speaker"),
-                    "text": data.get("text", ""),
-                })
-
-            if not chunks:
+            if not rows:
                 return None
 
-            # Post-filter by orador
+            chunks = []
+            for row in rows:
+                chunks.append({
+                    "periodo": row.periodo,
+                    "reunion": row.reunion,
+                    "fecha": row.fecha or "",
+                    "tipoSesion": row.tipo_sesion or "",
+                    "pdfUrl": row.pdf_url or "",
+                    "totalPages": row.total_pages or 0,
+                    "speaker": row.speaker,
+                    "text": row.content or "",
+                    "score": float(row.score),
+                })
+
+            # Post-filter by orador if specified
             if orador:
                 orador_lower = orador.lower()
                 chunks = [c for c in chunks if c.get("speaker") and orador_lower in c["speaker"].lower()]
 
-            logger.info("Firestore sesiones returned %d results for '%s'", len(chunks), query[:60])
+            logger.info("pgvector sesiones returned %d results for '%s'", len(chunks), query[:60])
             return chunks if chunks else None
         except Exception:
-            logger.warning("Firestore sesiones search failed", exc_info=True)
+            logger.warning("pgvector sesiones search failed", exc_info=True)
             return None
 
     def _ensure_loaded(self) -> None:
@@ -248,7 +203,7 @@ class SesionesAdapter(ISesionesConnector):
 
         return DataResult(
             source="sesiones:diputados",
-            portal_name="Diario de Sesiones — Cámara de Diputados",
+            portal_name="Diario de Sesiones \u2014 C\u00e1mara de Diputados",
             portal_url="https://www.diputados.gov.ar/sesiones/",
             dataset_title=f'Transcripciones parlamentarias: "{query}"',
             format="json",
@@ -258,7 +213,7 @@ class SesionesAdapter(ISesionesConnector):
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "description": (
                     f"Se encontraron {len(records)} fragmentos relevantes en "
-                    f"{len(unique_sessions)} sesión(es), con intervenciones de "
+                    f"{len(unique_sessions)} sesi\u00f3n(es), con intervenciones de "
                     f"{len(unique_speakers)} orador(es)."
                 ),
             },
@@ -271,12 +226,11 @@ class SesionesAdapter(ISesionesConnector):
         orador: str | None = None,
         limit: int = 15,
     ) -> DataResult | None:
-        # Try Firestore vector search first
-        if self._firestore_available:
-            chunks = await self._search_firestore(query, periodo, orador, limit)
-            if chunks:
-                return self._chunks_to_data_result(query, chunks)
-            logger.info("Firestore returned no results, falling back to local search")
+        # Try pgvector search first
+        chunks = await self._search_pgvector(query, periodo, orador, limit)
+        if chunks:
+            return self._chunks_to_data_result(query, chunks)
+        logger.info("pgvector returned no results, falling back to local keyword search")
 
         # Fallback to local keyword search
         chunks = self._search_local(query, periodo, orador, limit)
