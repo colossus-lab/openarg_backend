@@ -184,8 +184,16 @@ services:
     restart: always
     networks:
       - openarg_network
+    env_file:
+      - .env
     environment:
       OPENARG_BACKEND_URL: http://backend:8080
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS}
     depends_on:
       - backend
 
