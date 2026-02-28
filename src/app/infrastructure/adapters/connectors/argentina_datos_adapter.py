@@ -7,6 +7,7 @@ import httpx
 
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
+from app.infrastructure.resilience.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,15 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
             headers={"User-Agent": "OpenArg/1.0"},
         )
 
+    @with_retry(max_retries=2, base_delay=1.0, service_name="argentina_datos")
+    async def _get_json_internal(self, path: str) -> list | dict:
+        resp = await self._client.get(f"{self._base_url}{path}")
+        resp.raise_for_status()
+        return resp.json()
+
     async def _get_json(self, path: str) -> list | dict | None:
         try:
-            resp = await self._client.get(f"{self._base_url}{path}")
-            resp.raise_for_status()
-            return resp.json()
+            return await self._get_json_internal(path)
         except Exception:
             logger.warning("ArgentinaDatos request failed: %s", path, exc_info=True)
             return None

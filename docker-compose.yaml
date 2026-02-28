@@ -44,6 +44,11 @@ services:
       - REDIS_CACHE_URL=redis://redis:6379/2
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # MCP server URLs (standalone containers from docker-compose-mcp.yml)
+      - MCP_SERIES_TIEMPO_URL=http://mcp-series-tiempo:8091
+      - MCP_CKAN_URL=http://mcp-ckan:8092
+      - MCP_ARGENTINA_DATOS_URL=http://mcp-argentina-datos:8093
+      - MCP_SESIONES_URL=http://mcp-sesiones:8094
     depends_on:
       postgres:
         condition: service_healthy

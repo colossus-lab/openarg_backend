@@ -23,7 +23,10 @@ from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdap
 from app.infrastructure.adapters.chat.chat_repository_sqla import ChatRepositorySQLA
 from app.infrastructure.adapters.connectors.argentina_datos_adapter import ArgentinaDatosAdapter
 from app.infrastructure.adapters.connectors.ckan_search_adapter import CKANSearchAdapter
+from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
+from app.infrastructure.mcp.mcp_client import MCPClient
+from app.infrastructure.monitoring.health import HealthCheckService
 from app.infrastructure.adapters.connectors.georef_adapter import GeorefAdapter
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import SeriesTiempoAdapter
 from app.infrastructure.adapters.connectors.sesiones_adapter import SesionesAdapter
@@ -164,6 +167,47 @@ class ChatProvider(Provider):
         return ChatRepositorySQLA(session)
 
 
+class MCPProvider(Provider):
+    scope = Scope.APP
+
+    @provide
+    def mcp_client(self, settings: AppSettings) -> MCPClient:
+        servers = {
+            "series_tiempo": os.getenv("MCP_SERIES_TIEMPO_URL", "http://localhost:8091"),
+            "ckan": os.getenv("MCP_CKAN_URL", "http://localhost:8092"),
+            "argentina_datos": os.getenv("MCP_ARGENTINA_DATOS_URL", "http://localhost:8093"),
+            "sesiones": os.getenv("MCP_SESIONES_URL", "http://localhost:8094"),
+        }
+        return MCPClient(servers=servers, timeout=30.0)
+
+
+class SemanticCacheProvider(Provider):
+    scope = Scope.APP
+
+    @provide
+    def semantic_cache(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> SemanticCache:
+        return SemanticCache(session_factory=session_factory)
+
+
+class MonitoringProvider(Provider):
+    scope = Scope.APP
+
+    @provide
+    def health_check_service(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        ddjj: DDJJAdapter,
+    ) -> HealthCheckService:
+        redis_url = os.getenv("REDIS_CACHE_URL", "redis://localhost:6379/2")
+        return HealthCheckService(
+            session_factory=session_factory,
+            redis_url=redis_url,
+            ddjj=ddjj,
+        )
+
+
 class ConnectorProvider(Provider):
     scope = Scope.APP
 
@@ -214,6 +258,9 @@ def get_providers() -> Iterable[Provider]:
         UserProvider(),
         ChatProvider(),
         ConnectorProvider(),
+        MCPProvider(),
+        SemanticCacheProvider(),
+        MonitoringProvider(),
     )
 
 

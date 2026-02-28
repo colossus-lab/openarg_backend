@@ -11,6 +11,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from app.infrastructure.monitoring.middleware import MetricsMiddleware
 from app.infrastructure.persistence_sqla.mappings.all import map_tables
 from app.presentation.http.errors.handlers import register_exception_handlers
 
@@ -50,6 +51,8 @@ def configure_app(
 ) -> None:
     app.include_router(root_router)
     register_exception_handlers(app)
+
+    app.add_middleware(MetricsMiddleware)
 
     allow_origins = ["*"] if environment in ("local", "dev") else []
     app.add_middleware(

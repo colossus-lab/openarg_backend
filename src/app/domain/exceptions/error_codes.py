@@ -109,3 +109,61 @@ class ErrorCode(Enum):
         default_message="Failed to generate embedding for search",
         http_status=500,
     )
+
+    # CONNECTOR errors (CN_001 - CN_099)
+    CN_SERIES_UNAVAILABLE = ErrorDefinition(
+        code="CN_001",
+        i18n_key="errors.connector.series_unavailable",
+        default_message="Series de Tiempo API is unavailable",
+        http_status=502,
+    )
+    CN_CKAN_UNAVAILABLE = ErrorDefinition(
+        code="CN_002",
+        i18n_key="errors.connector.ckan_unavailable",
+        default_message="CKAN portal is unavailable",
+        http_status=502,
+    )
+    CN_ARGENTINA_DATOS_UNAVAILABLE = ErrorDefinition(
+        code="CN_003",
+        i18n_key="errors.connector.argentina_datos_unavailable",
+        default_message="ArgentinaDatos API is unavailable",
+        http_status=502,
+    )
+    CN_GEOREF_UNAVAILABLE = ErrorDefinition(
+        code="CN_004",
+        i18n_key="errors.connector.georef_unavailable",
+        default_message="Georef API is unavailable",
+        http_status=502,
+    )
+    CN_SESIONES_NO_RESULTS = ErrorDefinition(
+        code="CN_005",
+        i18n_key="errors.connector.sesiones_no_results",
+        default_message="No congressional session results found",
+        http_status=404,
+    )
+    CN_DDJJ_NO_MATCH = ErrorDefinition(
+        code="CN_006",
+        i18n_key="errors.connector.ddjj_no_match",
+        default_message="No matching DDJJ declarations found",
+        http_status=404,
+    )
+    CN_ALL_CONNECTORS_FAILED = ErrorDefinition(
+        code="CN_007",
+        i18n_key="errors.connector.all_failed",
+        default_message="All data connectors failed",
+        http_status=502,
+    )
+    CN_CIRCUIT_OPEN = ErrorDefinition(
+        code="CN_008",
+        i18n_key="errors.connector.circuit_open",
+        default_message="Circuit breaker is open for this connector",
+        http_status=503,
+    )
+
+    # QUERY PLAN errors
+    QR_PLAN_FAILED = ErrorDefinition(
+        code="QR_004",
+        i18n_key="errors.query.plan_failed",
+        default_message="Query planning failed",
+        http_status=500,
+    )
