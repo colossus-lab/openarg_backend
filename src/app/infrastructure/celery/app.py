@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from celery import Celery
+from celery.schedules import crontab
 
 
 def create_celery() -> Celery:
@@ -36,16 +37,16 @@ def create_celery() -> Celery:
     app.conf.accept_content = ["json"]
     app.conf.timezone = "America/Argentina/Buenos_Aires"
 
-    # Celery Beat — periodic catalog scraping
+    # Celery Beat — periodic catalog scraping (daily at 03:00 ART)
     app.conf.beat_schedule = {
         "scrape-datos-gob-ar": {
             "task": "openarg.scrape_catalog",
-            "schedule": 86400,  # every 24 hours
+            "schedule": crontab(hour=3, minute=0),
             "args": ["datos_gob_ar"],
         },
         "scrape-caba": {
             "task": "openarg.scrape_catalog",
-            "schedule": 86400,
+            "schedule": crontab(hour=3, minute=30),
             "args": ["caba"],
         },
     }
@@ -54,3 +55,11 @@ def create_celery() -> Celery:
 
 
 celery_app = create_celery()
+
+
+@celery_app.on_after_finalize.connect
+def _initial_scrape(sender, **kwargs):
+    """Dispatch initial scrape on first startup."""
+    from app.infrastructure.celery.tasks.scraper_tasks import scrape_catalog
+    scrape_catalog.delay("datos_gob_ar")
+    scrape_catalog.delay("caba")
