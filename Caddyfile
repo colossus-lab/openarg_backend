@@ -1,0 +1,30 @@
+# Frontend - openarg.com.ar
+openarg.parlamentia.xyz {
+	encode gzip zstd
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	reverse_proxy frontend:3000
+}
+
+# Backend API - api.openarg.com.ar
+api.openarg.parlamentia.xyz {
+	encode gzip zstd
+
+	header {
+		Access-Control-Allow-Origin https://openarg.parlamentia.xyz
+		Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+		Access-Control-Allow-Headers "Authorization, Content-Type"
+		Access-Control-Max-Age 86400
+		X-Content-Type-Options nosniff
+	}
+
+	@options method OPTIONS
+	respond @options 204
+
+	reverse_proxy backend:8080
+}

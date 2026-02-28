@@ -1,0 +1,219 @@
+name: openarg-prod
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: openarg_postgres
+    restart: always
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - openarg_network
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-openarg_db}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-openarg_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: openarg_redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    networks:
+      - openarg_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Backend API ─────────────────────────────────────────────────
+  backend:
+    image: ghcr.io/lucholeonel/openarg/api:latest
+    container_name: openarg_backend
+    restart: always
+    command: >
+      sh -c "alembic -c alembic.ini upgrade head &&
+             uvicorn app.run:make_app --factory --host 0.0.0.0 --port 8080 --loop uvloop --workers 2"
+    networks:
+      - openarg_network
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openarg_db}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      REDIS_CACHE_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery Workers ──────────────────────────────────────────────
+  worker-scraper:
+    image: ghcr.io/lucholeonel/openarg/worker-scraper:latest
+    container_name: openarg_worker_scraper
+    restart: always
+    networks:
+      - openarg_network
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openarg_db}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-collector:
+    image: ghcr.io/lucholeonel/openarg/worker-collector:latest
+    container_name: openarg_worker_collector
+    restart: always
+    networks:
+      - openarg_network
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openarg_db}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-embedding:
+    image: ghcr.io/lucholeonel/openarg/worker-embedding:latest
+    container_name: openarg_worker_embedding
+    restart: always
+    networks:
+      - openarg_network
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openarg_db}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-analyst:
+    image: ghcr.io/lucholeonel/openarg/worker-analyst:latest
+    container_name: openarg_worker_analyst
+    restart: always
+    networks:
+      - openarg_network
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openarg_db}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery Beat (periodic tasks) ────────────────────────────────
+  beat:
+    image: ghcr.io/lucholeonel/openarg/beat:latest
+    container_name: openarg_beat
+    restart: always
+    networks:
+      - openarg_network
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-openarg_db}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Frontend ────────────────────────────────────────────────────
+  frontend:
+    image: ghcr.io/lucholeonel/openarg/frontend:latest
+    container_name: openarg_frontend
+    restart: always
+    networks:
+      - openarg_network
+    environment:
+      OPENARG_BACKEND_URL: http://backend:8080
+    depends_on:
+      - backend
+
+  # ── Caddy (reverse proxy + auto HTTPS) ─────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: openarg_caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    networks:
+      - openarg_network
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  pg_data:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  openarg_network:
+    driver: bridge
