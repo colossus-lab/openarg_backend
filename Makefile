@@ -1,4 +1,4 @@
-.PHONY: help install dev db.up db.migrate db.revision api workers beat flower docker.up docker.down mcp.up mcp.down mcp.logs docker.all code.format code.lint code.test code.check
+.PHONY: help install dev db.up db.migrate db.revision api workers beat flower docker.up docker.down docker.prod code.format code.lint code.test code.check
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -39,24 +39,14 @@ beat: ## Run Celery Beat scheduler
 flower: ## Run Flower monitoring
 	celery --broker=redis://localhost:6379/0 flower --port=5555
 
-docker.up: ## Start core services (API + workers)
+docker.up: ## Start all services (API + workers + MCP servers)
 	docker compose up --build
 
-docker.down: ## Stop core services
+docker.down: ## Stop all services
 	docker compose down
 
-mcp.up: ## Start MCP servers (standalone containers)
-	docker compose -f docker-compose-mcp.yml up --build -d
-
-mcp.down: ## Stop MCP servers
-	docker compose -f docker-compose-mcp.yml down
-
-mcp.logs: ## Tail MCP server logs
-	docker compose -f docker-compose-mcp.yml logs -f
-
-docker.all: ## Start everything (core + MCP servers)
-	docker compose up --build -d
-	docker compose -f docker-compose-mcp.yml up --build -d
+docker.prod: ## Start production stack
+	docker compose -f docker-compose.prod.yml up -d
 
 code.format: ## Format code with ruff
 	ruff format src/ tests/

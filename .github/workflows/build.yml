@@ -27,53 +27,53 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 3
       matrix:
         include:
           # Core Services
           - service: api
             dockerfile: docker/api.Dockerfile
-            image_name: openarg-backend-api
+            image_name: openarg/api
 
           - service: worker-scraper
             dockerfile: docker/worker-scraper.Dockerfile
-            image_name: openarg-backend-worker-scraper
+            image_name: openarg/worker-scraper
 
           - service: worker-collector
             dockerfile: docker/worker-collector.Dockerfile
-            image_name: openarg-backend-worker-collector
+            image_name: openarg/worker-collector
 
           - service: worker-embedding
             dockerfile: docker/worker-embedding.Dockerfile
-            image_name: openarg-backend-worker-embedding
+            image_name: openarg/worker-embedding
 
           - service: worker-analyst
             dockerfile: docker/worker-analyst.Dockerfile
-            image_name: openarg-backend-worker-analyst
+            image_name: openarg/worker-analyst
 
           - service: beat
             dockerfile: docker/beat.Dockerfile
-            image_name: openarg-backend-beat
+            image_name: openarg/beat
 
           # MCP Servers (4)
           - service: mcp-series-tiempo
             dockerfile: docker/mcp.Dockerfile
-            image_name: openarg-backend-mcp-series-tiempo
+            image_name: openarg/mcp-series-tiempo
             build_args: MCP_SERVER=series_tiempo_mcp
 
           - service: mcp-ckan
             dockerfile: docker/mcp.Dockerfile
-            image_name: openarg-backend-mcp-ckan
+            image_name: openarg/mcp-ckan
             build_args: MCP_SERVER=ckan_mcp
 
           - service: mcp-argentina-datos
             dockerfile: docker/mcp.Dockerfile
-            image_name: openarg-backend-mcp-argentina-datos
+            image_name: openarg/mcp-argentina-datos
             build_args: MCP_SERVER=argentina_datos_mcp
 
           - service: mcp-sesiones
             dockerfile: docker/mcp.Dockerfile
-            image_name: openarg-backend-mcp-sesiones
+            image_name: openarg/mcp-sesiones
             build_args: MCP_SERVER=sesiones_mcp
 
     steps:
