@@ -7,12 +7,15 @@ from dishka import Provider, Scope, make_async_container, provide
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.domain.ports.source.data_source import IDataSource
+from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdapter
+from app.infrastructure.adapters.chat.chat_repository_sqla import ChatRepositorySQLA
 from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetRepositorySQLA
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
 from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
@@ -22,6 +25,7 @@ from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdap
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
 from app.infrastructure.adapters.source.datos_gob_ar_adapter import DatosGobArAdapter
+from app.infrastructure.adapters.user.user_repository_sqla import UserRepositorySQLA
 from app.infrastructure.persistence_sqla.config import PostgresDsn, SqlaEngineConfig
 from app.infrastructure.persistence_sqla.provider import (
     MainAsyncSession,
@@ -133,6 +137,22 @@ class SandboxProvider(Provider):
         return PgSandboxAdapter()
 
 
+class UserProvider(Provider):
+    scope = Scope.REQUEST
+
+    @provide
+    def user_repository(self, session: MainAsyncSession) -> IUserRepository:
+        return UserRepositorySQLA(session)
+
+
+class ChatProvider(Provider):
+    scope = Scope.REQUEST
+
+    @provide
+    def chat_repository(self, session: MainAsyncSession) -> IChatRepository:
+        return ChatRepositorySQLA(session)
+
+
 def get_providers() -> Iterable[Provider]:
     return (
         DatabaseProvider(),
@@ -141,6 +161,8 @@ def get_providers() -> Iterable[Provider]:
         DataSourceProvider(),
         CacheProvider(),
         SandboxProvider(),
+        UserProvider(),
+        ChatProvider(),
     )
 
 

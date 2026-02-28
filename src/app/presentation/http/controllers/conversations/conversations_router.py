@@ -1,134 +1,227 @@
 from __future__ import annotations
 
-import json
+from uuid import UUID
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import text
 
-from app.infrastructure.persistence_sqla.provider import MainAsyncSession
+from app.domain.entities.chat.conversation import Conversation
+from app.domain.entities.chat.message import Message
+from app.domain.ports.chat.chat_repository import IChatRepository
+from app.domain.ports.user.user_repository import IUserRepository
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
+# ---- Schemas ----
+
+class ConversationCreate(BaseModel):
+    user_email: str
+    title: str = ""
+
+
 class ConversationSummary(BaseModel):
     id: str
-    question: str
-    status: str
+    title: str
     created_at: str
-    preview: str | None
+    updated_at: str
+
+
+class MessageCreate(BaseModel):
+    role: str
+    content: str
+    sources: list[dict] | None = None
+
+
+class MessageResponse(BaseModel):
+    id: str
+    conversation_id: str
+    role: str
+    content: str
+    sources: list[dict]
+    created_at: str
 
 
 class ConversationDetail(BaseModel):
     id: str
-    question: str
-    status: str
-    analysis_result: str | None
-    sources: list[dict] | None
-    tokens_used: int
-    duration_ms: int
+    title: str
     created_at: str
+    updated_at: str
+    messages: list[MessageResponse]
 
+
+class TitleUpdate(BaseModel):
+    title: str
+
+
+# ---- Endpoints ----
 
 @router.get("/", response_model=list[ConversationSummary])
 @inject
 async def list_conversations(
-    session: FromDishka[MainAsyncSession],
-    user_id: str | None = None,
+    user_repo: FromDishka[IUserRepository],
+    chat_repo: FromDishka[IChatRepository],
+    user_email: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> list[ConversationSummary]:
-    """List past conversations for a user, ordered by created_at DESC."""
-    query = """
-        SELECT CAST(id AS text) AS id, question, status,
-               LEFT(analysis_result, 100) AS preview,
-               CAST(created_at AS text) AS created_at
-        FROM user_queries
-    """
-    params: dict = {"limit": limit, "offset": offset}
+    """List conversations for a user by email."""
+    if not user_email:
+        return []
 
-    if user_id:
-        query += " WHERE user_id = :user_id"
-        params["user_id"] = user_id
+    user = await user_repo.get_by_email(user_email)
+    if not user:
+        return []
 
-    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
-
-    result = await session.execute(text(query), params)
-    rows = result.fetchall()
-
+    conversations = await chat_repo.list_conversations(user.id, limit, offset)
     return [
         ConversationSummary(
-            id=row.id,
-            question=row.question,
-            status=row.status,
-            created_at=row.created_at,
-            preview=row.preview,
+            id=str(c.id),
+            title=c.title,
+            created_at=c.created_at.isoformat(),
+            updated_at=c.updated_at.isoformat(),
         )
-        for row in rows
+        for c in conversations
     ]
+
+
+@router.post("/", response_model=ConversationDetail)
+@inject
+async def create_conversation(
+    body: ConversationCreate,
+    user_repo: FromDishka[IUserRepository],
+    chat_repo: FromDishka[IChatRepository],
+) -> ConversationDetail:
+    """Create a new conversation."""
+    user = await user_repo.get_by_email(body.user_email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found. Sync user first.")
+
+    conversation = Conversation(user_id=user.id, title=body.title)
+    saved = await chat_repo.create_conversation(conversation)
+
+    return ConversationDetail(
+        id=str(saved.id),
+        title=saved.title,
+        created_at=saved.created_at.isoformat(),
+        updated_at=saved.updated_at.isoformat(),
+        messages=[],
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 @inject
 async def get_conversation(
-    conversation_id: str,
-    session: FromDishka[MainAsyncSession],
+    conversation_id: UUID,
+    chat_repo: FromDishka[IChatRepository],
 ) -> ConversationDetail:
-    """Get full conversation detail with analysis_result, sources, tokens_used."""
-    result = await session.execute(
-        text("""
-            SELECT CAST(id AS text) AS id, question, status, analysis_result,
-                   sources_json, tokens_used, duration_ms,
-                   CAST(created_at AS text) AS created_at
-            FROM user_queries
-            WHERE id = CAST(:id AS uuid)
-        """),
-        {"id": conversation_id},
-    )
-    row = result.fetchone()
-
-    if not row:
+    """Get a conversation with all its messages."""
+    conv = await chat_repo.get_conversation(conversation_id)
+    if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    sources = None
-    if row.sources_json:
-        try:
-            sources = json.loads(row.sources_json)
-        except json.JSONDecodeError:
-            pass
+    messages = await chat_repo.get_messages(conversation_id)
 
     return ConversationDetail(
-        id=row.id,
-        question=row.question,
-        status=row.status,
-        analysis_result=row.analysis_result,
-        sources=sources,
-        tokens_used=row.tokens_used or 0,
-        duration_ms=row.duration_ms or 0,
-        created_at=row.created_at,
+        id=str(conv.id),
+        title=conv.title,
+        created_at=conv.created_at.isoformat(),
+        updated_at=conv.updated_at.isoformat(),
+        messages=[
+            MessageResponse(
+                id=str(m.id),
+                conversation_id=str(m.conversation_id),
+                role=m.role,
+                content=m.content,
+                sources=m.sources or [],
+                created_at=m.created_at.isoformat(),
+            )
+            for m in messages
+        ],
     )
 
 
 @router.delete("/{conversation_id}")
 @inject
 async def delete_conversation(
-    conversation_id: str,
-    session: FromDishka[MainAsyncSession],
+    conversation_id: UUID,
+    chat_repo: FromDishka[IChatRepository],
 ) -> dict:
-    """Delete a conversation."""
-    result = await session.execute(
-        text("""
-            DELETE FROM user_queries
-            WHERE id = CAST(:id AS uuid)
-            RETURNING CAST(id AS text) AS id
-        """),
-        {"id": conversation_id},
-    )
-    row = result.fetchone()
-    await session.commit()
+    """Delete a conversation and all its messages (CASCADE)."""
+    deleted = await chat_repo.delete_conversation(conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"status": "deleted", "id": str(conversation_id)}
 
-    if not row:
+
+@router.patch("/{conversation_id}", response_model=ConversationSummary)
+@inject
+async def update_conversation_title(
+    conversation_id: UUID,
+    body: TitleUpdate,
+    chat_repo: FromDishka[IChatRepository],
+) -> ConversationSummary:
+    """Update conversation title."""
+    conv = await chat_repo.update_conversation_title(conversation_id, body.title)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return ConversationSummary(
+        id=str(conv.id),
+        title=conv.title,
+        created_at=conv.created_at.isoformat(),
+        updated_at=conv.updated_at.isoformat(),
+    )
+
+
+@router.post("/{conversation_id}/messages", response_model=MessageResponse)
+@inject
+async def add_message(
+    conversation_id: UUID,
+    body: MessageCreate,
+    chat_repo: FromDishka[IChatRepository],
+) -> MessageResponse:
+    """Add a message to a conversation."""
+    conv = await chat_repo.get_conversation(conversation_id)
+    if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    return {"status": "deleted", "id": row.id}
+    message = Message(
+        conversation_id=conversation_id,
+        role=body.role,
+        content=body.content,
+        sources=body.sources or [],
+    )
+    saved = await chat_repo.add_message(message)
+
+    return MessageResponse(
+        id=str(saved.id),
+        conversation_id=str(saved.conversation_id),
+        role=saved.role,
+        content=saved.content,
+        sources=saved.sources or [],
+        created_at=saved.created_at.isoformat(),
+    )
+
+
+@router.get("/{conversation_id}/messages", response_model=list[MessageResponse])
+@inject
+async def get_messages(
+    conversation_id: UUID,
+    chat_repo: FromDishka[IChatRepository],
+    limit: int = 100,
+    offset: int = 0,
+) -> list[MessageResponse]:
+    """Get messages for a conversation."""
+    messages = await chat_repo.get_messages(conversation_id, limit, offset)
+    return [
+        MessageResponse(
+            id=str(m.id),
+            conversation_id=str(m.conversation_id),
+            role=m.role,
+            content=m.content,
+            sources=m.sources or [],
+            created_at=m.created_at.isoformat(),
+        )
+        for m in messages
+    ]

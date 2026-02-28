@@ -17,6 +17,9 @@ from app.presentation.http.controllers.query.query_router import (
 from app.presentation.http.controllers.sandbox.sandbox_router import (
     router as sandbox_router,
 )
+from app.presentation.http.controllers.users.users_router import (
+    router as users_router,
+)
 
 
 def create_root_router() -> APIRouter:
@@ -31,6 +34,7 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(datasets_router)
     api_v1.include_router(sandbox_router)
     api_v1.include_router(conversations_router)
+    api_v1.include_router(users_router)
 
     root.include_router(api_v1)
 
