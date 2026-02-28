@@ -55,8 +55,7 @@ services:
   worker-scraper:
     build:
       context: .
-      dockerfile: docker/worker.Dockerfile
-    command: celery -A app.infrastructure.celery.app:celery_app worker -Q scraper -c 2 -n scraper@%h
+      dockerfile: docker/worker-scraper.Dockerfile
     environment:
       - APP_ENV=local
       - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
@@ -72,8 +71,7 @@ services:
   worker-collector:
     build:
       context: .
-      dockerfile: docker/worker.Dockerfile
-    command: celery -A app.infrastructure.celery.app:celery_app worker -Q collector -c 4 -n collector@%h
+      dockerfile: docker/worker-collector.Dockerfile
     environment:
       - APP_ENV=local
       - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
@@ -88,8 +86,7 @@ services:
   worker-embedding:
     build:
       context: .
-      dockerfile: docker/worker.Dockerfile
-    command: celery -A app.infrastructure.celery.app:celery_app worker -Q embedding -c 8 -n embedding@%h
+      dockerfile: docker/worker-embedding.Dockerfile
     environment:
       - APP_ENV=local
       - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
@@ -105,8 +102,7 @@ services:
   worker-analyst:
     build:
       context: .
-      dockerfile: docker/worker.Dockerfile
-    command: celery -A app.infrastructure.celery.app:celery_app worker -Q analyst -c 2 -n analyst@%h
+      dockerfile: docker/worker-analyst.Dockerfile
     environment:
       - APP_ENV=local
       - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db

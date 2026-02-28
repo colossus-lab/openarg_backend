@@ -2,7 +2,10 @@ name: Build & Push
 
 env:
   IMAGE_API: ghcr.io/lucholeonel/openarg/api
-  IMAGE_WORKER: ghcr.io/lucholeonel/openarg/worker
+  IMAGE_WORKER_SCRAPER: ghcr.io/lucholeonel/openarg/worker-scraper
+  IMAGE_WORKER_COLLECTOR: ghcr.io/lucholeonel/openarg/worker-collector
+  IMAGE_WORKER_EMBEDDING: ghcr.io/lucholeonel/openarg/worker-embedding
+  IMAGE_WORKER_ANALYST: ghcr.io/lucholeonel/openarg/worker-analyst
   IMAGE_VERSION: latest
 
 on:
@@ -37,7 +40,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  build_worker:
+  build_worker_scraper:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -54,12 +57,93 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build and Push Worker image
+      - name: Build and Push worker-scraper image
         uses: docker/build-push-action@v5
         with:
           context: ./
-          file: ./docker/worker.Dockerfile
+          file: ./docker/worker-scraper.Dockerfile
           push: true
-          tags: ${{ env.IMAGE_WORKER }}:${{ env.IMAGE_VERSION }}
+          tags: ${{ env.IMAGE_WORKER_SCRAPER }}:${{ env.IMAGE_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build_worker_collector:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push worker-collector image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./
+          file: ./docker/worker-collector.Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_WORKER_COLLECTOR }}:${{ env.IMAGE_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build_worker_embedding:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push worker-embedding image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./
+          file: ./docker/worker-embedding.Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_WORKER_EMBEDDING }}:${{ env.IMAGE_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build_worker_analyst:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push worker-analyst image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./
+          file: ./docker/worker-analyst.Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_WORKER_ANALYST }}:${{ env.IMAGE_VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
