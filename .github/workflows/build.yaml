@@ -3,13 +3,14 @@ env:
   IMAGE_TAG_API: ghcr.io/${{ github.repository_owner }}/openarg/api
   IMAGE_TAG_WORKER: ghcr.io/${{ github.repository_owner }}/openarg/worker
 
-  IMAGE_VERSION: ${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+  IMAGE_VERSION: latest
 
 on:
   push:
     branches:
       - main
-      - develop
+      - master
+      - dataset_cache
 
 jobs:
   build_api:
