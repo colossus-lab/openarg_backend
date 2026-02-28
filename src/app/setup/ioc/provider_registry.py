@@ -15,6 +15,7 @@ from app.domain.ports.source.data_source import IDataSource
 from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdapter
 from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetRepositorySQLA
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
+from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
 from app.infrastructure.adapters.llm.openai_adapter import OpenAILLMAdapter
 from app.infrastructure.adapters.llm.openai_embedding_adapter import OpenAIEmbeddingAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
@@ -88,6 +89,8 @@ class LLMProvider(Provider):
     @provide
     def llm_provider(self, settings: AppSettings) -> ILLMProvider:
         provider = settings.agents.DEFAULT_LLM_PROVIDER
+        if provider == "gemini":
+            return GeminiLLMAdapter(api_key=settings.gemini.API_KEY)
         if provider == "openai":
             return OpenAILLMAdapter(api_key=settings.openai.API_KEY)
         return AnthropicLLMAdapter(api_key=settings.anthropic.API_KEY)

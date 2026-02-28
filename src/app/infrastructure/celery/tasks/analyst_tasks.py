@@ -11,7 +11,7 @@ import logging
 import os
 import time
 
-import openai
+import google.generativeai as genai
 from sqlalchemy import create_engine, text
 
 from app.infrastructure.celery.app import celery_app
@@ -55,7 +55,8 @@ def analyze_query(self, query_id: str, question: str):
     """
     start = time.time()
     engine = _get_sync_engine()
-    api_key = os.getenv("OPENAI_API_KEY", "")
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    openai_key = os.getenv("OPENAI_API_KEY", "")
 
     try:
         # Update query status
@@ -65,21 +66,27 @@ def analyze_query(self, query_id: str, question: str):
                 {"id": query_id},
             )
 
-        llm = openai.OpenAI(api_key=api_key)
-        embedder = openai.OpenAI(api_key=api_key)
+        genai.configure(api_key=gemini_key)
+        planner_model = genai.GenerativeModel(
+            "gemini-2.5-flash",
+            system_instruction=PLANNER_SYSTEM_PROMPT,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=1024,
+                response_mime_type="application/json",
+            ),
+        )
 
         # --- STEP 1: Planner ---
         logger.info(f"[{query_id}] Planning...")
-        plan_response = llm.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-                {"role": "user", "content": question},
-            ],
-            temperature=0.0,
-            max_tokens=1024,
-        )
-        plan_text = plan_response.choices[0].message.content or "{}"
+        plan_response = planner_model.generate_content(question)
+        plan_text = plan_response.text or "{}"
+        plan_tokens = 0
+        if plan_response.usage_metadata:
+            plan_tokens = (
+                plan_response.usage_metadata.prompt_token_count
+                + plan_response.usage_metadata.candidates_token_count
+            )
 
         try:
             plan = json.loads(plan_text)
@@ -94,6 +101,8 @@ def analyze_query(self, query_id: str, question: str):
 
         # --- STEP 2: Vector search for relevant datasets ---
         logger.info(f"[{query_id}] Searching datasets...")
+        import openai
+        embedder = openai.OpenAI(api_key=openai_key)
         embed_resp = embedder.embeddings.create(
             input=question,
             model="text-embedding-3-small",
@@ -206,24 +215,26 @@ def analyze_query(self, query_id: str, question: str):
         # --- STEP 4: Analyst generates answer ---
         logger.info(f"[{query_id}] Analyzing...")
         context_str = "\n---\n".join(data_context)
-        analyst_response = llm.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": ANALYST_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Pregunta: {question}\n\nDatos disponibles:\n{context_str}",
-                },
-            ],
-            temperature=0.1,
-            max_tokens=4096,
+        analyst_model = genai.GenerativeModel(
+            "gemini-2.5-flash",
+            system_instruction=ANALYST_SYSTEM_PROMPT,
         )
-        analysis = analyst_response.choices[0].message.content or ""
-        total_tokens = (
-            (plan_response.usage.total_tokens if plan_response.usage else 0)
-            + (embed_resp.usage.total_tokens if embed_resp.usage else 0)
-            + (analyst_response.usage.total_tokens if analyst_response.usage else 0)
+        analyst_response = analyst_model.generate_content(
+            f"Pregunta: {question}\n\nDatos disponibles:\n{context_str}",
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.1,
+                max_output_tokens=4096,
+            ),
         )
+        analysis = analyst_response.text or ""
+        analyst_tokens = 0
+        if analyst_response.usage_metadata:
+            analyst_tokens = (
+                analyst_response.usage_metadata.prompt_token_count
+                + analyst_response.usage_metadata.candidates_token_count
+            )
+        embed_tokens = embed_resp.usage.total_tokens if embed_resp.usage else 0
+        total_tokens = plan_tokens + embed_tokens + analyst_tokens
 
         duration_ms = int((time.time() - start) * 1000)
 

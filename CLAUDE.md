@@ -9,7 +9,7 @@ Backend service for OpenArg — AI-powered analysis of Argentine government open
 - **ORM:** SQLAlchemy 2.0 (async) + Alembic migrations
 - **DI:** Dishka 1.6 (IoC container)
 - **Workers:** Celery 5.4 + Redis 7 (broker + cache + results)
-- **AI:** OpenAI SDK (GPT-4o, text-embedding-3-small) + Anthropic SDK (Claude Sonnet)
+- **AI:** Google Generative AI (Gemini 2.5 Flash) + OpenAI SDK (text-embedding-3-small for vectors)
 - **HTTP:** HTTPX (async client)
 - **Auth:** PyJWT + bcrypt
 - **Rate Limiting:** SlowAPI
@@ -91,7 +91,7 @@ collect_dataset → collector queue (concurrency 4)
     → downloads file, parses with pandas, caches in PG table
 
 analyze_query → analyst queue (concurrency 2)
-    → 4 steps: plan (GPT-4o-mini) → vector search → gather sample rows → analyze (GPT-4o)
+    → 4 steps: plan (Gemini 2.5 Flash) → vector search → gather sample rows → analyze (Gemini 2.5 Flash)
 ```
 
 ### API Endpoints
@@ -164,6 +164,6 @@ DATABASE_URL=postgresql+psycopg://openarg:openarg@localhost:5435/openarg
 CELERY_BROKER_URL=redis://localhost:6381/0
 CELERY_RESULT_BACKEND=redis://localhost:6381/1
 REDIS_CACHE_URL=redis://localhost:6381/2
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...
+OPENAI_API_KEY=sk-...              # only for embeddings (text-embedding-3-small)
 ```

@@ -42,7 +42,7 @@ class LoggingSettings(BaseModel):
 
 
 class AgentSettings(BaseModel):
-    DEFAULT_LLM_PROVIDER: str = "anthropic"
+    DEFAULT_LLM_PROVIDER: str = "gemini"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSIONS: int = 1536
     MAX_CONCURRENT_COLLECTORS: int = 5
@@ -65,6 +65,16 @@ class OpenAISecrets(BaseModel):
             self.API_KEY = env_key
 
 
+class GeminiSecrets(BaseModel):
+    API_KEY: str = ""
+
+    def model_post_init(self, __context: object) -> None:
+        import os
+        env_key = os.getenv("GEMINI_API_KEY", "")
+        if env_key:
+            self.API_KEY = env_key
+
+
 class AnthropicSecrets(BaseModel):
     API_KEY: str = ""
 
@@ -83,6 +93,7 @@ class AppSettings(BaseModel):
     agents: AgentSettings = AgentSettings()
     scraper: ScraperSettings = ScraperSettings()
     openai: OpenAISecrets = OpenAISecrets()
+    gemini: GeminiSecrets = GeminiSecrets()
     anthropic: AnthropicSecrets = AnthropicSecrets()
 
 
