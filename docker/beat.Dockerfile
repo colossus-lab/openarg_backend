@@ -7,10 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir uv && uv pip install --system -e '.'
-
 COPY src/ src/
 COPY config/ config/
+RUN pip install --no-cache-dir uv && uv pip install --system -e '.'
 
 ENV PYTHONPATH=/app/src
 ENV APP_ENV=local
