@@ -126,7 +126,7 @@ API (8080) ──MCPClient──HTTP──→ mcp-series-tiempo (8091)
 ```
 
 - **Dockerfile:** `docker/mcp.Dockerfile` (parametrized via `ARG MCP_SERVER`)
-- **Compose:** `docker-compose-mcp.yml`
+- **Compose:** included in `docker-compose.yaml` (local) and `docker-compose.prod.yml` (production)
 - Each server extends `MCPServer` (base_server.py) and registers tools with JSON Schema
 - Each has `if __name__ == "__main__"` for `python -m app.infrastructure.mcp.servers.<name>_mcp`
 
@@ -198,12 +198,9 @@ make workers.collector      # Run collector worker
 make workers.embedding      # Run embedding worker
 make workers.analyst        # Run analyst worker
 make flower                 # Celery monitoring UI
-make docker.up              # Full stack (docker-compose)
+make docker.up              # Start all services (API + workers + MCP servers)
 make docker.down            # Stop all services
-make mcp.up                 # Start MCP servers (standalone containers)
-make mcp.down               # Stop MCP servers
-make mcp.logs               # Tail MCP server logs
-make docker.all             # Start everything (API + workers + MCPs)
+make docker.prod            # Start production stack
 make code.format            # Ruff format
 make code.lint              # Ruff check + mypy
 make code.test              # Pytest with coverage
