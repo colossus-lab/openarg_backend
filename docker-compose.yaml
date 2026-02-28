@@ -44,6 +44,10 @@ services:
       - REDIS_CACHE_URL=redis://redis:6379/2
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID:-}
+      - FIREBASE_DATABASE_ID=${FIREBASE_DATABASE_ID:-}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL:-}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

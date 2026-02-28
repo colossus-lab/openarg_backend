@@ -184,8 +184,14 @@ class ConnectorProvider(Provider):
         return CKANSearchAdapter()
 
     @provide
-    def sesiones(self) -> ISesionesConnector:
-        adapter = SesionesAdapter()
+    def sesiones(self, settings: AppSettings) -> ISesionesConnector:
+        adapter = SesionesAdapter(
+            gemini_api_key=settings.gemini.API_KEY,
+            firebase_project_id=settings.firebase.PROJECT_ID,
+            firebase_database_id=settings.firebase.DATABASE_ID,
+            firebase_client_email=settings.firebase.CLIENT_EMAIL,
+            firebase_private_key=settings.firebase.PRIVATE_KEY,
+        )
         adapter._ensure_loaded()
         return adapter
 

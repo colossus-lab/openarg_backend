@@ -159,16 +159,20 @@ DATOS DE DDJJ (Declaraciones Juradas Patrimoniales):
 - Para rankings, usá una lista numerada con nombre y monto"""
 
 
-async def generate_plan(llm: ILLMProvider, question: str) -> ExecutionPlan:
+async def generate_plan(
+    llm: ILLMProvider, question: str, memory_context: str = ""
+) -> ExecutionPlan:
     """Generate an execution plan from a user query using the LLM."""
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
+    user_content = f'FECHA ACTUAL: {today}\n\nPregunta del usuario: "{question}"'
+    if memory_context:
+        user_content += f"\n\n{memory_context}"
+    user_content += "\n\nGenerá el plan de ejecución en JSON."
+
     messages = [
         LLMMessage(role="system", content=PLANNER_SYSTEM_PROMPT),
-        LLMMessage(
-            role="user",
-            content=f'FECHA ACTUAL: {today}\n\nPregunta del usuario: "{question}"\n\nGenerá el plan de ejecución en JSON.',
-        ),
+        LLMMessage(role="user", content=user_content),
     ]
 
     try:
