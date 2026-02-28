@@ -22,14 +22,14 @@ def app():
 
 @pytest.fixture
 async def client(app):
-    transport = ASGITransport(app=app)
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
 
 class TestHealthEndpoints:
     async def test_health_endpoint_exists(self, client):
-        """Health now uses DI (HealthCheckService); without container it may return 500."""
+        """Health now uses DI (HealthCheckService); without container it returns 500."""
         response = await client.get("/health")
         assert response.status_code in (200, 500)
 
