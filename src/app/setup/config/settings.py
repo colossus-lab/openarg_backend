@@ -88,6 +88,25 @@ class AnthropicSecrets(BaseModel):
             self.API_KEY = env_key
 
 
+class FirebaseSettings(BaseModel):
+    PROJECT_ID: str = ""
+    DATABASE_ID: str = "(default)"
+    CLIENT_EMAIL: str = ""
+    PRIVATE_KEY: str = ""
+
+    def model_post_init(self, __context: object) -> None:
+        import os
+
+        self.PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", self.PROJECT_ID)
+        self.DATABASE_ID = os.getenv("FIREBASE_DATABASE_ID", self.DATABASE_ID)
+        self.CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL", self.CLIENT_EMAIL)
+        self.PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY", self.PRIVATE_KEY).replace("\\n", "\n")
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.PROJECT_ID and self.CLIENT_EMAIL and self.PRIVATE_KEY)
+
+
 class AppSettings(BaseModel):
     postgres: PostgresSettings = PostgresSettings()
     sqla: SqlaEngineSettings = SqlaEngineSettings()
@@ -98,6 +117,7 @@ class AppSettings(BaseModel):
     openai: OpenAISecrets = OpenAISecrets()
     gemini: GeminiSecrets = GeminiSecrets()
     anthropic: AnthropicSecrets = AnthropicSecrets()
+    firebase: FirebaseSettings = FirebaseSettings()
 
 
 def load_settings() -> AppSettings:

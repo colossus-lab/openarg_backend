@@ -47,3 +47,14 @@ class ChartData:
     data: list[dict]
     x_key: str
     y_keys: list[str]
+
+
+@dataclass
+class MemoryContext:
+    """Conversational memory maintained across turns."""
+
+    turn_number: int = 0
+    summaries: list[str] = field(default_factory=list)
+    key_findings: list[str] = field(default_factory=list)
+    datasets_used: list[str] = field(default_factory=list)
+    pending_questions: list[str] = field(default_factory=list)

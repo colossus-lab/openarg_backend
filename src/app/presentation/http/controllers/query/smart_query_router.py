@@ -25,6 +25,12 @@ from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
+from app.infrastructure.adapters.connectors.memory_agent import (
+    build_memory_context_prompt,
+    load_memory,
+    save_memory,
+    update_memory,
+)
 from app.infrastructure.adapters.connectors.query_planner import (
     ANALYSIS_SYSTEM_PROMPT,
     generate_plan,
@@ -392,16 +398,21 @@ async def smart_query(
     except Exception:
         logger.debug("Cache read failed, proceeding without cache")
 
-    # 2. Plan — LLM classifies and generates execution plan
-    plan = await generate_plan(llm, body.question)
+    # 2. Load memory context for this session
+    session_id = body.user_email or body.conversation_id or ""
+    memory = await load_memory(cache, session_id)
+
+    # 3. Plan — LLM classifies and generates execution plan
+    plan = await generate_plan(llm, body.question, memory_context=build_memory_context_prompt(memory))
     logger.info(
-        "Plan for '%s': intent=%s, steps=%d",
+        "Plan for '%s': intent=%s, steps=%d, turn=%d",
         body.question[:60],
         plan.intent,
         len(plan.steps),
+        memory.turn_number + 1,
     )
 
-    # 3. Execute — dispatch each step to the appropriate connector (max 5 steps)
+    # 4. Execute — dispatch each step to the appropriate connector (max 5 steps)
     results: list[DataResult] = []
     for step in plan.steps[:5]:
         try:
@@ -427,7 +438,7 @@ async def smart_query(
         except Exception:
             logger.warning("Step %s failed", step.id, exc_info=True)
 
-    # 4. Complement with pgvector if no results or generic search
+    # 5. Complement with pgvector if no results or generic search
     if not results or plan.intent == "busqueda_general":
         try:
             query_embedding = await embedding.embed(body.question)
@@ -454,18 +465,17 @@ async def smart_query(
         except Exception:
             logger.warning("pgvector enrichment failed", exc_info=True)
 
-    # 5. Analyze with LLM
+    # 6. Analyze with LLM
     data_context = _build_data_context(results)
     today = datetime.now(UTC).strftime("%Y-%m-%d")
-
-    errors_ctx = ""  # No step-level error tracking needed for now
+    memory_ctx = build_memory_context_prompt(memory)
 
     analysis_prompt = (
         f'PREGUNTA DEL USUARIO: "{plan.query}"\n'
         f"FECHA ACTUAL: {today}\n"
         f"INTENCIÓN: {plan.intent}\n\n"
         f"DATOS RECOLECTADOS:\n{data_context}\n"
-        f"{errors_ctx}\n"
+        f"{memory_ctx}\n"
         "Respondé de forma breve y conversacional. Destacá el dato más importante, "
         "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
         "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
@@ -480,7 +490,7 @@ async def smart_query(
         max_tokens=8192,
     )
 
-    # 6. Build charts (deterministic first, LLM fallback)
+    # 7. Build charts (deterministic first, LLM fallback)
     det_charts = _build_deterministic_charts(results)
     llm_charts = _extract_llm_charts(response.content)
     charts = det_charts if det_charts else llm_charts
@@ -507,7 +517,14 @@ async def smart_query(
         "tokens_used": response.tokens_used or 0,
     }
 
-    # 7. Save to conversation history
+    # 8. Update memory (non-blocking, don't fail request)
+    try:
+        updated_memory = await update_memory(llm, memory, plan, results, clean_answer)
+        await save_memory(cache, session_id, updated_memory)
+    except Exception:
+        logger.debug("Memory update failed", exc_info=True)
+
+    # 9. Save to conversation history
     duration_ms = int((time.monotonic() - start_time) * 1000)
     try:
         query_id = str(uuid4())
@@ -534,7 +551,7 @@ async def smart_query(
         except Exception:
             pass
 
-    # 8. Cache result (non-critical — don't fail the request if cache is down)
+    # 10. Cache result (non-critical — don't fail the request if cache is down)
     try:
         await cache.set(cache_key, result, ttl_seconds=1800)
     except Exception:
