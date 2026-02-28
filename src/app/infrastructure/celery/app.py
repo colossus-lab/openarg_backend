@@ -36,6 +36,20 @@ def create_celery() -> Celery:
     app.conf.accept_content = ["json"]
     app.conf.timezone = "America/Argentina/Buenos_Aires"
 
+    # Celery Beat — periodic catalog scraping
+    app.conf.beat_schedule = {
+        "scrape-datos-gob-ar": {
+            "task": "openarg.scrape_catalog",
+            "schedule": 86400,  # every 24 hours
+            "args": ["datos_gob_ar"],
+        },
+        "scrape-caba": {
+            "task": "openarg.scrape_catalog",
+            "schedule": 86400,
+            "args": ["caba"],
+        },
+    }
+
     return app
 
 

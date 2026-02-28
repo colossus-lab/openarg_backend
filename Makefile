@@ -1,4 +1,4 @@
-.PHONY: help install dev db.up db.migrate db.revision api workers flower docker.up docker.down code.format code.lint code.test code.check
+.PHONY: help install dev db.up db.migrate db.revision api workers beat flower docker.up docker.down code.format code.lint code.test code.check
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -32,6 +32,9 @@ workers.analyst: ## Run analyst worker
 
 workers.embedding: ## Run embedding worker
 	APP_ENV=local celery -A app.infrastructure.celery.app:celery_app worker -Q embedding -c 8 -n embedding@%h
+
+beat: ## Run Celery Beat scheduler
+	APP_ENV=local celery -A app.infrastructure.celery.app:celery_app beat --loglevel=info
 
 flower: ## Run Flower monitoring
 	celery --broker=redis://localhost:6379/0 flower --port=5555

@@ -116,6 +116,19 @@ services:
       redis:
         condition: service_healthy
 
+  beat:
+    build:
+      context: .
+      dockerfile: docker/beat.Dockerfile
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+
   flower:
     image: mher/flower:2.0.0
     command: celery --broker=redis://redis:6379/0 flower --port=5555
