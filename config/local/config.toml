@@ -3,26 +3,26 @@ USER = "postgres"
 PASSWORD = "postgres"
 DB = "openarg_db"
 HOST = "localhost"
-PORT = 5432
+PORT = 5435
 DRIVER = "psycopg"
 
 [sqla]
-ECHO = false
+ECHO = true
 ECHO_POOL = false
-POOL_SIZE = 20
-MAX_OVERFLOW = 10
+POOL_SIZE = 10
+MAX_OVERFLOW = 5
+
+[security]
+JWT_SECRET_KEY = "local-dev-secret-key"
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 120
+REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 [logs]
 LEVEL = "DEBUG"
 
-[security]
-JWT_SECRET_KEY = "openarg-dev-secret-change-in-production"
-JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-REFRESH_TOKEN_EXPIRE_DAYS = 7
-
 [agents]
-DEFAULT_LLM_PROVIDER = "openai"
+DEFAULT_LLM_PROVIDER = "gemini"
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1536
 MAX_CONCURRENT_COLLECTORS = 5
