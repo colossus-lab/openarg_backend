@@ -34,6 +34,7 @@ from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetR
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
 from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdapter
 from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
+from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmbeddingService
 from app.infrastructure.adapters.llm.gemini_embedding_adapter import GeminiEmbeddingAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
@@ -118,12 +119,13 @@ class LLMProvider(Provider):
         )
 
     @provide
-    def embedding_provider(self, settings: AppSettings) -> IEmbeddingProvider:
-        return GeminiEmbeddingAdapter(
+    def embedding_provider(self, settings: AppSettings, cache: ICacheService) -> IEmbeddingProvider:
+        base = GeminiEmbeddingAdapter(
             api_key=settings.gemini.API_KEY,
             model=settings.agents.EMBEDDING_MODEL,
             dimensions=settings.agents.EMBEDDING_DIMENSIONS,
         )
+        return CachedEmbeddingService(base=base, cache=cache)
 
 
 class DataSourceProvider(Provider):

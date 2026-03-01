@@ -33,4 +33,13 @@ class IVectorSearch(ABC):
     ) -> None: ...
 
     @abstractmethod
+    async def search_datasets_hybrid(
+        self,
+        query_embedding: list[float],
+        query_text: str,
+        limit: int = 10,
+        portal_filter: str | None = None,
+    ) -> list[SearchResult]: ...
+
+    @abstractmethod
     async def delete_dataset_chunks(self, dataset_id: str) -> None: ...

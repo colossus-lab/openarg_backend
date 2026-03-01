@@ -49,12 +49,10 @@ class TestSQLValidation:
         assert result is not None
 
     def test_comment_bypass_rejected(self):
-        # Try to hide INSERT behind a comment
+        # Semicolon creates a multi-statement query which sqlglot's AST validation
+        # correctly rejects, even though the INSERT is behind a comment
         result = _validate_sql("SELECT 1; -- INSERT INTO evil VALUES (1)")
-        # The comment is stripped, so it should be allowed (the INSERT is in a comment)
-        # But having a semicolon could be an issue in real execution
-        # The validation only checks the command type, not semicolons
-        assert result is None  # comment is stripped, SELECT is fine
+        assert result is not None  # multi-statement rejected by AST validator
 
     def test_select_starting_with_spaces(self):
         assert _validate_sql("  SELECT 1") is None

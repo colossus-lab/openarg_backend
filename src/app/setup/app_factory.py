@@ -16,6 +16,7 @@ from app.infrastructure.monitoring.middleware import MetricsMiddleware
 from app.infrastructure.persistence_sqla.mappings.all import map_tables
 from app.presentation.http.errors.handlers import register_exception_handlers
 from app.presentation.http.middleware.auth_middleware import APIKeyMiddleware
+from app.presentation.http.middleware.security_headers import SecurityHeadersMiddleware
 from app.setup.config.settings import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ def configure_app(
     register_exception_handlers(app)
 
     app.add_middleware(MetricsMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # API key middleware (if configured)
     if settings and settings.security.BACKEND_API_KEY:
