@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -38,6 +39,14 @@ from app.infrastructure.adapters.connectors.query_planner import (
 )
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
+from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
+from app.infrastructure.adapters.search.query_preprocessor import QueryPreprocessor
+from app.infrastructure.audit.audit_logger import (
+    audit_cache_hit,
+    audit_injection_blocked,
+    audit_query,
+    audit_rate_limited,
+)
 from app.infrastructure.monitoring.metrics import MetricsCollector
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
 
@@ -176,6 +185,94 @@ def _get_meta_response(question: str) -> str | None:
     if _META_PATTERNS.search(question.strip()):
         return _META_RESPONSE
     return None
+
+
+# ── Educational static responder ──────────────────────────────
+
+_EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
+    re.compile(r"qu[eé]\s+(es|son)\s+(los\s+)?datos?\s+abiertos", re.IGNORECASE): (
+        "Los **datos abiertos** son datos que cualquier persona puede acceder, usar y compartir libremente. "
+        "En Argentina, el portal datos.gob.ar publica miles de datasets de gobierno nacional, provincias y municipios.\n\n"
+        "Probá preguntarme: *¿Qué datasets hay sobre educación?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?pbi", re.IGNORECASE): (
+        "El **PBI (Producto Bruto Interno)** es el valor total de todos los bienes y servicios producidos "
+        "en un país durante un período determinado. Es el principal indicador de la actividad económica.\n\n"
+        "Probá preguntarme: *¿Cómo evolucionó el PBI en los últimos años?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|significa)\s+(la\s+)?inflaci[oó]n", re.IGNORECASE): (
+        "La **inflación** es el aumento generalizado y sostenido de los precios de bienes y servicios "
+        "en una economía. En Argentina, el INDEC la mide mensualmente a través del IPC.\n\n"
+        "Probá preguntarme: *¿Cuál fue la inflación del último mes?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?riesgo\s+pa[ií]s", re.IGNORECASE): (
+        "El **riesgo país** mide la diferencia de tasa de interés que pagan los bonos de un país "
+        "respecto de los bonos del Tesoro de EE.UU. Un valor alto indica mayor percepción de riesgo.\n\n"
+        "Probá preguntarme: *¿Cuánto está el riesgo país hoy?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|son)\s+(las\s+)?ddjj", re.IGNORECASE): (
+        "Las **DDJJ (Declaraciones Juradas)** son documentos donde los funcionarios públicos declaran "
+        "su patrimonio. En OpenArg tenemos 195 declaraciones juradas de diputados nacionales.\n\n"
+        "Probá preguntarme: *¿Quién es el diputado con mayor patrimonio?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?tipo\s+de\s+cambio", re.IGNORECASE): (
+        "El **tipo de cambio** es el precio de una moneda en términos de otra. En Argentina se habla "
+        "del dólar oficial, blue, MEP, CCL, entre otros.\n\n"
+        "Probá preguntarme: *¿A cuánto está el dólar hoy?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|son)\s+(las\s+)?reservas\s+(del\s+)?bcra", re.IGNORECASE): (
+        "Las **reservas del BCRA** son los activos en moneda extranjera que posee el Banco Central "
+        "de la República Argentina. Se usan para respaldar la moneda y las obligaciones de deuda.\n\n"
+        "Probá preguntarme: *¿Cómo vienen las reservas del BCRA?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?presupuesto\s+(nacional|p[uú]blico)", re.IGNORECASE): (
+        "El **presupuesto nacional** es la ley que estima los ingresos y autoriza los gastos del Estado "
+        "para cada año fiscal. Define las prioridades de gasto público.\n\n"
+        "Probá preguntarme: *¿Cuánto se destina a educación en el presupuesto?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|son)\s+(las\s+)?sesiones\s+(del\s+)?congreso", re.IGNORECASE): (
+        "Las **sesiones del Congreso** son las reuniones de la Cámara de Diputados y el Senado "
+        "donde se debaten y votan proyectos de ley. Tenemos transcripciones de sesiones disponibles.\n\n"
+        "Probá preguntarme: *¿Qué se debatió sobre educación en el Congreso?*"
+    ),
+    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?[ií]ndice\s+de\s+pobreza", re.IGNORECASE): (
+        "El **índice de pobreza** mide el porcentaje de personas u hogares cuyos ingresos no alcanzan "
+        "para cubrir una canasta básica. El INDEC lo publica semestralmente en Argentina.\n\n"
+        "Probá preguntarme: *¿Cuál es el porcentaje de pobreza actual?*"
+    ),
+}
+
+
+def _get_educational_response(text: str) -> str | None:
+    """Return an educational response if the text matches a known educational pattern."""
+    for pattern, response in _EDUCATIONAL_PATTERNS.items():
+        if pattern.search(text.strip()):
+            return response
+    return None
+
+
+# ── WebSocket rate limit helper ───────────────────────────────
+
+
+async def _check_ws_rate_limit(cache: ICacheService, identifier: str) -> bool:
+    """Return True if the identifier has exceeded the WS rate limit (20/minute).
+
+    Uses Redis INCR + TTL via ICacheService.
+    Returns False (allowed) on any cache error for graceful degradation.
+    """
+    key = f"ws_rate:{identifier}"
+    try:
+        current = await cache.get(key)
+        if current is not None:
+            count = int(current) if not isinstance(current, int) else current
+            if count >= 20:
+                return True
+            await cache.set(key, count + 1, ttl_seconds=60)
+        else:
+            await cache.set(key, 1, ttl_seconds=60)
+        return False
+    except Exception:
+        return False
 
 
 # ── Step executors ────────────────────────────────────────────
@@ -505,6 +602,7 @@ async def smart_query(
     """
     start_time = time.monotonic()
     metrics = MetricsCollector()
+    user_id = body.user_email or "anonymous"
 
     # 0. Classify — casual/meta messages get instant responses (no LLM)
     casual_answer = _get_casual_response(body.question)
@@ -515,6 +613,26 @@ async def smart_query(
     if meta_answer:
         return {"answer": meta_answer, "sources": [], "chart_data": None, "tokens_used": 0}
 
+    # 0b. Prompt injection check
+    suspicious, injection_score = is_suspicious(body.question)
+    if suspicious:
+        audit_injection_blocked(user=user_id, question=body.question, score=injection_score)
+        return ORJSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "SEC_001",
+                    "message": "Potential prompt injection detected",
+                    "details": {"score": round(injection_score, 3)},
+                }
+            },
+        )
+
+    # 0c. Educational static response
+    edu_answer = _get_educational_response(body.question)
+    if edu_answer:
+        return {"answer": edu_answer, "sources": [], "chart_data": None, "tokens_used": 0}
+
     cache_key = _cache_key(body.question)
 
     # 1. Check cache — semantic cache first, then Redis hash
@@ -522,6 +640,7 @@ async def smart_query(
         sem_cached = await semantic_cache.get(body.question)
         if sem_cached:
             metrics.record_cache_hit()
+            audit_cache_hit(user=user_id, question=body.question)
             return {**sem_cached, "cached": True}
     except Exception:
         logger.debug("Semantic cache read failed")
@@ -530,6 +649,7 @@ async def smart_query(
         cached = await cache.get(cache_key)
         if cached and isinstance(cached, dict):
             metrics.record_cache_hit()
+            audit_cache_hit(user=user_id, question=body.question)
             return {**cached, "cached": True}
         metrics.record_cache_miss()
     except Exception:
@@ -539,8 +659,12 @@ async def smart_query(
     session_id = body.user_email or body.conversation_id or ""
     memory = await load_memory(cache, session_id)
 
+    # 2b. Query preprocessing — reformulate for better search relevance
+    preprocessor = QueryPreprocessor(llm)
+    enhanced_query = await preprocessor.reformulate(body.question)
+
     # 3. Plan — LLM classifies and generates execution plan
-    plan = await generate_plan(llm, body.question, memory_context=build_memory_context_prompt(memory))
+    plan = await generate_plan(llm, enhanced_query, memory_context=build_memory_context_prompt(memory))
     logger.info(
         "Plan for '%s': intent=%s, steps=%d, turn=%d",
         body.question[:60],
@@ -580,13 +704,15 @@ async def smart_query(
             metrics.record_connector_call(connector_name, step_ms, error=True)
             logger.warning("Step %s failed", step.id, exc_info=True)
 
-    # 5. Complement with pgvector if no results or generic search
+    # 5. Complement with hybrid search (vector + BM25) if no results or generic search
     if not results or plan.intent == "busqueda_general":
         try:
-            query_embedding = await embedding.embed(body.question)
-            vector_results = await vector_search.search_datasets(query_embedding, limit=5)
+            query_embedding = await embedding.embed(enhanced_query)
+            vector_results = await vector_search.search_datasets_hybrid(
+                query_embedding, query_text=enhanced_query, limit=5,
+            )
             for vr in vector_results:
-                if vr.score < 0.30:
+                if vr.score < 0.005:  # RRF scores are much lower than cosine
                     continue
                 results.append(
                     DataResult(
@@ -605,7 +731,7 @@ async def smart_query(
                     )
                 )
         except Exception:
-            logger.warning("pgvector enrichment failed", exc_info=True)
+            logger.warning("Hybrid search enrichment failed", exc_info=True)
 
     # 6. Analyze with LLM
     data_context = _build_data_context(results)
@@ -613,7 +739,7 @@ async def smart_query(
     memory_ctx = build_memory_context_prompt(memory)
 
     analysis_prompt = (
-        f'PREGUNTA DEL USUARIO: "{plan.query}"\n'
+        f'PREGUNTA DEL USUARIO: "{body.question}"\n'
         f"FECHA ACTUAL: {today}\n"
         f"INTENCIÓN: {plan.intent}\n\n"
         f"DATOS RECOLECTADOS:\n{data_context}\n"
@@ -662,7 +788,11 @@ async def smart_query(
         "tokens_used": tokens_used,
     }
 
-    # 8. Update memory (non-blocking, don't fail request)
+    # 8. Audit log
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+    audit_query(user=user_id, question=body.question, intent=plan.intent, duration_ms=duration_ms)
+
+    # 9. Update memory (non-blocking, don't fail request)
     try:
         updated_memory = await update_memory(llm, memory, plan, results, clean_answer)
         await save_memory(cache, session_id, updated_memory)
@@ -747,6 +877,14 @@ async def ws_smart_query(
     await ws.accept()
 
     try:
+        # ── Rate limiting ──
+        ws_identifier = ws.query_params.get("api_key") or ws.client.host if ws.client else "unknown"
+        if await _check_ws_rate_limit(cache, ws_identifier):
+            audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
+            await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
+            await ws.close(code=4429)
+            return
+
         raw = await ws.receive_json()
         question = raw.get("question", "")
         conversation_id = raw.get("conversation_id", "")
@@ -758,6 +896,18 @@ async def ws_smart_query(
 
         # ── Phase 1: Classifying ──
         await ws.send_json({"type": "status", "step": "classifying"})
+
+        # Prompt injection check
+        suspicious, injection_score = is_suspicious(question)
+        if suspicious:
+            audit_injection_blocked(user=ws_identifier, question=question, score=injection_score)
+            await ws.send_json({
+                "type": "error",
+                "message": "Potential prompt injection detected",
+                "code": "SEC_001",
+            })
+            await ws.close(code=4400)
+            return
 
         # Casual message → instant response (no LLM)
         casual_answer = _get_casual_response(question)
@@ -779,6 +929,18 @@ async def ws_smart_query(
             await ws.send_json({
                 "type": "complete",
                 "answer": meta_answer,
+                "sources": [],
+                "chart_data": None,
+            })
+            return
+
+        # Educational static response
+        edu_answer = _get_educational_response(question)
+        if edu_answer:
+            await ws.send_json({"type": "chunk", "content": edu_answer})
+            await ws.send_json({
+                "type": "complete",
+                "answer": edu_answer,
                 "sources": [],
                 "chart_data": None,
             })
@@ -825,8 +987,12 @@ async def ws_smart_query(
         # ── Phase 2: Planning ──
         await ws.send_json({"type": "status", "step": "planning"})
 
+        # Query preprocessing
+        preprocessor = QueryPreprocessor(llm)
+        enhanced_query = await preprocessor.reformulate(question)
+
         memory = await load_memory(cache, session_id)
-        plan = await generate_plan(llm, question, memory_context=build_memory_context_prompt(memory))
+        plan = await generate_plan(llm, enhanced_query, memory_context=build_memory_context_prompt(memory))
 
         await ws.send_json({
             "type": "status",
@@ -872,13 +1038,15 @@ async def ws_smart_query(
             except Exception:
                 logger.warning("WS step %s failed", step.action, exc_info=True)
 
-        # Pgvector complement
+        # Hybrid search complement (vector + BM25)
         if not results or plan.intent == "busqueda_general":
             try:
-                query_embedding = await embedding.embed(question)
-                vector_results = await vector_search.search_datasets(query_embedding, limit=5)
+                query_embedding = await embedding.embed(enhanced_query)
+                vector_results = await vector_search.search_datasets_hybrid(
+                    query_embedding, query_text=enhanced_query, limit=5,
+                )
                 for vr in vector_results:
-                    if vr.score < 0.30:
+                    if vr.score < 0.005:
                         continue
                     results.append(
                         DataResult(
@@ -897,7 +1065,7 @@ async def ws_smart_query(
                         )
                     )
             except Exception:
-                logger.debug("pgvector complement failed", exc_info=True)
+                logger.debug("Hybrid search complement failed", exc_info=True)
 
         # ── Phase 4: Generating (LLM analysis) ──
         await ws.send_json({"type": "status", "step": "generating"})
@@ -907,7 +1075,7 @@ async def ws_smart_query(
         memory_ctx = build_memory_context_prompt(memory)
 
         analysis_prompt = (
-            f'PREGUNTA DEL USUARIO: "{plan.query}"\n'
+            f'PREGUNTA DEL USUARIO: "{question}"\n'
             f"FECHA ACTUAL: {today}\n"
             f"INTENCIÓN: {plan.intent}\n\n"
             f"DATOS RECOLECTADOS:\n{data_context}\n"

@@ -167,3 +167,37 @@ class ErrorCode(Enum):
         default_message="Query planning failed",
         http_status=500,
     )
+
+    # SECURITY errors (SEC_001 - SEC_099)
+    SEC_INJECTION_DETECTED = ErrorDefinition(
+        code="SEC_001",
+        i18n_key="errors.security.injection_detected",
+        default_message="Potential prompt injection detected",
+        http_status=400,
+    )
+    SEC_RATE_LIMITED = ErrorDefinition(
+        code="SEC_002",
+        i18n_key="errors.security.rate_limited",
+        default_message="Too many requests",
+        http_status=429,
+    )
+    SEC_SUSPICIOUS_INPUT = ErrorDefinition(
+        code="SEC_003",
+        i18n_key="errors.security.suspicious_input",
+        default_message="Suspicious input detected",
+        http_status=400,
+    )
+
+    # AUTH errors (AU_001 - AU_099)
+    AUTH_INVALID_KEY = ErrorDefinition(
+        code="AU_001",
+        i18n_key="errors.auth.invalid_key",
+        default_message="Invalid API key",
+        http_status=401,
+    )
+    AUTH_EXPIRED = ErrorDefinition(
+        code="AU_002",
+        i18n_key="errors.auth.expired",
+        default_message="Authentication token expired",
+        http_status=401,
+    )

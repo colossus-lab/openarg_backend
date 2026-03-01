@@ -56,6 +56,100 @@ class PgVectorSearchAdapter(IVectorSearch):
             for row in rows
         ]
 
+    async def search_datasets_hybrid(
+        self,
+        query_embedding: list[float],
+        query_text: str,
+        limit: int = 10,
+        portal_filter: str | None = None,
+    ) -> list[SearchResult]:
+        """Hybrid search combining vector cosine similarity and BM25 full-text search with RRF fusion."""
+        embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+        k = 60  # RRF constant
+
+        portal_clause = ""
+        params: dict = {
+            "embedding": embedding_str,
+            "query_text": query_text,
+            "limit": limit,
+            "fetch_limit": limit * 4,  # fetch more candidates for fusion
+        }
+        if portal_filter:
+            portal_clause = "AND d.portal = :portal"
+            params["portal"] = portal_filter
+
+        query = text(f"""
+            WITH vector_ranked AS (
+                SELECT
+                    CAST(d.id AS text) AS dataset_id,
+                    d.title,
+                    d.description,
+                    d.portal,
+                    d.download_url,
+                    d.columns,
+                    1 - (dc.embedding <=> CAST(:embedding AS vector)) AS vec_score,
+                    ROW_NUMBER() OVER (ORDER BY dc.embedding <=> CAST(:embedding AS vector)) AS vec_rank
+                FROM dataset_chunks dc
+                JOIN datasets d ON d.id = dc.dataset_id
+                WHERE 1=1 {portal_clause}
+                ORDER BY dc.embedding <=> CAST(:embedding AS vector)
+                LIMIT :fetch_limit
+            ),
+            bm25_ranked AS (
+                SELECT
+                    CAST(d.id AS text) AS dataset_id,
+                    d.title,
+                    d.description,
+                    d.portal,
+                    d.download_url,
+                    d.columns,
+                    ts_rank_cd(dc.tsv, plainto_tsquery('spanish', :query_text)) AS bm25_score,
+                    ROW_NUMBER() OVER (
+                        ORDER BY ts_rank_cd(dc.tsv, plainto_tsquery('spanish', :query_text)) DESC
+                    ) AS bm25_rank
+                FROM dataset_chunks dc
+                JOIN datasets d ON d.id = dc.dataset_id
+                WHERE dc.tsv @@ plainto_tsquery('spanish', :query_text)
+                    {portal_clause}
+                ORDER BY bm25_score DESC
+                LIMIT :fetch_limit
+            ),
+            fused AS (
+                SELECT
+                    COALESCE(v.dataset_id, b.dataset_id) AS dataset_id,
+                    COALESCE(v.title, b.title) AS title,
+                    COALESCE(v.description, b.description) AS description,
+                    COALESCE(v.portal, b.portal) AS portal,
+                    COALESCE(v.download_url, b.download_url) AS download_url,
+                    COALESCE(v.columns, b.columns) AS columns,
+                    COALESCE(1.0 / ({k} + v.vec_rank), 0) +
+                    COALESCE(1.0 / ({k} + b.bm25_rank), 0) AS rrf_score
+                FROM vector_ranked v
+                FULL OUTER JOIN bm25_ranked b
+                    ON v.dataset_id = b.dataset_id
+            )
+            SELECT dataset_id, title, description, portal, download_url, columns, rrf_score AS score
+            FROM fused
+            ORDER BY rrf_score DESC
+            LIMIT :limit
+        """)
+
+        result = await self._session.execute(query, params)
+        rows = result.fetchall()
+
+        return [
+            SearchResult(
+                dataset_id=row.dataset_id,
+                title=row.title,
+                description=row.description or "",
+                portal=row.portal,
+                download_url=row.download_url or "",
+                columns=row.columns or "",
+                score=float(row.score),
+            )
+            for row in rows
+        ]
+
     async def index_dataset(
         self,
         dataset_id: str,

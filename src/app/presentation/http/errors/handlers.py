@@ -7,11 +7,40 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import ORJSONResponse
 
 from app.domain.exceptions.base import ApplicationError
+from app.domain.exceptions.error_codes import ErrorCode
+from app.infrastructure.audit.audit_logger import audit_injection_blocked
 
 logger = logging.getLogger(__name__)
 
 
+class PromptInjectionError(ApplicationError):
+    """Raised when prompt injection is detected."""
+
+    def __init__(self, score: float, user: str = "unknown") -> None:
+        self.injection_score = score
+        self.user = user
+        super().__init__(
+            error_code=ErrorCode.SEC_INJECTION_DETECTED,
+            details={"score": round(score, 3)},
+        )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(PromptInjectionError)
+    async def prompt_injection_handler(
+        request: Request, exc: PromptInjectionError
+    ) -> ORJSONResponse:
+        audit_injection_blocked(
+            user=exc.user,
+            question=str(exc.details.get("question", "")),
+            score=exc.injection_score,
+        )
+        logger.warning("Prompt injection blocked: score=%.3f user=%s", exc.injection_score, exc.user)
+        return ORJSONResponse(
+            status_code=exc.http_status,
+            content={"error": exc.to_dict()},
+        )
+
     @app.exception_handler(ApplicationError)
     async def application_error_handler(
         request: Request, exc: ApplicationError
