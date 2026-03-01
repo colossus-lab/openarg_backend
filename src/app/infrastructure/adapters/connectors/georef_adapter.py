@@ -8,6 +8,8 @@ from urllib.parse import quote
 import httpx
 
 from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.georef import IGeorefConnector
 from app.infrastructure.resilience.retry import with_retry
 
@@ -38,9 +40,18 @@ class GeorefAdapter(IGeorefConnector):
     ) -> list[dict]:
         try:
             return await self._get_entities_internal(entity_type, params)
-        except Exception:
-            logger.warning("Georef %s request failed", entity_type, exc_info=True)
-            return []
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_GEOREF_UNAVAILABLE,
+                details={"entity_type": entity_type, "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_GEOREF_UNAVAILABLE,
+                details={"entity_type": entity_type, "reason": str(exc)},
+            ) from exc
 
     async def get_provincias(self, nombre: str | None = None) -> list[dict]:
         params: dict[str, str] = {"max": "24"}

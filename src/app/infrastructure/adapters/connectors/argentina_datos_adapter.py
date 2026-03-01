@@ -4,7 +4,10 @@ import logging
 from datetime import UTC, datetime
 
 from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
+from app.infrastructure.mcp.exceptions import MCPServerError
 from app.infrastructure.mcp.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
@@ -40,9 +43,18 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     "description": f"Cotización histórica del dólar {casa_label}",
                 },
             )
-        except Exception:
-            logger.warning("ArgentinaDatos fetch_dolar failed", exc_info=True)
-            return None
+        except MCPServerError as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE,
+                details={"action": "fetch_dolar", "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE,
+                details={"action": "fetch_dolar", "reason": str(exc)},
+            ) from exc
 
     async def fetch_riesgo_pais(self, ultimo: bool = False) -> DataResult | None:
         try:
@@ -66,9 +78,18 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     "description": "Índice de Riesgo País (EMBI+ Argentina, puntos básicos)",
                 },
             )
-        except Exception:
-            logger.warning("ArgentinaDatos fetch_riesgo_pais failed", exc_info=True)
-            return None
+        except MCPServerError as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE,
+                details={"action": "fetch_riesgo_pais", "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE,
+                details={"action": "fetch_riesgo_pais", "reason": str(exc)},
+            ) from exc
 
     async def fetch_inflacion(self) -> DataResult | None:
         try:
@@ -92,6 +113,15 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     "description": "Inflación mensual (variación % IPC)",
                 },
             )
-        except Exception:
-            logger.warning("ArgentinaDatos fetch_inflacion failed", exc_info=True)
-            return None
+        except MCPServerError as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE,
+                details={"action": "fetch_inflacion", "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE,
+                details={"action": "fetch_inflacion", "reason": str(exc)},
+            ) from exc

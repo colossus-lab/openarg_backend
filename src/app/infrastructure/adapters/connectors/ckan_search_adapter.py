@@ -4,7 +4,10 @@ import logging
 from datetime import UTC, datetime
 
 from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
+from app.infrastructure.mcp.exceptions import MCPServerError
 from app.infrastructure.mcp.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
@@ -49,9 +52,18 @@ class CKANSearchAdapter(ICKANSearchConnector):
                     )
                 )
             return data_results
-        except Exception:
-            logger.warning("CKAN search_datasets failed", exc_info=True)
-            return []
+        except MCPServerError as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_CKAN_UNAVAILABLE,
+                details={"query": query[:100], "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_CKAN_UNAVAILABLE,
+                details={"query": query[:100], "reason": str(exc)},
+            ) from exc
 
     async def query_datastore(
         self,
@@ -73,6 +85,15 @@ class CKANSearchAdapter(ICKANSearchConnector):
                 "ckan", "query_datastore", params
             )
             return result.get("records", [])
-        except Exception:
-            logger.warning("CKAN query_datastore failed", exc_info=True)
-            return []
+        except MCPServerError as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_CKAN_UNAVAILABLE,
+                details={"portal_id": portal_id, "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_CKAN_UNAVAILABLE,
+                details={"portal_id": portal_id, "reason": str(exc)},
+            ) from exc

@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy import text
 
-from app.infrastructure.celery.tasks.scraper_tasks import scrape_catalog
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
-limiter = Limiter(key_func=get_remote_address)
 
 
 class DatasetSummary(BaseModel):
@@ -78,13 +74,3 @@ async def get_portal_stats(
     return [PortalStats(portal=row.portal, count=row.count) for row in result.fetchall()]
 
 
-@router.post("/scrape/{portal}")
-@limiter.limit("2/hour")
-async def trigger_scrape(request: Request, portal: str) -> dict:
-    """Trigger a catalog scrape for a specific portal."""
-    valid_portals = ["datos_gob_ar", "caba"]
-    if portal not in valid_portals:
-        raise HTTPException(status_code=400, detail=f"Invalid portal. Valid: {valid_portals}")
-
-    task = scrape_catalog.delay(portal)
-    return {"task_id": task.id, "portal": portal, "status": "scraping_started"}
