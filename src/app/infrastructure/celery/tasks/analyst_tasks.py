@@ -56,7 +56,6 @@ def analyze_query(self, query_id: str, question: str):
     start = time.time()
     engine = _get_sync_engine()
     gemini_key = os.getenv("GEMINI_API_KEY", "")
-    openai_key = os.getenv("OPENAI_API_KEY", "")
 
     try:
         # Update query status
@@ -101,14 +100,12 @@ def analyze_query(self, query_id: str, question: str):
 
         # --- STEP 2: Vector search for relevant datasets ---
         logger.info(f"[{query_id}] Searching datasets...")
-        import openai
-        embedder = openai.OpenAI(api_key=openai_key)
-        embed_resp = embedder.embeddings.create(
-            input=question,
-            model="text-embedding-3-small",
-            dimensions=1536,
+        embed_resp = genai.embed_content(
+            model="models/gemini-embedding-001",
+            content=question,
+            output_dimensionality=768,
         )
-        query_embedding = embed_resp.data[0].embedding
+        query_embedding = embed_resp["embedding"]
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
         with engine.begin() as conn:
@@ -233,8 +230,7 @@ def analyze_query(self, query_id: str, question: str):
                 analyst_response.usage_metadata.prompt_token_count
                 + analyst_response.usage_metadata.candidates_token_count
             )
-        embed_tokens = embed_resp.usage.total_tokens if embed_resp.usage else 0
-        total_tokens = plan_tokens + embed_tokens + analyst_tokens
+        total_tokens = plan_tokens + analyst_tokens
 
         duration_ms = int((time.time() - start) * 1000)
 

@@ -14,9 +14,8 @@ POOL_SIZE = 5
 LEVEL = "WARNING"
 
 [agents]
-DEFAULT_LLM_PROVIDER = "openai"
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSIONS = 1536
+EMBEDDING_MODEL = "gemini-embedding-001"
+EMBEDDING_DIMENSIONS = 768
 
 [scraper]
 DATOS_GOB_AR_BASE_URL = "https://datos.gob.ar/api/3/action"

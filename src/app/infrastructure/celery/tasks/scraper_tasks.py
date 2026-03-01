@@ -163,7 +163,7 @@ def index_dataset_embedding(self, dataset_id: str):
 
     Esto mejora la búsqueda vectorial al tener más puntos de entrada semánticos.
     """
-    import openai
+    import google.generativeai as genai
 
     logger.info(f"Generating embeddings for dataset: {dataset_id}")
     engine = _get_sync_engine()
@@ -229,13 +229,13 @@ def index_dataset_embedding(self, dataset_id: str):
         chunks.append("\n".join(context_parts))
 
         # Generate embeddings in batch
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        client = openai.OpenAI(api_key=api_key)
-        resp = client.embeddings.create(
-            input=chunks,
-            model="text-embedding-3-small",
-            dimensions=1536,
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
+        resp = genai.embed_content(
+            model="models/gemini-embedding-001",
+            content=chunks,
+            output_dimensionality=768,
         )
+        embeddings = resp["embedding"]
 
         with engine.begin() as conn:
             # Delete old chunks
@@ -244,8 +244,8 @@ def index_dataset_embedding(self, dataset_id: str):
                 {"did": dataset_id},
             )
             # Insert all chunks
-            for i, emb_data in enumerate(resp.data):
-                embedding_str = "[" + ",".join(str(v) for v in emb_data.embedding) + "]"
+            for i, emb in enumerate(embeddings):
+                embedding_str = "[" + ",".join(str(v) for v in emb) + "]"
                 conn.execute(
                     text("""
                         INSERT INTO dataset_chunks (dataset_id, content, embedding)

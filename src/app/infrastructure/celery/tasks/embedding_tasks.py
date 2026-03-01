@@ -59,17 +59,17 @@ def index_sesiones_chunks(self, batch_size: int = 50):
     Load congressional session chunks from JSON files, generate embeddings,
     and index them in the sesion_chunks pgvector table.
 
-    Processes in batches to avoid overwhelming the OpenAI API.
+    Processes in batches to avoid overwhelming the embedding API.
     """
-    import openai
+    import google.generativeai as genai
 
     engine = _get_sync_engine()
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        logger.error("OPENAI_API_KEY not set, cannot index sesiones")
-        return {"error": "OPENAI_API_KEY not set"}
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if not gemini_key:
+        logger.error("GEMINI_API_KEY not set, cannot index sesiones")
+        return {"error": "GEMINI_API_KEY not set"}
 
-    client = openai.OpenAI(api_key=api_key)
+    genai.configure(api_key=gemini_key)
 
     try:
         # Check if already indexed
@@ -113,17 +113,18 @@ def index_sesiones_chunks(self, batch_size: int = 50):
                     texts.append(chunk_text[:2000])
 
             # Generate embeddings in batch
-            resp = client.embeddings.create(
-                input=texts,
-                model="text-embedding-3-small",
-                dimensions=1536,
+            resp = genai.embed_content(
+                model="models/gemini-embedding-001",
+                content=texts,
+                output_dimensionality=768,
             )
+            embeddings = resp["embedding"]
 
             # Insert into DB
             with engine.begin() as conn:
-                for j, emb_data in enumerate(resp.data):
+                for j, emb in enumerate(embeddings):
                     chunk = batch[j]
-                    embedding_str = "[" + ",".join(str(v) for v in emb_data.embedding) + "]"
+                    embedding_str = "[" + ",".join(str(v) for v in emb) + "]"
                     conn.execute(
                         text("""
                             INSERT INTO sesion_chunks
