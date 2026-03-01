@@ -23,29 +23,32 @@ class SesionesAdapter(ISesionesConnector):
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        openai_api_key: str = "",
+        gemini_api_key: str = "",
     ) -> None:
         self._session_factory = session_factory
-        self._openai_api_key = openai_api_key
+        self._gemini_api_key = gemini_api_key
         self._chunks: list[dict] = []
         self._loaded = False
 
     async def _generate_embedding(self, text_input: str) -> list[float] | None:
-        """Generate query embedding using OpenAI text-embedding-3-small."""
-        if not self._openai_api_key:
+        """Generate query embedding using Gemini text-embedding-004."""
+        if not self._gemini_api_key:
             return None
         try:
-            import openai
+            import asyncio
 
-            client = openai.OpenAI(api_key=self._openai_api_key)
-            resp = client.embeddings.create(
-                input=[text_input[:2000]],
-                model="text-embedding-3-small",
-                dimensions=1536,
+            import google.generativeai as genai
+
+            genai.configure(api_key=self._gemini_api_key)
+            result = await asyncio.to_thread(
+                genai.embed_content,
+                model="models/gemini-embedding-001",
+                content=text_input[:2000],
+                output_dimensionality=768,
             )
-            return resp.data[0].embedding
+            return result["embedding"]
         except Exception:
-            logger.warning("Failed to generate OpenAI embedding for sesiones", exc_info=True)
+            logger.warning("Failed to generate Gemini embedding for sesiones", exc_info=True)
             return None
 
     async def _search_pgvector(

@@ -32,9 +32,9 @@ from app.infrastructure.adapters.connectors.series_tiempo_adapter import SeriesT
 from app.infrastructure.adapters.connectors.sesiones_adapter import SesionesAdapter
 from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetRepositorySQLA
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
+from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdapter
 from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
-from app.infrastructure.adapters.llm.openai_adapter import OpenAILLMAdapter
-from app.infrastructure.adapters.llm.openai_embedding_adapter import OpenAIEmbeddingAdapter
+from app.infrastructure.adapters.llm.gemini_embedding_adapter import GeminiEmbeddingAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
@@ -106,17 +106,15 @@ class LLMProvider(Provider):
 
     @provide
     def llm_provider(self, settings: AppSettings) -> ILLMProvider:
-        provider = settings.agents.DEFAULT_LLM_PROVIDER
-        if provider == "gemini":
-            return GeminiLLMAdapter(api_key=settings.gemini.API_KEY)
-        if provider == "openai":
-            return OpenAILLMAdapter(api_key=settings.openai.API_KEY)
-        return AnthropicLLMAdapter(api_key=settings.anthropic.API_KEY)
+        return FallbackLLMAdapter(
+            primary=GeminiLLMAdapter(api_key=settings.gemini.API_KEY),
+            fallback=AnthropicLLMAdapter(api_key=settings.anthropic.API_KEY),
+        )
 
     @provide
     def embedding_provider(self, settings: AppSettings) -> IEmbeddingProvider:
-        return OpenAIEmbeddingAdapter(
-            api_key=settings.openai.API_KEY,
+        return GeminiEmbeddingAdapter(
+            api_key=settings.gemini.API_KEY,
             model=settings.agents.EMBEDDING_MODEL,
             dimensions=settings.agents.EMBEDDING_DIMENSIONS,
         )
@@ -212,20 +210,20 @@ class ConnectorProvider(Provider):
     scope = Scope.APP
 
     @provide
-    def series_tiempo(self, settings: AppSettings) -> ISeriesTiempoConnector:
-        return SeriesTiempoAdapter(base_url=settings.scraper.SERIES_TIEMPO_BASE_URL)
+    def series_tiempo(self, mcp_client: MCPClient) -> ISeriesTiempoConnector:
+        return SeriesTiempoAdapter(mcp_client=mcp_client)
 
     @provide
-    def argentina_datos(self, settings: AppSettings) -> IArgentinaDatosConnector:
-        return ArgentinaDatosAdapter(base_url=settings.scraper.ARGENTINA_DATOS_BASE_URL)
+    def argentina_datos(self, mcp_client: MCPClient) -> IArgentinaDatosConnector:
+        return ArgentinaDatosAdapter(mcp_client=mcp_client)
 
     @provide
     def georef(self, settings: AppSettings) -> IGeorefConnector:
         return GeorefAdapter(base_url=settings.scraper.GEOREF_BASE_URL)
 
     @provide
-    def ckan_search(self) -> ICKANSearchConnector:
-        return CKANSearchAdapter()
+    def ckan_search(self, mcp_client: MCPClient) -> ICKANSearchConnector:
+        return CKANSearchAdapter(mcp_client=mcp_client)
 
     @provide
     def sesiones(
@@ -235,7 +233,7 @@ class ConnectorProvider(Provider):
     ) -> ISesionesConnector:
         adapter = SesionesAdapter(
             session_factory=session_factory,
-            openai_api_key=settings.openai.API_KEY,
+            gemini_api_key=settings.gemini.API_KEY,
         )
         adapter._ensure_loaded()
         return adapter

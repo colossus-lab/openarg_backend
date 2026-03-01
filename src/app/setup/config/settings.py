@@ -42,9 +42,8 @@ class LoggingSettings(BaseModel):
 
 
 class AgentSettings(BaseModel):
-    DEFAULT_LLM_PROVIDER: str = "gemini"
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
-    EMBEDDING_DIMENSIONS: int = 1536
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
+    EMBEDDING_DIMENSIONS: int = 768
     MAX_CONCURRENT_COLLECTORS: int = 5
     SANDBOX_TIMEOUT_SECONDS: int = 30
 
@@ -56,16 +55,6 @@ class ScraperSettings(BaseModel):
     SERIES_TIEMPO_BASE_URL: str = "https://apis.datos.gob.ar/series/api"
     ARGENTINA_DATOS_BASE_URL: str = "https://api.argentinadatos.com/v1"
     GEOREF_BASE_URL: str = "https://apis.datos.gob.ar/georef/api"
-
-
-class OpenAISecrets(BaseModel):
-    API_KEY: str = ""
-
-    def model_post_init(self, __context: object) -> None:
-        import os
-        env_key = os.getenv("OPENAI_API_KEY", "")
-        if env_key:
-            self.API_KEY = env_key
 
 
 class GeminiSecrets(BaseModel):
@@ -95,7 +84,6 @@ class AppSettings(BaseModel):
     logs: LoggingSettings = LoggingSettings()
     agents: AgentSettings = AgentSettings()
     scraper: ScraperSettings = ScraperSettings()
-    openai: OpenAISecrets = OpenAISecrets()
     gemini: GeminiSecrets = GeminiSecrets()
     anthropic: AnthropicSecrets = AnthropicSecrets()
 
