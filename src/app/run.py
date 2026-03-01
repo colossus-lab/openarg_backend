@@ -34,7 +34,11 @@ def make_app(*di_providers: Provider, settings: AppSettings | None = None) -> Fa
         app=app,
         root_router=create_root_router(),
         environment=current_env.value,
+        settings=settings,
     )
+
+    app.state.settings = settings
+    app.state.environment = current_env.value
 
     container = create_async_ioc_container(
         providers=(*get_providers(), *di_providers),

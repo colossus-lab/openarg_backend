@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from app.domain.entities.chat.conversation import Conversation
@@ -55,6 +55,32 @@ class TitleUpdate(BaseModel):
     title: str
 
 
+# ---- Helpers ----
+
+async def _resolve_user(user_repo: IUserRepository, email: str):
+    """Resolve user by email, raise 404 if not found."""
+    user = await user_repo.get_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found. Sync user first.")
+    return user
+
+
+async def _get_owned_conversation(
+    chat_repo: IChatRepository,
+    user_repo: IUserRepository,
+    conversation_id: UUID,
+    user_email: str,
+):
+    """Fetch a conversation and verify it belongs to the user. Raises 404 or 403."""
+    conv = await chat_repo.get_conversation(conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    user = await user_repo.get_by_email(user_email)
+    if not user or conv.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return conv
+
+
 # ---- Endpoints ----
 
 @router.get("/", response_model=list[ConversationSummary])
@@ -62,15 +88,18 @@ class TitleUpdate(BaseModel):
 async def list_conversations(
     user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
+    x_user_email: str = Header(alias="X-User-Email", default=""),
     user_email: str | None = None,
-    limit: int = 20,
-    offset: int = 0,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ) -> list[ConversationSummary]:
-    """List conversations for a user by email."""
-    if not user_email:
+    """List conversations for the authenticated user."""
+    # Force scoping by authenticated email (ignore user_email param)
+    email = x_user_email or user_email or ""
+    if not email:
         return []
 
-    user = await user_repo.get_by_email(user_email)
+    user = await user_repo.get_by_email(email)
     if not user:
         return []
 
@@ -92,11 +121,12 @@ async def create_conversation(
     body: ConversationCreate,
     user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
+    x_user_email: str = Header(alias="X-User-Email", default=""),
 ) -> ConversationDetail:
     """Create a new conversation."""
-    user = await user_repo.get_by_email(body.user_email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found. Sync user first.")
+    # Use authenticated email from header, fallback to body
+    email = x_user_email or body.user_email
+    user = await _resolve_user(user_repo, email)
 
     conversation = Conversation(user_id=user.id, title=body.title)
     saved = await chat_repo.create_conversation(conversation)
@@ -114,13 +144,12 @@ async def create_conversation(
 @inject
 async def get_conversation(
     conversation_id: UUID,
+    user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
+    x_user_email: str = Header(alias="X-User-Email", default=""),
 ) -> ConversationDetail:
     """Get a conversation with all its messages."""
-    conv = await chat_repo.get_conversation(conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
+    conv = await _get_owned_conversation(chat_repo, user_repo, conversation_id, x_user_email)
     messages = await chat_repo.get_messages(conversation_id)
 
     return ConversationDetail(
@@ -146,9 +175,12 @@ async def get_conversation(
 @inject
 async def delete_conversation(
     conversation_id: UUID,
+    user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
+    x_user_email: str = Header(alias="X-User-Email", default=""),
 ) -> dict:
     """Delete a conversation and all its messages (CASCADE)."""
+    await _get_owned_conversation(chat_repo, user_repo, conversation_id, x_user_email)
     deleted = await chat_repo.delete_conversation(conversation_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -160,9 +192,12 @@ async def delete_conversation(
 async def update_conversation_title(
     conversation_id: UUID,
     body: TitleUpdate,
+    user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
+    x_user_email: str = Header(alias="X-User-Email", default=""),
 ) -> ConversationSummary:
     """Update conversation title."""
+    await _get_owned_conversation(chat_repo, user_repo, conversation_id, x_user_email)
     conv = await chat_repo.update_conversation_title(conversation_id, body.title)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -179,12 +214,12 @@ async def update_conversation_title(
 async def add_message(
     conversation_id: UUID,
     body: MessageCreate,
+    user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
+    x_user_email: str = Header(alias="X-User-Email", default=""),
 ) -> MessageResponse:
     """Add a message to a conversation."""
-    conv = await chat_repo.get_conversation(conversation_id)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    await _get_owned_conversation(chat_repo, user_repo, conversation_id, x_user_email)
 
     message = Message(
         conversation_id=conversation_id,
@@ -208,11 +243,15 @@ async def add_message(
 @inject
 async def get_messages(
     conversation_id: UUID,
+    user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
-    limit: int = 100,
-    offset: int = 0,
+    x_user_email: str = Header(alias="X-User-Email", default=""),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> list[MessageResponse]:
     """Get messages for a conversation."""
+    await _get_owned_conversation(chat_repo, user_repo, conversation_id, x_user_email)
+
     messages = await chat_repo.get_messages(conversation_id, limit, offset)
     return [
         MessageResponse(

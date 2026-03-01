@@ -15,6 +15,7 @@ from app.domain.entities.query.query import UserQuery
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
 from app.domain.ports.search.vector_search import IVectorSearch
+from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
 from app.infrastructure.celery.tasks.analyst_tasks import analyze_query
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
 from sqlalchemy import text
@@ -145,9 +146,10 @@ async def _fetch_sample_data(
                 continue
 
             # Fetch sample rows (first 10)
-            sample_result = await session.execute(
-                text(f'SELECT * FROM "{cached.table_name}" LIMIT 10')  # noqa: S608
-            )
+            safe_sql = safe_table_query(cached.table_name, 'SELECT * FROM "{}" LIMIT 10')
+            if not safe_sql:
+                continue
+            sample_result = await session.execute(text(safe_sql))
             rows = sample_result.fetchall()
             columns = sample_result.keys()
 
@@ -339,6 +341,16 @@ async def invalidate_cache(
     return {"status": "deleted", "key": key}
 
 
+def _validate_ws_api_key(websocket: WebSocket) -> bool:
+    """Check api_key query param against configured BACKEND_API_KEY."""
+    import os
+    expected = os.getenv("BACKEND_API_KEY", "")
+    if not expected:
+        return True  # No key configured, allow all
+    provided = websocket.query_params.get("api_key", "")
+    return provided == expected
+
+
 @router.websocket("/ws/stream")
 @inject
 async def stream_query(
@@ -348,6 +360,9 @@ async def stream_query(
     vector_search: FromDishka[IVectorSearch],
 ):
     """WebSocket endpoint for streaming query responses."""
+    if not _validate_ws_api_key(websocket):
+        await websocket.close(code=4401, reason="Invalid or missing API key")
+        return
     await websocket.accept()
 
     try:
@@ -405,4 +420,4 @@ async def stream_query(
             await websocket.send_json({"type": "complete", "sources": sources})
 
     except WebSocketDisconnect:
-        pass
+        logger.debug("WS client disconnected")

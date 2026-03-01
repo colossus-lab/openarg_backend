@@ -35,6 +35,20 @@ class SecuritySettings(BaseModel):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    BACKEND_API_KEY: str = ""
+    CORS_ALLOWED_ORIGINS: list[str] = []
+
+    def model_post_init(self, __context: object) -> None:
+        import os
+
+        env_key = os.getenv("BACKEND_API_KEY", "")
+        if env_key:
+            self.BACKEND_API_KEY = env_key
+        env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+        if env_origins:
+            self.CORS_ALLOWED_ORIGINS = [
+                o.strip() for o in env_origins.split(",") if o.strip()
+            ]
 
 
 class LoggingSettings(BaseModel):
@@ -59,22 +73,30 @@ class ScraperSettings(BaseModel):
 
 class GeminiSecrets(BaseModel):
     API_KEY: str = ""
+    MODEL: str = "gemini-2.0-flash"
 
     def model_post_init(self, __context: object) -> None:
         import os
         env_key = os.getenv("GEMINI_API_KEY", "")
         if env_key:
             self.API_KEY = env_key
+        env_model = os.getenv("GEMINI_MODEL", "")
+        if env_model:
+            self.MODEL = env_model
 
 
 class AnthropicSecrets(BaseModel):
     API_KEY: str = ""
+    MODEL: str = "claude-sonnet-4-20250514"
 
     def model_post_init(self, __context: object) -> None:
         import os
         env_key = os.getenv("ANTHROPIC_API_KEY", "")
         if env_key:
             self.API_KEY = env_key
+        env_model = os.getenv("ANTHROPIC_MODEL", "")
+        if env_model:
+            self.MODEL = env_model
 
 
 class AppSettings(BaseModel):

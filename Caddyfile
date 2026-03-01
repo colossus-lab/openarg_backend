@@ -6,6 +6,9 @@ openarg.parlamentia.xyz {
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.openarg.parlamentia.xyz wss://api.openarg.parlamentia.xyz; font-src 'self' data:; frame-ancestors 'none'"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 	}
 
 	reverse_proxy frontend:3000
@@ -18,9 +21,11 @@ api.openarg.parlamentia.xyz {
 	header {
 		Access-Control-Allow-Origin https://openarg.parlamentia.xyz
 		Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
-		Access-Control-Allow-Headers "Authorization, Content-Type"
+		Access-Control-Allow-Headers "Authorization, Content-Type, X-API-Key, X-User-Email"
 		Access-Control-Max-Age 86400
 		X-Content-Type-Options nosniff
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Frame-Options DENY
 	}
 
 	@options method OPTIONS

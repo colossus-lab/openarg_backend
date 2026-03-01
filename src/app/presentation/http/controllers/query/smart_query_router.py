@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import re
 import time
 from datetime import UTC, datetime
@@ -593,6 +594,16 @@ async def smart_query(
 # ── WebSocket streaming endpoint ──────────────────────────────
 
 
+def _validate_ws_api_key(ws: WebSocket) -> bool:
+    """Check api_key query param against configured BACKEND_API_KEY."""
+    import os
+    expected = os.getenv("BACKEND_API_KEY", "")
+    if not expected:
+        return True
+    provided = ws.query_params.get("api_key", "")
+    return provided == expected
+
+
 @router.websocket("/ws/smart")
 @inject
 async def ws_smart_query(
@@ -608,6 +619,9 @@ async def ws_smart_query(
     sesiones: FromDishka[ISesionesConnector],
     ddjj: FromDishka[DDJJAdapter],
 ) -> None:
+    if not _validate_ws_api_key(ws):
+        await ws.close(code=4401, reason="Invalid or missing API key")
+        return
     await ws.accept()
 
     try:
@@ -694,7 +708,7 @@ async def ws_smart_query(
                         )
                     )
             except Exception:
-                pass
+                logger.debug("pgvector complement failed", exc_info=True)
 
         # 4. Streaming analysis
         await ws.send_json({"type": "status", "step": "analyzing"})

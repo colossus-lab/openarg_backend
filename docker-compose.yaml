@@ -2,7 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     ports:
-      - "5435:5432"
+      - "127.0.0.1:5435:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -18,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6381:6379"
+      - "127.0.0.1:6381:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -49,6 +49,7 @@ services:
       - MCP_CKAN_URL=http://mcp-ckan:8092
       - MCP_ARGENTINA_DATOS_URL=http://mcp-argentina-datos:8093
       - MCP_SESIONES_URL=http://mcp-sesiones:8094
+      - BACKEND_API_KEY=${BACKEND_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,7 +137,7 @@ services:
 
   flower:
     image: mher/flower:2.0.0
-    command: celery --broker=redis://redis:6379/0 flower --port=5555
+    command: celery --broker=redis://redis:6379/0 flower --port=5555 --basic-auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-changeme}
     ports:
       - "5556:5555"
     depends_on:
