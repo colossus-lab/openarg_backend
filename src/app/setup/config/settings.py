@@ -99,6 +99,17 @@ class AnthropicSecrets(BaseModel):
             self.MODEL = env_model
 
 
+class S3Settings(BaseModel):
+    BUCKET: str = "openarg-datasets"
+    REGION: str = "us-east-1"
+
+    def model_post_init(self, __context: object) -> None:
+        import os
+
+        self.BUCKET = os.getenv("S3_BUCKET", self.BUCKET)
+        self.REGION = os.getenv("AWS_REGION", self.REGION)
+
+
 class AppSettings(BaseModel):
     postgres: PostgresSettings = PostgresSettings()
     sqla: SqlaEngineSettings = SqlaEngineSettings()
@@ -108,6 +119,7 @@ class AppSettings(BaseModel):
     scraper: ScraperSettings = ScraperSettings()
     gemini: GeminiSecrets = GeminiSecrets()
     anthropic: AnthropicSecrets = AnthropicSecrets()
+    s3: S3Settings = S3Settings()
 
 
 def load_settings() -> AppSettings:

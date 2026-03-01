@@ -1,8 +1,8 @@
 [postgres]
-USER = "openarg"
+USER = "postgres"
 PASSWORD = ""
 DB = "openarg_db"
-HOST = "postgres"
+HOST = "localhost"
 PORT = 5432
 DRIVER = "psycopg"
 

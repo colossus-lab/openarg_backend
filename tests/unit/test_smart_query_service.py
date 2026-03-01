@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.application.smart_query_service import SmartQueryService, SmartQueryResult
+from app.application.smart_query_service import SmartQueryService
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
@@ -134,6 +134,7 @@ class TestExecuteFullPipeline:
         """A non-casual, non-educational question triggers the full pipeline."""
         # Mock generate_plan to return a simple plan
         fake_plan = ExecutionPlan(
+            query="¿a cuánto está el dólar hoy?",
             intent="consulta_datos",
             steps=[
                 PlanStep(
@@ -162,9 +163,14 @@ class TestExecuteFullPipeline:
             return_value=fake_plan,
         ), patch(
             "app.application.smart_query_service.QueryPreprocessor"
-        ) as mock_prep:
+        ) as mock_prep, patch(
+            "app.application.smart_query_service.QueryDecomposer"
+        ) as mock_decomp:
             mock_prep.return_value.reformulate = AsyncMock(
                 return_value="cotización del dólar hoy"
+            )
+            mock_decomp.return_value.decompose = AsyncMock(
+                return_value=["cotización del dólar hoy"]
             )
             result = await service.execute(
                 "¿a cuánto está el dólar hoy?", user_id="test@test.com"
@@ -172,12 +178,14 @@ class TestExecuteFullPipeline:
 
         assert result.answer  # LLM should have responded
         assert result.tokens_used == 100  # From FakeLLMResponse
+        assert result.confidence == 1.0  # Default confidence
 
 
 class TestConnectorFailureGraceful:
     async def test_one_connector_fails_rest_continues(self, service, mock_deps):
         """When one connector raises ConnectorError, execution continues."""
         fake_plan = ExecutionPlan(
+            query="test query",
             intent="consulta_datos",
             steps=[
                 PlanStep(
@@ -218,14 +226,78 @@ class TestConnectorFailureGraceful:
             return_value=fake_plan,
         ), patch(
             "app.application.smart_query_service.QueryPreprocessor"
-        ) as mock_prep:
+        ) as mock_prep, patch(
+            "app.application.smart_query_service.QueryDecomposer"
+        ) as mock_decomp:
             mock_prep.return_value.reformulate = AsyncMock(
                 return_value="series y dólar"
+            )
+            mock_decomp.return_value.decompose = AsyncMock(
+                return_value=["series y dólar"]
             )
             result = await service.execute("test query", user_id="test")
 
         # Should still have a result (from arg_datos)
         assert result.answer
+
+
+class TestCacheEmbeddingPassed:
+    async def test_check_cache_tries_redis_first(self, service, mock_deps):
+        """Verify _check_cache tries Redis before generating embedding."""
+        mock_deps["cache"].get.return_value = None
+        mock_deps["semantic_cache"].get.return_value = None
+        await service._check_cache("test question", "user")
+        # Redis should have been tried
+        mock_deps["cache"].get.assert_called_once()
+        # Embedding should have been generated (for semantic cache)
+        mock_deps["embedding"].embed.assert_called_once_with("test question")
+        # And passed to semantic_cache.get
+        mock_deps["semantic_cache"].get.assert_called_once_with(
+            "test question", embedding=mock_deps["embedding"].embed.return_value,
+        )
+
+    async def test_check_cache_skips_embedding_on_redis_hit(self, service, mock_deps):
+        """If Redis has a hit, embedding should NOT be generated."""
+        mock_deps["cache"].get.return_value = {"answer": "cached", "sources": []}
+        result = await service._check_cache("test question", "user")
+        assert result is not None
+        assert result.cached is True
+        # Embedding should NOT have been called
+        mock_deps["embedding"].embed.assert_not_called()
+
+    async def test_get_cached_dict_tries_redis_first(self, service, mock_deps):
+        """Verify _get_cached_dict tries Redis before semantic cache."""
+        mock_deps["cache"].get.return_value = None
+        mock_deps["semantic_cache"].get.return_value = None
+        await service._get_cached_dict("test question")
+        mock_deps["cache"].get.assert_called_once()
+        mock_deps["embedding"].embed.assert_called_once()
+        mock_deps["semantic_cache"].get.assert_called_once()
+
+
+class TestMetaParsing:
+    def test_extract_meta_with_valid_block(self, service):
+        text = (
+            'answer text <!--META:{"confidence": 0.8,'
+            ' "citations": [{"claim": "test", "source": "src"}]}-->'
+        )
+        confidence, citations = service._extract_meta(text)
+        assert confidence == 0.8
+        assert len(citations) == 1
+
+    def test_extract_meta_no_block(self, service):
+        confidence, citations = service._extract_meta("just an answer")
+        assert confidence == 1.0
+        assert citations == []
+
+    def test_extract_meta_invalid_json(self, service):
+        confidence, citations = service._extract_meta("<!--META:not json-->")
+        assert confidence == 1.0
+        assert citations == []
+
+    def test_extract_meta_clamped(self, service):
+        confidence, _ = service._extract_meta('<!--META:{"confidence": 1.5}-->')
+        assert confidence == 1.0
 
 
 class TestStreamingYieldsEvents:

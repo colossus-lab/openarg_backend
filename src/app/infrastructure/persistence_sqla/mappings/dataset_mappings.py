@@ -78,6 +78,7 @@ def map_dataset_tables() -> None:
         Column("size_bytes", Integer, server_default="0"),
         Column("status", String(50), server_default="pending"),
         Column("error_message", Text, nullable=True),
+        Column("s3_key", String(500), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
     )

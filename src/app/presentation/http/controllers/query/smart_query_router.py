@@ -19,6 +19,7 @@ from app.domain.ports.connectors.georef import IGeorefConnector
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
+from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
@@ -43,6 +44,8 @@ class SmartQueryResponse(BaseModel):
     sources: list[dict]
     chart_data: list[dict] | None = None
     tokens_used: int = 0
+    confidence: float = 1.0
+    citations: list[dict] = []
 
 
 def _build_service(
@@ -57,6 +60,7 @@ def _build_service(
     sesiones: ISesionesConnector,
     ddjj: DDJJAdapter,
     semantic_cache: SemanticCache,
+    retrieval_evaluator: IRetrievalEvaluator | None = None,
 ) -> SmartQueryService:
     return SmartQueryService(
         llm=llm,
@@ -70,6 +74,7 @@ def _build_service(
         sesiones=sesiones,
         ddjj=ddjj,
         semantic_cache=semantic_cache,
+        retrieval_evaluator=retrieval_evaluator,
     )
 
 
@@ -113,11 +118,13 @@ async def smart_query(
     sesiones: FromDishka[ISesionesConnector],
     ddjj: FromDishka[DDJJAdapter],
     semantic_cache: FromDishka[SemanticCache],
+    retrieval_evaluator: FromDishka[IRetrievalEvaluator],
     session: FromDishka[MainAsyncSession],
 ) -> dict:
     service = _build_service(
         llm, embedding, vector_search, cache, series,
         arg_datos, georef, ckan, sesiones, ddjj, semantic_cache,
+        retrieval_evaluator,
     )
     user_id = body.user_email or "anonymous"
 
@@ -150,6 +157,8 @@ async def smart_query(
         "sources": result.sources,
         "chart_data": result.chart_data,
         "tokens_used": result.tokens_used,
+        "confidence": result.confidence,
+        "citations": result.citations,
         **({"cached": True} if result.cached else {}),
         **({"casual": True} if result.casual else {}),
     }
@@ -181,6 +190,7 @@ async def ws_smart_query(
     sesiones: FromDishka[ISesionesConnector],
     ddjj: FromDishka[DDJJAdapter],
     semantic_cache: FromDishka[SemanticCache],
+    retrieval_evaluator: FromDishka[IRetrievalEvaluator],
 ) -> None:
     if not _validate_ws_api_key(ws):
         await ws.close(code=4401, reason="Invalid or missing API key")
@@ -209,6 +219,7 @@ async def ws_smart_query(
         service = _build_service(
             llm, embedding, vector_search, cache, series,
             arg_datos, georef, ckan, sesiones, ddjj, semantic_cache,
+            retrieval_evaluator,
         )
 
         async for event in service.execute_streaming(

@@ -1,12 +1,32 @@
-"""Tests for casual/meta message detection in smart_query_router."""
+"""Tests for casual/meta message detection in SmartQueryService."""
 
 import pytest
 
-from app.presentation.http.controllers.query.smart_query_router import (
-    _classify_casual_subtype,
-    _get_casual_response,
-    _get_meta_response,
-)
+from app.application.smart_query_service import SmartQueryService
+
+# Bind static methods for convenience
+_get_casual_response = SmartQueryService._get_casual_response
+_get_meta_response = SmartQueryService._get_meta_response
+
+
+def _classify_casual_subtype(text: str) -> str | None:
+    """Helper that mirrors the old router function using the service's static method."""
+    from app.application.smart_query_service import (
+        _GREETING_PATTERN,
+        _THANKS_PATTERN,
+        _FAREWELL_PATTERN,
+        _CASUAL_PATTERNS,
+    )
+    t = text.strip()
+    if not _CASUAL_PATTERNS.match(t):
+        return None
+    if _GREETING_PATTERN.match(t):
+        return "greeting"
+    if _THANKS_PATTERN.match(t):
+        return "thanks"
+    if _FAREWELL_PATTERN.match(t):
+        return "farewell"
+    return "generic"
 
 
 class TestCasualDetection:

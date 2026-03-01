@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
+
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -24,6 +26,13 @@ class DatasetSummary(BaseModel):
 class PortalStats(BaseModel):
     portal: str
     count: int
+
+
+class DownloadResponse(BaseModel):
+    url: str
+    source: str  # "s3" | "portal"
+    filename: str
+    expires_in: int  # seconds
 
 
 @router.get("/", response_model=list[DatasetSummary])
@@ -72,5 +81,60 @@ async def get_portal_stats(
         text("SELECT portal, COUNT(*) as count FROM datasets GROUP BY portal ORDER BY count DESC")
     )
     return [PortalStats(portal=row.portal, count=row.count) for row in result.fetchall()]
+
+
+@router.get("/{dataset_id}/download", response_model=DownloadResponse)
+@inject
+async def download_dataset(
+    dataset_id: str,
+    session: FromDishka[MainAsyncSession],
+):
+    """Descarga el archivo original de un dataset (presigned S3 URL o redirect al portal)."""
+    result = await session.execute(
+        text(
+            "SELECT d.title, d.download_url, d.format, d.source_id, cd.s3_key "
+            "FROM datasets d "
+            "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id AND cd.status = 'ready' "
+            "WHERE d.id = CAST(:did AS uuid)"
+        ),
+        {"did": dataset_id},
+    )
+    row = result.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    filename = f"{row.source_id}.{row.format}" if row.source_id and row.format else row.title
+    expires_in = 3600  # 1 hour
+
+    # Si tiene s3_key: generar presigned URL
+    if row.s3_key:
+        import boto3
+
+        bucket = os.getenv("S3_BUCKET", "openarg-datasets")
+        region = os.getenv("AWS_REGION", "us-east-1")
+        s3 = boto3.client("s3", region_name=region)
+        presigned_url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": row.s3_key},
+            ExpiresIn=expires_in,
+        )
+        return DownloadResponse(
+            url=presigned_url,
+            source="s3",
+            filename=filename,
+            expires_in=expires_in,
+        )
+
+    # Si tiene download_url: redirect al portal
+    if row.download_url:
+        return DownloadResponse(
+            url=row.download_url,
+            source="portal",
+            filename=filename,
+            expires_in=0,
+        )
+
+    raise HTTPException(status_code=404, detail="No download URL available")
 
 

@@ -4,10 +4,11 @@ from __future__ import annotations
 import pytest
 
 from app.domain.entities.connectors.data_result import DataResult
-from app.presentation.http.controllers.query.smart_query_router import (
-    _build_deterministic_charts,
-    _extract_llm_charts,
-)
+from app.application.smart_query_service import SmartQueryService
+
+# Bind static methods for convenience
+_build_deterministic_charts = SmartQueryService._build_deterministic_charts
+_extract_llm_charts = SmartQueryService._extract_llm_charts
 
 
 def _make_result(records, format="time_series", title="Test") -> DataResult:

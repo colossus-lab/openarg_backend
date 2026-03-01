@@ -56,16 +56,29 @@ class PgVectorSearchAdapter(IVectorSearch):
             for row in rows
         ]
 
+    @staticmethod
+    def _sanitize_tsquery_input(query_text: str) -> str:
+        """Sanitize input for websearch_to_tsquery to prevent syntax errors.
+
+        Balances unclosed quotes and strips characters that cause parse failures.
+        """
+        # Balance unclosed double quotes
+        if query_text.count('"') % 2 != 0:
+            query_text = query_text.replace('"', "")
+        return query_text.strip()
+
     async def search_datasets_hybrid(
         self,
         query_embedding: list[float],
         query_text: str,
         limit: int = 10,
         portal_filter: str | None = None,
+        rrf_k: int = 60,
+        min_score: float = 0.005,
     ) -> list[SearchResult]:
         """Hybrid search combining vector cosine similarity and BM25 full-text search with RRF fusion."""
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
-        k = 60  # RRF constant
+        query_text = self._sanitize_tsquery_input(query_text)
 
         portal_clause = ""
         params: dict = {
@@ -73,6 +86,7 @@ class PgVectorSearchAdapter(IVectorSearch):
             "query_text": query_text,
             "limit": limit,
             "fetch_limit": limit * 4,  # fetch more candidates for fusion
+            "rrf_k": rrf_k,
         }
         if portal_filter:
             portal_clause = "AND d.portal = :portal"
@@ -103,13 +117,13 @@ class PgVectorSearchAdapter(IVectorSearch):
                     d.portal,
                     d.download_url,
                     d.columns,
-                    ts_rank_cd(dc.tsv, plainto_tsquery('spanish', :query_text)) AS bm25_score,
+                    ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) AS bm25_score,
                     ROW_NUMBER() OVER (
-                        ORDER BY ts_rank_cd(dc.tsv, plainto_tsquery('spanish', :query_text)) DESC
+                        ORDER BY ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) DESC
                     ) AS bm25_rank
                 FROM dataset_chunks dc
                 JOIN datasets d ON d.id = dc.dataset_id
-                WHERE dc.tsv @@ plainto_tsquery('spanish', :query_text)
+                WHERE dc.tsv @@ websearch_to_tsquery('spanish', :query_text)
                     {portal_clause}
                 ORDER BY bm25_score DESC
                 LIMIT :fetch_limit
@@ -122,8 +136,8 @@ class PgVectorSearchAdapter(IVectorSearch):
                     COALESCE(v.portal, b.portal) AS portal,
                     COALESCE(v.download_url, b.download_url) AS download_url,
                     COALESCE(v.columns, b.columns) AS columns,
-                    COALESCE(1.0 / ({k} + v.vec_rank), 0) +
-                    COALESCE(1.0 / ({k} + b.bm25_rank), 0) AS rrf_score
+                    COALESCE(1.0 / (:rrf_k + v.vec_rank), 0) +
+                    COALESCE(1.0 / (:rrf_k + b.bm25_rank), 0) AS rrf_score
                 FROM vector_ranked v
                 FULL OUTER JOIN bm25_ranked b
                     ON v.dataset_id = b.dataset_id
@@ -148,6 +162,7 @@ class PgVectorSearchAdapter(IVectorSearch):
                 score=float(row.score),
             )
             for row in rows
+            if float(row.score) >= min_score
         ]
 
     async def index_dataset(

@@ -31,6 +31,34 @@ def _sanitize_table_name(name: str) -> str:
     return f"cache_{clean[:50]}"
 
 
+_CONTENT_TYPES = {
+    "csv": "text/csv",
+    "json": "application/json",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+}
+
+
+def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -> str:
+    """Sube archivo crudo a S3, retorna la key."""
+    import boto3
+
+    bucket = os.getenv("S3_BUCKET", "openarg-datasets")
+    region = os.getenv("AWS_REGION", "us-east-1")
+    s3 = boto3.client("s3", region_name=region)
+    key = f"datasets/{portal}/{dataset_id}/{filename}"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
+    s3.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=content,
+        ContentType=content_type,
+        ContentDisposition=f'attachment; filename="{filename}"',
+    )
+    return key
+
+
 @celery_app.task(name="openarg.collect_data", bind=True, max_retries=3)
 def collect_dataset(self, dataset_id: str):
     """
@@ -47,7 +75,8 @@ def collect_dataset(self, dataset_id: str):
         with engine.begin() as conn:
             row = conn.execute(
                 text(
-                    "SELECT title, download_url, format FROM datasets WHERE id = CAST(:id AS uuid)"
+                    "SELECT title, download_url, format, portal, source_id "
+                    "FROM datasets WHERE id = CAST(:id AS uuid)"
                 ),
                 {"id": dataset_id},
             ).fetchone()
@@ -57,6 +86,7 @@ def collect_dataset(self, dataset_id: str):
             return {"error": "not_found"}
 
         title, download_url, fmt = row.title, row.download_url, row.format
+        portal, source_id = row.portal, row.source_id
 
         if not download_url:
             logger.warning(f"Dataset {dataset_id} has no download URL")
@@ -93,6 +123,15 @@ def collect_dataset(self, dataset_id: str):
         resp.raise_for_status()
         client.close()
 
+        # Upload raw file to S3
+        s3_key = None
+        try:
+            filename = f"{source_id}.{fmt}"
+            s3_key = _upload_to_s3(resp.content, portal, dataset_id, filename)
+            logger.info(f"Uploaded to S3: {s3_key}")
+        except Exception:
+            logger.warning(f"S3 upload failed for {dataset_id}, continuing without S3", exc_info=True)
+
         # Parse with pandas
         df: pd.DataFrame
         if fmt == "csv":
@@ -120,13 +159,15 @@ def collect_dataset(self, dataset_id: str):
                 text("""
                     UPDATE cached_datasets SET
                         status = 'ready', row_count = :rows,
-                        columns_json = :cols, size_bytes = :size
+                        columns_json = :cols, size_bytes = :size,
+                        s3_key = :s3key
                     WHERE dataset_id = CAST(:did AS uuid)
                 """),
                 {
                     "rows": len(df),
                     "cols": columns_json,
                     "size": len(resp.content),
+                    "s3key": s3_key,
                     "did": dataset_id,
                 },
             )
@@ -138,12 +179,18 @@ def collect_dataset(self, dataset_id: str):
                 {"rows": len(df), "id": dataset_id},
             )
 
+        # Dispatch re-embedding with enriched data (sample rows)
+        from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+
+        index_dataset_embedding.delay(dataset_id)
+
         logger.info(f"Dataset {dataset_id} cached: {len(df)} rows in table {table_name}")
         return {
             "dataset_id": dataset_id,
             "table_name": table_name,
             "rows": len(df),
             "columns": list(df.columns),
+            "s3_key": s3_key,
         }
 
     except Exception as exc:
@@ -157,5 +204,30 @@ def collect_dataset(self, dataset_id: str):
                 {"msg": str(exc), "did": dataset_id},
             )
         raise self.retry(exc=exc, countdown=60)
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(name="openarg.bulk_collect_all", bind=True)
+def bulk_collect_all(self, portal: str | None = None):
+    """Descarga y cachea TODOS los datasets no cacheados."""
+    engine = _get_sync_engine()
+
+    try:
+        query = "SELECT CAST(id AS text) FROM datasets WHERE is_cached = false"
+        params: dict[str, str] = {}
+        if portal:
+            query += " AND portal = :portal"
+            params["portal"] = portal
+        query += " ORDER BY portal, title"
+
+        with engine.connect() as conn:
+            rows = conn.execute(text(query), params).fetchall()
+
+        logger.info(f"Bulk collect: {len(rows)} uncached datasets to process")
+        for row in rows:
+            collect_dataset.delay(row[0])
+
+        return {"dispatched": len(rows)}
     finally:
         engine.dispose()

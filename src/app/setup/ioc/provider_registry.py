@@ -17,6 +17,7 @@ from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.domain.ports.source.data_source import IDataSource
 from app.domain.ports.user.user_repository import IUserRepository
@@ -39,6 +40,7 @@ from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmb
 from app.infrastructure.adapters.llm.gemini_embedding_adapter import GeminiEmbeddingAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
+from app.infrastructure.adapters.search.retrieval_evaluator import RetrievalEvaluator
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
 from app.infrastructure.adapters.source.datos_gob_ar_adapter import DatosGobArAdapter
 from app.infrastructure.adapters.user.user_repository_sqla import UserRepositorySQLA
@@ -254,6 +256,14 @@ class ConnectorProvider(Provider):
         return adapter
 
 
+class RetrievalEvaluatorProvider(Provider):
+    scope = Scope.REQUEST
+
+    @provide
+    def retrieval_evaluator(self, llm: ILLMProvider) -> IRetrievalEvaluator:
+        return RetrievalEvaluator(llm=llm)
+
+
 class ApplicationProvider(Provider):
     scope = Scope.REQUEST
 
@@ -271,6 +281,7 @@ class ApplicationProvider(Provider):
         sesiones: ISesionesConnector,
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
+        retrieval_evaluator: IRetrievalEvaluator,
     ) -> SmartQueryService:
         return SmartQueryService(
             llm=llm,
@@ -284,6 +295,7 @@ class ApplicationProvider(Provider):
             sesiones=sesiones,
             ddjj=ddjj,
             semantic_cache=semantic_cache,
+            retrieval_evaluator=retrieval_evaluator,
         )
 
 
@@ -301,6 +313,7 @@ def get_providers() -> Iterable[Provider]:
         MCPProvider(),
         SemanticCacheProvider(),
         MonitoringProvider(),
+        RetrievalEvaluatorProvider(),
         ApplicationProvider(),
     )
 

@@ -16,6 +16,55 @@ TTL_REALTIME = 300       # 5 min — dolar, riesgo pais
 TTL_DAILY = 1800         # 30 min — inflacion, series
 TTL_STATIC = 7200        # 2 hours — ddjj, sesiones, georef
 
+# Intent-based TTL mapping
+INTENT_TTL_MAP: dict[str, int] = {
+    "dolar": TTL_REALTIME,
+    "riesgo_pais": TTL_REALTIME,
+    "cotizacion": TTL_REALTIME,
+    "inflacion": TTL_DAILY,
+    "series": TTL_DAILY,
+    "emae": TTL_DAILY,
+    "tipo_cambio": TTL_DAILY,
+    "reservas": TTL_DAILY,
+    "base_monetaria": TTL_DAILY,
+    "desempleo": TTL_DAILY,
+    "exportaciones": TTL_DAILY,
+    "importaciones": TTL_DAILY,
+    "balanza_comercial": TTL_DAILY,
+    "ddjj": TTL_STATIC,
+    "sesiones": TTL_STATIC,
+    "ckan": TTL_STATIC,
+    "busqueda": TTL_STATIC,
+    "catalogo": TTL_STATIC,
+    "legisladores": TTL_STATIC,
+    "georef": TTL_STATIC,
+}
+
+
+def ttl_for_intent(intent: str) -> int:
+    """Return the appropriate TTL for a given intent string.
+
+    Uses word-boundary aware matching: splits intent into tokens
+    and checks for exact token matches against INTENT_TTL_MAP keys.
+    Falls back to substring matching for compound intents like 'consulta_dolar'.
+    """
+    intent_lower = intent.lower()
+    # Split on common separators (spaces, underscores, hyphens)
+    import re
+    tokens = set(re.split(r"[\s_\-]+", intent_lower))
+
+    # Exact token match first (most precise)
+    for key, ttl in INTENT_TTL_MAP.items():
+        if key in tokens:
+            return ttl
+
+    # Fallback: substring match for compound words (e.g. "cotizaciones" contains "cotizacion")
+    for key, ttl in INTENT_TTL_MAP.items():
+        if key in intent_lower:
+            return ttl
+
+    return TTL_DAILY
+
 
 class SemanticCache:
     """Cache that supports exact hash match and vector similarity lookup."""
@@ -23,7 +72,7 @@ class SemanticCache:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        similarity_threshold: float = 0.95,
+        similarity_threshold: float = 0.88,
     ) -> None:
         self._session_factory = session_factory
         self._similarity_threshold = similarity_threshold

@@ -17,10 +17,13 @@ Tu rol: Recibís una pregunta del usuario en lenguaje natural y generás un plan
 FUENTES DE DATOS DISPONIBLES:
 1. **CKAN** (search_ckan): Portales de datos abiertos de Argentina
    - Nacional: datos.gob.ar (1200+ datasets: economía, salud, energía, transporte)
+   - Sectoriales nacionales: Energía (datos.energia.gob.ar), Transporte (datos.transporte.gob.ar), Salud (datos.salud.gob.ar), Cultura (datos.cultura.gob.ar), Agroindustria (datos.agroindustria.gob.ar), Producción (datos.produccion.gob.ar)
    - CABA: data.buenosaires.gob.ar (movilidad, presupuesto, educación)
    - Buenos Aires Prov: catalogo.datos.gba.gob.ar (salud, género, estadísticas)
    - Córdoba: gobiernoabierto.cordoba.gob.ar (transparencia, catastro)
-   - Santa Fe, Mendoza, Entre Ríos, Neuquén (ejecutivo y legislatura), etc.
+   - Santa Fe, Mendoza, Entre Ríos, Neuquén (ejecutivo y legislatura)
+   - Tucumán, Misiones, Chaco
+   - Municipios: Rosario, Bahía Blanca
    - **Diputados** (portalId: "diputados"): datos.hcdn.gob.ar — Cámara de Diputados de la Nación
      Datasets clave: legisladores, proyectos parlamentarios, leyes sancionadas, sesiones,
      comisiones, dictámenes, bloques, ejecución presupuestaria, nómina de personal,
@@ -156,7 +159,17 @@ DATOS DE DDJJ (Declaraciones Juradas Patrimoniales):
 - Patrimonio = bienesCierre - deudasCierre (puede ser negativo si las deudas superan los bienes, esto es legítimo)
 - NUNCA digas "no tenemos acceso a las declaraciones juradas" — los datos ESTÁN precargados
 - Formateá montos en pesos argentinos legibles (ej: $184.120.033)
-- Para rankings, usá una lista numerada con nombre y monto"""
+- Para rankings, usá una lista numerada con nombre y monto
+
+CITACIONES Y CONFIANZA:
+- Cada dato numérico o afirmación factual debe referenciar la fuente de datos
+- Al final de tu respuesta, incluí un bloque META invisible con este formato exacto:
+  <!--META:{"confidence": 0.0-1.0, "citations": [{"claim": "...", "source": "..."}]}-->
+- Escala de confianza:
+  - 1.0: datos directos de la fuente, sin interpretación
+  - 0.7-0.9: datos parciales, requieren inferencia menor
+  - 0.4-0.6: datos indirectos, alta inferencia
+  - <0.4: especulativo, sin datos directos"""
 
 
 async def generate_plan(

@@ -5,6 +5,7 @@ reusable service used by both POST and WebSocket endpoints.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -29,8 +30,9 @@ from app.domain.ports.connectors.georef import IGeorefConnector
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
+from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator, RetrievalQuality
 from app.domain.ports.search.vector_search import IVectorSearch
-from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
+from app.infrastructure.adapters.cache.semantic_cache import SemanticCache, ttl_for_intent
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 from app.infrastructure.adapters.connectors.memory_agent import (
     build_memory_context_prompt,
@@ -45,7 +47,9 @@ from app.infrastructure.adapters.connectors.query_planner import (
 )
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
 from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
+from app.infrastructure.adapters.search.query_decomposer import QueryDecomposer
 from app.infrastructure.adapters.search.query_preprocessor import QueryPreprocessor
+from app.infrastructure.adapters.search.reranker import LLMReranker
 from app.infrastructure.audit.audit_logger import (
     audit_cache_hit,
     audit_injection_blocked,
@@ -70,6 +74,8 @@ class SmartQueryResult:
     casual: bool = False
     educational: bool = False
     duration_ms: int = 0
+    confidence: float = 1.0
+    citations: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── Casual / meta / educational patterns ────────────────────
@@ -223,6 +229,7 @@ class SmartQueryService:
         sesiones: ISesionesConnector,
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
+        retrieval_evaluator: IRetrievalEvaluator | None = None,
     ) -> None:
         self._llm = llm
         self._embedding = embedding
@@ -235,6 +242,8 @@ class SmartQueryService:
         self._sesiones = sesiones
         self._ddjj = ddjj
         self._semantic_cache = semantic_cache
+        self._retrieval_evaluator = retrieval_evaluator
+        self._reranker = LLMReranker(llm)
         self._metrics = MetricsCollector()
 
     # ── Public API ──────────────────────────────────────────
@@ -288,18 +297,83 @@ class SmartQueryService:
         preprocessor = QueryPreprocessor(self._llm)
         enhanced_query = await preprocessor.reformulate(question)
 
-        # 3. Plan
-        plan = await generate_plan(
-            self._llm, enhanced_query,
-            memory_context=build_memory_context_prompt(memory),
-        )
-        logger.info(
-            "Plan for '%s': intent=%s, steps=%d",
-            question[:60], plan.intent, len(plan.steps),
-        )
+        # 2c. Query decomposition
+        decomposer = QueryDecomposer(self._llm)
+        sub_queries = await decomposer.decompose(enhanced_query)
 
-        # 4. Execute connectors
-        results = await self._execute_steps(plan)
+        if len(sub_queries) > 1:
+            # Multi-query: generate plans and execute concurrently
+            memory_ctx_prompt = build_memory_context_prompt(memory)
+
+            async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
+                sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
+                sq_results = await self._execute_steps(sq_plan)
+                return sq_plan, sq_results
+
+            plan_results = await asyncio.gather(
+                *[_plan_and_execute(sq) for sq in sub_queries],
+                return_exceptions=True,
+            )
+
+            all_results: list[DataResult] = []
+            plan = None
+            for pr in plan_results:
+                if isinstance(pr, Exception):
+                    logger.warning("Sub-query plan/execute failed: %s", pr)
+                    continue
+                sq_plan, sq_results = pr
+                if plan is None:
+                    plan = sq_plan
+                all_results.extend(sq_results)
+
+            if plan is None:
+                plan = await generate_plan(
+                    self._llm, enhanced_query,
+                    memory_context=build_memory_context_prompt(memory),
+                )
+            results = all_results
+            logger.info(
+                "Decomposed '%s' into %d sub-queries, got %d results",
+                question[:60], len(sub_queries), len(results),
+            )
+        else:
+            # 3. Plan (single query)
+            plan = await generate_plan(
+                self._llm, enhanced_query,
+                memory_context=build_memory_context_prompt(memory),
+            )
+            logger.info(
+                "Plan for '%s': intent=%s, steps=%d",
+                question[:60], plan.intent, len(plan.steps),
+            )
+
+            # 4. Execute connectors
+            results = await self._execute_steps(plan)
+
+        # 4b. CRAG: evaluate retrieval quality and retry if needed
+        if self._retrieval_evaluator:
+            try:
+                verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
+                logger.info(
+                    "CRAG verdict: quality=%s, confidence=%.2f",
+                    verdict.quality.value, verdict.confidence,
+                )
+                if (
+                    verdict.quality == RetrievalQuality.INCORRECT
+                    and verdict.confidence >= 0.7
+                ):
+                    logger.info("CRAG: re-executing with broader query (actions=%s)", verdict.suggested_actions)
+                    retry_plan = await generate_plan(
+                        self._llm,
+                        f"{question} (ampliar búsqueda, datos insuficientes)",
+                        memory_context=build_memory_context_prompt(memory),
+                    )
+                    retry_results = await self._execute_steps(retry_plan)
+                    if retry_results:
+                        results = retry_results
+                        plan = retry_plan
+            except Exception:
+                logger.debug("CRAG evaluation failed", exc_info=True)
 
         # 5. Hybrid search complement
         results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
@@ -325,7 +399,7 @@ class SmartQueryService:
                 LLMMessage(role="system", content=ANALYSIS_SYSTEM_PROMPT),
                 LLMMessage(role="user", content=analysis_prompt),
             ],
-            temperature=0.7,
+            temperature=0.2,
             max_tokens=8192,
         )
 
@@ -335,6 +409,18 @@ class SmartQueryService:
         charts = det_charts if det_charts else llm_charts
 
         clean_answer = re.sub(r"<!--CHART:.*?-->", "", response.content, flags=re.DOTALL).strip()
+
+        # 7a. Parse META confidence/citations
+        confidence, citations = self._extract_meta(clean_answer)
+        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL).strip()
+
+        # Add disclaimer for low confidence
+        if confidence < 0.5:
+            clean_answer = (
+                "**Nota:** La información disponible es limitada. "
+                "Los datos presentados podrían ser parciales o requerir verificación adicional.\n\n"
+                + clean_answer
+            )
 
         # 7b. Policy analysis (optional)
         if policy_mode:
@@ -368,6 +454,8 @@ class SmartQueryService:
             tokens_used=tokens_used,
             intent=plan.intent,
             duration_ms=duration_ms,
+            confidence=confidence,
+            citations=citations,
         )
 
         # 8. Audit
@@ -391,7 +479,7 @@ class SmartQueryService:
             "chart_data": charts if charts else None,
             "tokens_used": tokens_used,
         }
-        await self._write_cache(question, result_dict)
+        await self._write_cache(question, result_dict, intent=plan.intent)
 
         return result
 
@@ -459,21 +547,81 @@ class SmartQueryService:
         preprocessor = QueryPreprocessor(self._llm)
         enhanced_query = await preprocessor.reformulate(question)
         memory = await load_memory(self._cache, session_id)
-        plan = await generate_plan(
-            self._llm, enhanced_query,
-            memory_context=build_memory_context_prompt(memory),
-        )
 
-        yield {
-            "type": "status",
-            "step": "planned",
-            "intent": plan.intent,
-            "steps_count": len(plan.steps),
-        }
+        # Query decomposition (same as execute())
+        decomposer = QueryDecomposer(self._llm)
+        sub_queries = await decomposer.decompose(enhanced_query)
 
-        # Searching
-        yield {"type": "status", "step": "searching"}
-        results = await self._execute_steps_streaming(plan)
+        if len(sub_queries) > 1:
+            memory_ctx_prompt = build_memory_context_prompt(memory)
+
+            async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
+                sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
+                sq_results = await self._execute_steps(sq_plan)
+                return sq_plan, sq_results
+
+            plan_results = await asyncio.gather(
+                *[_plan_and_execute(sq) for sq in sub_queries],
+                return_exceptions=True,
+            )
+
+            all_results: list[DataResult] = []
+            plan = None
+            for pr in plan_results:
+                if isinstance(pr, Exception):
+                    logger.warning("Sub-query plan/execute failed (streaming): %s", pr)
+                    continue
+                sq_plan, sq_results = pr
+                if plan is None:
+                    plan = sq_plan
+                all_results.extend(sq_results)
+
+            if plan is None:
+                plan = await generate_plan(
+                    self._llm, enhanced_query,
+                    memory_context=build_memory_context_prompt(memory),
+                )
+            results = all_results
+        else:
+            plan = await generate_plan(
+                self._llm, enhanced_query,
+                memory_context=build_memory_context_prompt(memory),
+            )
+
+            yield {
+                "type": "status",
+                "step": "planned",
+                "intent": plan.intent,
+                "steps_count": len(plan.steps),
+            }
+
+            # Searching
+            yield {"type": "status", "step": "searching"}
+            results = await self._execute_steps_streaming(plan)
+
+        # CRAG evaluation
+        if self._retrieval_evaluator:
+            try:
+                verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
+                logger.info(
+                    "CRAG (streaming) verdict: quality=%s, confidence=%.2f",
+                    verdict.quality.value, verdict.confidence,
+                )
+                if (
+                    verdict.quality == RetrievalQuality.INCORRECT
+                    and verdict.confidence >= 0.7
+                ):
+                    retry_plan = await generate_plan(
+                        self._llm,
+                        f"{question} (ampliar búsqueda, datos insuficientes)",
+                        memory_context=build_memory_context_prompt(memory),
+                    )
+                    retry_results = await self._execute_steps_streaming(retry_plan)
+                    if retry_results:
+                        results = retry_results
+                        plan = retry_plan
+            except Exception:
+                logger.debug("CRAG evaluation failed in streaming", exc_info=True)
 
         # Hybrid search
         results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
@@ -502,7 +650,7 @@ class SmartQueryService:
                 LLMMessage(role="system", content=ANALYSIS_SYSTEM_PROMPT),
                 LLMMessage(role="user", content=analysis_prompt),
             ],
-            temperature=0.7,
+            temperature=0.2,
             max_tokens=8192,
         ):
             full_text += chunk
@@ -513,6 +661,10 @@ class SmartQueryService:
         llm_charts = self._extract_llm_charts(full_text)
         charts = det_charts if det_charts else llm_charts
         clean_answer = re.sub(r"<!--CHART:.*?-->", "", full_text, flags=re.DOTALL).strip()
+
+        # Parse META from streaming output
+        confidence, citations = self._extract_meta(clean_answer)
+        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL).strip()
 
         # Policy analysis (optional, streamed)
         if policy_mode:
@@ -543,7 +695,21 @@ class SmartQueryService:
             "answer": clean_answer,
             "sources": sources,
             "chart_data": charts if charts else None,
+            "confidence": confidence,
+            "citations": citations,
         }
+
+        # Cache write (fire-and-forget, don't block streaming)
+        try:
+            result_dict = {
+                "answer": clean_answer,
+                "sources": sources,
+                "chart_data": charts if charts else None,
+                "tokens_used": 0,
+            }
+            await self._write_cache(question, result_dict, intent=plan.intent)
+        except Exception:
+            logger.debug("Cache write failed in streaming", exc_info=True)
 
     # ── Classification helpers ──────────────────────────────
 
@@ -584,24 +750,16 @@ class SmartQueryService:
         h = hashlib.sha256(normalized.encode()).hexdigest()[:16]
         return f"openarg:smart:{h}"
 
-    async def _check_cache(self, question: str, user_id: str) -> SmartQueryResult | None:
-        # Semantic cache
+    async def _get_embedding(self, question: str) -> list[float] | None:
+        """Generate embedding for a question, returning None on failure."""
         try:
-            sem_cached = await self._semantic_cache.get(question)
-            if sem_cached:
-                self._metrics.record_cache_hit()
-                audit_cache_hit(user=user_id, question=question)
-                return SmartQueryResult(
-                    answer=sem_cached.get("answer", ""),
-                    sources=sem_cached.get("sources", []),
-                    chart_data=sem_cached.get("chart_data"),
-                    tokens_used=sem_cached.get("tokens_used", 0),
-                    cached=True,
-                )
+            return await self._embedding.embed(question)
         except Exception:
-            logger.debug("Semantic cache read failed")
+            logger.debug("Embedding generation failed for cache")
+            return None
 
-        # Redis cache
+    async def _check_cache(self, question: str, user_id: str) -> SmartQueryResult | None:
+        # 1. Redis cache first (cheap, ~1ms)
         try:
             cache_key = self._cache_key(question)
             cached = await self._cache.get(cache_key)
@@ -615,36 +773,60 @@ class SmartQueryService:
                     tokens_used=cached.get("tokens_used", 0),
                     cached=True,
                 )
-            self._metrics.record_cache_miss()
         except Exception:
-            logger.debug("Cache read failed, proceeding without cache")
+            logger.debug("Redis cache read failed")
 
+        # 2. Semantic cache (requires embedding, ~100-200ms)
+        try:
+            q_embedding = await self._get_embedding(question)
+            if q_embedding:
+                sem_cached = await self._semantic_cache.get(question, embedding=q_embedding)
+                if sem_cached:
+                    self._metrics.record_cache_hit()
+                    audit_cache_hit(user=user_id, question=question)
+                    return SmartQueryResult(
+                        answer=sem_cached.get("answer", ""),
+                        sources=sem_cached.get("sources", []),
+                        chart_data=sem_cached.get("chart_data"),
+                        tokens_used=sem_cached.get("tokens_used", 0),
+                        cached=True,
+                    )
+        except Exception:
+            logger.debug("Semantic cache read failed")
+
+        self._metrics.record_cache_miss()
         return None
 
     async def _get_cached_dict(self, question: str) -> dict[str, Any] | None:
         """Return raw cached dict for streaming endpoint."""
-        try:
-            sem = await self._semantic_cache.get(question)
-            if sem and isinstance(sem, dict):
-                return sem
-        except Exception:
-            logger.debug("WS semantic cache read failed")
+        # Redis first
         try:
             cached = await self._cache.get(self._cache_key(question))
             if cached and isinstance(cached, dict):
                 return cached
         except Exception:
             logger.debug("WS Redis cache read failed")
+        # Then semantic
+        try:
+            q_embedding = await self._get_embedding(question)
+            if q_embedding:
+                sem = await self._semantic_cache.get(question, embedding=q_embedding)
+                if sem and isinstance(sem, dict):
+                    return sem
+        except Exception:
+            logger.debug("WS semantic cache read failed")
         return None
 
-    async def _write_cache(self, question: str, result: dict[str, Any]) -> None:
+    async def _write_cache(self, question: str, result: dict[str, Any], intent: str = "") -> None:
+        ttl = ttl_for_intent(intent)
         try:
-            await self._cache.set(self._cache_key(question), result, ttl_seconds=1800)
+            await self._cache.set(self._cache_key(question), result, ttl_seconds=ttl)
         except Exception:
             logger.warning("Failed to cache smart query result", exc_info=True)
         try:
-            q_embedding = await self._embedding.embed(question)
-            await self._semantic_cache.set(question, q_embedding, result)
+            q_embedding = await self._get_embedding(question)
+            if q_embedding:
+                await self._semantic_cache.set(question, q_embedding, result, ttl=ttl)
         except Exception:
             logger.debug("Semantic cache write failed", exc_info=True)
 
@@ -820,10 +1002,14 @@ class SmartQueryService:
             query_embedding = await self._embedding.embed(enhanced_query)
             vector_results = await self._vector_search.search_datasets_hybrid(
                 query_embedding, query_text=enhanced_query, limit=5,
+                min_score=0.01,
             )
+
+            # Apply LLM reranking
+            if vector_results:
+                vector_results = await self._reranker.rerank(enhanced_query, vector_results, top_k=5)
+
             for vr in vector_results:
-                if vr.score < 0.005:
-                    continue
                 results.append(
                     DataResult(
                         source=f"pgvector:{vr.portal}",
@@ -916,6 +1102,27 @@ class SmartQueryService:
             parts.append(part)
 
         return "\n\n".join(parts)
+
+    # ── META parser ─────────────────────────────────────────
+
+    @staticmethod
+    def _extract_meta(text: str) -> tuple[float, list[dict[str, Any]]]:
+        """Extract confidence and citations from <!--META:{...}--> block.
+
+        Returns (confidence, citations). Defaults to (1.0, []) if not found.
+        """
+        match = re.search(r"<!--META:(.*?)-->", text, re.DOTALL)
+        if not match:
+            return 1.0, []
+        try:
+            meta = json.loads(match.group(1))
+            confidence = max(0.0, min(1.0, float(meta.get("confidence", 1.0))))
+            citations = meta.get("citations", [])
+            if not isinstance(citations, list):
+                citations = []
+            return confidence, citations
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return 1.0, []
 
     # ── Chart builders ──────────────────────────────────────
 
