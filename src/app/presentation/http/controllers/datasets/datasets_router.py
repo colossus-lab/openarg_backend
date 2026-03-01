@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -35,8 +35,8 @@ class PortalStats(BaseModel):
 async def list_datasets(
     session: FromDishka[MainAsyncSession],
     portal: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ) -> list[DatasetSummary]:
     """List indexed datasets, optionally filtered by portal."""
     query = "SELECT CAST(id AS text), title, description, organization, portal, format, is_cached, row_count FROM datasets"
@@ -84,7 +84,7 @@ async def trigger_scrape(request: Request, portal: str) -> dict:
     """Trigger a catalog scrape for a specific portal."""
     valid_portals = ["datos_gob_ar", "caba"]
     if portal not in valid_portals:
-        return {"error": f"Invalid portal. Valid: {valid_portals}"}
+        raise HTTPException(status_code=400, detail=f"Invalid portal. Valid: {valid_portals}")
 
     task = scrape_catalog.delay(portal)
     return {"task_id": task.id, "portal": portal, "status": "scraping_started"}

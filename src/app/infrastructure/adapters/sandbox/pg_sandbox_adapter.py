@@ -45,10 +45,52 @@ def _validate_sql(sql: str) -> str | None:
     if not re.match(r"^\s*(SELECT|WITH)\b", no_comments, re.IGNORECASE):
         return "Only SELECT queries are allowed."
 
-    # Check for forbidden keywords
+    # Check for forbidden keywords (defense-in-depth layer 1)
     match = _FORBIDDEN_PATTERNS.search(no_comments)
     if match:
         return f"Forbidden SQL operation: {match.group(0).upper()}"
+
+    # AST-level validation with sqlglot (defense-in-depth layer 2)
+    error = _validate_sql_ast(stripped)
+    if error:
+        return error
+
+    return None
+
+
+def _validate_sql_ast(sql: str) -> str | None:
+    """Parse SQL with sqlglot and reject anything that isn't a pure SELECT."""
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        statements = sqlglot.parse(sql, dialect="postgres")
+
+        if not statements:
+            return "Could not parse SQL statement."
+
+        if len(statements) > 1:
+            return "Only single SELECT statements are allowed."
+
+        stmt = statements[0]
+        if stmt is None:
+            return "Could not parse SQL statement."
+
+        # Reject non-SELECT top-level statements
+        if not isinstance(stmt, exp.Select):
+            return "Only SELECT queries are allowed."
+
+        # Walk the AST to find DML/DDL nodes embedded in CTEs or subqueries
+        _DML_DDL = (
+            exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create,
+            exp.AlterTable, exp.Command,
+        )
+        for node in stmt.walk():
+            if isinstance(node, _DML_DDL):
+                return f"Forbidden SQL operation in subquery: {type(node).__name__}"
+
+    except Exception:
+        logger.debug("sqlglot validation failed, falling back to regex", exc_info=True)
 
     return None
 
@@ -57,9 +99,13 @@ class PgSandboxAdapter(ISQLSandbox):
     """Read-only SQL sandbox that executes queries against cached dataset tables."""
 
     def __init__(self) -> None:
+        # Prefer dedicated sandbox URL (read-only role in prod) over main DB
         self._db_url = os.getenv(
-            "DATABASE_URL",
-            "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db",
+            "SANDBOX_DATABASE_URL",
+            os.getenv(
+                "DATABASE_URL",
+                "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db",
+            ),
         )
         self._engine: Engine | None = None
         self._executor = ThreadPoolExecutor(max_workers=2)
@@ -119,11 +165,20 @@ class PgSandboxAdapter(ISQLSandbox):
                 )
 
         except Exception as exc:
-            error_msg = str(exc)
-            # Provide cleaner error messages for common cases
-            if "statement timeout" in error_msg.lower() or "canceling statement" in error_msg.lower():
+            raw_error = str(exc)
+            logger.warning("Sandbox query failed: %s", raw_error)
+            # Sanitize error messages — don't expose PostgreSQL internals
+            error_lower = raw_error.lower()
+            if "statement timeout" in error_lower or "canceling statement" in error_lower:
                 error_msg = f"Query timed out after {timeout_seconds} seconds."
-            logger.warning("Sandbox query failed: %s", error_msg)
+            elif "relation" in error_lower and "does not exist" in error_lower:
+                error_msg = "The requested table does not exist."
+            elif "column" in error_lower and "does not exist" in error_lower:
+                error_msg = "One or more referenced columns do not exist."
+            elif "syntax error" in error_lower:
+                error_msg = "SQL syntax error in the query."
+            else:
+                error_msg = "Query execution failed. Please check your SQL and try again."
             return SandboxResult(
                 columns=[],
                 rows=[],

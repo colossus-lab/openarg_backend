@@ -61,6 +61,8 @@ services:
       MCP_CKAN_URL: http://mcp-ckan:8092
       MCP_ARGENTINA_DATOS_URL: http://mcp-argentina-datos:8093
       MCP_SESIONES_URL: http://mcp-sesiones:8094
+      BACKEND_API_KEY: ${BACKEND_API_KEY:-}
+      SANDBOX_DATABASE_URL: ${SANDBOX_DATABASE_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -198,6 +200,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       ALLOWED_EMAILS: ${ALLOWED_EMAILS}
+      OPENARG_BACKEND_API_KEY: ${BACKEND_API_KEY:-}
     depends_on:
       - backend
 

@@ -49,8 +49,8 @@ dependencies = [
     # Rate limiting
     "slowapi>=0.1.9",
 
-    # Utils
-    "structlog>=24.4.0",
+    # SQL validation
+    "sqlglot>=26.0.0",
 ]
 
 [project.optional-dependencies]

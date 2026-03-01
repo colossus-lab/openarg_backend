@@ -14,6 +14,7 @@ import time
 import google.generativeai as genai
 from sqlalchemy import create_engine, text
 
+from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks.collector_tasks import collect_dataset
 
@@ -176,13 +177,14 @@ def analyze_query(self, query_id: str, question: str):
 
             if cached:
                 try:
+                    sample_sql = safe_table_query(cached.table_name, 'SELECT * FROM "{}" LIMIT 20')
+                    cols_sql = safe_table_query(cached.table_name, 'SELECT * FROM "{}" LIMIT 0')
+                    if not sample_sql or not cols_sql:
+                        logger.warning("Invalid table name: %s", cached.table_name)
+                        continue
                     with engine.begin() as conn:
-                        sample = conn.execute(
-                            text(f'SELECT * FROM "{cached.table_name}" LIMIT 20')
-                        ).fetchall()
-                        cols = conn.execute(
-                            text(f'SELECT * FROM "{cached.table_name}" LIMIT 0')
-                        ).keys()
+                        sample = conn.execute(text(sample_sql)).fetchall()
+                        cols = conn.execute(text(cols_sql)).keys()
 
                     col_names = list(cols)
                     rows_str = "\n".join(
