@@ -4,11 +4,9 @@ import logging
 import unicodedata
 from datetime import UTC, datetime
 
-import httpx
-
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
-from app.infrastructure.resilience.retry import with_retry
+from app.infrastructure.mcp.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
 
@@ -130,70 +128,18 @@ def find_catalog_match(query: str) -> dict | None:
 
 
 class SeriesTiempoAdapter(ISeriesTiempoConnector):
-    def __init__(self, base_url: str = "https://apis.datos.gob.ar/series/api") -> None:
-        self._base_url = base_url
-        self._client = httpx.AsyncClient(
-            timeout=15.0,
-            headers={"User-Agent": "OpenArg/1.0"},
-        )
+    def __init__(self, mcp_client: MCPClient) -> None:
+        self._mcp = mcp_client
 
     async def search(self, query: str, limit: int = 10) -> list[dict]:
         try:
-            return await self._search_internal(query, limit)
+            result = await self._mcp.call_tool(
+                "series_tiempo", "search_series", {"query": query, "limit": limit}
+            )
+            return result.get("results", [])
         except Exception:
             logger.warning("Series de Tiempo search failed", exc_info=True)
             return []
-
-    @with_retry(max_retries=2, base_delay=1.0, service_name="series_tiempo")
-    async def _search_internal(self, query: str, limit: int) -> list[dict]:
-        resp = await self._client.get(
-            f"{self._base_url}/search",
-            params={"q": query, "limit": limit},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("data"):
-            return []
-        return [
-            {
-                "id": item["field"]["id"],
-                "title": item["field"].get("title") or item["field"].get("description", ""),
-                "description": item["field"].get("description", ""),
-                "units": item["field"].get("units", ""),
-                "frequency": item["field"].get("frequency", ""),
-                "dataset_title": item["dataset"].get("title", ""),
-                "source": item["dataset"].get("source", ""),
-            }
-            for item in data["data"]
-        ]
-
-    @with_retry(max_retries=2, base_delay=1.0, service_name="series_tiempo")
-    async def _fetch_internal(
-        self,
-        series_ids: list[str],
-        start_date: str | None,
-        end_date: str | None,
-        collapse: str | None,
-        representation: str | None,
-        limit: int,
-    ) -> dict:
-        params: dict[str, str] = {
-            "ids": ",".join(series_ids),
-            "format": "json",
-            "limit": str(limit),
-        }
-        if start_date:
-            params["start_date"] = start_date
-        if end_date:
-            params["end_date"] = end_date
-        if representation:
-            params["representation_mode"] = representation
-        if collapse:
-            params["collapse"] = collapse
-
-        resp = await self._client.get(f"{self._base_url}/series", params=params)
-        resp.raise_for_status()
-        return resp.json()
 
     async def fetch(
         self,
@@ -205,49 +151,39 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
         limit: int = 1000,
     ) -> DataResult | None:
         try:
-            result = await self._fetch_internal(
-                series_ids, start_date, end_date, collapse, representation, limit
+            params: dict = {
+                "series_ids": series_ids,
+                "limit": limit,
+            }
+            if start_date:
+                params["start_date"] = start_date
+            if end_date:
+                params["end_date"] = end_date
+            if collapse:
+                params["collapse"] = collapse
+            if representation:
+                params["representation"] = representation
+
+            result = await self._mcp.call_tool(
+                "series_tiempo", "fetch_series", params
             )
 
-            if not result or not result.get("data"):
+            records = result.get("records", [])
+            if not records:
                 return None
-
-            meta = result.get("meta", [])
-            field_meta = meta[0] if meta else None
-
-            # Transform percent_change values (multiply by 100)
-            is_percent = representation == "percent_change"
-
-            records = []
-            for row in result["data"]:
-                record: dict = {"fecha": row[0]}
-                for idx, sid in enumerate(series_ids):
-                    val = row[idx + 1]
-                    if val is not None and is_percent:
-                        val = round(val * 100, 2)
-                    record[sid] = val
-                records.append(record)
-
-            description = ""
-            units = ""
-            dataset_title = ", ".join(series_ids)
-            if field_meta:
-                description = field_meta.get("field", {}).get("description", "")
-                units = field_meta.get("field", {}).get("units", "")
-                dataset_title = field_meta.get("dataset", {}).get("title", dataset_title)
 
             return DataResult(
                 source="series_tiempo",
                 portal_name="API de Series de Tiempo",
                 portal_url=f"https://datos.gob.ar/series/api/series/?ids={','.join(series_ids)}",
-                dataset_title=dataset_title,
+                dataset_title=", ".join(series_ids),
                 format="time_series",
                 records=records,
                 metadata={
-                    "total_records": len(records),
+                    "total_records": result.get("total_records", len(records)),
                     "fetched_at": datetime.now(UTC).isoformat(),
-                    "description": description,
-                    "units": units,
+                    "description": result.get("description", ""),
+                    "units": result.get("units", ""),
                 },
             )
         except Exception:

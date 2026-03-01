@@ -66,6 +66,118 @@ def _cache_key(question: str) -> str:
     return f"openarg:smart:{h}"
 
 
+# ── Casual / meta message detection ─────────────────────────
+
+_GREETING_PATTERN = re.compile(
+    r"^("
+    r"hola|buenas|buen día|buenos días|buenas tardes|buenas noches"
+    r"|hey|qué tal|que tal|qué onda|que onda|cómo estás|como estas"
+    r"|cómo andás|como andas|qué hacés|que haces"
+    r")[\s!?.,;:]*$",
+    re.IGNORECASE,
+)
+
+_THANKS_PATTERN = re.compile(
+    r"^("
+    r"gracias|muchas gracias|genial|perfecto|dale|ok|de una|buenísimo|buenisimo"
+    r")[\s!?.,;:]*$",
+    re.IGNORECASE,
+)
+
+_FAREWELL_PATTERN = re.compile(
+    r"^("
+    r"chau|adiós|adios|hasta luego|nos vemos|hasta pronto"
+    r")[\s!?.,;:]*$",
+    re.IGNORECASE,
+)
+
+_CASUAL_PATTERNS = re.compile(
+    r"^("
+    # Saludos
+    r"hola|buenas|buen día|buenos días|buenas tardes|buenas noches"
+    r"|hey|qué tal|que tal|qué onda|que onda|cómo estás|como estas"
+    r"|cómo andás|como andas|qué hacés|que haces"
+    # Agradecimientos
+    r"|gracias|muchas gracias|genial|perfecto|dale|ok|de una|buenísimo|buenisimo"
+    # Despedidas
+    r"|chau|adiós|adios|hasta luego|nos vemos|hasta pronto"
+    r")[\s!?.,;:]*$",
+    re.IGNORECASE,
+)
+
+_META_PATTERNS = re.compile(
+    r"(qué pod[eé]s hacer|qu[eé] sab[eé]s|cu[aá]les son tus funciones"
+    r"|c[oó]mo funcion[aá]s|para qu[eé] serv[ií]s|ayuda"
+    r"|qu[eé] sos|qui[eé]n sos|qu[eé] es openarg)",
+    re.IGNORECASE,
+)
+
+
+def _classify_casual_subtype(text: str) -> str:
+    """Return 'greeting', 'thanks', 'farewell', or 'generic'."""
+    t = text.strip()
+    if _GREETING_PATTERN.match(t):
+        return "greeting"
+    if _THANKS_PATTERN.match(t):
+        return "thanks"
+    if _FAREWELL_PATTERN.match(t):
+        return "farewell"
+    return "generic"
+
+
+_CASUAL_RESPONSES: dict[str, list[str]] = {
+    "greeting": [
+        "¡Hola! ¿Qué querés saber sobre datos abiertos de Argentina?",
+        "¡Buenas! Estoy listo para ayudarte con datos públicos argentinos.",
+        "¡Hola! Preguntame sobre economía, presupuesto, educación o cualquier dato público.",
+    ],
+    "thanks": [
+        "¡De nada! Si tenés más consultas sobre datos públicos, acá estoy.",
+        "¡Con gusto! ¿Necesitás analizar algo más?",
+        "¡No hay de qué! Preguntame lo que necesites.",
+    ],
+    "farewell": [
+        "¡Hasta luego! Volvé cuando necesites datos.",
+        "¡Chau! Que andes bien.",
+        "¡Nos vemos! Estoy acá para cuando necesites.",
+    ],
+    "generic": [
+        "¡Hola! ¿Qué querés saber sobre datos abiertos de Argentina?",
+        "¿En qué puedo ayudarte hoy?",
+    ],
+}
+
+_META_RESPONSE = (
+    "Soy **OpenArg**, un asistente de inteligencia artificial especializado "
+    "en datos abiertos de Argentina.\n\n"
+    "Puedo ayudarte con:\n"
+    "- **Series de tiempo** — inflación, tipo de cambio, PBI, reservas del BCRA\n"
+    "- **Economía** — dólar, riesgo país, cotizaciones\n"
+    "- **Datos gubernamentales** — datasets de datos.gob.ar y portales provinciales\n"
+    "- **Declaraciones juradas** — patrimonio de diputados nacionales\n"
+    "- **Sesiones legislativas** — transcripciones del Congreso\n"
+    "- **Georeferenciación** — normalización de direcciones y localidades\n\n"
+    "Probá preguntándome algo como: *¿Cómo viene la inflación en los últimos meses?*"
+)
+
+
+def _get_casual_response(question: str) -> str | None:
+    """Return a static response if the question is casual, else None."""
+    text = question.strip()
+    if not _CASUAL_PATTERNS.match(text):
+        return None
+    subtype = _classify_casual_subtype(text)
+    responses = _CASUAL_RESPONSES.get(subtype, _CASUAL_RESPONSES["generic"])
+    return random.choice(responses)  # noqa: S311
+
+
+def _get_meta_response(question: str) -> str | None:
+    """Return the meta response if the question is about OpenArg, else None."""
+    if _META_PATTERNS.search(question.strip()):
+        return _META_RESPONSE
+    return None
+
+
 # ── Step executors ────────────────────────────────────────────
 
 
@@ -392,9 +504,18 @@ async def smart_query(
     enriches with pgvector, and analyzes with LLM.
     """
     start_time = time.monotonic()
-    cache_key = _cache_key(body.question)
-
     metrics = MetricsCollector()
+
+    # 0. Classify — casual/meta messages get instant responses (no LLM)
+    casual_answer = _get_casual_response(body.question)
+    if casual_answer:
+        return {"answer": casual_answer, "sources": [], "chart_data": None, "tokens_used": 0, "casual": True}
+
+    meta_answer = _get_meta_response(body.question)
+    if meta_answer:
+        return {"answer": meta_answer, "sources": [], "chart_data": None, "tokens_used": 0}
+
+    cache_key = _cache_key(body.question)
 
     # 1. Check cache — semantic cache first, then Redis hash
     try:
@@ -618,6 +739,7 @@ async def ws_smart_query(
     ckan: FromDishka[ICKANSearchConnector],
     sesiones: FromDishka[ISesionesConnector],
     ddjj: FromDishka[DDJJAdapter],
+    semantic_cache: FromDishka[SemanticCache],
 ) -> None:
     if not _validate_ws_api_key(ws):
         await ws.close(code=4401, reason="Invalid or missing API key")
@@ -634,10 +756,75 @@ async def ws_smart_query(
             await ws.close()
             return
 
-        # 1. Planning
+        # ── Phase 1: Classifying ──
+        await ws.send_json({"type": "status", "step": "classifying"})
+
+        # Casual message → instant response (no LLM)
+        casual_answer = _get_casual_response(question)
+        if casual_answer:
+            await ws.send_json({"type": "chunk", "content": casual_answer})
+            await ws.send_json({
+                "type": "complete",
+                "answer": casual_answer,
+                "sources": [],
+                "chart_data": None,
+                "casual": True,
+            })
+            return
+
+        # Meta message → instant response (no LLM)
+        meta_answer = _get_meta_response(question)
+        if meta_answer:
+            await ws.send_json({"type": "chunk", "content": meta_answer})
+            await ws.send_json({
+                "type": "complete",
+                "answer": meta_answer,
+                "sources": [],
+                "chart_data": None,
+            })
+            return
+
+        # ── Cache check (before expensive pipeline) ──
+        session_id = conversation_id or ""
+
+        try:
+            sem_cached = await semantic_cache.get(question)
+            if sem_cached and isinstance(sem_cached, dict):
+                await ws.send_json({"type": "status", "step": "cache_hit"})
+                answer = sem_cached.get("answer", "")
+                await ws.send_json({"type": "chunk", "content": answer})
+                await ws.send_json({
+                    "type": "complete",
+                    "answer": answer,
+                    "sources": sem_cached.get("sources", []),
+                    "chart_data": sem_cached.get("chart_data"),
+                    "cached": True,
+                })
+                return
+        except Exception:
+            logger.debug("WS semantic cache read failed")
+
+        try:
+            cache_key = _cache_key(question)
+            redis_cached = await cache.get(cache_key)
+            if redis_cached and isinstance(redis_cached, dict):
+                await ws.send_json({"type": "status", "step": "cache_hit"})
+                answer = redis_cached.get("answer", "")
+                await ws.send_json({"type": "chunk", "content": answer})
+                await ws.send_json({
+                    "type": "complete",
+                    "answer": answer,
+                    "sources": redis_cached.get("sources", []),
+                    "chart_data": redis_cached.get("chart_data"),
+                    "cached": True,
+                })
+                return
+        except Exception:
+            logger.debug("WS Redis cache read failed")
+
+        # ── Phase 2: Planning ──
         await ws.send_json({"type": "status", "step": "planning"})
 
-        session_id = conversation_id or ""
         memory = await load_memory(cache, session_id)
         plan = await generate_plan(llm, question, memory_context=build_memory_context_prompt(memory))
 
@@ -648,7 +835,9 @@ async def ws_smart_query(
             "steps_count": len(plan.steps),
         })
 
-        # 2. Execute steps
+        # ── Phase 3: Searching (execute connectors) ──
+        await ws.send_json({"type": "status", "step": "searching"})
+
         results: list[DataResult] = []
         connectors_map = {
             "query_series": ("series_tiempo", lambda s: _execute_series_step(series, s)),
@@ -663,7 +852,7 @@ async def ws_smart_query(
                 continue
 
             if step.action == "query_ddjj":
-                await ws.send_json({"type": "status", "step": "executing", "connector": "ddjj"})
+                await ws.send_json({"type": "status", "step": "searching", "connector": "ddjj"})
                 try:
                     data = _execute_ddjj_step(ddjj, step)
                     results.extend(data)
@@ -676,14 +865,14 @@ async def ws_smart_query(
                 continue
 
             connector_name, executor = entry
-            await ws.send_json({"type": "status", "step": "executing", "connector": connector_name})
+            await ws.send_json({"type": "status", "step": "searching", "connector": connector_name})
             try:
                 data = await executor(step)
                 results.extend(data)
             except Exception:
                 logger.warning("WS step %s failed", step.action, exc_info=True)
 
-        # 3. Pgvector complement
+        # Pgvector complement
         if not results or plan.intent == "busqueda_general":
             try:
                 query_embedding = await embedding.embed(question)
@@ -710,8 +899,8 @@ async def ws_smart_query(
             except Exception:
                 logger.debug("pgvector complement failed", exc_info=True)
 
-        # 4. Streaming analysis
-        await ws.send_json({"type": "status", "step": "analyzing"})
+        # ── Phase 4: Generating (LLM analysis) ──
+        await ws.send_json({"type": "status", "step": "generating"})
 
         data_context = _build_data_context(results)
         today = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -740,7 +929,7 @@ async def ws_smart_query(
             full_text += chunk
             await ws.send_json({"type": "chunk", "content": chunk})
 
-        # 5. Send complete message
+        # ── Phase 5: Complete ──
         det_charts = _build_deterministic_charts(results)
         llm_charts = _extract_llm_charts(full_text)
         charts = det_charts if det_charts else llm_charts

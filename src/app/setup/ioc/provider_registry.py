@@ -107,8 +107,14 @@ class LLMProvider(Provider):
     @provide
     def llm_provider(self, settings: AppSettings) -> ILLMProvider:
         return FallbackLLMAdapter(
-            primary=GeminiLLMAdapter(api_key=settings.gemini.API_KEY),
-            fallback=AnthropicLLMAdapter(api_key=settings.anthropic.API_KEY),
+            primary=GeminiLLMAdapter(
+                api_key=settings.gemini.API_KEY,
+                model=settings.gemini.MODEL,
+            ),
+            fallback=AnthropicLLMAdapter(
+                api_key=settings.anthropic.API_KEY,
+                model=settings.anthropic.MODEL,
+            ),
         )
 
     @provide
