@@ -47,9 +47,9 @@ def create_celery() -> Celery:
         "openarg.collect_data": {"queue": "collector"},
         "openarg.bulk_collect_all": {"queue": "collector"},
         "openarg.analyze_query": {"queue": "analyst"},
-        "openarg.score_portal_health": {"queue": "scraper"},
-        "openarg.detect_ddjj_anomalies": {"queue": "scraper"},
-        "openarg.analyze_session_topics": {"queue": "scraper"},
+        "openarg.score_portal_health": {"queue": "transparency"},
+        "openarg.detect_ddjj_anomalies": {"queue": "transparency"},
+        "openarg.analyze_session_topics": {"queue": "transparency"},
         "openarg.retry_s3_uploads": {"queue": "s3"},
         "openarg.upload_to_s3": {"queue": "s3"},
     }

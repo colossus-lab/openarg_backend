@@ -130,6 +130,21 @@ services:
       redis:
         condition: service_healthy
 
+  worker-transparency:
+    build:
+      context: .
+      dockerfile: docker/worker-transparency.Dockerfile
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   worker-s3:
     build:
       context: .
