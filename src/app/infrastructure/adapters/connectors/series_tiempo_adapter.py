@@ -5,7 +5,10 @@ import unicodedata
 from datetime import UTC, datetime
 
 from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
+from app.infrastructure.mcp.exceptions import MCPServerError
 from app.infrastructure.mcp.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
@@ -137,9 +140,18 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 "series_tiempo", "search_series", {"query": query, "limit": limit}
             )
             return result.get("results", [])
-        except Exception:
-            logger.warning("Series de Tiempo search failed", exc_info=True)
-            return []
+        except MCPServerError as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+                details={"query": query[:100], "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+                details={"query": query[:100], "reason": str(exc)},
+            ) from exc
 
     async def fetch(
         self,
@@ -186,6 +198,15 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     "units": result.get("units", ""),
                 },
             )
-        except Exception:
-            logger.warning("Series de Tiempo fetch failed for %s", series_ids, exc_info=True)
-            return None
+        except MCPServerError as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+                details={"series_ids": series_ids, "reason": str(exc)},
+            ) from exc
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+                details={"series_ids": series_ids, "reason": str(exc)},
+            ) from exc

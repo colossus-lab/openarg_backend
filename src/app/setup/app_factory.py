@@ -10,12 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from app.infrastructure.monitoring.middleware import MetricsMiddleware
 from app.infrastructure.persistence_sqla.mappings.all import map_tables
 from app.presentation.http.errors.handlers import register_exception_handlers
 from app.presentation.http.middleware.auth_middleware import APIKeyMiddleware
+from app.presentation.http.middleware.rate_limit_key import get_rate_limit_identifier
 from app.presentation.http.middleware.security_headers import SecurityHeadersMiddleware
 from app.setup.config.settings import AppSettings
 
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=get_rate_limit_identifier,
     storage_uri=os.getenv("REDIS_CACHE_URL", "memory://"),
 )
 

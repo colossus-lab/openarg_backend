@@ -82,7 +82,6 @@ jobs:
         uv pip install -e '.[dev,test]' --system
 
     - name: Run linting
-      continue-on-error: true
       run: |
         ruff check src/ tests/ --fix
         ruff format src/ tests/ --check
@@ -181,6 +180,5 @@ jobs:
         uv pip install -e '.[dev,test]' --system
 
     - name: Run mypy
-      continue-on-error: true
       run: |
-        mypy src/ --ignore-missing-imports
+        mypy src/

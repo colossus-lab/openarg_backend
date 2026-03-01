@@ -10,6 +10,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 
 logger = logging.getLogger(__name__)
@@ -229,15 +231,23 @@ class SesionesAdapter(ISesionesConnector):
         orador: str | None = None,
         limit: int = 15,
     ) -> DataResult | None:
-        # Try pgvector search first
-        chunks = await self._search_pgvector(query, periodo, orador, limit)
-        if chunks:
-            return self._chunks_to_data_result(query, chunks)
-        logger.info("pgvector returned no results, falling back to local keyword search")
+        try:
+            # Try pgvector search first
+            chunks = await self._search_pgvector(query, periodo, orador, limit)
+            if chunks:
+                return self._chunks_to_data_result(query, chunks)
+            logger.info("pgvector returned no results, falling back to local keyword search")
 
-        # Fallback to local keyword search
-        chunks = self._search_local(query, periodo, orador, limit)
-        if chunks:
-            return self._chunks_to_data_result(query, chunks)
+            # Fallback to local keyword search
+            chunks = self._search_local(query, periodo, orador, limit)
+            if chunks:
+                return self._chunks_to_data_result(query, chunks)
 
-        return None
+            return None
+        except ConnectorError:
+            raise
+        except Exception as exc:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_SESIONES_NO_RESULTS,
+                details={"query": query[:100], "reason": str(exc)},
+            ) from exc

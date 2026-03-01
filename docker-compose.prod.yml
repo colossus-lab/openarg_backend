@@ -10,6 +10,13 @@ services:
       - pg_data:/var/lib/postgresql/data
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+        reservations:
+          memory: 1G
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -30,6 +37,13 @@ services:
       - redis_data:/data
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
@@ -46,6 +60,13 @@ services:
              uvicorn app.run:make_app --factory --host 0.0.0.0 --port 8080 --loop uvloop --workers 2"
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          memory: 512M
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:
@@ -76,6 +97,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:
@@ -99,6 +127,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:
@@ -121,6 +156,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:
@@ -144,6 +186,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:
@@ -211,6 +260,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 128M
     environment:
       PYTHONPATH: /app/src
       MCP_PORT: "8091"
@@ -228,6 +284,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 128M
     environment:
       PYTHONPATH: /app/src
       MCP_PORT: "8092"
@@ -244,6 +307,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 128M
     environment:
       PYTHONPATH: /app/src
       MCP_PORT: "8093"
@@ -261,6 +331,13 @@ services:
     restart: always
     networks:
       - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          memory: 128M
     environment:
       PYTHONPATH: /app/src
       MCP_PORT: "8094"

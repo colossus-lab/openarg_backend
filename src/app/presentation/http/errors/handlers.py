@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import ORJSONResponse
 
 from app.domain.exceptions.base import ApplicationError
+from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
 from app.infrastructure.audit.audit_logger import audit_injection_blocked
 
@@ -41,11 +42,27 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"error": exc.to_dict()},
         )
 
+    @app.exception_handler(ConnectorError)
+    async def connector_error_handler(
+        request: Request, exc: ConnectorError
+    ) -> ORJSONResponse:
+        logger.warning(
+            "Connector error on %s %s: %s - %s",
+            request.method, request.url.path, exc.error_code.name, exc,
+        )
+        return ORJSONResponse(
+            status_code=exc.http_status,
+            content={"error": exc.to_dict()},
+        )
+
     @app.exception_handler(ApplicationError)
     async def application_error_handler(
         request: Request, exc: ApplicationError
     ) -> ORJSONResponse:
-        logger.warning(f"Application error: {exc.error_code.name} - {exc}")
+        logger.warning(
+            "Application error on %s %s: %s - %s",
+            request.method, request.url.path, exc.error_code.name, exc,
+        )
         return ORJSONResponse(
             status_code=exc.http_status,
             content={"error": exc.to_dict()},

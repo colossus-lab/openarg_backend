@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Iterable
 from dishka import Provider, Scope, make_async_container, provide
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.application.smart_query_service import SmartQueryService
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
@@ -253,6 +254,39 @@ class ConnectorProvider(Provider):
         return adapter
 
 
+class ApplicationProvider(Provider):
+    scope = Scope.REQUEST
+
+    @provide
+    def smart_query_service(
+        self,
+        llm: ILLMProvider,
+        embedding: IEmbeddingProvider,
+        vector_search: IVectorSearch,
+        cache: ICacheService,
+        series: ISeriesTiempoConnector,
+        arg_datos: IArgentinaDatosConnector,
+        georef: IGeorefConnector,
+        ckan: ICKANSearchConnector,
+        sesiones: ISesionesConnector,
+        ddjj: DDJJAdapter,
+        semantic_cache: SemanticCache,
+    ) -> SmartQueryService:
+        return SmartQueryService(
+            llm=llm,
+            embedding=embedding,
+            vector_search=vector_search,
+            cache=cache,
+            series=series,
+            arg_datos=arg_datos,
+            georef=georef,
+            ckan=ckan,
+            sesiones=sesiones,
+            ddjj=ddjj,
+            semantic_cache=semantic_cache,
+        )
+
+
 def get_providers() -> Iterable[Provider]:
     return (
         DatabaseProvider(),
@@ -267,6 +301,7 @@ def get_providers() -> Iterable[Provider]:
         MCPProvider(),
         SemanticCacheProvider(),
         MonitoringProvider(),
+        ApplicationProvider(),
     )
 
 

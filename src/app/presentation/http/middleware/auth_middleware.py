@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -38,5 +39,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 status_code=401,
                 content={"detail": "Invalid or missing API key"},
             )
+
+        # Store API key identifier for rate limiting
+        request.state.api_key_id = hashlib.sha256(provided_key.encode()).hexdigest()[:12]
 
         return await call_next(request)

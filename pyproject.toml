@@ -51,6 +51,9 @@ dependencies = [
 
     # SQL validation
     "sqlglot>=26.0.0",
+
+    # Monitoring
+    "prometheus-client>=0.21.0",
 ]
 
 [project.optional-dependencies]
@@ -86,6 +89,21 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "celery.*",
+    "dishka.*",
+    "slowapi.*",
+    "redis.*",
+    "sqlglot.*",
+    "google.*",
+    "anthropic.*",
+    "openai.*",
+    "uvloop",
+    "prometheus_client.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
