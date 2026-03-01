@@ -6,34 +6,25 @@ reusable service used by both POST and WebSocket endpoints.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import random
 import re
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.entities.connectors.data_result import ChartData, DataResult, ExecutionPlan, PlanStep
-from app.domain.exceptions.connector_errors import ConnectorError, EmbeddingError, LLMProviderError
-from app.domain.ports.cache.cache_port import ICacheService
-from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
-from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
-from app.domain.ports.connectors.georef import IGeorefConnector
-from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
-from app.domain.ports.connectors.sesiones import ISesionesConnector
+from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
+from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
 from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator, RetrievalQuality
-from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache, ttl_for_intent
-from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 from app.infrastructure.adapters.connectors.memory_agent import (
     build_memory_context_prompt,
     load_memory,
@@ -57,6 +48,21 @@ from app.infrastructure.audit.audit_logger import (
 )
 from app.infrastructure.monitoring.metrics import MetricsCollector
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.domain.ports.cache.cache_port import ICacheService
+    from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
+    from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
+    from app.domain.ports.connectors.georef import IGeorefConnector
+    from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
+    from app.domain.ports.connectors.sesiones import ISesionesConnector
+    from app.domain.ports.search.vector_search import IVectorSearch
+    from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
+    from app.infrastructure.adapters.connectors.staff_adapter import StaffAdapter
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +82,7 @@ class SmartQueryResult:
     duration_ms: int = 0
     confidence: float = 1.0
     citations: list[dict[str, Any]] = field(default_factory=list)
+    documents: list[dict[str, Any]] | None = None
 
 
 # ── Casual / meta / educational patterns ────────────────────
@@ -157,57 +164,157 @@ _META_RESPONSE = (
 )
 
 _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
-    re.compile(r"qu[eé]\s+(es|son)\s+(los\s+)?datos?\s+abiertos", re.IGNORECASE): (
-        "Los **datos abiertos** son datos que cualquier persona puede acceder, usar y compartir libremente. "
-        "En Argentina, el portal datos.gob.ar publica miles de datasets de gobierno nacional, provincias y municipios.\n\n"
+    re.compile(
+        r"qu[eé]\s+(es|son)\s+(los\s+)?datos?\s+abiertos", re.IGNORECASE,
+    ): (
+        "Los **datos abiertos** son datos que cualquier persona puede "
+        "acceder, usar y compartir libremente. En Argentina, el portal "
+        "datos.gob.ar publica miles de datasets de gobierno nacional, "
+        "provincias y municipios.\n\n"
         "Probá preguntarme: *¿Qué datasets hay sobre educación?*"
     ),
-    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?pbi", re.IGNORECASE): (
-        "El **PBI (Producto Bruto Interno)** es el valor total de todos los bienes y servicios producidos "
-        "en un país durante un período determinado. Es el principal indicador de la actividad económica.\n\n"
-        "Probá preguntarme: *¿Cómo evolucionó el PBI en los últimos años?*"
+    re.compile(
+        r"qu[eé]\s+(es|significa)\s+(el\s+)?pbi", re.IGNORECASE,
+    ): (
+        "El **PBI (Producto Bruto Interno)** es el valor total de todos "
+        "los bienes y servicios producidos en un país durante un período "
+        "determinado. Es el principal indicador de la actividad "
+        "económica.\n\n"
+        "Probá preguntarme: *¿Cómo evolucionó el PBI en los últimos "
+        "años?*"
     ),
-    re.compile(r"qu[eé]\s+(es|significa)\s+(la\s+)?inflaci[oó]n", re.IGNORECASE): (
-        "La **inflación** es el aumento generalizado y sostenido de los precios de bienes y servicios "
-        "en una economía. En Argentina, el INDEC la mide mensualmente a través del IPC.\n\n"
+    re.compile(
+        r"qu[eé]\s+(es|significa)\s+(la\s+)?inflaci[oó]n", re.IGNORECASE,
+    ): (
+        "La **inflación** es el aumento generalizado y sostenido de "
+        "los precios de bienes y servicios en una economía. En "
+        "Argentina, el INDEC la mide mensualmente a través del IPC.\n\n"
         "Probá preguntarme: *¿Cuál fue la inflación del último mes?*"
     ),
-    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?riesgo\s+pa[ií]s", re.IGNORECASE): (
-        "El **riesgo país** mide la diferencia de tasa de interés que pagan los bonos de un país "
-        "respecto de los bonos del Tesoro de EE.UU. Un valor alto indica mayor percepción de riesgo.\n\n"
+    re.compile(
+        r"qu[eé]\s+(es|significa)\s+(el\s+)?riesgo\s+pa[ií]s",
+        re.IGNORECASE,
+    ): (
+        "El **riesgo país** mide la diferencia de tasa de interés que "
+        "pagan los bonos de un país respecto de los bonos del Tesoro "
+        "de EE.UU. Un valor alto indica mayor percepción de riesgo.\n\n"
         "Probá preguntarme: *¿Cuánto está el riesgo país hoy?*"
     ),
-    re.compile(r"qu[eé]\s+(es|son)\s+(las\s+)?ddjj", re.IGNORECASE): (
-        "Las **DDJJ (Declaraciones Juradas)** son documentos donde los funcionarios públicos declaran "
-        "su patrimonio. En OpenArg tenemos 195 declaraciones juradas de diputados nacionales.\n\n"
-        "Probá preguntarme: *¿Quién es el diputado con mayor patrimonio?*"
+    re.compile(
+        r"qu[eé]\s+(es|son)\s+(las\s+)?ddjj", re.IGNORECASE,
+    ): (
+        "Las **DDJJ (Declaraciones Juradas)** son documentos donde "
+        "los funcionarios públicos declaran su patrimonio. En OpenArg "
+        "tenemos 195 declaraciones juradas de diputados nacionales.\n\n"
+        "Probá preguntarme: *¿Quién es el diputado con mayor "
+        "patrimonio?*"
     ),
-    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?tipo\s+de\s+cambio", re.IGNORECASE): (
-        "El **tipo de cambio** es el precio de una moneda en términos de otra. En Argentina se habla "
-        "del dólar oficial, blue, MEP, CCL, entre otros.\n\n"
+    re.compile(
+        r"qu[eé]\s+(es|significa)\s+(el\s+)?tipo\s+de\s+cambio",
+        re.IGNORECASE,
+    ): (
+        "El **tipo de cambio** es el precio de una moneda en términos "
+        "de otra. En Argentina se habla del dólar oficial, blue, MEP, "
+        "CCL, entre otros.\n\n"
         "Probá preguntarme: *¿A cuánto está el dólar hoy?*"
     ),
-    re.compile(r"qu[eé]\s+(es|son)\s+(las\s+)?reservas\s+(del\s+)?bcra", re.IGNORECASE): (
-        "Las **reservas del BCRA** son los activos en moneda extranjera que posee el Banco Central "
-        "de la República Argentina. Se usan para respaldar la moneda y las obligaciones de deuda.\n\n"
+    re.compile(
+        r"qu[eé]\s+(es|son)\s+(las\s+)?reservas\s+(del\s+)?bcra",
+        re.IGNORECASE,
+    ): (
+        "Las **reservas del BCRA** son los activos en moneda "
+        "extranjera que posee el Banco Central de la República "
+        "Argentina. Se usan para respaldar la moneda y las "
+        "obligaciones de deuda.\n\n"
         "Probá preguntarme: *¿Cómo vienen las reservas del BCRA?*"
     ),
-    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?presupuesto\s+(nacional|p[uú]blico)", re.IGNORECASE): (
-        "El **presupuesto nacional** es la ley que estima los ingresos y autoriza los gastos del Estado "
-        "para cada año fiscal. Define las prioridades de gasto público.\n\n"
-        "Probá preguntarme: *¿Cuánto se destina a educación en el presupuesto?*"
+    re.compile(
+        r"qu[eé]\s+(es|significa)\s+(el\s+)?presupuesto"
+        r"\s+(nacional|p[uú]blico)",
+        re.IGNORECASE,
+    ): (
+        "El **presupuesto nacional** es la ley que estima los "
+        "ingresos y autoriza los gastos del Estado para cada año "
+        "fiscal. Define las prioridades de gasto público.\n\n"
+        "Probá preguntarme: *¿Cuánto se destina a educación en el "
+        "presupuesto?*"
     ),
-    re.compile(r"qu[eé]\s+(es|son)\s+(las\s+)?sesiones\s+(del\s+)?congreso", re.IGNORECASE): (
-        "Las **sesiones del Congreso** son las reuniones de la Cámara de Diputados y el Senado "
-        "donde se debaten y votan proyectos de ley. Tenemos transcripciones de sesiones disponibles.\n\n"
-        "Probá preguntarme: *¿Qué se debatió sobre educación en el Congreso?*"
+    re.compile(
+        r"qu[eé]\s+(es|son)\s+(las\s+)?sesiones\s+(del\s+)?congreso",
+        re.IGNORECASE,
+    ): (
+        "Las **sesiones del Congreso** son las reuniones de la "
+        "Cámara de Diputados y el Senado donde se debaten y votan "
+        "proyectos de ley. Tenemos transcripciones de sesiones "
+        "disponibles.\n\n"
+        "Probá preguntarme: *¿Qué se debatió sobre educación en el "
+        "Congreso?*"
     ),
-    re.compile(r"qu[eé]\s+(es|significa)\s+(el\s+)?[ií]ndice\s+de\s+pobreza", re.IGNORECASE): (
-        "El **índice de pobreza** mide el porcentaje de personas u hogares cuyos ingresos no alcanzan "
-        "para cubrir una canasta básica. El INDEC lo publica semestralmente en Argentina.\n\n"
-        "Probá preguntarme: *¿Cuál es el porcentaje de pobreza actual?*"
+    re.compile(
+        r"qu[eé]\s+(es|significa)\s+(el\s+)?[ií]ndice\s+de\s+pobreza",
+        re.IGNORECASE,
+    ): (
+        "El **índice de pobreza** mide el porcentaje de personas u "
+        "hogares cuyos ingresos no alcanzan para cubrir una canasta "
+        "básica. El INDEC lo publica semestralmente en Argentina.\n\n"
+        "Probá preguntarme: *¿Cuál es el porcentaje de pobreza "
+        "actual?*"
     ),
 }
+
+# ── DDJJ deterministic routing patterns ─────────────────────
+_DDJJ_PATTERN = re.compile(
+    r"(patrimonio|declaraci[oó]n(?:es)?\s+jurada|ddjj"
+    r"|bienes\s+de\s+|riqueza\s+de\s+|cu[aá]nto\s+tiene"
+    r"|diputado.{0,20}(?:m[aá]s|mayor|menor)\s+(?:rico|patrimonio|plata)"
+    r"|ranking\s+(?:de\s+)?(?:diputados|patrimonio|ddjj)"
+    r"|mayor\s+patrimonio|menor\s+patrimonio"
+    r"|m[aá]s\s+ricos?|m[aá]s\s+pobres?"
+    r"|patrimonio\s+(?:de\s+)?diputado)",
+    re.IGNORECASE,
+)
+
+_DDJJ_NAME_PATTERN = re.compile(
+    r"(?:patrimonio|bienes|riqueza|ddjj|declaraci[oó]n\s+jurada)"
+    r"\s+(?:de(?:l)?)\s+(.+?)(?:\?|$)",
+    re.IGNORECASE,
+)
+
+_DDJJ_RANKING_PATTERN = re.compile(
+    r"(ranking|mayor\s+patrimonio|menor\s+patrimonio"
+    r"|m[aá]s\s+ricos?|m[aá]s\s+pobres?"
+    r"|top\s+\d+|diputados?\s+(?:con\s+)?(?:m[aá]s|mayor|menor))",
+    re.IGNORECASE,
+)
+
+# ── Staff deterministic routing patterns ──────────────────
+_STAFF_PATTERN = re.compile(
+    r"(asesores?\s+de\s+|personal\s+de\s+|empleados?\s+de\s+"
+    r"|cu[aá]ntos?\s+asesores?|equipo\s+de\s+"
+    r"|trabaja(?:n|r)?\s+(?:con|para)\s+"
+    r"|n[oó]mina\s+de\s+personal"
+    r"|qui[eé]n(?:es)?\s+trabaja)",
+    re.IGNORECASE,
+)
+
+_STAFF_NAME_PATTERN = re.compile(
+    r"(?:asesores?|personal|empleados?|equipo)"
+    r"\s+(?:de(?:l)?)\s+(.+?)(?:\?|$)",
+    re.IGNORECASE,
+)
+
+_STAFF_COUNT_PATTERN = re.compile(
+    r"cu[aá]ntos?\s+(?:asesores?|personal|empleados?)",
+    re.IGNORECASE,
+)
+
+_STAFF_CHANGES_PATTERN = re.compile(
+    r"((?:qui[eé]n(?:es)?|cu[aá]les?)\s+(?:se\s+fue|se\s+fueron|lleg[oó]|llegaron|entr[oó]|entraron|sali[oó]|salieron)"
+    r"|altas?\s+y\s+bajas?|bajas?\s+y\s+altas?"
+    r"|cambios?\s+(?:de\s+)?personal"
+    r"|rotaci[oó]n\s+de\s+personal)",
+    re.IGNORECASE,
+)
 
 
 # ── Service ─────────────────────────────────────────────────
@@ -230,6 +337,7 @@ class SmartQueryService:
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
         retrieval_evaluator: IRetrievalEvaluator | None = None,
+        staff: StaffAdapter | None = None,
     ) -> None:
         self._llm = llm
         self._embedding = embedding
@@ -243,6 +351,7 @@ class SmartQueryService:
         self._ddjj = ddjj
         self._semantic_cache = semantic_cache
         self._retrieval_evaluator = retrieval_evaluator
+        self._staff = staff
         self._reranker = LLMReranker(llm)
         self._metrics = MetricsCollector()
 
@@ -284,6 +393,12 @@ class SmartQueryService:
         if edu:
             return SmartQueryResult(answer=edu, sources=[], educational=True)
 
+        # 0d. DDJJ deterministic routing
+        ddjj_forced_plan = self._detect_ddjj_intent(question)
+
+        # 0e. Staff deterministic routing
+        staff_forced_plan = self._detect_staff_intent(question) if self._staff else None
+
         # 1. Cache lookup
         cached = await self._check_cache(question, user_id)
         if cached:
@@ -301,7 +416,22 @@ class SmartQueryService:
         decomposer = QueryDecomposer(self._llm)
         sub_queries = await decomposer.decompose(enhanced_query)
 
-        if len(sub_queries) > 1:
+        if ddjj_forced_plan:
+            # DDJJ deterministic: skip decomposition, use forced plan directly
+            plan = ddjj_forced_plan
+            results = await self._execute_steps(plan)
+            logger.info(
+                "DDJJ deterministic plan for '%s': intent=%s",
+                question[:60], plan.intent,
+            )
+        elif staff_forced_plan:
+            plan = staff_forced_plan
+            results = await self._execute_steps(plan)
+            logger.info(
+                "Staff deterministic plan for '%s': intent=%s",
+                question[:60], plan.intent,
+            )
+        elif len(sub_queries) > 1:
             # Multi-query: generate plans and execute concurrently
             memory_ctx_prompt = build_memory_context_prompt(memory)
 
@@ -362,7 +492,10 @@ class SmartQueryService:
                     verdict.quality == RetrievalQuality.INCORRECT
                     and verdict.confidence >= 0.7
                 ):
-                    logger.info("CRAG: re-executing with broader query (actions=%s)", verdict.suggested_actions)
+                    logger.info(
+                        "CRAG: re-executing with broader query (actions=%s)",
+                        verdict.suggested_actions,
+                    )
                     retry_plan = await generate_plan(
                         self._llm,
                         f"{question} (ampliar búsqueda, datos insuficientes)",
@@ -443,6 +576,14 @@ class SmartQueryService:
             if r.records
         ]
 
+        # Extract structured documents for frontend card rendering
+        documents: list[dict[str, Any]] = []
+        for r in results:
+            if r.source.startswith("ddjj:"):
+                for rec in r.records:
+                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
+                        documents.append({**rec, "doc_type": "ddjj"})
+
         tokens_used = response.tokens_used or 0
         self._metrics.record_tokens_used(tokens_used)
         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -456,6 +597,7 @@ class SmartQueryService:
             duration_ms=duration_ms,
             confidence=confidence,
             citations=citations,
+            documents=documents if documents else None,
         )
 
         # 8. Audit
@@ -470,7 +612,10 @@ class SmartQueryService:
 
         # 10. Save conversation history
         if session:
-            await self._save_history(session, question, user_id, clean_answer, sources, tokens_used, duration_ms)
+            await self._save_history(
+                session, question, user_id, clean_answer,
+                sources, tokens_used, duration_ms,
+            )
 
         # 11. Cache write
         result_dict = {
@@ -508,7 +653,10 @@ class SmartQueryService:
         casual = self._get_casual_response(question)
         if casual:
             yield {"type": "chunk", "content": casual}
-            yield {"type": "complete", "answer": casual, "sources": [], "chart_data": None, "casual": True}
+            yield {
+                "type": "complete", "answer": casual,
+                "sources": [], "chart_data": None, "casual": True,
+            }
             return
 
         # Meta
@@ -524,6 +672,11 @@ class SmartQueryService:
             yield {"type": "chunk", "content": edu}
             yield {"type": "complete", "answer": edu, "sources": [], "chart_data": None}
             return
+
+        # DDJJ deterministic routing
+        ddjj_forced_plan = self._detect_ddjj_intent(question)
+        # Staff deterministic routing
+        staff_forced_plan = self._detect_staff_intent(question) if self._staff else None
 
         # Cache check
         session_id = conversation_id or ""
@@ -552,7 +705,38 @@ class SmartQueryService:
         decomposer = QueryDecomposer(self._llm)
         sub_queries = await decomposer.decompose(enhanced_query)
 
-        if len(sub_queries) > 1:
+        if ddjj_forced_plan:
+            # DDJJ deterministic: skip decomposition, use forced plan directly
+            plan = ddjj_forced_plan
+            logger.info(
+                "DDJJ deterministic plan (streaming) for '%s': intent=%s",
+                question[:60], plan.intent,
+            )
+            yield {
+                "type": "status",
+                "step": "planned",
+                "intent": plan.intent,
+                "steps_count": len(plan.steps),
+            }
+
+            yield {"type": "status", "step": "searching"}
+            results = await self._execute_steps_streaming(plan)
+        elif staff_forced_plan:
+            plan = staff_forced_plan
+            logger.info(
+                "Staff deterministic plan (streaming) for '%s': intent=%s",
+                question[:60], plan.intent,
+            )
+            yield {
+                "type": "status",
+                "step": "planned",
+                "intent": plan.intent,
+                "steps_count": len(plan.steps),
+            }
+
+            yield {"type": "status", "step": "searching"}
+            results = await self._execute_steps_streaming(plan)
+        elif len(sub_queries) > 1:
             memory_ctx_prompt = build_memory_context_prompt(memory)
 
             async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
@@ -742,6 +926,137 @@ class SmartQueryService:
                 return response
         return None
 
+    # ── DDJJ deterministic intent detection ─────────────────
+
+    @staticmethod
+    def _detect_ddjj_intent(question: str) -> ExecutionPlan | None:
+        """Return a forced ExecutionPlan for DDJJ queries, or None to fall back to the LLM planner."""
+        text = question.strip()
+        if not _DDJJ_PATTERN.search(text):
+            return None
+
+        # Ranking queries
+        if _DDJJ_RANKING_PATTERN.search(text):
+            order = "asc" if re.search(r"menor|pobres?", text, re.IGNORECASE) else "desc"
+            return ExecutionPlan(
+                query=text,
+                intent="ddjj_ranking",
+                steps=[
+                    PlanStep(
+                        id="ddjj_ranking",
+                        action="query_ddjj",
+                        description=f"Ranking de diputados por patrimonio ({order})",
+                        params={"action": "ranking", "sortBy": "patrimonio", "order": order, "top": 10},
+                    ),
+                ],
+            )
+
+        # Name-based search
+        name_match = _DDJJ_NAME_PATTERN.search(text)
+        if name_match:
+            nombre = name_match.group(1).strip()
+            return ExecutionPlan(
+                query=text,
+                intent="ddjj_persona",
+                steps=[
+                    PlanStep(
+                        id="ddjj_name",
+                        action="query_ddjj",
+                        description=f"Buscar DDJJ de {nombre}",
+                        params={"action": "detail", "nombre": nombre},
+                    ),
+                ],
+            )
+
+        # Generic DDJJ search (fallback within DDJJ)
+        return ExecutionPlan(
+            query=text,
+            intent="ddjj_busqueda",
+            steps=[
+                PlanStep(
+                    id="ddjj_search",
+                    action="query_ddjj",
+                    description="Búsqueda general en DDJJ",
+                    params={"action": "search", "query": text},
+                ),
+            ],
+        )
+
+    # ── Staff deterministic intent detection ─────────────────
+
+    @staticmethod
+    def _detect_staff_intent(question: str) -> ExecutionPlan | None:
+        """Return a forced ExecutionPlan for staff queries, or None to fall back to the LLM planner."""
+        txt = question.strip()
+        if not _STAFF_PATTERN.search(txt):
+            return None
+
+        # Changes queries (altas/bajas)
+        if _STAFF_CHANGES_PATTERN.search(txt):
+            name_match = _STAFF_NAME_PATTERN.search(txt)
+            nombre = name_match.group(1).strip() if name_match else None
+            return ExecutionPlan(
+                query=txt,
+                intent="staff_changes",
+                steps=[
+                    PlanStep(
+                        id="staff_changes",
+                        action="query_staff",
+                        description=f"Cambios de personal{f' de {nombre}' if nombre else ''}",
+                        params={"action": "changes", **({"name": nombre} if nombre else {})},
+                    ),
+                ],
+            )
+
+        # Count queries
+        if _STAFF_COUNT_PATTERN.search(txt):
+            name_match = _STAFF_NAME_PATTERN.search(txt)
+            nombre = name_match.group(1).strip() if name_match else ""
+            if nombre:
+                return ExecutionPlan(
+                    query=txt,
+                    intent="staff_count",
+                    steps=[
+                        PlanStep(
+                            id="staff_count",
+                            action="query_staff",
+                            description=f"Cantidad de asesores de {nombre}",
+                            params={"action": "count", "name": nombre},
+                        ),
+                    ],
+                )
+
+        # Name-based list
+        name_match = _STAFF_NAME_PATTERN.search(txt)
+        if name_match:
+            nombre = name_match.group(1).strip()
+            return ExecutionPlan(
+                query=txt,
+                intent="staff_legislator",
+                steps=[
+                    PlanStep(
+                        id="staff_list",
+                        action="query_staff",
+                        description=f"Personal de {nombre}",
+                        params={"action": "get_by_legislator", "name": nombre},
+                    ),
+                ],
+            )
+
+        # Generic staff query
+        return ExecutionPlan(
+            query=txt,
+            intent="staff_busqueda",
+            steps=[
+                PlanStep(
+                    id="staff_search",
+                    action="query_staff",
+                    description="Búsqueda general de personal",
+                    params={"action": "search", "query": txt},
+                ),
+            ],
+        )
+
     # ── Cache helpers ───────────────────────────────────────
 
     @staticmethod
@@ -909,6 +1224,27 @@ class SmartQueryService:
 
         return [result] if result.records else []
 
+    async def _execute_staff_step(self, step: PlanStep) -> list[DataResult]:
+        if not self._staff:
+            logger.warning("Staff adapter not configured, skipping step %s", step.id)
+            return []
+        params = step.params
+        action = params.get("action", "search")
+        name = params.get("name", "")
+
+        if action == "get_by_legislator" and name:
+            result = await self._staff.get_by_legislator(name)
+        elif action == "count" and name:
+            result = await self._staff.count_by_legislator(name)
+        elif action == "changes":
+            result = await self._staff.get_changes(name=name or None)
+        elif action == "stats":
+            result = await self._staff.stats()
+        else:
+            result = await self._staff.search(params.get("query", name or step.description))
+
+        return [result] if result.records else []
+
     async def _execute_ckan_step(self, step: PlanStep) -> list[DataResult]:
         params = step.params
         query = params.get("query", step.description)
@@ -985,6 +1321,8 @@ class SmartQueryService:
             return await self._execute_ckan_step(step)
         elif step.action == "query_sesiones":
             return await self._execute_sesiones_step(step)
+        elif step.action == "query_staff":
+            return await self._execute_staff_step(step)
         elif step.action in ("analyze", "compare", "synthesize"):
             return []
         else:
@@ -1007,7 +1345,9 @@ class SmartQueryService:
 
             # Apply LLM reranking
             if vector_results:
-                vector_results = await self._reranker.rerank(enhanced_query, vector_results, top_k=5)
+                vector_results = await self._reranker.rerank(
+                    enhanced_query, vector_results, top_k=5,
+                )
 
             for vr in vector_results:
                 results.append(
@@ -1036,15 +1376,27 @@ class SmartQueryService:
     def _build_data_context(results: list[DataResult]) -> str:
         if not results:
             return (
-                "No se obtuvieron resultados directos en esta búsqueda. Sin embargo, TENÉS acceso en tiempo real a estos portales de datos abiertos:\n"
-                "- **Portal Nacional** (datos.gob.ar): 1200+ datasets de economía, salud, educación, transporte, energía, gobierno\n"
-                "- **CABA** (data.buenosaires.gob.ar): movilidad, presupuesto, educación\n"
-                "- **Buenos Aires Provincia** (catalogo.datos.gba.gob.ar): salud, género, estadísticas\n"
-                "- **Córdoba, Santa Fe, Mendoza, Entre Ríos, Neuquén** y más\n"
-                "- **Cámara de Diputados** (datos.hcdn.gob.ar): legisladores, proyectos, leyes\n"
-                "- **Series de Tiempo**: inflación, tipo de cambio, PBI, presupuesto\n"
-                "- **DDJJ**: 195 declaraciones juradas patrimoniales de diputados\n\n"
-                "INSTRUCCIÓN: NO digas que 'no pudiste acceder' o 'no tenés datos'. En cambio, explicale al usuario qué fuentes están disponibles y sugerí búsquedas concretas. Ofrecé 3-4 opciones temáticas."
+                "No se obtuvieron resultados directos en esta búsqueda. "
+                "Sin embargo, TENÉS acceso en tiempo real a estos "
+                "portales de datos abiertos:\n"
+                "- **Portal Nacional** (datos.gob.ar): 1200+ datasets "
+                "de economía, salud, educación, transporte, energía\n"
+                "- **CABA** (data.buenosaires.gob.ar): movilidad, "
+                "presupuesto, educación\n"
+                "- **Buenos Aires Provincia** "
+                "(catalogo.datos.gba.gob.ar): salud, estadísticas\n"
+                "- **Córdoba, Santa Fe, Mendoza, Entre Ríos, "
+                "Neuquén** y más\n"
+                "- **Cámara de Diputados** (datos.hcdn.gob.ar): "
+                "legisladores, proyectos, leyes\n"
+                "- **Series de Tiempo**: inflación, tipo de cambio, "
+                "PBI, presupuesto\n"
+                "- **DDJJ**: 195 declaraciones juradas patrimoniales "
+                "de diputados\n\n"
+                "INSTRUCCIÓN: NO digas que 'no pudiste acceder' o "
+                "'no tenés datos'. En cambio, explicale al usuario "
+                "qué fuentes están disponibles y sugerí búsquedas "
+                "concretas. Ofrecé 3-4 opciones temáticas."
             )
 
         parts = []
@@ -1065,11 +1417,16 @@ class SmartQueryService:
                     f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
                     f"Fuente: {result.portal_name} ({result.source})\n"
                     f"URL: {result.portal_url}\n"
-                    "NOTA: Este dataset no tiene Datastore habilitado. Solo metadatos de los recursos.\n"
+                    "NOTA: Este dataset no tiene Datastore "
+                    "habilitado. Solo metadatos de los recursos.\n"
                 )
                 if result.metadata.get("description"):
                     part += f"Descripción: {result.metadata['description']}\n"
-                part += f"Recursos disponibles:\n{records_text}\n\nExplicale al usuario qué datos contiene y proporcioná el link."
+                part += (
+                    f"Recursos disponibles:\n{records_text}\n\n"
+                    "Explicale al usuario qué datos contiene "
+                    "y proporcioná el link."
+                )
             else:
                 columns = list(valid_records[0].keys()) if valid_records else []
                 total_rows = len(valid_records)
@@ -1096,7 +1453,9 @@ class SmartQueryService:
                 part += (
                     f"Datos ({len(records_to_send)} registros{truncation_note}):\n"
                     f"{records_text}\n\n"
-                    "IMPORTANTE: Si hay una columna temporal (año, fecha, mes), generá un gráfico de línea temporal con <!--CHART:{}-->."
+                    "IMPORTANTE: Si hay una columna temporal "
+                    "(año, fecha, mes), generá un gráfico de línea "
+                    "temporal con <!--CHART:{}-->."
                 )
 
             parts.append(part)
@@ -1152,7 +1511,9 @@ class SmartQueryService:
             numeric_keys = [
                 k
                 for k in keys
-                if k != time_key and not k.startswith("_") and isinstance(first.get(k), (int, float))
+                if k != time_key
+                and not k.startswith("_")
+                and isinstance(first.get(k), int | float)
             ]
             if not numeric_keys:
                 continue
@@ -1164,7 +1525,8 @@ class SmartQueryService:
             if len(clean) < 2:
                 continue
 
-            chart_type = "line_chart" if result.format == "time_series" or time_key == "fecha" else "bar_chart"
+            is_time = result.format == "time_series" or time_key == "fecha"
+            chart_type = "line_chart" if is_time else "bar_chart"
             title = result.dataset_title
             units = result.metadata.get("units")
             if units:
@@ -1188,7 +1550,12 @@ class SmartQueryService:
         for match in re.finditer(r"<!--CHART:(.*?)-->", text, re.DOTALL):
             try:
                 chart = json.loads(match.group(1))
-                if chart.get("type") and chart.get("data") and chart.get("xKey") and chart.get("yKeys"):
+                if (
+                    chart.get("type")
+                    and chart.get("data")
+                    and chart.get("xKey")
+                    and chart.get("yKeys")
+                ):
                     charts.append(chart)
             except (json.JSONDecodeError, KeyError):
                 pass
@@ -1209,10 +1576,15 @@ class SmartQueryService:
         try:
             query_id = str(uuid4())
             await session.execute(
-                text("""
-                    INSERT INTO user_queries (id, question, user_id, status, analysis_result, sources_json, tokens_used, duration_ms)
-                    VALUES (CAST(:id AS uuid), :question, :user_id, 'completed', :result, :sources, :tokens, :duration_ms)
-                """),
+                text(
+                    "INSERT INTO user_queries "
+                    "(id, question, user_id, status, "
+                    "analysis_result, sources_json, "
+                    "tokens_used, duration_ms) "
+                    "VALUES (CAST(:id AS uuid), :question, "
+                    ":user_id, 'completed', :result, "
+                    ":sources, :tokens, :duration_ms)"
+                ),
                 {
                     "id": query_id,
                     "question": question,
@@ -1225,8 +1597,8 @@ class SmartQueryService:
             )
             await session.commit()
         except Exception:
-            logger.warning("Failed to save conversation history", exc_info=True)
-            try:
+            logger.warning(
+                "Failed to save conversation history", exc_info=True,
+            )
+            with contextlib.suppress(Exception):
                 await session.rollback()
-            except Exception:
-                pass

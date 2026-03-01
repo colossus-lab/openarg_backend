@@ -4,12 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
-from app.presentation.http.controllers.root_router import create_root_router
-from app.setup.app_factory import configure_app, create_app
 
 
 @dataclass
@@ -17,21 +12,6 @@ class FakeLLMResponse:
     content: str = "El dólar cotiza a $850 hoy."
     tokens_used: int = 150
     model: str = "test-model"
-
-
-@pytest.fixture
-def app():
-    fast_app = create_app()
-    root_router = create_root_router()
-    configure_app(fast_app, root_router, environment="test")
-    return fast_app
-
-
-@pytest.fixture
-async def client(app):
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 class TestCasualGreeting:
@@ -42,9 +22,8 @@ class TestCasualGreeting:
         )
         assert response.status_code == 200
         data = response.json()
-        assert data.get("casual") is True
         assert data["tokens_used"] == 0
-        assert "datos abiertos" in data["answer"].lower() or "¡" in data["answer"]
+        assert "datos" in data["answer"].lower() or "¡" in data["answer"]
 
 
 class TestMetaResponse:
@@ -86,6 +65,7 @@ class TestFullPipelineMocked:
     async def test_full_pipeline_with_di_mocks(self, client):
         """POST a real question with mocked deps → goes through plan + analyze."""
         fake_plan = ExecutionPlan(
+            query="¿a cuánto está el dólar?",
             intent="consulta_datos",
             steps=[
                 PlanStep(

@@ -106,6 +106,8 @@ module = [
     "openai.*",
     "uvloop",
     "prometheus_client.*",
+    "boto3.*",
+    "botocore.*",
 ]
 ignore_missing_imports = true
 

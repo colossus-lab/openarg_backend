@@ -1,27 +1,6 @@
 """Integration tests for improved health endpoint."""
 from __future__ import annotations
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from app.setup.app_factory import configure_app, create_app
-from app.presentation.http.controllers.root_router import create_root_router
-
-
-@pytest.fixture
-def app():
-    fast_app = create_app()
-    root_router = create_root_router()
-    configure_app(fast_app, root_router, environment="test")
-    return fast_app
-
-
-@pytest.fixture
-async def client(app):
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-
 
 class TestHealthEndpoint:
     async def test_readiness_check(self, client):
@@ -30,6 +9,6 @@ class TestHealthEndpoint:
         assert response.json()["status"] == "ready"
 
     async def test_health_returns_json(self, client):
-        """Health endpoint returns 500 without DI container, which is expected in test."""
+        """Health endpoint uses DI, now mocked via conftest."""
         response = await client.get("/health")
-        assert response.status_code in (200, 500)
+        assert response.status_code == 200

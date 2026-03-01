@@ -11,9 +11,11 @@ import logging
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
+from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
 
 logger = logging.getLogger(__name__)
@@ -21,25 +23,20 @@ logger = logging.getLogger(__name__)
 _CHUNKS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "chunks"
 
 
-def _get_sync_engine():
-    url = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db")
-    return create_engine(url)
-
-
 @celery_app.task(name="openarg.reindex_all_embeddings", bind=True)
 def reindex_all_embeddings(self, portal: str | None = None):
     """Re-genera embeddings para todos los datasets (o filtrado por portal)."""
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
 
     try:
         with engine.begin() as conn:
             if portal:
                 rows = conn.execute(
-                    text("SELECT CAST(id AS text) FROM datasets WHERE portal = :portal"),
+                    text("SELECT CAST(id AS text) FROM datasets WHERE portal = :portal LIMIT 10000"),
                     {"portal": portal},
                 ).fetchall()
             else:
-                rows = conn.execute(text("SELECT CAST(id AS text) FROM datasets")).fetchall()
+                rows = conn.execute(text("SELECT CAST(id AS text) FROM datasets LIMIT 10000")).fetchall()
 
         dataset_ids = [row[0] for row in rows]
         logger.info(f"Reindexing {len(dataset_ids)} datasets")
@@ -53,7 +50,7 @@ def reindex_all_embeddings(self, portal: str | None = None):
         engine.dispose()
 
 
-@celery_app.task(name="openarg.index_sesiones", bind=True, max_retries=2)
+@celery_app.task(name="openarg.index_sesiones", bind=True, max_retries=2, soft_time_limit=1800, time_limit=2100)
 def index_sesiones_chunks(self, batch_size: int = 50):
     """
     Load congressional session chunks from JSON files, generate embeddings,
@@ -63,7 +60,7 @@ def index_sesiones_chunks(self, batch_size: int = 50):
     """
     import google.generativeai as genai
 
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     if not gemini_key:
         logger.error("GEMINI_API_KEY not set, cannot index sesiones")
@@ -154,6 +151,9 @@ def index_sesiones_chunks(self, batch_size: int = 50):
 
         return {"status": "indexed", "total_chunks": indexed}
 
+    except SoftTimeLimitExceeded:
+        logger.error("Sesiones indexing timed out")
+        raise
     except Exception as exc:
         logger.exception("Sesiones indexing failed")
         raise self.retry(exc=exc, countdown=60)

@@ -300,6 +300,77 @@ class TestMetaParsing:
         assert confidence == 1.0
 
 
+class TestDDJJDeterministicRouting:
+    """Test _detect_ddjj_intent returns correct plans or None."""
+
+    def test_patrimonio_name_extraction(self, service):
+        plan = service._detect_ddjj_intent("patrimonio de Martin Yeza")
+        assert plan is not None
+        assert plan.intent == "ddjj_persona"
+        assert len(plan.steps) == 1
+        step = plan.steps[0]
+        assert step.action == "query_ddjj"
+        assert step.params["nombre"] == "Martin Yeza"
+        assert step.params["action"] == "detail"
+
+    def test_bienes_de_name(self, service):
+        plan = service._detect_ddjj_intent("bienes de Milei")
+        assert plan is not None
+        assert plan.intent == "ddjj_persona"
+        assert plan.steps[0].params["nombre"] == "Milei"
+
+    def test_declaracion_jurada_name(self, service):
+        plan = service._detect_ddjj_intent("declaración jurada de Yeza")
+        assert plan is not None
+        assert plan.intent == "ddjj_persona"
+        assert plan.steps[0].params["nombre"] == "Yeza"
+
+    def test_ranking_diputados(self, service):
+        plan = service._detect_ddjj_intent("ranking de diputados por patrimonio")
+        assert plan is not None
+        assert plan.intent == "ddjj_ranking"
+        step = plan.steps[0]
+        assert step.action == "query_ddjj"
+        assert step.params["action"] == "ranking"
+        assert step.params["order"] == "desc"
+
+    def test_diputado_mas_rico(self, service):
+        plan = service._detect_ddjj_intent("diputado más rico")
+        assert plan is not None
+        assert plan.intent == "ddjj_ranking"
+        assert plan.steps[0].params["order"] == "desc"
+
+    def test_menor_patrimonio(self, service):
+        plan = service._detect_ddjj_intent("menor patrimonio de diputados")
+        assert plan is not None
+        assert plan.intent == "ddjj_ranking"
+        assert plan.steps[0].params["order"] == "asc"
+
+    def test_mas_pobres(self, service):
+        plan = service._detect_ddjj_intent("diputados más pobres")
+        assert plan is not None
+        assert plan.intent == "ddjj_ranking"
+        assert plan.steps[0].params["order"] == "asc"
+
+    def test_non_ddjj_returns_none(self, service):
+        plan = service._detect_ddjj_intent("¿a cuánto está el dólar?")
+        assert plan is None
+
+    def test_non_ddjj_weather_returns_none(self, service):
+        plan = service._detect_ddjj_intent("¿cómo está el clima hoy?")
+        assert plan is None
+
+    def test_ddjj_keyword_generic(self, service):
+        plan = service._detect_ddjj_intent("ddjj de los senadores")
+        assert plan is not None
+        assert plan.steps[0].action == "query_ddjj"
+
+    def test_cuanto_tiene(self, service):
+        plan = service._detect_ddjj_intent("cuánto tiene el diputado López")
+        assert plan is not None
+        assert plan.steps[0].action == "query_ddjj"
+
+
 class TestStreamingYieldsEvents:
     async def test_casual_streaming(self, service):
         events = []

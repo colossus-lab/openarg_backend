@@ -11,19 +11,16 @@ import logging
 import os
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, text
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
+from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
 
-def _get_sync_engine():
-    url = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db")
-    return create_engine(url)
-
-
-@celery_app.task(name="openarg.scrape_catalog", bind=True, max_retries=3)
+@celery_app.task(name="openarg.scrape_catalog", bind=True, max_retries=3, soft_time_limit=900, time_limit=1080)
 def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
     """
     Scrapea el catálogo completo de un portal de datos.
@@ -53,7 +50,7 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
         logger.error(f"Unknown portal: {portal}")
         return {"error": f"Unknown portal: {portal}"}
 
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
     client = httpx.Client(timeout=60.0)
 
     try:
@@ -74,19 +71,13 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
             resp.raise_for_status()
             packages = resp.json().get("result", {}).get("results", [])
 
+            # Collect resources for batch upsert
+            batch_rows = []
             for pkg in packages:
                 for resource in pkg.get("resources", []):
                     fmt = resource.get("format", "").lower()
                     if fmt not in ("csv", "json", "xlsx", "xls"):
                         continue
-
-                    source_id = resource.get("id", "")
-                    title = pkg.get("title", "")
-                    description = pkg.get("notes", "")
-                    organization = pkg.get("organization", {}).get("title", "")
-                    url = pkg.get("url", "")
-                    download_url = resource.get("url", "")
-                    tags = ",".join(t.get("name", "") for t in pkg.get("tags", []))
 
                     columns_list = []
                     if resource.get("attributesDescription"):
@@ -96,58 +87,43 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                         except (json.JSONDecodeError, TypeError):
                             pass
 
-                    columns_json = json.dumps(columns_list)
+                    batch_rows.append({
+                        "sid": resource.get("id", ""),
+                        "title": pkg.get("title", ""),
+                        "desc": pkg.get("notes", ""),
+                        "org": pkg.get("organization", {}).get("title", ""),
+                        "portal": portal,
+                        "url": pkg.get("url", ""),
+                        "dl": resource.get("url", ""),
+                        "fmt": fmt,
+                        "cols": json.dumps(columns_list),
+                        "tags": ",".join(t.get("name", "") for t in pkg.get("tags", [])),
+                        "now": datetime.now(UTC),
+                    })
 
-                    with engine.begin() as conn:
-                        # Upsert
-                        existing = conn.execute(
-                            text(
-                                "SELECT id FROM datasets WHERE source_id = :sid AND portal = :p"
-                            ),
-                            {"sid": source_id, "p": portal},
-                        ).fetchone()
+            # Batch upsert using ON CONFLICT (eliminates N+1 SELECT per resource)
+            if batch_rows:
+                with engine.begin() as conn:
+                    result = conn.execute(
+                        text("""
+                            INSERT INTO datasets
+                                (source_id, title, description, organization,
+                                 portal, url, download_url, format, columns, tags)
+                            VALUES
+                                (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags)
+                            ON CONFLICT (source_id, portal) DO UPDATE SET
+                                title = EXCLUDED.title, description = EXCLUDED.description,
+                                organization = EXCLUDED.organization, url = EXCLUDED.url,
+                                download_url = EXCLUDED.download_url, format = EXCLUDED.format,
+                                columns = EXCLUDED.columns, tags = EXCLUDED.tags,
+                                updated_at = :now
+                            RETURNING CAST(id AS text)
+                        """),
+                        batch_rows,
+                    )
+                    dataset_ids = [row[0] for row in result.fetchall()]
 
-                        if existing:
-                            conn.execute(
-                                text("""
-                                    UPDATE datasets SET
-                                        title = :title, description = :desc,
-                                        organization = :org, url = :url,
-                                        download_url = :dl, format = :fmt,
-                                        columns = :cols, tags = :tags,
-                                        updated_at = :now
-                                    WHERE id = :id
-                                """),
-                                {
-                                    "title": title, "desc": description,
-                                    "org": organization, "url": url,
-                                    "dl": download_url, "fmt": fmt,
-                                    "cols": columns_json, "tags": tags,
-                                    "now": datetime.now(UTC), "id": existing[0],
-                                },
-                            )
-                            dataset_id = str(existing[0])
-                        else:
-                            result = conn.execute(
-                                text("""
-                                    INSERT INTO datasets
-                                        (source_id, title, description, organization,
-                                         portal, url, download_url, format, columns, tags)
-                                    VALUES
-                                        (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags)
-                                    RETURNING id
-                                """),
-                                {
-                                    "sid": source_id, "title": title,
-                                    "desc": description, "org": organization,
-                                    "portal": portal, "url": url,
-                                    "dl": download_url, "fmt": fmt,
-                                    "cols": columns_json, "tags": tags,
-                                },
-                            )
-                            dataset_id = str(result.fetchone()[0])
-
-                    # Dispatch embedding task
+                for dataset_id in dataset_ids:
                     index_dataset_embedding.delay(dataset_id)
                     indexed += 1
 
@@ -156,6 +132,9 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
 
         return {"portal": portal, "total_packages": total, "datasets_indexed": indexed}
 
+    except SoftTimeLimitExceeded:
+        logger.error(f"Scraper timed out for portal {portal}")
+        raise
     except Exception as exc:
         logger.exception(f"Scraper failed for {portal}")
         raise self.retry(exc=exc, countdown=60)
@@ -352,7 +331,7 @@ def _get_sample_rows_text(engine, dataset_id: str, title: str, portal_name: str)
         return None
 
 
-@celery_app.task(name="openarg.index_dataset", bind=True, max_retries=3)
+@celery_app.task(name="openarg.index_dataset", bind=True, max_retries=3, soft_time_limit=120, time_limit=180)
 def index_dataset_embedding(self, dataset_id: str):
     """
     Genera múltiples chunks de embedding por dataset:
@@ -366,7 +345,7 @@ def index_dataset_embedding(self, dataset_id: str):
     import google.generativeai as genai
 
     logger.info(f"Generating embeddings for dataset: {dataset_id}")
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
 
     try:
         with engine.begin() as conn:
@@ -485,6 +464,9 @@ def index_dataset_embedding(self, dataset_id: str):
         logger.info(f"Indexed {len(chunks)} chunks for dataset: {dataset_id}")
         return {"dataset_id": dataset_id, "chunks_created": len(chunks)}
 
+    except SoftTimeLimitExceeded:
+        logger.error(f"Embedding timed out for dataset {dataset_id}")
+        raise
     except Exception as exc:
         logger.exception(f"Embedding failed for dataset {dataset_id}")
         raise self.retry(exc=exc, countdown=30)

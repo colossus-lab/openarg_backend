@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from app.infrastructure.persistence_sqla.provider import MainAsyncSession
+from app.infrastructure.persistence_sqla.provider import MainAsyncSession  # noqa: TC001
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -44,7 +44,11 @@ async def list_datasets(
     offset: int = Query(default=0, ge=0),
 ) -> list[DatasetSummary]:
     """List indexed datasets, optionally filtered by portal."""
-    query = "SELECT CAST(id AS text), title, description, organization, portal, format, is_cached, row_count FROM datasets"
+    query = (
+        "SELECT CAST(id AS text), title, description, "
+        "organization, portal, format, is_cached, row_count "
+        "FROM datasets"
+    )
     params: dict = {"limit": limit, "offset": offset}
 
     if portal:

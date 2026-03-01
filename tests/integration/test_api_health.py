@@ -1,37 +1,12 @@
-"""
-Integration tests for the health endpoints.
-These test the actual FastAPI app without external dependencies.
-"""
+"""Integration tests for the health endpoints."""
 from __future__ import annotations
-
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from app.setup.app_factory import create_app, configure_app
-from app.presentation.http.controllers.root_router import create_root_router
-
-
-@pytest.fixture
-def app():
-    """Create a test FastAPI app."""
-    fast_app = create_app()
-    root_router = create_root_router()
-    configure_app(fast_app, root_router, environment="test")
-    return fast_app
-
-
-@pytest.fixture
-async def client(app):
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 class TestHealthEndpoints:
     async def test_health_endpoint_exists(self, client):
-        """Health now uses DI (HealthCheckService); without container it returns 500."""
+        """Health endpoint with DI mocked via conftest."""
         response = await client.get("/health")
-        assert response.status_code in (200, 500)
+        assert response.status_code == 200
 
     async def test_health_ready(self, client):
         response = await client.get("/health/ready")

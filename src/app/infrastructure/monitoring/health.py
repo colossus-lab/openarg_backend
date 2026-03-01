@@ -32,11 +32,12 @@ class HealthCheckService:
             self._check_redis(),
             self._check_ddjj(),
             self._check_sesion_chunks(),
+            self._check_stuck_tasks(),
             return_exceptions=True,
         )
 
         components = {}
-        names = ["postgres", "redis", "ddjj_loaded", "sesion_chunks"]
+        names = ["postgres", "redis", "ddjj_loaded", "sesion_chunks", "pipeline_health"]
         for name, result in zip(names, checks):
             if isinstance(result, Exception):
                 components[name] = {"status": "unhealthy", "error": str(result)}
@@ -45,15 +46,18 @@ class HealthCheckService:
 
         # Circuit breaker status
         cb_status = {}
+        any_cb_open = False
         for name, cb in circuit_breakers.items():
             cb_status[name] = cb.to_dict()
+            if cb.state.value == "open":
+                any_cb_open = True
         components["circuit_breakers"] = cb_status
 
         all_healthy = all(
-            c.get("status") == "healthy"
+            c.get("status") in ("healthy", None)
             for k, c in components.items()
             if k != "circuit_breakers" and isinstance(c, dict) and "status" in c
-        )
+        ) and not any_cb_open
 
         return {
             "status": "healthy" if all_healthy else "degraded",
@@ -81,7 +85,7 @@ class HealthCheckService:
             await r.aclose()
 
     async def _check_ddjj(self) -> dict:
-        count = len(self._ddjj._data) if hasattr(self._ddjj, "_data") else 0
+        count = self._ddjj.record_count
         return {
             "status": "healthy" if count > 0 else "unhealthy",
             "records": count,
@@ -97,3 +101,46 @@ class HealthCheckService:
             return {"status": "healthy", "count": count, "latency_ms": latency_ms}
         except Exception:
             return {"status": "unhealthy", "count": 0, "error": "table not found"}
+
+    async def _check_stuck_tasks(self) -> dict:
+        try:
+            async with self._session_factory() as session:
+                # Stuck downloads (>30 min in 'downloading')
+                result = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM cached_datasets "
+                        "WHERE status = 'downloading' "
+                        "AND updated_at < NOW() - INTERVAL '30 minutes'"
+                    )
+                )
+                stuck_downloads = result.scalar() or 0
+
+                # Stuck queries (>30 min in intermediate states)
+                result = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM user_queries "
+                        "WHERE status IN ('planning', 'collecting', 'analyzing') "
+                        "AND updated_at < NOW() - INTERVAL '30 minutes'"
+                    )
+                )
+                stuck_queries = result.scalar() or 0
+
+                # Recent errors (last 24h)
+                result = await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM cached_datasets "
+                        "WHERE status = 'error' "
+                        "AND updated_at > NOW() - INTERVAL '24 hours'"
+                    )
+                )
+                recent_errors_24h = result.scalar() or 0
+
+            status = "healthy" if (stuck_downloads == 0 and stuck_queries == 0) else "degraded"
+            return {
+                "status": status,
+                "stuck_downloads": stuck_downloads,
+                "stuck_queries": stuck_queries,
+                "recent_errors_24h": recent_errors_24h,
+            }
+        except Exception as e:
+            return {"status": "unhealthy", "error": str(e)}

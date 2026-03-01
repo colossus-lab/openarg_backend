@@ -13,16 +13,13 @@ import os
 import re
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
+from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
-
-
-def _get_sync_engine():
-    url = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db")
-    return create_engine(url)
 
 
 def _sanitize_table_name(name: str) -> str:
@@ -59,7 +56,7 @@ def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -
     return key
 
 
-@celery_app.task(name="openarg.collect_data", bind=True, max_retries=3)
+@celery_app.task(name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=300, time_limit=360)
 def collect_dataset(self, dataset_id: str):
     """
     Descarga un dataset real, lo parsea y lo guarda como tabla SQL.
@@ -68,7 +65,7 @@ def collect_dataset(self, dataset_id: str):
     import httpx
 
     logger.info(f"Collecting dataset: {dataset_id}")
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
 
     try:
         # Get dataset info
@@ -110,18 +107,32 @@ def collect_dataset(self, dataset_id: str):
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status)
-                    VALUES (CAST(:did AS uuid), :tn, 'downloading')
-                    ON CONFLICT (table_name) DO UPDATE SET status = 'downloading'
+                    INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
+                    VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
+                    ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
                 """),
                 {"did": dataset_id, "tn": table_name},
             )
 
-        # Download
-        client = httpx.Client(timeout=120.0)
-        resp = client.get(download_url, follow_redirects=True)
-        resp.raise_for_status()
-        client.close()
+        # Download (with size guard: reject files > 500MB)
+        max_download_bytes = 500 * 1024 * 1024  # 500 MB
+        with httpx.Client(timeout=120.0) as client:
+            # HEAD to check Content-Length before downloading
+            try:
+                head = client.head(download_url, follow_redirects=True)
+                content_length = int(head.headers.get("content-length", 0))
+                if content_length > max_download_bytes:
+                    logger.warning(f"Dataset {dataset_id} too large: {content_length} bytes")
+                    return {"error": f"file_too_large: {content_length} bytes"}
+            except Exception:
+                pass  # HEAD may fail; proceed with GET
+
+            resp = client.get(download_url, follow_redirects=True)
+            resp.raise_for_status()
+
+            if len(resp.content) > max_download_bytes:
+                logger.warning(f"Dataset {dataset_id} download too large: {len(resp.content)} bytes")
+                return {"error": f"file_too_large: {len(resp.content)} bytes"}
 
         # Upload raw file to S3
         s3_key = None
@@ -172,17 +183,23 @@ def collect_dataset(self, dataset_id: str):
                 },
             )
 
-        # Update dataset
+        # Update dataset — track whether this is a new cache for conditional re-embedding
         with engine.begin() as conn:
+            prev = conn.execute(
+                text("SELECT is_cached FROM datasets WHERE id = CAST(:id AS uuid)"),
+                {"id": dataset_id},
+            ).fetchone()
+            was_cached = prev.is_cached if prev else False
             conn.execute(
                 text("UPDATE datasets SET is_cached = true, row_count = :rows WHERE id = CAST(:id AS uuid)"),
                 {"rows": len(df), "id": dataset_id},
             )
 
-        # Dispatch re-embedding with enriched data (sample rows)
-        from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+        # Re-embed only on first cache (enriches with sample rows); skip if already embedded
+        if not was_cached:
+            from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
 
-        index_dataset_embedding.delay(dataset_id)
+            index_dataset_embedding.delay(dataset_id)
 
         logger.info(f"Dataset {dataset_id} cached: {len(df)} rows in table {table_name}")
         return {
@@ -193,6 +210,17 @@ def collect_dataset(self, dataset_id: str):
             "s3_key": s3_key,
         }
 
+    except SoftTimeLimitExceeded:
+        logger.error(f"Task timed out for dataset {dataset_id}")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE cached_datasets SET status = 'error', error_message = :msg "
+                    "WHERE dataset_id = CAST(:did AS uuid)"
+                ),
+                {"msg": "Task timed out", "did": dataset_id},
+            )
+        raise
     except Exception as exc:
         logger.exception(f"Collection failed for dataset {dataset_id}")
         with engine.begin() as conn:
@@ -208,26 +236,102 @@ def collect_dataset(self, dataset_id: str):
         engine.dispose()
 
 
-@celery_app.task(name="openarg.bulk_collect_all", bind=True)
+@celery_app.task(name="openarg.bulk_collect_all", bind=True, soft_time_limit=60, time_limit=120)
 def bulk_collect_all(self, portal: str | None = None):
     """Descarga y cachea TODOS los datasets no cacheados."""
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
 
     try:
         query = "SELECT CAST(id AS text) FROM datasets WHERE is_cached = false"
-        params: dict[str, str] = {}
+        params: dict = {}
         if portal:
             query += " AND portal = :portal"
             params["portal"] = portal
-        query += " ORDER BY portal, title"
+        query += " ORDER BY portal, title LIMIT 5000"
 
         with engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
 
         logger.info(f"Bulk collect: {len(rows)} uncached datasets to process")
-        for row in rows:
-            collect_dataset.delay(row[0])
+        from celery import group
+        tasks = [collect_dataset.s(row[0]) for row in rows]
+        if tasks:
+            group(tasks).apply_async()
 
         return {"dispatched": len(rows)}
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(name="openarg.recover_stuck_tasks", bind=True, soft_time_limit=60, time_limit=120)
+def recover_stuck_tasks(self):
+    """
+    Recover tasks stuck in intermediate states for more than 30 minutes.
+    - cached_datasets stuck in 'downloading'
+    - user_queries stuck in intermediate states (planning, collecting, analyzing)
+    Re-dispatches collect_dataset for stuck downloads.
+    """
+    engine = get_sync_engine()
+    try:
+        recovered_downloads = 0
+        recovered_queries = 0
+
+        # 1. Recover stuck cached_datasets
+        with engine.begin() as conn:
+            stuck_downloads = conn.execute(
+                text("""
+                    SELECT CAST(dataset_id AS text) AS dataset_id, table_name
+                    FROM cached_datasets
+                    WHERE status = 'downloading'
+                      AND updated_at < NOW() - INTERVAL '30 minutes'
+                """),
+            ).fetchall()
+
+            for row in stuck_downloads:
+                conn.execute(
+                    text("""
+                        UPDATE cached_datasets
+                        SET status = 'error', error_message = 'Recovered: stuck in downloading state', updated_at = NOW()
+                        WHERE dataset_id = CAST(:did AS uuid) AND status = 'downloading'
+                    """),
+                    {"did": row.dataset_id},
+                )
+                collect_dataset.delay(row.dataset_id)
+                recovered_downloads += 1
+
+        # 2. Recover stuck user_queries
+        with engine.begin() as conn:
+            stuck_queries = conn.execute(
+                text("""
+                    SELECT CAST(id AS text) AS id, status
+                    FROM user_queries
+                    WHERE status IN ('planning', 'collecting', 'analyzing')
+                      AND updated_at < NOW() - INTERVAL '30 minutes'
+                """),
+            ).fetchall()
+
+            for row in stuck_queries:
+                conn.execute(
+                    text("""
+                        UPDATE user_queries
+                        SET status = 'error', error_message = 'Recovered: stuck in intermediate state', updated_at = NOW()
+                        WHERE id = CAST(:id AS uuid)
+                    """),
+                    {"id": row.id},
+                )
+                recovered_queries += 1
+
+        if recovered_downloads or recovered_queries:
+            logger.warning(
+                "Recovered stuck tasks: %d downloads, %d queries",
+                recovered_downloads, recovered_queries,
+            )
+        else:
+            logger.debug("No stuck tasks found")
+
+        return {
+            "recovered_downloads": recovered_downloads,
+            "recovered_queries": recovered_queries,
+        }
     finally:
         engine.dispose()

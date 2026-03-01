@@ -16,16 +16,13 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
+from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
-
-
-def _get_sync_engine():
-    url = os.getenv("DATABASE_URL", "postgresql+psycopg://openarg:openarg@localhost:5435/openarg")
-    return create_engine(url)
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +106,13 @@ def _score_single_dataset(row) -> dict:
     }
 
 
-@celery_app.task(name="openarg.score_portal_health", bind=True, max_retries=2)
+@celery_app.task(name="openarg.score_portal_health", bind=True, max_retries=2, soft_time_limit=300, time_limit=360)
 def score_portal_health(self, portal: str | None = None):
     """
     Score dataset health for all datasets (or a specific portal).
     Replaces previous scores for the same batch.
     """
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
     try:
         query = """
             SELECT CAST(id AS text) AS id, title, description, organization,
@@ -185,6 +182,9 @@ def score_portal_health(self, portal: str | None = None):
         logger.info("Scored %d datasets across %d portals", scored, len(portal_stats))
         return {"scored": scored, "portals": len(portal_stats)}
 
+    except SoftTimeLimitExceeded:
+        logger.error("Health scoring timed out")
+        raise
     except Exception as exc:
         logger.exception("Health scoring failed")
         raise self.retry(exc=exc, countdown=60)
@@ -199,14 +199,14 @@ def score_portal_health(self, portal: str | None = None):
 _DDJJ_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "ddjj_dataset.json"
 
 
-@celery_app.task(name="openarg.detect_ddjj_anomalies", bind=True, max_retries=2)
+@celery_app.task(name="openarg.detect_ddjj_anomalies", bind=True, max_retries=2, soft_time_limit=300, time_limit=360)
 def detect_ddjj_anomalies(self):
     """
     Analiza las DDJJ patrimoniales y detecta anomalías:
     - Crecimiento patrimonial que excede significativamente los ingresos declarados
     - Patrimonio cierre >> bienes inicio sin ingresos que lo justifiquen
     """
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
     try:
         raw = _DDJJ_PATH.read_text(encoding="utf-8")
         dataset = json.loads(raw)
@@ -326,6 +326,9 @@ def detect_ddjj_anomalies(self):
         )
         return {"total": len(anomalies), "flagged": flagged}
 
+    except SoftTimeLimitExceeded:
+        logger.error("DDJJ anomaly detection timed out")
+        raise
     except Exception as exc:
         logger.exception("DDJJ anomaly detection failed")
         raise self.retry(exc=exc, countdown=60)
@@ -427,14 +430,14 @@ def _classify_text(text_content: str) -> dict[str, int]:
     return counts
 
 
-@celery_app.task(name="openarg.analyze_session_topics", bind=True, max_retries=2)
+@celery_app.task(name="openarg.analyze_session_topics", bind=True, max_retries=2, soft_time_limit=300, time_limit=360)
 def analyze_session_topics(self):
     """
     Analiza los chunks de sesiones parlamentarias por tema.
     Agrupa por sesión (periodo + reunion) y genera distribución temática.
     """
     chunks_dir = Path(__file__).resolve().parent.parent.parent / "data" / "chunks"
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
 
     try:
         # Load all session chunks from JSON files
@@ -553,6 +556,9 @@ def analyze_session_topics(self):
         )
         return {"sessions_analyzed": len(sessions), "topic_entries": len(results)}
 
+    except SoftTimeLimitExceeded:
+        logger.error("Session topic analysis timed out")
+        raise
     except Exception as exc:
         logger.exception("Session topic analysis failed")
         raise self.retry(exc=exc, countdown=60)

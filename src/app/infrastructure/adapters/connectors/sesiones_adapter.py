@@ -68,22 +68,27 @@ class SesionesAdapter(ISesionesConnector):
         try:
             embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
-            periodo_clause = ""
             params: dict = {"embedding": embedding_str, "limit": limit}
             if periodo is not None:
-                periodo_clause = "AND periodo = :periodo"
                 params["periodo"] = periodo
-
-            sql = text(f"""
-                SELECT
-                    periodo, reunion, fecha, tipo_sesion, pdf_url,
-                    total_pages, speaker, content,
-                    1 - (embedding <=> CAST(:embedding AS vector)) AS score
-                FROM sesion_chunks
-                WHERE 1=1 {periodo_clause}
-                ORDER BY embedding <=> CAST(:embedding AS vector)
-                LIMIT :limit
-            """)
+                sql = text(
+                    "SELECT periodo, reunion, fecha, tipo_sesion, pdf_url,"
+                    " total_pages, speaker, content,"
+                    " 1 - (embedding <=> CAST(:embedding AS vector)) AS score"
+                    " FROM sesion_chunks"
+                    " WHERE periodo = :periodo"
+                    " ORDER BY embedding <=> CAST(:embedding AS vector)"
+                    " LIMIT :limit"
+                )
+            else:
+                sql = text(
+                    "SELECT periodo, reunion, fecha, tipo_sesion, pdf_url,"
+                    " total_pages, speaker, content,"
+                    " 1 - (embedding <=> CAST(:embedding AS vector)) AS score"
+                    " FROM sesion_chunks"
+                    " ORDER BY embedding <=> CAST(:embedding AS vector)"
+                    " LIMIT :limit"
+                )
 
             async with self._session_factory() as session:
                 result = await session.execute(sql, params)
