@@ -304,6 +304,54 @@ def _get_data_statistics(engine, dataset_id: str) -> str | None:
         return None
 
 
+def _get_sample_rows_text(engine, dataset_id: str, title: str, portal_name: str) -> str | None:
+    """Genera texto natural de las primeras filas para embedding."""
+    import re
+
+    try:
+        with engine.begin() as conn:
+            cache_row = conn.execute(
+                text(
+                    "SELECT table_name, columns_json FROM cached_datasets "
+                    "WHERE dataset_id = CAST(:did AS uuid) AND status = 'ready'"
+                ),
+                {"did": dataset_id},
+            ).fetchone()
+
+        if not cache_row or not cache_row.table_name:
+            return None
+
+        table_name = cache_row.table_name
+        # Validate table name to prevent injection
+        if not re.match(r"^cache_[a-z0-9_]{1,100}$", table_name):
+            return None
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(f'SELECT * FROM "{table_name}" LIMIT 15')
+            ).fetchall()
+            if not rows:
+                return None
+            col_desc = conn.execute(
+                text(f'SELECT * FROM "{table_name}" LIMIT 0')
+            ).cursor.description
+            cols = [desc[0] for desc in col_desc]
+
+        parts = [f"Muestra de datos reales del dataset '{title}' ({portal_name}):"]
+        for i, r in enumerate(rows[:15], 1):
+            row_parts = []
+            for col, val in zip(cols, r):
+                if val is not None:
+                    row_parts.append(f"{col}: {str(val)[:100]}")
+            parts.append(f"Registro {i}: {', '.join(row_parts)}")
+
+        return "\n".join(parts)
+
+    except Exception:
+        logger.debug("Could not extract sample rows for %s", dataset_id, exc_info=True)
+        return None
+
+
 @celery_app.task(name="openarg.index_dataset", bind=True, max_retries=3)
 def index_dataset_embedding(self, dataset_id: str):
     """
@@ -401,6 +449,12 @@ def index_dataset_embedding(self, dataset_id: str):
             if cols:
                 stats_chunk_parts.append(f"Columnas: {', '.join(str(c) for c in cols[:10])}")
             chunks.append("\n".join(stats_chunk_parts))
+
+        # Chunk 5: Sample rows (rich data context for semantic search)
+        if row.is_cached:
+            sample_text = _get_sample_rows_text(engine, dataset_id, row.title, portal_name)
+            if sample_text:
+                chunks.append(sample_text)
 
         # Generate embeddings in batch
         genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))

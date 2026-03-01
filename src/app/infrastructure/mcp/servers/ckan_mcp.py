@@ -18,18 +18,31 @@ MAX_CSV_ROWS = 500
 
 PORTALS: list[dict] = [
     # Nacionales
-    {"id": "nacional", "name": "Portal Nacional", "base_url": "https://datos.gob.ar", "api_path": "/api/3/action"},
-    {"id": "diputados", "name": "Cámara de Diputados", "base_url": "https://datos.hcdn.gob.ar", "api_path": "/api/3/action"},
-    {"id": "justicia", "name": "Justicia (incl. Anticorrupción)", "base_url": "https://datos.jus.gob.ar", "api_path": "/api/3/action"},
+    {"id": "nacional", "name": "Portal Nacional", "base_url": "https://datos.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "diputados", "name": "Cámara de Diputados", "base_url": "https://datos.hcdn.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "justicia", "name": "Justicia (incl. Anticorrupción)", "base_url": "https://datos.jus.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    # Nacionales sectoriales
+    {"id": "energia", "name": "Energía", "base_url": "https://datos.energia.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "transporte", "name": "Transporte", "base_url": "https://datos.transporte.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "salud", "name": "Salud", "base_url": "https://datos.salud.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "cultura", "name": "Cultura", "base_url": "https://datos.cultura.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "agroindustria", "name": "Agroindustria", "base_url": "https://datos.agroindustria.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "produccion", "name": "Producción", "base_url": "https://datos.produccion.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
     # CABA
-    {"id": "caba", "name": "Buenos Aires Ciudad", "base_url": "https://data.buenosaires.gob.ar", "api_path": "/api/3/action"},
+    {"id": "caba", "name": "Buenos Aires Ciudad", "base_url": "https://data.buenosaires.gob.ar", "api_path": "/api/3/action", "category": "caba"},
     # Provincias
-    {"id": "pba", "name": "Provincia de Buenos Aires", "base_url": "https://catalogo.datos.gba.gob.ar", "api_path": "/api/3/action"},
-    {"id": "cordoba_prov", "name": "Córdoba Provincia", "base_url": "https://datosgestionabierta.cba.gov.ar", "api_path": "/api/3/action"},
-    {"id": "santafe", "name": "Santa Fe", "base_url": "https://datos.santafe.gob.ar", "api_path": "/api/3/action"},
-    {"id": "mendoza", "name": "Mendoza", "base_url": "https://datosabiertos.mendoza.gov.ar", "api_path": "/api/3/action"},
-    {"id": "entrerios", "name": "Entre Ríos", "base_url": "https://datos.entrerios.gov.ar", "api_path": "/api/3/action"},
-    {"id": "neuquen_legislatura", "name": "Legislatura de Neuquén", "base_url": "https://datos.legislaturaneuquen.gob.ar", "api_path": "/api/3/action"},
+    {"id": "pba", "name": "Provincia de Buenos Aires", "base_url": "https://catalogo.datos.gba.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "cordoba_prov", "name": "Córdoba Provincia", "base_url": "https://datosgestionabierta.cba.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "santafe", "name": "Santa Fe", "base_url": "https://datos.santafe.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "mendoza", "name": "Mendoza", "base_url": "https://datosabiertos.mendoza.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "entrerios", "name": "Entre Ríos", "base_url": "https://datos.entrerios.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "neuquen_legislatura", "name": "Legislatura de Neuquén", "base_url": "https://datos.legislaturaneuquen.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "tucuman", "name": "Tucumán", "base_url": "https://datos.tucuman.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "misiones", "name": "Misiones", "base_url": "https://datos.misiones.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "chaco", "name": "Chaco", "base_url": "https://datos.chaco.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    # Municipios
+    {"id": "rosario", "name": "Rosario", "base_url": "https://datos.rosario.gob.ar", "api_path": "/api/3/action", "category": "municipio"},
+    {"id": "bahia_blanca", "name": "Bahía Blanca", "base_url": "https://datos.bahiablanca.gob.ar", "api_path": "/api/3/action", "category": "municipio"},
 ]
 
 _client = httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "OpenArg-MCP/1.0"})

@@ -35,6 +35,8 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.embedding_tasks",
             "app.infrastructure.celery.tasks.collector_tasks",
             "app.infrastructure.celery.tasks.analyst_tasks",
+            "app.infrastructure.celery.tasks.transparency_tasks",
+            "app.infrastructure.celery.tasks.s3_tasks",
         ],
     )
 
@@ -43,7 +45,13 @@ def create_celery() -> Celery:
         "openarg.index_dataset": {"queue": "embedding"},
         "openarg.index_sesiones": {"queue": "embedding"},
         "openarg.collect_data": {"queue": "collector"},
+        "openarg.bulk_collect_all": {"queue": "collector"},
         "openarg.analyze_query": {"queue": "analyst"},
+        "openarg.score_portal_health": {"queue": "scraper"},
+        "openarg.detect_ddjj_anomalies": {"queue": "scraper"},
+        "openarg.analyze_session_topics": {"queue": "scraper"},
+        "openarg.retry_s3_uploads": {"queue": "s3"},
+        "openarg.upload_to_s3": {"queue": "s3"},
     }
 
     app.conf.task_default_queue = "default"
@@ -76,6 +84,32 @@ def create_celery() -> Celery:
         }
         for portal, (hour, minute) in _beat_schedule.items()
     }
+
+    # Bulk collect — download all uncached datasets after scraping (05:30 ART)
+    app.conf.beat_schedule["bulk-collect-datasets"] = {
+        "task": "openarg.bulk_collect_all",
+        "schedule": crontab(hour=5, minute=30),
+    }
+
+    # Transparency analysis — runs after scraping completes (~06:00 ART)
+    app.conf.beat_schedule.update({
+        "transparency-health-scoring": {
+            "task": "openarg.score_portal_health",
+            "schedule": crontab(hour=6, minute=0),
+        },
+        "transparency-ddjj-anomalies": {
+            "task": "openarg.detect_ddjj_anomalies",
+            "schedule": crontab(hour=6, minute=15),
+        },
+        "transparency-session-topics": {
+            "task": "openarg.analyze_session_topics",
+            "schedule": crontab(hour=6, minute=30),
+        },
+        "retry-s3-uploads": {
+            "task": "openarg.retry_s3_uploads",
+            "schedule": crontab(hour=6, minute=45),
+        },
+    })
 
     return app
 

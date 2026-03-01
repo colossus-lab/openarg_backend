@@ -34,9 +34,13 @@ dependencies = [
     "tiktoken>=0.8.0",
 
     # Data Processing
+    "python-dateutil>=2.9.0",
     "pandas>=2.2.0",
     "httpx>=0.28.0",
     "aiofiles>=24.1.0",
+
+    # AWS
+    "boto3>=1.28.0",
 
     # Config
     "pydantic>=2.10.0",

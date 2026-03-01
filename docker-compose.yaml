@@ -50,6 +50,10 @@ services:
       - MCP_ARGENTINA_DATOS_URL=http://mcp-argentina-datos:8093
       - MCP_SESIONES_URL=http://mcp-sesiones:8094
       - BACKEND_API_KEY=${BACKEND_API_KEY:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-openarg-datasets}
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,6 +87,10 @@ services:
       - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-openarg-datasets}
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,6 +124,25 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-s3:
+    build:
+      context: .
+      dockerfile: docker/worker-s3.Dockerfile
+    environment:
+      - APP_ENV=local
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/openarg_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET=${S3_BUCKET:-openarg-datasets}
     depends_on:
       postgres:
         condition: service_healthy

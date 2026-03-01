@@ -39,6 +39,8 @@ class IVectorSearch(ABC):
         query_text: str,
         limit: int = 10,
         portal_filter: str | None = None,
+        rrf_k: int = 60,
+        min_score: float = 0.005,
     ) -> list[SearchResult]: ...
 
     @abstractmethod
