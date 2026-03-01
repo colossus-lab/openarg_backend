@@ -1,9 +1,25 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from celery import Celery
 from celery.schedules import crontab
+
+logger = logging.getLogger(__name__)
+
+ALL_PORTALS = [
+    "datos_gob_ar",
+    "caba",
+    "diputados",
+    "justicia",
+    "buenos_aires_prov",
+    "cordoba_prov",
+    "santa_fe",
+    "mendoza",
+    "entre_rios",
+    "neuquen_legislatura",
+]
 
 
 def create_celery() -> Celery:
@@ -38,18 +54,27 @@ def create_celery() -> Celery:
     app.conf.accept_content = ["json"]
     app.conf.timezone = "America/Argentina/Buenos_Aires"
 
-    # Celery Beat — periodic catalog scraping (daily at 03:00 ART)
+    # Celery Beat — periodic catalog scraping (daily, staggered every 15 min)
+    _beat_schedule = {
+        # hour, minute for each portal
+        "datos_gob_ar": (3, 0),
+        "caba": (3, 15),
+        "diputados": (3, 30),
+        "justicia": (3, 45),
+        "buenos_aires_prov": (4, 0),
+        "cordoba_prov": (4, 15),
+        "santa_fe": (4, 30),
+        "mendoza": (4, 45),
+        "entre_rios": (5, 0),
+        "neuquen_legislatura": (5, 15),
+    }
     app.conf.beat_schedule = {
-        "scrape-datos-gob-ar": {
+        f"scrape-{portal.replace('_', '-')}": {
             "task": "openarg.scrape_catalog",
-            "schedule": crontab(hour=3, minute=0),
-            "args": ["datos_gob_ar"],
-        },
-        "scrape-caba": {
-            "task": "openarg.scrape_catalog",
-            "schedule": crontab(hour=3, minute=30),
-            "args": ["caba"],
-        },
+            "schedule": crontab(hour=hour, minute=minute),
+            "args": [portal],
+        }
+        for portal, (hour, minute) in _beat_schedule.items()
     }
 
     return app
@@ -60,10 +85,37 @@ celery_app = create_celery()
 
 @celery_app.on_after_finalize.connect
 def _initial_scrape(sender, **kwargs):
-    """Dispatch initial scrape on first startup."""
-    from app.infrastructure.celery.tasks.scraper_tasks import scrape_catalog
-    scrape_catalog.delay("datos_gob_ar")
-    scrape_catalog.delay("caba")
+    """Dispatch scrape only for portals with no datasets in the DB."""
+    from sqlalchemy import text
+
+    from app.infrastructure.celery.tasks.scraper_tasks import (
+        _get_sync_engine,
+        scrape_catalog,
+    )
+
+    try:
+        engine = _get_sync_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT portal, COUNT(*) FROM datasets GROUP BY portal")
+            ).fetchall()
+        populated = {row[0] for row in rows if row[1] > 0}
+    except Exception:
+        logger.warning("Could not check dataset counts — scraping all portals")
+        populated = set()
+
+    empty_portals = [p for p in ALL_PORTALS if p not in populated]
+
+    if empty_portals:
+        logger.info("Initial scrape for empty portals: %s", empty_portals)
+        for portal in empty_portals:
+            scrape_catalog.delay(portal)
+    else:
+        logger.info("All portals already populated — skipping initial scrape")
+
+    if populated:
+        skipped = [p for p in ALL_PORTALS if p in populated]
+        logger.info("Skipping portals with existing data: %s", skipped)
 
     # Index congressional session chunks in pgvector (idempotent — skips if already indexed)
     from app.infrastructure.celery.tasks.embedding_tasks import index_sesiones_chunks
