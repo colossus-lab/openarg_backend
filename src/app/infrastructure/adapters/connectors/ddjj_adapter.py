@@ -36,6 +36,12 @@ class DDJJAdapter:
         self._dataset: list[dict] = []
         self._loaded = False
 
+    @property
+    def record_count(self) -> int:
+        """Public accessor for health checks."""
+        self._ensure_loaded()
+        return len(self._dataset)
+
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return

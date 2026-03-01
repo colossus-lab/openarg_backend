@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -18,7 +18,7 @@ limiter = Limiter(key_func=get_remote_address)
 # ---------------------------------------------------------------------------
 
 class QueryRequest(BaseModel):
-    sql: str
+    sql: str = Field(..., min_length=1, max_length=5000)
 
 
 class QueryResponse(BaseModel):
@@ -37,7 +37,7 @@ class TableInfo(BaseModel):
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=2000)
 
 
 class AskResponse(BaseModel):

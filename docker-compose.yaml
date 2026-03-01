@@ -17,6 +17,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "127.0.0.1:6381:6379"
     volumes:

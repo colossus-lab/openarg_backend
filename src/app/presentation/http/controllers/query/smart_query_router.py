@@ -1,15 +1,13 @@
 """Smart query router — thin HTTP/WS layer delegating to SmartQueryService."""
-from __future__ import annotations
 
+import contextlib
 import logging
 import os
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import ORJSONResponse
-from pydantic import BaseModel
-from slowapi import Limiter
-from slowapi.util import get_remote_address
+from pydantic import BaseModel, Field
 
 from app.application.smart_query_service import SmartQueryService
 from app.domain.ports.cache.cache_port import ICacheService
@@ -25,15 +23,15 @@ from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 from app.infrastructure.audit.audit_logger import audit_rate_limited
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
+from app.setup.app_factory import limiter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/query", tags=["smart-query"])
-limiter = Limiter(key_func=get_remote_address)
 
 
 class SmartQueryRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=2000)
     user_email: str | None = None
     conversation_id: str | None = None
     policy_mode: bool = False
@@ -46,6 +44,7 @@ class SmartQueryResponse(BaseModel):
     tokens_used: int = 0
     confidence: float = 1.0
     citations: list[dict] = []
+    documents: list[dict] | None = None
 
 
 def _build_service(
@@ -159,6 +158,7 @@ async def smart_query(
         "tokens_used": result.tokens_used,
         "confidence": result.confidence,
         "citations": result.citations,
+        **({"documents": result.documents} if result.documents else {}),
         **({"cached": True} if result.cached else {}),
         **({"casual": True} if result.casual else {}),
     }
@@ -168,11 +168,12 @@ async def smart_query(
 
 
 def _validate_ws_api_key(ws: WebSocket) -> bool:
+    import secrets as _secrets
     expected = os.getenv("BACKEND_API_KEY", "")
     if not expected:
         return True
     provided = ws.query_params.get("api_key", "")
-    return provided == expected
+    return _secrets.compare_digest(provided, expected)
 
 
 @router.websocket("/ws/smart")
@@ -206,12 +207,18 @@ async def ws_smart_query(
             await ws.close(code=4429)
             return
 
-        raw = await ws.receive_json()
+        raw_text = await ws.receive_text()
+        if len(raw_text) > 10_000:
+            await ws.send_json({"type": "error", "message": "Message too large (max 10KB)"})
+            await ws.close(code=4400)
+            return
+        import json as _json
+        raw = _json.loads(raw_text)
         question = raw.get("question", "")
         conversation_id = raw.get("conversation_id", "")
         policy_mode = raw.get("policy_mode", False)
 
-        if not question:
+        if not question or len(question) > 2000:
             await ws.send_json({"type": "error", "message": "question is required"})
             await ws.close()
             return
@@ -239,12 +246,8 @@ async def ws_smart_query(
         logger.debug("WebSocket client disconnected")
     except Exception:
         logger.exception("WebSocket error")
-        try:
+        with contextlib.suppress(Exception):
             await ws.send_json({"type": "error", "message": "Internal error"})
-        except Exception:
-            pass
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await ws.close()
-        except Exception:
-            pass

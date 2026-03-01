@@ -18,27 +18,29 @@ class PgVectorSearchAdapter(IVectorSearch):
     ) -> list[SearchResult]:
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
-        portal_clause = ""
         params: dict = {"embedding": embedding_str, "limit": limit}
         if portal_filter:
-            portal_clause = "AND d.portal = :portal"
             params["portal"] = portal_filter
-
-        query = text(f"""
-            SELECT
-                CAST(d.id AS text) AS dataset_id,
-                d.title,
-                d.description,
-                d.portal,
-                d.download_url,
-                d.columns,
-                1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score
-            FROM dataset_chunks dc
-            JOIN datasets d ON d.id = dc.dataset_id
-            WHERE 1=1 {portal_clause}
-            ORDER BY dc.embedding <=> CAST(:embedding AS vector)
-            LIMIT :limit
-        """)
+            query = text(
+                "SELECT CAST(d.id AS text) AS dataset_id,"
+                " d.title, d.description, d.portal, d.download_url, d.columns,"
+                " 1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score"
+                " FROM dataset_chunks dc"
+                " JOIN datasets d ON d.id = dc.dataset_id"
+                " WHERE d.portal = :portal"
+                " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
+                " LIMIT :limit"
+            )
+        else:
+            query = text(
+                "SELECT CAST(d.id AS text) AS dataset_id,"
+                " d.title, d.description, d.portal, d.download_url, d.columns,"
+                " 1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score"
+                " FROM dataset_chunks dc"
+                " JOIN datasets d ON d.id = dc.dataset_id"
+                " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
+                " LIMIT :limit"
+            )
 
         result = await self._session.execute(query, params)
         rows = result.fetchall()
@@ -80,7 +82,6 @@ class PgVectorSearchAdapter(IVectorSearch):
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
         query_text = self._sanitize_tsquery_input(query_text)
 
-        portal_clause = ""
         params: dict = {
             "embedding": embedding_str,
             "query_text": query_text,
@@ -88,65 +89,59 @@ class PgVectorSearchAdapter(IVectorSearch):
             "fetch_limit": limit * 4,  # fetch more candidates for fusion
             "rrf_k": rrf_k,
         }
-        if portal_filter:
-            portal_clause = "AND d.portal = :portal"
-            params["portal"] = portal_filter
 
-        query = text(f"""
-            WITH vector_ranked AS (
-                SELECT
-                    CAST(d.id AS text) AS dataset_id,
-                    d.title,
-                    d.description,
-                    d.portal,
-                    d.download_url,
-                    d.columns,
-                    1 - (dc.embedding <=> CAST(:embedding AS vector)) AS vec_score,
-                    ROW_NUMBER() OVER (ORDER BY dc.embedding <=> CAST(:embedding AS vector)) AS vec_rank
-                FROM dataset_chunks dc
-                JOIN datasets d ON d.id = dc.dataset_id
-                WHERE 1=1 {portal_clause}
-                ORDER BY dc.embedding <=> CAST(:embedding AS vector)
-                LIMIT :fetch_limit
-            ),
-            bm25_ranked AS (
-                SELECT
-                    CAST(d.id AS text) AS dataset_id,
-                    d.title,
-                    d.description,
-                    d.portal,
-                    d.download_url,
-                    d.columns,
-                    ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) AS bm25_score,
-                    ROW_NUMBER() OVER (
-                        ORDER BY ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) DESC
-                    ) AS bm25_rank
-                FROM dataset_chunks dc
-                JOIN datasets d ON d.id = dc.dataset_id
-                WHERE dc.tsv @@ websearch_to_tsquery('spanish', :query_text)
-                    {portal_clause}
-                ORDER BY bm25_score DESC
-                LIMIT :fetch_limit
-            ),
-            fused AS (
-                SELECT
-                    COALESCE(v.dataset_id, b.dataset_id) AS dataset_id,
-                    COALESCE(v.title, b.title) AS title,
-                    COALESCE(v.description, b.description) AS description,
-                    COALESCE(v.portal, b.portal) AS portal,
-                    COALESCE(v.download_url, b.download_url) AS download_url,
-                    COALESCE(v.columns, b.columns) AS columns,
-                    COALESCE(1.0 / (:rrf_k + v.vec_rank), 0) +
-                    COALESCE(1.0 / (:rrf_k + b.bm25_rank), 0) AS rrf_score
-                FROM vector_ranked v
-                FULL OUTER JOIN bm25_ranked b
-                    ON v.dataset_id = b.dataset_id
-            )
-            SELECT dataset_id, title, description, portal, download_url, columns, rrf_score AS score
-            FROM fused
-            ORDER BY rrf_score DESC
-            LIMIT :limit
-        """)
+        _HYBRID_BASE = (
+            "WITH vector_ranked AS ("
+            " SELECT CAST(d.id AS text) AS dataset_id,"
+            " d.title, d.description, d.portal, d.download_url, d.columns,"
+            " 1 - (dc.embedding <=> CAST(:embedding AS vector)) AS vec_score,"
+            " ROW_NUMBER() OVER (ORDER BY dc.embedding <=> CAST(:embedding AS vector)) AS vec_rank"
+            " FROM dataset_chunks dc"
+            " JOIN datasets d ON d.id = dc.dataset_id"
+            " {where_vec}"
+            " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
+            " LIMIT :fetch_limit"
+            "), bm25_ranked AS ("
+            " SELECT CAST(d.id AS text) AS dataset_id,"
+            " d.title, d.description, d.portal, d.download_url, d.columns,"
+            " ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) AS bm25_score,"
+            " ROW_NUMBER() OVER ("
+            "   ORDER BY ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) DESC"
+            " ) AS bm25_rank"
+            " FROM dataset_chunks dc"
+            " JOIN datasets d ON d.id = dc.dataset_id"
+            " WHERE dc.tsv @@ websearch_to_tsquery('spanish', :query_text)"
+            " {and_portal}"
+            " ORDER BY bm25_score DESC"
+            " LIMIT :fetch_limit"
+            "), fused AS ("
+            " SELECT"
+            "   COALESCE(v.dataset_id, b.dataset_id) AS dataset_id,"
+            "   COALESCE(v.title, b.title) AS title,"
+            "   COALESCE(v.description, b.description) AS description,"
+            "   COALESCE(v.portal, b.portal) AS portal,"
+            "   COALESCE(v.download_url, b.download_url) AS download_url,"
+            "   COALESCE(v.columns, b.columns) AS columns,"
+            "   COALESCE(1.0 / (:rrf_k + v.vec_rank), 0) +"
+            "   COALESCE(1.0 / (:rrf_k + b.bm25_rank), 0) AS rrf_score"
+            " FROM vector_ranked v"
+            " FULL OUTER JOIN bm25_ranked b ON v.dataset_id = b.dataset_id"
+            ")"
+            " SELECT dataset_id, title, description, portal, download_url, columns, rrf_score AS score"
+            " FROM fused ORDER BY rrf_score DESC LIMIT :limit"
+        )
+
+        if portal_filter:
+            params["portal"] = portal_filter
+            query = text(_HYBRID_BASE.format(
+                where_vec="WHERE d.portal = :portal",
+                and_portal="AND d.portal = :portal",
+            ))
+        else:
+            query = text(_HYBRID_BASE.format(
+                where_vec="",
+                and_portal="",
+            ))
 
         result = await self._session.execute(query, params)
         rows = result.fetchall()

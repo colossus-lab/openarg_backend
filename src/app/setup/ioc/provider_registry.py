@@ -32,6 +32,7 @@ from app.infrastructure.monitoring.health import HealthCheckService
 from app.infrastructure.adapters.connectors.georef_adapter import GeorefAdapter
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import SeriesTiempoAdapter
 from app.infrastructure.adapters.connectors.sesiones_adapter import SesionesAdapter
+from app.infrastructure.adapters.connectors.staff_adapter import StaffAdapter
 from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetRepositorySQLA
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
 from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdapter
@@ -255,6 +256,12 @@ class ConnectorProvider(Provider):
         adapter._ensure_loaded()
         return adapter
 
+    @provide
+    def staff(
+        self, session_factory: async_sessionmaker[AsyncSession],
+    ) -> StaffAdapter:
+        return StaffAdapter(session_factory=session_factory)
+
 
 class RetrievalEvaluatorProvider(Provider):
     scope = Scope.REQUEST
@@ -282,6 +289,7 @@ class ApplicationProvider(Provider):
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
         retrieval_evaluator: IRetrievalEvaluator,
+        staff: StaffAdapter,
     ) -> SmartQueryService:
         return SmartQueryService(
             llm=llm,
@@ -296,6 +304,7 @@ class ApplicationProvider(Provider):
             ddjj=ddjj,
             semantic_cache=semantic_cache,
             retrieval_evaluator=retrieval_evaluator,
+            staff=staff,
         )
 
 

@@ -62,6 +62,12 @@ FUENTES DE DATOS DISPONIBLES:
    - Se puede buscar por contenido del debate, nombre de orador, temas discutidos
    - Parámetros: query (texto a buscar), periodo (número de período parlamentario, opcional), orador (nombre del orador, opcional)
 
+7. **Personal de HCDN** (query_staff): Nómina de personal de la Cámara de Diputados
+   - Snapshots semanales de la nómina completa (3600+ empleados): legajo, apellido, nombre, escalafón, área de desempeño, convenio
+   - Detección automática de altas y bajas por diff entre snapshots
+   - Parámetros: action ("get_by_legislator"|"count"|"changes"|"search"|"stats"), name (nombre del legislador/área, opcional), query (texto libre, opcional)
+   - **ASESORES/PERSONAL DE DIPUTADOS**: Para consultas como "asesores de Yeza", "cuántos empleados tiene Menem", "personal de Milei" → SIEMPRE usá query_staff. NUNCA uses search_ckan para estos temas.**
+
 ⚠️ CATÁLOGO DE SERIES VERIFICADAS (USÁLAS SIEMPRE QUE APLIQUE):
 - **Presupuesto / Gasto Público Nacional**: seriesIds = ["451.3_GPNGPN_0_0_3_30"]
 - **Inflación / IPC Nivel General**: seriesIds = ["103.1_I2N_2016_M_19"] (variación % mensual del IPC)
@@ -93,7 +99,8 @@ REGLAS:
 - **Para consultas sobre el Congreso, Diputados, legisladores, leyes sancionadas, proyectos parlamentarios → usá search_ckan con portalId: "diputados"**
 - **CATÁLOGO NACIONAL: Cuando el usuario pregunte "qué datasets hay", "qué datos tienen" → usá search_ckan con portalId: "nacional" y query: "*" con rows: 20.**
 - **DDJJ — IMPORTANTE: Tenemos 195 declaraciones juradas patrimoniales COMPLETAS precargadas. Para CUALQUIER consulta sobre patrimonio, riqueza, bienes, declaraciones juradas, DDJJ → usá query_ddjj. NUNCA uses search_ckan para estos temas.**
-- **NÓMINA DE PERSONAL HCDN — Para buscar si alguien trabaja/es empleado del Congreso → usá search_ckan con portalId: "diputados", resourceId: "6e49506e-6757-44cd-94e9-0e75f3bd8c38", q: "<nombre>".**
+- **ASESORES / PERSONAL DE DIPUTADOS — Para consultas sobre asesores, personal, empleados de un diputado, cuántos asesores tiene, quiénes trabajan con/para un legislador → SIEMPRE usá query_staff con action adecuada. NUNCA uses search_ckan para estos temas.**
+- **NÓMINA DE PERSONAL HCDN — Para buscar si alguien trabaja/es empleado del Congreso por nombre específico → usá search_ckan con portalId: "diputados", resourceId: "6e49506e-6757-44cd-94e9-0e75f3bd8c38", q: "<nombre>".**
 - **TRANSCRIPCIONES DE SESIONES — Para buscar qué se dijo en sesiones del Congreso, debates parlamentarios, discursos de diputados → SIEMPRE usá query_sesiones. NUNCA uses search_ckan para buscar contenido de debates.**
 - Para datasets generales (educación, salud, transporte, etc.), usá search_ckan
 - Máximo 5 pasos por plan
@@ -107,7 +114,7 @@ SCHEMA DE RESPUESTA:
   "steps": [
     {
       "id": "step_1",
-      "action": "search_ckan | query_series | query_georef | query_ddjj | query_argentina_datos | query_sesiones | analyze | compare",
+      "action": "search_ckan | query_series | query_georef | query_ddjj | query_argentina_datos | query_sesiones | query_staff | analyze | compare",
       "description": "descripción humana del paso",
       "params": { "query": "...", "seriesIds": ["..."], "startDate": "...", "endDate": "...", "collapse": "year" },
       "dependsOn": []

@@ -1,27 +1,6 @@
 """Security integration tests — headers and rate limiting."""
 from __future__ import annotations
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from app.presentation.http.controllers.root_router import create_root_router
-from app.setup.app_factory import configure_app, create_app
-
-
-@pytest.fixture
-def app():
-    fast_app = create_app()
-    root_router = create_root_router()
-    configure_app(fast_app, root_router, environment="test")
-    return fast_app
-
-
-@pytest.fixture
-async def client(app):
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-
 
 class TestSecurityHeaders:
     async def test_security_headers_on_health(self, client):
@@ -51,7 +30,7 @@ class TestRateLimiting:
         In test env without Redis, SlowAPI falls back to in-memory storage.
         """
         responses = []
-        for i in range(18):
+        for _i in range(18):
             resp = await client.post(
                 "/api/v1/query/smart",
                 json={"question": "hola"},

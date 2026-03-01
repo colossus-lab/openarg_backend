@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -29,7 +29,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 
 class QueryRequest(BaseModel):
-    question: str
+    question: str = Field(..., min_length=1, max_length=2000)
     user_id: str | None = None
 
 
@@ -344,11 +344,12 @@ async def invalidate_cache(
 def _validate_ws_api_key(websocket: WebSocket) -> bool:
     """Check api_key query param against configured BACKEND_API_KEY."""
     import os
+    import secrets as _secrets
     expected = os.getenv("BACKEND_API_KEY", "")
     if not expected:
         return True  # No key configured, allow all
     provided = websocket.query_params.get("api_key", "")
-    return provided == expected
+    return _secrets.compare_digest(provided, expected)
 
 
 @router.websocket("/ws/stream")
@@ -367,10 +368,14 @@ async def stream_query(
 
     try:
         while True:
-            data = await websocket.receive_json()
+            raw = await websocket.receive_text()
+            if len(raw) > 10_000:
+                await websocket.send_json({"type": "error", "content": "Message too large (max 10KB)"})
+                continue
+            data = json.loads(raw)
             question = data.get("question", "")
 
-            if not question:
+            if not question or len(question) > 2000:
                 await websocket.send_json({"type": "error", "content": "Question is required"})
                 continue
 

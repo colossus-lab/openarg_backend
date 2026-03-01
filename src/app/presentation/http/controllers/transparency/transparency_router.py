@@ -145,22 +145,44 @@ async def get_portal_datasets_health(
     offset: int = Query(default=0, ge=0),
 ) -> list[DatasetHealthDetail]:
     """Detalle de salud por dataset dentro de un portal."""
-    _allowed_sorts = {"overall_score", "freshness_score", "completeness_score"}
-    safe_sort = sort_by if sort_by in _allowed_sorts else "overall_score"
-    result = await session.execute(
-        text(
-            "SELECT"
-            "  CAST(h.dataset_id AS text) AS dataset_id,"
-            "  d.title, d.portal, d.format,"
-            "  h.overall_score, h.freshness_score, h.freshness_status,"
-            "  h.accessibility_score, h.machine_readability_score,"
-            "  h.completeness_score, h.contactability_score "
-            "FROM dataset_health_scores h "
-            "JOIN datasets d ON d.id = h.dataset_id "
-            "WHERE h.portal = :portal "
-            f"ORDER BY h.{safe_sort} DESC "
-            "LIMIT :limit OFFSET :offset"
+    _sort_queries = {
+        "overall_score": (
+            "SELECT CAST(h.dataset_id AS text) AS dataset_id, d.title, d.portal, d.format,"
+            " h.overall_score, h.freshness_score, h.freshness_status,"
+            " h.accessibility_score, h.machine_readability_score,"
+            " h.completeness_score, h.contactability_score"
+            " FROM dataset_health_scores h"
+            " JOIN datasets d ON d.id = h.dataset_id"
+            " WHERE h.portal = :portal"
+            " ORDER BY h.overall_score DESC"
+            " LIMIT :limit OFFSET :offset"
         ),
+        "freshness_score": (
+            "SELECT CAST(h.dataset_id AS text) AS dataset_id, d.title, d.portal, d.format,"
+            " h.overall_score, h.freshness_score, h.freshness_status,"
+            " h.accessibility_score, h.machine_readability_score,"
+            " h.completeness_score, h.contactability_score"
+            " FROM dataset_health_scores h"
+            " JOIN datasets d ON d.id = h.dataset_id"
+            " WHERE h.portal = :portal"
+            " ORDER BY h.freshness_score DESC"
+            " LIMIT :limit OFFSET :offset"
+        ),
+        "completeness_score": (
+            "SELECT CAST(h.dataset_id AS text) AS dataset_id, d.title, d.portal, d.format,"
+            " h.overall_score, h.freshness_score, h.freshness_status,"
+            " h.accessibility_score, h.machine_readability_score,"
+            " h.completeness_score, h.contactability_score"
+            " FROM dataset_health_scores h"
+            " JOIN datasets d ON d.id = h.dataset_id"
+            " WHERE h.portal = :portal"
+            " ORDER BY h.completeness_score DESC"
+            " LIMIT :limit OFFSET :offset"
+        ),
+    }
+    safe_sort = sort_by if sort_by in _sort_queries else "overall_score"
+    result = await session.execute(
+        text(_sort_queries[safe_sort]),
         {"portal": portal, "limit": limit, "offset": offset},
     )
     return [

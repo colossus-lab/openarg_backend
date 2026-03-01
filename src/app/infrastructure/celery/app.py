@@ -37,6 +37,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.analyst_tasks",
             "app.infrastructure.celery.tasks.transparency_tasks",
             "app.infrastructure.celery.tasks.s3_tasks",
+            "app.infrastructure.celery.tasks.staff_tasks",
         ],
     )
 
@@ -52,15 +53,30 @@ def create_celery() -> Celery:
         "openarg.analyze_session_topics": {"queue": "transparency"},
         "openarg.retry_s3_uploads": {"queue": "s3"},
         "openarg.upload_to_s3": {"queue": "s3"},
+        "openarg.recover_stuck_tasks": {"queue": "collector"},
+        "openarg.snapshot_staff": {"queue": "scraper"},
     }
 
     app.conf.task_default_queue = "default"
-    app.conf.worker_prefetch_multiplier = 4
     app.conf.worker_max_tasks_per_child = 500
     app.conf.task_serializer = "json"
     app.conf.result_serializer = "json"
     app.conf.accept_content = ["json"]
     app.conf.timezone = "America/Argentina/Buenos_Aires"
+
+    # --- Resilience: ACK after completion, re-enqueue on worker lost ---
+    app.conf.task_acks_late = True
+    app.conf.task_reject_on_worker_lost = True
+    app.conf.worker_prefetch_multiplier = 1  # Required for acks_late to be effective
+
+    # --- Default time limits (overridden per-task via decorator) ---
+    app.conf.task_soft_time_limit = 600   # 10 min soft (raises SoftTimeLimitExceeded)
+    app.conf.task_time_limit = 720        # 12 min hard kill
+
+    # --- Result backend: expire after 1 hour, compress payloads ---
+    app.conf.result_expires = 3600
+    app.conf.task_compression = "gzip"
+    app.conf.result_compression = "gzip"
 
     # Celery Beat — periodic catalog scraping (daily, staggered every 15 min)
     _beat_schedule = {
@@ -109,6 +125,14 @@ def create_celery() -> Celery:
             "task": "openarg.retry_s3_uploads",
             "schedule": crontab(hour=6, minute=45),
         },
+        "recover-stuck-tasks": {
+            "task": "openarg.recover_stuck_tasks",
+            "schedule": crontab(minute="*/15"),
+        },
+        "snapshot-staff-weekly": {
+            "task": "openarg.snapshot_staff",
+            "schedule": crontab(hour=2, minute=30, day_of_week=1),  # Monday 2:30 AM ART
+        },
     })
 
     return app
@@ -122,13 +146,11 @@ def _initial_scrape(sender, **kwargs):
     """Dispatch scrape only for portals with no datasets in the DB."""
     from sqlalchemy import text
 
-    from app.infrastructure.celery.tasks.scraper_tasks import (
-        _get_sync_engine,
-        scrape_catalog,
-    )
+    from app.infrastructure.celery.tasks._db import get_sync_engine
+    from app.infrastructure.celery.tasks.scraper_tasks import scrape_catalog
 
     try:
-        engine = _get_sync_engine()
+        engine = get_sync_engine()
         with engine.connect() as conn:
             rows = conn.execute(
                 text("SELECT portal, COUNT(*) FROM datasets GROUP BY portal")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from app.domain.entities.user.user import User
 from app.domain.ports.user.user_repository import IUserRepository
@@ -11,7 +11,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 class UserSyncRequest(BaseModel):
-    email: str
+    email: EmailStr
     name: str = ""
     image: str = ""
 

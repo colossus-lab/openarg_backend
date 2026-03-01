@@ -7,12 +7,24 @@ Each MCP server runs as an independent Docker container.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from typing import Any, Callable
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+def _verify_mcp_token(request: Request) -> None:
+    """Validate MCP_AUTH_TOKEN header for inter-service auth."""
+    expected = os.getenv("MCP_AUTH_TOKEN", "")
+    if not expected:
+        return  # No token configured — allow all (dev mode)
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not provided or not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing MCP auth token")
 
 
 class MCPExecuteRequest(BaseModel):
@@ -94,7 +106,7 @@ class MCPServer:
                 ],
             }
 
-        @self.app.post("/execute/{tool_name}", response_model=MCPExecuteResponse)
+        @self.app.post("/execute/{tool_name}", response_model=MCPExecuteResponse, dependencies=[Depends(_verify_mcp_token)])
         async def execute_tool(tool_name: str, request: MCPExecuteRequest):
             if tool_name not in self._tools:
                 raise HTTPException(

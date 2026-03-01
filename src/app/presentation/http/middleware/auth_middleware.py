@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import secrets
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -34,7 +35,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         provided_key = request.headers.get("X-API-Key", "")
-        if not provided_key or provided_key != self._api_key:
+        if not provided_key or not secrets.compare_digest(provided_key, self._api_key):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid or missing API key"},

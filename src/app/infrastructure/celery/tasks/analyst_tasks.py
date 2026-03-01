@@ -12,18 +12,15 @@ import os
 import time
 
 import google.generativeai as genai
-from sqlalchemy import create_engine, text
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import text
 
 from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
 from app.infrastructure.celery.app import celery_app
+from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.infrastructure.celery.tasks.collector_tasks import collect_dataset
 
 logger = logging.getLogger(__name__)
-
-
-def _get_sync_engine():
-    url = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db")
-    return create_engine(url)
 
 
 PLANNER_SYSTEM_PROMPT = """Sos un planificador de análisis de datos públicos de Argentina.
@@ -45,7 +42,7 @@ Reglas:
 - Si es relevante, sugierí una visualización"""
 
 
-@celery_app.task(name="openarg.analyze_query", bind=True, max_retries=2)
+@celery_app.task(name="openarg.analyze_query", bind=True, max_retries=2, soft_time_limit=600, time_limit=720)
 def analyze_query(self, query_id: str, question: str):
     """
     Pipeline completo de análisis:
@@ -55,7 +52,7 @@ def analyze_query(self, query_id: str, question: str):
     4. Analyst analiza con los datos concretos
     """
     start = time.time()
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
     gemini_key = os.getenv("GEMINI_API_KEY", "")
 
     try:
@@ -269,6 +266,17 @@ def analyze_query(self, query_id: str, question: str):
             "duration_ms": duration_ms,
         }
 
+    except SoftTimeLimitExceeded:
+        logger.error(f"Analysis timed out for query {query_id}")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE user_queries SET status = 'error', error_message = :msg "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"msg": "Task timed out", "id": query_id},
+            )
+        raise
     except Exception as exc:
         logger.exception(f"Analysis failed for query {query_id}")
         with engine.begin() as conn:
