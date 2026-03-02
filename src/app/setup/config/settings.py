@@ -73,7 +73,7 @@ class ScraperSettings(BaseModel):
 
 class GeminiSecrets(BaseModel):
     API_KEY: str = ""
-    MODEL: str = "gemini-2.0-flash"
+    MODEL: str = "gemini-2.5-flash"
 
     def model_post_init(self, __context: object) -> None:
         import os
