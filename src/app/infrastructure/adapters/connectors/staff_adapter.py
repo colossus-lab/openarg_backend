@@ -52,10 +52,47 @@ class StaffAdapter(IStaffConnector):
     def _like_pattern(self, value: str) -> str:
         return f"%{_escape_like(value)}%"
 
+    def _smart_like_patterns(self, name: str) -> list[str]:
+        """Full name first, then individual words longest-first (>=3 chars)."""
+        patterns = [self._like_pattern(name)]
+        words = [w for w in name.split() if len(w) >= 3]
+        for word in sorted(words, key=len, reverse=True):
+            p = self._like_pattern(word)
+            if p not in patterns:
+                patterns.append(p)
+        return patterns
+
+    async def _suggest_similar_areas(
+        self, session: AsyncSession, snap: str, name: str, limit: int = 5,
+    ) -> list[dict]:
+        """Return areas whose name partially matches any word in *name*."""
+        words = [w for w in name.split() if len(w) >= 3]
+        if not words:
+            return []
+        conditions = " OR ".join(f"area_desempeno ILIKE :w{i}" for i in range(len(words)))
+        params: dict = {"snap": snap, "lim": limit}
+        for i, w in enumerate(words):
+            params[f"w{i}"] = self._like_pattern(w)
+        rows = await session.execute(
+            text(
+                f"SELECT area_desempeno, COUNT(*) AS total "
+                f"FROM staff_snapshots "
+                f"WHERE snapshot_date = :snap AND ({conditions}) "
+                f"GROUP BY area_desempeno ORDER BY total DESC LIMIT :lim"
+            ),
+            params,
+        )
+        return [{"area": r.area_desempeno, "cantidad": r.total} for r in rows]
+
     # ── public API ─────────────────────────────────────────
 
     async def get_by_legislator(self, name: str, limit: int = 50) -> DataResult:
-        """Return staff members whose area_desempeno matches *name*."""
+        """Return staff members whose area_desempeno matches *name*.
+
+        Tries the full name first, then falls back to individual words
+        (longest first) so that ``"Martin Yeza"`` still matches areas
+        containing just ``"YEZA"``.
+        """
         name = name.strip()
         if not name:
             return self._result("Personal de (sin especificar)", [])
@@ -67,18 +104,33 @@ class StaffAdapter(IStaffConnector):
                     logger.info("No staff snapshot found — returning empty for '%s'", name)
                     return self._result(f"Personal de {name}", [])
 
-                rows = await session.execute(
-                    text(
-                        "SELECT legajo, apellido, nombre, escalafon, area_desempeno, convenio "
-                        "FROM staff_snapshots "
-                        "WHERE snapshot_date = :snap AND area_desempeno ILIKE :pattern "
-                        "ORDER BY apellido, nombre LIMIT :lim"
-                    ),
-                    {"snap": snap, "pattern": self._like_pattern(name), "lim": limit},
-                )
-                records = [dict(r._mapping) for r in rows]
+                records: list[dict] = []
+                matched_pattern: str | None = None
+                for pattern in self._smart_like_patterns(name):
+                    rows = await session.execute(
+                        text(
+                            "SELECT legajo, apellido, nombre, escalafon, area_desempeno, convenio "
+                            "FROM staff_snapshots "
+                            "WHERE snapshot_date = :snap AND area_desempeno ILIKE :pattern "
+                            "ORDER BY apellido, nombre LIMIT :lim"
+                        ),
+                        {"snap": snap, "pattern": pattern, "lim": limit},
+                    )
+                    records = [dict(r._mapping) for r in rows]
+                    if records:
+                        matched_pattern = pattern
+                        break
+
+                metadata = {}
+                if not records:
+                    similar = await self._suggest_similar_areas(session, snap, name)
+                    if similar:
+                        metadata["areas_similares"] = similar
+                else:
+                    metadata["matched_pattern"] = matched_pattern
+
                 logger.info("get_by_legislator('%s'): %d results", name, len(records))
-                return self._result(f"Personal de {name}", records)
+                return self._result(f"Personal de {name}", records, metadata)
         except ConnectorError:
             raise
         except Exception as exc:
@@ -89,7 +141,12 @@ class StaffAdapter(IStaffConnector):
             ) from exc
 
     async def count_by_legislator(self, name: str) -> DataResult:
-        """Count staff members whose area_desempeno matches *name*."""
+        """Count staff members whose area_desempeno matches *name*.
+
+        Cascades through full-name → individual-word patterns until a
+        non-zero count is found.  When all patterns yield 0, the result
+        includes ``areas_similares`` so the LLM can suggest alternatives.
+        """
         name = name.strip()
         if not name:
             return self._result("Cantidad de personal (sin especificar)", [])
@@ -100,19 +157,30 @@ class StaffAdapter(IStaffConnector):
                     logger.info("No staff snapshot found — returning empty count for '%s'", name)
                     return self._result(f"Cantidad de personal de {name}", [])
 
-                row = await session.execute(
-                    text(
-                        "SELECT COUNT(*) AS total "
-                        "FROM staff_snapshots "
-                        "WHERE snapshot_date = :snap AND area_desempeno ILIKE :pattern"
-                    ),
-                    {"snap": snap, "pattern": self._like_pattern(name)},
-                )
-                total = row.scalar() or 0
+                total = 0
+                for pattern in self._smart_like_patterns(name):
+                    row = await session.execute(
+                        text(
+                            "SELECT COUNT(*) AS total "
+                            "FROM staff_snapshots "
+                            "WHERE snapshot_date = :snap AND area_desempeno ILIKE :pattern"
+                        ),
+                        {"snap": snap, "pattern": pattern},
+                    )
+                    total = row.scalar() or 0
+                    if total:
+                        break
+
+                record: dict = {"legislador": name, "cantidad_asesores": total}
+                if not total:
+                    similar = await self._suggest_similar_areas(session, snap, name)
+                    if similar:
+                        record["areas_similares"] = similar
+
                 logger.info("count_by_legislator('%s'): %d", name, total)
                 return self._result(
                     f"Cantidad de personal de {name}",
-                    [{"legislador": name, "cantidad_asesores": total}],
+                    [record],
                 )
         except ConnectorError:
             raise
@@ -124,20 +192,36 @@ class StaffAdapter(IStaffConnector):
             ) from exc
 
     async def get_changes(self, name: str | None = None, limit: int = 20) -> DataResult:
-        """Return recent altas/bajas, optionally filtered by area name."""
+        """Return recent altas/bajas, optionally filtered by area name.
+
+        When a *name* is given, cascades through smart LIKE patterns so
+        that ``"Martin Yeza"`` still matches areas containing ``"YEZA"``.
+        """
         limit = max(1, min(limit, 500))
         try:
             async with self._session_factory() as session:
                 if name and name.strip():
-                    rows = await session.execute(
-                        text(
-                            "SELECT legajo, apellido, nombre, area_desempeno, tipo, detected_at "
-                            "FROM staff_changes "
-                            "WHERE area_desempeno ILIKE :pattern "
-                            "ORDER BY detected_at DESC LIMIT :lim"
-                        ),
-                        {"pattern": self._like_pattern(name.strip()), "lim": limit},
-                    )
+                    clean = name.strip()
+                    records: list[dict] = []
+                    for pattern in self._smart_like_patterns(clean):
+                        rows = await session.execute(
+                            text(
+                                "SELECT legajo, apellido, nombre, area_desempeno, tipo, detected_at "
+                                "FROM staff_changes "
+                                "WHERE area_desempeno ILIKE :pattern "
+                                "ORDER BY detected_at DESC LIMIT :lim"
+                            ),
+                            {"pattern": pattern, "lim": limit},
+                        )
+                        records = [
+                            {
+                                **dict(r._mapping),
+                                "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+                            }
+                            for r in rows
+                        ]
+                        if records:
+                            break
                 else:
                     rows = await session.execute(
                         text(
@@ -147,13 +231,13 @@ class StaffAdapter(IStaffConnector):
                         ),
                         {"lim": limit},
                     )
-                records = [
-                    {
-                        **dict(r._mapping),
-                        "detected_at": r.detected_at.isoformat() if r.detected_at else None,
-                    }
-                    for r in rows
-                ]
+                    records = [
+                        {
+                            **dict(r._mapping),
+                            "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+                        }
+                        for r in rows
+                    ]
                 title = f"Cambios de personal de {name}" if name else "Últimos cambios de personal"
                 logger.info("get_changes(name=%s): %d results", name, len(records))
                 return self._result(title, records)

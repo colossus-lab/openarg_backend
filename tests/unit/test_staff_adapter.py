@@ -110,12 +110,60 @@ class TestGetByLegislator:
 
         rows_result = MagicMock()
         rows_result.__iter__ = lambda self: iter([])
-        session.execute.side_effect = [date_result, rows_result]
+
+        # No results → suggest_similar_areas also queries
+        similar_result = MagicMock()
+        similar_result.__iter__ = lambda self: iter([])
+        session.execute.side_effect = [date_result, rows_result, similar_result]
 
         await adapter.get_by_legislator("Yeza", limit=9999)
         # The second execute call should have lim=500 (clamped)
         call_args = session.execute.call_args_list[1]
         assert call_args[0][1]["lim"] == 500
+
+    async def test_cascading_fallback_to_word(self, adapter, mock_session_factory):
+        """'Martin Yeza' → full-name miss → 'Martin' miss → 'Yeza' hit."""
+        _, session = mock_session_factory
+        date_result = MagicMock()
+        date_result.scalar.return_value = date(2026, 3, 1)
+
+        empty_rows = MagicMock()
+        empty_rows.__iter__ = lambda self: iter([])
+
+        hit_rows = [
+            _make_row(
+                legajo="1234", apellido="GOMEZ", nombre="JUAN",
+                escalafon="A", area_desempeno="YEZA", convenio="LEY",
+            )
+        ]
+        hit_result = MagicMock()
+        hit_result.__iter__ = lambda self: iter(hit_rows)
+
+        # snapshot → miss('%Martin Yeza%') → miss('%Martin%') → hit('%Yeza%')
+        session.execute.side_effect = [date_result, empty_rows, empty_rows, hit_result]
+
+        result = await adapter.get_by_legislator("Martin Yeza")
+        assert len(result.records) == 1
+        assert result.records[0]["legajo"] == "1234"
+        assert result.metadata.get("matched_pattern") == "%Yeza%"
+
+    async def test_no_match_returns_similar_areas(self, adapter, mock_session_factory):
+        _, session = mock_session_factory
+        date_result = MagicMock()
+        date_result.scalar.return_value = date(2026, 3, 1)
+
+        empty_rows = MagicMock()
+        empty_rows.__iter__ = lambda self: iter([])
+
+        similar_rows = [_make_row(area_desempeno="YEZA SIMILAR", total=5)]
+        similar_result = MagicMock()
+        similar_result.__iter__ = lambda self: iter(similar_rows)
+
+        session.execute.side_effect = [date_result, empty_rows, similar_result]
+
+        result = await adapter.get_by_legislator("XYZNOEXISTE")
+        assert result.records == []
+        assert len(result.metadata["areas_similares"]) == 1
 
     async def test_db_error_raises_connector_error(self, adapter, mock_session_factory):
         _, session = mock_session_factory
@@ -151,6 +199,43 @@ class TestCountByLegislator:
 
         result = await adapter.count_by_legislator("Yeza")
         assert result.records == []
+
+    async def test_count_cascading_fallback(self, adapter, mock_session_factory):
+        """'Martin Yeza' → full-name 0 → 'Martin' 0 → 'Yeza' 15."""
+        _, session = mock_session_factory
+        date_result = MagicMock()
+        date_result.scalar.return_value = date(2026, 3, 1)
+
+        zero_result = MagicMock()
+        zero_result.scalar.return_value = 0
+
+        hit_result = MagicMock()
+        hit_result.scalar.return_value = 15
+
+        # snapshot → 0 → 0 → 15
+        session.execute.side_effect = [date_result, zero_result, zero_result, hit_result]
+
+        result = await adapter.count_by_legislator("Martin Yeza")
+        assert result.records[0]["cantidad_asesores"] == 15
+
+    async def test_count_zero_includes_similar_areas(self, adapter, mock_session_factory):
+        _, session = mock_session_factory
+        date_result = MagicMock()
+        date_result.scalar.return_value = date(2026, 3, 1)
+
+        zero_result = MagicMock()
+        zero_result.scalar.return_value = 0
+
+        similar_rows = [_make_row(area_desempeno="YEZA", total=15)]
+        similar_result = MagicMock()
+        similar_result.__iter__ = lambda self: iter(similar_rows)
+
+        session.execute.side_effect = [date_result, zero_result, similar_result]
+
+        result = await adapter.count_by_legislator("XYZNOEXISTE")
+        assert result.records[0]["cantidad_asesores"] == 0
+        assert "areas_similares" in result.records[0]
+        assert result.records[0]["areas_similares"][0]["area"] == "YEZA"
 
     async def test_count_empty_name(self, adapter):
         result = await adapter.count_by_legislator("")
@@ -238,6 +323,30 @@ class TestGetChanges:
 
         result = await adapter.get_changes(name="test")
         assert result.records[0]["detected_at"] is None
+
+    async def test_changes_cascading_fallback(self, adapter, mock_session_factory):
+        """'Martin Yeza' → full-name miss → 'Martin' miss → 'Yeza' hit."""
+        _, session = mock_session_factory
+        dt = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+
+        empty_rows = MagicMock()
+        empty_rows.__iter__ = lambda self: iter([])
+
+        hit_rows = [
+            _make_row(
+                legajo="5678", apellido="PEREZ", nombre="MARIA",
+                area_desempeno="YEZA", tipo="alta", detected_at=dt,
+            )
+        ]
+        hit_result = MagicMock()
+        hit_result.__iter__ = lambda self: iter(hit_rows)
+
+        # miss('%Martin Yeza%') → miss('%Martin%') → hit('%Yeza%')
+        session.execute.side_effect = [empty_rows, empty_rows, hit_result]
+
+        result = await adapter.get_changes(name="Martin Yeza")
+        assert len(result.records) == 1
+        assert result.records[0]["tipo"] == "alta"
 
     async def test_changes_db_error(self, adapter, mock_session_factory):
         _, session = mock_session_factory
