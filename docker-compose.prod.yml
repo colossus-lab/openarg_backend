@@ -112,15 +112,16 @@ services:
     image: ghcr.io/lucholeonel/openarg/worker-collector:latest
     container_name: openarg_worker_collector
     restart: always
+    command: ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "collector", "-c", "8", "--max-memory-per-child=400000", "--loglevel=info"]
     networks:
       - openarg_network
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: 2G
+          cpus: "4"
+          memory: 4G
         reservations:
-          memory: 512M
+          memory: 1G
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:
