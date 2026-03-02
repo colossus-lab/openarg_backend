@@ -19,6 +19,14 @@ ALL_PORTALS = [
     "mendoza",
     "entre_rios",
     "neuquen_legislatura",
+    "modernizacion",
+    "ambiente",
+    "arsat",
+    "rio_negro",
+    "jujuy",
+    "salta",
+    "cordoba_muni",
+    "la_plata",
 ]
 
 
@@ -38,6 +46,13 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.transparency_tasks",
             "app.infrastructure.celery.tasks.s3_tasks",
             "app.infrastructure.celery.tasks.staff_tasks",
+            "app.infrastructure.celery.tasks.presupuesto_tasks",
+            "app.infrastructure.celery.tasks.bcra_tasks",
+            "app.infrastructure.celery.tasks.bac_tasks",
+            "app.infrastructure.celery.tasks.indec_tasks",
+            "app.infrastructure.celery.tasks.dkan_tasks",
+            "app.infrastructure.celery.tasks.senado_tasks",
+            "app.infrastructure.celery.tasks.cordoba_leg_tasks",
         ],
     )
 
@@ -55,6 +70,14 @@ def create_celery() -> Celery:
         "openarg.upload_to_s3": {"queue": "s3"},
         "openarg.recover_stuck_tasks": {"queue": "collector"},
         "openarg.snapshot_staff": {"queue": "scraper"},
+        # New data source tasks
+        "openarg.ingest_presupuesto": {"queue": "collector"},
+        "openarg.snapshot_bcra": {"queue": "collector"},
+        "openarg.ingest_bac": {"queue": "collector"},
+        "openarg.ingest_indec": {"queue": "collector"},
+        "openarg.scrape_dkan_rosario": {"queue": "scraper"},
+        "openarg.scrape_senado": {"queue": "scraper"},
+        "openarg.scrape_cordoba_legislatura": {"queue": "scraper"},
     }
 
     app.conf.task_default_queue = "default"
@@ -78,19 +101,29 @@ def create_celery() -> Celery:
     app.conf.task_compression = "gzip"
     app.conf.result_compression = "gzip"
 
-    # Celery Beat — periodic catalog scraping (daily, staggered every 15 min)
+    # Celery Beat — periodic catalog scraping (daily, staggered every 10 min, no collisions)
     _beat_schedule = {
-        # hour, minute for each portal
+        # 03:00 – 03:50 (original large portals)
         "datos_gob_ar": (3, 0),
-        "caba": (3, 15),
-        "diputados": (3, 30),
-        "justicia": (3, 45),
-        "buenos_aires_prov": (4, 0),
-        "cordoba_prov": (4, 15),
-        "santa_fe": (4, 30),
-        "mendoza": (4, 45),
-        "entre_rios": (5, 0),
-        "neuquen_legislatura": (5, 15),
+        "caba": (3, 10),
+        "diputados": (3, 20),
+        "justicia": (3, 30),
+        "buenos_aires_prov": (3, 40),
+        "cordoba_prov": (3, 50),
+        # 04:00 – 04:50 (provinces)
+        "santa_fe": (4, 0),
+        "mendoza": (4, 10),
+        "entre_rios": (4, 20),
+        "neuquen_legislatura": (4, 30),
+        "rio_negro": (4, 40),
+        "jujuy": (4, 50),
+        # 05:00 – 05:20 (remaining)
+        "modernizacion": (5, 0),
+        "ambiente": (5, 5),
+        "arsat": (5, 10),
+        "salta": (5, 15),
+        "cordoba_muni": (5, 20),
+        "la_plata": (5, 25),
     }
     app.conf.beat_schedule = {
         f"scrape-{portal.replace('_', '-')}": {
@@ -101,13 +134,13 @@ def create_celery() -> Celery:
         for portal, (hour, minute) in _beat_schedule.items()
     }
 
-    # Bulk collect — download all uncached datasets after scraping (05:30 ART)
+    # Bulk collect — download all uncached datasets after scraping (05:45 ART)
     app.conf.beat_schedule["bulk-collect-datasets"] = {
         "task": "openarg.bulk_collect_all",
-        "schedule": crontab(hour=5, minute=30),
+        "schedule": crontab(hour=5, minute=45),
     }
 
-    # Transparency analysis — runs after scraping completes (~06:00 ART)
+    # Transparency analysis — runs after scraping completes (~06:15 ART)
     app.conf.beat_schedule.update({
         "transparency-health-scoring": {
             "task": "openarg.score_portal_health",
@@ -132,6 +165,35 @@ def create_celery() -> Celery:
         "snapshot-staff-weekly": {
             "task": "openarg.snapshot_staff",
             "schedule": crontab(hour=2, minute=30, day_of_week=1),  # Monday 2:30 AM ART
+        },
+        # --- New data sources ---
+        "ingest-presupuesto": {
+            "task": "openarg.ingest_presupuesto",
+            "schedule": crontab(day_of_month=5, hour=0, minute=0),  # Monthly, day 5
+        },
+        "snapshot-bcra": {
+            "task": "openarg.snapshot_bcra",
+            "schedule": crontab(hour=4, minute=0),  # Daily 4:00 AM ART
+        },
+        "ingest-bac": {
+            "task": "openarg.ingest_bac",
+            "schedule": crontab(day_of_week=0, hour=1, minute=0),  # Sunday 1:00 AM ART
+        },
+        "ingest-indec": {
+            "task": "openarg.ingest_indec",
+            "schedule": crontab(day_of_month=15, hour=1, minute=0),  # Monthly, day 15
+        },
+        "scrape-dkan-rosario": {
+            "task": "openarg.scrape_dkan_rosario",
+            "schedule": crontab(day_of_week=6, hour=0, minute=30),  # Saturday 0:30 AM ART
+        },
+        "scrape-senado": {
+            "task": "openarg.scrape_senado",
+            "schedule": crontab(day_of_week=0, hour=2, minute=0),  # Sunday 2:00 AM ART
+        },
+        "scrape-cordoba-legislatura": {
+            "task": "openarg.scrape_cordoba_legislatura",
+            "schedule": crontab(day_of_month=1, hour=2, minute=0),  # Monthly, day 1
         },
     })
 
