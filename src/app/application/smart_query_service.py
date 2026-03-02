@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from app.domain.ports.connectors.sesiones import ISesionesConnector
     from app.domain.ports.search.vector_search import IVectorSearch
     from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
-    from app.infrastructure.adapters.connectors.staff_adapter import StaffAdapter
+    from app.domain.ports.connectors.staff import IStaffConnector
 
 logger = logging.getLogger(__name__)
 
@@ -289,11 +289,23 @@ _DDJJ_RANKING_PATTERN = re.compile(
 
 # ── Staff deterministic routing patterns ──────────────────
 _STAFF_PATTERN = re.compile(
-    r"(asesores?\s+de\s+|personal\s+de\s+|empleados?\s+de\s+"
-    r"|cu[aá]ntos?\s+asesores?|equipo\s+de\s+"
+    r"(asesores?\s+de\s+|personal\s+de(?:l)?\s+|empleados?\s+de\s+"
+    r"|cu[aá]ntos?\s+(?:asesores?|personal|empleados?)"
+    r"|equipo\s+de\s+"
     r"|trabaja(?:n|r)?\s+(?:con|para)\s+"
-    r"|n[oó]mina\s+de\s+personal"
-    r"|qui[eé]n(?:es)?\s+trabaja)",
+    r"|n[oó]mina\s+de(?:l)?\s+personal"
+    r"|qui[eé]n(?:es)?\s+trabaja"
+    r"|list(?:a|ado)\s+de\s+(?:asesores?|personal|empleados?)"
+    r"|altas?\s+y\s+bajas?|bajas?\s+y\s+altas?"
+    r"|cambios?\s+(?:de\s+)?personal"
+    r"|rotaci[oó]n\s+de\s+personal"
+    r"|(?:qui[eé]n(?:es)?|cu[aá]les?)\s+(?:se\s+fue|se\s+fueron|lleg[oó]|llegaron|entr[oó]|entraron|sali[oó]|salieron))",
+    re.IGNORECASE,
+)
+
+# Stop words that should NOT be part of extracted legislator names
+_STAFF_NAME_STOP = re.compile(
+    r"\s+(?:tiene|hay|son|est[aá]n?|tiene[ns]?|en\s+|del?\s+congreso|del?\s+la\s+c[aá]mara).*$",
     re.IGNORECASE,
 )
 
@@ -303,8 +315,18 @@ _STAFF_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_STAFF_NAME_TIENE_PATTERN = re.compile(
+    r"(?:asesores?|personal|empleados?)\s+tiene\s+(.+?)(?:\?|$)",
+    re.IGNORECASE,
+)
+
 _STAFF_COUNT_PATTERN = re.compile(
     r"cu[aá]ntos?\s+(?:asesores?|personal|empleados?)",
+    re.IGNORECASE,
+)
+
+_STAFF_COUNT_TIENE_PATTERN = re.compile(
+    r"cu[aá]ntos?\s+(?:asesores?|personal|empleados?)\s+tiene\s+(.+?)(?:\?|$)",
     re.IGNORECASE,
 )
 
@@ -337,7 +359,7 @@ class SmartQueryService:
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
         retrieval_evaluator: IRetrievalEvaluator | None = None,
-        staff: StaffAdapter | None = None,
+        staff: IStaffConnector | None = None,
     ) -> None:
         self._llm = llm
         self._embedding = embedding
@@ -985,6 +1007,33 @@ class SmartQueryService:
     # ── Staff deterministic intent detection ─────────────────
 
     @staticmethod
+    def _clean_staff_name(raw: str) -> str:
+        """Strip trailing stop words from an extracted legislator name."""
+        name = raw.strip()
+        name = _STAFF_NAME_STOP.sub("", name).strip()
+        return name
+
+    @staticmethod
+    def _extract_staff_name(txt: str) -> str:
+        """Try multiple patterns to extract a legislator name from the query."""
+        # "asesores/personal/empleados de X"
+        m = _STAFF_NAME_PATTERN.search(txt)
+        if m:
+            return SmartQueryService._clean_staff_name(m.group(1))
+
+        # "cuantos asesores tiene X"
+        m = _STAFF_COUNT_TIENE_PATTERN.search(txt)
+        if m:
+            return SmartQueryService._clean_staff_name(m.group(1))
+
+        # "asesores tiene X" (without cuantos)
+        m = _STAFF_NAME_TIENE_PATTERN.search(txt)
+        if m:
+            return SmartQueryService._clean_staff_name(m.group(1))
+
+        return ""
+
+    @staticmethod
     def _detect_staff_intent(question: str) -> ExecutionPlan | None:
         """Return a forced ExecutionPlan for staff queries, or None to fall back to the LLM planner."""
         txt = question.strip()
@@ -993,8 +1042,7 @@ class SmartQueryService:
 
         # Changes queries (altas/bajas)
         if _STAFF_CHANGES_PATTERN.search(txt):
-            name_match = _STAFF_NAME_PATTERN.search(txt)
-            nombre = name_match.group(1).strip() if name_match else None
+            nombre = SmartQueryService._extract_staff_name(txt) or None
             return ExecutionPlan(
                 query=txt,
                 intent="staff_changes",
@@ -1008,10 +1056,9 @@ class SmartQueryService:
                 ],
             )
 
-        # Count queries
+        # Count queries ("cuantos asesores de X" or "cuantos asesores tiene X")
         if _STAFF_COUNT_PATTERN.search(txt):
-            name_match = _STAFF_NAME_PATTERN.search(txt)
-            nombre = name_match.group(1).strip() if name_match else ""
+            nombre = SmartQueryService._extract_staff_name(txt)
             if nombre:
                 return ExecutionPlan(
                     query=txt,
@@ -1027,9 +1074,8 @@ class SmartQueryService:
                 )
 
         # Name-based list
-        name_match = _STAFF_NAME_PATTERN.search(txt)
-        if name_match:
-            nombre = name_match.group(1).strip()
+        nombre = SmartQueryService._extract_staff_name(txt)
+        if nombre:
             return ExecutionPlan(
                 query=txt,
                 intent="staff_legislator",

@@ -159,6 +159,12 @@ class ErrorCode(Enum):
         default_message="Circuit breaker is open for this connector",
         http_status=503,
     )
+    CN_STAFF_UNAVAILABLE = ErrorDefinition(
+        code="CN_009",
+        i18n_key="errors.connector.staff_unavailable",
+        default_message="Staff data source is unavailable",
+        http_status=502,
+    )
 
     # QUERY PLAN errors
     QR_PLAN_FAILED = ErrorDefinition(
