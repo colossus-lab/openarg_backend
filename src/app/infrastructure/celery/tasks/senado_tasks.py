@@ -1,0 +1,254 @@
+"""
+Senado — Scraper de datos abiertos del Senado de la Nación.
+
+Scrapea las páginas HTML de datos abiertos del Senado, descarga CSVs/XLS
+y cachea en PostgreSQL.
+"""
+from __future__ import annotations
+
+import io
+import json
+import logging
+import re
+from datetime import UTC, datetime
+
+import pandas as pd
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import text
+
+from app.infrastructure.celery.app import celery_app
+from app.infrastructure.celery.tasks._db import get_sync_engine
+
+logger = logging.getLogger(__name__)
+
+SENADO_BASE_URL = "https://www.senado.gob.ar/micrositios/DatosAbiertos"
+
+MAX_ROWS = 500_000
+MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
+
+# Known tabular file extensions to process
+TABULAR_EXTENSIONS = (".csv", ".xls", ".xlsx")
+
+
+def _sanitize_name(name: str) -> str:
+    clean = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    clean = re.sub(r"_+", "_", clean).strip("_")
+    return clean[:50]
+
+
+def _register_dataset(engine, source_id: str, title: str, table_name: str, df: pd.DataFrame, url: str):
+    """Upsert into datasets and cached_datasets tables."""
+    portal = "senado"
+    columns_json = json.dumps(list(df.columns))
+    now = datetime.now(UTC)
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO datasets
+                    (source_id, title, description, organization, portal, url,
+                     download_url, format, columns, tags, last_updated_at, is_cached, row_count)
+                VALUES
+                    (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags,
+                     :now, true, :rows)
+                ON CONFLICT (source_id, portal) DO UPDATE SET
+                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
+            """),
+            {
+                "sid": source_id,
+                "title": f"Senado - {title}",
+                "desc": f"Datos abiertos del Senado de la Nación: {title}",
+                "org": "Senado de la Nación Argentina",
+                "portal": portal,
+                "url": SENADO_BASE_URL,
+                "dl": url,
+                "fmt": url.rsplit(".", 1)[-1].lower() if "." in url else "csv",
+                "cols": columns_json,
+                "tags": f"senado,congreso,{_sanitize_name(title)}",
+                "now": now, "rows": len(df),
+            },
+        )
+        dataset_row = conn.execute(
+            text(
+                "SELECT CAST(id AS text) FROM datasets "
+                "WHERE source_id = :sid AND portal = :portal"
+            ),
+            {"sid": source_id, "portal": portal},
+        ).fetchone()
+        dataset_id = dataset_row[0] if dataset_row else None
+
+        if dataset_id:
+            conn.execute(
+                text("""
+                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
+                                                  columns_json, updated_at)
+                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
+                    ON CONFLICT (table_name) DO UPDATE SET
+                        status = 'ready', row_count = EXCLUDED.row_count,
+                        columns_json = EXCLUDED.columns_json, updated_at = :now
+                """),
+                {"did": dataset_id, "tn": table_name, "rows": len(df),
+                 "cols": columns_json, "now": now},
+            )
+
+    return dataset_id
+
+
+def _parse_file(content: bytes, url: str) -> pd.DataFrame | None:
+    """Parse a downloaded file (CSV, XLS, XLSX) into a DataFrame."""
+    lower_url = url.lower()
+
+    if lower_url.endswith((".xls", ".xlsx")):
+        try:
+            return pd.read_excel(io.BytesIO(content))
+        except Exception:
+            return None
+
+    # Default: CSV
+    for encoding in ("utf-8", "latin-1"):
+        for sep in (",", ";"):
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(content), encoding=encoding,
+                    sep=sep, on_bad_lines="skip",
+                )
+                if len(df.columns) > 1:
+                    return df
+            except Exception:
+                continue
+    return None
+
+
+def _extract_links(html: str) -> list[dict]:
+    """Extract download links from Senado HTML page."""
+    links = []
+    # Match <a> tags with href pointing to downloadable files
+    pattern = re.compile(
+        r'<a\s+[^>]*href="([^"]*\.(?:csv|xls|xlsx))"[^>]*>([^<]*)</a>',
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(html):
+        href = match.group(1)
+        label = match.group(2).strip()
+        if href.startswith("/"):
+            href = f"https://www.senado.gob.ar{href}"
+        links.append({"url": href, "label": label or href.rsplit("/", 1)[-1]})
+
+    # Also check for direct file links in any href
+    pattern2 = re.compile(
+        r'href="(https?://[^"]*\.(?:csv|xls|xlsx))"',
+        re.IGNORECASE,
+    )
+    seen = {l["url"] for l in links}
+    for match in pattern2.finditer(html):
+        href = match.group(1)
+        if href not in seen:
+            links.append({"url": href, "label": href.rsplit("/", 1)[-1]})
+            seen.add(href)
+
+    return links
+
+
+@celery_app.task(
+    name="openarg.scrape_senado", bind=True, max_retries=3,
+    soft_time_limit=600, time_limit=720,
+)
+def scrape_senado(self):
+    """Scrape Senado datos abiertos and cache tabular datasets."""
+    import httpx
+
+    engine = get_sync_engine()
+    results = {"ingested": 0, "skipped": 0, "errors": 0}
+
+    try:
+        with httpx.Client(timeout=60.0, follow_redirects=True) as client:
+            # Fetch main page
+            resp = client.get(SENADO_BASE_URL)
+            resp.raise_for_status()
+            main_html = resp.text
+
+            # Extract download links
+            links = _extract_links(main_html)
+
+            # Also check category pages (26 categories)
+            category_pattern = re.compile(
+                r'href="(/micrositios/DatosAbiertos/[^"]*)"',
+                re.IGNORECASE,
+            )
+            category_urls = set()
+            for match in category_pattern.finditer(main_html):
+                cat_url = f"https://www.senado.gob.ar{match.group(1)}"
+                category_urls.add(cat_url)
+
+            for cat_url in list(category_urls)[:30]:  # safety limit
+                try:
+                    cat_resp = client.get(cat_url)
+                    if cat_resp.status_code == 200:
+                        links.extend(_extract_links(cat_resp.text))
+                except Exception:
+                    continue
+
+        # Deduplicate by URL
+        seen_urls: set[str] = set()
+        unique_links = []
+        for link in links:
+            if link["url"] not in seen_urls:
+                seen_urls.add(link["url"])
+                unique_links.append(link)
+
+        logger.info("Senado: found %d unique download links", len(unique_links))
+
+        for link in unique_links:
+            url = link["url"]
+            label = link["label"]
+            source_id = f"senado-{_sanitize_name(label)}"
+            table_name = f"cache_senado_{_sanitize_name(label)}"
+
+            try:
+                with httpx.Client(timeout=120.0, follow_redirects=True) as client:
+                    try:
+                        head = client.head(url)
+                        cl = int(head.headers.get("content-length", 0))
+                        if cl > MAX_DOWNLOAD_BYTES:
+                            continue
+                    except Exception:
+                        pass
+
+                    resp = client.get(url)
+                    if resp.status_code != 200:
+                        continue
+                    resp.raise_for_status()
+
+                df = _parse_file(resp.content, url)
+                if df is None or df.empty:
+                    results["skipped"] += 1
+                    continue
+
+                if len(df) > MAX_ROWS:
+                    df = df.head(MAX_ROWS)
+
+                df.to_sql(table_name, engine, if_exists="replace", index=False)
+
+                dataset_id = _register_dataset(engine, source_id, label, table_name, df, url)
+                if dataset_id:
+                    from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                    index_dataset_embedding.delay(dataset_id)
+
+                results["ingested"] += 1
+                logger.info("Senado %s: %d rows", label, len(df))
+
+            except Exception:
+                results["errors"] += 1
+                logger.warning("Senado: failed %s", url, exc_info=True)
+
+        return results
+
+    except SoftTimeLimitExceeded:
+        logger.error("Senado scrape timed out")
+        raise
+    except Exception as exc:
+        logger.exception("Senado scrape failed")
+        raise self.retry(exc=exc, countdown=120)
+    finally:
+        engine.dispose()
