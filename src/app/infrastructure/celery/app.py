@@ -57,6 +57,7 @@ def create_celery() -> Celery:
     )
 
     app.conf.task_routes = {
+        "openarg.scrape_all_portals": {"queue": "scraper"},
         "openarg.scrape_catalog": {"queue": "scraper"},
         "openarg.index_dataset": {"queue": "embedding"},
         "openarg.index_sesiones": {"queue": "embedding"},
