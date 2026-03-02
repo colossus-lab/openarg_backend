@@ -4,15 +4,14 @@ from __future__ import annotations
 import pytest
 
 from app.application.smart_query_service import (
-    SmartQueryService,
     _STAFF_CHANGES_PATTERN,
     _STAFF_COUNT_PATTERN,
     _STAFF_COUNT_TIENE_PATTERN,
     _STAFF_NAME_PATTERN,
     _STAFF_NAME_TIENE_PATTERN,
     _STAFF_PATTERN,
+    SmartQueryService,
 )
-
 
 # ── _STAFF_PATTERN gate ─────────────────────────────────────
 

@@ -12,7 +12,7 @@ import secrets
 from datetime import UTC, datetime
 
 from celery.result import AsyncResult
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app

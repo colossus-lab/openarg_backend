@@ -126,12 +126,21 @@ def ingest_bac(self):
                 # Parse CSV in chunks to handle large files
                 chunks = []
                 total_rows = 0
-                for chunk in pd.read_csv(
-                    io.BytesIO(resp.content),
-                    encoding="utf-8",
-                    on_bad_lines="skip",
-                    chunksize=CHUNK_SIZE,
-                ):
+                try:
+                    csv_reader = pd.read_csv(
+                        io.BytesIO(resp.content),
+                        encoding="utf-8",
+                        on_bad_lines="skip",
+                        chunksize=CHUNK_SIZE,
+                    )
+                except UnicodeDecodeError:
+                    csv_reader = pd.read_csv(
+                        io.BytesIO(resp.content),
+                        encoding="latin-1",
+                        on_bad_lines="skip",
+                        chunksize=CHUNK_SIZE,
+                    )
+                for chunk in csv_reader:
                     chunks.append(chunk)
                     total_rows += len(chunk)
                     if total_rows >= MAX_ROWS:
@@ -151,7 +160,9 @@ def ingest_bac(self):
                 # Register and dispatch embeddings
                 dataset_id = _register_dataset(engine, file_type, table_name, df)
                 if dataset_id:
-                    from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                    from app.infrastructure.celery.tasks.scraper_tasks import (
+                        index_dataset_embedding,
+                    )
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

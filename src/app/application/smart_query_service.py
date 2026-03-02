@@ -46,6 +46,7 @@ from app.infrastructure.audit.audit_logger import (
     audit_injection_blocked,
     audit_query,
 )
+from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _download_and_parse
 from app.infrastructure.monitoring.metrics import MetricsCollector
 
 if TYPE_CHECKING:
@@ -59,11 +60,11 @@ if TYPE_CHECKING:
     from app.domain.ports.connectors.georef import IGeorefConnector
     from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
     from app.domain.ports.connectors.sesiones import ISesionesConnector
-    from app.domain.ports.search.vector_search import IVectorSearch
-    from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
     from app.domain.ports.connectors.staff import IStaffConnector
-    from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
     from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+    from app.domain.ports.search.vector_search import IVectorSearch
+    from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
+    from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,28 @@ _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
     ),
 }
 
+# ── INDEC fallback detection pattern ─────────────────────────
+_INDEC_PATTERN = re.compile(
+    r"(indec|ipc|inflaci[oó]n\s+mensual|emae|actividad\s+econ[oó]mica"
+    r"|pib\s+trimestral|comercio\s+exterior|exportacion|importacion"
+    r"|empleo\s+eph|canasta\s+b[aá]sica|salarios?\s+indec"
+    r"|pobreza|indigencia|construcci[oó]n\s+isac|industria\s+ipi"
+    r"|supermercados?\s+indec|turismo\s+internacional)",
+    re.IGNORECASE,
+)
+
+# ── Economic query detection (for federated fallback) ──────
+_ECONOMIC_PATTERN = re.compile(
+    r"(inflaci[oó]n|ipc|dolar|d[oó]lar|tipo\s+de\s+cambio|pbi|pib|emae"
+    r"|desempleo|reservas|tasa|exportaci|importaci|salario|deuda)",
+    re.IGNORECASE,
+)
+
+
+def _is_economic_query(q: str) -> bool:
+    return bool(_ECONOMIC_PATTERN.search(q))
+
+
 # ── DDJJ deterministic routing patterns ─────────────────────
 _DDJJ_PATTERN = re.compile(
     r"(patrimonio|declaraci[oó]n(?:es)?\s+jurada|ddjj"
@@ -417,7 +440,11 @@ class SmartQueryService:
         if suspicious:
             audit_injection_blocked(user=user_id, question=question, score=score)
             return SmartQueryResult(
-                answer="",
+                answer=(
+                    "No pude procesar esa consulta. "
+                    "Probá reformulándola con una pregunta sobre datos públicos argentinos, "
+                    "por ejemplo: *¿Cuál fue la inflación del último mes?*"
+                ),
                 sources=[],
                 intent="injection_blocked",
                 duration_ms=int((time.monotonic() - start_time) * 1000),
@@ -455,14 +482,14 @@ class SmartQueryService:
         if ddjj_forced_plan:
             # DDJJ deterministic: skip decomposition, use forced plan directly
             plan = ddjj_forced_plan
-            results = await self._execute_steps(plan)
+            results = await self._execute_steps(plan, nl_query=question)
             logger.info(
                 "DDJJ deterministic plan for '%s': intent=%s",
                 question[:60], plan.intent,
             )
         elif staff_forced_plan:
             plan = staff_forced_plan
-            results = await self._execute_steps(plan)
+            results = await self._execute_steps(plan, nl_query=question)
             logger.info(
                 "Staff deterministic plan for '%s': intent=%s",
                 question[:60], plan.intent,
@@ -473,7 +500,7 @@ class SmartQueryService:
 
             async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
                 sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                sq_results = await self._execute_steps(sq_plan)
+                sq_results = await self._execute_steps(sq_plan, nl_query=sq)
                 return sq_plan, sq_results
 
             plan_results = await asyncio.gather(
@@ -514,7 +541,7 @@ class SmartQueryService:
             )
 
             # 4. Execute connectors
-            results = await self._execute_steps(plan)
+            results = await self._execute_steps(plan, nl_query=question)
 
         # 4b. CRAG: evaluate retrieval quality and retry if needed
         if self._retrieval_evaluator:
@@ -537,7 +564,7 @@ class SmartQueryService:
                         f"{question} (ampliar búsqueda, datos insuficientes)",
                         memory_context=build_memory_context_prompt(memory),
                     )
-                    retry_results = await self._execute_steps(retry_plan)
+                    retry_results = await self._execute_steps(retry_plan, nl_query=question)
                     if retry_results:
                         results = retry_results
                         plan = retry_plan
@@ -568,7 +595,7 @@ class SmartQueryService:
                 LLMMessage(role="system", content=ANALYSIS_SYSTEM_PROMPT),
                 LLMMessage(role="user", content=analysis_prompt),
             ],
-            temperature=0.2,
+            temperature=0.4,
             max_tokens=8192,
         )
 
@@ -679,10 +706,15 @@ class SmartQueryService:
         suspicious, score = is_suspicious(question)
         if suspicious:
             audit_injection_blocked(user=user_id, question=question, score=score)
+            friendly_msg = (
+                "No pude procesar esa consulta. "
+                "Probá reformulándola con una pregunta sobre datos públicos argentinos, "
+                "por ejemplo: *¿Cuál fue la inflación del último mes?*"
+            )
+            yield {"type": "chunk", "content": friendly_msg}
             yield {
-                "type": "error",
-                "message": "Potential prompt injection detected",
-                "code": "SEC_001",
+                "type": "complete", "answer": friendly_msg,
+                "sources": [], "chart_data": None,
             }
             return
 
@@ -758,7 +790,7 @@ class SmartQueryService:
             }
 
             yield {"type": "status", "step": "searching"}
-            results = await self._execute_steps_streaming(plan)
+            results = await self._execute_steps_streaming(plan, nl_query=question)
         elif staff_forced_plan:
             plan = staff_forced_plan
             logger.info(
@@ -773,13 +805,13 @@ class SmartQueryService:
             }
 
             yield {"type": "status", "step": "searching"}
-            results = await self._execute_steps_streaming(plan)
+            results = await self._execute_steps_streaming(plan, nl_query=question)
         elif len(sub_queries) > 1:
             memory_ctx_prompt = build_memory_context_prompt(memory)
 
             async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
                 sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                sq_results = await self._execute_steps(sq_plan)
+                sq_results = await self._execute_steps(sq_plan, nl_query=sq)
                 return sq_plan, sq_results
 
             plan_results = await asyncio.gather(
@@ -819,7 +851,7 @@ class SmartQueryService:
 
             # Searching
             yield {"type": "status", "step": "searching"}
-            results = await self._execute_steps_streaming(plan)
+            results = await self._execute_steps_streaming(plan, nl_query=question)
 
         # CRAG evaluation
         if self._retrieval_evaluator:
@@ -838,7 +870,7 @@ class SmartQueryService:
                         f"{question} (ampliar búsqueda, datos insuficientes)",
                         memory_context=build_memory_context_prompt(memory),
                     )
-                    retry_results = await self._execute_steps_streaming(retry_plan)
+                    retry_results = await self._execute_steps_streaming(retry_plan, nl_query=question)
                     if retry_results:
                         results = retry_results
                         plan = retry_plan
@@ -872,7 +904,7 @@ class SmartQueryService:
                 LLMMessage(role="system", content=ANALYSIS_SYSTEM_PROMPT),
                 LLMMessage(role="user", content=analysis_prompt),
             ],
-            temperature=0.2,
+            temperature=0.4,
             max_tokens=8192,
         ):
             full_text += chunk
@@ -1389,6 +1421,119 @@ class SmartQueryService:
             logger.warning("BCRA step %s failed", step.id, exc_info=True)
             return []
 
+    async def _indec_live_fallback(self, nl_query: str) -> list[DataResult]:
+        """Plan B: download INDEC XLS on-the-fly when cache tables don't exist."""
+        query_lower = nl_query.lower()
+        keyword_map = {
+            "ipc": ["ipc", "inflacion", "precios"],
+            "emae": ["emae", "actividad economica", "actividad económica"],
+            "pib": ["pib", "producto bruto", "producto interno"],
+            "comercio_exterior": ["exportacion", "importacion", "comercio exterior"],
+            "empleo": ["empleo", "eph", "desempleo", "trabajo"],
+            "canasta_basica": ["canasta basica", "canasta básica", "cbt", "cba"],
+            "salarios": ["salario", "salarios"],
+            "pobreza": ["pobreza", "indigencia"],
+            "construccion": ["construccion", "construcción", "isac"],
+            "industria": ["industria", "ipi", "manufacturero"],
+            "supermercados": ["supermercado"],
+            "turismo": ["turismo"],
+            "ipc_regiones": ["ipc region", "inflacion region"],
+            "pib_provincial": ["pib provincial"],
+            "uso_tiempo": ["uso del tiempo"],
+        }
+
+        matched_ids = []
+        for ds_id, keywords in keyword_map.items():
+            if any(kw in query_lower for kw in keywords):
+                matched_ids.append(ds_id)
+
+        if not matched_ids:
+            matched_ids = ["ipc", "emae", "pib"]
+
+        results: list[DataResult] = []
+        for ds_id in matched_ids[:3]:
+            ds_info = next((d for d in INDEC_DATASETS if d["id"] == ds_id), None)
+            if not ds_info:
+                continue
+
+            try:
+                df = await asyncio.to_thread(_download_and_parse, ds_info["url"])
+                if df is None or df.empty:
+                    continue
+
+                if len(df) > 500:
+                    df = df.tail(500)
+
+                records = df.to_dict(orient="records")
+                results.append(DataResult(
+                    source="indec:live",
+                    portal_name="INDEC (descarga en vivo)",
+                    portal_url="https://www.indec.gob.ar",
+                    dataset_title=f"INDEC - {ds_info['name']} (live)",
+                    format="json",
+                    records=records[:200],
+                    metadata={
+                        "total_records": len(records),
+                        "columns": list(df.columns),
+                        "source_url": ds_info["url"],
+                        "fallback": True,
+                        "fetched_at": datetime.now(UTC).isoformat(),
+                    },
+                ))
+            except Exception:
+                logger.warning("INDEC live fallback failed for %s", ds_id, exc_info=True)
+
+        return results
+
+    async def _federated_fallback(
+        self, nl_query: str, existing_results: list[DataResult],
+    ) -> list[DataResult]:
+        """Búsqueda federada: intenta CKAN + series cuando los conectores primarios fallaron."""
+        real_results = [r for r in existing_results if r.records]
+        if len(real_results) >= 2:
+            return existing_results
+
+        extra: list[DataResult] = []
+
+        # 1. CKAN search (busca en todos los portales)
+        if self._ckan:
+            try:
+                ckan_results = await self._ckan.search_datasets(nl_query, rows=5)
+                for r in ckan_results:
+                    if r.records:
+                        r.metadata["fallback"] = True
+                        extra.append(r)
+            except Exception:
+                logger.debug("Federated CKAN fallback failed", exc_info=True)
+
+        # 2. Series de Tiempo (si la query parece económica)
+        if self._series and _is_economic_query(nl_query):
+            try:
+                series_step = PlanStep(
+                    id="fallback_series",
+                    action="query_series",
+                    description=nl_query,
+                    params={"query": nl_query},
+                )
+                series_data = await self._execute_series_step(series_step)
+                for r in series_data:
+                    if r.records:
+                        r.metadata["fallback"] = True
+                        extra.append(r)
+            except Exception:
+                logger.debug("Federated series fallback failed", exc_info=True)
+
+        # 3. INDEC live (si parece INDEC y no hay ya datos INDEC)
+        has_indec = any("indec" in r.source for r in existing_results if r.records)
+        if not has_indec and _INDEC_PATTERN.search(nl_query):
+            try:
+                indec_data = await self._indec_live_fallback(nl_query)
+                extra.extend(indec_data)
+            except Exception:
+                logger.debug("Federated INDEC fallback failed", exc_info=True)
+
+        return existing_results + extra[:3]
+
     async def _execute_sandbox_step(self, step: PlanStep) -> list[DataResult]:
         if not self._sandbox:
             logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
@@ -1399,11 +1544,15 @@ class SmartQueryService:
         try:
             # Get available tables
             tables = await self._sandbox.list_cached_tables()
+            table_hints = params.get("tables", [])
             if not tables:
+                # If no tables at all but hints point to INDEC, try live fallback
+                if table_hints and any("indec" in h for h in table_hints):
+                    logger.info("No cached tables at all, attempting INDEC live fallback")
+                    return await self._indec_live_fallback(nl_query)
                 return []
 
             # Filter tables if hints provided
-            table_hints = params.get("tables", [])
             if table_hints:
                 import fnmatch
                 filtered = []
@@ -1414,6 +1563,11 @@ class SmartQueryService:
                             break
                 if filtered:
                     tables = filtered
+                else:
+                    # INDEC fallback: if hints match indec pattern and no cached tables found
+                    if any("indec" in h for h in table_hints):
+                        logger.info("No cached INDEC tables, attempting live fallback")
+                        return await self._indec_live_fallback(nl_query)
 
             # Build context for NL2SQL
             tables_context_parts = []
@@ -1458,6 +1612,13 @@ class SmartQueryService:
                 logger.warning("Sandbox query failed: %s", result.error)
                 return []
 
+            # If sandbox returned empty and query is INDEC-related, try live fallback
+            if not result.rows and _INDEC_PATTERN.search(nl_query):
+                logger.info("Sandbox returned empty for INDEC query, trying live fallback")
+                fallback = await self._indec_live_fallback(nl_query)
+                if fallback:
+                    return fallback
+
             return [
                 DataResult(
                     source="sandbox:nl2sql",
@@ -1479,7 +1640,9 @@ class SmartQueryService:
             logger.warning("Sandbox step %s failed", step.id, exc_info=True)
             return []
 
-    async def _execute_steps(self, plan: ExecutionPlan) -> list[DataResult]:
+    async def _execute_steps(
+        self, plan: ExecutionPlan, nl_query: str = "",
+    ) -> list[DataResult]:
         """Execute plan steps, catching ConnectorError per step."""
         results: list[DataResult] = []
         for step in plan.steps[:5]:
@@ -1498,11 +1661,20 @@ class SmartQueryService:
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms, error=True)
                 logger.warning("Step %s failed", step.id, exc_info=True)
+
+        # If no results with actual data, attempt federated fallback
+        real = [r for r in results if r.records]
+        if not real and nl_query:
+            logger.info("No real data from plan steps, attempting federated fallback")
+            results = await self._federated_fallback(nl_query, results)
+
         return results
 
-    async def _execute_steps_streaming(self, plan: ExecutionPlan) -> list[DataResult]:
+    async def _execute_steps_streaming(
+        self, plan: ExecutionPlan, nl_query: str = "",
+    ) -> list[DataResult]:
         """Same as _execute_steps but used by streaming endpoint."""
-        return await self._execute_steps(plan)
+        return await self._execute_steps(plan, nl_query=nl_query)
 
     async def _dispatch_step(self, step: PlanStep) -> list[DataResult]:
         if step.action == "query_series":
@@ -1660,7 +1832,12 @@ class SmartQueryService:
 
             parts.append(part)
 
-        return "\n\n".join(parts)
+        joined = "\n\n".join(parts)
+        # Truncate to ~60k chars (~15k tokens) to avoid hitting LLM context limits
+        max_context_chars = 60_000
+        if len(joined) > max_context_chars:
+            joined = joined[:max_context_chars] + "\n\n[... datos truncados por límite de contexto ...]"
+        return joined
 
     # ── META parser ─────────────────────────────────────────
 

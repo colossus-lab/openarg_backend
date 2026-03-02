@@ -76,7 +76,7 @@ class PgVectorSearchAdapter(IVectorSearch):
         limit: int = 10,
         portal_filter: str | None = None,
         rrf_k: int = 60,
-        min_score: float = 0.005,
+        min_score: float = 0.05,
     ) -> list[SearchResult]:
         """Hybrid search combining vector cosine similarity and BM25 full-text search with RRF fusion."""
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"

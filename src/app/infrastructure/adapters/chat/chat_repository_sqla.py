@@ -74,3 +74,15 @@ class ChatRepositorySQLA(IChatRepository):
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def update_message_feedback(
+        self, message_id: UUID, feedback: str, comment: str | None = None,
+    ) -> Message | None:
+        stmt = (
+            update(Message)
+            .where(Message.id == message_id)
+            .values(feedback=feedback, feedback_comment=comment, updated_at=func.now())
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+        return await self._session.get(Message, message_id)

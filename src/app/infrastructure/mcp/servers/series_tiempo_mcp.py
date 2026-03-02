@@ -1,8 +1,8 @@
 """Standalone MCP Server for Series de Tiempo API."""
 from __future__ import annotations
 
-import os
 import logging
+import os
 import unicodedata
 
 import httpx

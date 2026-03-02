@@ -214,7 +214,9 @@ def ingest_presupuesto(self, prefixes: list[str] | None = None, years: list[int]
                     # Register and dispatch embeddings
                     dataset_id = _register_dataset(engine, prefix, year, table_name, df)
                     if dataset_id:
-                        from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                        from app.infrastructure.celery.tasks.scraper_tasks import (
+                            index_dataset_embedding,
+                        )
                         index_dataset_embedding.delay(dataset_id)
 
                     results["ingested"] += 1

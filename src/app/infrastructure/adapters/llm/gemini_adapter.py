@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 import google.generativeai as genai
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage, LLMResponse
+
+logger = logging.getLogger(__name__)
+
+LLM_TIMEOUT_SECONDS = 120
 
 
 class GeminiLLMAdapter(ILLMProvider):
@@ -34,13 +40,20 @@ class GeminiLLMAdapter(ILLMProvider):
                 system_instruction="\n".join(system_parts),
             )
 
-        response = await model.generate_content_async(
-            chat_messages,
-            generation_config=genai.types.GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-            ),
-        )
+        try:
+            response = await asyncio.wait_for(
+                model.generate_content_async(
+                    chat_messages,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens,
+                    ),
+                ),
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Gemini chat timed out after %ds", LLM_TIMEOUT_SECONDS)
+            raise
 
         content = response.text or ""
         tokens = 0

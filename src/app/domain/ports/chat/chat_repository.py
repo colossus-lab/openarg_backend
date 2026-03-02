@@ -34,3 +34,8 @@ class IChatRepository(ABC):
     async def get_messages(
         self, conversation_id: UUID, limit: int = 100, offset: int = 0
     ) -> list[Message]: ...
+
+    @abstractmethod
+    async def update_message_feedback(
+        self, message_id: UUID, feedback: str, comment: str | None = None,
+    ) -> Message | None: ...

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -72,14 +73,20 @@ class SemanticCache:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        similarity_threshold: float = 0.88,
+        similarity_threshold: float = 0.85,
     ) -> None:
         self._session_factory = session_factory
         self._similarity_threshold = similarity_threshold
 
     @staticmethod
+    def _normalize(question: str) -> str:
+        """Normalize question for consistent hashing: lowercase, strip, NFC Unicode."""
+        return unicodedata.normalize("NFC", question.strip().lower())
+
+    @staticmethod
     def _hash(question: str) -> str:
-        return hashlib.sha256(question.strip().lower().encode()).hexdigest()
+        normalized = SemanticCache._normalize(question)
+        return hashlib.sha256(normalized.encode()).hexdigest()
 
     async def get(
         self, question: str, embedding: list[float] | None = None

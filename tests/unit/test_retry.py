@@ -1,8 +1,7 @@
 """Tests for retry decorator with exponential backoff."""
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -90,7 +89,7 @@ class TestWithRetry:
 
     @pytest.mark.anyio
     async def test_circuit_breaker_skips_when_open(self):
-        from app.infrastructure.resilience.circuit_breaker import get_circuit_breaker, CircuitState
+        from app.infrastructure.resilience.circuit_breaker import CircuitState, get_circuit_breaker
 
         cb = get_circuit_breaker("test_open_cb")
         cb.state = CircuitState.OPEN

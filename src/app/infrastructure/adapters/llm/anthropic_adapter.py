@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 import anthropic
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage, LLMResponse
+
+logger = logging.getLogger(__name__)
+
+LLM_TIMEOUT_SECONDS = 120
 
 
 class AnthropicLLMAdapter(ILLMProvider):
@@ -41,7 +47,14 @@ class AnthropicLLMAdapter(ILLMProvider):
         if system_prompt:
             kwargs["system"] = system_prompt
 
-        response = await self._client.messages.create(**kwargs)
+        try:
+            response = await asyncio.wait_for(
+                self._client.messages.create(**kwargs),
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error("Anthropic chat timed out after %ds", LLM_TIMEOUT_SECONDS)
+            raise
 
         content = ""
         for block in response.content:

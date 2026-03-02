@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from app.domain.exceptions.base import ApplicationError, DomainError, InfrastructureError
 from app.domain.exceptions.error_codes import ErrorCode
 

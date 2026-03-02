@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel

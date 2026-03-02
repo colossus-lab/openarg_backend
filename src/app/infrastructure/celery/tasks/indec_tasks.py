@@ -211,7 +211,9 @@ def ingest_indec(self):
                 # Register and dispatch embeddings
                 dataset_id = _register_dataset(engine, ds_info, table_name, df)
                 if dataset_id:
-                    from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                    from app.infrastructure.celery.tasks.scraper_tasks import (
+                        index_dataset_embedding,
+                    )
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

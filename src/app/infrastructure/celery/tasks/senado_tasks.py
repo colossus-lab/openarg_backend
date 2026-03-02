@@ -232,7 +232,9 @@ def scrape_senado(self):
 
                 dataset_id = _register_dataset(engine, source_id, label, table_name, df, url)
                 if dataset_id:
-                    from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                    from app.infrastructure.celery.tasks.scraper_tasks import (
+                        index_dataset_embedding,
+                    )
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

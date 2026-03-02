@@ -1,8 +1,8 @@
 """Rate limit key function — identifies clients by API key or IP."""
 from __future__ import annotations
 
-from starlette.requests import Request
 from slowapi.util import get_remote_address
+from starlette.requests import Request
 
 
 def get_rate_limit_identifier(request: Request) -> str:

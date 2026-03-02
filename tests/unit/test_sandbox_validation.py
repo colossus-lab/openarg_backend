@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
 
 

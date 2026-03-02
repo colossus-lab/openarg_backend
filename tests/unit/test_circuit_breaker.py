@@ -8,8 +8,8 @@ import pytest
 from app.infrastructure.resilience.circuit_breaker import (
     CircuitBreaker,
     CircuitState,
-    get_circuit_breaker,
     circuit_breakers,
+    get_circuit_breaker,
 )
 
 
