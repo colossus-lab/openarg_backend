@@ -103,6 +103,22 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                         except (json.JSONDecodeError, TypeError):
                             pass
 
+                    # Extract last-updated timestamp: prefer resource-level, fallback to package
+                    last_updated = None
+                    for ts_field in (
+                        resource.get("last_modified"),
+                        pkg.get("metadata_modified"),
+                        pkg.get("revision_timestamp"),
+                    ):
+                        if ts_field:
+                            try:
+                                last_updated = datetime.fromisoformat(
+                                    ts_field.replace("Z", "+00:00")
+                                )
+                                break
+                            except (ValueError, AttributeError):
+                                continue
+
                     batch_rows.append({
                         "sid": resource.get("id", ""),
                         "title": pkg.get("title", ""),
@@ -115,6 +131,7 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                         "cols": json.dumps(columns_list),
                         "tags": ",".join(t.get("name", "") for t in pkg.get("tags", [])),
                         "now": datetime.now(UTC),
+                        "last_upd": last_updated,
                     })
 
             # Batch upsert using ON CONFLICT (eliminates N+1 SELECT per resource)
@@ -125,14 +142,17 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                         text("""
                             INSERT INTO datasets
                                 (source_id, title, description, organization,
-                                 portal, url, download_url, format, columns, tags)
+                                 portal, url, download_url, format, columns, tags,
+                                 last_updated_at)
                             VALUES
-                                (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags)
+                                (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags,
+                                 :last_upd)
                             ON CONFLICT (source_id, portal) DO UPDATE SET
                                 title = EXCLUDED.title, description = EXCLUDED.description,
                                 organization = EXCLUDED.organization, url = EXCLUDED.url,
                                 download_url = EXCLUDED.download_url, format = EXCLUDED.format,
                                 columns = EXCLUDED.columns, tags = EXCLUDED.tags,
+                                last_updated_at = COALESCE(EXCLUDED.last_updated_at, datasets.last_updated_at),
                                 updated_at = :now
                         """),
                         batch_rows,

@@ -32,6 +32,7 @@ class PortalHealthSummary(BaseModel):
     fresh_count: int
     stale_count: int
     abandoned_count: int
+    unknown_count: int = 0
 
 
 class DatasetHealthDetail(BaseModel):
@@ -117,7 +118,8 @@ async def get_portal_health(
             COALESCE(ROUND(AVG(overall_score)::numeric, 3), 0) AS avg_score,
             COALESCE(SUM(CASE WHEN freshness_status = 'FRESH' THEN 1 ELSE 0 END), 0) AS fresh_count,
             COALESCE(SUM(CASE WHEN freshness_status = 'STALE' THEN 1 ELSE 0 END), 0) AS stale_count,
-            COALESCE(SUM(CASE WHEN freshness_status = 'ABANDONED' THEN 1 ELSE 0 END), 0) AS abandoned_count
+            COALESCE(SUM(CASE WHEN freshness_status = 'ABANDONED' THEN 1 ELSE 0 END), 0) AS abandoned_count,
+            COALESCE(SUM(CASE WHEN freshness_status = 'unknown' THEN 1 ELSE 0 END), 0) AS unknown_count
         FROM dataset_health_scores
         GROUP BY portal
         ORDER BY avg_score DESC
@@ -130,6 +132,7 @@ async def get_portal_health(
             fresh_count=row.fresh_count,
             stale_count=row.stale_count,
             abandoned_count=row.abandoned_count,
+            unknown_count=row.unknown_count,
         )
         for row in result.fetchall()
     ]
