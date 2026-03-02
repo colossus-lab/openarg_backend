@@ -51,6 +51,14 @@ jobs:
             dockerfile: docker/worker-analyst.Dockerfile
             image_name: openarg/worker-analyst
 
+          - service: worker-s3
+            dockerfile: docker/worker-s3.Dockerfile
+            image_name: openarg/worker-s3
+
+          - service: worker-transparency
+            dockerfile: docker/worker-transparency.Dockerfile
+            image_name: openarg/worker-transparency
+
           - service: beat
             dockerfile: docker/beat.Dockerfile
             image_name: openarg/beat
@@ -149,8 +157,8 @@ jobs:
           echo ""
           echo "Built Services:"
           echo "  - API"
-          echo "  - 4 Celery Workers (scraper, collector, embedding, analyst)"
+          echo "  - 6 Celery Workers (scraper, collector, embedding, analyst, s3, transparency)"
           echo "  - Celery Beat"
           echo "  - 4 MCP Servers (series_tiempo, ckan, argentina_datos, sesiones)"
           echo ""
-          echo "Total: 10 Docker images"
+          echo "Total: 12 Docker images"
