@@ -31,7 +31,7 @@ router = APIRouter(prefix="/query", tags=["smart-query"])
 
 
 class SmartQueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000)
+    question: str = Field(..., min_length=1, max_length=10000)
     user_email: str | None = None
     conversation_id: str | None = None
     policy_mode: bool = False
@@ -220,7 +220,7 @@ async def ws_smart_query(
         conversation_id = raw.get("conversation_id", "")
         policy_mode = raw.get("policy_mode", False)
 
-        if not question or len(question) > 2000:
+        if not question or len(question) > 10000:
             await ws.send_json({"type": "error", "message": "question is required"})
             await ws.close()
             return
