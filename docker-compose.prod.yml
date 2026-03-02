@@ -140,6 +140,37 @@ services:
       redis:
         condition: service_healthy
 
+  worker-ingest:
+    image: ghcr.io/lucholeonel/openarg/worker-ingest:latest
+    container_name: openarg_worker_ingest
+    restart: always
+    networks:
+      - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          memory: 256M
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+    depends_on:
+      redis:
+        condition: service_healthy
+
   worker-embedding:
     image: ghcr.io/lucholeonel/openarg/worker-embedding:latest
     container_name: openarg_worker_embedding

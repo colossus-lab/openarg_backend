@@ -62,6 +62,46 @@ class StaffAdapter(IStaffConnector):
                 patterns.append(p)
         return patterns
 
+    async def _query_boletin_assignments(
+        self, session: AsyncSession, name: str, snap: str, limit: int,
+    ) -> list[dict]:
+        """Find staff via boletin_staff_assignments JOIN staff_snapshots."""
+        for pattern in self._smart_like_patterns(name):
+            rows = await session.execute(
+                text(
+                    "SELECT DISTINCT s.legajo, s.apellido, s.nombre, s.escalafon, "
+                    "  s.area_desempeno, s.convenio, b.legislator_name, b.cargo, b.camara "
+                    "FROM boletin_staff_assignments b "
+                    "JOIN staff_snapshots s ON s.legajo = b.legajo AND s.snapshot_date = :snap "
+                    "WHERE b.legislator_name ILIKE :pattern "
+                    "ORDER BY s.apellido, s.nombre LIMIT :lim"
+                ),
+                {"snap": snap, "pattern": pattern, "lim": limit},
+            )
+            records = [dict(r._mapping) for r in rows]
+            if records:
+                return records
+        return []
+
+    async def _count_boletin_assignments(
+        self, session: AsyncSession, name: str, snap: str,
+    ) -> int:
+        """Count staff via boletin_staff_assignments."""
+        for pattern in self._smart_like_patterns(name):
+            row = await session.execute(
+                text(
+                    "SELECT COUNT(DISTINCT b.legajo) AS total "
+                    "FROM boletin_staff_assignments b "
+                    "JOIN staff_snapshots s ON s.legajo = b.legajo AND s.snapshot_date = :snap "
+                    "WHERE b.legislator_name ILIKE :pattern"
+                ),
+                {"snap": snap, "pattern": pattern},
+            )
+            total = row.scalar() or 0
+            if total:
+                return total
+        return 0
+
     async def _suggest_similar_areas(
         self, session: AsyncSession, snap: str, name: str, limit: int = 5,
     ) -> list[dict]:
@@ -104,6 +144,15 @@ class StaffAdapter(IStaffConnector):
                     logger.info("No staff snapshot found — returning empty for '%s'", name)
                     return self._result(f"Personal de {name}", [])
 
+                # 1. Try boletin assignments first
+                boletin_records = await self._query_boletin_assignments(session, name, snap, limit)
+                if boletin_records:
+                    logger.info("get_by_legislator('%s'): %d results (boletin)", name, len(boletin_records))
+                    return self._result(
+                        f"Personal de {name}", boletin_records, {"source": "boletin_oficial"},
+                    )
+
+                # 2. Fallback to area_desempeno
                 records: list[dict] = []
                 matched_pattern: str | None = None
                 for pattern in self._smart_like_patterns(name):
@@ -157,6 +206,16 @@ class StaffAdapter(IStaffConnector):
                     logger.info("No staff snapshot found — returning empty count for '%s'", name)
                     return self._result(f"Cantidad de personal de {name}", [])
 
+                # 1. Try boletin count first
+                boletin_total = await self._count_boletin_assignments(session, name, snap)
+                if boletin_total:
+                    logger.info("count_by_legislator('%s'): %d (boletin)", name, boletin_total)
+                    return self._result(
+                        f"Cantidad de personal de {name}",
+                        [{"legislador": name, "cantidad_asesores": boletin_total, "fuente": "boletin_oficial"}],
+                    )
+
+                # 2. Fallback to area_desempeno
                 total = 0
                 for pattern in self._smart_like_patterns(name):
                     row = await session.execute(
