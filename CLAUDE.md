@@ -9,7 +9,7 @@ Backend service for OpenArg — AI-powered analysis of Argentine government open
 - **ORM:** SQLAlchemy 2.0 (async) + Alembic migrations
 - **DI:** Dishka 1.6 (IoC container)
 - **Workers:** Celery 5.4 + Redis 7 (broker + cache + results)
-- **AI:** Google Generative AI (Gemini 2.5 Flash) + OpenAI SDK (text-embedding-3-small for vectors)
+- **AI:** Google Generative AI (Gemini 2.5 Flash + gemini-embedding-001 for vectors) + Anthropic (Claude Sonnet fallback)
 - **HTTP:** HTTPX (async client)
 - **Auth:** PyJWT + bcrypt
 - **Rate Limiting:** SlowAPI
@@ -41,9 +41,8 @@ src/app/
 │   │   │   ├── datos_gob_ar_adapter.py          # IDataSource → datos.gob.ar CKAN
 │   │   │   └── caba_adapter.py                  # IDataSource → CABA CKAN
 │   │   ├── llm/
-│   │   │   ├── openai_adapter.py                # ILLMProvider → GPT-4o
-│   │   │   ├── anthropic_adapter.py             # ILLMProvider → Claude Sonnet
-│   │   │   └── openai_embedding_adapter.py      # IEmbeddingProvider → text-embedding-3-small
+│   │   │   ├── anthropic_adapter.py             # ILLMProvider → Claude Sonnet (fallback)
+│   │   │   ├── gemini_embedding_adapter.py      # IEmbeddingProvider → gemini-embedding-001
 │   │   ├── search/
 │   │   │   └── pgvector_search_adapter.py       # IVectorSearch → pgvector
 │   │   ├── sandbox/
@@ -216,7 +215,6 @@ CELERY_BROKER_URL=redis://localhost:6381/0
 CELERY_RESULT_BACKEND=redis://localhost:6381/1
 REDIS_CACHE_URL=redis://localhost:6381/2
 GEMINI_API_KEY=...
-OPENAI_API_KEY=sk-...              # only for embeddings (text-embedding-3-small)
 
 # MCP Server URLs (standalone containers)
 MCP_SERIES_TIEMPO_URL=http://localhost:8091
