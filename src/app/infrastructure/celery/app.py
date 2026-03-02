@@ -180,6 +180,9 @@ def _initial_scrape(sender, **kwargs):
     # Transparency tasks — run on first startup if tables are empty
     _initial_transparency()
 
+    # Bulk collect — download uncached datasets after scrapers finish
+    _initial_bulk_collect()
+
 
 def _initial_transparency(engine=None):
     """Dispatch transparency analysis tasks if their tables are empty."""
@@ -230,3 +233,31 @@ def _initial_transparency(engine=None):
         analyze_session_topics.delay()
     else:
         logger.info("Session topics already exist (%d) — skipping", topics_count)
+
+
+def _initial_bulk_collect():
+    """Dispatch bulk_collect_all if there are uncached datasets."""
+    from sqlalchemy import text
+
+    from app.infrastructure.celery.tasks._db import get_sync_engine
+    from app.infrastructure.celery.tasks.collector_tasks import bulk_collect_all
+
+    try:
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            uncached = conn.execute(
+                text("SELECT COUNT(*) FROM datasets WHERE is_cached = false")
+            ).scalar() or 0
+        engine.dispose()
+    except Exception:
+        logger.warning("Could not check uncached datasets — dispatching bulk_collect_all")
+        uncached = 1  # assume there's work to do
+
+    if uncached > 0:
+        # Delay 180s to let scrapers index datasets first
+        logger.info(
+            "Found %d uncached datasets — dispatching bulk_collect_all (180s delay)", uncached
+        )
+        bulk_collect_all.apply_async(countdown=180)
+    else:
+        logger.info("All datasets already cached — skipping bulk_collect_all")
