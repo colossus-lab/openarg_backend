@@ -62,6 +62,8 @@ if TYPE_CHECKING:
     from app.domain.ports.search.vector_search import IVectorSearch
     from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
     from app.domain.ports.connectors.staff import IStaffConnector
+    from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
+    from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,13 @@ _META_PATTERNS = re.compile(
     r"(qué pod[eé]s hacer|qu[eé] sab[eé]s|cu[aá]les son tus funciones"
     r"|c[oó]mo funcion[aá]s|para qu[eé] serv[ií]s|ayuda"
     r"|qu[eé] sos|qui[eé]n sos|qu[eé] es openarg)",
+    re.IGNORECASE,
+)
+
+_BCRA_PATTERN = re.compile(
+    r"(cotizaci[oó]n|tipo\s+de\s+cambio|d[oó]lar\s+oficial"
+    r"|reservas?\s+(?:del\s+)?bcra|tasa\s+(?:de\s+)?(?:pol[ií]tica|referencia)"
+    r"|base\s+monetaria|circulaci[oó]n\s+monetaria)",
     re.IGNORECASE,
 )
 
@@ -360,6 +369,8 @@ class SmartQueryService:
         semantic_cache: SemanticCache,
         retrieval_evaluator: IRetrievalEvaluator | None = None,
         staff: IStaffConnector | None = None,
+        bcra: BCRAAdapter | None = None,
+        sandbox: ISQLSandbox | None = None,
     ) -> None:
         self._llm = llm
         self._embedding = embedding
@@ -374,6 +385,8 @@ class SmartQueryService:
         self._semantic_cache = semantic_cache
         self._retrieval_evaluator = retrieval_evaluator
         self._staff = staff
+        self._bcra = bcra
+        self._sandbox = sandbox
         self._reranker = LLMReranker(llm)
         self._metrics = MetricsCollector()
 
@@ -421,10 +434,11 @@ class SmartQueryService:
         # 0e. Staff deterministic routing
         staff_forced_plan = self._detect_staff_intent(question) if self._staff else None
 
-        # 1. Cache lookup
-        cached = await self._check_cache(question, user_id)
-        if cached:
-            return cached
+        # 1. Cache lookup (skip in policy mode — always fetch fresh data)
+        if not policy_mode:
+            cached = await self._check_cache(question, user_id)
+            if cached:
+                return cached
 
         # 2. Memory
         session_id = conversation_id or ""
@@ -701,21 +715,22 @@ class SmartQueryService:
         # Staff deterministic routing
         staff_forced_plan = self._detect_staff_intent(question) if self._staff else None
 
-        # Cache check
+        # Cache check (skip in policy mode — always fetch fresh data)
         session_id = conversation_id or ""
-        cached_result = await self._get_cached_dict(question)
-        if cached_result:
-            yield {"type": "status", "step": "cache_hit"}
-            answer = cached_result.get("answer", "")
-            yield {"type": "chunk", "content": answer}
-            yield {
-                "type": "complete",
-                "answer": answer,
-                "sources": cached_result.get("sources", []),
-                "chart_data": cached_result.get("chart_data"),
-                "cached": True,
-            }
-            return
+        if not policy_mode:
+            cached_result = await self._get_cached_dict(question)
+            if cached_result:
+                yield {"type": "status", "step": "cache_hit"}
+                answer = cached_result.get("answer", "")
+                yield {"type": "chunk", "content": answer}
+                yield {
+                    "type": "complete",
+                    "answer": answer,
+                    "sources": cached_result.get("sources", []),
+                    "chart_data": cached_result.get("chart_data"),
+                    "cached": True,
+                }
+                return
 
         # Planning
         yield {"type": "status", "step": "planning"}
@@ -1342,6 +1357,128 @@ class SmartQueryService:
         )
         return [result] if result else []
 
+    async def _execute_bcra_step(self, step: PlanStep) -> list[DataResult]:
+        if not self._bcra:
+            logger.warning("BCRAAdapter not configured, skipping step %s", step.id)
+            return []
+        params = step.params
+        tipo = params.get("tipo", "cotizaciones")
+        try:
+            if tipo == "cotizaciones":
+                result = await self._bcra.get_cotizaciones(
+                    moneda=params.get("moneda", "USD"),
+                    fecha_desde=params.get("fecha_desde"),
+                    fecha_hasta=params.get("fecha_hasta"),
+                )
+            elif tipo == "variables":
+                result = await self._bcra.get_principales_variables()
+            elif tipo == "historica":
+                id_variable = params.get("id_variable")
+                if not id_variable:
+                    result = await self._bcra.get_principales_variables()
+                else:
+                    result = await self._bcra.get_variable_historica(
+                        id_variable=int(id_variable),
+                        fecha_desde=params.get("fecha_desde", "2024-01-01"),
+                        fecha_hasta=params.get("fecha_hasta", datetime.now(UTC).strftime("%Y-%m-%d")),
+                    )
+            else:
+                result = await self._bcra.get_cotizaciones()
+            return [result] if result else []
+        except Exception:
+            logger.warning("BCRA step %s failed", step.id, exc_info=True)
+            return []
+
+    async def _execute_sandbox_step(self, step: PlanStep) -> list[DataResult]:
+        if not self._sandbox:
+            logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
+            return []
+        params = step.params
+        nl_query = params.get("query", step.description)
+
+        try:
+            # Get available tables
+            tables = await self._sandbox.list_cached_tables()
+            if not tables:
+                return []
+
+            # Filter tables if hints provided
+            table_hints = params.get("tables", [])
+            if table_hints:
+                import fnmatch
+                filtered = []
+                for t in tables:
+                    for pattern in table_hints:
+                        if fnmatch.fnmatch(t.table_name, pattern):
+                            filtered.append(t)
+                            break
+                if filtered:
+                    tables = filtered
+
+            # Build context for NL2SQL
+            tables_context_parts = []
+            for t in tables[:50]:  # safety limit
+                cols = ", ".join(t.columns) if t.columns else "(no column info)"
+                tables_context_parts.append(
+                    f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
+                )
+            tables_context = "\n\n".join(tables_context_parts)
+
+            nl2sql_prompt = (
+                "You are a SQL assistant for Argentine public datasets stored in PostgreSQL.\n"
+                "You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, "
+                "DROP, or any DDL/DML statement.\n\n"
+                f"Available tables and their columns:\n\n{tables_context}\n\n"
+                "Rules:\n"
+                "- Only reference the tables and columns listed above.\n"
+                '- Always use double-quoted identifiers for column names that contain spaces or special characters.\n'
+                "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
+                "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
+                "- The query must be valid PostgreSQL syntax.\n"
+            )
+
+            llm_response = await self._llm.chat(
+                messages=[
+                    LLMMessage(role="system", content=nl2sql_prompt),
+                    LLMMessage(role="user", content=nl_query),
+                ],
+                temperature=0.0,
+                max_tokens=1024,
+            )
+
+            generated_sql = llm_response.content.strip()
+            # Strip markdown code fences
+            if generated_sql.startswith("```"):
+                lines = generated_sql.split("\n")
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                generated_sql = "\n".join(lines).strip()
+
+            result = await self._sandbox.execute_readonly(generated_sql)
+            if result.error:
+                logger.warning("Sandbox query failed: %s", result.error)
+                return []
+
+            return [
+                DataResult(
+                    source="sandbox:nl2sql",
+                    portal_name="Cache Local (NL2SQL)",
+                    portal_url="",
+                    dataset_title=f"Consulta SQL: {nl_query[:100]}",
+                    format="json",
+                    records=result.rows[:200],
+                    metadata={
+                        "total_records": result.row_count,
+                        "generated_sql": generated_sql,
+                        "truncated": result.truncated,
+                        "columns": result.columns,
+                        "fetched_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+            ]
+        except Exception:
+            logger.warning("Sandbox step %s failed", step.id, exc_info=True)
+            return []
+
     async def _execute_steps(self, plan: ExecutionPlan) -> list[DataResult]:
         """Execute plan steps, catching ConnectorError per step."""
         results: list[DataResult] = []
@@ -1382,6 +1519,10 @@ class SmartQueryService:
             return await self._execute_sesiones_step(step)
         elif step.action == "query_staff":
             return await self._execute_staff_step(step)
+        elif step.action == "query_bcra":
+            return await self._execute_bcra_step(step)
+        elif step.action == "query_sandbox":
+            return await self._execute_sandbox_step(step)
         elif step.action in ("analyze", "compare", "synthesize"):
             return []
         else:

@@ -22,7 +22,7 @@ class PlanStep:
     """A single step in an execution plan."""
 
     id: str
-    action: str  # search_ckan, query_series, query_georef, query_ddjj, query_argentina_datos, query_sesiones, analyze, compare
+    action: str  # search_ckan, query_series, query_georef, query_ddjj, query_argentina_datos, query_sesiones, query_staff, query_bcra, query_sandbox, analyze, compare
     description: str
     params: dict = field(default_factory=dict)
     depends_on: list[str] = field(default_factory=list)

@@ -27,6 +27,7 @@ from app.infrastructure.adapters.chat.chat_repository_sqla import ChatRepository
 from app.infrastructure.adapters.connectors.argentina_datos_adapter import ArgentinaDatosAdapter
 from app.infrastructure.adapters.connectors.ckan_search_adapter import CKANSearchAdapter
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
+from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 from app.infrastructure.mcp.mcp_client import MCPClient
 from app.infrastructure.monitoring.health import HealthCheckService
@@ -263,6 +264,10 @@ class ConnectorProvider(Provider):
     ) -> IStaffConnector:
         return StaffAdapter(session_factory=session_factory)
 
+    @provide
+    def bcra(self) -> BCRAAdapter:
+        return BCRAAdapter()
+
 
 class RetrievalEvaluatorProvider(Provider):
     scope = Scope.REQUEST
@@ -291,6 +296,8 @@ class ApplicationProvider(Provider):
         semantic_cache: SemanticCache,
         retrieval_evaluator: IRetrievalEvaluator,
         staff: IStaffConnector,
+        bcra: BCRAAdapter,
+        sandbox: ISQLSandbox,
     ) -> SmartQueryService:
         return SmartQueryService(
             llm=llm,
@@ -306,6 +313,8 @@ class ApplicationProvider(Provider):
             semantic_cache=semantic_cache,
             retrieval_evaluator=retrieval_evaluator,
             staff=staff,
+            bcra=bcra,
+            sandbox=sandbox,
         )
 
 

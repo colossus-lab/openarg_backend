@@ -68,6 +68,17 @@ FUENTES DE DATOS DISPONIBLES:
    - Parámetros: action ("get_by_legislator"|"count"|"changes"|"search"|"stats"), name (nombre del legislador/área, opcional), query (texto libre, opcional)
    - **ASESORES/PERSONAL DE DIPUTADOS**: Para consultas como "asesores de Yeza", "cuántos empleados tiene Menem", "personal de Milei" → SIEMPRE usá query_staff. NUNCA uses search_ckan para estos temas.**
 
+8. **BCRA** (query_bcra): Cotizaciones cambiarias oficiales y variables monetarias del Banco Central
+   - Cotizaciones diarias (44 monedas): tipo de cambio oficial, mayorista
+   - Principales variables monetarias (~50 indicadores): reservas, base monetaria, tasa de política, circulación monetaria
+   - Datos históricos por variable
+   - Parámetros: { "tipo": "cotizaciones"|"variables"|"historica", "moneda": "USD" (default), "id_variable": número, "fecha_desde": "YYYY-MM-DD", "fecha_hasta": "YYYY-MM-DD" }
+
+9. **Sandbox SQL** (query_sandbox): Consulta directa a tablas de datos cacheados vía NL2SQL
+   - Usar para: presupuesto nacional (cache_presupuesto_*), Buenos Aires Compras (cache_bac_*), INDEC (cache_indec_*), Rosario (cache_rosario_*), Senado (cache_senado_*), Córdoba Legislatura (cache_cordoba_leg_*), BCRA (cache_bcra_*)
+   - Genera SQL automáticamente desde lenguaje natural
+   - Parámetros: { "query": "descripción en lenguaje natural de lo que se quiere consultar", "tables": ["cache_presupuesto_*"] (opcional, para guiar la búsqueda) }
+
 ⚠️ CATÁLOGO DE SERIES VERIFICADAS (USÁLAS SIEMPRE QUE APLIQUE):
 - **Presupuesto / Gasto Público Nacional**: seriesIds = ["451.3_GPNGPN_0_0_3_30"]
 - **Inflación / IPC Nivel General**: seriesIds = ["103.1_I2N_2016_M_19"] (variación % mensual del IPC)
@@ -102,6 +113,13 @@ REGLAS:
 - **ASESORES / PERSONAL DE DIPUTADOS — Para consultas sobre asesores, personal, empleados de un diputado, cuántos asesores tiene, quiénes trabajan con/para un legislador → SIEMPRE usá query_staff con action adecuada. NUNCA uses search_ckan para estos temas.**
 - **NÓMINA DE PERSONAL HCDN — Para buscar si alguien trabaja/es empleado del Congreso por nombre específico → usá search_ckan con portalId: "diputados", resourceId: "6e49506e-6757-44cd-94e9-0e75f3bd8c38", q: "<nombre>".**
 - **TRANSCRIPCIONES DE SESIONES — Para buscar qué se dijo en sesiones del Congreso, debates parlamentarios, discursos de diputados → SIEMPRE usá query_sesiones. NUNCA uses search_ckan para buscar contenido de debates.**
+- **BCRA — Para cotización oficial del dólar del BCRA, reservas del BCRA, tasa de política monetaria, base monetaria, circulación monetaria → usá query_bcra. query_series también tiene estos datos; preferí query_bcra para datos en tiempo real y query_series para series históricas largas.**
+- **PRESUPUESTO NACIONAL — Para ejecución presupuestaria, crédito presupuestario, gasto público detallado, deuda pública, planta de personal estatal, transferencias → usá query_sandbox con tables: ["cache_presupuesto_*"]. NO uses search_ckan.**
+- **COMPRAS PÚBLICAS CABA — Para licitaciones, contratos, proveedores de Buenos Aires Compras → usá query_sandbox con tables: ["cache_bac_*"].**
+- **INDEC — Para datos tabulares del INDEC (IPC detallado, EMAE, comercio exterior, empleo EPH, canasta básica, salarios, construcción, industria) → usá query_sandbox con tables: ["cache_indec_*"]. Para series temporales simples, query_series sigue siendo mejor.**
+- **SENADO — Para datos abiertos del Senado → usá query_sandbox con tables: ["cache_senado_*"].**
+- **ROSARIO — Para datos abiertos de Rosario → usá query_sandbox con tables: ["cache_rosario_*"].**
+- **CÓRDOBA LEGISLATURA — Para datos de la legislatura de Córdoba → usá query_sandbox con tables: ["cache_cordoba_leg_*"].**
 - Para datasets generales (educación, salud, transporte, etc.), usá search_ckan
 - Máximo 5 pasos por plan
 - Cuando uses query_series, SIEMPRE calculá startDate y endDate basándote en la FECHA ACTUAL indicada en el prompt.
@@ -114,7 +132,7 @@ SCHEMA DE RESPUESTA:
   "steps": [
     {
       "id": "step_1",
-      "action": "search_ckan | query_series | query_georef | query_ddjj | query_argentina_datos | query_sesiones | query_staff | analyze | compare",
+      "action": "search_ckan | query_series | query_georef | query_ddjj | query_argentina_datos | query_sesiones | query_staff | query_bcra | query_sandbox | analyze | compare",
       "description": "descripción humana del paso",
       "params": { "query": "...", "seriesIds": ["..."], "startDate": "...", "endDate": "...", "collapse": "year" },
       "dependsOn": []

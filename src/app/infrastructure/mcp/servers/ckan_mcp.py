@@ -43,6 +43,17 @@ PORTALS: list[dict] = [
     # Municipios
     {"id": "rosario", "name": "Rosario", "base_url": "https://datos.rosario.gob.ar", "api_path": "/api/3/action", "category": "municipio"},
     {"id": "bahia_blanca", "name": "Bahía Blanca", "base_url": "https://datos.bahiablanca.gob.ar", "api_path": "/api/3/action", "category": "municipio"},
+    # Nacionales nuevos
+    {"id": "modernizacion", "name": "Modernización", "base_url": "https://datos.modernizacion.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "ambiente", "name": "Ambiente", "base_url": "https://datos.ambiente.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {"id": "arsat", "name": "ARSAT", "base_url": "https://datos.arsat.com.ar", "api_path": "/api/3/action", "category": "nacional"},
+    # Provincias nuevas
+    {"id": "rio_negro", "name": "Río Negro", "base_url": "https://datos.rionegro.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "jujuy", "name": "Jujuy", "base_url": "https://datos.jujuy.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {"id": "salta", "name": "Salta", "base_url": "https://datos.salta.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    # Municipios nuevos
+    {"id": "cordoba_muni", "name": "Córdoba Ciudad", "base_url": "https://gobiernoabierto.cordoba.gob.ar/data", "api_path": "/api/3/action", "category": "municipio"},
+    {"id": "la_plata", "name": "La Plata", "base_url": "https://datos.laplata.gob.ar", "api_path": "/api/3/action", "category": "municipio"},
 ]
 
 _client = httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "OpenArg-MCP/1.0"})
