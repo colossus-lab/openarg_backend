@@ -62,7 +62,8 @@ def _normalize_record(raw: dict) -> dict:
         "nombre": _safe_str(raw.get("Nombre") or raw.get("nombre")),
         "escalafon": _safe_str(raw.get("Escalafón") or raw.get("Escalafon") or raw.get("escalafon")),
         "area_desempeno": _safe_str(
-            raw.get("Área de Desempeño") or raw.get("Area de Desempeño") or raw.get("area_desempeno")
+            raw.get("Área de Desempeño") or raw.get("Area de Desempeño")
+            or raw.get("area_desempeno") or raw.get("estructura_desempeno")
         ),
         "convenio": _safe_str(raw.get("Convenio") or raw.get("convenio")),
     }
