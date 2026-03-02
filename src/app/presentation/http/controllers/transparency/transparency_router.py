@@ -449,3 +449,27 @@ async def trigger_staff_snapshot():
 
     snapshot_staff.delay()
     return {"status": "dispatched", "task": "snapshot_staff"}
+
+
+@router.get("/staff/status")
+@inject
+async def get_staff_status(
+    session: FromDishka[MainAsyncSession],
+):
+    """Check staff snapshot status: latest snapshot date, total employees, recent changes."""
+    snap = await session.execute(text(
+        "SELECT snapshot_date, COUNT(*) AS total "
+        "FROM staff_snapshots GROUP BY snapshot_date ORDER BY snapshot_date DESC LIMIT 5"
+    ))
+    snapshots = [{"date": str(r.snapshot_date), "total": r.total} for r in snap.fetchall()]
+
+    changes = await session.execute(text(
+        "SELECT tipo, COUNT(*) AS c FROM staff_changes GROUP BY tipo"
+    ))
+    changes_summary = {r.tipo: r.c for r in changes.fetchall()}
+
+    return {
+        "snapshots": snapshots,
+        "changes": changes_summary,
+        "has_data": len(snapshots) > 0,
+    }
