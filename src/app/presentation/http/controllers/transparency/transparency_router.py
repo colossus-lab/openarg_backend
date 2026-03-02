@@ -427,16 +427,13 @@ async def trigger_rescore(portal: str | None = None):
 @router.post("/rescrape")
 async def trigger_rescrape(portal: str | None = None):
     """Trigger catalog scrape + health rescore (with delay)."""
-    from app.infrastructure.celery.tasks.scraper_tasks import scrape_catalog
+    from app.infrastructure.celery.tasks.scraper_tasks import PORTAL_URLS, scrape_catalog
     from app.infrastructure.celery.tasks.transparency_tasks import score_portal_health
 
-    portals = [portal] if portal else [
-        "datos_gob_ar", "caba", "diputados", "justicia",
-        "buenos_aires_prov", "cordoba_prov", "santa_fe",
-        "mendoza", "entre_rios", "neuquen_legislatura",
-    ]
-    for p in portals:
-        scrape_catalog.delay(p)
+    portals = [portal] if portal else list(PORTAL_URLS.keys())
+    for i, p in enumerate(portals):
+        # Stagger dispatches by 10s to avoid overwhelming the worker
+        scrape_catalog.apply_async(args=[p], countdown=i * 10)
     # Rescore after scrapers finish (5 min delay)
     score_portal_health.apply_async(countdown=300)
     return {"status": "dispatched", "scrape_portals": portals, "rescore_delay": "5min"}
