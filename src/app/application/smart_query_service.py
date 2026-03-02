@@ -370,6 +370,38 @@ _STAFF_CHANGES_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ── Argentina Datos deterministic routing ──────────────────
+_ARGDATOS_PATTERN = re.compile(
+    r"(d[oó]lar\s+(?:blue|mep|ccl|cripto|turista|tarjeta|contado\s+con\s+liqui)"
+    r"|riesgo\s+pa[ií]s"
+    r"|(?:a\s+)?cu[aá]nto\s+(?:est[aá]|cotiza|sale)\s+(?:el\s+)?d[oó]lar"
+    r"|precio\s+del\s+d[oó]lar(?!\s+oficial))",
+    re.IGNORECASE,
+)
+
+# ── Series de Tiempo deterministic routing ─────────────────
+_SERIES_PATTERN = re.compile(
+    r"(inflaci[oó]n|ipc\b|pbi\b|pib\b|emae\b"
+    r"|desempleo|desocupaci[oó]n"
+    r"|exportaci[oó]n(?:es)?|importaci[oó]n(?:es)?"
+    r"|balanza\s+comercial|deuda\s+p[uú]blica"
+    r"|salario(?:s)?\s+(?:promedio|real)"
+    r"|serie(?:s)?\s+de\s+tiempo"
+    r"|indicador(?:es)?\s+econ[oó]mico)",
+    re.IGNORECASE,
+)
+
+# ── Sesiones deterministic routing ─────────────────────────
+_SESIONES_PATTERN = re.compile(
+    r"(sesi[oó]n(?:es)?\s+(?:del?\s+)?(?:congreso|c[aá]mara|diputados|senado)"
+    r"|(?:qu[eé]\s+(?:se\s+)?debati[oó]|debate(?:s)?|discurso(?:s)?)\s+(?:sobre|de|en)\s+"
+    r"|transcripci[oó]n(?:es)?\s+(?:del?\s+)?(?:congreso|c[aá]mara)"
+    r"|(?:diputad[oa]|senador[a]?)\s+\w+\s+(?:dijo|habl[oó])"
+    r"|qu[eé]\s+(?:dijo|dijeron)\s+.{0,20}(?:diputad|senador)"
+    r"|(?:se\s+)?trat[oó]\s+en\s+(?:el\s+)?congreso)",
+    re.IGNORECASE,
+)
+
 
 # ── Service ─────────────────────────────────────────────────
 
@@ -455,124 +487,116 @@ class SmartQueryService:
         if edu:
             return SmartQueryResult(answer=edu, sources=[], educational=True)
 
-        # 0d. DDJJ deterministic routing
-        ddjj_forced_plan = self._detect_ddjj_intent(question)
-
-        # 0e. Staff deterministic routing
-        staff_forced_plan = self._detect_staff_intent(question) if self._staff else None
-
-        # 1. Cache lookup (skip in policy mode — always fetch fresh data)
+        # 1. Cache lookup FIRST (skip in policy mode — always fetch fresh data)
         if not policy_mode:
             cached = await self._check_cache(question, user_id)
             if cached:
                 return cached
 
-        # 2. Memory
+        # 2. Memory (lightweight cache read, needed for analysis)
         session_id = conversation_id or ""
         memory = await load_memory(self._cache, session_id)
 
-        # 2b. Query preprocessing
-        preprocessor = QueryPreprocessor(self._llm)
-        enhanced_query = await preprocessor.reformulate(question)
+        # 3. Deterministic routing — bypasses preprocessing, decomposition, CRAG, reranking
+        deterministic_plan = (
+            self._detect_ddjj_intent(question)
+            or (self._detect_staff_intent(question) if self._staff else None)
+            or (self._detect_bcra_intent(question) if self._bcra else None)
+            or self._detect_argentina_datos_intent(question)
+            or self._detect_series_intent(question)
+            or self._detect_sesiones_intent(question)
+        )
 
-        # 2c. Query decomposition
-        decomposer = QueryDecomposer(self._llm)
-        sub_queries = await decomposer.decompose(enhanced_query)
-
-        if ddjj_forced_plan:
-            # DDJJ deterministic: skip decomposition, use forced plan directly
-            plan = ddjj_forced_plan
+        if deterministic_plan:
+            plan = deterministic_plan
             results = await self._execute_steps(plan, nl_query=question)
             logger.info(
-                "DDJJ deterministic plan for '%s': intent=%s",
-                question[:60], plan.intent,
+                "Deterministic plan for '%s': intent=%s, steps=%d",
+                question[:60], plan.intent, len(plan.steps),
             )
-        elif staff_forced_plan:
-            plan = staff_forced_plan
-            results = await self._execute_steps(plan, nl_query=question)
-            logger.info(
-                "Staff deterministic plan for '%s': intent=%s",
-                question[:60], plan.intent,
-            )
-        elif len(sub_queries) > 1:
-            # Multi-query: generate plans and execute concurrently
-            memory_ctx_prompt = build_memory_context_prompt(memory)
+        else:
+            # Full LLM pipeline: preprocess → decompose → plan → execute → CRAG → hybrid
+            preprocessor = QueryPreprocessor(self._llm)
+            enhanced_query = await preprocessor.reformulate(question)
 
-            async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
-                sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                sq_results = await self._execute_steps(sq_plan, nl_query=sq)
-                return sq_plan, sq_results
+            decomposer = QueryDecomposer(self._llm)
+            sub_queries = await decomposer.decompose(enhanced_query)
 
-            plan_results = await asyncio.gather(
-                *[_plan_and_execute(sq) for sq in sub_queries],
-                return_exceptions=True,
-            )
+            if len(sub_queries) > 1:
+                memory_ctx_prompt = build_memory_context_prompt(memory)
 
-            all_results: list[DataResult] = []
-            plan = None
-            for pr in plan_results:
-                if isinstance(pr, Exception):
-                    logger.warning("Sub-query plan/execute failed: %s", pr)
-                    continue
-                sq_plan, sq_results = pr
+                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
+                    sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
+                    sq_results = await self._execute_steps(sq_plan, nl_query=sq)
+                    return sq_plan, sq_results
+
+                plan_results = await asyncio.gather(
+                    *[_plan_and_execute(sq) for sq in sub_queries],
+                    return_exceptions=True,
+                )
+
+                all_results: list[DataResult] = []
+                plan = None
+                for pr in plan_results:
+                    if isinstance(pr, Exception):
+                        logger.warning("Sub-query plan/execute failed: %s", pr)
+                        continue
+                    sq_plan, sq_results = pr
+                    if plan is None:
+                        plan = sq_plan
+                    all_results.extend(sq_results)
+
                 if plan is None:
-                    plan = sq_plan
-                all_results.extend(sq_results)
-
-            if plan is None:
+                    plan = await generate_plan(
+                        self._llm, enhanced_query,
+                        memory_context=build_memory_context_prompt(memory),
+                    )
+                results = all_results
+                logger.info(
+                    "Decomposed '%s' into %d sub-queries, got %d results",
+                    question[:60], len(sub_queries), len(results),
+                )
+            else:
                 plan = await generate_plan(
                     self._llm, enhanced_query,
                     memory_context=build_memory_context_prompt(memory),
                 )
-            results = all_results
-            logger.info(
-                "Decomposed '%s' into %d sub-queries, got %d results",
-                question[:60], len(sub_queries), len(results),
-            )
-        else:
-            # 3. Plan (single query)
-            plan = await generate_plan(
-                self._llm, enhanced_query,
-                memory_context=build_memory_context_prompt(memory),
-            )
-            logger.info(
-                "Plan for '%s': intent=%s, steps=%d",
-                question[:60], plan.intent, len(plan.steps),
-            )
-
-            # 4. Execute connectors
-            results = await self._execute_steps(plan, nl_query=question)
-
-        # 4b. CRAG: evaluate retrieval quality and retry if needed
-        if self._retrieval_evaluator:
-            try:
-                verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
                 logger.info(
-                    "CRAG verdict: quality=%s, confidence=%.2f",
-                    verdict.quality.value, verdict.confidence,
+                    "Plan for '%s': intent=%s, steps=%d",
+                    question[:60], plan.intent, len(plan.steps),
                 )
-                if (
-                    verdict.quality == RetrievalQuality.INCORRECT
-                    and verdict.confidence >= 0.7
-                ):
-                    logger.info(
-                        "CRAG: re-executing with broader query (actions=%s)",
-                        verdict.suggested_actions,
-                    )
-                    retry_plan = await generate_plan(
-                        self._llm,
-                        f"{question} (ampliar búsqueda, datos insuficientes)",
-                        memory_context=build_memory_context_prompt(memory),
-                    )
-                    retry_results = await self._execute_steps(retry_plan, nl_query=question)
-                    if retry_results:
-                        results = retry_results
-                        plan = retry_plan
-            except Exception:
-                logger.debug("CRAG evaluation failed", exc_info=True)
+                results = await self._execute_steps(plan, nl_query=question)
 
-        # 5. Hybrid search complement
-        results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
+            # CRAG: evaluate retrieval quality and retry if needed (skip for deterministic)
+            if self._retrieval_evaluator:
+                try:
+                    verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
+                    logger.info(
+                        "CRAG verdict: quality=%s, confidence=%.2f",
+                        verdict.quality.value, verdict.confidence,
+                    )
+                    if (
+                        verdict.quality == RetrievalQuality.INCORRECT
+                        and verdict.confidence >= 0.7
+                    ):
+                        logger.info(
+                            "CRAG: re-executing with broader query (actions=%s)",
+                            verdict.suggested_actions,
+                        )
+                        retry_plan = await generate_plan(
+                            self._llm,
+                            f"{question} (ampliar búsqueda, datos insuficientes)",
+                            memory_context=build_memory_context_prompt(memory),
+                        )
+                        retry_results = await self._execute_steps(retry_plan, nl_query=question)
+                        if retry_results:
+                            results = retry_results
+                            plan = retry_plan
+                except Exception:
+                    logger.debug("CRAG evaluation failed", exc_info=True)
+
+            # Hybrid search complement (skip for deterministic)
+            results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
 
         # 6. LLM analysis
         data_context = self._build_data_context(results)
@@ -742,12 +766,7 @@ class SmartQueryService:
             yield {"type": "complete", "answer": edu, "sources": [], "chart_data": None}
             return
 
-        # DDJJ deterministic routing
-        ddjj_forced_plan = self._detect_ddjj_intent(question)
-        # Staff deterministic routing
-        staff_forced_plan = self._detect_staff_intent(question) if self._staff else None
-
-        # Cache check (skip in policy mode — always fetch fresh data)
+        # Cache check FIRST (skip in policy mode — always fetch fresh data)
         session_id = conversation_id or ""
         if not policy_mode:
             cached_result = await self._get_cached_dict(question)
@@ -764,22 +783,22 @@ class SmartQueryService:
                 }
                 return
 
-        # Planning
-        yield {"type": "status", "step": "planning"}
+        # Deterministic routing — bypasses preprocessing, decomposition, CRAG, reranking
+        deterministic_plan = (
+            self._detect_ddjj_intent(question)
+            or (self._detect_staff_intent(question) if self._staff else None)
+            or (self._detect_bcra_intent(question) if self._bcra else None)
+            or self._detect_argentina_datos_intent(question)
+            or self._detect_series_intent(question)
+            or self._detect_sesiones_intent(question)
+        )
 
-        preprocessor = QueryPreprocessor(self._llm)
-        enhanced_query = await preprocessor.reformulate(question)
         memory = await load_memory(self._cache, session_id)
 
-        # Query decomposition (same as execute())
-        decomposer = QueryDecomposer(self._llm)
-        sub_queries = await decomposer.decompose(enhanced_query)
-
-        if ddjj_forced_plan:
-            # DDJJ deterministic: skip decomposition, use forced plan directly
-            plan = ddjj_forced_plan
+        if deterministic_plan:
+            plan = deterministic_plan
             logger.info(
-                "DDJJ deterministic plan (streaming) for '%s': intent=%s",
+                "Deterministic plan (streaming) for '%s': intent=%s",
                 question[:60], plan.intent,
             )
             yield {
@@ -788,97 +807,90 @@ class SmartQueryService:
                 "intent": plan.intent,
                 "steps_count": len(plan.steps),
             }
-
             yield {"type": "status", "step": "searching"}
             results = await self._execute_steps_streaming(plan, nl_query=question)
-        elif staff_forced_plan:
-            plan = staff_forced_plan
-            logger.info(
-                "Staff deterministic plan (streaming) for '%s': intent=%s",
-                question[:60], plan.intent,
-            )
-            yield {
-                "type": "status",
-                "step": "planned",
-                "intent": plan.intent,
-                "steps_count": len(plan.steps),
-            }
+        else:
+            # Full LLM pipeline: preprocess → decompose → plan → execute → CRAG → hybrid
+            yield {"type": "status", "step": "planning"}
 
-            yield {"type": "status", "step": "searching"}
-            results = await self._execute_steps_streaming(plan, nl_query=question)
-        elif len(sub_queries) > 1:
-            memory_ctx_prompt = build_memory_context_prompt(memory)
+            preprocessor = QueryPreprocessor(self._llm)
+            enhanced_query = await preprocessor.reformulate(question)
 
-            async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
-                sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                sq_results = await self._execute_steps(sq_plan, nl_query=sq)
-                return sq_plan, sq_results
+            decomposer = QueryDecomposer(self._llm)
+            sub_queries = await decomposer.decompose(enhanced_query)
 
-            plan_results = await asyncio.gather(
-                *[_plan_and_execute(sq) for sq in sub_queries],
-                return_exceptions=True,
-            )
+            if len(sub_queries) > 1:
+                memory_ctx_prompt = build_memory_context_prompt(memory)
 
-            all_results: list[DataResult] = []
-            plan = None
-            for pr in plan_results:
-                if isinstance(pr, Exception):
-                    logger.warning("Sub-query plan/execute failed (streaming): %s", pr)
-                    continue
-                sq_plan, sq_results = pr
+                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
+                    sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
+                    sq_results = await self._execute_steps(sq_plan, nl_query=sq)
+                    return sq_plan, sq_results
+
+                plan_results = await asyncio.gather(
+                    *[_plan_and_execute(sq) for sq in sub_queries],
+                    return_exceptions=True,
+                )
+
+                all_results: list[DataResult] = []
+                plan = None
+                for pr in plan_results:
+                    if isinstance(pr, Exception):
+                        logger.warning("Sub-query plan/execute failed (streaming): %s", pr)
+                        continue
+                    sq_plan, sq_results = pr
+                    if plan is None:
+                        plan = sq_plan
+                    all_results.extend(sq_results)
+
                 if plan is None:
-                    plan = sq_plan
-                all_results.extend(sq_results)
-
-            if plan is None:
+                    plan = await generate_plan(
+                        self._llm, enhanced_query,
+                        memory_context=build_memory_context_prompt(memory),
+                    )
+                results = all_results
+            else:
                 plan = await generate_plan(
                     self._llm, enhanced_query,
                     memory_context=build_memory_context_prompt(memory),
                 )
-            results = all_results
-        else:
-            plan = await generate_plan(
-                self._llm, enhanced_query,
-                memory_context=build_memory_context_prompt(memory),
-            )
 
-            yield {
-                "type": "status",
-                "step": "planned",
-                "intent": plan.intent,
-                "steps_count": len(plan.steps),
-            }
+                yield {
+                    "type": "status",
+                    "step": "planned",
+                    "intent": plan.intent,
+                    "steps_count": len(plan.steps),
+                }
 
-            # Searching
-            yield {"type": "status", "step": "searching"}
-            results = await self._execute_steps_streaming(plan, nl_query=question)
+                yield {"type": "status", "step": "searching"}
+                results = await self._execute_steps_streaming(plan, nl_query=question)
 
-        # CRAG evaluation
-        if self._retrieval_evaluator:
-            try:
-                verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
-                logger.info(
-                    "CRAG (streaming) verdict: quality=%s, confidence=%.2f",
-                    verdict.quality.value, verdict.confidence,
-                )
-                if (
-                    verdict.quality == RetrievalQuality.INCORRECT
-                    and verdict.confidence >= 0.7
-                ):
-                    retry_plan = await generate_plan(
-                        self._llm,
-                        f"{question} (ampliar búsqueda, datos insuficientes)",
-                        memory_context=build_memory_context_prompt(memory),
+            # CRAG evaluation (skip for deterministic routes)
+            if self._retrieval_evaluator:
+                try:
+                    verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
+                    logger.info(
+                        "CRAG (streaming) verdict: quality=%s, confidence=%.2f",
+                        verdict.quality.value, verdict.confidence,
                     )
-                    retry_results = await self._execute_steps_streaming(retry_plan, nl_query=question)
-                    if retry_results:
-                        results = retry_results
-                        plan = retry_plan
-            except Exception:
-                logger.debug("CRAG evaluation failed in streaming", exc_info=True)
+                    if (
+                        verdict.quality == RetrievalQuality.INCORRECT
+                        and verdict.confidence >= 0.7
+                    ):
+                        retry_plan = await generate_plan(
+                            self._llm,
+                            f"{question} (ampliar búsqueda, datos insuficientes)",
+                            memory_context=build_memory_context_prompt(memory),
+                        )
+                        retry_results = await self._execute_steps_streaming(retry_plan, nl_query=question)
+                        if retry_results:
+                            results = retry_results
+                            plan = retry_plan
+                except Exception:
+                    logger.debug("CRAG evaluation failed in streaming", exc_info=True)
 
-        # Hybrid search
-        results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
+            # Hybrid search (skip for deterministic routes)
+            results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
 
         # Generating
         yield {"type": "status", "step": "generating"}
@@ -1159,6 +1171,139 @@ class SmartQueryService:
                     params={"action": "search", "query": txt},
                 ),
             ],
+        )
+
+    # ── BCRA deterministic intent detection ──────────────────
+
+    @staticmethod
+    def _detect_bcra_intent(question: str) -> ExecutionPlan | None:
+        """Return a forced ExecutionPlan for BCRA queries."""
+        text = question.strip()
+        if not _BCRA_PATTERN.search(text):
+            return None
+        lower = text.lower()
+        if any(kw in lower for kw in ("reserva", "reservas")):
+            return ExecutionPlan(
+                query=text,
+                intent="bcra_reservas",
+                steps=[PlanStep(
+                    id="bcra_variables",
+                    action="query_bcra",
+                    description="Reservas del BCRA",
+                    params={"tipo": "variables"},
+                )],
+            )
+        if any(kw in lower for kw in ("tasa", "política monetaria", "politica monetaria")):
+            return ExecutionPlan(
+                query=text,
+                intent="bcra_tasa",
+                steps=[PlanStep(
+                    id="bcra_variables",
+                    action="query_bcra",
+                    description="Tasa de política monetaria BCRA",
+                    params={"tipo": "variables"},
+                )],
+            )
+        if any(kw in lower for kw in ("base monetaria", "circulación monetaria", "circulacion monetaria")):
+            return ExecutionPlan(
+                query=text,
+                intent="bcra_monetaria",
+                steps=[PlanStep(
+                    id="bcra_variables",
+                    action="query_bcra",
+                    description="Variables monetarias BCRA",
+                    params={"tipo": "variables"},
+                )],
+            )
+        return ExecutionPlan(
+            query=text,
+            intent="bcra_cotizaciones",
+            steps=[PlanStep(
+                id="bcra_cotizaciones",
+                action="query_bcra",
+                description="Cotizaciones oficiales BCRA",
+                params={"tipo": "cotizaciones"},
+            )],
+        )
+
+    # ── Argentina Datos deterministic intent detection ───────
+
+    @staticmethod
+    def _detect_argentina_datos_intent(question: str) -> ExecutionPlan | None:
+        """Return a forced ExecutionPlan for ArgDatos queries (dólar blue, riesgo país)."""
+        text = question.strip()
+        if not _ARGDATOS_PATTERN.search(text):
+            return None
+        lower = text.lower()
+        if "riesgo" in lower and "pa" in lower:
+            return ExecutionPlan(
+                query=text,
+                intent="argdatos_riesgo_pais",
+                steps=[PlanStep(
+                    id="argdatos_riesgo",
+                    action="query_argentina_datos",
+                    description="Riesgo país actual",
+                    params={"type": "riesgo_pais", "ultimo": True},
+                )],
+            )
+        casa = None
+        if "blue" in lower:
+            casa = "blue"
+        elif "mep" in lower or "bolsa" in lower:
+            casa = "bolsa"
+        elif "ccl" in lower or "contado con liqui" in lower:
+            casa = "contadoconliqui"
+        elif "cripto" in lower:
+            casa = "cripto"
+        elif "tarjeta" in lower or "turista" in lower:
+            casa = "tarjeta"
+        return ExecutionPlan(
+            query=text,
+            intent="argdatos_dolar",
+            steps=[PlanStep(
+                id="argdatos_dolar",
+                action="query_argentina_datos",
+                description=f"Cotización dólar{f' {casa}' if casa else ''}",
+                params={"type": "dolar", **({"casa": casa} if casa else {})},
+            )],
+        )
+
+    # ── Series de Tiempo deterministic intent detection ──────
+
+    @staticmethod
+    def _detect_series_intent(question: str) -> ExecutionPlan | None:
+        """Return a forced ExecutionPlan for economic time-series queries."""
+        text = question.strip()
+        if not _SERIES_PATTERN.search(text):
+            return None
+        return ExecutionPlan(
+            query=text,
+            intent="series_tiempo",
+            steps=[PlanStep(
+                id="series_query",
+                action="query_series",
+                description=f"Serie de tiempo: {text[:100]}",
+                params={"query": text},
+            )],
+        )
+
+    # ── Sesiones deterministic intent detection ──────────────
+
+    @staticmethod
+    def _detect_sesiones_intent(question: str) -> ExecutionPlan | None:
+        """Return a forced ExecutionPlan for congressional session queries."""
+        text = question.strip()
+        if not _SESIONES_PATTERN.search(text):
+            return None
+        return ExecutionPlan(
+            query=text,
+            intent="sesiones_congreso",
+            steps=[PlanStep(
+                id="sesiones_search",
+                action="query_sesiones",
+                description=f"Buscar en sesiones: {text[:100]}",
+                params={"query": text},
+            )],
         )
 
     # ── Cache helpers ───────────────────────────────────────
