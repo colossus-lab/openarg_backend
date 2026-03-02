@@ -442,6 +442,15 @@ async def trigger_rescrape(portal: str | None = None):
     return {"status": "dispatched", "scrape_portals": portals, "rescore_delay": "5min"}
 
 
+@router.post("/detect-anomalies")
+async def trigger_detect_anomalies():
+    """Trigger DDJJ anomaly detection (inflation-adjusted analysis)."""
+    from app.infrastructure.celery.tasks.transparency_tasks import detect_ddjj_anomalies
+
+    detect_ddjj_anomalies.delay()
+    return {"status": "dispatched", "task": "detect_ddjj_anomalies"}
+
+
 @router.post("/snapshot-staff")
 async def trigger_staff_snapshot():
     """Trigger HCDN staff snapshot (download nómina + diff against previous)."""
