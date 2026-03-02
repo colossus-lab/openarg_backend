@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import time
 from datetime import UTC, datetime
 
 import httpx
@@ -257,6 +258,10 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
             offset += batch_size
             logger.info(f"Scraped {offset}/{total} packages from {portal}")
 
+            # Rate-limit page requests for portals with WAF (e.g. CABA)
+            if portal == "caba" and offset < total:
+                time.sleep(2.0)
+
         cb.record_success()
         return {"portal": portal, "total_packages": total, "datasets_indexed": indexed}
 
@@ -471,7 +476,7 @@ def _get_sample_rows_text(engine, dataset_id: str, title: str, portal_name: str)
         parts = [f"Muestra de datos reales del dataset '{title}' ({portal_name}):"]
         for i, r in enumerate(rows[:15], 1):
             row_parts = []
-            for col, val in zip(cols, r):
+            for col, val in zip(cols, r, strict=False):
                 if val is not None:
                     row_parts.append(f"{col}: {str(val)[:100]}")
             parts.append(f"Registro {i}: {', '.join(row_parts)}")
