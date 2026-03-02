@@ -411,13 +411,23 @@ async def classify_intent(
     clarification_msg = data.get("clarification_message", "")
     clarification_opts = data.get("clarification_options", [])
 
-    return ClassifiedIntent(
+    result = ClassifiedIntent(
         intents=intent_matches,
         confidence=confidence,
         reasoning=reasoning,
         clarification_message=clarification_msg,
         clarification_options=clarification_opts,
     )
+
+    intent_names = [m.intent for m in intent_matches]
+    logger.info(
+        "Intent classified: %s (confidence=%.2f, reasoning=%s)",
+        intent_names,
+        confidence,
+        reasoning,
+    )
+
+    return result
 
 
 def intent_to_plan(
