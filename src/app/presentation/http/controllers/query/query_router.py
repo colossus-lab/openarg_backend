@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from uuid import uuid4
 
@@ -10,17 +11,14 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy import text
 
-from app.domain.entities.query.query import UserQuery
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
 from app.infrastructure.celery.tasks.analyst_tasks import analyze_query
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
-from sqlalchemy import text
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +151,7 @@ async def _fetch_sample_data(
             rows = sample_result.fetchall()
             columns = sample_result.keys()
 
-            sample_rows = [dict(zip(columns, r)) for r in rows]
+            sample_rows = [dict(zip(columns, r, strict=False)) for r in rows]
             samples[did] = {
                 "table_name": cached.table_name,
                 "row_count": cached.row_count,

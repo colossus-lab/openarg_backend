@@ -487,8 +487,6 @@ async def flush_query_cache(
     session: FromDishka[MainAsyncSession],
 ):
     """Flush Redis query cache + pgvector semantic cache."""
-    from app.domain.ports.cache.cache_port import ICacheService
-    from dishka import AsyncContainer
 
     # Clear semantic cache (pgvector)
     result = await session.execute(text("DELETE FROM query_cache"))

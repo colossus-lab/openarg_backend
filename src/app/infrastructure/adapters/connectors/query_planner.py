@@ -194,7 +194,16 @@ CITACIONES Y CONFIANZA:
   - 1.0: datos directos de la fuente, sin interpretación
   - 0.7-0.9: datos parciales, requieren inferencia menor
   - 0.4-0.6: datos indirectos, alta inferencia
-  - <0.4: especulativo, sin datos directos"""
+  - <0.4: especulativo, sin datos directos
+
+ANTI-ALUCINACIÓN (CRÍTICO):
+- NUNCA inventes datos, cifras, fechas ni porcentajes que no estén en los datos recolectados
+- Si los datos son insuficientes o no hay registros, decilo claramente: "No encontré datos sobre esto en las fuentes disponibles"
+- NO extrapoles tendencias ni hagas predicciones a futuro basadas en los datos
+- Si un número no aparece explícitamente en los datos, NO lo incluyas en la respuesta
+- Distinguí entre datos directos ("Según datos.gob.ar...") y tu interpretación ("Esto sugiere que...")
+- Cuando cites un dato, siempre mencioná la fuente específica (portal, dataset, período)
+- Si los datos tienen fecha de recolección, mencionala para que el usuario sepa la vigencia"""
 
 
 async def generate_plan(
@@ -253,6 +262,53 @@ def _fallback_plan(question: str) -> ExecutionPlan:
 
     is_national = bool(re.search(r"\b(nacional|nivel nacional|datos\.gob|cat[aá]logo|datasets?\s+(hay|tiene|disponibles))\b", lower, re.IGNORECASE))
     is_list_all = bool(re.search(r"\b(todos|listado|cat[aá]logo|cu[aá]ntos|qu[eé]\s+(hay|tiene|datos))\b", lower, re.IGNORECASE))
+
+    # Detect economic queries for series de tiempo fallback
+    is_economic = bool(re.search(
+        r"(inflaci[oó]n|ipc|d[oó]lar|tipo\s+de\s+cambio|pbi|emae|reservas|tasa|salario|desempleo"
+        r"|exportaci|importaci|canasta|presupuesto|base\s+monetaria|leliq)",
+        lower, re.IGNORECASE,
+    ))
+
+    # Detect DDJJ queries
+    is_ddjj = bool(re.search(r"(ddjj|declaraci[oó]n\s+jurada|patrimonio\s+de\s+diputado)", lower, re.IGNORECASE))
+
+    if is_economic:
+        return ExecutionPlan(
+            query=question,
+            intent="Consulta económica (fallback)",
+            steps=[
+                PlanStep(
+                    id="step_1",
+                    action="query_series",
+                    description=f"Buscar series de tiempo: {question}",
+                    params={"query": question},
+                ),
+                PlanStep(
+                    id="step_2",
+                    action="analyze",
+                    description="Analizar indicadores económicos",
+                    params={"focus": question},
+                    depends_on=["step_1"],
+                ),
+            ],
+            suggested_visualizations=["line_chart"],
+        )
+
+    if is_ddjj:
+        return ExecutionPlan(
+            query=question,
+            intent="Consulta DDJJ (fallback)",
+            steps=[
+                PlanStep(
+                    id="step_1",
+                    action="query_ddjj",
+                    description=f"Buscar DDJJ: {question}",
+                    params={"action": "search", "query": question},
+                ),
+            ],
+            suggested_visualizations=["table"],
+        )
 
     return ExecutionPlan(
         query=question,

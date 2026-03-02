@@ -1,14 +1,12 @@
 """Tests for semantic cache hash utility, TTL constants, and intent-based TTL."""
 from __future__ import annotations
 
-import pytest
-
 from app.infrastructure.adapters.cache.semantic_cache import (
     INTENT_TTL_MAP,
-    SemanticCache,
     TTL_DAILY,
     TTL_REALTIME,
     TTL_STATIC,
+    SemanticCache,
     ttl_for_intent,
 )
 

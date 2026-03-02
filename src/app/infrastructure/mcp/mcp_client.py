@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.infrastructure.mcp.exceptions import classify_http_error, MCPNetworkError
+from app.infrastructure.mcp.exceptions import MCPNetworkError, classify_http_error
 
 logger = logging.getLogger(__name__)
 

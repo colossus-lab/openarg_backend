@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -7,7 +8,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
-import asyncio
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -149,7 +149,7 @@ class PgSandboxAdapter(ISQLSandbox):
                 if truncated:
                     rows_raw = rows_raw[:MAX_ROWS]
 
-                rows = [dict(zip(columns, row)) for row in rows_raw]
+                rows = [dict(zip(columns, row, strict=False)) for row in rows_raw]
 
                 # Get the true row count if truncated
                 row_count = len(rows)

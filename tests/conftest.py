@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 

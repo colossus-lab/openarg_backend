@@ -115,7 +115,9 @@ def snapshot_bcra(self):
                     table_name, df_cot,
                 )
                 if dataset_id:
-                    from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                    from app.infrastructure.celery.tasks.scraper_tasks import (
+                        index_dataset_embedding,
+                    )
                     index_dataset_embedding.delay(dataset_id)
                 results["tables"].append({"table": table_name, "rows": len(df_cot)})
                 logger.info("BCRA cotizaciones: %d records cached", len(df_cot))
@@ -131,7 +133,9 @@ def snapshot_bcra(self):
                     table_name, df_var,
                 )
                 if dataset_id:
-                    from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                    from app.infrastructure.celery.tasks.scraper_tasks import (
+                        index_dataset_embedding,
+                    )
                     index_dataset_embedding.delay(dataset_id)
                 results["tables"].append({"table": table_name, "rows": len(df_var)})
                 logger.info("BCRA variables: %d records cached", len(df_var))

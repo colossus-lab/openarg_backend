@@ -1,8 +1,6 @@
 """Tests for query planner fallback logic."""
 from __future__ import annotations
 
-import pytest
-
 from app.infrastructure.adapters.connectors.query_planner import _fallback_plan
 
 

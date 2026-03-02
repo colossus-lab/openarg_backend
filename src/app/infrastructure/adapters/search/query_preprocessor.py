@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
+
 from dateutil.relativedelta import relativedelta
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
@@ -95,6 +96,42 @@ _PROVINCE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b" + re.escape(alias) + r"\b", re.IGNORECASE), full_name)
     for alias, full_name in _PROVINCE_ALIASES.items()
 ]
+
+# ── Synonym expansion ─────────────────────────────────────
+
+SYNONYM_MAP: dict[str, list[str]] = {
+    "sueldo": ["salario", "remuneración"],
+    "salario": ["sueldo", "remuneración"],
+    "plata": ["dinero", "fondos"],
+    "guita": ["dinero", "fondos"],
+    "laburo": ["trabajo", "empleo"],
+    "desocupación": ["desempleo"],
+    "desempleo": ["desocupación"],
+    "deuda": ["endeudamiento", "pasivos"],
+    "gasto": ["erogación", "ejecución presupuestaria"],
+    "recaudación": ["ingresos fiscales", "recaudación tributaria"],
+    "obra pública": ["inversión pública", "obra de infraestructura"],
+    "jubilación": ["haber jubilatorio", "prestación previsional"],
+    "educación": ["sistema educativo", "establecimientos educativos"],
+    "seguridad": ["delitos", "hechos delictivos"],
+    "pobreza": ["indigencia", "necesidades básicas insatisfechas"],
+    "mortalidad": ["defunciones", "fallecimientos"],
+    "nacimientos": ["natalidad"],
+}
+
+
+def expand_synonyms(query: str) -> str:
+    """Append relevant synonyms to the query for broader search coverage."""
+    lower = query.lower()
+    additions: list[str] = []
+    for term, synonyms in SYNONYM_MAP.items():
+        if term in lower:
+            additions.extend(synonyms)
+    if additions:
+        # Deduplicate and append as context
+        unique = list(dict.fromkeys(additions))[:4]
+        return query + " (" + ", ".join(unique) + ")"
+    return query
 
 
 def expand_acronyms(query: str) -> str:
@@ -190,7 +227,7 @@ class QueryPreprocessor:
     async def reformulate(self, query: str) -> str:
         """Reformulate a user query for better search relevance.
 
-        Pipeline: expand_acronyms -> normalize_temporal -> normalize_provinces -> LLM reformulation.
+        Pipeline: expand_acronyms -> normalize_temporal -> normalize_provinces -> expand_synonyms -> LLM reformulation.
         All queries are processed (no skip for short queries).
         Falls back to the preprocessed query on any LLM error.
         """
@@ -198,6 +235,7 @@ class QueryPreprocessor:
         processed = expand_acronyms(query)
         processed, _ = normalize_temporal(processed)
         processed = normalize_provinces(processed)
+        processed = expand_synonyms(processed)
 
         try:
             response = await self._llm.chat(
@@ -219,4 +257,5 @@ class QueryPreprocessor:
         result = expand_acronyms(query)
         result, _ = normalize_temporal(result)
         result = normalize_provinces(result)
+        result = expand_synonyms(result)
         return result

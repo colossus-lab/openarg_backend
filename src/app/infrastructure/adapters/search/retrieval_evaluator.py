@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan
+from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
 from app.domain.ports.search.retrieval_evaluator import (
     IRetrievalEvaluator,
@@ -65,7 +65,7 @@ class RetrievalEvaluator(IRetrievalEvaluator):
                     LLMMessage(role="system", content=_EVAL_SYSTEM_PROMPT),
                     LLMMessage(role="user", content=user_prompt),
                 ],
-                temperature=0.1,
+                temperature=0.0,
                 max_tokens=512,
             )
 
@@ -95,8 +95,12 @@ class RetrievalEvaluator(IRetrievalEvaluator):
                 if r.records and record_count > 0:
                     first = r.records[0]
                     if isinstance(first, dict):
-                        keys = list(first.keys())[:5]
+                        keys = list(first.keys())[:8]
                         part += f"\n     Columnas: {', '.join(keys)}"
+                        # Include sample values for better evaluation
+                        sample_vals = {k: first[k] for k in keys[:4] if first.get(k) is not None}
+                        if sample_vals:
+                            part += f"\n     Ejemplo: {sample_vals}"
                 parts.append(part)
             else:
                 parts.append(f"  {i + 1}. {str(r)[:200]}")

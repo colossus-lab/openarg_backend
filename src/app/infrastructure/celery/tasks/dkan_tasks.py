@@ -170,7 +170,9 @@ def scrape_dkan_rosario(self):
 
                 dataset_id = _register_dataset(engine, ds_id, title, table_name, df, download_url)
                 if dataset_id:
-                    from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+                    from app.infrastructure.celery.tasks.scraper_tasks import (
+                        index_dataset_embedding,
+                    )
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

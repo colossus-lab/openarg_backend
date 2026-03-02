@@ -1,10 +1,8 @@
 """Tests for chart builder functions."""
 from __future__ import annotations
 
-import pytest
-
-from app.domain.entities.connectors.data_result import DataResult
 from app.application.smart_query_service import SmartQueryService
+from app.domain.entities.connectors.data_result import DataResult
 
 # Bind static methods for convenience
 _build_deterministic_charts = SmartQueryService._build_deterministic_charts

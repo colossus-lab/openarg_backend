@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from dishka.integrations.fastapi import FromDishka, inject
@@ -41,6 +42,8 @@ class MessageResponse(BaseModel):
     content: str
     sources: list[dict]
     created_at: str
+    feedback: str | None = None
+    feedback_comment: str | None = None
 
 
 class ConversationDetail(BaseModel):
@@ -53,6 +56,11 @@ class ConversationDetail(BaseModel):
 
 class TitleUpdate(BaseModel):
     title: str
+
+
+class FeedbackCreate(BaseModel):
+    feedback: Literal["up", "down"]
+    comment: str | None = None
 
 
 # ---- Helpers ----
@@ -165,6 +173,8 @@ async def get_conversation(
                 content=m.content,
                 sources=m.sources or [],
                 created_at=m.created_at.isoformat(),
+                feedback=m.feedback,
+                feedback_comment=m.feedback_comment,
             )
             for m in messages
         ],
@@ -236,6 +246,8 @@ async def add_message(
         content=saved.content,
         sources=saved.sources or [],
         created_at=saved.created_at.isoformat(),
+        feedback=saved.feedback,
+        feedback_comment=saved.feedback_comment,
     )
 
 
@@ -261,6 +273,48 @@ async def get_messages(
             content=m.content,
             sources=m.sources or [],
             created_at=m.created_at.isoformat(),
+            feedback=m.feedback,
+            feedback_comment=m.feedback_comment,
         )
         for m in messages
     ]
+
+
+@router.patch(
+    "/{conversation_id}/messages/{message_id}/feedback",
+    response_model=MessageResponse,
+)
+@inject
+async def submit_feedback(
+    conversation_id: UUID,
+    message_id: UUID,
+    body: FeedbackCreate,
+    user_repo: FromDishka[IUserRepository],
+    chat_repo: FromDishka[IChatRepository],
+    x_user_email: str = Header(alias="X-User-Email", default=""),
+) -> MessageResponse:
+    """Submit thumbs up/down feedback on an assistant message."""
+    await _get_owned_conversation(chat_repo, user_repo, conversation_id, x_user_email)
+
+    # Verify the message belongs to this conversation
+    messages = await chat_repo.get_messages(conversation_id)
+    msg = next((m for m in messages if m.id == message_id), None)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found in this conversation")
+
+    updated = await chat_repo.update_message_feedback(
+        message_id, body.feedback, body.comment,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return MessageResponse(
+        id=str(updated.id),
+        conversation_id=str(updated.conversation_id),
+        role=updated.role,
+        content=updated.content,
+        sources=updated.sources or [],
+        created_at=updated.created_at.isoformat(),
+        feedback=updated.feedback,
+        feedback_comment=updated.feedback_comment,
+    )

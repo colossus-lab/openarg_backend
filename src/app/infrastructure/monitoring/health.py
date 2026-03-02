@@ -38,7 +38,7 @@ class HealthCheckService:
 
         components = {}
         names = ["postgres", "redis", "ddjj_loaded", "sesion_chunks", "pipeline_health"]
-        for name, result in zip(names, checks):
+        for name, result in zip(names, checks, strict=False):
             if isinstance(result, Exception):
                 components[name] = {"status": "unhealthy", "error": str(result)}
             else:

@@ -110,9 +110,9 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: 1G
+          memory: 2G
         reservations:
-          memory: 256M
+          memory: 512M
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:

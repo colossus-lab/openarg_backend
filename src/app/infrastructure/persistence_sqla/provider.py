@@ -37,4 +37,4 @@ async def get_main_async_session(
     factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[MainAsyncSession]:
     async with factory() as session:
-        yield cast(MainAsyncSession, session)
+        yield cast("MainAsyncSession", session)

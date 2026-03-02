@@ -146,7 +146,10 @@ def collect_dataset(self, dataset_id: str):
         # Parse with pandas
         df: pd.DataFrame
         if fmt == "csv":
-            df = pd.read_csv(io.BytesIO(resp.content), encoding="utf-8", on_bad_lines="skip")
+            try:
+                df = pd.read_csv(io.BytesIO(resp.content), encoding="utf-8", on_bad_lines="skip")
+            except UnicodeDecodeError:
+                df = pd.read_csv(io.BytesIO(resp.content), encoding="latin-1", on_bad_lines="skip")
         elif fmt == "json":
             df = pd.read_json(io.BytesIO(resp.content))
         elif fmt in ("xlsx", "xls"):

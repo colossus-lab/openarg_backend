@@ -20,17 +20,15 @@ from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator
 from app.domain.ports.search.vector_search import IVectorSearch
-from app.domain.ports.source.data_source import IDataSource
 from app.domain.ports.user.user_repository import IUserRepository
+from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmbeddingService
 from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdapter
+from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.chat.chat_repository_sqla import ChatRepositorySQLA
 from app.infrastructure.adapters.connectors.argentina_datos_adapter import ArgentinaDatosAdapter
-from app.infrastructure.adapters.connectors.ckan_search_adapter import CKANSearchAdapter
-from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
+from app.infrastructure.adapters.connectors.ckan_search_adapter import CKANSearchAdapter
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
-from app.infrastructure.mcp.mcp_client import MCPClient
-from app.infrastructure.monitoring.health import HealthCheckService
 from app.infrastructure.adapters.connectors.georef_adapter import GeorefAdapter
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import SeriesTiempoAdapter
 from app.infrastructure.adapters.connectors.sesiones_adapter import SesionesAdapter
@@ -39,7 +37,6 @@ from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetR
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
 from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdapter
 from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
-from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmbeddingService
 from app.infrastructure.adapters.llm.gemini_embedding_adapter import GeminiEmbeddingAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
@@ -47,6 +44,8 @@ from app.infrastructure.adapters.search.retrieval_evaluator import RetrievalEval
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
 from app.infrastructure.adapters.source.datos_gob_ar_adapter import DatosGobArAdapter
 from app.infrastructure.adapters.user.user_repository_sqla import UserRepositorySQLA
+from app.infrastructure.mcp.mcp_client import MCPClient
+from app.infrastructure.monitoring.health import HealthCheckService
 from app.infrastructure.persistence_sqla.config import PostgresDsn, SqlaEngineConfig
 from app.infrastructure.persistence_sqla.provider import (
     MainAsyncSession,

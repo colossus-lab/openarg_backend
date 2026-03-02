@@ -14,3 +14,5 @@ class Message(BaseEntity):
     role: str = ""  # "user" | "assistant"
     content: str = ""
     sources: list[dict] = field(default_factory=list)
+    feedback: str | None = None  # "up" | "down" | None
+    feedback_comment: str | None = None
