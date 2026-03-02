@@ -103,8 +103,9 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
 
             # Batch upsert using ON CONFLICT (eliminates N+1 SELECT per resource)
             if batch_rows:
+                source_ids = [r["sid"] for r in batch_rows]
                 with engine.begin() as conn:
-                    result = conn.execute(
+                    conn.execute(
                         text("""
                             INSERT INTO datasets
                                 (source_id, title, description, organization,
@@ -117,9 +118,16 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                                 download_url = EXCLUDED.download_url, format = EXCLUDED.format,
                                 columns = EXCLUDED.columns, tags = EXCLUDED.tags,
                                 updated_at = :now
-                            RETURNING CAST(id AS text)
                         """),
                         batch_rows,
+                    )
+                    # Fetch IDs separately (RETURNING doesn't work with executemany)
+                    result = conn.execute(
+                        text(
+                            "SELECT CAST(id AS text) FROM datasets "
+                            "WHERE source_id = ANY(:sids) AND portal = :portal"
+                        ),
+                        {"sids": source_ids, "portal": portal},
                     )
                     dataset_ids = [row[0] for row in result.fetchall()]
 
