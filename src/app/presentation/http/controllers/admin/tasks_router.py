@@ -104,6 +104,12 @@ TASK_REGISTRY: dict[str, dict] = {
         "params": [],
         "queue": "scraper",
     },
+    "scrape_boletin_staff": {
+        "celery_name": "openarg.scrape_boletin_staff",
+        "description": "Scrape Boletín Oficial staff designations (Diputados + Senado)",
+        "params": [],
+        "queue": "scraper",
+    },
     # --- S3 ---
     "retry_s3_uploads": {
         "celery_name": "openarg.retry_s3_uploads",
