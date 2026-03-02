@@ -440,3 +440,12 @@ async def trigger_rescrape(portal: str | None = None):
     # Rescore after scrapers finish (5 min delay)
     score_portal_health.apply_async(countdown=300)
     return {"status": "dispatched", "scrape_portals": portals, "rescore_delay": "5min"}
+
+
+@router.post("/snapshot-staff")
+async def trigger_staff_snapshot():
+    """Trigger HCDN staff snapshot (download nómina + diff against previous)."""
+    from app.infrastructure.celery.tasks.staff_tasks import snapshot_staff
+
+    snapshot_staff.delay()
+    return {"status": "dispatched", "task": "snapshot_staff"}
