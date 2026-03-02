@@ -45,6 +45,7 @@ class SmartQueryResponse(BaseModel):
     confidence: float = 1.0
     citations: list[dict] = []
     documents: list[dict] | None = None
+    warnings: list[str] = []
 
 
 def _build_service(
@@ -161,6 +162,7 @@ async def smart_query(
         **({"documents": result.documents} if result.documents else {}),
         **({"cached": True} if result.cached else {}),
         **({"casual": True} if result.casual else {}),
+        **({"warnings": result.warnings} if result.warnings else {}),
     }
 
 

@@ -57,10 +57,14 @@ class DDJJAdapter:
             self._dataset = json.loads(raw)
             self._loaded = True
             logger.info("DDJJ dataset loaded: %d records from %s", len(self._dataset), _DATA_PATH)
-        except Exception:
-            logger.warning("Failed to load DDJJ dataset from %s", _DATA_PATH, exc_info=True)
+        except FileNotFoundError:
+            logger.error("DDJJ dataset file not found: %s", _DATA_PATH)
             self._dataset = []
-            self._loaded = True
+            # Don't set _loaded = True — allow retry if the file appears later
+        except Exception:
+            logger.error("Failed to load DDJJ dataset from %s", _DATA_PATH, exc_info=True)
+            self._dataset = []
+            # Don't set _loaded = True — allow retry on next call
 
     def search(self, query: str, limit: int = 20) -> DataResult:
         self._ensure_loaded()

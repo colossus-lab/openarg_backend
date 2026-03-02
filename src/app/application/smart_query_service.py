@@ -86,6 +86,7 @@ class SmartQueryResult:
     confidence: float = 1.0
     citations: list[dict[str, Any]] = field(default_factory=list)
     documents: list[dict[str, Any]] | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 # ── Casual / meta / educational patterns ────────────────────
@@ -515,9 +516,12 @@ class SmartQueryService:
             or self._detect_sesiones_intent(question)
         )
 
+        all_warnings: list[str] = []
+
         if deterministic_plan:
             plan = deterministic_plan
-            results = await self._execute_steps(plan, nl_query=question)
+            results, step_warnings = await self._execute_steps(plan, nl_query=question)
+            all_warnings.extend(step_warnings)
             logger.info(
                 "Deterministic plan for '%s': intent=%s, steps=%d",
                 question[:60], plan.intent, len(plan.steps),
@@ -533,10 +537,10 @@ class SmartQueryService:
             if len(sub_queries) > 1:
                 memory_ctx_prompt = build_memory_context_prompt(memory)
 
-                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
+                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult], list[str]]:
                     sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                    sq_results = await self._execute_steps(sq_plan, nl_query=sq)
-                    return sq_plan, sq_results
+                    sq_results, sq_warnings = await self._execute_steps(sq_plan, nl_query=sq)
+                    return sq_plan, sq_results, sq_warnings
 
                 plan_results = await asyncio.gather(
                     *[_plan_and_execute(sq) for sq in sub_queries],
@@ -549,10 +553,11 @@ class SmartQueryService:
                     if isinstance(pr, Exception):
                         logger.warning("Sub-query plan/execute failed: %s", pr)
                         continue
-                    sq_plan, sq_results = pr
+                    sq_plan, sq_results, sq_warnings = pr
                     if plan is None:
                         plan = sq_plan
                     all_results.extend(sq_results)
+                    all_warnings.extend(sq_warnings)
 
                 if plan is None:
                     plan = await generate_plan(
@@ -573,7 +578,8 @@ class SmartQueryService:
                     "Plan for '%s': intent=%s, steps=%d",
                     question[:60], plan.intent, len(plan.steps),
                 )
-                results = await self._execute_steps(plan, nl_query=question)
+                results, step_warnings = await self._execute_steps(plan, nl_query=question)
+                all_warnings.extend(step_warnings)
 
             # CRAG: evaluate retrieval quality and retry if needed (skip for deterministic)
             if self._retrieval_evaluator:
@@ -596,7 +602,8 @@ class SmartQueryService:
                             f"{question} (ampliar búsqueda, datos insuficientes)",
                             memory_context=build_memory_context_prompt(memory),
                         )
-                        retry_results = await self._execute_steps(retry_plan, nl_query=question)
+                        retry_results, retry_warnings = await self._execute_steps(retry_plan, nl_query=question)
+                        all_warnings.extend(retry_warnings)
                         if retry_results:
                             results = retry_results
                             plan = retry_plan
@@ -693,6 +700,7 @@ class SmartQueryService:
             confidence=confidence,
             citations=citations,
             documents=documents if documents else None,
+            warnings=all_warnings,
         )
 
         # 8. Audit
@@ -803,6 +811,8 @@ class SmartQueryService:
 
         memory = await load_memory(self._cache, session_id)
 
+        all_warnings: list[str] = []
+
         if deterministic_plan:
             plan = deterministic_plan
             logger.info(
@@ -816,7 +826,8 @@ class SmartQueryService:
                 "steps_count": len(plan.steps),
             }
             yield {"type": "status", "step": "searching"}
-            results = await self._execute_steps_streaming(plan, nl_query=question)
+            results, step_warnings = await self._execute_steps_streaming(plan, nl_query=question)
+            all_warnings.extend(step_warnings)
         else:
             # Full LLM pipeline: preprocess → decompose → plan → execute → CRAG → hybrid
             yield {"type": "status", "step": "planning"}
@@ -830,10 +841,10 @@ class SmartQueryService:
             if len(sub_queries) > 1:
                 memory_ctx_prompt = build_memory_context_prompt(memory)
 
-                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult]]:
+                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult], list[str]]:
                     sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                    sq_results = await self._execute_steps(sq_plan, nl_query=sq)
-                    return sq_plan, sq_results
+                    sq_results, sq_warnings = await self._execute_steps(sq_plan, nl_query=sq)
+                    return sq_plan, sq_results, sq_warnings
 
                 plan_results = await asyncio.gather(
                     *[_plan_and_execute(sq) for sq in sub_queries],
@@ -846,10 +857,11 @@ class SmartQueryService:
                     if isinstance(pr, Exception):
                         logger.warning("Sub-query plan/execute failed (streaming): %s", pr)
                         continue
-                    sq_plan, sq_results = pr
+                    sq_plan, sq_results, sq_warnings = pr
                     if plan is None:
                         plan = sq_plan
                     all_results.extend(sq_results)
+                    all_warnings.extend(sq_warnings)
 
                 if plan is None:
                     plan = await generate_plan(
@@ -871,7 +883,8 @@ class SmartQueryService:
                 }
 
                 yield {"type": "status", "step": "searching"}
-                results = await self._execute_steps_streaming(plan, nl_query=question)
+                results, step_warnings = await self._execute_steps_streaming(plan, nl_query=question)
+                all_warnings.extend(step_warnings)
 
             # CRAG evaluation (skip for deterministic routes)
             if self._retrieval_evaluator:
@@ -890,7 +903,8 @@ class SmartQueryService:
                             f"{question} (ampliar búsqueda, datos insuficientes)",
                             memory_context=build_memory_context_prompt(memory),
                         )
-                        retry_results = await self._execute_steps_streaming(retry_plan, nl_query=question)
+                        retry_results, retry_warnings = await self._execute_steps_streaming(retry_plan, nl_query=question)
+                        all_warnings.extend(retry_warnings)
                         if retry_results:
                             results = retry_results
                             plan = retry_plan
@@ -980,6 +994,7 @@ class SmartQueryService:
             "confidence": confidence,
             "citations": citations,
             "documents": documents if documents else None,
+            **({"warnings": all_warnings} if all_warnings else {}),
         }
 
         # Cache write (fire-and-forget, don't block streaming)
@@ -1796,9 +1811,14 @@ class SmartQueryService:
 
     async def _execute_steps(
         self, plan: ExecutionPlan, nl_query: str = "",
-    ) -> list[DataResult]:
-        """Execute plan steps, catching ConnectorError per step."""
+    ) -> tuple[list[DataResult], list[str]]:
+        """Execute plan steps, catching ConnectorError per step.
+
+        Returns:
+            Tuple of (results, warnings) where warnings lists connector failures.
+        """
         results: list[DataResult] = []
+        warnings: list[str] = []
         for step in plan.steps[:5]:
             step_start = time.monotonic()
             connector_name = step.action
@@ -1807,14 +1827,16 @@ class SmartQueryService:
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms)
                 results.extend(data)
-            except ConnectorError:
+            except ConnectorError as exc:
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms, error=True)
                 logger.warning("Step %s failed (ConnectorError)", step.id, exc_info=True)
-            except Exception:
+                warnings.append(f"Conector '{connector_name}' no disponible: {exc}")
+            except Exception as exc:
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms, error=True)
                 logger.warning("Step %s failed", step.id, exc_info=True)
+                warnings.append(f"Conector '{connector_name}' falló: {type(exc).__name__}")
 
         # If no results with actual data, attempt federated fallback
         real = [r for r in results if r.records]
@@ -1822,11 +1844,11 @@ class SmartQueryService:
             logger.info("No real data from plan steps, attempting federated fallback")
             results = await self._federated_fallback(nl_query, results)
 
-        return results
+        return results, warnings
 
     async def _execute_steps_streaming(
         self, plan: ExecutionPlan, nl_query: str = "",
-    ) -> list[DataResult]:
+    ) -> tuple[list[DataResult], list[str]]:
         """Same as _execute_steps but used by streaming endpoint."""
         return await self._execute_steps(plan, nl_query=nl_query)
 

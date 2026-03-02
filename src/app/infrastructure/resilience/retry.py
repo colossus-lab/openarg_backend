@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.infrastructure.resilience.circuit_breaker import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -55,7 +57,10 @@ def with_retry(
 
             if cb.is_open:
                 logger.warning("Circuit OPEN for %s — skipping call", cb_name)
-                return None
+                raise ConnectorError(
+                    error_code=ErrorCode.CN_CIRCUIT_OPEN,
+                    details={"service": cb_name},
+                )
 
             last_exc: Exception | None = None
             for attempt in range(max_retries + 1):
