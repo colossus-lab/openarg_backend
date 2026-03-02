@@ -10,6 +10,7 @@ from app.application.smart_query_service import (
     _STAFF_NAME_PATTERN,
     _STAFF_NAME_TIENE_PATTERN,
     _STAFF_PATTERN,
+    _STAFF_TITLE_PREFIX,
     SmartQueryService,
 )
 
@@ -117,6 +118,35 @@ class TestStaffNameExtraction:
 # ── _clean_staff_name ────────────────────────────────────────
 
 
+class TestStaffTitlePrefix:
+    """Verify _STAFF_TITLE_PREFIX strips common title prefixes."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("diputado Menem", "Menem"),
+            ("diputada Giménez", "Giménez"),
+            ("el diputado Martin Yeza", "Martin Yeza"),
+            ("la senadora Cristina", "Cristina"),
+            ("senador Parrilli", "Parrilli"),
+            ("la legisladora López", "López"),
+            ("del secretario García", "García"),
+            ("presidente Milei", "Milei"),
+            ("directora Gómez", "Gómez"),
+            ("jefa de Gabinete", "de Gabinete"),
+        ],
+    )
+    def test_strips_title(self, raw, expected):
+        assert _STAFF_TITLE_PREFIX.sub("", raw).strip() == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["Yeza", "Cristina Kirchner", "Tolosa Paz"],
+    )
+    def test_no_title_unchanged(self, raw):
+        assert _STAFF_TITLE_PREFIX.sub("", raw).strip() == raw
+
+
 class TestCleanStaffName:
     @pytest.mark.parametrize(
         "raw,expected",
@@ -128,6 +158,10 @@ class TestCleanStaffName:
             ("Massa en el congreso", "Massa"),
             ("Yeza de la cámara", "Yeza"),
             ("Kirchner", "Kirchner"),  # no stop words → unchanged
+            # Title stripping
+            ("diputado Menem", "Menem"),
+            ("el diputado Martin Yeza", "Martin Yeza"),
+            ("la senadora Cristina", "Cristina"),
         ],
     )
     def test_strips_stop_words(self, raw, expected):
@@ -146,6 +180,11 @@ class TestExtractStaffName:
             ("personal tiene Massa", "Massa"),
             ("empleados de Ritondo hay", "Ritondo"),
             ("equipo de Tolosa Paz", "Tolosa Paz"),
+            # Title stripping via _clean_staff_name
+            ("personal del diputado Menem", "Menem"),
+            ("asesores del senador Parrilli", "Parrilli"),
+            ("equipo de la diputada Giménez", "Giménez"),
+            ("empleados del presidente Milei", "Milei"),
         ],
     )
     def test_extracts_name(self, query, expected):

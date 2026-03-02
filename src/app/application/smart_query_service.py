@@ -341,6 +341,14 @@ _STAFF_NAME_STOP = re.compile(
     re.IGNORECASE,
 )
 
+# Titles/roles that precede a legislator name and should be stripped
+_STAFF_TITLE_PREFIX = re.compile(
+    r"^(?:(?:el|la|del?)\s+)?"
+    r"(?:diputad[oa]|senad(?:or|ora)|legislad(?:or|ora)|ministro|ministra|"
+    r"secretari[oa]|director[a]?|presidente|presidenta|jef[ea])\s+",
+    re.IGNORECASE,
+)
+
 _STAFF_NAME_PATTERN = re.compile(
     r"(?:asesores?|personal|empleados?|equipo)"
     r"\s+(?:de(?:l)?)\s+(.+?)(?:\?|$)",
@@ -1078,8 +1086,9 @@ class SmartQueryService:
 
     @staticmethod
     def _clean_staff_name(raw: str) -> str:
-        """Strip trailing stop words from an extracted legislator name."""
+        """Strip title prefixes and trailing stop words from an extracted legislator name."""
         name = raw.strip()
+        name = _STAFF_TITLE_PREFIX.sub("", name).strip()
         name = _STAFF_NAME_STOP.sub("", name).strip()
         return name
 
