@@ -24,7 +24,7 @@ services:
         reservations:
           memory: 256M
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -69,6 +69,14 @@ services:
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
     depends_on:
       redis:
+        condition: service_healthy
+      mcp-series-tiempo:
+        condition: service_healthy
+      mcp-ckan:
+        condition: service_healthy
+      mcp-argentina-datos:
+        condition: service_healthy
+      mcp-sesiones:
         condition: service_healthy
 
   # ── Celery Workers ──────────────────────────────────────────────

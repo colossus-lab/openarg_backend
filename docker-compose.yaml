@@ -60,6 +60,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mcp-series-tiempo:
+        condition: service_healthy
+      mcp-ckan:
+        condition: service_healthy
+      mcp-argentina-datos:
+        condition: service_healthy
+      mcp-sesiones:
+        condition: service_healthy
 
   # --- WORKERS (Multi-Agent System) ---
 

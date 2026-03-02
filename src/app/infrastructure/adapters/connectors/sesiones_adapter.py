@@ -50,7 +50,7 @@ class SesionesAdapter(ISesionesConnector):
             )
             return result["embedding"]
         except Exception:
-            logger.warning("Failed to generate Gemini embedding for sesiones", exc_info=True)
+            logger.error("Failed to generate Gemini embedding for sesiones — falling back to keyword search", exc_info=True)
             return None
 
     async def _search_pgvector(
@@ -119,7 +119,7 @@ class SesionesAdapter(ISesionesConnector):
             logger.info("pgvector sesiones returned %d results for '%s'", len(chunks), query[:60])
             return chunks if chunks else None
         except Exception:
-            logger.warning("pgvector sesiones search failed", exc_info=True)
+            logger.error("pgvector sesiones search failed — falling back to local keyword search", exc_info=True)
             return None
 
     def _ensure_loaded(self) -> None:
@@ -127,24 +127,29 @@ class SesionesAdapter(ISesionesConnector):
             return
         try:
             if not _CHUNKS_DIR.exists():
-                logger.warning("Sesiones chunks directory not found: %s", _CHUNKS_DIR)
-                self._loaded = True
+                logger.error("Sesiones chunks directory not found: %s", _CHUNKS_DIR)
+                # Don't set _loaded = True — allow retry if the directory appears later
                 return
 
             files = sorted(_CHUNKS_DIR.glob("*.json"))
             logger.info("Loading %d sesiones chunk files from %s", len(files), _CHUNKS_DIR)
+            bad_files = 0
             for f in files:
                 try:
                     data = json.loads(f.read_text(encoding="utf-8"))
                     if isinstance(data, list):
                         self._chunks.extend(data)
                 except Exception:
-                    logger.debug("Bad chunk file: %s", f)
+                    bad_files += 1
+                    logger.warning("Bad sesiones chunk file: %s", f)
 
+            if bad_files:
+                logger.warning("Skipped %d bad chunk files out of %d", bad_files, len(files))
             logger.info("Loaded %d sesiones chunks", len(self._chunks))
+            self._loaded = True
         except Exception:
-            logger.warning("Failed to load sesiones chunks", exc_info=True)
-        self._loaded = True
+            logger.error("Failed to load sesiones chunks", exc_info=True)
+            # Don't set _loaded = True — allow retry on next call
 
     def _search_local(
         self,
