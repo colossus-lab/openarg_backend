@@ -1,4 +1,4 @@
-.PHONY: help install dev db.up db.migrate db.revision api workers beat flower docker.up docker.down docker.prod code.format code.lint code.test code.check workers.s3 workers.transparency
+.PHONY: help install dev db.up db.migrate db.revision api workers beat flower docker.up docker.down docker.prod code.format code.lint code.test code.check workers.s3 workers.transparency workers.ingest
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -35,6 +35,9 @@ workers.embedding: ## Run embedding worker
 
 workers.transparency: ## Run transparency worker
 	APP_ENV=local celery -A app.infrastructure.celery.app:celery_app worker -Q transparency -c 2 -n transparency@%h
+
+workers.ingest: ## Run ingest worker
+	APP_ENV=local celery -A app.infrastructure.celery.app:celery_app worker -Q ingest -c 2 -n ingest@%h --max-memory-per-child=512000
 
 workers.s3: ## Run S3 worker
 	APP_ENV=local celery -A app.infrastructure.celery.app:celery_app worker -Q s3 -c 2 -n s3@%h

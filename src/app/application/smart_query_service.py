@@ -20,6 +20,11 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
+from app.application.intent_classifier import (
+    ClassifiedIntent,
+    classify_intent,
+    intent_to_plan,
+)
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
@@ -468,6 +473,89 @@ class SmartQueryService:
         self._reranker = LLMReranker(llm)
         self._metrics = MetricsCollector()
 
+    # ── LLM intent classification ────────────────────────────
+
+    def _available_connectors(self) -> list[str]:
+        connectors = ["ddjj", "argentina_datos", "series_tiempo", "sesiones", "ckan"]
+        if self._staff:
+            connectors.append("staff")
+        if self._bcra:
+            connectors.append("bcra")
+        if self._sandbox:
+            connectors.append("sandbox")
+        return connectors
+
+    async def _classify_intent(
+        self, question: str,
+    ) -> ExecutionPlan | None:
+        """LLM-based intent classification with regex fallback."""
+        try:
+            classified = await asyncio.wait_for(
+                classify_intent(
+                    self._llm, question,
+                    available_connectors=(
+                        self._available_connectors()
+                    ),
+                ),
+                timeout=10.0,
+            )
+            if classified and not classified.is_clarification:
+                plan = intent_to_plan(question, classified)
+                intents_str = ", ".join(
+                    m.intent for m in classified.intents
+                )
+                logger.info(
+                    "LLM classified '%s' as [%s] "
+                    "(confidence=%.2f, steps=%d)",
+                    question[:60],
+                    intents_str,
+                    classified.confidence,
+                    len(plan.steps),
+                )
+                return plan
+            if classified and classified.is_clarification:
+                self._pending_clarification = (
+                    self._format_clarification(classified)
+                )
+                return None
+        except Exception:
+            logger.warning(
+                "LLM intent classification failed, "
+                "falling back to regex",
+                exc_info=True,
+            )
+
+        # Fallback: deterministic regex (existing code)
+        return (
+            self._detect_ddjj_intent(question)
+            or (
+                self._detect_staff_intent(question)
+                if self._staff else None
+            )
+            or (
+                self._detect_bcra_intent(question)
+                if self._bcra else None
+            )
+            or self._detect_argentina_datos_intent(question)
+            or self._detect_series_intent(question)
+            or self._detect_sesiones_intent(question)
+        )
+
+    @staticmethod
+    def _format_clarification(classified: ClassifiedIntent) -> str:
+        """Build a user-friendly clarification message."""
+        msg = classified.clarification_message
+        if not msg:
+            msg = (
+                "Tu pregunta podría referirse a "
+                "varios recursos. ¿Podés especificar?"
+            )
+        opts = classified.clarification_options
+        if opts:
+            bullets = "\n".join(f"- {o}" for o in opts)
+            msg += f"\n\n{bullets}"
+        return msg
+
     # ── Public API ──────────────────────────────────────────
 
     async def execute(
@@ -520,15 +608,16 @@ class SmartQueryService:
         session_id = conversation_id or ""
         memory = await load_memory(self._cache, session_id)
 
-        # 3. Deterministic routing — bypasses preprocessing, decomposition, CRAG, reranking
-        deterministic_plan = (
-            self._detect_ddjj_intent(question)
-            or (self._detect_staff_intent(question) if self._staff else None)
-            or (self._detect_bcra_intent(question) if self._bcra else None)
-            or self._detect_argentina_datos_intent(question)
-            or self._detect_series_intent(question)
-            or self._detect_sesiones_intent(question)
-        )
+        # 3. Intent classification (LLM → regex fallback)
+        deterministic_plan = await self._classify_intent(question)
+
+        # Handle clarification request
+        pending = getattr(self, "_pending_clarification", "")
+        if not deterministic_plan and pending:
+            self._pending_clarification = ""
+            return SmartQueryResult(
+                answer=pending, sources=[], intent="clarification",
+            )
 
         all_warnings: list[str] = []
 
@@ -813,15 +902,20 @@ class SmartQueryService:
                 }
                 return
 
-        # Deterministic routing — bypasses preprocessing, decomposition, CRAG, reranking
-        deterministic_plan = (
-            self._detect_ddjj_intent(question)
-            or (self._detect_staff_intent(question) if self._staff else None)
-            or (self._detect_bcra_intent(question) if self._bcra else None)
-            or self._detect_argentina_datos_intent(question)
-            or self._detect_series_intent(question)
-            or self._detect_sesiones_intent(question)
-        )
+        # Intent classification (LLM → regex fallback)
+        deterministic_plan = await self._classify_intent(question)
+
+        # Handle clarification request
+        pending = getattr(self, "_pending_clarification", "")
+        if not deterministic_plan and pending:
+            self._pending_clarification = ""
+            yield {"type": "chunk", "content": pending}
+            yield {
+                "type": "complete", "answer": pending,
+                "sources": [], "chart_data": None,
+                "intent": "clarification",
+            }
+            return
 
         memory = await load_memory(self._cache, session_id)
 

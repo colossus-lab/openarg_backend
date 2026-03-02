@@ -52,7 +52,7 @@ class AnthropicLLMAdapter(ILLMProvider):
                 self._client.messages.create(**kwargs),
                 timeout=LLM_TIMEOUT_SECONDS,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error("Anthropic chat timed out after %ds", LLM_TIMEOUT_SECONDS)
             raise
 

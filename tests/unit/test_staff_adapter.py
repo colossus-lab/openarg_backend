@@ -108,21 +108,22 @@ class TestGetByLegislator:
         date_result = MagicMock()
         date_result.scalar.return_value = date(2026, 3, 1)
 
-        rows_result = MagicMock()
-        rows_result.__iter__ = lambda self: iter([])
+        empty_rows = MagicMock()
+        empty_rows.__iter__ = lambda self: iter([])
 
         # No results → suggest_similar_areas also queries
         similar_result = MagicMock()
         similar_result.__iter__ = lambda self: iter([])
-        session.execute.side_effect = [date_result, rows_result, similar_result]
+        # boletin query (empty) → area query (empty) → similar areas
+        session.execute.side_effect = [date_result, empty_rows, empty_rows, similar_result]
 
         await adapter.get_by_legislator("Yeza", limit=9999)
-        # The second execute call should have lim=500 (clamped)
-        call_args = session.execute.call_args_list[1]
+        # The boletin query (index 1) also receives lim=500; area query at index 2
+        call_args = session.execute.call_args_list[2]
         assert call_args[0][1]["lim"] == 500
 
     async def test_cascading_fallback_to_word(self, adapter, mock_session_factory):
-        """'Martin Yeza' → full-name miss → 'Martin' miss → 'Yeza' hit."""
+        """'Martin Yeza' → boletin miss → area fallback → 'Yeza' hit."""
         _, session = mock_session_factory
         date_result = MagicMock()
         date_result.scalar.return_value = date(2026, 3, 1)
@@ -139,8 +140,12 @@ class TestGetByLegislator:
         hit_result = MagicMock()
         hit_result.__iter__ = lambda self: iter(hit_rows)
 
-        # snapshot → miss('%Martin Yeza%') → miss('%Martin%') → hit('%Yeza%')
-        session.execute.side_effect = [date_result, empty_rows, empty_rows, hit_result]
+        # snapshot → 3 boletin misses → 2 area misses → area hit('%Yeza%')
+        session.execute.side_effect = [
+            date_result,
+            empty_rows, empty_rows, empty_rows,  # boletin (3 patterns)
+            empty_rows, empty_rows, hit_result,   # area fallback (3 patterns)
+        ]
 
         result = await adapter.get_by_legislator("Martin Yeza")
         assert len(result.records) == 1
@@ -159,7 +164,8 @@ class TestGetByLegislator:
         similar_result = MagicMock()
         similar_result.__iter__ = lambda self: iter(similar_rows)
 
-        session.execute.side_effect = [date_result, empty_rows, similar_result]
+        # boletin miss → area miss → similar areas
+        session.execute.side_effect = [date_result, empty_rows, empty_rows, similar_result]
 
         result = await adapter.get_by_legislator("XYZNOEXISTE")
         assert result.records == []
@@ -230,7 +236,8 @@ class TestCountByLegislator:
         similar_result = MagicMock()
         similar_result.__iter__ = lambda self: iter(similar_rows)
 
-        session.execute.side_effect = [date_result, zero_result, similar_result]
+        # boletin count (0) → area count (0) → similar areas
+        session.execute.side_effect = [date_result, zero_result, zero_result, similar_result]
 
         result = await adapter.count_by_legislator("XYZNOEXISTE")
         assert result.records[0]["cantidad_asesores"] == 0

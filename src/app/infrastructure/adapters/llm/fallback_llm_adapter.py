@@ -50,6 +50,36 @@ class FallbackLLMAdapter(ILLMProvider):
                     )
         raise RuntimeError(f"All {len(self.chain)} LLM services failed") from last_exc
 
+    async def chat_json(
+        self,
+        messages: list[LLMMessage],
+        json_schema: dict | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> LLMResponse:
+        last_exc: Exception | None = None
+        for i, svc in enumerate(self.chain):
+            try:
+                return await svc.chat_json(messages, json_schema, temperature, max_tokens)
+            except Exception as exc:
+                last_exc = exc
+                name = type(svc).__name__
+                remaining = len(self.chain) - i - 1
+                if remaining > 0:
+                    logger.warning(
+                        "%s chat_json failed (%s), trying next fallback (%d remaining)...",
+                        name,
+                        exc,
+                        remaining,
+                    )
+                else:
+                    logger.error(
+                        "All %d LLM services failed chat_json. Last error: %s",
+                        len(self.chain),
+                        exc,
+                    )
+        raise RuntimeError(f"All {len(self.chain)} LLM services failed chat_json") from last_exc
+
     async def chat_stream(
         self,
         messages: list[LLMMessage],

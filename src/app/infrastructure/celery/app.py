@@ -53,6 +53,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.dkan_tasks",
             "app.infrastructure.celery.tasks.senado_tasks",
             "app.infrastructure.celery.tasks.cordoba_leg_tasks",
+            "app.infrastructure.celery.tasks.boletin_tasks",
         ],
     )
 
@@ -71,17 +72,19 @@ def create_celery() -> Celery:
         "openarg.upload_to_s3": {"queue": "s3"},
         "openarg.recover_stuck_tasks": {"queue": "collector"},
         "openarg.snapshot_staff": {"queue": "scraper"},
-        # New data source tasks
-        "openarg.ingest_presupuesto": {"queue": "collector"},
-        "openarg.snapshot_bcra": {"queue": "collector"},
-        "openarg.ingest_bac": {"queue": "collector"},
-        "openarg.ingest_indec": {"queue": "collector"},
+        "openarg.reindex_all_embeddings": {"queue": "embedding"},
+        # New data source tasks (dedicated ingest queue)
+        "openarg.ingest_presupuesto": {"queue": "ingest"},
+        "openarg.snapshot_bcra": {"queue": "ingest"},
+        "openarg.ingest_bac": {"queue": "ingest"},
+        "openarg.ingest_indec": {"queue": "ingest"},
         "openarg.scrape_dkan_rosario": {"queue": "scraper"},
         "openarg.scrape_senado": {"queue": "scraper"},
         "openarg.scrape_cordoba_legislatura": {"queue": "scraper"},
+        "openarg.scrape_boletin_staff": {"queue": "scraper"},
     }
 
-    app.conf.task_default_queue = "default"
+    app.conf.task_default_queue = "scraper"
     app.conf.worker_max_tasks_per_child = 500
     app.conf.task_serializer = "json"
     app.conf.result_serializer = "json"
@@ -131,6 +134,7 @@ def create_celery() -> Celery:
             "task": "openarg.scrape_catalog",
             "schedule": crontab(hour=hour, minute=minute),
             "args": [portal],
+            "options": {"queue": "scraper"},
         }
         for portal, (hour, minute) in _beat_schedule.items()
     }
@@ -139,6 +143,7 @@ def create_celery() -> Celery:
     app.conf.beat_schedule["bulk-collect-datasets"] = {
         "task": "openarg.bulk_collect_all",
         "schedule": crontab(hour=5, minute=45),
+        "options": {"queue": "collector"},
     }
 
     # Transparency analysis — runs after scraping completes (~06:15 ART)
@@ -146,55 +151,73 @@ def create_celery() -> Celery:
         "transparency-health-scoring": {
             "task": "openarg.score_portal_health",
             "schedule": crontab(hour=6, minute=0),
+            "options": {"queue": "transparency"},
         },
         "transparency-ddjj-anomalies": {
             "task": "openarg.detect_ddjj_anomalies",
             "schedule": crontab(hour=6, minute=15),
+            "options": {"queue": "transparency"},
         },
         "transparency-session-topics": {
             "task": "openarg.analyze_session_topics",
             "schedule": crontab(hour=6, minute=30),
+            "options": {"queue": "transparency"},
         },
         "retry-s3-uploads": {
             "task": "openarg.retry_s3_uploads",
             "schedule": crontab(hour=6, minute=45),
+            "options": {"queue": "s3"},
         },
         "recover-stuck-tasks": {
             "task": "openarg.recover_stuck_tasks",
             "schedule": crontab(minute="*/15"),
+            "options": {"queue": "collector"},
         },
         "snapshot-staff-weekly": {
             "task": "openarg.snapshot_staff",
             "schedule": crontab(hour=2, minute=30, day_of_week=1),  # Monday 2:30 AM ART
+            "options": {"queue": "scraper"},
         },
         # --- New data sources ---
         "ingest-presupuesto": {
             "task": "openarg.ingest_presupuesto",
             "schedule": crontab(day_of_month=5, hour=0, minute=0),  # Monthly, day 5
+            "options": {"queue": "ingest"},
         },
         "snapshot-bcra": {
             "task": "openarg.snapshot_bcra",
             "schedule": crontab(hour=4, minute=0),  # Daily 4:00 AM ART
+            "options": {"queue": "ingest"},
         },
         "ingest-bac": {
             "task": "openarg.ingest_bac",
             "schedule": crontab(day_of_week=0, hour=1, minute=0),  # Sunday 1:00 AM ART
+            "options": {"queue": "ingest"},
         },
         "ingest-indec": {
             "task": "openarg.ingest_indec",
             "schedule": crontab(day_of_month=15, hour=1, minute=0),  # Monthly, day 15
+            "options": {"queue": "ingest"},
         },
         "scrape-dkan-rosario": {
             "task": "openarg.scrape_dkan_rosario",
             "schedule": crontab(day_of_week=6, hour=0, minute=30),  # Saturday 0:30 AM ART
+            "options": {"queue": "scraper"},
         },
         "scrape-senado": {
             "task": "openarg.scrape_senado",
             "schedule": crontab(day_of_week=0, hour=2, minute=0),  # Sunday 2:00 AM ART
+            "options": {"queue": "scraper"},
         },
         "scrape-cordoba-legislatura": {
             "task": "openarg.scrape_cordoba_legislatura",
             "schedule": crontab(day_of_month=1, hour=2, minute=0),  # Monthly, day 1
+            "options": {"queue": "scraper"},
+        },
+        "scrape-boletin-staff": {
+            "task": "openarg.scrape_boletin_staff",
+            "schedule": crontab(day_of_week=1, hour=3, minute=0),  # Monday 3:00 AM ART
+            "options": {"queue": "scraper"},
         },
     })
 

@@ -35,6 +35,16 @@ class ILLMProvider(ABC):
         max_tokens: int = 4096,
     ) -> AsyncIterator[str]: ...
 
+    async def chat_json(
+        self,
+        messages: list[LLMMessage],
+        json_schema: dict | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> LLMResponse:
+        """Structured JSON output. Default: calls chat() and expects JSON."""
+        return await self.chat(messages, temperature, max_tokens)
+
 
 class IEmbeddingProvider(ABC):
     @abstractmethod
