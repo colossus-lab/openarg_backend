@@ -30,6 +30,7 @@ def upgrade() -> None:
         sa.Column("convenio", sa.String(200), nullable=True),
         sa.Column("snapshot_date", sa.Date, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
     op.create_index("ix_staff_snapshots_snapshot_date", "staff_snapshots", ["snapshot_date"])
     op.create_index("ix_staff_snapshots_area", "staff_snapshots", ["area_desempeno"])
@@ -43,12 +44,15 @@ def upgrade() -> None:
         sa.Column("apellido", sa.String(300), nullable=False),
         sa.Column("nombre", sa.String(300), nullable=False),
         sa.Column("area_desempeno", sa.String(500), nullable=False),
-        sa.Column("tipo", sa.String(10), nullable=False),  # "alta" | "baja"
+        sa.Column("tipo", sa.String(10), nullable=False),
         sa.Column("detected_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.CheckConstraint("tipo IN ('alta', 'baja')", name="ck_staff_changes_tipo"),
     )
     op.create_index("ix_staff_changes_area", "staff_changes", ["area_desempeno"])
     op.create_index("ix_staff_changes_tipo_detected", "staff_changes", ["tipo", "detected_at"])
+    op.create_index("ix_staff_changes_legajo", "staff_changes", ["legajo"])
 
 
 def downgrade() -> None:

@@ -14,6 +14,7 @@ from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
 from app.domain.ports.connectors.georef import IGeorefConnector
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
+from app.domain.ports.connectors.staff import IStaffConnector
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
@@ -259,7 +260,7 @@ class ConnectorProvider(Provider):
     @provide
     def staff(
         self, session_factory: async_sessionmaker[AsyncSession],
-    ) -> StaffAdapter:
+    ) -> IStaffConnector:
         return StaffAdapter(session_factory=session_factory)
 
 
@@ -289,7 +290,7 @@ class ApplicationProvider(Provider):
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
         retrieval_evaluator: IRetrievalEvaluator,
-        staff: StaffAdapter,
+        staff: IStaffConnector,
     ) -> SmartQueryService:
         return SmartQueryService(
             llm=llm,

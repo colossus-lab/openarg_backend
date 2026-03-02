@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import Column, Date, DateTime, String, Table, func, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
-from app.domain.entities.staff import StaffChange, StaffMember
+from app.domain.entities.staff.staff import StaffChange, StaffMember
 from app.infrastructure.persistence_sqla.registry import mapping_registry
 
 _mapped = False
@@ -29,6 +29,7 @@ def map_staff_tables() -> None:
         Column("convenio", String(200), nullable=True),
         Column("snapshot_date", Date, nullable=False),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
+        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
     )
 
     staff_changes_table = Table(
@@ -45,6 +46,7 @@ def map_staff_tables() -> None:
         Column("tipo", String(10), nullable=False),
         Column("detected_at", DateTime(timezone=True), server_default=func.now()),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
+        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
     )
 
     mapping_registry.map_imperatively(StaffMember, staff_snapshots_table)

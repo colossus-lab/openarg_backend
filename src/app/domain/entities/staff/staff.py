@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from app.domain.entities.base import BaseEntity
+from app.domain.entities.base import BaseEntity, _utcnow
 
 
 @dataclass
@@ -13,9 +13,9 @@ class StaffMember(BaseEntity):
     legajo: str = ""
     apellido: str = ""
     nombre: str = ""
-    escalafon: str = ""
+    escalafon: str | None = None
     area_desempeno: str = ""
-    convenio: str = ""
+    convenio: str | None = None
     snapshot_date: date = field(default_factory=date.today)
 
 
@@ -28,4 +28,4 @@ class StaffChange(BaseEntity):
     nombre: str = ""
     area_desempeno: str = ""
     tipo: str = ""  # "alta" | "baja"
-    detected_at: datetime | None = None
+    detected_at: datetime = field(default_factory=_utcnow)
