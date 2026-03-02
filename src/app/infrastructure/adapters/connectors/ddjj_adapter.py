@@ -21,6 +21,13 @@ def _strip_accents(text: str) -> str:
     )
 
 
+def _name_matches(nombre: str, query: str) -> bool:
+    """Check if all query words appear in the name (order-independent)."""
+    nombre_norm = _strip_accents(nombre.lower())
+    words = _strip_accents(query.lower()).split()
+    return all(w in nombre_norm for w in words)
+
+
 def _summarize_assets(bienes: list[dict]) -> dict[str, float]:
     summary: dict[str, float] = {}
     for b in bienes:
@@ -61,7 +68,7 @@ class DDJJAdapter:
         matches = [
             r
             for r in self._dataset
-            if _strip_accents(r.get("nombre", "").lower()).find(q) >= 0
+            if _name_matches(r.get("nombre", ""), query)
             or r.get("cuit", "").replace("-", "").find(q.replace("-", "")) >= 0
         ][:limit]
         return self._to_data_result(f'Búsqueda DDJJ: "{query}"', matches)
@@ -93,11 +100,10 @@ class DDJJAdapter:
 
     def get_by_name(self, name: str) -> DataResult:
         self._ensure_loaded()
-        q = _strip_accents(name.lower())
         matches = [
             r
             for r in self._dataset
-            if _strip_accents(r.get("nombre", "").lower()).find(q) >= 0
+            if _name_matches(r.get("nombre", ""), name)
         ][:5]
         return self._to_data_result(f'DDJJ de "{name}"', matches)
 
