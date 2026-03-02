@@ -9,52 +9,115 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 from datetime import UTC, datetime
 
+import httpx
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.resilience.circuit_breaker import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
 
+# Browser-like User-Agent (some portals like CABA block default httpx UA)
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
-@celery_app.task(name="openarg.scrape_catalog", bind=True, max_retries=3, soft_time_limit=900, time_limit=1080)
+PORTAL_URLS = {
+    # Nacionales
+    "datos_gob_ar": "https://datos.gob.ar/api/3/action",
+    "diputados": "https://datos.hcdn.gob.ar/api/3/action",
+    "justicia": "https://datos.jus.gob.ar/api/3/action",
+    # CABA
+    "caba": "https://data.buenosaires.gob.ar/api/3/action",
+    # Provincias
+    "buenos_aires_prov": "https://catalogo.datos.gba.gob.ar/api/3/action",
+    "cordoba_prov": "https://datosgestionabierta.cba.gov.ar/api/3/action",
+    "santa_fe": "https://datos.santafe.gob.ar/api/3/action",
+    "mendoza": "https://datosabiertos.mendoza.gov.ar/api/3/action",
+    "entre_rios": "https://datos.entrerios.gov.ar/api/3/action",
+    "neuquen_legislatura": "https://datos.legislaturaneuquen.gob.ar/api/3/action",
+    # Nacionales nuevos
+    "modernizacion": "https://datos.modernizacion.gob.ar/api/3/action",
+    "ambiente": "https://datos.ambiente.gob.ar/api/3/action",
+    "arsat": "https://datos.arsat.com.ar/api/3/action",
+    # Provincias nuevas
+    "rio_negro": "https://datos.rionegro.gov.ar/api/3/action",
+    "jujuy": "https://datos.jujuy.gob.ar/api/3/action",
+    "salta": "https://datos.salta.gob.ar/api/3/action",
+    # Municipios nuevos
+    "cordoba_muni": "https://gobiernoabierto.cordoba.gob.ar/data/api/3/action",
+    "la_plata": "https://datos.laplata.gob.ar/api/3/action",
+}
+
+
+class PortalUnavailableError(Exception):
+    """Portal is down/maintenance — do NOT retry."""
+
+
+class PortalHTMLResponseError(PortalUnavailableError):
+    """Portal returned HTML instead of JSON (maintenance page, WAF block, etc.)."""
+
+
+def _retry_countdown(attempt: int, base: float = 30.0, cap: float = 300.0) -> float:
+    """Exponential backoff with full jitter: uniform(0, min(base * 2^attempt, cap))."""
+    return random.uniform(0, min(base * (2 ** attempt), cap))
+
+
+def _check_html_response(resp, portal: str) -> None:
+    """Detect HTML maintenance pages or WAF blocks that arrive with 200 status."""
+    ct = resp.headers.get("content-type", "")
+    if "text/html" in ct:
+        snippet = resp.text[:300] if resp.text else "(empty)"
+        raise PortalHTMLResponseError(
+            f"Portal {portal} returned HTML instead of JSON "
+            f"(likely maintenance or WAF block): {snippet}"
+        )
+    # Some broken servers return raw HTML without proper Content-Type
+    body = resp.content[:50] if resp.content else b""
+    if body.lstrip().startswith(b"<html") or body.lstrip().startswith(b"<!DOCTYPE"):
+        snippet = resp.text[:300] if resp.text else "(empty)"
+        raise PortalHTMLResponseError(
+            f"Portal {portal} returned raw HTML (no proper HTTP headers): {snippet}"
+        )
+
+
+@celery_app.task(name="openarg.scrape_catalog", bind=True, max_retries=2, soft_time_limit=900, time_limit=1080)
 def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
     """
     Scrapea el catálogo completo de un portal de datos.
     Guarda metadata en tabla datasets. Dispara embedding para cada uno.
     """
-    import httpx
+    logger.info(f"Starting catalog scrape for portal: {portal} (attempt {self.request.retries + 1}/{self.max_retries + 1})")
 
-    logger.info(f"Starting catalog scrape for portal: {portal}")
-
-    portal_urls = {
-        # Nacionales
-        "datos_gob_ar": "https://datos.gob.ar/api/3/action",
-        "diputados": "https://datos.hcdn.gob.ar/api/3/action",
-        "justicia": "https://datos.jus.gob.ar/api/3/action",
-        # CABA
-        "caba": "https://data.buenosaires.gob.ar/api/3/action",
-        # Provincias
-        "buenos_aires_prov": "https://catalogo.datos.gba.gob.ar/api/3/action",
-        "cordoba_prov": "https://datosgestionabierta.cba.gov.ar/api/3/action",
-        "santa_fe": "https://datos.santafe.gob.ar/api/3/action",
-        "mendoza": "https://datosabiertos.mendoza.gov.ar/api/3/action",
-        "entre_rios": "https://datos.entrerios.gov.ar/api/3/action",
-        "neuquen_legislatura": "https://datos.legislaturaneuquen.gob.ar/api/3/action",
-    }
-    base_url = portal_urls.get(portal)
+    base_url = PORTAL_URLS.get(portal)
     if not base_url:
         logger.error(f"Unknown portal: {portal}")
         return {"error": f"Unknown portal: {portal}"}
 
+    # Circuit breaker: skip portal if it has been failing repeatedly
+    cb = get_circuit_breaker(f"scraper:{portal}", failure_threshold=3, recovery_timeout=300.0)
+    if cb.is_open:
+        logger.warning(
+            "Circuit OPEN for portal %s — skipping scrape (will recover in ~5 min)", portal
+        )
+        return {"portal": portal, "skipped": True, "reason": "circuit_open"}
+
     engine = get_sync_engine()
-    client = httpx.Client(timeout=60.0)
+    client = httpx.Client(
+        timeout=httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=30.0),
+        headers={"User-Agent": _USER_AGENT},
+        follow_redirects=True,
+    )
 
     def _safe_json(resp, label: str) -> dict:
-        """Parse JSON response, handling empty bodies gracefully."""
+        """Parse JSON response, handling empty/HTML bodies gracefully."""
+        _check_html_response(resp, portal)
         if not resp.content or not resp.content.strip():
             logger.warning("Empty response body from %s (HTTP %d)", label, resp.status_code)
             return {}
@@ -77,15 +140,35 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
 
         indexed = 0
         offset = 0
+        consecutive_page_errors = 0
+        max_consecutive_page_errors = 3
 
         while offset < total:
-            resp = client.get(
-                f"{base_url}/package_search",
-                params={"rows": batch_size, "start": offset},
-            )
-            resp.raise_for_status()
-            page_data = _safe_json(resp, f"{portal}/page?start={offset}")
-            packages = page_data.get("result", {}).get("results", [])
+            try:
+                resp = client.get(
+                    f"{base_url}/package_search",
+                    params={"rows": batch_size, "start": offset},
+                )
+                resp.raise_for_status()
+                page_data = _safe_json(resp, f"{portal}/page?start={offset}")
+                packages = page_data.get("result", {}).get("results", [])
+                consecutive_page_errors = 0  # reset on success
+            except PortalUnavailableError:
+                raise  # propagate immediately — no retry
+            except Exception as page_exc:
+                consecutive_page_errors += 1
+                logger.warning(
+                    "Page fetch failed for %s offset=%d (%d/%d consecutive): %s",
+                    portal, offset, consecutive_page_errors, max_consecutive_page_errors, page_exc,
+                )
+                if consecutive_page_errors >= max_consecutive_page_errors:
+                    logger.error(
+                        "Too many consecutive page errors for %s — aborting with partial results",
+                        portal,
+                    )
+                    break
+                offset += batch_size
+                continue
 
             # Collect resources for batch upsert
             batch_rows = []
@@ -174,14 +257,34 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
             offset += batch_size
             logger.info(f"Scraped {offset}/{total} packages from {portal}")
 
+        cb.record_success()
         return {"portal": portal, "total_packages": total, "datasets_indexed": indexed}
 
     except SoftTimeLimitExceeded:
         logger.error(f"Scraper timed out for portal {portal}")
+        cb.record_failure()
         raise
+    except PortalUnavailableError as exc:
+        # Portal is down/maintenance/WAF — do NOT retry, fail immediately
+        cb.record_failure()
+        logger.error(f"Portal {portal} unavailable (no retry): {exc}")
+        return {"portal": portal, "error": str(exc), "retryable": False}
+    except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+        # Connection-level failure — retry with backoff but limited
+        cb.record_failure()
+        logger.warning(f"Connection failed for {portal}: {exc}")
+        countdown = _retry_countdown(self.request.retries)
+        raise self.retry(exc=exc, countdown=countdown)
+    except httpx.RemoteProtocolError as exc:
+        # Broken HTTP response (e.g., HTTP/0.9 maintenance page) — no retry
+        cb.record_failure()
+        logger.error(f"Protocol error from {portal} (no retry): {exc}")
+        return {"portal": portal, "error": str(exc), "retryable": False}
     except Exception as exc:
+        cb.record_failure()
         logger.exception(f"Scraper failed for {portal}")
-        raise self.retry(exc=exc, countdown=60)
+        countdown = _retry_countdown(self.request.retries)
+        raise self.retry(exc=exc, countdown=countdown)
     finally:
         client.close()
         engine.dispose()
@@ -189,15 +292,12 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
 
 @celery_app.task(name="openarg.scrape_all_portals")
 def scrape_all_portals():
-    """Dispara scrape_catalog para todos los portales registrados."""
-    portals = [
-        "datos_gob_ar", "diputados", "justicia", "caba",
-        "buenos_aires_prov", "cordoba_prov", "santa_fe",
-        "mendoza", "entre_rios", "neuquen_legislatura",
-    ]
-    for portal in portals:
-        scrape_catalog.delay(portal)
-    logger.info(f"Dispatched scrape for {len(portals)} portals")
+    """Dispara scrape_catalog para todos los portales, escalonado 10s entre cada uno."""
+    portals = list(PORTAL_URLS.keys())
+    for i, portal in enumerate(portals):
+        # Stagger dispatches by 10 seconds to avoid overwhelming the worker
+        scrape_catalog.apply_async(args=[portal], countdown=i * 10)
+    logger.info(f"Dispatched scrape for {len(portals)} portals (staggered)")
     return {"dispatched": portals}
 
 
@@ -214,6 +314,14 @@ def _portal_display_name(portal: str) -> str:
         "mendoza": "Mendoza",
         "entre_rios": "Entre Ríos",
         "neuquen_legislatura": "Legislatura de Neuquén",
+        "modernizacion": "Modernización",
+        "ambiente": "Ambiente",
+        "arsat": "ARSAT",
+        "rio_negro": "Río Negro",
+        "jujuy": "Jujuy",
+        "salta": "Salta",
+        "cordoba_muni": "Córdoba Ciudad",
+        "la_plata": "La Plata",
     }
     return names.get(portal, portal)
 
@@ -513,6 +621,7 @@ def index_dataset_embedding(self, dataset_id: str):
         raise
     except Exception as exc:
         logger.exception(f"Embedding failed for dataset {dataset_id}")
-        raise self.retry(exc=exc, countdown=30)
+        countdown = _retry_countdown(self.request.retries, base=15.0, cap=120.0)
+        raise self.retry(exc=exc, countdown=countdown)
     finally:
         engine.dispose()
