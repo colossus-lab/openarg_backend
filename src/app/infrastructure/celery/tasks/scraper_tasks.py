@@ -53,11 +53,26 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
     engine = get_sync_engine()
     client = httpx.Client(timeout=60.0)
 
+    def _safe_json(resp, label: str) -> dict:
+        """Parse JSON response, handling empty bodies gracefully."""
+        if not resp.content or not resp.content.strip():
+            logger.warning("Empty response body from %s (HTTP %d)", label, resp.status_code)
+            return {}
+        try:
+            return resp.json()
+        except Exception:
+            logger.warning("Invalid JSON from %s: %s", label, resp.text[:200])
+            return {}
+
     try:
         # Get total count
         count_resp = client.get(f"{base_url}/package_search", params={"rows": 0})
         count_resp.raise_for_status()
-        total = count_resp.json().get("result", {}).get("count", 0)
+        data = _safe_json(count_resp, f"{portal}/count")
+        total = data.get("result", {}).get("count", 0)
+        if not total:
+            logger.warning("Portal %s returned 0 packages or bad response — skipping", portal)
+            return {"portal": portal, "total_packages": 0, "datasets_indexed": 0}
         logger.info(f"Portal {portal} has {total} packages")
 
         indexed = 0
@@ -69,7 +84,8 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                 params={"rows": batch_size, "start": offset},
             )
             resp.raise_for_status()
-            packages = resp.json().get("result", {}).get("results", [])
+            page_data = _safe_json(resp, f"{portal}/page?start={offset}")
+            packages = page_data.get("result", {}).get("results", [])
 
             # Collect resources for batch upsert
             batch_rows = []

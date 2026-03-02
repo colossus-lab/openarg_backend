@@ -176,3 +176,57 @@ def _initial_scrape(sender, **kwargs):
     # Index congressional session chunks in pgvector (idempotent — skips if already indexed)
     from app.infrastructure.celery.tasks.embedding_tasks import index_sesiones_chunks
     index_sesiones_chunks.delay()
+
+    # Transparency tasks — run on first startup if tables are empty
+    _initial_transparency()
+
+
+def _initial_transparency(engine=None):
+    """Dispatch transparency analysis tasks if their tables are empty."""
+    from sqlalchemy import text
+
+    from app.infrastructure.celery.tasks._db import get_sync_engine
+    from app.infrastructure.celery.tasks.transparency_tasks import (
+        analyze_session_topics,
+        detect_ddjj_anomalies,
+        score_portal_health,
+    )
+
+    if engine is None:
+        engine = get_sync_engine()
+
+    try:
+        with engine.connect() as conn:
+            health_count = conn.execute(
+                text("SELECT COUNT(*) FROM dataset_health_scores")
+            ).scalar() or 0
+            anomaly_count = conn.execute(
+                text("SELECT COUNT(*) FROM ddjj_anomalies")
+            ).scalar() or 0
+            topics_count = conn.execute(
+                text("SELECT COUNT(*) FROM session_topics")
+            ).scalar() or 0
+    except Exception:
+        logger.warning("Could not check transparency tables — dispatching all")
+        health_count = anomaly_count = topics_count = 0
+
+    # Portal health needs datasets — delay 120s to let scrapers finish
+    if health_count == 0:
+        logger.info("No health scores found — dispatching score_portal_health (120s delay)")
+        score_portal_health.apply_async(countdown=120)
+    else:
+        logger.info("Health scores already exist (%d) — skipping", health_count)
+
+    # DDJJ anomalies — can run immediately (uses pre-loaded DDJJ data)
+    if anomaly_count == 0:
+        logger.info("No DDJJ anomalies found — dispatching detect_ddjj_anomalies")
+        detect_ddjj_anomalies.delay()
+    else:
+        logger.info("DDJJ anomalies already exist (%d) — skipping", anomaly_count)
+
+    # Session topics — can run immediately (uses pre-loaded session chunks)
+    if topics_count == 0:
+        logger.info("No session topics found — dispatching analyze_session_topics")
+        analyze_session_topics.delay()
+    else:
+        logger.info("Session topics already exist (%d) — skipping", topics_count)
