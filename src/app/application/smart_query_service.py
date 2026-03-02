@@ -320,6 +320,13 @@ _DDJJ_RANKING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Extracts a specific position number from follow-up queries like
+# "cual es el 11", "numero 11", "puesto 11", "#11", "el 11°"
+_DDJJ_POSITION_PATTERN = re.compile(
+    r"(?:n[uú]mero|puesto|posici[oó]n|lugar|#|el)\s*(\d{1,3})(?:[°ºª]|\b)",
+    re.IGNORECASE,
+)
+
 # ── Staff deterministic routing patterns ──────────────────
 _STAFF_PATTERN = re.compile(
     r"(asesores?\s+de\s+|personal\s+de(?:l)?\s+|empleados?\s+de\s+"
@@ -1050,8 +1057,36 @@ class SmartQueryService:
         if not _DDJJ_PATTERN.search(text):
             return None
 
+        # Extract just the new user question (avoid matching numbers in context history)
+        user_question = text
+        marker = "NUEVA PREGUNTA DEL USUARIO"
+        marker_idx = text.find(marker)
+        if marker_idx != -1:
+            user_question = text[marker_idx:]
+
+        # Specific position query (e.g. "cual es el numero 11", "puesto 15")
+        pos_match = _DDJJ_POSITION_PATTERN.search(user_question)
+        if pos_match and _DDJJ_RANKING_PATTERN.search(text):
+            position = int(pos_match.group(1))
+            order = "asc" if re.search(r"menor|pobres?", text, re.IGNORECASE) else "desc"
+            return ExecutionPlan(
+                query=text,
+                intent="ddjj_ranking",
+                steps=[
+                    PlanStep(
+                        id="ddjj_ranking",
+                        action="query_ddjj",
+                        description=f"Posición {position} del ranking de diputados por patrimonio ({order})",
+                        params={"action": "ranking", "sortBy": "patrimonio", "order": order, "top": position, "position": position},
+                    ),
+                ],
+            )
+
         # Ranking queries
         if _DDJJ_RANKING_PATTERN.search(text):
+            # Extract custom top N if specified (e.g. "top 20", "los 15 diputados")
+            top_match = re.search(r"(?:top|los|las)\s+(\d{1,3})", user_question, re.IGNORECASE)
+            top = int(top_match.group(1)) if top_match else 10
             order = "asc" if re.search(r"menor|pobres?", text, re.IGNORECASE) else "desc"
             return ExecutionPlan(
                 query=text,
@@ -1061,7 +1096,7 @@ class SmartQueryService:
                         id="ddjj_ranking",
                         action="query_ddjj",
                         description=f"Ranking de diputados por patrimonio ({order})",
-                        params={"action": "ranking", "sortBy": "patrimonio", "order": order, "top": 10},
+                        params={"action": "ranking", "sortBy": "patrimonio", "order": order, "top": top},
                     ),
                 ],
             )
@@ -1490,6 +1525,18 @@ class SmartQueryService:
                 top=params.get("top", 10),
                 order=params.get("order", "desc"),
             )
+            # If a specific position was requested, only return that record
+            position = params.get("position")
+            if position and result.records and len(result.records) >= position:
+                result = DataResult(
+                    source=result.source,
+                    portal_name=result.portal_name,
+                    portal_url=result.portal_url,
+                    dataset_title=result.dataset_title,
+                    format=result.format,
+                    records=[result.records[position - 1]],
+                    metadata={**result.metadata, "position": position},
+                )
         elif action == "stats":
             result = self._ddjj.stats()
         elif action == "detail" or params.get("nombre"):
