@@ -330,15 +330,17 @@ _DDJJ_POSITION_PATTERN = re.compile(
 # ── Staff deterministic routing patterns ──────────────────
 _STAFF_PATTERN = re.compile(
     r"(asesores?\s+de\s+|personal\s+de(?:l)?\s+|empleados?\s+de\s+"
-    r"|cu[aá]ntos?\s+(?:asesores?|personal|empleados?)"
+    r"|personas?\s+(?:que\s+)?(?:trabaja|en\s+(?:la\s+)?comisi[oó]n)"
+    r"|cu[aá]ntos?\s+(?:asesores?|personal|empleados?|personas?)"
     r"|equipo\s+de\s+"
-    r"|trabaja(?:n|r)?\s+(?:con|para)\s+"
+    r"|trabaja(?:n|r)?\s+(?:con|para|en)\s+"
     r"|n[oó]mina\s+de(?:l)?\s+personal"
     r"|qui[eé]n(?:es)?\s+trabaja"
     r"|list(?:a|ado)\s+de\s+(?:asesores?|personal|empleados?)"
     r"|altas?\s+y\s+bajas?|bajas?\s+y\s+altas?"
     r"|cambios?\s+(?:de\s+)?personal"
     r"|rotaci[oó]n\s+de\s+personal"
+    r"|comisi[oó]n\s+de\s+\w+.{0,30}(?:personal|trabaja|empleado|asesor|miembro)"
     r"|(?:qui[eé]n(?:es)?|cu[aá]les?)\s+(?:se\s+fue|se\s+fueron|lleg[oó]|llegaron|entr[oó]|entraron|sali[oó]|salieron))",
     re.IGNORECASE,
 )
@@ -375,6 +377,11 @@ _STAFF_COUNT_PATTERN = re.compile(
 
 _STAFF_COUNT_TIENE_PATTERN = re.compile(
     r"cu[aá]ntos?\s+(?:asesores?|personal|empleados?)\s+tiene\s+(.+?)(?:\?|$)",
+    re.IGNORECASE,
+)
+
+_STAFF_COMMISSION_PATTERN = re.compile(
+    r"comisi[oó]n\s+de\s+(.+?)(?:\s+(?:en|del?)\s+(?:el\s+)?(?:congreso|c[aá]mara|senado|diputados?))?(?:\?|$)",
     re.IGNORECASE,
 )
 
@@ -1218,7 +1225,35 @@ class SmartQueryService:
                 ],
             )
 
-        # Generic staff query
+        # Commission-based query ("comisión de educación", "comisión de presupuesto")
+        # Extract user question only to avoid matching commission names in context
+        user_q = txt
+        marker = "NUEVA PREGUNTA DEL USUARIO"
+        idx = txt.find(marker)
+        if idx != -1:
+            user_q = txt[idx:]
+        comm_match = _STAFF_COMMISSION_PATTERN.search(user_q)
+        if comm_match:
+            commission = comm_match.group(1).strip()
+            return ExecutionPlan(
+                query=txt,
+                intent="staff_commission",
+                steps=[
+                    PlanStep(
+                        id="staff_commission",
+                        action="query_staff",
+                        description=f"Personal de la comisión de {commission}",
+                        params={"action": "get_by_legislator", "name": f"comision de {commission}"},
+                    ),
+                ],
+            )
+
+        # Generic staff query — extract keywords instead of passing full text
+        keywords = re.sub(
+            r"\b(que|cual|cuales|quienes?|como|donde|cuanto|personas?|trabajan?|en|el|la|los|las|del?|un[oa]?s?|por|con|para|es|son|hay)\b",
+            " ", txt, flags=re.IGNORECASE,
+        ).strip()
+        keywords = re.sub(r"\s+", " ", keywords).strip()[:200]
         return ExecutionPlan(
             query=txt,
             intent="staff_busqueda",
@@ -1227,7 +1262,7 @@ class SmartQueryService:
                     id="staff_search",
                     action="query_staff",
                     description="Búsqueda general de personal",
-                    params={"action": "search", "query": txt},
+                    params={"action": "search", "query": keywords or txt[:200]},
                 ),
             ],
         )
