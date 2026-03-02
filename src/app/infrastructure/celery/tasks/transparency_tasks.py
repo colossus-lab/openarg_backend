@@ -193,18 +193,26 @@ def score_portal_health(self, portal: str | None = None):
 
 
 # ---------------------------------------------------------------------------
-# Feature 3: DDJJ Anomaly Detector
+# Feature 3: DDJJ Anomaly Detector (ajustado por inflación y tipo de cambio)
 # ---------------------------------------------------------------------------
 
 _DDJJ_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "ddjj_dataset.json"
+
+# Constantes económicas Argentina 2024
+TC_PROMEDIO_2024 = 900.0        # ARS/USD promedio anual 2024
+INFLACION_ANUAL_2024 = 2.11     # 211% inflación acumulada 2024
+UMBRAL_VARIACION_USD = 50_000   # Variaciones reales < USD 50K no son significativas
+UMBRAL_BRECHA_USD = 100_000     # Brecha inexplicable mínima para flaggear
 
 
 @celery_app.task(name="openarg.detect_ddjj_anomalies", bind=True, max_retries=2, soft_time_limit=300, time_limit=360)
 def detect_ddjj_anomalies(self):
     """
-    Analiza las DDJJ patrimoniales y detecta anomalías:
-    - Crecimiento patrimonial que excede significativamente los ingresos declarados
-    - Patrimonio cierre >> bienes inicio sin ingresos que lo justifiquen
+    Analiza las DDJJ patrimoniales con métricas ajustadas a la realidad argentina:
+    - Variación real descontando inflación
+    - Conversión a USD para evaluar magnitud real
+    - Brecha inexplicable (variación real - ingreso neto)
+    - Percentil de patrimonio entre pares
     """
     engine = get_sync_engine()
     try:
@@ -216,58 +224,105 @@ def detect_ddjj_anomalies(self):
         return {"error": "Could not load DDJJ data"}
 
     try:
+        # Pre-compute percentiles for patrimonio_cierre across all records
+        patrimonios = [
+            float(r.get("patrimonioCierre", 0) or 0) for r in dataset
+        ]
+        patrimonios_sorted = sorted(patrimonios)
+        n_total = len(patrimonios_sorted)
+
+        def _percentil(valor: float) -> float:
+            """Percentile rank of valor within all patrimonio_cierre values."""
+            if n_total == 0:
+                return 0.0
+            count_below = sum(1 for v in patrimonios_sorted if v < valor)
+            return round((count_below / max(n_total - 1, 1)) * 100, 1)
+
         anomalies = []
 
         for record in dataset:
-            bienes_inicio = record.get("bienesInicio", 0) or 0
-            bienes_cierre = record.get("bienesCierre", 0) or 0
-            deudas_inicio = record.get("deudasInicio", 0) or 0
-            deudas_cierre = record.get("deudasCierre", 0) or 0
-            patrimonio_cierre = record.get("patrimonioCierre", 0) or 0
-            ingresos = record.get("ingresosTrabajoNeto", 0) or 0
-            gastos = record.get("gastosPersonales", 0) or 0
+            bienes_inicio = float(record.get("bienesInicio", 0) or 0)
+            bienes_cierre = float(record.get("bienesCierre", 0) or 0)
+            deudas_inicio = float(record.get("deudasInicio", 0) or 0)
+            deudas_cierre = float(record.get("deudasCierre", 0) or 0)
+            patrimonio_cierre = float(record.get("patrimonioCierre", 0) or 0)
+            ingresos = float(record.get("ingresosTrabajoNeto", 0) or 0)
+            gastos = float(record.get("gastosPersonales", 0) or 0)
 
-            # Variación patrimonial bruta dentro del año
-            variacion = bienes_cierre - bienes_inicio
-            # Ingreso neto disponible
+            # --- Métricas ajustadas ---
+
+            # 1. Variación real (descontando inflación)
+            variacion_nominal = bienes_cierre - bienes_inicio
+            variacion_por_inflacion = bienes_inicio * INFLACION_ANUAL_2024
+            variacion_real = variacion_nominal - variacion_por_inflacion
+
+            # 2. Conversión a USD
+            variacion_real_usd = variacion_real / TC_PROMEDIO_2024
+
+            # 3. Brecha real inexplicable
             ingreso_neto = ingresos - gastos
-            # Brecha inexplicable: cuánto creció el patrimonio más allá de lo que
-            # los ingresos - gastos podrían justificar (si ingreso_neto es negativo,
-            # la brecha es aún mayor)
+            brecha_real = variacion_real - ingreso_neto
+            brecha_real_usd = brecha_real / TC_PROMEDIO_2024
+
+            # 4. Ratio real (solo si hay ingresos y variación real positiva)
+            ratio_real = (variacion_real / ingresos) if (ingresos > 0 and variacion_real > 0) else 0.0
+
+            # 5. Percentil de patrimonio entre pares
+            percentil = _percentil(patrimonio_cierre)
+
+            # --- Clasificación ---
+            # Variación bruta (para DB, compatibilidad)
+            variacion = variacion_nominal
             brecha = variacion - ingreso_neto
+            ratio = variacion / ingresos if ingresos > 0 else 0.0
 
-            # Ratio: cuántas veces la variación supera los ingresos
-            ratio = variacion / ingresos if ingresos > 0 else 0
-
-            # Clasificar anomalía
             is_anomalous = False
             anomaly_type = None
             severity = None
 
-            if ingresos > 0 and ratio > 5:
-                # Patrimonio creció más de 5x los ingresos
-                is_anomalous = True
-                anomaly_type = "crecimiento_excesivo"
-                severity = "high" if ratio > 10 else "medium"
-            elif ingresos > 0 and ratio > 3:
-                is_anomalous = True
-                anomaly_type = "crecimiento_elevado"
-                severity = "medium" if ratio > 4 else "low"
-            elif ingresos > 0 and bienes_inicio == 0 and bienes_cierre > ingresos * 2:
-                # Patrimonio apareció de la nada, pero tiene ingresos
-                is_anomalous = True
-                anomaly_type = "patrimonio_aparece"
-                severity = "medium"
-            elif ingresos <= 0 and variacion > 0:
-                is_anomalous = True
-                anomaly_type = "crecimiento_sin_ingresos"
-                severity = "high"
+            # Filtro previo: si la variación real es <= 0 o < USD 50K, no es anomalía
+            if variacion_real > 0 and variacion_real_usd >= UMBRAL_VARIACION_USD:
+                # HIGH
+                if ratio_real > 10 and brecha_real_usd > 500_000:
+                    is_anomalous = True
+                    anomaly_type = "crecimiento_excesivo"
+                    severity = "high"
+                elif ingresos <= 0 and variacion_real_usd > 100_000:
+                    is_anomalous = True
+                    anomaly_type = "crecimiento_sin_ingresos"
+                    severity = "high"
+                # MEDIUM
+                elif ratio_real > 5 and brecha_real_usd > UMBRAL_BRECHA_USD:
+                    is_anomalous = True
+                    anomaly_type = "crecimiento_excesivo"
+                    severity = "medium"
+                elif (
+                    bienes_inicio == 0
+                    and (patrimonio_cierre / TC_PROMEDIO_2024) > 200_000
+                    and ratio_real > 3
+                ):
+                    is_anomalous = True
+                    anomaly_type = "patrimonio_aparece"
+                    severity = "medium"
+                # LOW
+                elif ratio_real > 3 and brecha_real_usd > UMBRAL_VARIACION_USD:
+                    is_anomalous = True
+                    anomaly_type = "crecimiento_elevado"
+                    severity = "low"
 
             details = {
                 "deudas_inicio": deudas_inicio,
                 "deudas_cierre": deudas_cierre,
                 "ingreso_neto": ingreso_neto,
                 "bienes_count": len(record.get("bienes") or []),
+                "variacion_real": round(variacion_real, 2),
+                "variacion_real_usd": round(variacion_real_usd, 2),
+                "brecha_real": round(brecha_real, 2),
+                "brecha_real_usd": round(brecha_real_usd, 2),
+                "ratio_real": round(ratio_real, 2),
+                "percentil_patrimonio": percentil,
+                "tc_usado": TC_PROMEDIO_2024,
+                "inflacion_usada": INFLACION_ANUAL_2024,
             }
 
             anomalies.append({
@@ -321,8 +376,9 @@ def detect_ddjj_anomalies(self):
                     flagged += 1
 
         logger.info(
-            "DDJJ anomaly analysis complete: %d records, %d flagged",
-            len(anomalies), flagged,
+            "DDJJ anomaly analysis complete: %d records, %d flagged "
+            "(inflation=%.0f%%, tc=%.0f ARS/USD)",
+            len(anomalies), flagged, INFLACION_ANUAL_2024 * 100, TC_PROMEDIO_2024,
         )
         return {"total": len(anomalies), "flagged": flagged}
 
