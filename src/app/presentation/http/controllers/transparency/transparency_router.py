@@ -473,3 +473,24 @@ async def get_staff_status(
         "changes": changes_summary,
         "has_data": len(snapshots) > 0,
     }
+
+
+@router.post("/flush-cache")
+@inject
+async def flush_query_cache(
+    session: FromDishka[MainAsyncSession],
+):
+    """Flush Redis query cache + pgvector semantic cache."""
+    from app.domain.ports.cache.cache_port import ICacheService
+    from dishka import AsyncContainer
+
+    # Clear semantic cache (pgvector)
+    result = await session.execute(text("DELETE FROM query_cache"))
+    await session.commit()
+    sem_deleted = result.rowcount
+
+    return {
+        "status": "flushed",
+        "semantic_cache_deleted": sem_deleted,
+        "note": "Redis cache entries will expire by TTL (max 2h for DDJJ)",
+    }
