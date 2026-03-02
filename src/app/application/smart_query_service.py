@@ -645,6 +645,7 @@ class SmartQueryService:
             "sources": sources,
             "chart_data": charts if charts else None,
             "tokens_used": tokens_used,
+            "documents": documents if documents else None,
         }
         await self._write_cache(question, result_dict, intent=plan.intent)
 
@@ -896,6 +897,14 @@ class SmartQueryService:
             if r.records
         ]
 
+        # Extract structured documents for frontend card rendering
+        documents: list[dict[str, Any]] = []
+        for r in results:
+            if r.source.startswith("ddjj:"):
+                for rec in r.records:
+                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
+                        documents.append({**rec, "doc_type": "ddjj"})
+
         yield {
             "type": "complete",
             "answer": clean_answer,
@@ -903,6 +912,7 @@ class SmartQueryService:
             "chart_data": charts if charts else None,
             "confidence": confidence,
             "citations": citations,
+            "documents": documents if documents else None,
         }
 
         # Cache write (fire-and-forget, don't block streaming)
@@ -912,6 +922,7 @@ class SmartQueryService:
                 "sources": sources,
                 "chart_data": charts if charts else None,
                 "tokens_used": 0,
+                "documents": documents if documents else None,
             }
             await self._write_cache(question, result_dict, intent=plan.intent)
         except Exception:
@@ -1132,6 +1143,7 @@ class SmartQueryService:
                     sources=cached.get("sources", []),
                     chart_data=cached.get("chart_data"),
                     tokens_used=cached.get("tokens_used", 0),
+                    documents=cached.get("documents"),
                     cached=True,
                 )
         except Exception:
@@ -1150,6 +1162,7 @@ class SmartQueryService:
                         sources=sem_cached.get("sources", []),
                         chart_data=sem_cached.get("chart_data"),
                         tokens_used=sem_cached.get("tokens_used", 0),
+                        documents=sem_cached.get("documents"),
                         cached=True,
                     )
         except Exception:
