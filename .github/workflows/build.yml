@@ -67,27 +67,6 @@ jobs:
             dockerfile: docker/beat.Dockerfile
             image_name: openarg/beat
 
-          # MCP Servers (4)
-          - service: mcp-series-tiempo
-            dockerfile: docker/mcp.Dockerfile
-            image_name: openarg/mcp-series-tiempo
-            build_args: MCP_SERVER=series_tiempo_mcp
-
-          - service: mcp-ckan
-            dockerfile: docker/mcp.Dockerfile
-            image_name: openarg/mcp-ckan
-            build_args: MCP_SERVER=ckan_mcp
-
-          - service: mcp-argentina-datos
-            dockerfile: docker/mcp.Dockerfile
-            image_name: openarg/mcp-argentina-datos
-            build_args: MCP_SERVER=argentina_datos_mcp
-
-          - service: mcp-sesiones
-            dockerfile: docker/mcp.Dockerfile
-            image_name: openarg/mcp-sesiones
-            build_args: MCP_SERVER=sesiones_mcp
-
     steps:
       - name: Free up disk space
         run: |
@@ -163,6 +142,5 @@ jobs:
           echo "  - API"
           echo "  - 7 Celery Workers (scraper, collector, ingest, embedding, analyst, s3, transparency)"
           echo "  - Celery Beat"
-          echo "  - 4 MCP Servers (series_tiempo, ckan, argentina_datos, sesiones)"
           echo ""
-          echo "Total: 13 Docker images"
+          echo "Total: 9 Docker images"

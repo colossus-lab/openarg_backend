@@ -58,15 +58,6 @@ src/app/
 │   │   ├── health.py                            # HealthCheckService (postgres, redis, ddjj, sesiones)
 │   │   ├── metrics.py                           # MetricsCollector singleton (requests, connectors, cache, tokens)
 │   │   └── middleware.py                        # MetricsMiddleware (ASGI)
-│   ├── mcp/                                     # MCP Servers (standalone Docker containers)
-│   │   ├── base_server.py                       # MCPServer base (FastAPI with /tools, /execute/{name}, /health)
-│   │   ├── mcp_client.py                        # MCPClient — HTTP proxy to remote MCP servers
-│   │   ├── exceptions.py                        # MCPServerError hierarchy (retryable classification)
-│   │   └── servers/                             # Standalone MCP server processes
-│   │       ├── series_tiempo_mcp.py             # Port 8091 — search/fetch time series
-│   │       ├── ckan_mcp.py                      # Port 8092 — CKAN open data portals
-│   │       ├── argentina_datos_mcp.py           # Port 8093 — dollar, risk, inflation
-│   │       └── sesiones_mcp.py                  # Port 8094 — congressional transcripts
 │   ├── persistence_sqla/
 │   │   ├── mappings/                            # SQLAlchemy table ↔ entity mappings
 │   │   ├── alembic/versions/                    # Migration files
@@ -86,8 +77,7 @@ src/app/
 │   ├── query/query_router.py                    # Query submission + WebSocket stream
 │   ├── query/smart_query_router.py              # Smart pipeline + WS /ws/smart streaming
 │   ├── sandbox/sandbox_router.py                # SQL sandbox + NL2SQL
-│   ├── monitoring/metrics_router.py             # GET /api/v1/metrics
-│   └── mcp/mcp_router.py                        # MCP proxy → remote servers (/mcp/*)
+│   └── monitoring/metrics_router.py             # GET /api/v1/metrics
 │
 └── setup/
     ├── ioc/provider_registry.py                 # Dishka providers (all DI wiring)
@@ -111,23 +101,6 @@ collect_dataset → collector queue (concurrency 4)
 analyze_query → analyst queue (concurrency 2)
     → 4 steps: plan (Gemini 2.5 Flash) → vector search → gather sample rows → analyze (Gemini 2.5 Flash)
 ```
-
-### MCP Servers (Standalone Docker Containers)
-
-Each MCP server runs as an independent FastAPI process in its own Docker container.
-The API communicates with them via `MCPClient` (HTTP proxy).
-
-```
-API (8080) ──MCPClient──HTTP──→ mcp-series-tiempo (8091)
-                            ──→ mcp-ckan (8092)
-                            ──→ mcp-argentina-datos (8093)
-                            ──→ mcp-sesiones (8094)
-```
-
-- **Dockerfile:** `docker/mcp.Dockerfile` (parametrized via `ARG MCP_SERVER`)
-- **Compose:** included in `docker-compose.yaml` (local) and `docker-compose.prod.yml` (production)
-- Each server extends `MCPServer` (base_server.py) and registers tools with JSON Schema
-- Each has `if __name__ == "__main__"` for `python -m app.infrastructure.mcp.servers.<name>_mcp`
 
 ### Resilience
 
@@ -154,9 +127,6 @@ API (8080) ──MCPClient──HTTP──→ mcp-series-tiempo (8091)
 | GET | `/api/v1/sandbox/tables` | List cached tables |
 | POST | `/api/v1/sandbox/ask` | NL2SQL query |
 | GET | `/api/v1/metrics` | In-memory metrics (requests, connectors, cache, tokens) |
-| GET | `/mcp/tools` | List all MCP tools across servers |
-| POST | `/mcp/tools/{server}/{tool}` | Execute an MCP tool |
-| GET | `/mcp/health/{server}` | MCP server health check |
 
 ### Database Tables
 
@@ -197,7 +167,7 @@ make workers.collector      # Run collector worker
 make workers.embedding      # Run embedding worker
 make workers.analyst        # Run analyst worker
 make flower                 # Celery monitoring UI
-make docker.up              # Start all services (API + workers + MCP servers)
+make docker.up              # Start all services (API + workers)
 make docker.down            # Stop all services
 make docker.prod            # Start production stack
 make code.format            # Ruff format
@@ -215,15 +185,9 @@ CELERY_BROKER_URL=redis://localhost:6381/0
 CELERY_RESULT_BACKEND=redis://localhost:6381/1
 REDIS_CACHE_URL=redis://localhost:6381/2
 GEMINI_API_KEY=...
-
-# MCP Server URLs (standalone containers)
-MCP_SERIES_TIEMPO_URL=http://localhost:8091
-MCP_CKAN_URL=http://localhost:8092
-MCP_ARGENTINA_DATOS_URL=http://localhost:8093
-MCP_SESIONES_URL=http://localhost:8094
 ```
 
 ## CI/CD
 
 - **`.github/workflows/test.yml`** — Unit tests, integration tests, type checking (pgvector:pg16 + redis:7 services)
-- **`.github/workflows/build.yml`** — Build & push 10 Docker images (API + 4 workers + beat + 4 MCP servers) to GHCR
+- **`.github/workflows/build.yml`** — Build & push 9 Docker images (API + 7 workers + beat) to GHCR

@@ -150,10 +150,6 @@ jobs:
         CELERY_BROKER_URL: redis://localhost:6379/0
         CELERY_RESULT_BACKEND: redis://localhost:6379/1
         REDIS_CACHE_URL: redis://localhost:6379/2
-        MCP_SERIES_TIEMPO_URL: http://localhost:8091
-        MCP_CKAN_URL: http://localhost:8092
-        MCP_ARGENTINA_DATOS_URL: http://localhost:8093
-        MCP_SESIONES_URL: http://localhost:8094
       run: |
         pytest tests/integration/ -v --maxfail=5 --tb=short
 

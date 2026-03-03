@@ -4,14 +4,16 @@ import logging
 import unicodedata
 from datetime import UTC, datetime
 
+import httpx
+
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
-from app.infrastructure.mcp.exceptions import MCPServerError
-from app.infrastructure.mcp.mcp_client import MCPClient
 
 logger = logging.getLogger(__name__)
+
+BASE_URL = "https://apis.datos.gob.ar/series/api"
 
 # Curated catalog of verified Series de Tiempo IDs.
 # These IDs were validated against the live API and return real data.
@@ -131,20 +133,30 @@ def find_catalog_match(query: str) -> dict | None:
 
 
 class SeriesTiempoAdapter(ISeriesTiempoConnector):
-    def __init__(self, mcp_client: MCPClient) -> None:
-        self._mcp = mcp_client
+    def __init__(self, http_client: httpx.AsyncClient) -> None:
+        self._http = http_client
 
     async def search(self, query: str, limit: int = 10) -> list[dict]:
         try:
-            result = await self._mcp.call_tool(
-                "series_tiempo", "search_series", {"query": query, "limit": limit}
+            resp = await self._http.get(
+                f"{BASE_URL}/search", params={"q": query, "limit": limit},
             )
-            return result.get("results", [])
-        except MCPServerError as exc:
-            raise ConnectorError(
-                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-                details={"query": query[:100], "reason": str(exc)},
-            ) from exc
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("data"):
+                return []
+            return [
+                {
+                    "id": item["field"]["id"],
+                    "title": item["field"].get("title") or item["field"].get("description", ""),
+                    "description": item["field"].get("description", ""),
+                    "units": item["field"].get("units", ""),
+                    "frequency": item["field"].get("frequency", ""),
+                    "dataset_title": item["dataset"].get("title", ""),
+                    "source": item["dataset"].get("source", ""),
+                }
+                for item in data["data"]
+            ]
         except ConnectorError:
             raise
         except Exception as exc:
@@ -163,24 +175,38 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
         limit: int = 1000,
     ) -> DataResult | None:
         try:
-            params: dict = {
-                "series_ids": series_ids,
-                "limit": limit,
+            params: dict[str, str] = {
+                "ids": ",".join(series_ids),
+                "format": "json",
+                "limit": str(limit),
             }
             if start_date:
                 params["start_date"] = start_date
             if end_date:
                 params["end_date"] = end_date
+            if representation:
+                params["representation_mode"] = representation
             if collapse:
                 params["collapse"] = collapse
-            if representation:
-                params["representation"] = representation
 
-            result = await self._mcp.call_tool(
-                "series_tiempo", "fetch_series", params
-            )
+            resp = await self._http.get(f"{BASE_URL}/series", params=params)
+            resp.raise_for_status()
+            raw = resp.json()
 
-            records = result.get("records", [])
+            if not raw or not raw.get("data"):
+                return None
+
+            is_percent = representation == "percent_change"
+            records = []
+            for row in raw["data"]:
+                record: dict = {"fecha": row[0]}
+                for idx, sid in enumerate(series_ids):
+                    val = row[idx + 1]
+                    if val is not None and is_percent:
+                        val = round(val * 100, 2)
+                    record[sid] = val
+                records.append(record)
+
             if not records:
                 return None
 
@@ -192,17 +218,12 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 format="time_series",
                 records=records,
                 metadata={
-                    "total_records": result.get("total_records", len(records)),
+                    "total_records": len(records),
                     "fetched_at": datetime.now(UTC).isoformat(),
-                    "description": result.get("description", ""),
-                    "units": result.get("units", ""),
+                    "description": "",
+                    "units": "",
                 },
             )
-        except MCPServerError as exc:
-            raise ConnectorError(
-                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-                details={"series_ids": series_ids, "reason": str(exc)},
-            ) from exc
         except ConnectorError:
             raise
         except Exception as exc:
