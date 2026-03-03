@@ -11,15 +11,6 @@ from pydantic import BaseModel, Field
 
 from app.application.smart_query_service import SmartQueryService
 from app.domain.ports.cache.cache_port import ICacheService
-from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
-from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
-from app.domain.ports.connectors.georef import IGeorefConnector
-from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
-from app.domain.ports.connectors.sesiones import ISesionesConnector
-from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
-from app.domain.ports.search.vector_search import IVectorSearch
-from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
-from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 from app.infrastructure.audit.audit_logger import audit_rate_limited
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
 from app.setup.app_factory import limiter
@@ -45,34 +36,6 @@ class SmartQueryResponse(BaseModel):
     citations: list[dict] = []
     documents: list[dict] | None = None
     warnings: list[str] = []
-
-
-def _build_service(
-    llm: ILLMProvider,
-    embedding: IEmbeddingProvider,
-    vector_search: IVectorSearch,
-    cache: ICacheService,
-    series: ISeriesTiempoConnector,
-    arg_datos: IArgentinaDatosConnector,
-    georef: IGeorefConnector,
-    ckan: ICKANSearchConnector,
-    sesiones: ISesionesConnector,
-    ddjj: DDJJAdapter,
-    semantic_cache: SemanticCache,
-) -> SmartQueryService:
-    return SmartQueryService(
-        llm=llm,
-        embedding=embedding,
-        vector_search=vector_search,
-        cache=cache,
-        series=series,
-        arg_datos=arg_datos,
-        georef=georef,
-        ckan=ckan,
-        sesiones=sesiones,
-        ddjj=ddjj,
-        semantic_cache=semantic_cache,
-    )
 
 
 # ── WebSocket rate limit helper ────────────────────────────
@@ -104,23 +67,9 @@ async def _check_ws_rate_limit(cache: ICacheService, identifier: str) -> bool:
 async def smart_query(
     request: Request,
     body: SmartQueryRequest,
-    llm: FromDishka[ILLMProvider],
-    embedding: FromDishka[IEmbeddingProvider],
-    vector_search: FromDishka[IVectorSearch],
-    cache: FromDishka[ICacheService],
-    series: FromDishka[ISeriesTiempoConnector],
-    arg_datos: FromDishka[IArgentinaDatosConnector],
-    georef: FromDishka[IGeorefConnector],
-    ckan: FromDishka[ICKANSearchConnector],
-    sesiones: FromDishka[ISesionesConnector],
-    ddjj: FromDishka[DDJJAdapter],
-    semantic_cache: FromDishka[SemanticCache],
+    service: FromDishka[SmartQueryService],
     session: FromDishka[MainAsyncSession],
 ) -> dict:
-    service = _build_service(
-        llm, embedding, vector_search, cache, series,
-        arg_datos, georef, ckan, sesiones, ddjj, semantic_cache,
-    )
     user_id = body.user_email or "anonymous"
 
     result = await service.execute(
@@ -177,17 +126,8 @@ def _validate_ws_api_key(ws: WebSocket) -> bool:
 @inject
 async def ws_smart_query(
     ws: WebSocket,
-    llm: FromDishka[ILLMProvider],
-    embedding: FromDishka[IEmbeddingProvider],
-    vector_search: FromDishka[IVectorSearch],
+    service: FromDishka[SmartQueryService],
     cache: FromDishka[ICacheService],
-    series: FromDishka[ISeriesTiempoConnector],
-    arg_datos: FromDishka[IArgentinaDatosConnector],
-    georef: FromDishka[IGeorefConnector],
-    ckan: FromDishka[ICKANSearchConnector],
-    sesiones: FromDishka[ISesionesConnector],
-    ddjj: FromDishka[DDJJAdapter],
-    semantic_cache: FromDishka[SemanticCache],
 ) -> None:
     if not _validate_ws_api_key(ws):
         await ws.close(code=4401, reason="Invalid or missing API key")
@@ -218,11 +158,6 @@ async def ws_smart_query(
             await ws.send_json({"type": "error", "message": "question is required"})
             await ws.close()
             return
-
-        service = _build_service(
-            llm, embedding, vector_search, cache, series,
-            arg_datos, georef, ckan, sesiones, ddjj, semantic_cache,
-        )
 
         async for event in service.execute_streaming(
             question=question,
