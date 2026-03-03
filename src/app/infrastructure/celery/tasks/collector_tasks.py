@@ -398,3 +398,40 @@ def recover_stuck_tasks(self):
         }
     finally:
         engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.reset_failed_collectors",
+    soft_time_limit=60,
+    time_limit=120,
+)
+def reset_failed_collectors():
+    """Weekly reset: give permanently_failed datasets another chance.
+
+    Resets retry_count and status so the next bulk_collect cycle
+    picks them up again.  If the underlying problem persists they
+    will fail 5 more times and go back to permanently_failed.
+    """
+    engine = get_sync_engine()
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE cached_datasets
+                    SET status  = 'error',
+                        retry_count = 0,
+                        updated_at  = NOW()
+                    WHERE status = 'permanently_failed'
+                """),
+            )
+            count = result.rowcount
+        if count:
+            logger.info(
+                "Reset %d permanently_failed datasets "
+                "for retry", count,
+            )
+        else:
+            logger.debug("No permanently_failed datasets to reset")
+        return {"reset": count}
+    finally:
+        engine.dispose()
