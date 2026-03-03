@@ -62,40 +62,35 @@ class StaffAdapter(IStaffConnector):
                 patterns.append(p)
         return patterns
 
-    async def _query_boletin_assignments(
-        self, session: AsyncSession, name: str, snap: str, limit: int,
+    async def _query_senado_staff(
+        self, session: AsyncSession, name: str, limit: int,
     ) -> list[dict]:
-        """Find staff via boletin_staff_assignments JOIN staff_snapshots."""
+        """Find staff via senado_staff table (scraped from senator profiles)."""
         for pattern in self._smart_like_patterns(name):
             rows = await session.execute(
                 text(
-                    "SELECT DISTINCT s.legajo, s.apellido, s.nombre, s.escalafon, "
-                    "  s.area_desempeno, s.convenio, b.legislator_name, b.cargo, b.camara "
-                    "FROM boletin_staff_assignments b "
-                    "JOIN staff_snapshots s ON s.legajo = b.legajo AND s.snapshot_date = :snap "
-                    "WHERE b.legislator_name ILIKE :pattern "
-                    "ORDER BY s.apellido, s.nombre LIMIT :lim"
+                    "SELECT employee_name, categoria, senator_name, bloque, provincia, senator_id "
+                    "FROM senado_staff WHERE senator_name ILIKE :pattern "
+                    "ORDER BY employee_name LIMIT :lim"
                 ),
-                {"snap": snap, "pattern": pattern, "lim": limit},
+                {"pattern": pattern, "lim": limit},
             )
             records = [dict(r._mapping) for r in rows]
             if records:
                 return records
         return []
 
-    async def _count_boletin_assignments(
-        self, session: AsyncSession, name: str, snap: str,
+    async def _count_senado_staff(
+        self, session: AsyncSession, name: str,
     ) -> int:
-        """Count staff via boletin_staff_assignments."""
+        """Count staff via senado_staff table."""
         for pattern in self._smart_like_patterns(name):
             row = await session.execute(
                 text(
-                    "SELECT COUNT(DISTINCT b.legajo) AS total "
-                    "FROM boletin_staff_assignments b "
-                    "JOIN staff_snapshots s ON s.legajo = b.legajo AND s.snapshot_date = :snap "
-                    "WHERE b.legislator_name ILIKE :pattern"
+                    "SELECT COUNT(*) AS total "
+                    "FROM senado_staff WHERE senator_name ILIKE :pattern"
                 ),
-                {"snap": snap, "pattern": pattern},
+                {"pattern": pattern},
             )
             total = row.scalar() or 0
             if total:
@@ -144,12 +139,12 @@ class StaffAdapter(IStaffConnector):
                     logger.info("No staff snapshot found — returning empty for '%s'", name)
                     return self._result(f"Personal de {name}", [])
 
-                # 1. Try boletin assignments first
-                boletin_records = await self._query_boletin_assignments(session, name, snap, limit)
-                if boletin_records:
-                    logger.info("get_by_legislator('%s'): %d results (boletin)", name, len(boletin_records))
+                # 1. Try senado staff first
+                senado_records = await self._query_senado_staff(session, name, limit)
+                if senado_records:
+                    logger.info("get_by_legislator('%s'): %d results (senado)", name, len(senado_records))
                     return self._result(
-                        f"Personal de {name}", boletin_records, {"source": "boletin_oficial"},
+                        f"Personal de {name}", senado_records, {"source": "senado_perfiles"},
                     )
 
                 # 2. Fallback to area_desempeno
@@ -206,13 +201,13 @@ class StaffAdapter(IStaffConnector):
                     logger.info("No staff snapshot found — returning empty count for '%s'", name)
                     return self._result(f"Cantidad de personal de {name}", [])
 
-                # 1. Try boletin count first
-                boletin_total = await self._count_boletin_assignments(session, name, snap)
-                if boletin_total:
-                    logger.info("count_by_legislator('%s'): %d (boletin)", name, boletin_total)
+                # 1. Try senado staff count first
+                senado_total = await self._count_senado_staff(session, name)
+                if senado_total:
+                    logger.info("count_by_legislator('%s'): %d (senado)", name, senado_total)
                     return self._result(
                         f"Cantidad de personal de {name}",
-                        [{"legislador": name, "cantidad_asesores": boletin_total, "fuente": "boletin_oficial"}],
+                        [{"legislador": name, "cantidad_asesores": senado_total, "fuente": "senado_perfiles"}],
                     )
 
                 # 2. Fallback to area_desempeno

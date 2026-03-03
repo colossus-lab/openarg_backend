@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Iterable
 
+import httpx
 from dishka import Provider, Scope, make_async_container, provide
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -18,7 +19,6 @@ from app.domain.ports.connectors.staff import IStaffConnector
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
-from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmbeddingService
@@ -40,11 +40,9 @@ from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
 from app.infrastructure.adapters.llm.gemini_embedding_adapter import GeminiEmbeddingAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
-from app.infrastructure.adapters.search.retrieval_evaluator import RetrievalEvaluator
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
 from app.infrastructure.adapters.source.datos_gob_ar_adapter import DatosGobArAdapter
 from app.infrastructure.adapters.user.user_repository_sqla import UserRepositorySQLA
-from app.infrastructure.mcp.mcp_client import MCPClient
 from app.infrastructure.monitoring.health import HealthCheckService
 from app.infrastructure.persistence_sqla.config import PostgresDsn, SqlaEngineConfig
 from app.infrastructure.persistence_sqla.provider import (
@@ -178,18 +176,16 @@ class ChatProvider(Provider):
         return ChatRepositorySQLA(session)
 
 
-class MCPProvider(Provider):
+class HttpClientProvider(Provider):
     scope = Scope.APP
 
     @provide
-    def mcp_client(self, settings: AppSettings) -> MCPClient:
-        servers = {
-            "series_tiempo": os.getenv("MCP_SERIES_TIEMPO_URL", "http://localhost:8091"),
-            "ckan": os.getenv("MCP_CKAN_URL", "http://localhost:8092"),
-            "argentina_datos": os.getenv("MCP_ARGENTINA_DATOS_URL", "http://localhost:8093"),
-            "sesiones": os.getenv("MCP_SESIONES_URL", "http://localhost:8094"),
-        }
-        return MCPClient(servers=servers, timeout=30.0)
+    def http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=15.0,
+            headers={"User-Agent": "OpenArg/1.0"},
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
 
 
 class SemanticCacheProvider(Provider):
@@ -223,20 +219,20 @@ class ConnectorProvider(Provider):
     scope = Scope.APP
 
     @provide
-    def series_tiempo(self, mcp_client: MCPClient) -> ISeriesTiempoConnector:
-        return SeriesTiempoAdapter(mcp_client=mcp_client)
+    def series_tiempo(self, http_client: httpx.AsyncClient) -> ISeriesTiempoConnector:
+        return SeriesTiempoAdapter(http_client=http_client)
 
     @provide
-    def argentina_datos(self, mcp_client: MCPClient) -> IArgentinaDatosConnector:
-        return ArgentinaDatosAdapter(mcp_client=mcp_client)
+    def argentina_datos(self, http_client: httpx.AsyncClient) -> IArgentinaDatosConnector:
+        return ArgentinaDatosAdapter(http_client=http_client)
 
     @provide
     def georef(self, settings: AppSettings) -> IGeorefConnector:
         return GeorefAdapter(base_url=settings.scraper.GEOREF_BASE_URL)
 
     @provide
-    def ckan_search(self, mcp_client: MCPClient) -> ICKANSearchConnector:
-        return CKANSearchAdapter(mcp_client=mcp_client)
+    def ckan_search(self, http_client: httpx.AsyncClient) -> ICKANSearchConnector:
+        return CKANSearchAdapter(http_client=http_client)
 
     @provide
     def sesiones(
@@ -268,14 +264,6 @@ class ConnectorProvider(Provider):
         return BCRAAdapter()
 
 
-class RetrievalEvaluatorProvider(Provider):
-    scope = Scope.REQUEST
-
-    @provide
-    def retrieval_evaluator(self, llm: ILLMProvider) -> IRetrievalEvaluator:
-        return RetrievalEvaluator(llm=llm)
-
-
 class ApplicationProvider(Provider):
     scope = Scope.REQUEST
 
@@ -293,7 +281,6 @@ class ApplicationProvider(Provider):
         sesiones: ISesionesConnector,
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
-        retrieval_evaluator: IRetrievalEvaluator,
         staff: IStaffConnector,
         bcra: BCRAAdapter,
         sandbox: ISQLSandbox,
@@ -310,7 +297,6 @@ class ApplicationProvider(Provider):
             sesiones=sesiones,
             ddjj=ddjj,
             semantic_cache=semantic_cache,
-            retrieval_evaluator=retrieval_evaluator,
             staff=staff,
             bcra=bcra,
             sandbox=sandbox,
@@ -327,11 +313,10 @@ def get_providers() -> Iterable[Provider]:
         SandboxProvider(),
         UserProvider(),
         ChatProvider(),
+        HttpClientProvider(),
         ConnectorProvider(),
-        MCPProvider(),
         SemanticCacheProvider(),
         MonitoringProvider(),
-        RetrievalEvaluatorProvider(),
         ApplicationProvider(),
     )
 

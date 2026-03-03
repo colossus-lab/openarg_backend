@@ -44,12 +44,6 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - REDIS_CACHE_URL=redis://redis:6379/2
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-
-      # MCP server URLs (standalone containers)
-      - MCP_SERIES_TIEMPO_URL=http://mcp-series-tiempo:8091
-      - MCP_CKAN_URL=http://mcp-ckan:8092
-      - MCP_ARGENTINA_DATOS_URL=http://mcp-argentina-datos:8093
-      - MCP_SESIONES_URL=http://mcp-sesiones:8094
       - BACKEND_API_KEY=${BACKEND_API_KEY:-}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
@@ -59,14 +53,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      mcp-series-tiempo:
-        condition: service_healthy
-      mcp-ckan:
-        condition: service_healthy
-      mcp-argentina-datos:
-        condition: service_healthy
-      mcp-sesiones:
         condition: service_healthy
 
   # --- WORKERS (Multi-Agent System) ---
@@ -213,89 +199,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-
-  # --- MCP Servers (standalone containers) ---
-
-  mcp-series-tiempo:
-    build:
-      context: .
-      dockerfile: docker/mcp.Dockerfile
-      args:
-        MCP_SERVER: series_tiempo_mcp
-        MCP_PORT: "8091"
-    ports:
-      - "8091:8091"
-    environment:
-      - PYTHONPATH=/app/src
-      - MCP_PORT=8091
-      - SERIES_TIEMPO_BASE_URL=https://apis.datos.gob.ar/series/api
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  mcp-ckan:
-    build:
-      context: .
-      dockerfile: docker/mcp.Dockerfile
-      args:
-        MCP_SERVER: ckan_mcp
-        MCP_PORT: "8092"
-    ports:
-      - "8092:8092"
-    environment:
-      - PYTHONPATH=/app/src
-      - MCP_PORT=8092
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  mcp-argentina-datos:
-    build:
-      context: .
-      dockerfile: docker/mcp.Dockerfile
-      args:
-        MCP_SERVER: argentina_datos_mcp
-        MCP_PORT: "8093"
-    ports:
-      - "8093:8093"
-    environment:
-      - PYTHONPATH=/app/src
-      - MCP_PORT=8093
-      - ARGENTINA_DATOS_BASE_URL=https://api.argentinadatos.com/v1
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  mcp-sesiones:
-    build:
-      context: .
-      dockerfile: docker/mcp.Dockerfile
-      args:
-        MCP_SERVER: sesiones_mcp
-        MCP_PORT: "8094"
-    ports:
-      - "8094:8094"
-    environment:
-      - PYTHONPATH=/app/src
-      - MCP_PORT=8094
-      - SESIONES_CHUNKS_DIR=/app/src/app/data/chunks
-    volumes:
-      - ./src/app/data/chunks:/app/src/app/data/chunks:ro
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8094/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
 
 volumes:
   pg_data:

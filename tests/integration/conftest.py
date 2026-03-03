@@ -18,7 +18,6 @@ from app.domain.ports.connectors.georef import IGeorefConnector
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
-from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
@@ -92,10 +91,6 @@ class MockProvider(Provider):
         mock.get.return_value = None
         mock.set.return_value = None
         return mock
-
-    @provide
-    def retrieval_evaluator(self) -> IRetrievalEvaluator:
-        return AsyncMock()
 
     @provide
     def session(self) -> MainAsyncSession:

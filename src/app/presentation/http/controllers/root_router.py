@@ -14,9 +14,6 @@ from app.presentation.http.controllers.datasets.datasets_router import (
 from app.presentation.http.controllers.health.health_router import (
     router as health_router,
 )
-from app.presentation.http.controllers.mcp.mcp_router import (
-    router as mcp_router,
-)
 from app.presentation.http.controllers.monitoring.metrics_router import (
     router as metrics_router,
 )
@@ -56,8 +53,5 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(admin_tasks_router)
 
     root.include_router(api_v1)
-
-    # MCP (outside api/v1 — mounted at /mcp)
-    root.include_router(mcp_router)
 
     return root
