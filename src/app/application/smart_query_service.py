@@ -20,6 +20,7 @@ from sqlalchemy import text
 
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache, ttl_for_intent
 from app.infrastructure.adapters.connectors.memory_agent import (
@@ -486,9 +487,17 @@ class SmartQueryService:
 
         # 9. Save conversation history
         if session:
+            plan_data = {
+                "intent": plan.intent,
+                "steps": [
+                    {"action": s.action, "params": s.params}
+                    for s in plan.steps
+                ],
+            }
             await self._save_history(
                 session, question, user_id, clean_answer,
                 sources, tokens_used, duration_ms,
+                plan_json=json.dumps(plan_data, ensure_ascii=False),
             )
 
         # 10. Cache write
@@ -823,23 +832,29 @@ class SmartQueryService:
         collapse = params.get("collapse")
         representation = params.get("representation")
 
+        query_text = params.get("query", step.description)
+
         if not series_ids:
-            query = params.get("query", step.description)
-            match = find_catalog_match(query)
+            match = find_catalog_match(query_text)
             if match:
                 series_ids = match["ids"]
                 if not collapse and "default_collapse" in match:
                     collapse = match["default_collapse"]
                 if not representation and "default_representation" in match:
                     representation = match["default_representation"]
+                logger.info("Series catalog match for '%s': %s", query_text[:60], series_ids)
 
         if not series_ids:
-            search_results = await self._series.search(params.get("query", step.description))
+            search_results = await self._series.search(query_text)
             if search_results:
                 series_ids = [r["id"] for r in search_results[:3]]
+                logger.info("Series dynamic search for '%s': %s", query_text[:60], series_ids)
 
         if not series_ids:
-            return []
+            raise ConnectorError(
+                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+                details={"query": query_text[:100], "reason": "No se encontraron series matching"},
+            )
 
         start_date = params.get("startDate")
         end_date = params.get("endDate")
@@ -853,7 +868,12 @@ class SmartQueryService:
             collapse=collapse,
             representation=representation,
         )
-        return [result] if result else []
+        if not result:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+                details={"series_ids": series_ids, "reason": "API respondió sin datos"},
+            )
+        return [result]
 
     async def _execute_argentina_datos_step(self, step: PlanStep) -> list[DataResult]:
         params = step.params
@@ -1375,6 +1395,8 @@ class SmartQueryService:
                 continue
 
             keys = list(first.keys())
+
+            # Detect temporal key
             time_key = None
             for k in keys:
                 kl = k.lower()
@@ -1382,18 +1404,40 @@ class SmartQueryService:
                     time_key = k
                     break
 
+            # Detect label key for categorical data (e.g., "nombre")
+            label_key = None
             if not time_key:
+                for k in keys:
+                    kl = k.lower()
+                    if kl in ("nombre", "name", "titulo", "title", "label", "categoria", "category"):
+                        label_key = k
+                        break
+
+            x_key = time_key or label_key
+            if not x_key:
                 continue
 
             numeric_keys = [
                 k
                 for k in keys
-                if k != time_key
+                if k != x_key
                 and not k.startswith("_")
                 and isinstance(first.get(k), int | float)
             ]
             if not numeric_keys:
                 continue
+
+            # For categorical charts, pick the most relevant numeric column
+            if label_key and not time_key:
+                # Prefer patrimonio/value columns for rankings
+                preferred = [
+                    k for k in numeric_keys
+                    if any(t in k.lower() for t in ("patrimonio", "total", "monto", "valor", "cantidad", "importe"))
+                ]
+                if preferred:
+                    numeric_keys = preferred[:1]
+                else:
+                    numeric_keys = numeric_keys[:1]
 
             clean = [
                 row for row in result.records
@@ -1413,10 +1457,10 @@ class SmartQueryService:
                 "type": chart_type,
                 "title": title,
                 "data": [
-                    {time_key: row[time_key], **{k: row.get(k) for k in numeric_keys}}
+                    {x_key: row[x_key], **{k: row.get(k) for k in numeric_keys}}
                     for row in clean
                 ],
-                "xKey": time_key,
+                "xKey": x_key,
                 "yKeys": numeric_keys,
             })
         return charts
@@ -1449,6 +1493,7 @@ class SmartQueryService:
         sources: list[dict[str, Any]],
         tokens_used: int,
         duration_ms: int,
+        plan_json: str = "",
     ) -> None:
         try:
             query_id = str(uuid4())
@@ -1457,10 +1502,10 @@ class SmartQueryService:
                     "INSERT INTO user_queries "
                     "(id, question, user_id, status, "
                     "analysis_result, sources_json, "
-                    "tokens_used, duration_ms) "
+                    "tokens_used, duration_ms, plan_json) "
                     "VALUES (CAST(:id AS uuid), :question, "
                     ":user_id, 'completed', :result, "
-                    ":sources, :tokens, :duration_ms)"
+                    ":sources, :tokens, :duration_ms, :plan)"
                 ),
                 {
                     "id": query_id,
@@ -1470,6 +1515,7 @@ class SmartQueryService:
                     "sources": json.dumps(sources, ensure_ascii=False),
                     "tokens": tokens_used,
                     "duration_ms": duration_ms,
+                    "plan": plan_json,
                 },
             )
             await session.commit()
