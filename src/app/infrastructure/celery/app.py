@@ -53,7 +53,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.dkan_tasks",
             "app.infrastructure.celery.tasks.senado_tasks",
             "app.infrastructure.celery.tasks.cordoba_leg_tasks",
-            "app.infrastructure.celery.tasks.boletin_tasks",
+            "app.infrastructure.celery.tasks.senado_staff_tasks",
         ],
     )
 
@@ -71,6 +71,7 @@ def create_celery() -> Celery:
         "openarg.retry_s3_uploads": {"queue": "s3"},
         "openarg.upload_to_s3": {"queue": "s3"},
         "openarg.recover_stuck_tasks": {"queue": "collector"},
+        "openarg.reset_failed_collectors": {"queue": "collector"},
         "openarg.snapshot_staff": {"queue": "scraper"},
         "openarg.reindex_all_embeddings": {"queue": "embedding"},
         # New data source tasks (dedicated ingest queue)
@@ -81,7 +82,7 @@ def create_celery() -> Celery:
         "openarg.scrape_dkan_rosario": {"queue": "scraper"},
         "openarg.scrape_senado": {"queue": "scraper"},
         "openarg.scrape_cordoba_legislatura": {"queue": "scraper"},
-        "openarg.scrape_boletin_staff": {"queue": "scraper"},
+        "openarg.scrape_senado_staff": {"queue": "scraper"},
     }
 
     app.conf.task_default_queue = "scraper"
@@ -214,10 +215,15 @@ def create_celery() -> Celery:
             "schedule": crontab(day_of_month=1, hour=2, minute=0),  # Monthly, day 1
             "options": {"queue": "scraper"},
         },
-        "scrape-boletin-staff": {
-            "task": "openarg.scrape_boletin_staff",
+        "scrape-senado-staff": {
+            "task": "openarg.scrape_senado_staff",
             "schedule": crontab(day_of_week=1, hour=3, minute=0),  # Monday 3:00 AM ART
             "options": {"queue": "scraper"},
+        },
+        "reset-failed-collectors": {
+            "task": "openarg.reset_failed_collectors",
+            "schedule": crontab(day_of_week=0, hour=5, minute=0),  # Sunday 5:00 AM ART
+            "options": {"queue": "collector"},
         },
     })
 
