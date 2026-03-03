@@ -8,6 +8,7 @@ from slowapi.util import get_remote_address
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+from app.prompts import load_prompt
 
 router = APIRouter(prefix="/sandbox", tags=["sandbox"])
 limiter = Limiter(key_func=get_remote_address)
@@ -90,25 +91,6 @@ async def list_tables(
     ]
 
 
-_NL2SQL_SYSTEM_PROMPT = """\
-You are a SQL assistant for Argentine public datasets stored in PostgreSQL.
-You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, \
-DROP, or any DDL/DML statement.
-
-Available tables and their columns:
-
-{tables_context}
-
-Rules:
-- Only reference the tables and columns listed above.
-- Always use double-quoted identifiers for column names that contain spaces or \
-special characters.
-- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).
-- Return ONLY the SQL query, nothing else. No markdown, no explanation.
-- The query must be valid PostgreSQL syntax.
-"""
-
-
 @router.post("/ask", response_model=AskResponse)
 @limiter.limit("10/minute")
 @inject
@@ -144,7 +126,7 @@ async def ask_natural_language(
     tables_context = "\n\n".join(tables_context_parts)
 
     # 2. Ask the LLM to generate SQL
-    system_prompt = _NL2SQL_SYSTEM_PROMPT.format(tables_context=tables_context)
+    system_prompt = load_prompt("nl2sql", tables_context=tables_context)
     llm_response = await llm.chat(
         messages=[
             LLMMessage(role="system", content=system_prompt),

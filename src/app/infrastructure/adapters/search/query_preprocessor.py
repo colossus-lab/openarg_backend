@@ -8,14 +8,9 @@ from datetime import UTC, datetime
 from dateutil.relativedelta import relativedelta
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
+from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
-
-_SYSTEM_PROMPT = (
-    "Reformulá esta consulta para maximizar la relevancia de búsqueda en datos abiertos argentinos. "
-    "Expandí siglas, agregá contexto temporal si es implícito, y normalizá nombres geográficos. "
-    "Solo retorná la consulta reformulada, sin explicaciones."
-)
 
 # ── Acronym expansion map ──────────────────────────────────
 
@@ -240,7 +235,7 @@ class QueryPreprocessor:
         try:
             response = await self._llm.chat(
                 messages=[
-                    LLMMessage(role="system", content=_SYSTEM_PROMPT),
+                    LLMMessage(role="system", content=load_prompt("preprocessor")),
                     LLMMessage(role="user", content=processed),
                 ],
                 temperature=0.3,

@@ -19,27 +19,9 @@ from app.infrastructure.adapters.sandbox.table_validation import safe_table_quer
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.infrastructure.celery.tasks.collector_tasks import collect_dataset
+from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
-
-
-PLANNER_SYSTEM_PROMPT = """Sos un planificador de análisis de datos públicos de Argentina.
-Dada una pregunta del usuario, generá un plan JSON con:
-1. "datasets_needed": lista de descripciones de datasets que necesitás
-2. "analysis_steps": lista de pasos de análisis
-3. "output_format": tipo de output esperado (tabla, gráfico, número, texto)
-
-Respondé SOLO con JSON válido, sin markdown."""
-
-ANALYST_SYSTEM_PROMPT = """Sos un analista de datos públicos de Argentina.
-Te doy datos reales en formato tabular. Analizalos y respondé la pregunta del usuario.
-
-Reglas:
-- Usá SOLO los datos proporcionados, no inventes números
-- Citá la fuente de cada dato
-- Si los datos son insuficientes, decilo explícitamente
-- Respondé en español
-- Si es relevante, sugierí una visualización"""
 
 
 @celery_app.task(name="openarg.analyze_query", bind=True, max_retries=2, soft_time_limit=600, time_limit=720)
@@ -66,7 +48,7 @@ def analyze_query(self, query_id: str, question: str):
         genai.configure(api_key=gemini_key)
         planner_model = genai.GenerativeModel(
             "gemini-2.5-flash",
-            system_instruction=PLANNER_SYSTEM_PROMPT,
+            system_instruction=load_prompt("celery_planner"),
             generation_config=genai.types.GenerationConfig(
                 temperature=0.3,
                 max_output_tokens=1024,
@@ -213,7 +195,7 @@ def analyze_query(self, query_id: str, question: str):
         context_str = "\n---\n".join(data_context)
         analyst_model = genai.GenerativeModel(
             "gemini-2.5-flash",
-            system_instruction=ANALYST_SYSTEM_PROMPT,
+            system_instruction=load_prompt("celery_analyst"),
         )
         analyst_response = analyst_model.generate_content(
             f"Pregunta: {question}\n\nDatos disponibles:\n{context_str}",

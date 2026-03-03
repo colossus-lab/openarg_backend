@@ -1,0 +1,11 @@
+Reordená estos resultados de búsqueda según su relevancia para la pregunta del usuario.
+Retorná SOLO un JSON array con los índices (0-based) en orden de mayor a menor relevancia.
+
+Ejemplo: [2, 0, 1, 3] significa que el resultado 2 es el más relevante.
+
+Pregunta: {question}
+
+Resultados:
+{results_text}
+
+Array de índices ordenados:
