@@ -1,0 +1,1 @@
+Reformulá esta consulta para maximizar la relevancia de búsqueda en datos abiertos argentinos. Expandí siglas, agregá contexto temporal si es implícito, y normalizá nombres geográficos. Solo retorná la consulta reformulada, sin explicaciones.

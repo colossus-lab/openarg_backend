@@ -1,11 +1,9 @@
 """Application service for the smart query pipeline.
 
-Extracts all business logic from smart_query_router.py into a testable,
-reusable service used by both POST and WebSocket endpoints.
+Simplified pipeline: planner (1 LLM) → dispatch steps (0 LLM) → analysis (1 LLM) + optional policy (1 LLM).
 """
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import json
@@ -20,15 +18,9 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
-from app.application.intent_classifier import (
-    ClassifiedIntent,
-    classify_intent,
-    intent_to_plan,
-)
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
-from app.domain.ports.search.retrieval_evaluator import IRetrievalEvaluator, RetrievalQuality
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache, ttl_for_intent
 from app.infrastructure.adapters.connectors.memory_agent import (
     build_memory_context_prompt,
@@ -37,15 +29,10 @@ from app.infrastructure.adapters.connectors.memory_agent import (
     update_memory,
 )
 from app.infrastructure.adapters.connectors.policy_agent import analyze_policy
-from app.infrastructure.adapters.connectors.query_planner import (
-    ANALYSIS_SYSTEM_PROMPT,
-    generate_plan,
-)
+from app.infrastructure.adapters.connectors.query_planner import generate_plan
+from app.prompts import load_prompt
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
 from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
-from app.infrastructure.adapters.search.query_decomposer import QueryDecomposer
-from app.infrastructure.adapters.search.query_preprocessor import QueryPreprocessor
-from app.infrastructure.adapters.search.reranker import LLMReranker
 from app.infrastructure.audit.audit_logger import (
     audit_cache_hit,
     audit_injection_blocked,
@@ -55,6 +42,7 @@ from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _downloa
 from app.infrastructure.monitoring.metrics import MetricsCollector
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import AsyncIterator
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,13 +122,6 @@ _META_PATTERNS = re.compile(
     r"(qué pod[eé]s hacer|qu[eé] sab[eé]s|cu[aá]les son tus funciones"
     r"|c[oó]mo funcion[aá]s|para qu[eé] serv[ií]s|ayuda"
     r"|qu[eé] sos|qui[eé]n sos|qu[eé] es openarg)",
-    re.IGNORECASE,
-)
-
-_BCRA_PATTERN = re.compile(
-    r"(cotizaci[oó]n|tipo\s+de\s+cambio|d[oó]lar\s+oficial"
-    r"|reservas?\s+(?:del\s+)?bcra|tasa\s+(?:de\s+)?(?:pol[ií]tica|referencia)"
-    r"|base\s+monetaria|circulaci[oó]n\s+monetaria)",
     re.IGNORECASE,
 )
 
@@ -288,154 +269,12 @@ _INDEC_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# ── Economic query detection (for federated fallback) ──────
-_ECONOMIC_PATTERN = re.compile(
-    r"(inflaci[oó]n|ipc|dolar|d[oó]lar|tipo\s+de\s+cambio|pbi|pib|emae"
-    r"|desempleo|reservas|tasa|exportaci|importaci|salario|deuda)",
-    re.IGNORECASE,
-)
-
-
-def _is_economic_query(q: str) -> bool:
-    return bool(_ECONOMIC_PATTERN.search(q))
-
-
-# ── DDJJ deterministic routing patterns ─────────────────────
-_DDJJ_PATTERN = re.compile(
-    r"(patrimonio|declaraci[oó]n(?:es)?\s+jurada|ddjj"
-    r"|bienes\s+de\s+|riqueza\s+de\s+|cu[aá]nto\s+tiene"
-    r"|diputado.{0,20}(?:m[aá]s|mayor|menor)\s+(?:rico|patrimonio|plata)"
-    r"|ranking\s+(?:de\s+)?(?:diputados|patrimonio|ddjj)"
-    r"|mayor\s+patrimonio|menor\s+patrimonio"
-    r"|m[aá]s\s+ricos?|m[aá]s\s+pobres?"
-    r"|patrimonio\s+(?:de\s+)?diputado)",
-    re.IGNORECASE,
-)
-
-_DDJJ_NAME_PATTERN = re.compile(
-    r"(?:patrimonio|bienes|riqueza|ddjj|declaraci[oó]n\s+jurada)"
-    r"\s+(?:de(?:l)?)\s+(.+?)(?:\?|$)",
-    re.IGNORECASE,
-)
-
-_DDJJ_RANKING_PATTERN = re.compile(
-    r"(ranking|mayor\s+patrimonio|menor\s+patrimonio"
-    r"|m[aá]s\s+ricos?|m[aá]s\s+pobres?"
-    r"|top\s+\d+|diputados?\s+(?:con\s+)?(?:m[aá]s|mayor|menor))",
-    re.IGNORECASE,
-)
-
-# Extracts a specific position number from follow-up queries like
-# "cual es el 11", "numero 11", "puesto 11", "#11", "el 11°"
-_DDJJ_POSITION_PATTERN = re.compile(
-    r"(?:n[uú]mero|puesto|posici[oó]n|lugar|#|el)\s*(\d{1,3})(?:[°ºª]|\b)",
-    re.IGNORECASE,
-)
-
-# ── Staff deterministic routing patterns ──────────────────
-_STAFF_PATTERN = re.compile(
-    r"(asesores?\s+de\s+|personal\s+de(?:l)?\s+|empleados?\s+de\s+"
-    r"|personas?\s+(?:que\s+)?(?:trabaja|en\s+(?:la\s+)?comisi[oó]n)"
-    r"|cu[aá]ntos?\s+(?:asesores?|personal|empleados?|personas?)"
-    r"|equipo\s+de\s+"
-    r"|trabaja(?:n|r)?\s+(?:con|para|en)\s+"
-    r"|n[oó]mina\s+de(?:l)?\s+personal"
-    r"|qui[eé]n(?:es)?\s+trabaja"
-    r"|list(?:a|ado)\s+de\s+(?:asesores?|personal|empleados?)"
-    r"|altas?\s+y\s+bajas?|bajas?\s+y\s+altas?"
-    r"|cambios?\s+(?:de\s+)?personal"
-    r"|rotaci[oó]n\s+de\s+personal"
-    r"|comisi[oó]n\s+de\s+\w+.{0,30}(?:personal|trabaja|empleado|asesor|miembro)"
-    r"|(?:qui[eé]n(?:es)?|cu[aá]les?)\s+(?:se\s+fue|se\s+fueron|lleg[oó]|llegaron|entr[oó]|entraron|sali[oó]|salieron))",
-    re.IGNORECASE,
-)
-
-# Stop words that should NOT be part of extracted legislator names
-_STAFF_NAME_STOP = re.compile(
-    r"\s+(?:tiene|hay|son|est[aá]n?|tiene[ns]?|en\s+|del?\s+congreso|del?\s+la\s+c[aá]mara).*$",
-    re.IGNORECASE,
-)
-
-# Titles/roles that precede a legislator name and should be stripped
-_STAFF_TITLE_PREFIX = re.compile(
-    r"^(?:(?:el|la|del?)\s+)?"
-    r"(?:diputad[oa]|senad(?:or|ora)|legislad(?:or|ora)|ministro|ministra|"
-    r"secretari[oa]|director[a]?|presidente|presidenta|jef[ea])\s+",
-    re.IGNORECASE,
-)
-
-_STAFF_NAME_PATTERN = re.compile(
-    r"(?:asesores?|personal|empleados?|equipo)"
-    r"\s+(?:de(?:l)?)\s+(.+?)(?:\?|$)",
-    re.IGNORECASE,
-)
-
-_STAFF_NAME_TIENE_PATTERN = re.compile(
-    r"(?:asesores?|personal|empleados?)\s+tiene\s+(.+?)(?:\?|$)",
-    re.IGNORECASE,
-)
-
-_STAFF_COUNT_PATTERN = re.compile(
-    r"cu[aá]ntos?\s+(?:asesores?|personal|empleados?)",
-    re.IGNORECASE,
-)
-
-_STAFF_COUNT_TIENE_PATTERN = re.compile(
-    r"cu[aá]ntos?\s+(?:asesores?|personal|empleados?)\s+tiene\s+(.+?)(?:\?|$)",
-    re.IGNORECASE,
-)
-
-_STAFF_COMMISSION_PATTERN = re.compile(
-    r"comisi[oó]n\s+de\s+(.+?)(?:\s+(?:en|del?)\s+(?:el\s+)?(?:congreso|c[aá]mara|senado|diputados?))?(?:\?|$)",
-    re.IGNORECASE,
-)
-
-_STAFF_CHANGES_PATTERN = re.compile(
-    r"((?:qui[eé]n(?:es)?|cu[aá]les?)\s+(?:se\s+fue|se\s+fueron|lleg[oó]|llegaron|entr[oó]|entraron|sali[oó]|salieron)"
-    r"|altas?\s+y\s+bajas?|bajas?\s+y\s+altas?"
-    r"|cambios?\s+(?:de\s+)?personal"
-    r"|rotaci[oó]n\s+de\s+personal)",
-    re.IGNORECASE,
-)
-
-# ── Argentina Datos deterministic routing ──────────────────
-_ARGDATOS_PATTERN = re.compile(
-    r"(d[oó]lar\s+(?:blue|mep|ccl|cripto|turista|tarjeta|contado\s+con\s+liqui)"
-    r"|riesgo\s+pa[ií]s"
-    r"|(?:a\s+)?cu[aá]nto\s+(?:est[aá]|cotiza|sale)\s+(?:el\s+)?d[oó]lar"
-    r"|precio\s+del\s+d[oó]lar(?!\s+oficial))",
-    re.IGNORECASE,
-)
-
-# ── Series de Tiempo deterministic routing ─────────────────
-_SERIES_PATTERN = re.compile(
-    r"(inflaci[oó]n|ipc\b|pbi\b|pib\b|emae\b"
-    r"|desempleo|desocupaci[oó]n"
-    r"|exportaci[oó]n(?:es)?|importaci[oó]n(?:es)?"
-    r"|balanza\s+comercial|deuda\s+p[uú]blica"
-    r"|salario(?:s)?\s+(?:promedio|real)"
-    r"|serie(?:s)?\s+de\s+tiempo"
-    r"|indicador(?:es)?\s+econ[oó]mico)",
-    re.IGNORECASE,
-)
-
-# ── Sesiones deterministic routing ─────────────────────────
-_SESIONES_PATTERN = re.compile(
-    r"(sesi[oó]n(?:es)?\s+(?:del?\s+)?(?:congreso|c[aá]mara|diputados|senado)"
-    r"|(?:qu[eé]\s+(?:se\s+)?debati[oó]|debate(?:s)?|discurso(?:s)?)\s+(?:sobre|de|en)\s+"
-    r"|transcripci[oó]n(?:es)?\s+(?:del?\s+)?(?:congreso|c[aá]mara)"
-    r"|(?:diputad[oa]|senador[a]?)\s+\w+\s+(?:dijo|habl[oó])"
-    r"|qu[eé]\s+(?:dijo|dijeron)\s+.{0,20}(?:diputad|senador)"
-    r"|(?:se\s+)?trat[oó]\s+en\s+(?:el\s+)?congreso)",
-    re.IGNORECASE,
-)
-
 
 # ── Service ─────────────────────────────────────────────────
 
 
 class SmartQueryService:
-    """Orchestrates the full smart-query pipeline."""
+    """Orchestrates the full smart-query pipeline: plan → dispatch → analyze."""
 
     def __init__(
         self,
@@ -450,7 +289,6 @@ class SmartQueryService:
         sesiones: ISesionesConnector,
         ddjj: DDJJAdapter,
         semantic_cache: SemanticCache,
-        retrieval_evaluator: IRetrievalEvaluator | None = None,
         staff: IStaffConnector | None = None,
         bcra: BCRAAdapter | None = None,
         sandbox: ISQLSandbox | None = None,
@@ -466,95 +304,10 @@ class SmartQueryService:
         self._sesiones = sesiones
         self._ddjj = ddjj
         self._semantic_cache = semantic_cache
-        self._retrieval_evaluator = retrieval_evaluator
         self._staff = staff
         self._bcra = bcra
         self._sandbox = sandbox
-        self._reranker = LLMReranker(llm)
         self._metrics = MetricsCollector()
-
-    # ── LLM intent classification ────────────────────────────
-
-    def _available_connectors(self) -> list[str]:
-        connectors = ["ddjj", "argentina_datos", "series_tiempo", "sesiones", "ckan"]
-        if self._staff:
-            connectors.append("staff")
-        if self._bcra:
-            connectors.append("bcra")
-        if self._sandbox:
-            connectors.append("sandbox")
-        return connectors
-
-    async def _classify_intent(
-        self, question: str,
-    ) -> ExecutionPlan | None:
-        """LLM-based intent classification with regex fallback."""
-        try:
-            classified = await asyncio.wait_for(
-                classify_intent(
-                    self._llm, question,
-                    available_connectors=(
-                        self._available_connectors()
-                    ),
-                ),
-                timeout=10.0,
-            )
-            if classified and not classified.is_clarification:
-                plan = intent_to_plan(question, classified)
-                intents_str = ", ".join(
-                    m.intent for m in classified.intents
-                )
-                logger.info(
-                    "LLM classified '%s' as [%s] "
-                    "(confidence=%.2f, steps=%d)",
-                    question[:60],
-                    intents_str,
-                    classified.confidence,
-                    len(plan.steps),
-                )
-                return plan
-            if classified and classified.is_clarification:
-                self._pending_clarification = (
-                    self._format_clarification(classified)
-                )
-                return None
-        except Exception:
-            logger.warning(
-                "LLM intent classification failed, "
-                "falling back to regex",
-                exc_info=True,
-            )
-
-        # Fallback: deterministic regex (existing code)
-        return (
-            self._detect_ddjj_intent(question)
-            or (
-                self._detect_staff_intent(question)
-                if self._staff else None
-            )
-            or (
-                self._detect_bcra_intent(question)
-                if self._bcra else None
-            )
-            or self._detect_argentina_datos_intent(question)
-            or self._detect_series_intent(question)
-            or self._detect_sesiones_intent(question)
-        )
-
-    @staticmethod
-    def _format_clarification(classified: ClassifiedIntent) -> str:
-        """Build a user-friendly clarification message."""
-        msg = classified.clarification_message
-        if not msg:
-            msg = (
-                "Tu pregunta podría referirse a "
-                "varios recursos. ¿Podés especificar?"
-            )
-        opts = classified.clarification_options
-        if opts:
-            bullets = "\n".join(f"- {o}" for o in opts)
-            msg += f"\n\n{bullets}"
-        return msg
 
     # ── Public API ──────────────────────────────────────────
 
@@ -569,7 +322,7 @@ class SmartQueryService:
         """Run the full pipeline synchronously and return a result."""
         start_time = time.monotonic()
 
-        # 0. Classify — casual/meta/educational get instant responses
+        # 0. Casual/meta/educational — instant responses (0 LLM calls)
         casual = self._get_casual_response(question)
         if casual:
             return SmartQueryResult(answer=casual, sources=[], casual=True)
@@ -598,135 +351,50 @@ class SmartQueryService:
         if edu:
             return SmartQueryResult(answer=edu, sources=[], educational=True)
 
-        # 1. Cache lookup FIRST (skip in policy mode — always fetch fresh data)
+        # 1. Cache lookup (skip in policy mode — always fetch fresh data)
         if not policy_mode:
             cached = await self._check_cache(question, user_id)
             if cached:
                 return cached
 
-        # 2. Memory (lightweight cache read, needed for analysis)
+        # 2. Memory
         session_id = conversation_id or ""
         memory = await load_memory(self._cache, session_id)
+        memory_ctx = build_memory_context_prompt(memory)
 
-        # 3. Intent classification (LLM → regex fallback)
-        deterministic_plan = await self._classify_intent(question)
+        # 3. Plan (1 LLM call)
+        plan = await generate_plan(self._llm, question, memory_context=memory_ctx)
+        logger.info(
+            "Plan for '%s': intent=%s, steps=%d",
+            question[:60], plan.intent, len(plan.steps),
+        )
 
-        # Handle clarification request
-        pending = getattr(self, "_pending_clarification", "")
-        if not deterministic_plan and pending:
-            self._pending_clarification = ""
-            return SmartQueryResult(
-                answer=pending, sources=[], intent="clarification",
-            )
-
+        # 4. Dispatch steps (0 LLM calls — just connector calls)
         all_warnings: list[str] = []
+        results, step_warnings = await self._execute_steps(plan, nl_query=question)
+        all_warnings.extend(step_warnings)
 
-        if deterministic_plan:
-            plan = deterministic_plan
-            results, step_warnings = await self._execute_steps(plan, nl_query=question)
-            all_warnings.extend(step_warnings)
-            logger.info(
-                "Deterministic plan for '%s': intent=%s, steps=%d",
-                question[:60], plan.intent, len(plan.steps),
-            )
-        else:
-            # Full LLM pipeline: preprocess → decompose → plan → execute → CRAG → hybrid
-            preprocessor = QueryPreprocessor(self._llm)
-            enhanced_query = await preprocessor.reformulate(question)
-
-            decomposer = QueryDecomposer(self._llm)
-            sub_queries = await decomposer.decompose(enhanced_query)
-
-            if len(sub_queries) > 1:
-                memory_ctx_prompt = build_memory_context_prompt(memory)
-
-                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult], list[str]]:
-                    sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                    sq_results, sq_warnings = await self._execute_steps(sq_plan, nl_query=sq)
-                    return sq_plan, sq_results, sq_warnings
-
-                plan_results = await asyncio.gather(
-                    *[_plan_and_execute(sq) for sq in sub_queries],
-                    return_exceptions=True,
-                )
-
-                all_results: list[DataResult] = []
-                plan = None
-                for pr in plan_results:
-                    if isinstance(pr, Exception):
-                        logger.warning("Sub-query plan/execute failed: %s", pr)
-                        continue
-                    sq_plan, sq_results, sq_warnings = pr
-                    if plan is None:
-                        plan = sq_plan
-                    all_results.extend(sq_results)
-                    all_warnings.extend(sq_warnings)
-
-                if plan is None:
-                    plan = await generate_plan(
-                        self._llm, enhanced_query,
-                        memory_context=build_memory_context_prompt(memory),
-                    )
-                results = all_results
-                logger.info(
-                    "Decomposed '%s' into %d sub-queries, got %d results",
-                    question[:60], len(sub_queries), len(results),
-                )
-            else:
-                plan = await generate_plan(
-                    self._llm, enhanced_query,
-                    memory_context=build_memory_context_prompt(memory),
-                )
-                logger.info(
-                    "Plan for '%s': intent=%s, steps=%d",
-                    question[:60], plan.intent, len(plan.steps),
-                )
-                results, step_warnings = await self._execute_steps(plan, nl_query=question)
-                all_warnings.extend(step_warnings)
-
-            # CRAG: evaluate retrieval quality and retry if needed (skip for deterministic)
-            if self._retrieval_evaluator:
-                try:
-                    verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
-                    logger.info(
-                        "CRAG verdict: quality=%s, confidence=%.2f",
-                        verdict.quality.value, verdict.confidence,
-                    )
-                    if (
-                        verdict.quality == RetrievalQuality.INCORRECT
-                        and verdict.confidence >= 0.7
-                    ):
-                        logger.info(
-                            "CRAG: re-executing with broader query (actions=%s)",
-                            verdict.suggested_actions,
-                        )
-                        retry_plan = await generate_plan(
-                            self._llm,
-                            f"{question} (ampliar búsqueda, datos insuficientes)",
-                            memory_context=build_memory_context_prompt(memory),
-                        )
-                        retry_results, retry_warnings = await self._execute_steps(retry_plan, nl_query=question)
-                        all_warnings.extend(retry_warnings)
-                        if retry_results:
-                            results = retry_results
-                            plan = retry_plan
-                except Exception:
-                    logger.debug("CRAG evaluation failed", exc_info=True)
-
-            # Hybrid search complement (skip for deterministic)
-            results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
-
-        # 6. LLM analysis
+        # 5. LLM analysis (1 LLM call)
         data_context = self._build_data_context(results)
         today = datetime.now(UTC).strftime("%Y-%m-%d")
-        memory_ctx = build_memory_context_prompt(memory)
+
+        errors_block = ""
+        if all_warnings:
+            errors_block = (
+                "\nERRORES EN LA RECOLECCIÓN:\n"
+                + "\n".join(f"- {w}" for w in all_warnings)
+            )
 
         analysis_prompt = (
             f'PREGUNTA DEL USUARIO: "{question}"\n'
             f"FECHA ACTUAL: {today}\n"
             f"INTENCIÓN: {plan.intent}\n\n"
             f"DATOS RECOLECTADOS:\n{data_context}\n"
-            f"{memory_ctx}\n"
+            f"{errors_block}"
+            f"{memory_ctx}\n\n"
+            "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
+            "para no repetir contexto innecesariamente y para mantener coherencia "
+            "con respuestas anteriores.\n\n"
             "Respondé de forma breve y conversacional. Destacá el dato más importante, "
             "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
             "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
@@ -734,21 +402,21 @@ class SmartQueryService:
 
         response = await self._llm.chat(
             messages=[
-                LLMMessage(role="system", content=ANALYSIS_SYSTEM_PROMPT),
+                LLMMessage(role="system", content=load_prompt("analyst")),
                 LLMMessage(role="user", content=analysis_prompt),
             ],
             temperature=0.4,
             max_tokens=8192,
         )
 
-        # 7. Charts
+        # 6. Charts
         det_charts = self._build_deterministic_charts(results)
         llm_charts = self._extract_llm_charts(response.content)
         charts = det_charts if det_charts else llm_charts
 
         clean_answer = re.sub(r"<!--CHART:.*?-->", "", response.content, flags=re.DOTALL).strip()
 
-        # 7a. Parse META confidence/citations
+        # 6a. Parse META confidence/citations
         confidence, citations = self._extract_meta(clean_answer)
         clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL).strip()
 
@@ -760,7 +428,7 @@ class SmartQueryService:
                 + clean_answer
             )
 
-        # 7b. Policy analysis (optional)
+        # 6b. Policy analysis (optional, 1 LLM call)
         if policy_mode:
             try:
                 policy_text = await analyze_policy(
@@ -806,24 +474,24 @@ class SmartQueryService:
             warnings=all_warnings,
         )
 
-        # 8. Audit
+        # 7. Audit
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=duration_ms)
 
-        # 9. Memory update (non-blocking)
+        # 8. Memory update (non-blocking)
         try:
             updated_memory = await update_memory(self._llm, memory, plan, results, clean_answer)
             await save_memory(self._cache, session_id, updated_memory)
         except Exception:
             logger.debug("Memory update failed", exc_info=True)
 
-        # 10. Save conversation history
+        # 9. Save conversation history
         if session:
             await self._save_history(
                 session, question, user_id, clean_answer,
                 sources, tokens_used, duration_ms,
             )
 
-        # 11. Cache write
+        # 10. Cache write
         result_dict = {
             "answer": clean_answer,
             "sources": sources,
@@ -885,7 +553,7 @@ class SmartQueryService:
             yield {"type": "complete", "answer": edu, "sources": [], "chart_data": None}
             return
 
-        # Cache check FIRST (skip in policy mode — always fetch fresh data)
+        # Cache check (skip in policy mode)
         session_id = conversation_id or ""
         if not policy_mode:
             cached_result = await self._get_cached_dict(question)
@@ -902,139 +570,50 @@ class SmartQueryService:
                 }
                 return
 
-        # Intent classification (LLM → regex fallback)
-        deterministic_plan = await self._classify_intent(question)
-
-        # Handle clarification request
-        pending = getattr(self, "_pending_clarification", "")
-        if not deterministic_plan and pending:
-            self._pending_clarification = ""
-            yield {"type": "chunk", "content": pending}
-            yield {
-                "type": "complete", "answer": pending,
-                "sources": [], "chart_data": None,
-                "intent": "clarification",
-            }
-            return
-
+        # Memory
         memory = await load_memory(self._cache, session_id)
+        memory_ctx = build_memory_context_prompt(memory)
 
+        # Plan (1 LLM call)
+        yield {"type": "status", "step": "planning"}
+        plan = await generate_plan(self._llm, question, memory_context=memory_ctx)
+
+        yield {
+            "type": "status",
+            "step": "planned",
+            "intent": plan.intent,
+            "steps_count": len(plan.steps),
+        }
+
+        # Dispatch steps (0 LLM calls)
+        yield {"type": "status", "step": "searching"}
         all_warnings: list[str] = []
+        results, step_warnings = await self._execute_steps(plan, nl_query=question)
+        all_warnings.extend(step_warnings)
 
-        if deterministic_plan:
-            plan = deterministic_plan
-            logger.info(
-                "Deterministic plan (streaming) for '%s': intent=%s",
-                question[:60], plan.intent,
-            )
-            yield {
-                "type": "status",
-                "step": "planned",
-                "intent": plan.intent,
-                "steps_count": len(plan.steps),
-            }
-            yield {"type": "status", "step": "searching"}
-            results, step_warnings = await self._execute_steps_streaming(plan, nl_query=question)
-            all_warnings.extend(step_warnings)
-        else:
-            # Full LLM pipeline: preprocess → decompose → plan → execute → CRAG → hybrid
-            yield {"type": "status", "step": "planning"}
-
-            preprocessor = QueryPreprocessor(self._llm)
-            enhanced_query = await preprocessor.reformulate(question)
-
-            decomposer = QueryDecomposer(self._llm)
-            sub_queries = await decomposer.decompose(enhanced_query)
-
-            if len(sub_queries) > 1:
-                memory_ctx_prompt = build_memory_context_prompt(memory)
-
-                async def _plan_and_execute(sq: str) -> tuple[ExecutionPlan, list[DataResult], list[str]]:
-                    sq_plan = await generate_plan(self._llm, sq, memory_context=memory_ctx_prompt)
-                    sq_results, sq_warnings = await self._execute_steps(sq_plan, nl_query=sq)
-                    return sq_plan, sq_results, sq_warnings
-
-                plan_results = await asyncio.gather(
-                    *[_plan_and_execute(sq) for sq in sub_queries],
-                    return_exceptions=True,
-                )
-
-                all_results: list[DataResult] = []
-                plan = None
-                for pr in plan_results:
-                    if isinstance(pr, Exception):
-                        logger.warning("Sub-query plan/execute failed (streaming): %s", pr)
-                        continue
-                    sq_plan, sq_results, sq_warnings = pr
-                    if plan is None:
-                        plan = sq_plan
-                    all_results.extend(sq_results)
-                    all_warnings.extend(sq_warnings)
-
-                if plan is None:
-                    plan = await generate_plan(
-                        self._llm, enhanced_query,
-                        memory_context=build_memory_context_prompt(memory),
-                    )
-                results = all_results
-            else:
-                plan = await generate_plan(
-                    self._llm, enhanced_query,
-                    memory_context=build_memory_context_prompt(memory),
-                )
-
-                yield {
-                    "type": "status",
-                    "step": "planned",
-                    "intent": plan.intent,
-                    "steps_count": len(plan.steps),
-                }
-
-                yield {"type": "status", "step": "searching"}
-                results, step_warnings = await self._execute_steps_streaming(plan, nl_query=question)
-                all_warnings.extend(step_warnings)
-
-            # CRAG evaluation (skip for deterministic routes)
-            if self._retrieval_evaluator:
-                try:
-                    verdict = await self._retrieval_evaluator.evaluate(question, results, plan)
-                    logger.info(
-                        "CRAG (streaming) verdict: quality=%s, confidence=%.2f",
-                        verdict.quality.value, verdict.confidence,
-                    )
-                    if (
-                        verdict.quality == RetrievalQuality.INCORRECT
-                        and verdict.confidence >= 0.7
-                    ):
-                        retry_plan = await generate_plan(
-                            self._llm,
-                            f"{question} (ampliar búsqueda, datos insuficientes)",
-                            memory_context=build_memory_context_prompt(memory),
-                        )
-                        retry_results, retry_warnings = await self._execute_steps_streaming(retry_plan, nl_query=question)
-                        all_warnings.extend(retry_warnings)
-                        if retry_results:
-                            results = retry_results
-                            plan = retry_plan
-                except Exception:
-                    logger.debug("CRAG evaluation failed in streaming", exc_info=True)
-
-            # Hybrid search (skip for deterministic routes)
-            results = await self._enrich_with_hybrid_search(results, enhanced_query, plan.intent)
-
-        # Generating
+        # Analysis (1 LLM call, streamed)
         yield {"type": "status", "step": "generating"}
 
         data_context = self._build_data_context(results)
         today = datetime.now(UTC).strftime("%Y-%m-%d")
-        memory_ctx = build_memory_context_prompt(memory)
+
+        errors_block = ""
+        if all_warnings:
+            errors_block = (
+                "\nERRORES EN LA RECOLECCIÓN:\n"
+                + "\n".join(f"- {w}" for w in all_warnings)
+            )
 
         analysis_prompt = (
             f'PREGUNTA DEL USUARIO: "{question}"\n'
             f"FECHA ACTUAL: {today}\n"
             f"INTENCIÓN: {plan.intent}\n\n"
             f"DATOS RECOLECTADOS:\n{data_context}\n"
-            f"{memory_ctx}\n"
+            f"{errors_block}"
+            f"{memory_ctx}\n\n"
+            "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
+            "para no repetir contexto innecesariamente y para mantener coherencia "
+            "con respuestas anteriores.\n\n"
             "Respondé de forma breve y conversacional. Destacá el dato más importante, "
             "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
             "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
@@ -1043,7 +622,7 @@ class SmartQueryService:
         full_text = ""
         async for chunk in self._llm.chat_stream(
             messages=[
-                LLMMessage(role="system", content=ANALYSIS_SYSTEM_PROMPT),
+                LLMMessage(role="system", content=load_prompt("analyst")),
                 LLMMessage(role="user", content=analysis_prompt),
             ],
             temperature=0.4,
@@ -1105,7 +684,7 @@ class SmartQueryService:
             **({"warnings": all_warnings} if all_warnings else {}),
         }
 
-        # Cache write (fire-and-forget, don't block streaming)
+        # Cache write (fire-and-forget)
         try:
             result_dict = {
                 "answer": clean_answer,
@@ -1149,351 +728,6 @@ class SmartQueryService:
                 return response
         return None
 
-    # ── DDJJ deterministic intent detection ─────────────────
-
-    @staticmethod
-    def _detect_ddjj_intent(question: str) -> ExecutionPlan | None:
-        """Return a forced ExecutionPlan for DDJJ queries, or None to fall back to the LLM planner."""
-        text = question.strip()
-        if not _DDJJ_PATTERN.search(text):
-            return None
-
-        # Extract just the new user question (avoid matching numbers in context history)
-        user_question = text
-        marker = "NUEVA PREGUNTA DEL USUARIO"
-        marker_idx = text.find(marker)
-        if marker_idx != -1:
-            user_question = text[marker_idx:]
-
-        # Specific position query (e.g. "cual es el numero 11", "puesto 15")
-        pos_match = _DDJJ_POSITION_PATTERN.search(user_question)
-        if pos_match and _DDJJ_RANKING_PATTERN.search(text):
-            position = int(pos_match.group(1))
-            order = "asc" if re.search(r"menor|pobres?", text, re.IGNORECASE) else "desc"
-            return ExecutionPlan(
-                query=text,
-                intent="ddjj_ranking",
-                steps=[
-                    PlanStep(
-                        id="ddjj_ranking",
-                        action="query_ddjj",
-                        description=f"Posición {position} del ranking de diputados por patrimonio ({order})",
-                        params={"action": "ranking", "sortBy": "patrimonio", "order": order, "top": position, "position": position},
-                    ),
-                ],
-            )
-
-        # Ranking queries
-        if _DDJJ_RANKING_PATTERN.search(text):
-            # Extract custom top N if specified (e.g. "top 20", "los 15 diputados")
-            top_match = re.search(r"(?:top|los|las)\s+(\d{1,3})", user_question, re.IGNORECASE)
-            top = int(top_match.group(1)) if top_match else 10
-            order = "asc" if re.search(r"menor|pobres?", text, re.IGNORECASE) else "desc"
-            return ExecutionPlan(
-                query=text,
-                intent="ddjj_ranking",
-                steps=[
-                    PlanStep(
-                        id="ddjj_ranking",
-                        action="query_ddjj",
-                        description=f"Ranking de diputados por patrimonio ({order})",
-                        params={"action": "ranking", "sortBy": "patrimonio", "order": order, "top": top},
-                    ),
-                ],
-            )
-
-        # Name-based search
-        name_match = _DDJJ_NAME_PATTERN.search(text)
-        if name_match:
-            nombre = name_match.group(1).strip()
-            return ExecutionPlan(
-                query=text,
-                intent="ddjj_persona",
-                steps=[
-                    PlanStep(
-                        id="ddjj_name",
-                        action="query_ddjj",
-                        description=f"Buscar DDJJ de {nombre}",
-                        params={"action": "detail", "nombre": nombre},
-                    ),
-                ],
-            )
-
-        # Generic DDJJ search (fallback within DDJJ)
-        return ExecutionPlan(
-            query=text,
-            intent="ddjj_busqueda",
-            steps=[
-                PlanStep(
-                    id="ddjj_search",
-                    action="query_ddjj",
-                    description="Búsqueda general en DDJJ",
-                    params={"action": "search", "query": text},
-                ),
-            ],
-        )
-
-    # ── Staff deterministic intent detection ─────────────────
-
-    @staticmethod
-    def _clean_staff_name(raw: str) -> str:
-        """Strip title prefixes and trailing stop words from an extracted legislator name."""
-        name = raw.strip()
-        name = _STAFF_TITLE_PREFIX.sub("", name).strip()
-        name = _STAFF_NAME_STOP.sub("", name).strip()
-        return name
-
-    @staticmethod
-    def _extract_staff_name(txt: str) -> str:
-        """Try multiple patterns to extract a legislator name from the query."""
-        # "asesores/personal/empleados de X"
-        m = _STAFF_NAME_PATTERN.search(txt)
-        if m:
-            return SmartQueryService._clean_staff_name(m.group(1))
-
-        # "cuantos asesores tiene X"
-        m = _STAFF_COUNT_TIENE_PATTERN.search(txt)
-        if m:
-            return SmartQueryService._clean_staff_name(m.group(1))
-
-        # "asesores tiene X" (without cuantos)
-        m = _STAFF_NAME_TIENE_PATTERN.search(txt)
-        if m:
-            return SmartQueryService._clean_staff_name(m.group(1))
-
-        return ""
-
-    @staticmethod
-    def _detect_staff_intent(question: str) -> ExecutionPlan | None:
-        """Return a forced ExecutionPlan for staff queries, or None to fall back to the LLM planner."""
-        txt = question.strip()
-        if not _STAFF_PATTERN.search(txt):
-            return None
-
-        # Changes queries (altas/bajas)
-        if _STAFF_CHANGES_PATTERN.search(txt):
-            nombre = SmartQueryService._extract_staff_name(txt) or None
-            return ExecutionPlan(
-                query=txt,
-                intent="staff_changes",
-                steps=[
-                    PlanStep(
-                        id="staff_changes",
-                        action="query_staff",
-                        description=f"Cambios de personal{f' de {nombre}' if nombre else ''}",
-                        params={"action": "changes", **({"name": nombre} if nombre else {})},
-                    ),
-                ],
-            )
-
-        # Count queries ("cuantos asesores de X" or "cuantos asesores tiene X")
-        if _STAFF_COUNT_PATTERN.search(txt):
-            nombre = SmartQueryService._extract_staff_name(txt)
-            if nombre:
-                return ExecutionPlan(
-                    query=txt,
-                    intent="staff_count",
-                    steps=[
-                        PlanStep(
-                            id="staff_count",
-                            action="query_staff",
-                            description=f"Cantidad de asesores de {nombre}",
-                            params={"action": "count", "name": nombre},
-                        ),
-                    ],
-                )
-
-        # Name-based list
-        nombre = SmartQueryService._extract_staff_name(txt)
-        if nombre:
-            return ExecutionPlan(
-                query=txt,
-                intent="staff_legislator",
-                steps=[
-                    PlanStep(
-                        id="staff_list",
-                        action="query_staff",
-                        description=f"Personal de {nombre}",
-                        params={"action": "get_by_legislator", "name": nombre},
-                    ),
-                ],
-            )
-
-        # Commission-based query ("comisión de educación", "comisión de presupuesto")
-        # Extract user question only to avoid matching commission names in context
-        user_q = txt
-        marker = "NUEVA PREGUNTA DEL USUARIO"
-        idx = txt.find(marker)
-        if idx != -1:
-            user_q = txt[idx:]
-        comm_match = _STAFF_COMMISSION_PATTERN.search(user_q)
-        if comm_match:
-            commission = comm_match.group(1).strip()
-            return ExecutionPlan(
-                query=txt,
-                intent="staff_commission",
-                steps=[
-                    PlanStep(
-                        id="staff_commission",
-                        action="query_staff",
-                        description=f"Personal de la comisión de {commission}",
-                        params={"action": "get_by_legislator", "name": f"comision de {commission}"},
-                    ),
-                ],
-            )
-
-        # Generic staff query — extract keywords instead of passing full text
-        keywords = re.sub(
-            r"\b(que|cual|cuales|quienes?|como|donde|cuanto|personas?|trabajan?|en|el|la|los|las|del?|un[oa]?s?|por|con|para|es|son|hay)\b",
-            " ", txt, flags=re.IGNORECASE,
-        ).strip()
-        keywords = re.sub(r"\s+", " ", keywords).strip()[:200]
-        return ExecutionPlan(
-            query=txt,
-            intent="staff_busqueda",
-            steps=[
-                PlanStep(
-                    id="staff_search",
-                    action="query_staff",
-                    description="Búsqueda general de personal",
-                    params={"action": "search", "query": keywords or txt[:200]},
-                ),
-            ],
-        )
-
-    # ── BCRA deterministic intent detection ──────────────────
-
-    @staticmethod
-    def _detect_bcra_intent(question: str) -> ExecutionPlan | None:
-        """Return a forced ExecutionPlan for BCRA queries."""
-        text = question.strip()
-        if not _BCRA_PATTERN.search(text):
-            return None
-        lower = text.lower()
-        if any(kw in lower for kw in ("reserva", "reservas")):
-            return ExecutionPlan(
-                query=text,
-                intent="bcra_reservas",
-                steps=[PlanStep(
-                    id="bcra_variables",
-                    action="query_bcra",
-                    description="Reservas del BCRA",
-                    params={"tipo": "variables"},
-                )],
-            )
-        if any(kw in lower for kw in ("tasa", "política monetaria", "politica monetaria")):
-            return ExecutionPlan(
-                query=text,
-                intent="bcra_tasa",
-                steps=[PlanStep(
-                    id="bcra_variables",
-                    action="query_bcra",
-                    description="Tasa de política monetaria BCRA",
-                    params={"tipo": "variables"},
-                )],
-            )
-        if any(kw in lower for kw in ("base monetaria", "circulación monetaria", "circulacion monetaria")):
-            return ExecutionPlan(
-                query=text,
-                intent="bcra_monetaria",
-                steps=[PlanStep(
-                    id="bcra_variables",
-                    action="query_bcra",
-                    description="Variables monetarias BCRA",
-                    params={"tipo": "variables"},
-                )],
-            )
-        return ExecutionPlan(
-            query=text,
-            intent="bcra_cotizaciones",
-            steps=[PlanStep(
-                id="bcra_cotizaciones",
-                action="query_bcra",
-                description="Cotizaciones oficiales BCRA",
-                params={"tipo": "cotizaciones"},
-            )],
-        )
-
-    # ── Argentina Datos deterministic intent detection ───────
-
-    @staticmethod
-    def _detect_argentina_datos_intent(question: str) -> ExecutionPlan | None:
-        """Return a forced ExecutionPlan for ArgDatos queries (dólar blue, riesgo país)."""
-        text = question.strip()
-        if not _ARGDATOS_PATTERN.search(text):
-            return None
-        lower = text.lower()
-        if "riesgo" in lower and "pa" in lower:
-            return ExecutionPlan(
-                query=text,
-                intent="argdatos_riesgo_pais",
-                steps=[PlanStep(
-                    id="argdatos_riesgo",
-                    action="query_argentina_datos",
-                    description="Riesgo país actual",
-                    params={"type": "riesgo_pais", "ultimo": True},
-                )],
-            )
-        casa = None
-        if "blue" in lower:
-            casa = "blue"
-        elif "mep" in lower or "bolsa" in lower:
-            casa = "bolsa"
-        elif "ccl" in lower or "contado con liqui" in lower:
-            casa = "contadoconliqui"
-        elif "cripto" in lower:
-            casa = "cripto"
-        elif "tarjeta" in lower or "turista" in lower:
-            casa = "tarjeta"
-        return ExecutionPlan(
-            query=text,
-            intent="argdatos_dolar",
-            steps=[PlanStep(
-                id="argdatos_dolar",
-                action="query_argentina_datos",
-                description=f"Cotización dólar{f' {casa}' if casa else ''}",
-                params={"type": "dolar", **({"casa": casa} if casa else {})},
-            )],
-        )
-
-    # ── Series de Tiempo deterministic intent detection ──────
-
-    @staticmethod
-    def _detect_series_intent(question: str) -> ExecutionPlan | None:
-        """Return a forced ExecutionPlan for economic time-series queries."""
-        text = question.strip()
-        if not _SERIES_PATTERN.search(text):
-            return None
-        return ExecutionPlan(
-            query=text,
-            intent="series_tiempo",
-            steps=[PlanStep(
-                id="series_query",
-                action="query_series",
-                description=f"Serie de tiempo: {text[:100]}",
-                params={"query": text},
-            )],
-        )
-
-    # ── Sesiones deterministic intent detection ──────────────
-
-    @staticmethod
-    def _detect_sesiones_intent(question: str) -> ExecutionPlan | None:
-        """Return a forced ExecutionPlan for congressional session queries."""
-        text = question.strip()
-        if not _SESIONES_PATTERN.search(text):
-            return None
-        return ExecutionPlan(
-            query=text,
-            intent="sesiones_congreso",
-            steps=[PlanStep(
-                id="sesiones_search",
-                action="query_sesiones",
-                description=f"Buscar en sesiones: {text[:100]}",
-                params={"query": text},
-            )],
-        )
-
     # ── Cache helpers ───────────────────────────────────────
 
     @staticmethod
@@ -1503,7 +737,6 @@ class SmartQueryService:
         return f"openarg:smart:{h}"
 
     async def _get_embedding(self, question: str) -> list[float] | None:
-        """Generate embedding for a question, returning None on failure."""
         try:
             return await self._embedding.embed(question)
         except Exception:
@@ -1553,14 +786,12 @@ class SmartQueryService:
 
     async def _get_cached_dict(self, question: str) -> dict[str, Any] | None:
         """Return raw cached dict for streaming endpoint."""
-        # Redis first
         try:
             cached = await self._cache.get(self._cache_key(question))
             if cached and isinstance(cached, dict):
                 return cached
         except Exception:
             logger.debug("WS Redis cache read failed")
-        # Then semantic
         try:
             q_embedding = await self._get_embedding(question)
             if q_embedding:
@@ -1654,7 +885,6 @@ class SmartQueryService:
                 top=params.get("top", 10),
                 order=params.get("order", "desc"),
             )
-            # If a specific position was requested, only return that record
             position = params.get("position")
             if position and result.records and len(result.records) >= position:
                 result = DataResult(
@@ -1766,8 +996,140 @@ class SmartQueryService:
             logger.warning("BCRA step %s failed", step.id, exc_info=True)
             return []
 
+    async def _execute_sandbox_step(self, step: PlanStep) -> list[DataResult]:
+        if not self._sandbox:
+            logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
+            return []
+        params = step.params
+        nl_query = params.get("query", step.description)
+
+        try:
+            tables = await self._sandbox.list_cached_tables()
+            table_hints = params.get("tables", [])
+            if not tables:
+                if table_hints and any("indec" in h for h in table_hints):
+                    logger.info("No cached tables at all, attempting INDEC live fallback")
+                    return await self._indec_live_fallback(nl_query)
+                return []
+
+            if table_hints:
+                import fnmatch
+                filtered = []
+                for t in tables:
+                    for pattern in table_hints:
+                        if fnmatch.fnmatch(t.table_name, pattern):
+                            filtered.append(t)
+                            break
+                if filtered:
+                    tables = filtered
+                elif any("indec" in h for h in table_hints):
+                    logger.info("No cached INDEC tables, attempting live fallback")
+                    return await self._indec_live_fallback(nl_query)
+
+            tables_context_parts = []
+            for t in tables[:50]:
+                cols = ", ".join(t.columns) if t.columns else "(no column info)"
+                tables_context_parts.append(
+                    f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
+                )
+            tables_context = "\n\n".join(tables_context_parts)
+
+            nl2sql_prompt = (
+                "You are a SQL assistant for Argentine public datasets stored in PostgreSQL.\n"
+                "You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, "
+                "DROP, or any DDL/DML statement.\n\n"
+                f"Available tables and their columns:\n\n{tables_context}\n\n"
+                "Rules:\n"
+                "- Only reference the tables and columns listed above.\n"
+                '- Always use double-quoted identifiers for column names that contain spaces or special characters.\n'
+                "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
+                "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
+                "- The query must be valid PostgreSQL syntax.\n"
+            )
+
+            llm_response = await self._llm.chat(
+                messages=[
+                    LLMMessage(role="system", content=nl2sql_prompt),
+                    LLMMessage(role="user", content=nl_query),
+                ],
+                temperature=0.0,
+                max_tokens=1024,
+            )
+
+            generated_sql = llm_response.content.strip()
+            if generated_sql.startswith("```"):
+                lines = generated_sql.split("\n")
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                generated_sql = "\n".join(lines).strip()
+
+            result = await self._sandbox.execute_readonly(generated_sql)
+            if result.error:
+                logger.warning("Sandbox query failed: %s", result.error)
+                return []
+
+            if not result.rows and _INDEC_PATTERN.search(nl_query):
+                logger.info("Sandbox returned empty for INDEC query, trying live fallback")
+                fallback = await self._indec_live_fallback(nl_query)
+                if fallback:
+                    return fallback
+
+            return [
+                DataResult(
+                    source="sandbox:nl2sql",
+                    portal_name="Cache Local (NL2SQL)",
+                    portal_url="",
+                    dataset_title=f"Consulta SQL: {nl_query[:100]}",
+                    format="json",
+                    records=result.rows[:200],
+                    metadata={
+                        "total_records": result.row_count,
+                        "generated_sql": generated_sql,
+                        "truncated": result.truncated,
+                        "columns": result.columns,
+                        "fetched_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+            ]
+        except Exception:
+            logger.warning("Sandbox step %s failed", step.id, exc_info=True)
+            return []
+
+    async def _execute_search_datasets_step(self, step: PlanStep) -> list[DataResult]:
+        """Vector search over cached dataset chunks in pgvector."""
+        params = step.params
+        query = params.get("query", step.description)
+        try:
+            q_embedding = await self._embedding.embed(query)
+            vector_results = await self._vector_search.search_datasets(
+                q_embedding, limit=params.get("limit", 10),
+            )
+            if not vector_results:
+                return []
+            return [
+                DataResult(
+                    source=f"pgvector:{vr.portal}",
+                    portal_name=vr.portal,
+                    portal_url=vr.download_url or "",
+                    dataset_title=vr.title,
+                    format="json",
+                    records=[],
+                    metadata={
+                        "total_records": 0,
+                        "description": vr.description,
+                        "columns": vr.columns,
+                        "score": round(vr.score, 3),
+                    },
+                )
+                for vr in vector_results
+            ]
+        except Exception:
+            logger.warning("search_datasets step failed", exc_info=True)
+            return []
+
     async def _indec_live_fallback(self, nl_query: str) -> list[DataResult]:
         """Plan B: download INDEC XLS on-the-fly when cache tables don't exist."""
+        import asyncio as _asyncio
+
         query_lower = nl_query.lower()
         keyword_map = {
             "ipc": ["ipc", "inflacion", "precios"],
@@ -1802,7 +1164,7 @@ class SmartQueryService:
                 continue
 
             try:
-                df = await asyncio.to_thread(_download_and_parse, ds_info["url"])
+                df = await _asyncio.to_thread(_download_and_parse, ds_info["url"])
                 if df is None or df.empty:
                     continue
 
@@ -1830,169 +1192,10 @@ class SmartQueryService:
 
         return results
 
-    async def _federated_fallback(
-        self, nl_query: str, existing_results: list[DataResult],
-    ) -> list[DataResult]:
-        """Búsqueda federada: intenta CKAN + series cuando los conectores primarios fallaron."""
-        real_results = [r for r in existing_results if r.records]
-        if len(real_results) >= 2:
-            return existing_results
-
-        extra: list[DataResult] = []
-
-        # 1. CKAN search (busca en todos los portales)
-        if self._ckan:
-            try:
-                ckan_results = await self._ckan.search_datasets(nl_query, rows=5)
-                for r in ckan_results:
-                    if r.records:
-                        r.metadata["fallback"] = True
-                        extra.append(r)
-            except Exception:
-                logger.debug("Federated CKAN fallback failed", exc_info=True)
-
-        # 2. Series de Tiempo (si la query parece económica)
-        if self._series and _is_economic_query(nl_query):
-            try:
-                series_step = PlanStep(
-                    id="fallback_series",
-                    action="query_series",
-                    description=nl_query,
-                    params={"query": nl_query},
-                )
-                series_data = await self._execute_series_step(series_step)
-                for r in series_data:
-                    if r.records:
-                        r.metadata["fallback"] = True
-                        extra.append(r)
-            except Exception:
-                logger.debug("Federated series fallback failed", exc_info=True)
-
-        # 3. INDEC live (si parece INDEC y no hay ya datos INDEC)
-        has_indec = any("indec" in r.source for r in existing_results if r.records)
-        if not has_indec and _INDEC_PATTERN.search(nl_query):
-            try:
-                indec_data = await self._indec_live_fallback(nl_query)
-                extra.extend(indec_data)
-            except Exception:
-                logger.debug("Federated INDEC fallback failed", exc_info=True)
-
-        return existing_results + extra[:3]
-
-    async def _execute_sandbox_step(self, step: PlanStep) -> list[DataResult]:
-        if not self._sandbox:
-            logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
-            return []
-        params = step.params
-        nl_query = params.get("query", step.description)
-
-        try:
-            # Get available tables
-            tables = await self._sandbox.list_cached_tables()
-            table_hints = params.get("tables", [])
-            if not tables:
-                # If no tables at all but hints point to INDEC, try live fallback
-                if table_hints and any("indec" in h for h in table_hints):
-                    logger.info("No cached tables at all, attempting INDEC live fallback")
-                    return await self._indec_live_fallback(nl_query)
-                return []
-
-            # Filter tables if hints provided
-            if table_hints:
-                import fnmatch
-                filtered = []
-                for t in tables:
-                    for pattern in table_hints:
-                        if fnmatch.fnmatch(t.table_name, pattern):
-                            filtered.append(t)
-                            break
-                if filtered:
-                    tables = filtered
-                else:
-                    # INDEC fallback: if hints match indec pattern and no cached tables found
-                    if any("indec" in h for h in table_hints):
-                        logger.info("No cached INDEC tables, attempting live fallback")
-                        return await self._indec_live_fallback(nl_query)
-
-            # Build context for NL2SQL
-            tables_context_parts = []
-            for t in tables[:50]:  # safety limit
-                cols = ", ".join(t.columns) if t.columns else "(no column info)"
-                tables_context_parts.append(
-                    f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
-                )
-            tables_context = "\n\n".join(tables_context_parts)
-
-            nl2sql_prompt = (
-                "You are a SQL assistant for Argentine public datasets stored in PostgreSQL.\n"
-                "You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, "
-                "DROP, or any DDL/DML statement.\n\n"
-                f"Available tables and their columns:\n\n{tables_context}\n\n"
-                "Rules:\n"
-                "- Only reference the tables and columns listed above.\n"
-                '- Always use double-quoted identifiers for column names that contain spaces or special characters.\n'
-                "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
-                "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
-                "- The query must be valid PostgreSQL syntax.\n"
-            )
-
-            llm_response = await self._llm.chat(
-                messages=[
-                    LLMMessage(role="system", content=nl2sql_prompt),
-                    LLMMessage(role="user", content=nl_query),
-                ],
-                temperature=0.0,
-                max_tokens=1024,
-            )
-
-            generated_sql = llm_response.content.strip()
-            # Strip markdown code fences
-            if generated_sql.startswith("```"):
-                lines = generated_sql.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
-                generated_sql = "\n".join(lines).strip()
-
-            result = await self._sandbox.execute_readonly(generated_sql)
-            if result.error:
-                logger.warning("Sandbox query failed: %s", result.error)
-                return []
-
-            # If sandbox returned empty and query is INDEC-related, try live fallback
-            if not result.rows and _INDEC_PATTERN.search(nl_query):
-                logger.info("Sandbox returned empty for INDEC query, trying live fallback")
-                fallback = await self._indec_live_fallback(nl_query)
-                if fallback:
-                    return fallback
-
-            return [
-                DataResult(
-                    source="sandbox:nl2sql",
-                    portal_name="Cache Local (NL2SQL)",
-                    portal_url="",
-                    dataset_title=f"Consulta SQL: {nl_query[:100]}",
-                    format="json",
-                    records=result.rows[:200],
-                    metadata={
-                        "total_records": result.row_count,
-                        "generated_sql": generated_sql,
-                        "truncated": result.truncated,
-                        "columns": result.columns,
-                        "fetched_at": datetime.now(UTC).isoformat(),
-                    },
-                )
-            ]
-        except Exception:
-            logger.warning("Sandbox step %s failed", step.id, exc_info=True)
-            return []
-
     async def _execute_steps(
         self, plan: ExecutionPlan, nl_query: str = "",
     ) -> tuple[list[DataResult], list[str]]:
-        """Execute plan steps, catching ConnectorError per step.
-
-        Returns:
-            Tuple of (results, warnings) where warnings lists connector failures.
-        """
+        """Execute plan steps, catching ConnectorError per step."""
         results: list[DataResult] = []
         warnings: list[str] = []
         for step in plan.steps[:5]:
@@ -2014,19 +1217,7 @@ class SmartQueryService:
                 logger.warning("Step %s failed", step.id, exc_info=True)
                 warnings.append(f"Conector '{connector_name}' falló: {type(exc).__name__}")
 
-        # If no results with actual data, attempt federated fallback
-        real = [r for r in results if r.records]
-        if not real and nl_query:
-            logger.info("No real data from plan steps, attempting federated fallback")
-            results = await self._federated_fallback(nl_query, results)
-
         return results, warnings
-
-    async def _execute_steps_streaming(
-        self, plan: ExecutionPlan, nl_query: str = "",
-    ) -> tuple[list[DataResult], list[str]]:
-        """Same as _execute_steps but used by streaming endpoint."""
-        return await self._execute_steps(plan, nl_query=nl_query)
 
     async def _dispatch_step(self, step: PlanStep) -> list[DataResult]:
         if step.action == "query_series":
@@ -2047,52 +1238,13 @@ class SmartQueryService:
             return await self._execute_bcra_step(step)
         elif step.action == "query_sandbox":
             return await self._execute_sandbox_step(step)
+        elif step.action == "search_datasets":
+            return await self._execute_search_datasets_step(step)
         elif step.action in ("analyze", "compare", "synthesize"):
             return []
         else:
             logger.info("Unknown step action '%s', skipping", step.action)
             return []
-
-    # ── Hybrid search enrichment ────────────────────────────
-
-    async def _enrich_with_hybrid_search(
-        self, results: list[DataResult], enhanced_query: str, intent: str,
-    ) -> list[DataResult]:
-        if results and intent != "busqueda_general":
-            return results
-        try:
-            query_embedding = await self._embedding.embed(enhanced_query)
-            vector_results = await self._vector_search.search_datasets_hybrid(
-                query_embedding, query_text=enhanced_query, limit=5,
-                min_score=0.01,
-            )
-
-            # Apply LLM reranking
-            if vector_results:
-                vector_results = await self._reranker.rerank(
-                    enhanced_query, vector_results, top_k=5,
-                )
-
-            for vr in vector_results:
-                results.append(
-                    DataResult(
-                        source=f"pgvector:{vr.portal}",
-                        portal_name=vr.portal,
-                        portal_url="",
-                        dataset_title=vr.title,
-                        format="json",
-                        records=[],
-                        metadata={
-                            "total_records": 0,
-                            "description": vr.description,
-                            "columns": vr.columns,
-                            "score": round(vr.score, 3),
-                        },
-                    )
-                )
-        except Exception:
-            logger.warning("Hybrid search enrichment failed", exc_info=True)
-        return results
 
     # ── Data context builder ────────────────────────────────
 
@@ -2179,13 +1331,13 @@ class SmartQueryService:
                     f"{records_text}\n\n"
                     "IMPORTANTE: Si hay una columna temporal "
                     "(año, fecha, mes), generá un gráfico de línea "
-                    "temporal con <!--CHART:{}-->."
+                    "temporal con <!--CHART:{}--> usando TODOS los "
+                    "datos proporcionados."
                 )
 
             parts.append(part)
 
         joined = "\n\n".join(parts)
-        # Truncate to ~60k chars (~15k tokens) to avoid hitting LLM context limits
         max_context_chars = 60_000
         if len(joined) > max_context_chars:
             joined = joined[:max_context_chars] + "\n\n[... datos truncados por límite de contexto ...]"
@@ -2195,10 +1347,6 @@ class SmartQueryService:
 
     @staticmethod
     def _extract_meta(text: str) -> tuple[float, list[dict[str, Any]]]:
-        """Extract confidence and citations from <!--META:{...}--> block.
-
-        Returns (confidence, citations). Defaults to (1.0, []) if not found.
-        """
         match = re.search(r"<!--META:(.*?)-->", text, re.DOTALL)
         if not match:
             return 1.0, []

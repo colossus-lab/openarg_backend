@@ -6,20 +6,9 @@ import logging
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
 from app.domain.ports.search.vector_search import SearchResult
+from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
-
-_RERANK_PROMPT = """Reordená estos resultados de búsqueda según su relevancia para la pregunta del usuario.
-Retorná SOLO un JSON array con los índices (0-based) en orden de mayor a menor relevancia.
-
-Ejemplo: [2, 0, 1, 3] significa que el resultado 2 es el más relevante.
-
-Pregunta: {question}
-
-Resultados:
-{results_text}
-
-Array de índices ordenados:"""
 
 
 class LLMReranker:
@@ -39,9 +28,7 @@ class LLMReranker:
                 for i, r in enumerate(results)
             )
 
-            prompt = _RERANK_PROMPT.format(
-                question=question, results_text=results_text,
-            )
+            prompt = load_prompt("reranker", question=question, results_text=results_text)
 
             response = await self._llm.chat(
                 messages=[LLMMessage(role="user", content=prompt)],

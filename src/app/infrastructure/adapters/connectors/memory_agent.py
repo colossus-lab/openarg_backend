@@ -6,26 +6,11 @@ import logging
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, MemoryContext
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
+from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
 MEMORY_TTL = 30 * 60  # 30 minutes
-
-MEMORY_SYSTEM_PROMPT = """Sos el Agente de Memoria de OpenArg, un sistema de inteligencia artificial entrenado por ColossusLab.tech. Tu rol es mantener un "mapa mental" de la conversación.
-
-Después de cada turno de análisis, debés:
-1. Resumir los hallazgos clave en 2-3 oraciones
-2. Identificar conexiones con información previa
-3. Sugerir preguntas de seguimiento relevantes
-4. Trackear qué datasets ya fueron consultados para evitar redundancia
-
-Respondé SIEMPRE con JSON válido y NADA más:
-{
-  "summary": "resumen del turno actual",
-  "keyFindings": ["hallazgo 1", "hallazgo 2"],
-  "suggestedFollowups": ["pregunta 1", "pregunta 2"],
-  "datasetsUsed": ["dataset1", "dataset2"]
-}"""
 
 
 def _memory_cache_key(session_id: str) -> str:
@@ -95,7 +80,7 @@ async def update_memory(
 
         response = await llm.chat(
             messages=[
-                LLMMessage(role="system", content=MEMORY_SYSTEM_PROMPT),
+                LLMMessage(role="system", content=load_prompt("memory")),
                 LLMMessage(role="user", content=context),
             ],
             temperature=0.3,
