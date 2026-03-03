@@ -21,6 +21,10 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
+# After this many total attempts (across Celery retries AND external
+# re-dispatches) the task is marked permanently_failed and never retried.
+MAX_TOTAL_ATTEMPTS = 5
+
 
 def _sanitize_table_name(name: str) -> str:
     clean = re.sub(r"[^a-z0-9_]", "_", name.lower())
@@ -88,6 +92,22 @@ def collect_dataset(self, dataset_id: str):
         if not download_url:
             logger.warning(f"Dataset {dataset_id} has no download URL")
             return {"error": "no_download_url"}
+
+        # Check retry_count — skip if permanently failed
+        with engine.begin() as conn:
+            cd_row = conn.execute(
+                text(
+                    "SELECT retry_count FROM cached_datasets "
+                    "WHERE dataset_id = CAST(:did AS uuid)"
+                ),
+                {"did": dataset_id},
+            ).fetchone()
+            if cd_row and cd_row.retry_count >= MAX_TOTAL_ATTEMPTS:
+                logger.info(
+                    f"Dataset {dataset_id} permanently failed "
+                    f"after {cd_row.retry_count} attempts, skipping"
+                )
+                return {"error": "permanently_failed"}
 
         # Check if already cached
         table_name = _sanitize_table_name(title)
@@ -227,14 +247,42 @@ def collect_dataset(self, dataset_id: str):
     except Exception as exc:
         logger.exception(f"Collection failed for dataset {dataset_id}")
         with engine.begin() as conn:
+            # Increment retry_count and check if we should give up
             conn.execute(
                 text(
-                    "UPDATE cached_datasets SET status = 'error', error_message = :msg "
+                    "UPDATE cached_datasets "
+                    "SET retry_count = retry_count + 1, "
+                    "    error_message = :msg, "
+                    "    updated_at = NOW(), "
+                    "    status = CASE "
+                    "      WHEN retry_count + 1 >= :max THEN 'permanently_failed' "
+                    "      ELSE 'error' "
+                    "    END "
                     "WHERE dataset_id = CAST(:did AS uuid)"
                 ),
-                {"msg": str(exc), "did": dataset_id},
+                {
+                    "msg": str(exc)[:500],
+                    "did": dataset_id,
+                    "max": MAX_TOTAL_ATTEMPTS,
+                },
             )
-        raise self.retry(exc=exc, countdown=60)
+            current = conn.execute(
+                text(
+                    "SELECT retry_count FROM cached_datasets "
+                    "WHERE dataset_id = CAST(:did AS uuid)"
+                ),
+                {"did": dataset_id},
+            ).fetchone()
+
+        attempts = current.retry_count if current else 0
+        if attempts >= MAX_TOTAL_ATTEMPTS:
+            logger.warning(
+                f"Dataset {dataset_id} permanently failed "
+                f"after {attempts} attempts: {exc}"
+            )
+            return {"error": "permanently_failed", "attempts": attempts}
+
+        raise self.retry(exc=exc, countdown=60) from exc
     finally:
         engine.dispose()
 
@@ -245,12 +293,18 @@ def bulk_collect_all(self, portal: str | None = None):
     engine = get_sync_engine()
 
     try:
-        query = "SELECT CAST(id AS text) FROM datasets WHERE is_cached = false"
+        # Skip datasets that have permanently failed collection
+        query = (
+            "SELECT CAST(d.id AS text) FROM datasets d "
+            "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
+            "WHERE d.is_cached = false "
+            "AND (cd.status IS NULL OR cd.status != 'permanently_failed')"
+        )
         params: dict = {}
         if portal:
-            query += " AND portal = :portal"
+            query += " AND d.portal = :portal"
             params["portal"] = portal
-        query += " ORDER BY portal, title LIMIT 5000"
+        query += " ORDER BY d.portal, d.title LIMIT 5000"
 
         with engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
@@ -279,23 +333,29 @@ def recover_stuck_tasks(self):
         recovered_downloads = 0
         recovered_queries = 0
 
-        # 1. Recover stuck cached_datasets
+        # 1. Recover stuck cached_datasets (skip permanently failed)
         with engine.begin() as conn:
             stuck_downloads = conn.execute(
                 text("""
-                    SELECT CAST(dataset_id AS text) AS dataset_id, table_name
+                    SELECT CAST(dataset_id AS text) AS dataset_id,
+                           table_name, retry_count
                     FROM cached_datasets
                     WHERE status = 'downloading'
                       AND updated_at < NOW() - INTERVAL '30 minutes'
+                      AND retry_count < :max
                 """),
+                {"max": MAX_TOTAL_ATTEMPTS},
             ).fetchall()
 
             for row in stuck_downloads:
                 conn.execute(
                     text("""
                         UPDATE cached_datasets
-                        SET status = 'error', error_message = 'Recovered: stuck in downloading state', updated_at = NOW()
-                        WHERE dataset_id = CAST(:did AS uuid) AND status = 'downloading'
+                        SET status = 'error',
+                            error_message = 'Recovered: stuck in downloading state',
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:did AS uuid)
+                          AND status = 'downloading'
                     """),
                     {"did": row.dataset_id},
                 )
