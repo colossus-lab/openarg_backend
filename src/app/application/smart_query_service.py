@@ -972,7 +972,81 @@ class SmartQueryService:
                     )
                 ]
 
+        # --- Try local cached tables first ---
+        local_results = await self._search_cached_tables(query, limit=rows)
+        if local_results:
+            logger.info("CKAN step resolved from %d local cached table(s)", len(local_results))
+            return local_results
+
+        # --- Fallback: live CKAN search ---
         return await self._ckan.search_datasets(query, portal_id=portal_id, rows=rows)
+
+    async def _search_cached_tables(
+        self, query: str, limit: int = 10,
+    ) -> list[DataResult]:
+        """Search locally cached tables (cache_*) for datasets matching *query*.
+
+        Uses a simple keyword match against table names.  If matches are found,
+        fetches a sample of rows via the sandbox so we avoid hitting the
+        internet entirely.
+        """
+        if not self._sandbox:
+            return []
+
+        try:
+            all_tables = await self._sandbox.list_cached_tables()
+        except Exception:
+            logger.debug("Failed to list cached tables", exc_info=True)
+            return []
+
+        if not all_tables:
+            return []
+
+        # Normalise query keywords for matching
+        keywords = [k.lower() for k in query.split() if len(k) > 2]
+        if not keywords:
+            return []
+
+        matched = [
+            t for t in all_tables
+            if any(kw in t.table_name.lower() for kw in keywords)
+        ]
+        if not matched:
+            return []
+
+        matched = matched[:limit]
+        results: list[DataResult] = []
+        now = datetime.now(UTC).isoformat()
+
+        for table in matched:
+            try:
+                cols = ", ".join(f'"{c}"' for c in table.columns[:30]) if table.columns else "*"
+                sql = f'SELECT {cols} FROM "{table.table_name}" LIMIT 50'
+                sandbox_result = await self._sandbox.execute_readonly(sql, timeout_seconds=5)
+                if sandbox_result.error or not sandbox_result.rows:
+                    continue
+
+                results.append(
+                    DataResult(
+                        source=f"cache:{table.table_name}",
+                        portal_name="Base de datos local (cache)",
+                        portal_url="",
+                        dataset_title=table.table_name.replace("cache_", "").replace("_", " ").title(),
+                        format="json",
+                        records=sandbox_result.rows[:50],
+                        metadata={
+                            "total_records": table.row_count or len(sandbox_result.rows),
+                            "columns": table.columns,
+                            "fetched_at": now,
+                            "source": "local_cache",
+                        },
+                    )
+                )
+            except Exception:
+                logger.debug("Failed to query cached table %s", table.table_name, exc_info=True)
+                continue
+
+        return results
 
     async def _execute_sesiones_step(self, step: PlanStep) -> list[DataResult]:
         params = step.params
