@@ -183,6 +183,7 @@ class HttpClientProvider(Provider):
     def http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             timeout=15.0,
+            follow_redirects=True,
             headers={"User-Agent": "OpenArg/1.0"},
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
