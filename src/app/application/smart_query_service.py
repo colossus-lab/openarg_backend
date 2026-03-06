@@ -32,6 +32,12 @@ from app.infrastructure.adapters.connectors.memory_agent import (
 )
 from app.infrastructure.adapters.connectors.policy_agent import analyze_policy
 from app.infrastructure.adapters.connectors.query_planner import generate_plan
+from app.infrastructure.adapters.search.query_preprocessor import (
+    expand_acronyms,
+    expand_synonyms,
+    normalize_provinces,
+    normalize_temporal,
+)
 from app.prompts import load_prompt
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
 from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
@@ -363,8 +369,14 @@ class SmartQueryService:
         memory = await load_memory(self._cache, session_id)
         memory_ctx = build_memory_context_prompt(memory)
 
-        # 3. Plan (1 LLM call)
-        plan = await generate_plan(self._llm, question, memory_context=memory_ctx)
+        # 3. Preprocess query (expand synonyms, acronyms, normalize)
+        _q = expand_acronyms(question)
+        _q, _ = normalize_temporal(_q)
+        _q = normalize_provinces(_q)
+        preprocessed_q = expand_synonyms(_q)
+
+        # 4. Plan (1 LLM call)
+        plan = await generate_plan(self._llm, preprocessed_q, memory_context=memory_ctx)
         logger.info(
             "Plan for '%s': intent=%s, steps=%d",
             question[:60], plan.intent, len(plan.steps),
@@ -583,9 +595,15 @@ class SmartQueryService:
         memory = await load_memory(self._cache, session_id)
         memory_ctx = build_memory_context_prompt(memory)
 
+        # Preprocess query (expand synonyms, acronyms, normalize)
+        _q = expand_acronyms(question)
+        _q, _ = normalize_temporal(_q)
+        _q = normalize_provinces(_q)
+        preprocessed_q = expand_synonyms(_q)
+
         # Plan (1 LLM call)
         yield {"type": "status", "step": "planning"}
-        plan = await generate_plan(self._llm, question, memory_context=memory_ctx)
+        plan = await generate_plan(self._llm, preprocessed_q, memory_context=memory_ctx)
 
         yield {
             "type": "status",

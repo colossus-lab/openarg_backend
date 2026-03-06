@@ -1,0 +1,1232 @@
+"""Deterministic keyword-to-action routing index for the query planner.
+
+Provides fast, LLM-free routing hints so the planner can choose the right
+data source without guessing.  All logic is pure Python (no DB, no LLM,
+no external deps) and runs in microseconds.
+
+The production database has ~1,800 cache_* tables with 27 million rows of
+pre-downloaded dataset data.  This index implements a "cache-first" strategy:
+queries that match known cached datasets are routed to ``query_sandbox``
+(NL2SQL) before falling back to internet APIs.
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+from dataclasses import dataclass
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def normalize_query(text: str) -> str:
+    """Normalize a query string for keyword matching.
+
+    Strips accents, lowercases, removes punctuation and collapses whitespace.
+    """
+    # Strip combining marks (accents)
+    nfkd = unicodedata.normalize("NFKD", text)
+    stripped = "".join(ch for ch in nfkd if unicodedata.category(ch) != "Mn")
+    # Lowercase and remove punctuation (keep alphanumeric + spaces)
+    cleaned = re.sub(r"[^\w\s]", " ", stripped.lower())
+    # Collapse whitespace
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+# ---------------------------------------------------------------------------
+# RoutingHint dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingHint:
+    """A deterministic routing hint for the planner."""
+
+    action: str
+    params: dict
+    confidence: float
+    description: str
+
+
+# ---------------------------------------------------------------------------
+# 1. KEYWORD_ROUTES — keyword -> RoutingHint mapping
+#
+# Keys are already normalized (no accents, lowercase).  Values carry the
+# target action, default params, confidence [0-1], and a short description.
+# ---------------------------------------------------------------------------
+
+KEYWORD_ROUTES: dict[str, dict] = {
+    # ── Economia: Inflacion / IPC / Precios ────────────────────
+    "inflacion": {
+        "action": "query_series",
+        "params": {"series_ids": ["103.1_I2N_2016_M_19"], "representation": "percent_change"},
+        "confidence": 0.95,
+        "description": "IPC variacion mensual (inflacion)",
+    },
+    "ipc": {
+        "action": "query_series",
+        "params": {"series_ids": ["103.1_I2N_2016_M_19"], "representation": "percent_change"},
+        "confidence": 0.95,
+        "description": "Indice de Precios al Consumidor",
+    },
+    "precios": {
+        "action": "query_series",
+        "params": {"series_ids": ["103.1_I2N_2016_M_19"]},
+        "confidence": 0.80,
+        "description": "Indice de precios",
+    },
+    "costo de vida": {
+        "action": "query_series",
+        "params": {"series_ids": ["103.1_I2N_2016_M_19"]},
+        "confidence": 0.85,
+        "description": "Costo de vida / IPC",
+    },
+    "ipc regional": {
+        "action": "query_series",
+        "params": {"series_ids": ["103.1_I2N_2016_M_19", "148.3_INIVELNOA_DICI_M_21", "145.3_INGCUYUYO_DICI_M_11"]},
+        "confidence": 0.90,
+        "description": "IPC regional: GBA, NOA, Cuyo",
+    },
+
+    # ── Economia: Actividad ────────────────────────────────────
+    "emae": {
+        "action": "query_series",
+        "params": {"series_ids": ["143.3_NO_PR_2004_A_21"]},
+        "confidence": 0.95,
+        "description": "EMAE - Estimador Mensual de Actividad Economica",
+    },
+    "actividad economica": {
+        "action": "query_series",
+        "params": {"series_ids": ["143.3_NO_PR_2004_A_21"]},
+        "confidence": 0.90,
+        "description": "Actividad economica (EMAE)",
+    },
+    "pbi": {
+        "action": "query_series",
+        "params": {"series_ids": ["143.3_NO_PR_2004_A_21"]},
+        "confidence": 0.90,
+        "description": "Producto Bruto Interno (via EMAE)",
+    },
+    "producto bruto": {
+        "action": "query_series",
+        "params": {"series_ids": ["143.3_NO_PR_2004_A_21"]},
+        "confidence": 0.85,
+        "description": "Producto bruto / PBI",
+    },
+    "crecimiento": {
+        "action": "query_series",
+        "params": {"series_ids": ["143.3_NO_PR_2004_A_21"]},
+        "confidence": 0.75,
+        "description": "Crecimiento economico (EMAE)",
+    },
+    "recesion": {
+        "action": "query_series",
+        "params": {"series_ids": ["143.3_NO_PR_2004_A_21"]},
+        "confidence": 0.75,
+        "description": "Recesion / contraccion economica (EMAE)",
+    },
+    "actividad industrial": {
+        "action": "query_series",
+        "params": {"series_ids": ["11.3_AGCS_2004_M_41"]},
+        "confidence": 0.90,
+        "description": "Actividad industrial (EMAE sector industrial)",
+    },
+    "produccion industrial": {
+        "action": "query_series",
+        "params": {"series_ids": ["11.3_AGCS_2004_M_41"]},
+        "confidence": 0.90,
+        "description": "Produccion industrial",
+    },
+    "industria": {
+        "action": "query_series",
+        "params": {"series_ids": ["11.3_AGCS_2004_M_41"]},
+        "confidence": 0.80,
+        "description": "Sector industrial",
+    },
+    "manufactura": {
+        "action": "query_series",
+        "params": {"series_ids": ["11.3_AGCS_2004_M_41"]},
+        "confidence": 0.80,
+        "description": "Sector manufacturero",
+    },
+
+    # ── Empleo ─────────────────────────────────────────────────
+    "desempleo": {
+        "action": "query_series",
+        "params": {"series_ids": ["45.2_ECTDT_0_T_33"]},
+        "confidence": 0.95,
+        "description": "Tasa de desempleo",
+    },
+    "desocupacion": {
+        "action": "query_series",
+        "params": {"series_ids": ["45.2_ECTDT_0_T_33"]},
+        "confidence": 0.95,
+        "description": "Tasa de desocupacion",
+    },
+    "empleo": {
+        "action": "query_series",
+        "params": {"series_ids": ["45.2_ECTDT_0_T_33"]},
+        "confidence": 0.80,
+        "description": "Indicadores de empleo",
+    },
+    "trabajo": {
+        "action": "query_series",
+        "params": {"series_ids": ["45.2_ECTDT_0_T_33"]},
+        "confidence": 0.70,
+        "description": "Mercado de trabajo",
+    },
+    "mercado laboral": {
+        "action": "query_series",
+        "params": {"series_ids": ["45.2_ECTDT_0_T_33"]},
+        "confidence": 0.85,
+        "description": "Mercado laboral",
+    },
+    "salarios": {
+        "action": "query_series",
+        "params": {"series_ids": ["149.1_TL_INDIIOS_OCTU_0_21"]},
+        "confidence": 0.95,
+        "description": "Indice de Salarios",
+    },
+    "sueldos": {
+        "action": "query_series",
+        "params": {"series_ids": ["149.1_TL_INDIIOS_OCTU_0_21"]},
+        "confidence": 0.90,
+        "description": "Sueldos / salarios",
+    },
+    "remuneraciones": {
+        "action": "query_series",
+        "params": {"series_ids": ["149.1_TL_INDIIOS_OCTU_0_21"]},
+        "confidence": 0.85,
+        "description": "Remuneraciones",
+    },
+    "paritarias": {
+        "action": "query_series",
+        "params": {"series_ids": ["149.1_TL_INDIIOS_OCTU_0_21"]},
+        "confidence": 0.75,
+        "description": "Paritarias / negociacion salarial",
+    },
+
+    # ── Finanzas: Dolar ────────────────────────────────────────
+    "dolar blue": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "blue"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar blue",
+    },
+    "dolar oficial": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "oficial"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar oficial",
+    },
+    "dolar cripto": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "cripto"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar cripto",
+    },
+    "dolar bolsa": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "bolsa"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar bolsa (MEP)",
+    },
+    "dolar mep": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "bolsa"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar MEP",
+    },
+    "dolar ccl": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "contadoconliqui"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar contado con liquidacion",
+    },
+    "contado con liquidacion": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "contadoconliqui"},
+        "confidence": 0.95,
+        "description": "Dolar contado con liquidacion",
+    },
+    "dolar solidario": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "solidario"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar solidario (tarjeta)",
+    },
+    "dolar tarjeta": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "solidario"},
+        "confidence": 0.90,
+        "description": "Dolar tarjeta / solidario",
+    },
+    "dolar mayorista": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar", "casa": "mayorista"},
+        "confidence": 0.95,
+        "description": "Cotizacion dolar mayorista",
+    },
+    "dolar": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar"},
+        "confidence": 0.85,
+        "description": "Cotizacion del dolar (todas las casas)",
+    },
+    "cotizacion dolar": {
+        "action": "query_argentina_datos",
+        "params": {"type": "dolar"},
+        "confidence": 0.90,
+        "description": "Cotizacion del dolar",
+    },
+
+    # ── Finanzas: Tipo de cambio (BCRA / series historicas) ────
+    "tipo de cambio": {
+        "action": "query_series",
+        "params": {"series_ids": ["92.2_TIPO_CAMBIION_0_0_21_24"]},
+        "confidence": 0.90,
+        "description": "Tipo de cambio oficial historico",
+    },
+    "tipo de cambio oficial": {
+        "action": "query_bcra",
+        "params": {"tipo": "cotizaciones", "moneda": "USD"},
+        "confidence": 0.90,
+        "description": "Tipo de cambio oficial BCRA",
+    },
+
+    # ── Finanzas: Reservas / Monetarias ────────────────────────
+    "reservas": {
+        "action": "query_series",
+        "params": {"series_ids": ["174.1_RRVAS_IDOS_0_0_36"]},
+        "confidence": 0.90,
+        "description": "Reservas internacionales del BCRA",
+    },
+    "reservas internacionales": {
+        "action": "query_series",
+        "params": {"series_ids": ["174.1_RRVAS_IDOS_0_0_36"]},
+        "confidence": 0.95,
+        "description": "Reservas internacionales del BCRA",
+    },
+    "reservas bcra": {
+        "action": "query_series",
+        "params": {"series_ids": ["174.1_RRVAS_IDOS_0_0_36"]},
+        "confidence": 0.95,
+        "description": "Reservas del BCRA",
+    },
+    "base monetaria": {
+        "action": "query_series",
+        "params": {"series_ids": ["331.1_SALDO_BASERIA__15"]},
+        "confidence": 0.95,
+        "description": "Base monetaria",
+    },
+    "emision": {
+        "action": "query_series",
+        "params": {"series_ids": ["331.1_SALDO_BASERIA__15"]},
+        "confidence": 0.85,
+        "description": "Emision monetaria / base monetaria",
+    },
+    "emision monetaria": {
+        "action": "query_series",
+        "params": {"series_ids": ["331.1_SALDO_BASERIA__15"]},
+        "confidence": 0.90,
+        "description": "Emision monetaria",
+    },
+    "leliq": {
+        "action": "query_series",
+        "params": {"series_ids": ["331.1_PASES_REDELIQ_M_MONE_0_24_24"]},
+        "confidence": 0.95,
+        "description": "LELIQ del BCRA",
+    },
+    "pases": {
+        "action": "query_series",
+        "params": {"series_ids": ["331.1_PASES_REDELIQ_M_MONE_0_24_24"]},
+        "confidence": 0.85,
+        "description": "Pases pasivos del BCRA",
+    },
+    "pases pasivos": {
+        "action": "query_series",
+        "params": {"series_ids": ["331.1_PASES_REDELIQ_M_MONE_0_24_24"]},
+        "confidence": 0.90,
+        "description": "Pases pasivos del BCRA",
+    },
+    "pasivos remunerados": {
+        "action": "query_series",
+        "params": {"series_ids": ["331.1_PASES_REDELIQ_M_MONE_0_24_24"]},
+        "confidence": 0.85,
+        "description": "Pasivos remunerados del BCRA",
+    },
+    "tasa de interes": {
+        "action": "query_bcra",
+        "params": {"tipo": "variables"},
+        "confidence": 0.85,
+        "description": "Tasa de interes / politica monetaria BCRA",
+    },
+    "tasa de politica monetaria": {
+        "action": "query_bcra",
+        "params": {"tipo": "variables"},
+        "confidence": 0.90,
+        "description": "Tasa de politica monetaria BCRA",
+    },
+
+    # ── Finanzas: Riesgo pais ──────────────────────────────────
+    "riesgo pais": {
+        "action": "query_argentina_datos",
+        "params": {"type": "riesgo_pais"},
+        "confidence": 0.95,
+        "description": "Riesgo pais (EMBI+)",
+    },
+    "embi": {
+        "action": "query_argentina_datos",
+        "params": {"type": "riesgo_pais"},
+        "confidence": 0.90,
+        "description": "Indice EMBI+ Argentina",
+    },
+
+    # ── Finanzas: Otras monedas ────────────────────────────────
+    "euro": {
+        "action": "query_bcra",
+        "params": {"tipo": "cotizaciones", "moneda": "EUR"},
+        "confidence": 0.85,
+        "description": "Cotizacion del euro",
+    },
+    "real": {
+        "action": "query_bcra",
+        "params": {"tipo": "cotizaciones", "moneda": "BRL"},
+        "confidence": 0.80,
+        "description": "Cotizacion del real brasileno",
+    },
+
+    # ── Pobreza ────────────────────────────────────────────────
+    "pobreza": {
+        "action": "query_series",
+        "params": {"series_ids": ["150.1_LA_POBREZA_0_D_13"]},
+        "confidence": 0.90,
+        "description": "Canasta basica total / linea de pobreza",
+    },
+    "indigencia": {
+        "action": "query_series",
+        "params": {"series_ids": ["150.1_LA_INDICIA_0_D_16"]},
+        "confidence": 0.90,
+        "description": "Canasta basica alimentaria / linea de indigencia",
+    },
+    "canasta basica": {
+        "action": "query_series",
+        "params": {"series_ids": ["150.1_LA_POBREZA_0_D_13"]},
+        "confidence": 0.95,
+        "description": "Canasta Basica Total (CBT)",
+    },
+    "canasta basica total": {
+        "action": "query_series",
+        "params": {"series_ids": ["150.1_LA_POBREZA_0_D_13"]},
+        "confidence": 0.95,
+        "description": "Canasta Basica Total (CBT)",
+    },
+    "canasta basica alimentaria": {
+        "action": "query_series",
+        "params": {"series_ids": ["150.1_LA_INDICIA_0_D_16"]},
+        "confidence": 0.95,
+        "description": "Canasta Basica Alimentaria (CBA)",
+    },
+    "linea de pobreza": {
+        "action": "query_series",
+        "params": {"series_ids": ["150.1_LA_POBREZA_0_D_13"]},
+        "confidence": 0.95,
+        "description": "Linea de pobreza (CBT)",
+    },
+    "linea de indigencia": {
+        "action": "query_series",
+        "params": {"series_ids": ["150.1_LA_INDICIA_0_D_16"]},
+        "confidence": 0.95,
+        "description": "Linea de indigencia (CBA)",
+    },
+
+    # ── Comercio exterior ──────────────────────────────────────
+    "exportaciones": {
+        "action": "query_series",
+        "params": {"series_ids": ["74.3_IET_0_M_16"]},
+        "confidence": 0.95,
+        "description": "Exportaciones totales",
+    },
+    "importaciones": {
+        "action": "query_series",
+        "params": {"series_ids": ["74.3_IIT_0_M_25"]},
+        "confidence": 0.95,
+        "description": "Importaciones totales",
+    },
+    "balanza comercial": {
+        "action": "query_series",
+        "params": {"series_ids": ["74.3_IET_0_M_16", "74.3_IIT_0_M_25"]},
+        "confidence": 0.95,
+        "description": "Balanza comercial (exportaciones e importaciones)",
+    },
+    "comercio exterior": {
+        "action": "query_series",
+        "params": {"series_ids": ["74.3_IET_0_M_16", "74.3_IIT_0_M_25"]},
+        "confidence": 0.90,
+        "description": "Comercio exterior",
+    },
+    "saldo comercial": {
+        "action": "query_series",
+        "params": {"series_ids": ["74.3_IET_0_M_16", "74.3_IIT_0_M_25"]},
+        "confidence": 0.90,
+        "description": "Saldo de balanza comercial",
+    },
+
+    # ── Presupuesto → query_sandbox (cached) ───────────────────
+    "presupuesto": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_*"]},
+        "confidence": 0.85,
+        "description": "Presupuesto nacional (datos cacheados)",
+    },
+    "gasto publico": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_*"]},
+        "confidence": 0.85,
+        "description": "Gasto publico nacional",
+    },
+    "ejecucion presupuestaria": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_ejecucion_presupuestaria_*"]},
+        "confidence": 0.90,
+        "description": "Ejecucion presupuestaria",
+    },
+    "credito vigente": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_credito_presupuestario_*"]},
+        "confidence": 0.90,
+        "description": "Credito presupuestario vigente",
+    },
+    "credito presupuestario": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_credito_presupuestario_*"]},
+        "confidence": 0.90,
+        "description": "Credito presupuestario",
+    },
+    "devengado": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_ejecucion_presupuestaria_*"]},
+        "confidence": 0.85,
+        "description": "Devengado presupuestario",
+    },
+    "deuda publica": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_deuda_publica_*"]},
+        "confidence": 0.90,
+        "description": "Deuda publica nacional",
+    },
+    "transferencias": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_transferencias_*"]},
+        "confidence": 0.85,
+        "description": "Transferencias presupuestarias",
+    },
+    "planta de personal": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_planta_de_personal_*"]},
+        "confidence": 0.90,
+        "description": "Planta de personal del Estado nacional",
+    },
+    "ingresos fiscales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_recursos_recaudacion_*"]},
+        "confidence": 0.85,
+        "description": "Ingresos fiscales / recaudacion",
+    },
+    "recaudacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_recursos_recaudacion_*"]},
+        "confidence": 0.85,
+        "description": "Recaudacion tributaria",
+    },
+    "coparticipacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_coparticipacion_federal_*"]},
+        "confidence": 0.90,
+        "description": "Coparticipacion federal de impuestos",
+    },
+    "ingresos tributarios": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_ingresos_tributarios_*"]},
+        "confidence": 0.90,
+        "description": "Ingresos tributarios nacionales",
+    },
+    "resultado fiscal": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_resultado_financiero_*", "cache_presupuesto_resultado_primario_*"]},
+        "confidence": 0.85,
+        "description": "Resultado fiscal / financiero",
+    },
+    "deficit fiscal": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_resultado_financiero_*", "cache_presupuesto_resultado_primario_*"]},
+        "confidence": 0.85,
+        "description": "Deficit fiscal",
+    },
+    "superavit fiscal": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_presupuesto_resultado_financiero_*", "cache_presupuesto_resultado_primario_*"]},
+        "confidence": 0.85,
+        "description": "Superavit fiscal",
+    },
+
+    # ── Presupuesto: Gasto publico (series de tiempo) ──────────
+    "gasto publico historico": {
+        "action": "query_series",
+        "params": {"series_ids": ["451.3_GPNGPN_0_0_3_30"]},
+        "confidence": 0.90,
+        "description": "Gasto publico nacional historico (serie anual)",
+    },
+
+    # ── INDEC → query_sandbox (cached) ─────────────────────────
+    "indec": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_indec_*"]},
+        "confidence": 0.80,
+        "description": "Datos tabulares del INDEC",
+    },
+    "construccion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_indec_construccion"]},
+        "confidence": 0.85,
+        "description": "ISAC - Indicador de actividad de la construccion",
+    },
+    "isac": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_indec_construccion"]},
+        "confidence": 0.90,
+        "description": "ISAC - Construccion",
+    },
+    "supermercados": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_indec_supermercados"]},
+        "confidence": 0.90,
+        "description": "Ventas en supermercados (INDEC)",
+    },
+    "turismo": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_indec_turismo"]},
+        "confidence": 0.85,
+        "description": "Turismo internacional (INDEC)",
+    },
+    "uso del tiempo": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_indec_uso_tiempo"]},
+        "confidence": 0.90,
+        "description": "Encuesta de uso del tiempo (INDEC)",
+    },
+    "pib provincial": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_indec_pib_provincial"]},
+        "confidence": 0.90,
+        "description": "PIB provincial (INDEC)",
+    },
+
+    # ── DDJJ ───────────────────────────────────────────────────
+    "declaracion jurada": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking"},
+        "confidence": 0.95,
+        "description": "Declaraciones juradas patrimoniales de diputados",
+    },
+    "ddjj": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking"},
+        "confidence": 0.95,
+        "description": "DDJJ patrimoniales de diputados",
+    },
+    "patrimonio diputados": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking", "sortBy": "patrimonio"},
+        "confidence": 0.95,
+        "description": "Patrimonio de diputados nacionales",
+    },
+    "bienes diputados": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking", "sortBy": "bienes"},
+        "confidence": 0.90,
+        "description": "Bienes de diputados nacionales",
+    },
+    "patrimonio legisladores": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking", "sortBy": "patrimonio"},
+        "confidence": 0.90,
+        "description": "Patrimonio de legisladores",
+    },
+    "diputados mas ricos": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking", "sortBy": "patrimonio", "order": "desc"},
+        "confidence": 0.95,
+        "description": "Ranking de diputados con mayor patrimonio",
+    },
+    "diputados mas pobres": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking", "sortBy": "patrimonio", "order": "asc"},
+        "confidence": 0.95,
+        "description": "Ranking de diputados con menor patrimonio",
+    },
+
+    # ── Sesiones ───────────────────────────────────────────────
+    "sesion": {
+        "action": "query_sesiones",
+        "params": {},
+        "confidence": 0.85,
+        "description": "Transcripciones de sesiones del Congreso",
+    },
+    "debate": {
+        "action": "query_sesiones",
+        "params": {},
+        "confidence": 0.80,
+        "description": "Debates parlamentarios",
+    },
+    "discurso": {
+        "action": "query_sesiones",
+        "params": {},
+        "confidence": 0.80,
+        "description": "Discursos en sesiones del Congreso",
+    },
+    "taquigrafica": {
+        "action": "query_sesiones",
+        "params": {},
+        "confidence": 0.90,
+        "description": "Version taquigrafica de sesiones",
+    },
+    "diario de sesiones": {
+        "action": "query_sesiones",
+        "params": {},
+        "confidence": 0.95,
+        "description": "Diario de sesiones del Congreso",
+    },
+    "transcripcion": {
+        "action": "query_sesiones",
+        "params": {},
+        "confidence": 0.80,
+        "description": "Transcripciones de sesiones",
+    },
+
+    # ── Personal / Staff ───────────────────────────────────────
+    "asesores": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Asesores / personal de diputados",
+    },
+    "personal diputados": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Personal de la Camara de Diputados",
+    },
+    "empleados congreso": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.85,
+        "description": "Empleados del Congreso",
+    },
+    "nomina personal": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Nomina de personal de HCDN",
+    },
+    "nomina hcdn": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Nomina de personal de HCDN",
+    },
+
+    # ── BCRA ───────────────────────────────────────────────────
+    "bcra": {
+        "action": "query_bcra",
+        "params": {"tipo": "variables"},
+        "confidence": 0.85,
+        "description": "Variables monetarias del BCRA",
+    },
+    "variables monetarias": {
+        "action": "query_bcra",
+        "params": {"tipo": "variables"},
+        "confidence": 0.90,
+        "description": "Principales variables monetarias del BCRA",
+    },
+    "circulacion monetaria": {
+        "action": "query_bcra",
+        "params": {"tipo": "variables"},
+        "confidence": 0.85,
+        "description": "Circulacion monetaria",
+    },
+
+    # ── BCRA cached → query_sandbox ────────────────────────────
+    "cotizaciones bcra": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_bcra_cotizaciones"]},
+        "confidence": 0.90,
+        "description": "Cotizaciones cambiarias BCRA (datos cacheados)",
+    },
+    "variables bcra historicas": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_bcra_variables"]},
+        "confidence": 0.85,
+        "description": "Variables monetarias BCRA historicas (datos cacheados)",
+    },
+
+    # ── Elecciones → query_sandbox (cached tables) ─────────────
+    "elecciones": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_*"]},
+        "confidence": 0.80,
+        "description": "Resultados electorales",
+    },
+    "elecciones 2023": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_2023_*"]},
+        "confidence": 0.90,
+        "description": "Resultados elecciones 2023",
+    },
+    "elecciones 2019": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_2019_*"]},
+        "confidence": 0.90,
+        "description": "Resultados elecciones 2019",
+    },
+    "elecciones 2017": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_2017_*"]},
+        "confidence": 0.90,
+        "description": "Resultados elecciones 2017",
+    },
+    "elecciones 2015": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_2015_*"]},
+        "confidence": 0.90,
+        "description": "Resultados elecciones 2015",
+    },
+    "elecciones 2025": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_2025_*"]},
+        "confidence": 0.90,
+        "description": "Resultados elecciones 2025",
+    },
+    "resultados electorales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_*"]},
+        "confidence": 0.85,
+        "description": "Resultados electorales",
+    },
+    "votacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_elecciones_*"]},
+        "confidence": 0.70,
+        "description": "Resultados de votaciones",
+    },
+
+    # ── Votaciones nominales → query_sandbox ───────────────────
+    "votaciones nominales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_votaciones_nominales_*"]},
+        "confidence": 0.90,
+        "description": "Votaciones nominales en el Congreso",
+    },
+    "voto nominal": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_votaciones_nominales_*"]},
+        "confidence": 0.85,
+        "description": "Votos nominales de diputados",
+    },
+
+    # ── Buenos Aires Compras → query_sandbox ───────────────────
+    "compras publicas": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_bac_*"]},
+        "confidence": 0.85,
+        "description": "Compras publicas de Buenos Aires (BAC)",
+    },
+    "buenos aires compras": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_bac_*"]},
+        "confidence": 0.95,
+        "description": "Buenos Aires Compras (BAC)",
+    },
+    "licitaciones": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_bac_tenders"]},
+        "confidence": 0.85,
+        "description": "Licitaciones de Buenos Aires Compras",
+    },
+    "contratos publicos": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_bac_contracts"]},
+        "confidence": 0.85,
+        "description": "Contratos publicos (BAC)",
+    },
+
+    # ── Rosario → query_sandbox ────────────────────────────────
+    "datos rosario": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_rosario_*"]},
+        "confidence": 0.90,
+        "description": "Datos abiertos de Rosario",
+    },
+
+    # ── Senado → query_sandbox ─────────────────────────────────
+    "senado": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_senado_*"]},
+        "confidence": 0.85,
+        "description": "Datos abiertos del Senado",
+    },
+    "senadores": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_senado_*"]},
+        "confidence": 0.80,
+        "description": "Datos de senadores",
+    },
+
+    # ── Cordoba Legislatura → query_sandbox ────────────────────
+    "legislatura cordoba": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_cordoba_leg_*"]},
+        "confidence": 0.90,
+        "description": "Datos de la legislatura de Cordoba",
+    },
+    "cordoba legislatura": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_cordoba_leg_*"]},
+        "confidence": 0.90,
+        "description": "Datos de la legislatura de Cordoba",
+    },
+
+    # ── Siniestros viales → query_sandbox ──────────────────────
+    "siniestros viales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_siniestros_viales_*"]},
+        "confidence": 0.90,
+        "description": "Siniestros viales",
+    },
+    "accidentes de transito": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_siniestros_viales_*"]},
+        "confidence": 0.85,
+        "description": "Accidentes de transito / siniestros viales",
+    },
+
+    # ── Educacion → search_ckan ────────────────────────────────
+    "educacion": {
+        "action": "search_ckan",
+        "params": {"query": "educacion"},
+        "confidence": 0.70,
+        "description": "Datasets de educacion",
+    },
+
+    # ── Salud → search_ckan ────────────────────────────────────
+    "salud": {
+        "action": "search_ckan",
+        "params": {"query": "salud", "portalId": "salud"},
+        "confidence": 0.75,
+        "description": "Datasets de salud",
+    },
+
+    # ── Seguridad → search_ckan ────────────────────────────────
+    "seguridad": {
+        "action": "search_ckan",
+        "params": {"query": "seguridad"},
+        "confidence": 0.70,
+        "description": "Datasets de seguridad",
+    },
+    "delitos": {
+        "action": "search_ckan",
+        "params": {"query": "delitos"},
+        "confidence": 0.75,
+        "description": "Datos de delitos",
+    },
+
+    # ── Transporte → search_ckan ───────────────────────────────
+    "transporte": {
+        "action": "search_ckan",
+        "params": {"query": "transporte", "portalId": "transporte"},
+        "confidence": 0.75,
+        "description": "Datasets de transporte",
+    },
+    "subte": {
+        "action": "search_ckan",
+        "params": {"query": "subte"},
+        "confidence": 0.80,
+        "description": "Datos del subte",
+    },
+    "colectivo": {
+        "action": "search_ckan",
+        "params": {"query": "colectivo transporte"},
+        "confidence": 0.75,
+        "description": "Datos de colectivos / transporte publico",
+    },
+
+    # ── Energia → search_ckan ──────────────────────────────────
+    "energia": {
+        "action": "search_ckan",
+        "params": {"query": "energia", "portalId": "energia"},
+        "confidence": 0.75,
+        "description": "Datasets de energia",
+    },
+    "petroleo": {
+        "action": "search_ckan",
+        "params": {"query": "petroleo", "portalId": "energia"},
+        "confidence": 0.80,
+        "description": "Datos de petroleo",
+    },
+    "gas": {
+        "action": "search_ckan",
+        "params": {"query": "gas", "portalId": "energia"},
+        "confidence": 0.75,
+        "description": "Datos de gas natural",
+    },
+
+    # ── Agro → search_ckan ─────────────────────────────────────
+    "agro": {
+        "action": "search_ckan",
+        "params": {"query": "agro", "portalId": "agroindustria"},
+        "confidence": 0.75,
+        "description": "Datos agropecuarios",
+    },
+    "agricultura": {
+        "action": "search_ckan",
+        "params": {"query": "agricultura", "portalId": "agroindustria"},
+        "confidence": 0.80,
+        "description": "Datos de agricultura",
+    },
+    "ganaderia": {
+        "action": "search_ckan",
+        "params": {"query": "ganaderia", "portalId": "agroindustria"},
+        "confidence": 0.80,
+        "description": "Datos de ganaderia",
+    },
+    "soja": {
+        "action": "search_ckan",
+        "params": {"query": "soja", "portalId": "agroindustria"},
+        "confidence": 0.85,
+        "description": "Datos de soja",
+    },
+    "trigo": {
+        "action": "search_ckan",
+        "params": {"query": "trigo", "portalId": "agroindustria"},
+        "confidence": 0.85,
+        "description": "Datos de trigo",
+    },
+
+    # ── Justicia → search_ckan ─────────────────────────────────
+    "justicia": {
+        "action": "search_ckan",
+        "params": {"query": "justicia", "portalId": "justicia"},
+        "confidence": 0.75,
+        "description": "Datos de justicia",
+    },
+    "anticorrupcion": {
+        "action": "search_ckan",
+        "params": {"query": "anticorrupcion", "portalId": "justicia"},
+        "confidence": 0.80,
+        "description": "Datos de anticorrupcion",
+    },
+
+    # ── Ambiente → search_ckan ─────────────────────────────────
+    "ambiente": {
+        "action": "search_ckan",
+        "params": {"query": "ambiente", "portalId": "ambiente"},
+        "confidence": 0.75,
+        "description": "Datos de medio ambiente",
+    },
+    "medio ambiente": {
+        "action": "search_ckan",
+        "params": {"query": "medio ambiente", "portalId": "ambiente"},
+        "confidence": 0.80,
+        "description": "Datos de medio ambiente",
+    },
+
+    # ── Georef ─────────────────────────────────────────────────
+    "provincia": {
+        "action": "query_georef",
+        "params": {},
+        "confidence": 0.60,
+        "description": "Normalizacion geografica (provincias)",
+    },
+    "municipio": {
+        "action": "query_georef",
+        "params": {},
+        "confidence": 0.60,
+        "description": "Normalizacion geografica (municipios)",
+    },
+    "localidad": {
+        "action": "query_georef",
+        "params": {},
+        "confidence": 0.60,
+        "description": "Normalizacion geografica (localidades)",
+    },
+
+    # ── Datasets / catalogo → search_ckan ──────────────────────
+    "datasets": {
+        "action": "search_ckan",
+        "params": {"query": "*", "portalId": "nacional", "rows": 20},
+        "confidence": 0.80,
+        "description": "Catalogo de datasets nacionales",
+    },
+    "catalogo": {
+        "action": "search_ckan",
+        "params": {"query": "*", "portalId": "nacional", "rows": 20},
+        "confidence": 0.80,
+        "description": "Catalogo de datasets nacionales",
+    },
+    "datos abiertos": {
+        "action": "search_ckan",
+        "params": {"query": "*", "portalId": "nacional", "rows": 20},
+        "confidence": 0.75,
+        "description": "Catalogo de datos abiertos",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# 2. DOMAIN_PATTERNS — regex patterns matching domain topics to portals
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class DomainPattern:
+    """A regex pattern that maps a domain topic to a CKAN portal or action."""
+
+    pattern: re.Pattern[str]
+    portal_id: str
+    description: str
+
+
+DOMAIN_PATTERNS: list[DomainPattern] = [
+    # Nacional sectorial
+    DomainPattern(re.compile(r"\bsalud\b", re.IGNORECASE), "salud", "Portal de datos de Salud"),
+    DomainPattern(re.compile(r"\benerg[ií]a\b", re.IGNORECASE), "energia", "Portal de datos de Energia"),
+    DomainPattern(re.compile(r"\bjusticia\b", re.IGNORECASE), "justicia", "Portal de datos de Justicia"),
+    DomainPattern(re.compile(r"\bagro|agroindustria|agropecuari\b", re.IGNORECASE), "agroindustria", "Portal de datos de Agroindustria"),
+    DomainPattern(re.compile(r"\btransporte\b", re.IGNORECASE), "transporte", "Portal de datos de Transporte"),
+    DomainPattern(re.compile(r"\bambiente|acumar|medioambient\b", re.IGNORECASE), "ambiente", "Portal de datos de Ambiente"),
+    DomainPattern(re.compile(r"\bcultura\b", re.IGNORECASE), "cultura", "Portal de datos de Cultura"),
+    DomainPattern(re.compile(r"\bproduccion\b", re.IGNORECASE), "produccion", "Portal de datos de Produccion"),
+    DomainPattern(re.compile(r"\bmodernizacion\b", re.IGNORECASE), "modernizacion", "Portal de Modernizacion"),
+    # CABA
+    DomainPattern(re.compile(r"\bcaba\b|\bciudad de buenos aires\b|\bbuenosaires\b", re.IGNORECASE), "caba", "Portal de CABA"),
+    # Provincias
+    DomainPattern(re.compile(r"\bmendoza\b", re.IGNORECASE), "mendoza", "Portal de datos de Mendoza"),
+    DomainPattern(re.compile(r"\brosario\b", re.IGNORECASE), "rosario", "Portal de datos de Rosario"),
+    DomainPattern(re.compile(r"\bcordoba\b", re.IGNORECASE), "cordoba_prov", "Portal de datos de Cordoba"),
+    DomainPattern(re.compile(r"\bsanta fe\b", re.IGNORECASE), "santafe", "Portal de datos de Santa Fe"),
+    DomainPattern(re.compile(r"\bentre rios\b|\bentrerios\b", re.IGNORECASE), "entrerios", "Portal de datos de Entre Rios"),
+    DomainPattern(re.compile(r"\bneuquen\b", re.IGNORECASE), "neuquen_legislatura", "Legislatura de Neuquen"),
+    DomainPattern(re.compile(r"\btucuman\b", re.IGNORECASE), "tucuman", "Portal de datos de Tucuman"),
+    DomainPattern(re.compile(r"\bmisiones\b", re.IGNORECASE), "misiones", "Portal de datos de Misiones"),
+    DomainPattern(re.compile(r"\bchaco\b", re.IGNORECASE), "chaco", "Portal de datos de Chaco"),
+    DomainPattern(re.compile(r"\bbahia blanca\b", re.IGNORECASE), "bahia_blanca", "Portal de datos de Bahia Blanca"),
+    DomainPattern(re.compile(r"\bprovincia de buenos aires\b|\bpba\b|\bbonaerense\b", re.IGNORECASE), "pba", "Portal de Buenos Aires Provincia"),
+    DomainPattern(re.compile(r"\brio negro\b", re.IGNORECASE), "rio_negro", "Portal de datos de Rio Negro"),
+    DomainPattern(re.compile(r"\bjujuy\b", re.IGNORECASE), "jujuy", "Portal de datos de Jujuy"),
+    DomainPattern(re.compile(r"\bsalta\b", re.IGNORECASE), "salta", "Portal de datos de Salta"),
+    DomainPattern(re.compile(r"\bla plata\b", re.IGNORECASE), "la_plata", "Portal de datos de La Plata"),
+    # Institucional
+    DomainPattern(re.compile(r"\bdiputados\b|\bcongreso\b|\bcamara\b", re.IGNORECASE), "diputados", "Portal de Camara de Diputados"),
+    DomainPattern(re.compile(r"\barsat\b", re.IGNORECASE), "arsat", "Portal de ARSAT"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Pre-sorted keyword list (longest first) for greedy matching
+# ---------------------------------------------------------------------------
+
+_SORTED_KEYWORDS: list[str] = sorted(KEYWORD_ROUTES.keys(), key=len, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# 3. Functions
+# ---------------------------------------------------------------------------
+
+
+def resolve_hints(query: str) -> list[RoutingHint]:
+    """Resolve routing hints from a user query using deterministic keyword matching.
+
+    Scans the normalized query for known keywords (longest-first to avoid
+    partial matches) and returns matching ``RoutingHint`` objects sorted by
+    confidence (highest first).  Duplicates by action are collapsed, keeping
+    the highest-confidence match.
+
+    Args:
+        query: Raw user query in natural language (Spanish).
+
+    Returns:
+        A list of ``RoutingHint`` sorted by confidence descending.
+    """
+    normalized = normalize_query(query)
+    if not normalized:
+        return []
+
+    # Track which actions we've already matched (keep highest confidence)
+    seen_actions: dict[str, RoutingHint] = {}
+
+    for keyword in _SORTED_KEYWORDS:
+        # Only match if keyword appears as a whole token sequence
+        # Use word boundaries to prevent "gas" matching inside "gastos"
+        if re.search(r"\b" + re.escape(keyword) + r"\b", normalized):
+            route = KEYWORD_ROUTES[keyword]
+            hint = RoutingHint(
+                action=route["action"],
+                params=dict(route["params"]),
+                confidence=route["confidence"],
+                description=route["description"],
+            )
+
+            # Build a dedup key: action + serialized params for more
+            # granular deduplication (e.g. two different dolar casas
+            # should both appear)
+            param_key = str(sorted(hint.params.items()))
+            dedup_key = f"{hint.action}:{param_key}"
+
+            if dedup_key not in seen_actions or hint.confidence > seen_actions[dedup_key].confidence:
+                seen_actions[dedup_key] = hint
+
+    # Also check domain patterns for portal-specific routing
+    for dp in DOMAIN_PATTERNS:
+        if dp.pattern.search(normalized):
+            hint = RoutingHint(
+                action="search_ckan",
+                params={"portalId": dp.portal_id},
+                confidence=0.65,
+                description=dp.description,
+            )
+            dedup_key = f"search_ckan:{dp.portal_id}"
+            if dedup_key not in seen_actions or hint.confidence > seen_actions[dedup_key].confidence:
+                seen_actions[dedup_key] = hint
+
+    # Sort by confidence descending
+    return sorted(seen_actions.values(), key=lambda h: h.confidence, reverse=True)
+
+
+def format_hints_for_prompt(hints: list[RoutingHint]) -> str:
+    """Format routing hints as a string to inject into the Planner prompt.
+
+    Only includes the top 3 hints to keep the prompt concise and avoid
+    confusing the LLM with too many options.
+
+    Args:
+        hints: A list of ``RoutingHint`` (typically from ``resolve_hints``).
+
+    Returns:
+        A formatted string ready to be appended to the planner system prompt,
+        or an empty string if there are no hints.
+    """
+    if not hints:
+        return ""
+
+    top = hints[:3]
+    lines = [
+        "ROUTING HINTS (alta confianza, usa estas acciones si aplican):",
+    ]
+    for i, h in enumerate(top, 1):
+        params_str = ", ".join(f"{k}={v!r}" for k, v in h.params.items())
+        lines.append(
+            f"  {i}. {h.action}({params_str}) "
+            f"[confianza={h.confidence:.0%}] — {h.description}"
+        )
+
+    return "\n".join(lines)

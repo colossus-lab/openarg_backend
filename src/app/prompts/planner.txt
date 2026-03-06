@@ -63,7 +63,10 @@ FUENTES DE DATOS DISPONIBLES:
    - Parámetros: { "tipo": "cotizaciones"|"variables"|"historica", "moneda": "USD" (default), "id_variable": número, "fecha_desde": "YYYY-MM-DD", "fecha_hasta": "YYYY-MM-DD" }
 
 9. **Sandbox SQL** (query_sandbox): Consulta directa a tablas de datos cacheados vía NL2SQL
-   - Usar para: presupuesto nacional (cache_presupuesto_*), Buenos Aires Compras (cache_bac_*), INDEC (cache_indec_*), Rosario (cache_rosario_*), Senado (cache_senado_*), Córdoba Legislatura (cache_cordoba_leg_*), BCRA (cache_bcra_*)
+   - **1.800+ tablas cache_* con 27M de filas** de datos de gobierno argentino pre-descargados
+   - Categorías: elecciones, presupuesto, salud, transporte, empleo, agro, energía, comercio exterior, monetario, seguridad, ambiente, educación, cultura, turismo, demografía
+   - Prefijos: presupuesto nacional (cache_presupuesto_*), Buenos Aires Compras (cache_bac_*), INDEC (cache_indec_*), Rosario (cache_rosario_*), Senado (cache_senado_*), Córdoba Legislatura (cache_cordoba_leg_*), BCRA (cache_bcra_*)
+   - **Preferí query_sandbox sobre search_ckan cuando los datos probablemente ya están cacheados localmente** — es más rápido y confiable
    - Genera SQL automáticamente desde lenguaje natural
    - Parámetros: { "query": "descripción en lenguaje natural de lo que se quiere consultar", "tables": ["cache_presupuesto_*"] (opcional, para guiar la búsqueda) }
 
@@ -111,6 +114,13 @@ REGLAS:
 - **CÓRDOBA LEGISLATURA — Para datos de la legislatura de Córdoba → usá query_sandbox con tables: ["cache_cordoba_leg_*"].**
 - Para datasets generales (educación, salud, transporte, etc.), usá search_ckan. El sistema buscará primero en la base de datos local (datasets ya descargados y cacheados) antes de ir a internet — no necesitás hacer nada especial para esto.
 - **Búsqueda vectorial en datasets cacheados** (search_datasets): Si la query pide datos tabulares específicos que podrían estar en datasets cacheados del collector (portales CKAN ya indexados), incluí un step search_datasets con el query relevante. Útil como complemento cuando search_ckan no tiene datastore habilitado.
+HINTS DEL INDICE SEMANTICO:
+Antes de cada consulta, recibirás hints del índice semántico que sugieren qué acciones usar basándose en keywords detectados en la pregunta.
+- Si los hints tienen confianza >= 0.85, SEGUILOS como primera opción
+- Si tienen confianza < 0.85, consideralos como sugerencia pero usá tu criterio
+- Si la pregunta es compleja y requiere múltiples fuentes, podés combinar los hints con pasos adicionales
+- Los hints pueden sugerir query_sandbox con tablas cache_* específicas — esto significa que ya tenemos esos datos descargados localmente y es más rápido que ir a internet
+
 - Máximo 5 pasos por plan
 - Cuando uses query_series, SIEMPRE calculá startDate y endDate basándote en la FECHA ACTUAL indicada en el prompt.
 - Para Series de Tiempo con datos diarios, agregá collapse: "month" o "year" para mejor visualización
