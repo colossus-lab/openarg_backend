@@ -4,6 +4,7 @@ import contextlib
 import logging
 import os
 
+from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import ORJSONResponse
@@ -123,54 +124,56 @@ def _validate_ws_api_key(ws: WebSocket) -> bool:
 
 
 @router.websocket("/ws/smart")
-@inject
-async def ws_smart_query(
-    ws: WebSocket,
-    service: FromDishka[SmartQueryService],
-    cache: FromDishka[ICacheService],
-) -> None:
+async def ws_smart_query(ws: WebSocket) -> None:
     if not _validate_ws_api_key(ws):
         await ws.close(code=4401, reason="Invalid or missing API key")
         return
     await ws.accept()
 
     try:
-        # Rate limiting
-        ws_identifier = ws.query_params.get("api_key") or ws.client.host if ws.client else "unknown"
-        if await _check_ws_rate_limit(cache, ws_identifier):
-            audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
-            await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
-            await ws.close(code=4429)
-            return
+        # Obtain the Dishka container and enter REQUEST scope so all
+        # providers (including SmartQueryService) can be resolved.
+        container: AsyncContainer = ws.app.state.dishka_container
+        async with container() as session_scope:
+            async with session_scope() as request_scope:
+                cache = await request_scope.get(ICacheService)
+                service = await request_scope.get(SmartQueryService)
 
-        raw_text = await ws.receive_text()
-        if len(raw_text) > 10_000:
-            await ws.send_json({"type": "error", "message": "Message too large (max 10KB)"})
-            await ws.close(code=4400)
-            return
-        import json as _json
-        raw = _json.loads(raw_text)
-        question = raw.get("question", "")
-        conversation_id = raw.get("conversation_id", "")
-        policy_mode = raw.get("policy_mode", False)
+                # Rate limiting
+                ws_identifier = ws.query_params.get("api_key") or ws.client.host if ws.client else "unknown"
+                if await _check_ws_rate_limit(cache, ws_identifier):
+                    audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
+                    await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
+                    await ws.close(code=4429)
+                    return
 
-        if not question or len(question) > 10000:
-            await ws.send_json({"type": "error", "message": "question is required"})
-            await ws.close()
-            return
+                raw_text = await ws.receive_text()
+                if len(raw_text) > 10_000:
+                    await ws.send_json({"type": "error", "message": "Message too large (max 10KB)"})
+                    await ws.close(code=4400)
+                    return
+                import json as _json
+                raw = _json.loads(raw_text)
+                question = raw.get("question", "")
+                conversation_id = raw.get("conversation_id", "")
+                policy_mode = raw.get("policy_mode", False)
 
-        async for event in service.execute_streaming(
-            question=question,
-            user_id=ws_identifier,
-            conversation_id=conversation_id,
-            policy_mode=policy_mode,
-        ):
-            await ws.send_json(event)
-            # If error or injection, close with appropriate code
-            if event.get("type") == "error":
-                code = 4400 if event.get("code") == "SEC_001" else 4500
-                await ws.close(code=code)
-                return
+                if not question or len(question) > 10000:
+                    await ws.send_json({"type": "error", "message": "question is required"})
+                    await ws.close()
+                    return
+
+                async for event in service.execute_streaming(
+                    question=question,
+                    user_id=ws_identifier,
+                    conversation_id=conversation_id,
+                    policy_mode=policy_mode,
+                ):
+                    await ws.send_json(event)
+                    if event.get("type") == "error":
+                        code = 4400 if event.get("code") == "SEC_001" else 4500
+                        await ws.close(code=code)
+                        return
 
     except WebSocketDisconnect:
         logger.debug("WebSocket client disconnected")
