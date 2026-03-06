@@ -10,7 +10,7 @@ from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
-MEMORY_TTL = 30 * 60  # 30 minutes
+MEMORY_TTL = 4 * 60 * 60  # 4 hours
 
 
 def _memory_cache_key(session_id: str) -> str:

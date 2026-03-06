@@ -238,10 +238,17 @@ def collect_dataset(self, dataset_id: str):
         with engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE cached_datasets SET status = 'error', error_message = :msg "
+                    "UPDATE cached_datasets "
+                    "SET retry_count = retry_count + 1, "
+                    "    error_message = :msg, "
+                    "    updated_at = NOW(), "
+                    "    status = CASE "
+                    "      WHEN retry_count + 1 >= :max THEN 'permanently_failed' "
+                    "      ELSE 'error' "
+                    "    END "
                     "WHERE dataset_id = CAST(:did AS uuid)"
                 ),
-                {"msg": "Task timed out", "did": dataset_id},
+                {"msg": "Task timed out", "did": dataset_id, "max": MAX_TOTAL_ATTEMPTS},
             )
         raise
     except Exception as exc:
@@ -348,18 +355,34 @@ def recover_stuck_tasks(self):
             ).fetchall()
 
             for row in stuck_downloads:
-                conn.execute(
-                    text("""
-                        UPDATE cached_datasets
-                        SET status = 'error',
-                            error_message = 'Recovered: stuck in downloading state',
-                            updated_at = NOW()
-                        WHERE dataset_id = CAST(:did AS uuid)
-                          AND status = 'downloading'
-                    """),
-                    {"did": row.dataset_id},
-                )
-                collect_dataset.delay(row.dataset_id)
+                new_count = (row.retry_count or 0) + 1
+                if new_count >= MAX_TOTAL_ATTEMPTS:
+                    conn.execute(
+                        text("""
+                            UPDATE cached_datasets
+                            SET status = 'permanently_failed',
+                                retry_count = :cnt,
+                                error_message = 'Permanently failed: stuck in downloading too many times',
+                                updated_at = NOW()
+                            WHERE dataset_id = CAST(:did AS uuid)
+                              AND status = 'downloading'
+                        """),
+                        {"did": row.dataset_id, "cnt": new_count},
+                    )
+                else:
+                    conn.execute(
+                        text("""
+                            UPDATE cached_datasets
+                            SET status = 'error',
+                                retry_count = :cnt,
+                                error_message = 'Recovered: stuck in downloading state',
+                                updated_at = NOW()
+                            WHERE dataset_id = CAST(:did AS uuid)
+                              AND status = 'downloading'
+                        """),
+                        {"did": row.dataset_id, "cnt": new_count},
+                    )
+                    collect_dataset.delay(row.dataset_id)
                 recovered_downloads += 1
 
         # 2. Recover stuck user_queries

@@ -115,10 +115,10 @@ class SemanticCache:
                     emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
                     result = await session.execute(
                         text("""
-                            SELECT response, 1 - (embedding <=> :emb::vector) AS similarity
+                            SELECT response, 1 - (embedding <=> CAST(:emb AS vector)) AS similarity
                             FROM query_cache
                             WHERE expires_at > :now AND embedding IS NOT NULL
-                            ORDER BY embedding <=> :emb::vector
+                            ORDER BY embedding <=> CAST(:emb AS vector)
                             LIMIT 1
                         """),
                         {"emb": emb_str, "now": now},
@@ -153,7 +153,7 @@ class SemanticCache:
                 await session.execute(
                     text("""
                         INSERT INTO query_cache (question_hash, question, embedding, response, ttl_seconds, expires_at)
-                        VALUES (:hash, :question, :emb::vector, :response::jsonb, :ttl, :expires_at)
+                        VALUES (:hash, :question, CAST(:emb AS vector), CAST(:response AS jsonb), :ttl, :expires_at)
                         ON CONFLICT (question_hash) DO UPDATE SET
                             response = EXCLUDED.response,
                             embedding = EXCLUDED.embedding,
