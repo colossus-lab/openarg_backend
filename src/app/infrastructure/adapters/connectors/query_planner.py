@@ -12,15 +12,36 @@ from app.prompts import load_prompt
 logger = logging.getLogger(__name__)
 
 
+def _resolve_routing_hints(question: str) -> str:
+    """Resolve routing hints from the dataset index. Returns formatted text or empty string."""
+    try:
+        from app.infrastructure.adapters.connectors.dataset_index import (
+            format_hints_for_prompt,
+            resolve_hints,
+        )
+
+        hints = resolve_hints(question)
+        if hints:
+            return format_hints_for_prompt(hints)
+    except Exception:
+        logger.debug("Dataset index hints unavailable, continuing without hints", exc_info=True)
+    return ""
+
+
 async def generate_plan(
     llm: ILLMProvider, question: str, memory_context: str = ""
 ) -> ExecutionPlan:
     """Generate an execution plan from a user query using the LLM."""
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
+    # Resolve routing hints from the semantic dataset index
+    hints_text = _resolve_routing_hints(question)
+
     user_content = f'FECHA ACTUAL: {today}\n\nPregunta del usuario: "{question}"'
     if memory_context:
         user_content += f"\n\n{memory_context}"
+    if hints_text:
+        user_content += f"\n\n{hints_text}"
     user_content += (
         "\n\nSi la pregunta del usuario hace referencia a algo mencionado antes "
         "en el historial (ej: \"y eso?\", \"compará\", \"lo mismo pero...\"), "
