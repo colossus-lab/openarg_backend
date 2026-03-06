@@ -22,6 +22,8 @@ async def get_async_engine(config: SqlaEngineConfig) -> AsyncEngine:
         echo_pool=config.echo_pool,
         pool_size=config.pool_size,
         max_overflow=config.max_overflow,
+        pool_pre_ping=True,
+        pool_recycle=300,
     )
 
 

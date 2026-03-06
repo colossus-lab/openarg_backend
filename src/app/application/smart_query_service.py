@@ -4,6 +4,7 @@ Simplified pipeline: planner (1 LLM) → dispatch steps (0 LLM) → analysis (1 
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -43,7 +44,6 @@ from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _downloa
 from app.infrastructure.monitoring.metrics import MetricsCollector
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import AsyncIterator
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -1215,27 +1215,65 @@ class SmartQueryService:
     async def _execute_steps(
         self, plan: ExecutionPlan, nl_query: str = "",
     ) -> tuple[list[DataResult], list[str]]:
-        """Execute plan steps, catching ConnectorError per step."""
+        """Execute plan steps, catching ConnectorError per step.
+
+        Steps are grouped by dependency level and executed in parallel
+        within each level using ``asyncio.gather()``.
+        """
         results: list[DataResult] = []
         warnings: list[str] = []
-        for step in plan.steps[:5]:
+        steps = plan.steps[:5]
+
+        if not steps:
+            return results, warnings
+
+        # --- build a lookup and group steps by dependency level ---
+        step_by_id: dict[str, PlanStep] = {s.id: s for s in steps}
+        step_ids = set(step_by_id)
+        remaining = list(steps)
+        levels: list[list[PlanStep]] = []
+
+        completed_ids: set[str] = set()
+        while remaining:
+            # Steps whose dependencies are all completed (or absent)
+            ready = [
+                s for s in remaining
+                if all(dep in completed_ids or dep not in step_ids for dep in s.depends_on)
+            ]
+            if not ready:
+                # Avoid infinite loop: treat remaining steps as ready
+                ready = list(remaining)
+            levels.append(ready)
+            completed_ids.update(s.id for s in ready)
+            remaining = [s for s in remaining if s.id not in completed_ids]
+
+        # --- wrapper that runs a single step with error handling ---
+        async def _run_step(step: PlanStep) -> tuple[list[DataResult], str | None]:
             step_start = time.monotonic()
             connector_name = step.action
             try:
                 data = await self._dispatch_step(step)
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms)
-                results.extend(data)
+                return data, None
             except ConnectorError as exc:
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms, error=True)
                 logger.warning("Step %s failed (ConnectorError)", step.id, exc_info=True)
-                warnings.append(f"Conector '{connector_name}' no disponible: {exc}")
+                return [], f"Conector '{connector_name}' no disponible: {exc}"
             except Exception as exc:
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms, error=True)
                 logger.warning("Step %s failed", step.id, exc_info=True)
-                warnings.append(f"Conector '{connector_name}' falló: {type(exc).__name__}")
+                return [], f"Conector '{connector_name}' falló: {type(exc).__name__}"
+
+        # --- execute level by level, parallelising within each level ---
+        for level in levels:
+            outcomes = await asyncio.gather(*[_run_step(s) for s in level])
+            for data, warning in outcomes:
+                results.extend(data)
+                if warning:
+                    warnings.append(warning)
 
         return results, warnings
 
