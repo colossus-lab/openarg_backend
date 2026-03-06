@@ -629,6 +629,7 @@ class SmartQueryService:
         )
 
         full_text = ""
+        stream_buf = ""  # buffer for filtering <!--CHART/META--> tags
         async for chunk in self._llm.chat_stream(
             messages=[
                 LLMMessage(role="system", content=load_prompt("analyst")),
@@ -638,7 +639,34 @@ class SmartQueryService:
             max_tokens=8192,
         ):
             full_text += chunk
-            yield {"type": "chunk", "content": chunk}
+            stream_buf += chunk
+
+            # If we're inside a tag, keep buffering
+            if "<!--" in stream_buf:
+                tag_start = stream_buf.index("<!--")
+                # Flush everything before the tag
+                if tag_start > 0:
+                    yield {"type": "chunk", "content": stream_buf[:tag_start]}
+                    stream_buf = stream_buf[tag_start:]
+                # Check if the tag is complete
+                if "-->" in stream_buf:
+                    # Drop the tag entirely, keep anything after it
+                    tag_end = stream_buf.index("-->") + 3
+                    stream_buf = stream_buf[tag_end:]
+                    # Flush remaining if no new tag is starting
+                    if stream_buf and "<!--" not in stream_buf:
+                        yield {"type": "chunk", "content": stream_buf}
+                        stream_buf = ""
+                # else: tag not yet complete, keep buffering
+            else:
+                yield {"type": "chunk", "content": stream_buf}
+                stream_buf = ""
+
+        # Flush any remaining buffer (shouldn't have unclosed tags)
+        if stream_buf:
+            cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
+            if cleaned:
+                yield {"type": "chunk", "content": cleaned}
 
         # Complete
         det_charts = self._build_deterministic_charts(results)
