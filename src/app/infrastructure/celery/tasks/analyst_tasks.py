@@ -78,8 +78,8 @@ def analyze_query(self, query_id: str, question: str):
                 {"plan": json.dumps(plan), "id": query_id},
             )
 
-        # --- STEP 2: Vector search for relevant datasets ---
-        logger.info(f"[{query_id}] Searching datasets...")
+        # --- STEP 2: Hybrid search (cosine + BM25 RRF) for relevant datasets ---
+        logger.info(f"[{query_id}] Searching datasets (hybrid)...")
         embed_resp = genai.embed_content(
             model="models/gemini-embedding-001",
             content=question,
@@ -88,24 +88,70 @@ def analyze_query(self, query_id: str, question: str):
         query_embedding = embed_resp["embedding"]
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
+        # Sanitize query text for websearch_to_tsquery
+        query_text = question.strip()
+        if query_text.count('"') % 2 != 0:
+            query_text = query_text.replace('"', "")
+
         with engine.begin() as conn:
             results = conn.execute(
                 text("""
-                    SELECT
-                        CAST(d.id AS text) AS dataset_id,
-                        d.title,
-                        d.description,
-                        d.download_url,
-                        d.portal,
-                        d.columns,
-                        d.is_cached,
-                        1 - (dc.embedding <=> CAST(:emb AS vector)) AS score
-                    FROM dataset_chunks dc
-                    JOIN datasets d ON d.id = dc.dataset_id
-                    ORDER BY dc.embedding <=> CAST(:emb AS vector)
+                    WITH vector_ranked AS (
+                        SELECT
+                            CAST(d.id AS text) AS dataset_id,
+                            d.title,
+                            d.description,
+                            d.download_url,
+                            d.portal,
+                            d.columns,
+                            d.is_cached,
+                            ROW_NUMBER() OVER (
+                                ORDER BY dc.embedding <=> CAST(:emb AS vector)
+                            ) AS vec_rank
+                        FROM dataset_chunks dc
+                        JOIN datasets d ON d.id = dc.dataset_id
+                        ORDER BY dc.embedding <=> CAST(:emb AS vector)
+                        LIMIT 20
+                    ),
+                    bm25_ranked AS (
+                        SELECT
+                            CAST(d.id AS text) AS dataset_id,
+                            d.title,
+                            d.description,
+                            d.download_url,
+                            d.portal,
+                            d.columns,
+                            d.is_cached,
+                            ROW_NUMBER() OVER (
+                                ORDER BY ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) DESC
+                            ) AS bm25_rank
+                        FROM dataset_chunks dc
+                        JOIN datasets d ON d.id = dc.dataset_id
+                        WHERE dc.tsv @@ websearch_to_tsquery('spanish', :query_text)
+                        ORDER BY ts_rank_cd(dc.tsv, websearch_to_tsquery('spanish', :query_text)) DESC
+                        LIMIT 20
+                    ),
+                    fused AS (
+                        SELECT
+                            COALESCE(v.dataset_id, b.dataset_id) AS dataset_id,
+                            COALESCE(v.title, b.title) AS title,
+                            COALESCE(v.description, b.description) AS description,
+                            COALESCE(v.download_url, b.download_url) AS download_url,
+                            COALESCE(v.portal, b.portal) AS portal,
+                            COALESCE(v.columns, b.columns) AS columns,
+                            COALESCE(v.is_cached, b.is_cached) AS is_cached,
+                            COALESCE(1.0 / (60 + v.vec_rank), 0)
+                              + COALESCE(1.0 / (60 + b.bm25_rank), 0) AS score
+                        FROM vector_ranked v
+                        FULL OUTER JOIN bm25_ranked b ON v.dataset_id = b.dataset_id
+                    )
+                    SELECT dataset_id, title, description, download_url,
+                           portal, columns, is_cached, score
+                    FROM fused
+                    ORDER BY score DESC
                     LIMIT 5
                 """),
-                {"emb": embedding_str},
+                {"emb": embedding_str, "query_text": query_text},
             ).fetchall()
 
         if not results:
