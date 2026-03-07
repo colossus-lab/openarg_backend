@@ -246,12 +246,12 @@ def create_celery() -> Celery:
         },
         "scrape-cordoba-legislatura": {
             "task": "openarg.scrape_cordoba_legislatura",
-            "schedule": crontab(day_of_month=1, hour=2, minute=0),  # Monthly, day 1
+            "schedule": crontab(day_of_month=1, hour=2, minute=30),  # Monthly, day 1
             "options": {"queue": "scraper"},
         },
         "scrape-senado-staff": {
             "task": "openarg.scrape_senado_staff",
-            "schedule": crontab(day_of_week=1, hour=3, minute=0),  # Monday 3:00 AM ART
+            "schedule": crontab(day_of_week=1, hour=1, minute=30),  # Monday 1:30 AM ART
             "options": {"queue": "scraper"},
         },
         "reset-failed-collectors": {
@@ -261,7 +261,7 @@ def create_celery() -> Celery:
         },
         "ingest-georef": {
             "task": "openarg.ingest_georef",
-            "schedule": crontab(day_of_month=1, hour=1, minute=0),  # Monthly, day 1
+            "schedule": crontab(day_of_month=1, hour=0, minute=30),  # Monthly, day 1
             "options": {"queue": "ingest"},
         },
         "ingest-series-tiempo": {

@@ -57,7 +57,7 @@ def _register_dataset(engine, key: str, table_name: str, df: pd.DataFrame):
                      :now, true, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
                     title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
-                    columns = EXCLUDED.columns, updated_at = :now
+                    columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
                 "sid": source_id, "title": title,
@@ -66,7 +66,7 @@ def _register_dataset(engine, key: str, table_name: str, df: pd.DataFrame):
                 "portal": portal,
                 "url": f"{API_URL}?ids={entry['ids']}",
                 "cols": columns_json,
-                "tags": f"series de tiempo,{key.replace('_', ',')},economia,indicadores",
+                "tags": f"series de tiempo,{key.replace('_', ' ')},economia,indicadores",
                 "now": now, "rows": len(df),
             },
         )
@@ -125,7 +125,7 @@ def ingest_series_tiempo(self):
                 continue
 
             try:
-                with httpx.Client(timeout=30.0) as client:
+                with httpx.Client(timeout=30.0, follow_redirects=True) as client:
                     resp = client.get(
                         API_URL,
                         params={
@@ -146,10 +146,11 @@ def ingest_series_tiempo(self):
                     continue
 
                 # Build column names: first column is always "fecha",
-                # remaining come from meta field titles
+                # remaining come from meta field descriptors (skip meta[0] which
+                # is frequency/date-range info, not a field descriptor)
                 col_names = ["fecha"]
-                for field_meta in meta:
-                    field_title = field_meta.get("field", {}).get("title", key)
+                for field_meta in meta[1:]:
+                    field_title = field_meta.get("field", {}).get("description", key)
                     col_names.append(field_title)
 
                 # Ensure column count matches data width
