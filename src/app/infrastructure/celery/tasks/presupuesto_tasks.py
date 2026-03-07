@@ -26,14 +26,29 @@ API_URL = "https://www.presupuestoabierto.gob.ar/api/v1"
 # Endpoints and their default columns
 ENDPOINTS = {
     "credito": [
-        "jurisdiccion_desc", "finalidad_desc", "funcion_desc",
-        "programa_desc", "credito_presupuestado", "credito_vigente",
+        "ejercicio_presupuestario", "jurisdiccion_desc", "subjurisdiccion_desc",
+        "entidad_desc", "finalidad_desc", "funcion_desc", "programa_desc",
+        "fuente_financiamiento_desc", "ubicacion_geografica_desc",
+        "credito_presupuestado", "credito_vigente",
         "credito_comprometido", "credito_devengado", "credito_pagado",
     ],
     "recurso": [
-        "concepto_desc", "rubro_desc", "recurso_presupuestado",
-        "recurso_vigente", "recurso_ingresado_devengado",
-        "recurso_ingresado_percibido",
+        "ejercicio_presupuestario", "sector_desc", "tipo_desc", "clase_desc",
+        "concepto_desc", "subconcepto_desc", "fuente_financiamiento_desc",
+        "recurso_inicial", "recurso_vigente", "recurso_ingresado_percibido",
+    ],
+    "pef": [
+        "ejercicio_presupuestario", "trimestre", "jurisdiccion_desc",
+        "programa_desc", "actividad_desc", "medicion_fisica_desc",
+        "unidad_medida_desc", "ubicacion_geografica_desc",
+        "programacion_inicial_DA", "programacion_anual_vig_trim",
+        "ejecutado_acumulado_trim",
+    ],
+    "transversal_financiero": [
+        "ejercicio_presupuestario", "jurisdiccion_desc", "programa_desc",
+        "finalidad_desc", "funcion_desc", "fuente_financiamiento_desc",
+        "ubicacion_geografica_desc", "inciso_desc", "etiqueta_desc",
+        "credito_inicial", "credito_vigente", "credito_ejecutado",
     ],
 }
 
