@@ -50,11 +50,13 @@ FUENTES DE DATOS DISPONIBLES:
    - Se puede buscar por contenido del debate, nombre de orador, temas discutidos
    - Parámetros: query (texto a buscar), periodo (número de período parlamentario, opcional), orador (nombre del orador, opcional)
 
-7. **Personal de HCDN** (query_staff): Nómina de personal de la Cámara de Diputados
-   - Snapshots semanales de la nómina completa (3600+ empleados): legajo, apellido, nombre, escalafón, área de desempeño, convenio
-   - Detección automática de altas y bajas por diff entre snapshots
+7. **Personal legislativo** (query_staff): Nómina de personal de Diputados Y Senado
+   - **Diputados (HCDN)**: Snapshots semanales de la nómina completa (3600+ empleados): legajo, apellido, nombre, escalafón, área de desempeño, convenio. Detección automática de altas y bajas.
+   - **Senado**: Asesores por senador, con bloque y provincia. Busca por nombre de senador.
    - Parámetros: action ("get_by_legislator"|"count"|"changes"|"search"|"stats"), name (nombre del legislador/área, opcional), query (texto libre, opcional)
-   - **ASESORES/PERSONAL DE DIPUTADOS**: Para consultas como "asesores de Yeza", "cuántos empleados tiene Menem", "personal de Milei" → SIEMPRE usá query_staff. NUNCA uses search_ckan para estos temas.**
+   - Para "asesores de [NOMBRE]", "cuántos empleados tiene [NOMBRE]", "personal de [NOMBRE]" → usá action="get_by_legislator" con name="NOMBRE"
+   - Para "cuántos asesores tiene [NOMBRE]" → usá action="count" con name="NOMBRE"
+   - **IMPORTANTE**: query_staff cubre TANTO Diputados como Senado. Para consultas sobre asesores/personal de CUALQUIER legislador (diputado O senador) → SIEMPRE usá query_staff. NUNCA uses search_ckan para estos temas.**
 
 8. **BCRA** (query_bcra): Cotizaciones cambiarias oficiales y variables monetarias del Banco Central
    - Cotizaciones diarias (44 monedas): tipo de cambio oficial, mayorista

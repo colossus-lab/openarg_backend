@@ -1776,13 +1776,23 @@ class SmartQueryService:
         for match in re.finditer(r"<!--CHART:(.*?)-->", text, re.DOTALL):
             try:
                 chart = json.loads(match.group(1))
-                if (
+                if not (
                     chart.get("type")
                     and chart.get("data")
                     and chart.get("xKey")
                     and chart.get("yKeys")
                 ):
-                    charts.append(chart)
+                    continue
+                # Validate that data rows actually contain numeric values
+                y_keys = chart["yKeys"]
+                valid_rows = [
+                    row for row in chart["data"]
+                    if any(isinstance(row.get(k), int | float) for k in y_keys)
+                ]
+                if len(valid_rows) < 2:
+                    continue
+                chart["data"] = valid_rows
+                charts.append(chart)
             except (json.JSONDecodeError, KeyError):
                 pass
         return charts
