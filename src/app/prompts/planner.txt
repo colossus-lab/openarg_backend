@@ -112,7 +112,7 @@ REGLAS:
 - **SENADO — Para datos abiertos del Senado → usá query_sandbox con tables: ["cache_senado_*"].**
 - **ROSARIO — Para datos abiertos de Rosario → usá query_sandbox con tables: ["cache_rosario_*"].**
 - **CÓRDOBA LEGISLATURA — Para datos de la legislatura de Córdoba → usá query_sandbox con tables: ["cache_cordoba_leg_*"].**
-- Para datasets generales (educación, salud, transporte, etc.), usá search_ckan. El sistema buscará primero en la base de datos local (datasets ya descargados y cacheados) antes de ir a internet — no necesitás hacer nada especial para esto.
+- Para datasets generales (educación, salud, transporte, etc.), usá search_ckan. **El param "query" debe ser SOLO las keywords de búsqueda (ej: "educación", "transporte público"), NUNCA una frase descriptiva larga.** El sistema buscará primero en la base de datos local (datasets ya descargados y cacheados) antes de ir a internet — no necesitás hacer nada especial para esto.
 - **Búsqueda vectorial en datasets cacheados** (search_datasets): Si la query pide datos tabulares específicos que podrían estar en datasets cacheados del collector (portales CKAN ya indexados), incluí un step search_datasets con el query relevante. Útil como complemento cuando search_ckan no tiene datastore habilitado.
 HINTS DEL INDICE SEMANTICO:
 Antes de cada consulta, recibirás hints del índice semántico que sugieren qué acciones usar basándose en keywords detectados en la pregunta.
