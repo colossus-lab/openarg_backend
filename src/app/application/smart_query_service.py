@@ -485,7 +485,7 @@ class SmartQueryService:
         for r in results:
             if r.source.startswith("ddjj:"):
                 for rec in r.records:
-                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
+                    if rec.get("nombre") and rec.get("patrimonio cierre") is not None:
                         documents.append({**rec, "doc_type": "ddjj"})
 
         tokens_used = response.tokens_used or 0
@@ -760,7 +760,7 @@ class SmartQueryService:
         for r in results:
             if r.source.startswith("ddjj:"):
                 for rec in r.records:
-                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
+                    if rec.get("nombre") and rec.get("patrimonio cierre") is not None:
                         documents.append({**rec, "doc_type": "ddjj"})
 
         yield {
