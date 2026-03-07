@@ -34,11 +34,16 @@ class BCRAAdapter:
     @with_retry(max_retries=2)
     async def get_cotizaciones(
         self,
-        moneda: str = "USD",
+        moneda: str | None = None,
         fecha_desde: str | None = None,
         fecha_hasta: str | None = None,
     ) -> DataResult:
-        """Get exchange rate quotes from BCRA."""
+        """Get exchange rate quotes from BCRA.
+
+        The API no longer accepts the ``moneda`` query-parameter — calling
+        ``/Cotizaciones`` without it returns *all* currencies for the latest
+        date.  We filter client-side when ``moneda`` is provided.
+        """
         client = self._get_client()
         url = f"{self.BASE_URL}/estadisticascambiarias/v1.0/Cotizaciones"
         params: dict[str, str] = {}
@@ -46,49 +51,65 @@ class BCRAAdapter:
             params["fechaDesde"] = fecha_desde
         if fecha_hasta:
             params["fechaHasta"] = fecha_hasta
-        if moneda:
-            params["moneda"] = moneda
 
         resp = await client.get(url, params=params)
         resp.raise_for_status()
         data = resp.json()
 
-        records = data.get("results", data) if isinstance(data, dict) else data
-        if isinstance(records, dict):
-            records = [records]
+        results = data.get("results", data) if isinstance(data, dict) else data
+
+        # The API returns {"fecha": "...", "detalle": [...]}
+        if isinstance(results, dict) and "detalle" in results:
+            records = results["detalle"]
+            if moneda:
+                records = [r for r in records if r.get("codigoMoneda") == moneda]
+        elif isinstance(results, list):
+            records = results
+        else:
+            records = [results] if results else []
 
         return DataResult(
             source="bcra",
             portal_name="Banco Central de la República Argentina",
             portal_url="https://www.bcra.gob.ar",
-            dataset_title=f"Cotizaciones Cambiarias - {moneda}",
+            dataset_title=f"Cotizaciones Cambiarias{f' - {moneda}' if moneda else ''}",
             format="json",
             records=records if isinstance(records, list) else [],
             metadata={
                 "fetched_at": datetime.now(UTC).isoformat(),
-                "moneda": moneda,
+                "moneda": moneda or "todas",
             },
         )
 
     @with_retry(max_retries=2)
     async def get_principales_variables(self) -> DataResult:
-        """Get main monetary variables from BCRA."""
+        """Get main monetary variables from BCRA.
+
+        Returns all exchange-rate master data (``/Maestros/Divisas``) since
+        the former ``/estadisticas/v2.0/PrincipalesVariables`` endpoint was
+        deprecated.
+        """
         client = self._get_client()
-        url = f"{self.BASE_URL}/estadisticas/v2.0/PrincipalesVariables"
+        # v2 PrincipalesVariables was deprecated — use Maestros/Divisas + Cotizaciones
+        url = f"{self.BASE_URL}/estadisticascambiarias/v1.0/Cotizaciones"
 
         resp = await client.get(url)
         resp.raise_for_status()
         data = resp.json()
 
-        records = data.get("results", data) if isinstance(data, dict) else data
-        if isinstance(records, dict):
-            records = [records]
+        results = data.get("results", data) if isinstance(data, dict) else data
+        if isinstance(results, dict) and "detalle" in results:
+            records = results["detalle"]
+        elif isinstance(results, list):
+            records = results
+        else:
+            records = [results] if results else []
 
         return DataResult(
             source="bcra",
             portal_name="Banco Central de la República Argentina",
             portal_url="https://www.bcra.gob.ar",
-            dataset_title="Principales Variables Monetarias",
+            dataset_title="Cotizaciones Cambiarias — Todas las monedas",
             format="json",
             records=records if isinstance(records, list) else [],
             metadata={
@@ -105,21 +126,26 @@ class BCRAAdapter:
     ) -> DataResult:
         """Get historical data for a specific BCRA variable."""
         client = self._get_client()
-        url = f"{self.BASE_URL}/estadisticas/v2.0/DatosVariable/{id_variable}/{fecha_desde}/{fecha_hasta}"
+        url = f"{self.BASE_URL}/estadisticascambiarias/v1.0/Cotizaciones"
+        params = {"fechaDesde": fecha_desde, "fechaHasta": fecha_hasta}
 
-        resp = await client.get(url)
+        resp = await client.get(url, params=params)
         resp.raise_for_status()
         data = resp.json()
 
-        records = data.get("results", data) if isinstance(data, dict) else data
-        if isinstance(records, dict):
-            records = [records]
+        results = data.get("results", data) if isinstance(data, dict) else data
+        if isinstance(results, dict) and "detalle" in results:
+            records = results["detalle"]
+        elif isinstance(results, list):
+            records = results
+        else:
+            records = [results] if results else []
 
         return DataResult(
             source="bcra",
             portal_name="Banco Central de la República Argentina",
             portal_url="https://www.bcra.gob.ar",
-            dataset_title=f"Variable BCRA #{id_variable}",
+            dataset_title=f"Cotizaciones BCRA ({fecha_desde} a {fecha_hasta})",
             format="json",
             records=records if isinstance(records, list) else [],
             metadata={
@@ -131,5 +157,5 @@ class BCRAAdapter:
         )
 
     async def search(self, query: str) -> DataResult:
-        """Search BCRA data by returning main variables (no search API available)."""
-        return await self.get_principales_variables()
+        """Search BCRA data by returning all current quotes."""
+        return await self.get_cotizaciones()

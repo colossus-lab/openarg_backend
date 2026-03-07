@@ -43,17 +43,30 @@ PORTAL_URLS = {
     "mendoza": "https://datosabiertos.mendoza.gov.ar/api/3/action",
     "entre_rios": "https://datos.entrerios.gov.ar/api/3/action",
     "neuquen_legislatura": "https://datos.legislaturaneuquen.gob.ar/api/3/action",
-    # Nacionales nuevos
+    # Nacionales sectoriales
     "modernizacion": "https://datos.modernizacion.gob.ar/api/3/action",
     "ambiente": "https://datos.ambiente.gob.ar/api/3/action",
     "arsat": "https://datos.arsat.com.ar/api/3/action",
+    "energia": "http://datos.energia.gob.ar/api/3/action",  # HTTP only (no HTTPS)
+    "produccion": "https://datos.produccion.gob.ar/api/3/action",
+    "magyp": "https://datos.magyp.gob.ar/api/3/action",
+    "salud": "https://datos.salud.gob.ar/api/3/action",
+    "transporte": "https://datos.transporte.gob.ar/api/3/action",
+    "acumar": "https://datos.acumar.gob.ar/api/3/action",
+    "mininterior": "https://datos.mininterior.gob.ar/api/3/action",
+    "cultura": "https://datos.cultura.gob.ar/api/3/action",
+    "pami": "https://datos.pami.org.ar/api/3/action",
     # Provincias nuevas
     "rio_negro": "https://datos.rionegro.gov.ar/api/3/action",
     "jujuy": "https://datos.jujuy.gob.ar/api/3/action",
     "salta": "https://datos.salta.gob.ar/api/3/action",
-    # Municipios nuevos
+    "tucuman": "https://sep.tucuman.gob.ar/api/3/action",
+    "chaco": "https://datosabiertos.chaco.gob.ar/api/3/action",
+    # Municipios
     "cordoba_muni": "https://gobiernoabierto.cordoba.gob.ar/data/api/3/action",
     "la_plata": "https://datos.laplata.gob.ar/api/3/action",
+    "ciudad_mendoza": "https://datos.ciudaddemendoza.gov.ar/api/3/action",
+    "corrientes": "https://datos.ciudaddecorrientes.gov.ar/api/3/action",
 }
 
 

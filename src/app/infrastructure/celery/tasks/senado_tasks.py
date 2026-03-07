@@ -95,11 +95,33 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
     return dataset_id
 
 
-def _parse_file(content: bytes, url: str) -> pd.DataFrame | None:
-    """Parse a downloaded file (CSV, XLS, XLSX) into a DataFrame."""
-    lower_url = url.lower()
+def _parse_response(content: bytes, url: str, fmt: str = "file") -> pd.DataFrame | None:
+    """Parse a downloaded response (JSON, CSV, XLS, XLSX) into a DataFrame."""
+    if fmt == "json" or url.lower().endswith("/json") or url.lower().endswith("/json/todas"):
+        try:
+            import json as _json
 
-    if lower_url.endswith((".xls", ".xlsx")):
+            data = _json.loads(content)
+            if isinstance(data, list):
+                records = data
+            elif isinstance(data, dict):
+                # Common patterns: {"data": [...]}, {"results": [...]}, or flat dict
+                records = (
+                    data.get("data")
+                    or data.get("results")
+                    or data.get("Records")
+                    or [data]
+                )
+            else:
+                return None
+            if not records or not isinstance(records, list):
+                return None
+            return pd.json_normalize(records)
+        except Exception:
+            return None
+
+    lower_url = url.lower()
+    if lower_url.endswith((".xls", ".xlsx")) or fmt == "excel":
         try:
             return pd.read_excel(io.BytesIO(content))
         except Exception:
@@ -121,30 +143,65 @@ def _parse_file(content: bytes, url: str) -> pd.DataFrame | None:
 
 
 def _extract_links(html: str) -> list[dict]:
-    """Extract download links from Senado HTML page."""
-    links = []
-    # Match <a> tags with href pointing to downloadable files
-    pattern = re.compile(
-        r'<a\s+[^>]*href="([^"]*\.(?:csv|xls|xlsx))"[^>]*>([^<]*)</a>',
-        re.IGNORECASE,
-    )
-    for match in pattern.finditer(html):
-        href = match.group(1)
-        label = match.group(2).strip()
-        if href.startswith("/"):
-            href = f"https://www.senado.gob.ar{href}"
-        links.append({"url": href, "label": label or href.rsplit("/", 1)[-1]})
+    """Extract download links from Senado HTML page.
 
-    # Also check for direct file links in any href
-    pattern2 = re.compile(
-        r'href="(https?://[^"]*\.(?:csv|xls|xlsx))"',
+    The Senado doesn't serve static CSV/XLS files.  Instead, it exposes
+    ``/Exportar.../json`` and ``/Exportar.../Excel`` endpoints that return
+    data directly.  We prefer JSON endpoints since they're easier to parse.
+    """
+    links: list[dict] = []
+    seen: set[str] = set()
+
+    # Match Exportar endpoints (JSON preferred, Excel as fallback)
+    pattern = re.compile(
+        r'href="(/micrositios/DatosAbiertos/Exportar[^"]*)"',
         re.IGNORECASE,
     )
-    seen = {l["url"] for l in links}
+    json_endpoints: dict[str, str] = {}  # base_name → full path
+    excel_endpoints: dict[str, str] = {}
+
+    for match in pattern.finditer(html):
+        path = match.group(1)
+        # Derive a label from the path: /Exportar<Name>/<format>
+        parts = path.rstrip("/").split("/")
+        fmt = parts[-1].lower() if parts else ""
+        # base is the Exportar part without the format suffix
+        base = "/".join(parts[:-1]) if fmt in ("json", "excel") else path
+
+        if fmt == "json":
+            json_endpoints[base] = path
+        elif fmt == "excel":
+            excel_endpoints[base] = path
+
+    # Prefer JSON endpoints; fall back to Excel for those without JSON
+    for base, path in json_endpoints.items():
+        url = f"https://www.senado.gob.ar{path}"
+        # Derive label from path e.g. ExportarListadoSenadores → Listado Senadores
+        label_raw = path.split("Exportar")[-1].split("/")[0]
+        label = re.sub(r"([A-Z])", r" \1", label_raw).strip()
+        if url not in seen:
+            links.append({"url": url, "label": label, "format": "json"})
+            seen.add(url)
+
+    for base, path in excel_endpoints.items():
+        if base not in json_endpoints:
+            url = f"https://www.senado.gob.ar{path}"
+            label_raw = path.split("Exportar")[-1].split("/")[0]
+            label = re.sub(r"([A-Z])", r" \1", label_raw).strip()
+            if url not in seen:
+                links.append({"url": url, "label": label, "format": "excel"})
+                seen.add(url)
+
+    # Also match static file links (.csv, .xls, .xlsx)
+    pattern2 = re.compile(
+        r'href="([^"]*\.(?:csv|xls|xlsx))"', re.IGNORECASE,
+    )
     for match in pattern2.finditer(html):
         href = match.group(1)
+        if href.startswith("/"):
+            href = f"https://www.senado.gob.ar{href}"
         if href not in seen:
-            links.append({"url": href, "label": href.rsplit("/", 1)[-1]})
+            links.append({"url": href, "label": href.rsplit("/", 1)[-1], "format": "file"})
             seen.add(href)
 
     return links
@@ -202,6 +259,7 @@ def scrape_senado(self):
         for link in unique_links:
             url = link["url"]
             label = link["label"]
+            fmt = link.get("format", "file")
             source_id = f"senado-{_sanitize_name(label)}"
             table_name = f"cache_senado_{_sanitize_name(label)}"
 
@@ -220,7 +278,7 @@ def scrape_senado(self):
                         continue
                     resp.raise_for_status()
 
-                df = _parse_file(resp.content, url)
+                df = _parse_response(resp.content, url, fmt)
                 if df is None or df.empty:
                     results["skipped"] += 1
                     continue

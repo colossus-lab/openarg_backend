@@ -78,15 +78,13 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
 
 
 def _fetch_bcra_data():
-    """Fetch BCRA data synchronously using async adapter."""
+    """Fetch BCRA cotizaciones synchronously using async adapter."""
     from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
 
     adapter = BCRAAdapter()
 
     async def _run():
-        cotizaciones = await adapter.get_cotizaciones()
-        variables = await adapter.get_principales_variables()
-        return cotizaciones, variables
+        return await adapter.get_cotizaciones()
 
     return asyncio.run(_run())
 
@@ -100,45 +98,26 @@ def snapshot_bcra(self):
     engine = get_sync_engine()
 
     try:
-        cotizaciones, variables = _fetch_bcra_data()
+        cotizaciones = _fetch_bcra_data()
 
         results = {"tables": []}
 
-        # Cotizaciones
         if cotizaciones.records:
-            df_cot = pd.DataFrame(cotizaciones.records)
-            if not df_cot.empty:
+            df = pd.DataFrame(cotizaciones.records)
+            if not df.empty:
                 table_name = "cache_bcra_cotizaciones"
-                df_cot.to_sql(table_name, engine, if_exists="replace", index=False)
+                df.to_sql(table_name, engine, if_exists="replace", index=False)
                 dataset_id = _register_dataset(
                     engine, "bcra-cotizaciones", "Cotizaciones Cambiarias BCRA",
-                    table_name, df_cot,
+                    table_name, df,
                 )
                 if dataset_id:
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
                     index_dataset_embedding.delay(dataset_id)
-                results["tables"].append({"table": table_name, "rows": len(df_cot)})
-                logger.info("BCRA cotizaciones: %d records cached", len(df_cot))
-
-        # Variables
-        if variables.records:
-            df_var = pd.DataFrame(variables.records)
-            if not df_var.empty:
-                table_name = "cache_bcra_variables"
-                df_var.to_sql(table_name, engine, if_exists="replace", index=False)
-                dataset_id = _register_dataset(
-                    engine, "bcra-variables", "Principales Variables Monetarias BCRA",
-                    table_name, df_var,
-                )
-                if dataset_id:
-                    from app.infrastructure.celery.tasks.scraper_tasks import (
-                        index_dataset_embedding,
-                    )
-                    index_dataset_embedding.delay(dataset_id)
-                results["tables"].append({"table": table_name, "rows": len(df_var)})
-                logger.info("BCRA variables: %d records cached", len(df_var))
+                results["tables"].append({"table": table_name, "rows": len(df)})
+                logger.info("BCRA cotizaciones: %d records cached", len(df))
 
         return results
 

@@ -1,16 +1,15 @@
 """
 Presupuesto Abierto — ETL de datos presupuestarios nacionales.
 
-Descarga ZIPs con CSVs del repositorio DGSIAF/MECON, los parsea con pandas
-y los cachea en PostgreSQL para consultas SQL (NL2SQL).
+Consulta la API de Presupuesto Abierto (presupuestoabierto.gob.ar/api/v1)
+y cachea los resultados en PostgreSQL para consultas NL2SQL.
 """
 from __future__ import annotations
 
-import io
 import json
 import logging
+import os
 import re
-import zipfile
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -22,56 +21,38 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://dgsiaf-repo.mecon.gob.ar/repository/pa/datasets"
+API_URL = "https://www.presupuestoabierto.gob.ar/api/v1"
 
-PRIORITY_PREFIXES = [
-    "credito-presupuestario",
-    "ejecucion-presupuestaria",
-    "recursos-recaudacion",
-    "deuda-publica",
-    "planta-de-personal",
-    "transferencias",
-]
+# Endpoints and their default columns
+ENDPOINTS = {
+    "credito": [
+        "jurisdiccion_desc", "finalidad_desc", "funcion_desc",
+        "programa_desc", "credito_presupuestado", "credito_vigente",
+        "credito_comprometido", "credito_devengado", "credito_pagado",
+    ],
+    "recurso": [
+        "concepto_desc", "rubro_desc", "recurso_presupuestado",
+        "recurso_vigente", "recurso_ingresado_devengado",
+        "recurso_ingresado_percibido",
+    ],
+}
 
-ALL_PREFIXES = [
-    *PRIORITY_PREFIXES,
-    "gastos-por-finalidad",
-    "gastos-por-funcion",
-    "gastos-por-jurisdiccion",
-    "gastos-por-objeto",
-    "gastos-por-programa",
-    "gastos-por-fuente",
-    "gastos-por-ubicacion-geografica",
-    "inversiones-reales",
-    "resultado-financiero",
-    "resultado-primario",
-    "servicio-de-la-deuda",
-    "intereses-de-la-deuda",
-    "esquema-ahorro-inversion",
-    "coparticipacion-federal",
-    "contribuciones-patronales",
-    "otros-recursos",
-    "ingresos-tributarios",
-    "ingresos-no-tributarios",
-]
-
-YEARS = list(range(2010, 2026))
+YEARS = list(range(2020, 2027))
 
 MAX_ROWS = 500_000
-MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 
 
-def _sanitize_table_name(prefix: str, year: int) -> str:
-    clean = re.sub(r"[^a-z0-9_]", "_", prefix.lower())
+def _sanitize_table_name(endpoint: str, year: int) -> str:
+    clean = re.sub(r"[^a-z0-9_]", "_", endpoint.lower())
     clean = re.sub(r"_+", "_", clean).strip("_")
     return f"cache_presupuesto_{clean}_{year}"
 
 
-def _register_dataset(engine, prefix: str, year: int, table_name: str, df: pd.DataFrame):
+def _register_dataset(engine, endpoint: str, year: int, table_name: str, df: pd.DataFrame):
     """Upsert into datasets and cached_datasets tables."""
-    source_id = f"{prefix}-{year}"
+    source_id = f"presupuesto-{endpoint}-{year}"
     portal = "presupuesto_abierto"
-    title = f"Presupuesto - {prefix.replace('-', ' ').title()} {year}"
+    title = f"Presupuesto — {endpoint.replace('_', ' ').title()} {year}"
     columns_json = json.dumps(list(df.columns))
     now = datetime.now(UTC)
 
@@ -82,7 +63,7 @@ def _register_dataset(engine, prefix: str, year: int, table_name: str, df: pd.Da
                     (source_id, title, description, organization, portal, url,
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
-                    (:sid, :title, :desc, :org, :portal, :url, :dl, 'csv', :cols, :tags,
+                    (:sid, :title, :desc, :org, :portal, :url, '', 'json', :cols, :tags,
                      :now, true, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
                     title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
@@ -90,13 +71,12 @@ def _register_dataset(engine, prefix: str, year: int, table_name: str, df: pd.Da
             """),
             {
                 "sid": source_id, "title": title,
-                "desc": f"Datos de {prefix.replace('-', ' ')} del presupuesto nacional, año {year}.",
-                "org": "Ministerio de Economía - DGSIAF",
+                "desc": f"Datos de {endpoint} del presupuesto nacional, ejercicio {year}.",
+                "org": "Ministerio de Economía — Presupuesto Abierto",
                 "portal": portal,
-                "url": f"{BASE_URL}/{year}/{prefix}-{year}.zip",
-                "dl": f"{BASE_URL}/{year}/{prefix}-{year}.zip",
+                "url": f"{API_URL}/{endpoint}",
                 "cols": columns_json,
-                "tags": f"presupuesto,{prefix},{year},finanzas públicas",
+                "tags": f"presupuesto,{endpoint},{year},finanzas públicas",
                 "now": now, "rows": len(df),
             },
         )
@@ -130,21 +110,24 @@ def _register_dataset(engine, prefix: str, year: int, table_name: str, df: pd.Da
     name="openarg.ingest_presupuesto", bind=True, max_retries=3,
     soft_time_limit=600, time_limit=720,
 )
-def ingest_presupuesto(self, prefixes: list[str] | None = None, years: list[int] | None = None):
-    """Download and cache Presupuesto Abierto datasets."""
+def ingest_presupuesto(self):
+    """Fetch budget data from the Presupuesto Abierto API and cache it."""
     import httpx
 
-    target_prefixes = prefixes or PRIORITY_PREFIXES
-    target_years = years or YEARS
+    token = os.getenv("PRESUPUESTO_API_TOKEN")
+    if not token:
+        logger.error("PRESUPUESTO_API_TOKEN not set — skipping presupuesto ingestion")
+        return {"ingested": 0, "skipped": 0, "errors": 0, "reason": "no token"}
+
     engine = get_sync_engine()
     results = {"ingested": 0, "skipped": 0, "errors": 0}
 
     try:
-        for prefix in target_prefixes:
-            for year in target_years:
-                table_name = _sanitize_table_name(prefix, year)
+        for endpoint, columns in ENDPOINTS.items():
+            for year in YEARS:
+                table_name = _sanitize_table_name(endpoint, year)
 
-                # Check if already cached
+                # Skip if already cached
                 with engine.begin() as conn:
                     cached = conn.execute(
                         text(
@@ -157,62 +140,40 @@ def ingest_presupuesto(self, prefixes: list[str] | None = None, years: list[int]
                     results["skipped"] += 1
                     continue
 
-                url = f"{BASE_URL}/{year}/{prefix}-{year}.zip"
                 try:
-                    with httpx.Client(timeout=120.0) as client:
-                        # HEAD check
-                        try:
-                            head = client.head(url, follow_redirects=True)
-                            if head.status_code == 404:
-                                continue
-                            cl = int(head.headers.get("content-length", 0))
-                            if cl > MAX_DOWNLOAD_BYTES:
-                                logger.warning("Presupuesto %s-%d too large: %d", prefix, year, cl)
-                                continue
-                        except Exception:
-                            pass
-
-                        resp = client.get(url, follow_redirects=True)
-                        if resp.status_code == 404:
-                            continue
+                    body = {
+                        "title": f"OpenArg — {endpoint} {year}",
+                        "ejercicios": [year],
+                        "columns": columns,
+                        "filters": [],
+                    }
+                    with httpx.Client(timeout=30.0) as client:
+                        resp = client.post(
+                            f"{API_URL}/{endpoint}?format=json",
+                            headers={
+                                "Authorization": token,
+                                "Content-Type": "application/json",
+                            },
+                            json=body,
+                        )
+                        if resp.status_code == 401:
+                            logger.error("Presupuesto API: invalid token")
+                            return {**results, "reason": "auth_failed"}
                         resp.raise_for_status()
 
-                    # Extract CSVs from ZIP
-                    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-                        if not csv_names:
-                            logger.warning("No CSVs in %s", url)
-                            continue
+                    data = resp.json()
+                    records = data if isinstance(data, list) else data.get("data", [])
+                    if not records:
+                        results["skipped"] += 1
+                        continue
 
-                        # Concatenate all CSVs in the ZIP
-                        frames = []
-                        for csv_name in csv_names:
-                            with zf.open(csv_name) as f:
-                                try:
-                                    df = pd.read_csv(f, encoding="utf-8", on_bad_lines="skip")
-                                except Exception:
-                                    try:
-                                        with zf.open(csv_name) as f2:
-                                            df = pd.read_csv(f2, encoding="latin-1", on_bad_lines="skip")
-                                    except Exception:
-                                        logger.warning("Cannot parse %s in %s", csv_name, url)
-                                        continue
-                                frames.append(df)
-
-                        if not frames:
-                            continue
-                        df = pd.concat(frames, ignore_index=True)
-
-                    # Truncate
+                    df = pd.DataFrame(records)
                     if len(df) > MAX_ROWS:
                         df = df.head(MAX_ROWS)
-                        logger.warning("Presupuesto %s-%d truncated to %d rows", prefix, year, MAX_ROWS)
 
-                    # Write to PG
                     df.to_sql(table_name, engine, if_exists="replace", index=False)
 
-                    # Register and dispatch embeddings
-                    dataset_id = _register_dataset(engine, prefix, year, table_name, df)
+                    dataset_id = _register_dataset(engine, endpoint, year, table_name, df)
                     if dataset_id:
                         from app.infrastructure.celery.tasks.scraper_tasks import (
                             index_dataset_embedding,
@@ -220,11 +181,13 @@ def ingest_presupuesto(self, prefixes: list[str] | None = None, years: list[int]
                         index_dataset_embedding.delay(dataset_id)
 
                     results["ingested"] += 1
-                    logger.info("Ingested presupuesto %s-%d: %d rows", prefix, year, len(df))
+                    logger.info("Presupuesto %s %d: %d rows cached", endpoint, year, len(df))
 
                 except Exception:
                     results["errors"] += 1
-                    logger.warning("Failed to ingest presupuesto %s-%d", prefix, year, exc_info=True)
+                    logger.warning(
+                        "Failed to ingest presupuesto %s %d", endpoint, year, exc_info=True,
+                    )
 
         return results
 
