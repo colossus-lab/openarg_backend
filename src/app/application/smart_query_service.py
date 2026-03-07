@@ -445,7 +445,9 @@ class SmartQueryService:
         llm_charts = self._extract_llm_charts(response.content)
         charts = det_charts if det_charts else llm_charts
 
-        clean_answer = re.sub(r"<!--CHART:.*?-->", "", response.content, flags=re.DOTALL).strip()
+        clean_answer = re.sub(r"<!--CHART:.*?-->", "", response.content, flags=re.DOTALL)
+        # Also strip truncated/unclosed chart tags (LLM ran out of tokens)
+        clean_answer = re.sub(r"<!--CHART:.*", "", clean_answer, flags=re.DOTALL).strip()
 
         # 6a. Parse META confidence/citations
         confidence, citations = self._extract_meta(clean_answer)
@@ -725,7 +727,9 @@ class SmartQueryService:
         det_charts = self._build_deterministic_charts(results)
         llm_charts = self._extract_llm_charts(full_text)
         charts = det_charts if det_charts else llm_charts
-        clean_answer = re.sub(r"<!--CHART:.*?-->", "", full_text, flags=re.DOTALL).strip()
+        clean_answer = re.sub(r"<!--CHART:.*?-->", "", full_text, flags=re.DOTALL)
+        # Also strip truncated/unclosed chart tags (LLM ran out of tokens)
+        clean_answer = re.sub(r"<!--CHART:.*", "", clean_answer, flags=re.DOTALL).strip()
 
         # Parse META from streaming output
         confidence, citations = self._extract_meta(clean_answer)
