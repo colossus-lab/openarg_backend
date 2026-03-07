@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Iterable
-from typing import TYPE_CHECKING
 
 import httpx
 from dishka import Provider, Scope, make_async_container, provide
@@ -49,12 +48,11 @@ from app.infrastructure.persistence_sqla.provider import (
     get_main_async_session,
 )
 
-if TYPE_CHECKING:
-    from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
-    from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
-    from app.domain.ports.search.vector_search import IVectorSearch
-    from app.domain.ports.user.user_repository import IUserRepository
-    from app.setup.config.settings import AppSettings
+from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
+from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+from app.domain.ports.search.vector_search import IVectorSearch
+from app.domain.ports.user.user_repository import IUserRepository
+from app.setup.config.settings import AppSettings
 
 
 class SettingsProvider(Provider):  # type: ignore[misc]
