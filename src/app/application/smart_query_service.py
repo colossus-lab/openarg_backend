@@ -1549,12 +1549,34 @@ class SmartQueryService:
             if not valid_records and result.records:
                 continue
 
+            # Vector search results: no records but have metadata
+            is_vector_result = (
+                not valid_records
+                and result.source.startswith("pgvector:")
+            )
+
             is_metadata_only = (
                 valid_records
                 and valid_records[0].get("_type") == "resource_metadata"
             )
 
-            if is_metadata_only:
+            if is_vector_result:
+                part = (
+                    f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
+                    f"Portal: {result.portal_name}\n"
+                    f"URL: {result.portal_url}\n"
+                )
+                if result.metadata.get("description"):
+                    part += f"Descripción: {result.metadata['description']}\n"
+                if result.metadata.get("columns"):
+                    part += f"Columnas: {result.metadata['columns']}\n"
+                if result.metadata.get("score"):
+                    part += f"Relevancia: {result.metadata['score']}\n"
+                part += (
+                    "\nEste dataset está indexado en la base de datos. "
+                    "Listalo al usuario con su título, descripción y URL."
+                )
+            elif is_metadata_only:
                 preview = valid_records[:20]
                 records_text = json.dumps(preview, ensure_ascii=False, indent=2)
                 part = (
