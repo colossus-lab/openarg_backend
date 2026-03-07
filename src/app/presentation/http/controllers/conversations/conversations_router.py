@@ -33,6 +33,8 @@ class MessageCreate(BaseModel):
     role: str
     content: str
     sources: list[dict[str, Any]] | None = None
+    chart_data: list[dict[str, Any]] | None = None
+    documents: list[dict[str, Any]] | None = None
 
 
 class MessageResponse(BaseModel):
@@ -41,6 +43,8 @@ class MessageResponse(BaseModel):
     role: str
     content: str
     sources: list[dict[str, Any]]
+    chart_data: list[dict[str, Any]] | None = None
+    documents: list[dict[str, Any]] | None = None
     created_at: str
     feedback: str | None = None
     feedback_comment: str | None = None
@@ -172,6 +176,8 @@ async def get_conversation(
                 role=m.role,
                 content=m.content,
                 sources=m.sources or [],
+                chart_data=m.chart_data,
+                documents=m.documents,
                 created_at=m.created_at.isoformat(),
                 feedback=m.feedback,
                 feedback_comment=m.feedback_comment,
@@ -236,6 +242,8 @@ async def add_message(
         role=body.role,
         content=body.content,
         sources=body.sources or [],
+        chart_data=body.chart_data,
+        documents=body.documents,
     )
     saved = await chat_repo.add_message(message)
 
@@ -245,6 +253,8 @@ async def add_message(
         role=saved.role,
         content=saved.content,
         sources=saved.sources or [],
+        chart_data=saved.chart_data,
+        documents=saved.documents,
         created_at=saved.created_at.isoformat(),
         feedback=saved.feedback,
         feedback_comment=saved.feedback_comment,
@@ -272,6 +282,8 @@ async def get_messages(
             role=m.role,
             content=m.content,
             sources=m.sources or [],
+            chart_data=m.chart_data,
+            documents=m.documents,
             created_at=m.created_at.isoformat(),
             feedback=m.feedback,
             feedback_comment=m.feedback_comment,

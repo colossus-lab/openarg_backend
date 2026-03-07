@@ -1027,9 +1027,37 @@ class SmartQueryService:
 
         return [result] if result.records else []
 
+    @staticmethod
+    def _sanitize_ckan_query(raw: str) -> str:
+        """Extract meaningful keywords from a potentially verbose LLM-generated query.
+
+        CKAN's Solr search works best with short keyword queries, not full
+        sentences like "Buscar datasets relacionados con educación en el portal".
+        """
+        # Common filler words the LLM likes to include
+        _STOPWORDS = {
+            "buscar", "busca", "buscando", "datasets", "dataset", "datos",
+            "relacionados", "relacionado", "sobre", "acerca", "portal",
+            "nacional", "disponibles", "disponible", "listar", "mostrar",
+            "obtener", "consultar", "encontrar", "abiertos", "abierto",
+            "informacion", "información", "con", "del", "los", "las",
+            "que", "hay", "tiene", "para", "una", "por", "como", "son",
+            "mas", "más", "este", "esta", "estos", "estas",
+            "datos.gob.ar", "datos.gob", "gob.ar",
+        }
+        # Strip quotes and parenthetical text
+        clean = re.sub(r"[\"'()]", " ", raw)
+        # Extract words, keep only meaningful ones
+        words = [w for w in clean.lower().split() if len(w) > 2 and w not in _STOPWORDS]
+        if not words:
+            # If everything was filtered, use the original minus obvious filler
+            return raw.strip()[:100]
+        return " ".join(words[:5])
+
     async def _execute_ckan_step(self, step: PlanStep) -> list[DataResult]:
         params = step.params
-        query = params.get("query", step.description)
+        raw_query = params.get("query", step.description)
+        query = self._sanitize_ckan_query(raw_query) if raw_query not in ("*", "*:*") else raw_query
         portal_id = params.get("portalId")
         rows = params.get("rows", 10)
 
