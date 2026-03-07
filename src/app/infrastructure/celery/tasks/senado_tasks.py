@@ -36,11 +36,13 @@ def _sanitize_name(name: str) -> str:
     return clean[:50]
 
 
-def _register_dataset(engine, source_id: str, title: str, table_name: str, df: pd.DataFrame, url: str):
+def _register_dataset(engine, source_id: str, title: str, table_name: str, df: pd.DataFrame, url: str, fmt: str = "csv"):
     """Upsert into datasets and cached_datasets tables."""
     portal = "senado"
     columns_json = json.dumps(list(df.columns))
     now = datetime.now(UTC)
+    # Truncate format to fit varchar(50) column
+    fmt_value = fmt[:50] if fmt else "csv"
 
     with engine.begin() as conn:
         conn.execute(
@@ -63,7 +65,7 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                 "portal": portal,
                 "url": SENADO_BASE_URL,
                 "dl": url,
-                "fmt": url.rsplit(".", 1)[-1].lower() if "." in url else "csv",
+                "fmt": fmt_value,
                 "cols": columns_json,
                 "tags": f"senado,congreso,{_sanitize_name(title)}",
                 "now": now, "rows": len(df),
@@ -294,7 +296,7 @@ def scrape_senado(self):
 
                 df.to_sql(table_name, engine, if_exists="replace", index=False)
 
-                dataset_id = _register_dataset(engine, source_id, label, table_name, df, url)
+                dataset_id = _register_dataset(engine, source_id, label, table_name, df, url, fmt)
                 if dataset_id:
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,

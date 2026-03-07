@@ -34,12 +34,13 @@ MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 CHUNK_SIZE = 50_000
 
 
-def _register_dataset(engine, file_type: str, table_name: str, df: pd.DataFrame):
+def _register_dataset(engine, file_type: str, table_name: str,
+                      total_rows: int, columns: list[str]):
     """Upsert into datasets and cached_datasets tables."""
     source_id = f"bac-{file_type}"
     portal = "bac"
     title = f"Buenos Aires Compras - {file_type.title()}"
-    columns_json = json.dumps(list(df.columns))
+    columns_json = json.dumps(columns)
     now = datetime.now(UTC)
 
     with engine.begin() as conn:
@@ -64,7 +65,7 @@ def _register_dataset(engine, file_type: str, table_name: str, df: pd.DataFrame)
                 "dl": BAC_FILES[file_type],
                 "cols": columns_json,
                 "tags": f"compras,contrataciones,OCDS,{file_type},CABA",
-                "now": now, "rows": len(df),
+                "now": now, "rows": total_rows,
             },
         )
         dataset_row = conn.execute(
@@ -86,7 +87,7 @@ def _register_dataset(engine, file_type: str, table_name: str, df: pd.DataFrame)
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
+                {"did": dataset_id, "tn": table_name, "rows": total_rows,
                  "cols": columns_json, "now": now},
             )
 
@@ -126,9 +127,11 @@ def ingest_bac(self):
                     tmp.flush()
                     tmp.seek(0)
 
-                    # Parse CSV in chunks — read directly from file, not memory
-                    chunks = []
+                    # Parse CSV in chunks and write each chunk to DB
+                    # to avoid loading the entire file into memory.
                     total_rows = 0
+                    columns: list[str] | None = None
+                    chunk_num = 0
                     try:
                         csv_reader = pd.read_csv(
                             tmp.name, encoding="utf-8",
@@ -140,24 +143,34 @@ def ingest_bac(self):
                             on_bad_lines="skip", chunksize=CHUNK_SIZE,
                         )
                     for chunk in csv_reader:
-                        chunks.append(chunk)
-                        total_rows += len(chunk)
-                        if total_rows >= MAX_ROWS:
+                        remaining = MAX_ROWS - total_rows
+                        if remaining <= 0:
                             break
+                        if len(chunk) > remaining:
+                            chunk = chunk.head(remaining)
 
-                if not chunks:
+                        # First chunk replaces the table; subsequent chunks append
+                        if_exists = "replace" if chunk_num == 0 else "append"
+                        chunk.to_sql(table_name, engine, if_exists=if_exists, index=False)
+
+                        if columns is None:
+                            columns = list(chunk.columns)
+                        total_rows += len(chunk)
+                        chunk_num += 1
+                        logger.debug("BAC %s: wrote chunk %d (%d rows so far)",
+                                     file_type, chunk_num, total_rows)
+
+                        # Free chunk memory explicitly
+                        del chunk
+
+                if total_rows == 0 or columns is None:
                     logger.warning("BAC %s: no data parsed", file_type)
                     continue
 
-                df = pd.concat(chunks, ignore_index=True)
-                if len(df) > MAX_ROWS:
-                    df = df.head(MAX_ROWS)
-
-                # Write to PG
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
-
                 # Register and dispatch embeddings
-                dataset_id = _register_dataset(engine, file_type, table_name, df)
+                dataset_id = _register_dataset(
+                    engine, file_type, table_name, total_rows, columns,
+                )
                 if dataset_id:
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
@@ -165,7 +178,7 @@ def ingest_bac(self):
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1
-                logger.info("BAC %s: %d rows cached", file_type, len(df))
+                logger.info("BAC %s: %d rows cached", file_type, total_rows)
 
             except Exception:
                 results["errors"] += 1
