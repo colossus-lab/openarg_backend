@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -412,7 +413,17 @@ async def get_session_topics(
 # Admin: trigger tasks manually
 # ---------------------------------------------------------------------------
 
-@router.post("/rescore")
+def _verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> str:
+    """Validate admin API key for destructive transparency operations."""
+    import secrets as _secrets
+
+    expected = os.getenv("ADMIN_API_KEY", os.getenv("BACKEND_API_KEY", ""))
+    if not expected or not _secrets.compare_digest(x_admin_key, expected):
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    return x_admin_key
+
+
+@router.post("/rescore", dependencies=[Depends(_verify_admin_key)])
 async def trigger_rescore(portal: str | None = None):
     """Trigger health scoring task (re-scrape must happen first for last_updated_at)."""
     from app.infrastructure.celery.tasks.transparency_tasks import score_portal_health
@@ -424,7 +435,7 @@ async def trigger_rescore(portal: str | None = None):
     return {"status": "dispatched", "task": "score_portal_health", "portal": "all"}
 
 
-@router.post("/rescrape")
+@router.post("/rescrape", dependencies=[Depends(_verify_admin_key)])
 async def trigger_rescrape(portal: str | None = None):
     """Trigger catalog scrape + health rescore (with delay)."""
     from app.infrastructure.celery.tasks.scraper_tasks import PORTAL_URLS, scrape_catalog
@@ -439,7 +450,7 @@ async def trigger_rescrape(portal: str | None = None):
     return {"status": "dispatched", "scrape_portals": portals, "rescore_delay": "5min"}
 
 
-@router.post("/detect-anomalies")
+@router.post("/detect-anomalies", dependencies=[Depends(_verify_admin_key)])
 async def trigger_detect_anomalies():
     """Trigger DDJJ anomaly detection (inflation-adjusted analysis)."""
     from app.infrastructure.celery.tasks.transparency_tasks import detect_ddjj_anomalies
@@ -448,7 +459,7 @@ async def trigger_detect_anomalies():
     return {"status": "dispatched", "task": "detect_ddjj_anomalies"}
 
 
-@router.post("/snapshot-staff")
+@router.post("/snapshot-staff", dependencies=[Depends(_verify_admin_key)])
 async def trigger_staff_snapshot():
     """Trigger HCDN staff snapshot (download nómina + diff against previous)."""
     from app.infrastructure.celery.tasks.staff_tasks import snapshot_staff
@@ -481,7 +492,7 @@ async def get_staff_status(
     }
 
 
-@router.post("/flush-cache")
+@router.post("/flush-cache", dependencies=[Depends(_verify_admin_key)])
 @inject
 async def flush_query_cache(
     session: FromDishka[MainAsyncSession],

@@ -110,18 +110,23 @@ def ingest_bac(self):
         for file_type, url in BAC_FILES.items():
             table_name = f"cache_bac_{file_type}"
 
-            # Skip if already cached
+            # Skip if already cached or permanently failed
             with engine.begin() as conn:
                 cached = conn.execute(
                     text(
-                        "SELECT id FROM cached_datasets "
-                        "WHERE table_name = :tn AND status = 'ready'"
+                        "SELECT status, retry_count FROM cached_datasets "
+                        "WHERE table_name = :tn"
                     ),
                     {"tn": table_name},
                 ).fetchone()
             if cached:
-                results["skipped"] += 1
-                continue
+                if cached.status == "ready":
+                    results["skipped"] += 1
+                    continue
+                if cached.status == "permanently_failed":
+                    logger.info("BAC %s permanently failed, skipping", file_type)
+                    results["skipped"] += 1
+                    continue
 
             try:
                 # Stream download to temp file to avoid OOM
@@ -201,9 +206,30 @@ def ingest_bac(self):
                 results["ingested"] += 1
                 logger.info("BAC %s: %d rows cached", file_type, total_rows)
 
-            except Exception:
+            except Exception as file_exc:
                 results["errors"] += 1
                 logger.warning("Failed to ingest BAC %s", file_type, exc_info=True)
+                # Track error in cached_datasets
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "INSERT INTO cached_datasets (dataset_id, table_name, status, "
+                                "error_message, retry_count, updated_at) "
+                                "SELECT CAST(id AS uuid), :tn, 'error', :msg, "
+                                "COALESCE((SELECT retry_count + 1 FROM cached_datasets WHERE table_name = :tn), 1), NOW() "
+                                "FROM datasets WHERE source_id = :sid AND portal = 'bac' "
+                                "ON CONFLICT (table_name) DO UPDATE SET "
+                                "status = CASE WHEN cached_datasets.retry_count + 1 >= 5 "
+                                "THEN 'permanently_failed' ELSE 'error' END, "
+                                "retry_count = cached_datasets.retry_count + 1, "
+                                "error_message = :msg, updated_at = NOW()"
+                            ),
+                            {"tn": table_name, "msg": str(file_exc)[:500],
+                             "sid": f"bac-{file_type}"},
+                        )
+                except Exception:
+                    logger.debug("Could not track BAC error for %s", file_type, exc_info=True)
 
         return results
 
