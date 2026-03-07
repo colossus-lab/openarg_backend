@@ -105,18 +105,24 @@ def _parse_response(content: bytes, url: str, fmt: str = "file") -> pd.DataFrame
             if isinstance(data, list):
                 records = data
             elif isinstance(data, dict):
-                # Common patterns: {"data": [...]}, {"results": [...]}, or flat dict
-                records = (
-                    data.get("data")
-                    or data.get("results")
-                    or data.get("Records")
-                    or [data]
-                )
+                # Senado pattern: {"table": {"rows": [...]}}
+                if "table" in data and isinstance(data["table"], dict):
+                    records = data["table"].get("rows", [])
+                else:
+                    records = (
+                        data.get("data")
+                        or data.get("results")
+                        or data.get("Records")
+                        or [data]
+                    )
             else:
                 return None
             if not records or not isinstance(records, list):
                 return None
-            return pd.json_normalize(records)
+            # Flatten nested dicts if records contain them
+            if records and isinstance(records[0], dict):
+                return pd.json_normalize(records)
+            return pd.DataFrame(records)
         except Exception:
             return None
 

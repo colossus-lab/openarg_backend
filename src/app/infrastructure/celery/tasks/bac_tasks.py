@@ -100,6 +100,7 @@ def _register_dataset(engine, file_type: str, table_name: str, df: pd.DataFrame)
 def ingest_bac(self):
     """Download and cache Buenos Aires Compras OCDS datasets."""
     import httpx
+    import tempfile
 
     engine = get_sync_engine()
     results = {"ingested": 0, "skipped": 0, "errors": 0}
@@ -109,42 +110,40 @@ def ingest_bac(self):
             table_name = f"cache_bac_{file_type}"
 
             try:
-                with httpx.Client(timeout=120.0) as client:
-                    # HEAD check
+                # Stream download to temp file to avoid OOM
+                with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
+                    with httpx.Client(timeout=300.0) as client:
+                        with client.stream("GET", url, follow_redirects=True) as resp:
+                            resp.raise_for_status()
+                            downloaded = 0
+                            for data in resp.iter_bytes(chunk_size=1024 * 1024):
+                                tmp.write(data)
+                                downloaded += len(data)
+                                if downloaded > MAX_DOWNLOAD_BYTES:
+                                    logger.warning("BAC %s too large, stopping at %d bytes", file_type, downloaded)
+                                    break
+
+                    tmp.flush()
+                    tmp.seek(0)
+
+                    # Parse CSV in chunks — read directly from file, not memory
+                    chunks = []
+                    total_rows = 0
                     try:
-                        head = client.head(url, follow_redirects=True)
-                        cl = int(head.headers.get("content-length", 0))
-                        if cl > MAX_DOWNLOAD_BYTES:
-                            logger.warning("BAC %s too large: %d bytes", file_type, cl)
-                            continue
-                    except Exception:
-                        pass
-
-                    resp = client.get(url, follow_redirects=True)
-                    resp.raise_for_status()
-
-                # Parse CSV in chunks to handle large files
-                chunks = []
-                total_rows = 0
-                try:
-                    csv_reader = pd.read_csv(
-                        io.BytesIO(resp.content),
-                        encoding="utf-8",
-                        on_bad_lines="skip",
-                        chunksize=CHUNK_SIZE,
-                    )
-                except UnicodeDecodeError:
-                    csv_reader = pd.read_csv(
-                        io.BytesIO(resp.content),
-                        encoding="latin-1",
-                        on_bad_lines="skip",
-                        chunksize=CHUNK_SIZE,
-                    )
-                for chunk in csv_reader:
-                    chunks.append(chunk)
-                    total_rows += len(chunk)
-                    if total_rows >= MAX_ROWS:
-                        break
+                        csv_reader = pd.read_csv(
+                            tmp.name, encoding="utf-8",
+                            on_bad_lines="skip", chunksize=CHUNK_SIZE,
+                        )
+                    except UnicodeDecodeError:
+                        csv_reader = pd.read_csv(
+                            tmp.name, encoding="latin-1",
+                            on_bad_lines="skip", chunksize=CHUNK_SIZE,
+                        )
+                    for chunk in csv_reader:
+                        chunks.append(chunk)
+                        total_rows += len(chunk)
+                        if total_rows >= MAX_ROWS:
+                            break
 
                 if not chunks:
                     logger.warning("BAC %s: no data parsed", file_type)
