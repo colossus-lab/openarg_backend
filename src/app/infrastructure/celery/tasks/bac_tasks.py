@@ -129,6 +129,45 @@ def ingest_bac(self):
                     continue
 
             try:
+                # Pre-register dataset so error tracking has a dataset_id
+                source_id = f"bac-{file_type}"
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("""
+                            INSERT INTO datasets
+                                (source_id, title, description, organization, portal, url,
+                                 download_url, format, columns, tags, last_updated_at, is_cached, row_count)
+                            VALUES
+                                (:sid, :title, :desc, :org, 'bac', :url, :url, 'csv', '[]',
+                                 :tags, NOW(), false, 0)
+                            ON CONFLICT (source_id, portal) DO NOTHING
+                        """),
+                        {
+                            "sid": source_id,
+                            "title": f"Buenos Aires Compras - {file_type.title()}",
+                            "desc": f"Datos de contrataciones públicas de CABA ({file_type}), estándar OCDS.",
+                            "org": "Ministerio de Hacienda y Finanzas - CABA",
+                            "url": url,
+                            "tags": f"compras,contrataciones,OCDS,{file_type},CABA",
+                        },
+                    )
+                    row = conn.execute(
+                        text("SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = 'bac'"),
+                        {"sid": source_id},
+                    ).fetchone()
+                    dataset_id_pre = row[0] if row else None
+
+                if dataset_id_pre:
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text("""
+                                INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
+                                VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
+                                ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
+                            """),
+                            {"did": dataset_id_pre, "tn": table_name},
+                        )
+
                 # Stream download to temp file to avoid OOM
                 with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
                     with httpx.Client(timeout=300.0) as client:
@@ -209,24 +248,19 @@ def ingest_bac(self):
             except Exception as file_exc:
                 results["errors"] += 1
                 logger.warning("Failed to ingest BAC %s", file_type, exc_info=True)
-                # Track error in cached_datasets
+                # Track error in cached_datasets (row created by pre-registration above)
                 try:
                     with engine.begin() as conn:
                         conn.execute(
                             text(
-                                "INSERT INTO cached_datasets (dataset_id, table_name, status, "
-                                "error_message, retry_count, updated_at) "
-                                "SELECT CAST(id AS uuid), :tn, 'error', :msg, "
-                                "COALESCE((SELECT retry_count + 1 FROM cached_datasets WHERE table_name = :tn), 1), NOW() "
-                                "FROM datasets WHERE source_id = :sid AND portal = 'bac' "
-                                "ON CONFLICT (table_name) DO UPDATE SET "
-                                "status = CASE WHEN cached_datasets.retry_count + 1 >= 5 "
+                                "UPDATE cached_datasets SET "
+                                "status = CASE WHEN retry_count + 1 >= 5 "
                                 "THEN 'permanently_failed' ELSE 'error' END, "
-                                "retry_count = cached_datasets.retry_count + 1, "
-                                "error_message = :msg, updated_at = NOW()"
+                                "retry_count = retry_count + 1, "
+                                "error_message = :msg, updated_at = NOW() "
+                                "WHERE table_name = :tn"
                             ),
-                            {"tn": table_name, "msg": str(file_exc)[:500],
-                             "sid": f"bac-{file_type}"},
+                            {"tn": table_name, "msg": str(file_exc)[:500]},
                         )
                 except Exception:
                     logger.debug("Could not track BAC error for %s", file_type, exc_info=True)

@@ -52,6 +52,11 @@ def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
     if not url:
         return metadata_fmt
     path = url.split("?")[0].split("#")[0].lower()
+    # Extract extension using rsplit to avoid .geojson matching .json
+    dot_pos = path.rfind(".")
+    if dot_pos == -1:
+        return metadata_fmt
+    ext = path[dot_pos:]
     _ext_map = {
         ".geojson": "geojson",
         ".zip": "zip",
@@ -63,10 +68,7 @@ def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
         ".xlsx": "xlsx",
         ".xls": "xls",
     }
-    for ext, fmt in _ext_map.items():
-        if path.endswith(ext):
-            return fmt
-    return metadata_fmt
+    return _ext_map.get(ext, metadata_fmt)
 
 
 def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -> str:
@@ -90,14 +92,20 @@ def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -
 
 
 def _set_error_status(engine, dataset_id: str, error_msg: str):
-    """Update cached_datasets status to 'error' for early-return error paths."""
+    """Mark cached_datasets as permanently_failed for deterministic errors.
+
+    Deterministic errors (unsupported format, file too large, zip bomb, etc.)
+    will never succeed on retry, so we mark them permanently_failed immediately
+    to prevent infinite re-dispatch loops from bulk_collect_all.
+    """
     try:
         with engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE cached_datasets SET status = 'error', "
-                    "error_message = :msg, updated_at = NOW() "
-                    "WHERE dataset_id = CAST(:did AS uuid) AND status = 'downloading'"
+                    "UPDATE cached_datasets SET status = 'permanently_failed', "
+                    "error_message = :msg, retry_count = retry_count + 1, "
+                    "updated_at = NOW() "
+                    "WHERE dataset_id = CAST(:did AS uuid)"
                 ),
                 {"msg": error_msg[:500], "did": dataset_id},
             )
@@ -269,7 +277,12 @@ def collect_dataset(self, dataset_id: str):
         elif fmt == "zip":
             import zipfile
             max_decompressed = 500 * 1024 * 1024  # 500 MB decompressed limit
-            zf = zipfile.ZipFile(io.BytesIO(resp.content))
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(resp.content))
+            except zipfile.BadZipFile:
+                logger.warning(f"ZIP {dataset_id}: not a valid ZIP file")
+                _set_error_status(engine, dataset_id, "bad_zip_file")
+                return {"error": "bad_zip_file"}
             # Check total decompressed size to prevent zip bombs
             total_size = sum(info.file_size for info in zf.infolist())
             if total_size > max_decompressed:
@@ -369,7 +382,7 @@ def collect_dataset(self, dataset_id: str):
                     UPDATE cached_datasets SET
                         status = 'ready', row_count = :rows,
                         columns_json = :cols, size_bytes = :size,
-                        s3_key = :s3key
+                        s3_key = :s3key, updated_at = NOW()
                     WHERE dataset_id = CAST(:did AS uuid)
                 """),
                 {
