@@ -9,24 +9,41 @@ from celery.schedules import crontab
 logger = logging.getLogger(__name__)
 
 ALL_PORTALS = [
+    # Nacionales
     "datos_gob_ar",
-    "caba",
     "diputados",
     "justicia",
+    "energia",
+    "produccion",
+    "magyp",
+    "salud",
+    "transporte",
+    "acumar",
+    "mininterior",
+    "cultura",
+    "pami",
+    "modernizacion",
+    "ambiente",
+    "arsat",
+    # CABA
+    "caba",
+    # Provincias
     "buenos_aires_prov",
     "cordoba_prov",
     "santa_fe",
     "mendoza",
     "entre_rios",
     "neuquen_legislatura",
-    "modernizacion",
-    "ambiente",
-    "arsat",
+    "tucuman",
+    "chaco",
     "rio_negro",
     "jujuy",
     "salta",
+    # Municipios
     "cordoba_muni",
     "la_plata",
+    "ciudad_mendoza",
+    "corrientes",
 ]
 
 
@@ -108,27 +125,40 @@ def create_celery() -> Celery:
 
     # Celery Beat — periodic catalog scraping (daily, staggered every 10 min, no collisions)
     _beat_schedule = {
-        # 03:00 – 03:50 (original large portals)
+        # 03:00 – 03:50 (large national portals)
         "datos_gob_ar": (3, 0),
         "caba": (3, 10),
         "diputados": (3, 20),
         "justicia": (3, 30),
         "buenos_aires_prov": (3, 40),
         "cordoba_prov": (3, 50),
-        # 04:00 – 04:50 (provinces)
-        "santa_fe": (4, 0),
-        "mendoza": (4, 10),
-        "entre_rios": (4, 20),
-        "neuquen_legislatura": (4, 30),
-        "rio_negro": (4, 40),
-        "jujuy": (4, 50),
-        # 05:00 – 05:20 (remaining)
-        "modernizacion": (5, 0),
-        "ambiente": (5, 5),
-        "arsat": (5, 10),
-        "salta": (5, 15),
-        "cordoba_muni": (5, 20),
-        "la_plata": (5, 25),
+        # 04:00 – 04:50 (national sectoral + provinces)
+        "energia": (4, 0),
+        "produccion": (4, 5),
+        "magyp": (4, 10),
+        "salud": (4, 15),
+        "transporte": (4, 20),
+        "acumar": (4, 25),
+        "mininterior": (4, 30),
+        "cultura": (4, 35),
+        "pami": (4, 40),
+        "santa_fe": (4, 45),
+        "mendoza": (4, 50),
+        "entre_rios": (4, 55),
+        # 05:00 – 05:40 (provinces + municipalities)
+        "neuquen_legislatura": (5, 0),
+        "tucuman": (5, 5),
+        "chaco": (5, 10),
+        "rio_negro": (5, 15),
+        "jujuy": (5, 20),
+        "salta": (5, 25),
+        "modernizacion": (5, 30),
+        "ambiente": (5, 32),
+        "arsat": (5, 34),
+        "cordoba_muni": (5, 36),
+        "la_plata": (5, 38),
+        "ciudad_mendoza": (5, 40),
+        "corrientes": (5, 42),
     }
     app.conf.beat_schedule = {
         f"scrape-{portal.replace('_', '-')}": {
