@@ -39,7 +39,28 @@ _CONTENT_TYPES = {
     "json": "application/json",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "xls": "application/vnd.ms-excel",
+    "geojson": "application/geo+json",
+    "txt": "text/plain",
+    "ods": "application/vnd.oasis.opendocument.spreadsheet",
+    "zip": "application/zip",
+    "xml": "application/xml",
 }
+
+
+def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
+    """Override metadata format if URL extension clearly indicates a different format."""
+    if not url:
+        return metadata_fmt
+    path = url.split("?")[0].lower()
+    if path.endswith(".geojson"):
+        return "geojson"
+    if path.endswith(".zip"):
+        return "zip"
+    if path.endswith(".ods"):
+        return "ods"
+    if path.endswith(".txt"):
+        return "txt"
+    return metadata_fmt
 
 
 def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -> str:
@@ -89,6 +110,7 @@ def collect_dataset(self, dataset_id: str):
             return {"error": "not_found"}
 
         title, download_url, fmt = row.title, row.download_url, row.format
+        fmt = _detect_format_from_url(download_url, fmt)
         portal, source_id = row.portal, row.source_id
 
         if not download_url:
@@ -167,15 +189,89 @@ def collect_dataset(self, dataset_id: str):
 
         # Parse with pandas
         df: pd.DataFrame
-        if fmt == "csv":
+        if fmt == "csv" or fmt == "txt":
             try:
                 df = pd.read_csv(io.BytesIO(resp.content), encoding="utf-8", on_bad_lines="skip")
             except UnicodeDecodeError:
                 df = pd.read_csv(io.BytesIO(resp.content), encoding="latin-1", on_bad_lines="skip")
+            if df.shape[1] <= 1:
+                # Retry with semicolon separator
+                try:
+                    df = pd.read_csv(io.BytesIO(resp.content), encoding="utf-8", sep=";", on_bad_lines="skip")
+                except UnicodeDecodeError:
+                    df = pd.read_csv(io.BytesIO(resp.content), encoding="latin-1", sep=";", on_bad_lines="skip")
         elif fmt == "json":
-            df = pd.read_json(io.BytesIO(resp.content))
+            try:
+                df = pd.read_json(io.BytesIO(resp.content))
+            except ValueError:
+                # Fallback: try json_normalize for nested JSON
+                raw = json.loads(resp.content)
+                if isinstance(raw, list):
+                    df = pd.json_normalize(raw)
+                elif isinstance(raw, dict):
+                    # Try common wrapper keys
+                    for key in ("data", "results", "records", "features", "rows"):
+                        if key in raw and isinstance(raw[key], list):
+                            df = pd.json_normalize(raw[key])
+                            break
+                    else:
+                        df = pd.json_normalize([raw])
+                else:
+                    raise
+        elif fmt == "geojson":
+            raw = json.loads(resp.content)
+            features = raw.get("features", [])
+            if features:
+                # Extract properties from each GeoJSON feature
+                records = []
+                for f in features:
+                    props = f.get("properties", {})
+                    geom = f.get("geometry", {})
+                    if geom:
+                        props["geometry_type"] = geom.get("type")
+                        coords = geom.get("coordinates")
+                        if coords:
+                            props["geometry_coordinates"] = str(coords)
+                    records.append(props)
+                df = pd.DataFrame(records)
+            else:
+                df = pd.json_normalize(raw if isinstance(raw, list) else [raw])
+        elif fmt == "zip":
+            import zipfile
+            import tempfile as _tf
+            zf = zipfile.ZipFile(io.BytesIO(resp.content))
+            # Find first parseable file inside the zip
+            parsed = False
+            for name in zf.namelist():
+                lower = name.lower()
+                if lower.endswith(".csv") or lower.endswith(".txt"):
+                    with zf.open(name) as f:
+                        content = f.read()
+                    try:
+                        df = pd.read_csv(io.BytesIO(content), encoding="utf-8", on_bad_lines="skip")
+                    except UnicodeDecodeError:
+                        df = pd.read_csv(io.BytesIO(content), encoding="latin-1", on_bad_lines="skip")
+                    parsed = True
+                    break
+                elif lower.endswith((".xlsx", ".xls")):
+                    with zf.open(name) as f:
+                        content = f.read()
+                    df = pd.read_excel(io.BytesIO(content))
+                    parsed = True
+                    break
+                elif lower.endswith(".json") or lower.endswith(".geojson"):
+                    with zf.open(name) as f:
+                        content = f.read()
+                    df = pd.read_json(io.BytesIO(content))
+                    parsed = True
+                    break
+            if not parsed:
+                logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
+                return {"error": "zip_no_parseable_file"}
         elif fmt in ("xlsx", "xls"):
             df = pd.read_excel(io.BytesIO(resp.content))
+        elif fmt == "ods":
+            df = pd.read_excel(io.BytesIO(resp.content), engine="odf")
         else:
             logger.warning(f"Unsupported format: {fmt}")
             return {"error": f"unsupported_format: {fmt}"}

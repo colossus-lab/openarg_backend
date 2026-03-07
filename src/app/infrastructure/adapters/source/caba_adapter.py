@@ -34,7 +34,7 @@ class CABADataAdapter(IDataSource):
         for pkg in data.get("result", {}).get("results", []):
             for resource in pkg.get("resources", []):
                 fmt = resource.get("format", "").lower()
-                if fmt not in ("csv", "json", "xlsx", "xls"):
+                if fmt not in ("csv", "json", "xlsx", "xls", "geojson", "txt", "ods", "zip", "xml"):
                     continue
 
                 entries.append(
