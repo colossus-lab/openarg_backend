@@ -179,6 +179,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 "ids": ",".join(series_ids),
                 "format": "json",
                 "limit": str(limit),
+                "metadata": "full",
             }
             if start_date:
                 params["start_date"] = start_date
@@ -196,6 +197,34 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             if not raw or not raw.get("data"):
                 return None
 
+            # Build human-readable labels from metadata
+            # meta[0] is the time axis, meta[1..N] are series fields
+            meta_list = raw.get("meta", [])
+            id_to_label: dict[str, str] = {}
+            field_descriptions: list[str] = []
+            field_units = ""
+            dataset_title = ""
+            for m in meta_list[1:]:
+                field = m.get("field", {})
+                sid = field.get("id", "")
+                label = (
+                    field.get("description")
+                    or field.get("title")
+                    or sid
+                )
+                if sid:
+                    id_to_label[sid] = label
+                if field.get("description"):
+                    field_descriptions.append(field["description"])
+                if not field_units and field.get("units"):
+                    field_units = field["units"]
+                if not dataset_title:
+                    ds = m.get("dataset", {})
+                    dataset_title = ds.get("title", "")
+
+            if not dataset_title:
+                dataset_title = ", ".join(series_ids)
+
             is_percent = representation == "percent_change"
             records = []
             for row in raw["data"]:
@@ -204,7 +233,8 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     val = row[idx + 1]
                     if val is not None and is_percent:
                         val = round(val * 100, 2)
-                    record[sid] = val
+                    label = id_to_label.get(sid, sid)
+                    record[label] = val
                 records.append(record)
 
             if not records:
@@ -214,14 +244,14 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 source="series_tiempo",
                 portal_name="API de Series de Tiempo",
                 portal_url=f"https://datos.gob.ar/series/api/series/?ids={','.join(series_ids)}",
-                dataset_title=", ".join(series_ids),
+                dataset_title=dataset_title,
                 format="time_series",
                 records=records,
                 metadata={
                     "total_records": len(records),
                     "fetched_at": datetime.now(UTC).isoformat(),
-                    "description": "",
-                    "units": "",
+                    "description": "; ".join(field_descriptions),
+                    "units": field_units,
                 },
             )
         except ConnectorError:
