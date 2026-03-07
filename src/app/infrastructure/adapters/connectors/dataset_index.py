@@ -390,7 +390,13 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Cotizacion del euro",
     },
-    "real": {
+    "real brasileno": {
+        "action": "query_bcra",
+        "params": {"tipo": "cotizaciones", "moneda": "BRL"},
+        "confidence": 0.80,
+        "description": "Cotizacion del real brasileno",
+    },
+    "cotizacion real": {
         "action": "query_bcra",
         "params": {"tipo": "cotizaciones", "moneda": "BRL"},
         "confidence": 0.80,
@@ -625,6 +631,12 @@ KEYWORD_ROUTES: dict[str, dict] = {
 
     # ── DDJJ ───────────────────────────────────────────────────
     "declaracion jurada": {
+        "action": "query_ddjj",
+        "params": {"action": "ranking"},
+        "confidence": 0.95,
+        "description": "Declaraciones juradas patrimoniales de diputados",
+    },
+    "declaraciones juradas": {
         "action": "query_ddjj",
         "params": {"action": "ranking"},
         "confidence": 0.95,
@@ -911,134 +923,390 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "description": "Accidentes de transito / siniestros viales",
     },
 
-    # ── Educacion → search_ckan ────────────────────────────────
+    # ── Educacion → query_sandbox (110 cache tables) ────────────
     "educacion": {
-        "action": "search_ckan",
-        "params": {"query": "educacion"},
-        "confidence": 0.70,
-        "description": "Datasets de educacion",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*educaci*", "cache_*escuel*", "cache_*docent*", "cache_*universid*", "cache_*aprender*"]},
+        "confidence": 0.80,
+        "description": "Datos de educacion (110 tablas cacheadas)",
+    },
+    "escuela": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*escuel*"]},
+        "confidence": 0.80,
+        "description": "Datos de escuelas",
+    },
+    "escuelas": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*escuel*"]},
+        "confidence": 0.80,
+        "description": "Datos de escuelas",
+    },
+    "docentes": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*docent*"]},
+        "confidence": 0.80,
+        "description": "Datos de docentes",
+    },
+    "universidad": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*universid*"]},
+        "confidence": 0.80,
+        "description": "Datos de universidades",
+    },
+    "matricula escolar": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*matricul*"]},
+        "confidence": 0.85,
+        "description": "Matricula escolar",
     },
 
-    # ── Salud → search_ckan ────────────────────────────────────
+    # ── Salud → query_sandbox (119 cache tables) ──────────────
     "salud": {
-        "action": "search_ckan",
-        "params": {"query": "salud", "portalId": "salud"},
-        "confidence": 0.75,
-        "description": "Datasets de salud",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*salud*", "cache_*hospital*", "cache_*vacun*", "cache_*mortalid*"]},
+        "confidence": 0.80,
+        "description": "Datos de salud (119 tablas cacheadas)",
+    },
+    "vacunacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*vacun*"]},
+        "confidence": 0.85,
+        "description": "Datos de vacunacion",
+    },
+    "hospital": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*hospital*"]},
+        "confidence": 0.85,
+        "description": "Datos de hospitales",
+    },
+    "mortalidad": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*mortalid*", "cache_*defunci*"]},
+        "confidence": 0.85,
+        "description": "Datos de mortalidad y defunciones",
+    },
+    "natalidad": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*natalid*", "cache_*nacimiento*"]},
+        "confidence": 0.85,
+        "description": "Datos de natalidad y nacimientos",
+    },
+    "covid": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*covid*"]},
+        "confidence": 0.90,
+        "description": "Datos de COVID-19",
     },
 
-    # ── Seguridad → search_ckan ────────────────────────────────
+    # ── Seguridad → query_sandbox (35 cache tables) ──────────
     "seguridad": {
-        "action": "search_ckan",
-        "params": {"query": "seguridad"},
-        "confidence": 0.70,
-        "description": "Datasets de seguridad",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*seguridad*", "cache_*delito*", "cache_*polic*", "cache_*homicid*"]},
+        "confidence": 0.80,
+        "description": "Datos de seguridad (35 tablas cacheadas)",
     },
     "delitos": {
-        "action": "search_ckan",
-        "params": {"query": "delitos"},
-        "confidence": 0.75,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*"]},
+        "confidence": 0.85,
         "description": "Datos de delitos",
     },
+    "homicidios": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*homicid*"]},
+        "confidence": 0.85,
+        "description": "Datos de homicidios",
+    },
+    "femicidios": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*femicid*"]},
+        "confidence": 0.90,
+        "description": "Datos de femicidios",
+    },
 
-    # ── Transporte → search_ckan ───────────────────────────────
+    # ── Transporte → query_sandbox (103 cache tables) ─────────
     "transporte": {
-        "action": "search_ckan",
-        "params": {"query": "transporte", "portalId": "transporte"},
-        "confidence": 0.75,
-        "description": "Datasets de transporte",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*transport*", "cache_*transit*", "cache_*vehicul*", "cache_*subte*"]},
+        "confidence": 0.80,
+        "description": "Datos de transporte (103 tablas cacheadas)",
     },
     "subte": {
-        "action": "search_ckan",
-        "params": {"query": "subte"},
-        "confidence": 0.80,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*subte*"]},
+        "confidence": 0.85,
         "description": "Datos del subte",
     },
     "colectivo": {
-        "action": "search_ckan",
-        "params": {"query": "colectivo transporte"},
-        "confidence": 0.75,
-        "description": "Datos de colectivos / transporte publico",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*colectiv*"]},
+        "confidence": 0.80,
+        "description": "Datos de colectivos",
+    },
+    "ecobici": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*ecobici*", "cache_*biciclet*"]},
+        "confidence": 0.90,
+        "description": "Datos de Ecobici / bicicletas",
+    },
+    "metrobus": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*metrobus*"]},
+        "confidence": 0.90,
+        "description": "Datos del Metrobus",
+    },
+    "patentamiento": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*patentamient*", "cache_*vehicul*"]},
+        "confidence": 0.85,
+        "description": "Datos de patentamiento de vehiculos",
     },
 
-    # ── Energia → search_ckan ──────────────────────────────────
+    # ── Energia → query_sandbox (78 cache tables) ─────────────
     "energia": {
-        "action": "search_ckan",
-        "params": {"query": "energia", "portalId": "energia"},
-        "confidence": 0.75,
-        "description": "Datasets de energia",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*energ*", "cache_*electri*", "cache_*petrole*", "cache_*hidrocarb*"]},
+        "confidence": 0.80,
+        "description": "Datos de energia (78 tablas cacheadas)",
     },
     "petroleo": {
-        "action": "search_ckan",
-        "params": {"query": "petroleo", "portalId": "energia"},
-        "confidence": 0.80,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*petrole*", "cache_*crudo*"]},
+        "confidence": 0.85,
         "description": "Datos de petroleo",
     },
-    "gas": {
-        "action": "search_ckan",
-        "params": {"query": "gas", "portalId": "energia"},
-        "confidence": 0.75,
+    "gas natural": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*gas_*"]},
+        "confidence": 0.85,
         "description": "Datos de gas natural",
     },
+    "nafta": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*nafta*", "cache_*combustibl*"]},
+        "confidence": 0.85,
+        "description": "Datos de nafta y combustibles",
+    },
+    "energia renovable": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*renovabl*", "cache_*eolic*", "cache_*solar*"]},
+        "confidence": 0.85,
+        "description": "Datos de energia renovable",
+    },
 
-    # ── Agro → search_ckan ─────────────────────────────────────
+    # ── Agro → query_sandbox (125 cache tables) ───────────────
     "agro": {
-        "action": "search_ckan",
-        "params": {"query": "agro", "portalId": "agroindustria"},
-        "confidence": 0.75,
-        "description": "Datos agropecuarios",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*agro*", "cache_*ganad*", "cache_*agric*", "cache_*senasa*"]},
+        "confidence": 0.80,
+        "description": "Datos agropecuarios (125 tablas cacheadas)",
     },
     "agricultura": {
-        "action": "search_ckan",
-        "params": {"query": "agricultura", "portalId": "agroindustria"},
-        "confidence": 0.80,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*agric*", "cache_*cultiv*", "cache_*cosech*"]},
+        "confidence": 0.85,
         "description": "Datos de agricultura",
     },
     "ganaderia": {
-        "action": "search_ckan",
-        "params": {"query": "ganaderia", "portalId": "agroindustria"},
-        "confidence": 0.80,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*ganad*", "cache_*bovino*", "cache_*porcin*"]},
+        "confidence": 0.85,
         "description": "Datos de ganaderia",
     },
     "soja": {
-        "action": "search_ckan",
-        "params": {"query": "soja", "portalId": "agroindustria"},
-        "confidence": 0.85,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*soja*"]},
+        "confidence": 0.90,
         "description": "Datos de soja",
     },
     "trigo": {
-        "action": "search_ckan",
-        "params": {"query": "trigo", "portalId": "agroindustria"},
-        "confidence": 0.85,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*trigo*"]},
+        "confidence": 0.90,
         "description": "Datos de trigo",
     },
+    "senasa": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*senasa*"]},
+        "confidence": 0.90,
+        "description": "Datos de SENASA",
+    },
+    "lecheria": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*leche*", "cache_*tambo*"]},
+        "confidence": 0.85,
+        "description": "Datos de lecheria y tambos",
+    },
 
-    # ── Justicia → search_ckan ─────────────────────────────────
+    # ── Justicia → query_sandbox (21 cache tables) ────────────
     "justicia": {
-        "action": "search_ckan",
-        "params": {"query": "justicia", "portalId": "justicia"},
-        "confidence": 0.75,
-        "description": "Datos de justicia",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*justici*", "cache_*judicial*", "cache_*penal*"]},
+        "confidence": 0.80,
+        "description": "Datos de justicia (21 tablas cacheadas)",
     },
     "anticorrupcion": {
-        "action": "search_ckan",
-        "params": {"query": "anticorrupcion", "portalId": "justicia"},
-        "confidence": 0.80,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*anticorrupci*"]},
+        "confidence": 0.85,
         "description": "Datos de anticorrupcion",
     },
 
-    # ── Ambiente → search_ckan ─────────────────────────────────
+    # ── Ambiente → query_sandbox (71 cache tables) ────────────
     "ambiente": {
-        "action": "search_ckan",
-        "params": {"query": "ambiente", "portalId": "ambiente"},
-        "confidence": 0.75,
-        "description": "Datos de medio ambiente",
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*ambient*", "cache_*forestal*", "cache_*bosqu*", "cache_*residuo*"]},
+        "confidence": 0.80,
+        "description": "Datos de medio ambiente (71 tablas cacheadas)",
     },
     "medio ambiente": {
-        "action": "search_ckan",
-        "params": {"query": "medio ambiente", "portalId": "ambiente"},
-        "confidence": 0.80,
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*ambient*", "cache_*contamin*"]},
+        "confidence": 0.85,
         "description": "Datos de medio ambiente",
+    },
+    "contaminacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*contamin*", "cache_*ambient*", "cache_*efluent*"]},
+        "confidence": 0.85,
+        "description": "Datos de contaminacion ambiental",
+    },
+    "bosques": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*bosqu*", "cache_*forestal*"]},
+        "confidence": 0.85,
+        "description": "Datos de bosques y deforestacion",
+    },
+    "incendios forestales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*incendi*"]},
+        "confidence": 0.85,
+        "description": "Datos de incendios forestales",
+    },
+
+    # ── Genero → query_sandbox (47 cache tables) ──────────────
+    "genero": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*genero*", "cache_*mujer*", "cache_*femeni*"]},
+        "confidence": 0.80,
+        "description": "Datos de genero (47 tablas cacheadas)",
+    },
+    "brecha de genero": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*genero*", "cache_*brecha*"]},
+        "confidence": 0.85,
+        "description": "Datos de brecha de genero",
+    },
+    "violencia de genero": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*violencia*genero*", "cache_*femicid*"]},
+        "confidence": 0.85,
+        "description": "Datos de violencia de genero",
+    },
+
+    # ── Telecomunicaciones → query_sandbox (60 cache tables) ──
+    "telecomunicaciones": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*teleco*", "cache_*internet*", "cache_*telefon*", "cache_*conectivid*"]},
+        "confidence": 0.80,
+        "description": "Datos de telecomunicaciones (60 tablas cacheadas)",
+    },
+    "banda ancha": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*internet*", "cache_*banda_anch*", "cache_*conectivid*"]},
+        "confidence": 0.85,
+        "description": "Datos de banda ancha e internet",
+    },
+    "telefonia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*telefon*"]},
+        "confidence": 0.85,
+        "description": "Datos de telefonia",
+    },
+    "celulares": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*celular*", "cache_*telefon*movil*", "cache_*telefon*"]},
+        "confidence": 0.80,
+        "description": "Datos de telefonia celular",
+    },
+    "celular": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*celular*", "cache_*telefon*"]},
+        "confidence": 0.80,
+        "description": "Datos de telefonia celular",
+    },
+
+    # ── Poblacion → query_sandbox (28 cache tables) ───────────
+    "censo": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"]},
+        "confidence": 0.85,
+        "description": "Datos censales y demograficos",
+    },
+    "demografia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*demograf*", "cache_*poblaci*"]},
+        "confidence": 0.85,
+        "description": "Datos demograficos",
+    },
+    "migracion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*migraci*", "cache_*extranje*"]},
+        "confidence": 0.85,
+        "description": "Datos de migracion",
+    },
+
+    # ── Ciencia → query_sandbox (13 cache tables) ─────────────
+    "ciencia y tecnologia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*ciencia*", "cache_*tecnolog*", "cache_*conicet*"]},
+        "confidence": 0.80,
+        "description": "Datos de ciencia y tecnologia",
+    },
+
+    # ── Vivienda → query_sandbox (19 cache tables) ────────────
+    "vivienda": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*viviend*", "cache_*construcci*", "cache_*hipotec*"]},
+        "confidence": 0.80,
+        "description": "Datos de vivienda y construccion",
+    },
+
+    # ── Social → query_sandbox (22 cache tables) ──────────────
+    "programas sociales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*social*", "cache_*asistenci*", "cache_*beneficiari*"]},
+        "confidence": 0.85,
+        "description": "Datos de programas sociales",
+    },
+    "tarjeta alimentar": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*alimentar*"]},
+        "confidence": 0.90,
+        "description": "Datos de tarjeta alimentar",
+    },
+
+    # ── Derechos Humanos → query_sandbox ──────────────────────
+    "derechos humanos": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*derecho*human*", "cache_*memoria*", "cache_*desaparecid*"]},
+        "confidence": 0.85,
+        "description": "Datos de derechos humanos",
+    },
+
+    # ── Empleo adicional → query_sandbox (66 cache tables) ────
+    "empleo formal": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*empleo*", "cache_*asalariad*"]},
+        "confidence": 0.85,
+        "description": "Datos de empleo formal",
+    },
+    "informalidad laboral": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*informal*", "cache_*laboral*"]},
+        "confidence": 0.85,
+        "description": "Datos de informalidad laboral",
     },
 
     # ── Georef ─────────────────────────────────────────────────
@@ -1101,9 +1369,9 @@ DOMAIN_PATTERNS: list[DomainPattern] = [
     DomainPattern(re.compile(r"\bsalud\b", re.IGNORECASE), "salud", "Portal de datos de Salud"),
     DomainPattern(re.compile(r"\benerg[ií]a\b", re.IGNORECASE), "energia", "Portal de datos de Energia"),
     DomainPattern(re.compile(r"\bjusticia\b", re.IGNORECASE), "justicia", "Portal de datos de Justicia"),
-    DomainPattern(re.compile(r"\bagro|agroindustria|agropecuari\b", re.IGNORECASE), "agroindustria", "Portal de datos de Agroindustria"),
+    DomainPattern(re.compile(r"\bagro\b|\bagroindustria\b|\bagropecuari\w*\b", re.IGNORECASE), "agroindustria", "Portal de datos de Agroindustria"),
     DomainPattern(re.compile(r"\btransporte\b", re.IGNORECASE), "transporte", "Portal de datos de Transporte"),
-    DomainPattern(re.compile(r"\bambiente|medioambient\b", re.IGNORECASE), "ambiente", "Portal de datos de Ambiente"),
+    DomainPattern(re.compile(r"\bambiente\b|\bmedioambient\w*\b", re.IGNORECASE), "ambiente", "Portal de datos de Ambiente"),
     DomainPattern(re.compile(r"\bacumar\b", re.IGNORECASE), "acumar", "Portal de datos de ACUMAR"),
     DomainPattern(re.compile(r"\bcultura\b", re.IGNORECASE), "cultura", "Portal de datos de Cultura"),
     DomainPattern(re.compile(r"\bproduccion\b", re.IGNORECASE), "produccion", "Portal de datos de Produccion"),
@@ -1128,8 +1396,8 @@ DOMAIN_PATTERNS: list[DomainPattern] = [
     DomainPattern(re.compile(r"\bla plata\b", re.IGNORECASE), "la_plata", "Portal de datos de La Plata"),
     DomainPattern(re.compile(r"\bcorrientes\b", re.IGNORECASE), "corrientes", "Portal de datos de Corrientes"),
     DomainPattern(re.compile(r"\bpami\b", re.IGNORECASE), "pami", "Portal de datos de PAMI"),
-    DomainPattern(re.compile(r"\binterior\b", re.IGNORECASE), "mininterior", "Portal de datos del Ministerio del Interior"),
-    DomainPattern(re.compile(r"\bmagyp\b|\bagricultura\b|\bganader[ií]a\b", re.IGNORECASE), "magyp", "Portal de datos de Agricultura y Ganaderia"),
+    DomainPattern(re.compile(r"\bministerio\s+(?:del\s+)?interior\b|\bmininterior\b", re.IGNORECASE), "mininterior", "Portal de datos del Ministerio del Interior"),
+    DomainPattern(re.compile(r"\bmagyp\b|\bagricultura\b|\bganaderia\b", re.IGNORECASE), "magyp", "Portal de datos de Agricultura y Ganaderia"),
     # Institucional
     DomainPattern(re.compile(r"\bdiputados\b|\bcongreso\b|\bcamara\b", re.IGNORECASE), "diputados", "Portal de Camara de Diputados"),
     DomainPattern(re.compile(r"\barsat\b", re.IGNORECASE), "arsat", "Portal de ARSAT"),
@@ -1233,5 +1501,187 @@ def format_hints_for_prompt(hints: list[RoutingHint]) -> str:
             f"  {i}. {h.action}({params_str}) "
             f"[confianza={h.confidence:.0%}] — {h.description}"
         )
+
+    # Append taxonomy context if we can derive it from hints
+    taxonomy_ctx = resolve_taxonomy_context_from_hints(hints)
+    if taxonomy_ctx:
+        lines.append("")
+        lines.append(taxonomy_ctx)
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 4. Hierarchical Taxonomy — 6 domains, 34 categories
+# ---------------------------------------------------------------------------
+
+TAXONOMY: dict[str, dict] = {
+    "economia": {
+        "label": "Economía y Finanzas",
+        "children": {
+            "inflacion": {"label": "Inflación / Precios", "actions": ["query_series"], "cache_pattern": ["cache_*precio*", "cache_indec_ipc*"]},
+            "actividad": {"label": "Actividad Económica", "actions": ["query_series"], "cache_pattern": ["cache_indec_emae*"]},
+            "empleo": {"label": "Empleo y Salarios", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*empleo*", "cache_*laboral*", "cache_*asalariad*"]},
+            "comercio_exterior": {"label": "Comercio Exterior", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*export*", "cache_*import*"]},
+            "finanzas": {"label": "Finanzas / Dólar / BCRA", "actions": ["query_argentina_datos", "query_bcra", "query_series"], "cache_pattern": ["cache_bcra_*"]},
+            "deuda": {"label": "Deuda Pública", "actions": ["query_sandbox"], "cache_pattern": ["cache_presupuesto_deuda*"]},
+            "produccion": {"label": "Producción Industrial", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*producci*", "cache_*industrial*"]},
+            "pobreza": {"label": "Pobreza e Indigencia", "actions": ["query_series"], "cache_pattern": []},
+            "precios": {"label": "Precios y Canasta Básica", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*precio*", "cache_*canasta*"]},
+        },
+    },
+    "gobierno": {
+        "label": "Gobierno y Transparencia",
+        "children": {
+            "presupuesto": {"label": "Presupuesto Nacional", "actions": ["query_sandbox"], "cache_pattern": ["cache_presupuesto_*"]},
+            "compras_publicas": {"label": "Compras Públicas", "actions": ["query_sandbox"], "cache_pattern": ["cache_bac_*", "cache_*compras*", "cache_*licitaci*"]},
+            "ddjj": {"label": "Declaraciones Juradas", "actions": ["query_ddjj"], "cache_pattern": []},
+            "congreso": {"label": "Congreso / Diputados", "actions": ["query_sesiones", "query_staff", "search_ckan"], "cache_pattern": ["cache_*comision*", "cache_*personal*"]},
+            "senado": {"label": "Senado", "actions": ["query_sandbox"], "cache_pattern": ["cache_senado_*"]},
+            "elecciones": {"label": "Elecciones", "actions": ["query_sandbox"], "cache_pattern": ["cache_elecciones_*"]},
+            "gobierno": {"label": "Gobierno y Normativa", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*gobierno*", "cache_*decreto*"]},
+            "justicia": {"label": "Justicia", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*justici*"]},
+        },
+    },
+    "social": {
+        "label": "Desarrollo Social y Humano",
+        "children": {
+            "educacion": {"label": "Educación", "actions": ["query_sandbox"], "cache_pattern": ["cache_*educaci*", "cache_*escuel*", "cache_*docent*", "cache_*universid*"]},
+            "salud": {"label": "Salud", "actions": ["query_sandbox"], "cache_pattern": ["cache_*salud*", "cache_*hospital*", "cache_*vacun*", "cache_*covid*"]},
+            "seguridad": {"label": "Seguridad", "actions": ["query_sandbox"], "cache_pattern": ["cache_*seguridad*", "cache_*delito*", "cache_*homicid*"]},
+            "genero": {"label": "Género", "actions": ["query_sandbox"], "cache_pattern": ["cache_*genero*", "cache_*mujer*", "cache_*femicid*"]},
+            "social": {"label": "Programas Sociales", "actions": ["query_sandbox"], "cache_pattern": ["cache_*social*", "cache_*asistenci*", "cache_*beneficiari*"]},
+            "poblacion": {"label": "Población y Demografía", "actions": ["query_sandbox"], "cache_pattern": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"]},
+            "vivienda": {"label": "Vivienda", "actions": ["query_sandbox"], "cache_pattern": ["cache_*viviend*", "cache_*construcci*"]},
+            "derechos_humanos": {"label": "Derechos Humanos", "actions": ["query_sandbox"], "cache_pattern": ["cache_*derecho*human*", "cache_*memoria*"]},
+            "cultura": {"label": "Cultura", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*cultur*", "cache_*museo*"]},
+        },
+    },
+    "infraestructura": {
+        "label": "Infraestructura y Servicios",
+        "children": {
+            "transporte": {"label": "Transporte", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*transport*", "cache_*subte*", "cache_*ecobici*"]},
+            "energia": {"label": "Energía", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*energ*", "cache_*petrole*", "cache_*hidrocarb*"]},
+            "telecomunicaciones": {"label": "Telecomunicaciones", "actions": ["query_sandbox"], "cache_pattern": ["cache_*teleco*", "cache_*internet*", "cache_*telefon*"]},
+            "infraestructura": {"label": "Obra Pública", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*infraestr*", "cache_*obra_pub*"]},
+        },
+    },
+    "recursos_naturales": {
+        "label": "Recursos Naturales y Ambiente",
+        "children": {
+            "agro": {"label": "Agro y Ganadería", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*agro*", "cache_*ganad*", "cache_*senasa*"]},
+            "ambiente": {"label": "Medio Ambiente", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*ambient*", "cache_*forestal*", "cache_*residuo*"]},
+            "turismo": {"label": "Turismo", "actions": ["query_sandbox"], "cache_pattern": ["cache_*turism*"]},
+        },
+    },
+    "ciencia": {
+        "label": "Ciencia, Tecnología e Indicadores",
+        "children": {
+            "ciencia": {"label": "Ciencia y Tecnología", "actions": ["query_sandbox"], "cache_pattern": ["cache_*ciencia*", "cache_*tecnolog*", "cache_*conicet*"]},
+            "indicadores": {"label": "Indicadores y Estadísticas", "actions": ["query_sandbox"], "cache_pattern": ["cache_*indice*", "cache_*indicador*", "cache_*estadistic*"]},
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Pre-built reverse index: action → list of (domain_label, category_label, cache_patterns)
+# ---------------------------------------------------------------------------
+
+_ACTION_TO_TAXONOMY: dict[str, list[tuple[str, str, list[str]]]] = {}
+
+for _domain_key, _domain in TAXONOMY.items():
+    for _cat_key, _cat in _domain["children"].items():
+        for _act in _cat["actions"]:
+            _ACTION_TO_TAXONOMY.setdefault(_act, []).append(
+                (_domain["label"], _cat["label"], _cat["cache_pattern"])
+            )
+
+
+def resolve_taxonomy_context(query: str) -> str:
+    """Resolve taxonomy context for a user query.
+
+    Uses the existing ``resolve_hints()`` to find matched actions, then maps
+    those actions back to the hierarchical taxonomy to provide domain context.
+
+    Args:
+        query: Raw user query in natural language (Spanish).
+
+    Returns:
+        A formatted string showing the taxonomy path and related cache tables,
+        or an empty string if no taxonomy match is found.
+    """
+    hints = resolve_hints(query)
+    return resolve_taxonomy_context_from_hints(hints)
+
+
+def resolve_taxonomy_context_from_hints(hints: list[RoutingHint]) -> str:
+    """Resolve taxonomy context from pre-computed routing hints.
+
+    Args:
+        hints: A list of ``RoutingHint`` (typically from ``resolve_hints``).
+
+    Returns:
+        A formatted string showing the taxonomy path and related cache tables,
+        or an empty string if no taxonomy match is found.
+    """
+    if not hints:
+        return ""
+
+    # Collect unique taxonomy entries from the matched actions.
+    # When a hint has table params, prefer taxonomy categories whose
+    # cache_pattern overlaps with those tables (avoids showing all 20+
+    # query_sandbox categories).
+    seen: set[tuple[str, str]] = set()
+    entries: list[str] = []
+    cache_patterns: list[str] = []
+
+    for hint in hints[:5]:
+        tax_matches = _ACTION_TO_TAXONOMY.get(hint.action, [])
+        hint_tables = hint.params.get("tables", [])
+
+        # If the hint has table patterns, filter taxonomy to matching categories
+        if hint_tables and len(tax_matches) > 4:
+            filtered = []
+            for domain_label, cat_label, patterns in tax_matches:
+                if patterns and any(
+                    hp in tp or tp in hp
+                    for hp in hint_tables
+                    for tp in patterns
+                ):
+                    filtered.append((domain_label, cat_label, patterns))
+            if filtered:
+                tax_matches = filtered
+
+        for domain_label, cat_label, patterns in tax_matches:
+            key = (domain_label, cat_label)
+            if key not in seen:
+                seen.add(key)
+                entries.append(f"  Dominio: {domain_label} → {cat_label}")
+                cache_patterns.extend(patterns)
+
+    if not entries:
+        return ""
+
+    lines = ["CONTEXTO TAXONOMICO:"]
+    # Deduplicate entries — show up to 4
+    for entry in entries[:4]:
+        lines.append(entry)
+
+    # Suggested actions
+    action_descs: list[str] = []
+    for hint in hints[:3]:
+        params_str = ", ".join(f"{v}" for v in hint.params.values()) if hint.params else ""
+        desc = f"{hint.action}"
+        if params_str:
+            desc += f" ({params_str})"
+        action_descs.append(desc)
+    if action_descs:
+        lines.append(f"  Acciones sugeridas: {', '.join(action_descs)}")
+
+    # Related cache patterns (deduplicated)
+    unique_patterns = list(dict.fromkeys(cache_patterns))
+    if unique_patterns:
+        lines.append(f"  Tablas cache relacionadas: {', '.join(unique_patterns[:8])}")
 
     return "\n".join(lines)

@@ -377,6 +377,24 @@ class SmartQueryService:
 
         # 4. Plan (1 LLM call)
         plan = await generate_plan(self._llm, preprocessed_q, memory_context=memory_ctx)
+
+        # Inject search_datasets fallback if plan has no vector search step
+        # and no high-confidence data-fetching step
+        _DATA_ACTIONS = frozenset((
+            "query_sandbox", "query_series", "query_argentina_datos", "query_bcra",
+            "query_ddjj", "query_sesiones", "query_staff", "search_ckan", "query_georef",
+        ))
+        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
+        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
+        if not _has_vector_step and not _has_data_step:
+            plan.steps.insert(0, PlanStep(
+                id="step_vector_fallback",
+                action="search_datasets",
+                description=f"Buscar datasets relevantes por similitud semántica: {question[:100]}",
+                params={"query": preprocessed_q, "limit": 5},
+                depends_on=[],
+            ))
+
         logger.info(
             "Plan for '%s': intent=%s, steps=%d",
             question[:60], plan.intent, len(plan.steps),
@@ -604,6 +622,23 @@ class SmartQueryService:
         # Plan (1 LLM call)
         yield {"type": "status", "step": "planning"}
         plan = await generate_plan(self._llm, preprocessed_q, memory_context=memory_ctx)
+
+        # Inject search_datasets fallback if plan has no vector search step
+        # and no high-confidence data-fetching step
+        _DATA_ACTIONS = frozenset((
+            "query_sandbox", "query_series", "query_argentina_datos", "query_bcra",
+            "query_ddjj", "query_sesiones", "query_staff", "search_ckan", "query_georef",
+        ))
+        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
+        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
+        if not _has_vector_step and not _has_data_step:
+            plan.steps.insert(0, PlanStep(
+                id="step_vector_fallback",
+                action="search_datasets",
+                description=f"Buscar datasets relevantes por similitud semántica: {question[:100]}",
+                params={"query": preprocessed_q, "limit": 5},
+                depends_on=[],
+            ))
 
         yield {
             "type": "status",
@@ -1136,6 +1171,47 @@ class SmartQueryService:
             logger.warning("BCRA step %s failed", step.id, exc_info=True)
             return []
 
+    async def _discover_tables_by_vector_search(
+        self,
+        query: str,
+        cached_tables: list[Any],
+    ) -> list[str]:
+        """Use vector search to find relevant cached table names for a query.
+
+        Embeds the query, searches for similar datasets, and returns the
+        table names of any that are cached.  *cached_tables* is the
+        already-fetched list of ``CachedTableInfo`` to avoid a redundant DB
+        round-trip.
+        """
+        try:
+            q_embedding = await self._embedding.embed(query)
+            vector_results = await self._vector_search.search_datasets(
+                q_embedding, limit=10,
+            )
+            if not vector_results:
+                return []
+
+            # Collect dataset_ids from vector search results
+            hit_dataset_ids = {vr.dataset_id for vr in vector_results}
+
+            # Match against cached tables by dataset_id
+            matched_names = [
+                t.table_name
+                for t in cached_tables
+                if t.dataset_id and t.dataset_id in hit_dataset_ids
+            ]
+
+            if matched_names:
+                logger.info(
+                    "Vector search discovered %d cached table(s) for sandbox: %s",
+                    len(matched_names),
+                    matched_names[:5],
+                )
+            return matched_names
+        except Exception:
+            logger.warning("Vector-based table discovery failed, falling back", exc_info=True)
+            return []
+
     async def _execute_sandbox_step(self, step: PlanStep) -> list[DataResult]:
         if not self._sandbox:
             logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
@@ -1152,14 +1228,28 @@ class SmartQueryService:
                     return await self._indec_live_fallback(nl_query)
                 return []
 
+            # When no table_hints from planner, use vector search to discover relevant tables
+            _from_vector_search = False
+            if not table_hints:
+                discovered = await self._discover_tables_by_vector_search(nl_query, tables)
+                if discovered:
+                    table_hints = discovered
+                    _from_vector_search = True
+
             if table_hints:
-                import fnmatch
-                filtered = []
-                for t in tables:
-                    for pattern in table_hints:
-                        if fnmatch.fnmatch(t.table_name, pattern):
-                            filtered.append(t)
-                            break
+                if _from_vector_search:
+                    # Vector search returns exact table names — use set lookup
+                    hint_set = set(table_hints)
+                    filtered = [t for t in tables if t.table_name in hint_set]
+                else:
+                    # Planner returns glob patterns — use fnmatch
+                    import fnmatch
+                    filtered = []
+                    for t in tables:
+                        for pattern in table_hints:
+                            if fnmatch.fnmatch(t.table_name, pattern):
+                                filtered.append(t)
+                                break
                 if filtered:
                     tables = filtered
                 elif any("indec" in h for h in table_hints):
