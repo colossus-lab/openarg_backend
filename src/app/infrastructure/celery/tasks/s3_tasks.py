@@ -26,6 +26,11 @@ _CONTENT_TYPES: dict[str, str] = {
         ".spreadsheetml.sheet"
     ),
     "xls": "application/vnd.ms-excel",
+    "geojson": "application/geo+json",
+    "txt": "text/plain",
+    "ods": "application/vnd.oasis.opendocument.spreadsheet",
+    "zip": "application/zip",
+    "xml": "application/xml",
 }
 
 

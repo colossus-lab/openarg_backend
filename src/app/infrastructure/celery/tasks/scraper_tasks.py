@@ -192,7 +192,7 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
             for pkg in packages:
                 for resource in pkg.get("resources", []):
                     fmt = resource.get("format", "").lower()
-                    if fmt not in ("csv", "json", "xlsx", "xls"):
+                    if fmt not in ("csv", "json", "xlsx", "xls", "geojson", "txt", "ods", "zip", "xml"):
                         continue
 
                     columns_list = []

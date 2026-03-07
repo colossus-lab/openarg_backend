@@ -34,7 +34,7 @@ class DatosGobArAdapter(IDataSource):
             resources = pkg.get("resources", [])
             for resource in resources:
                 fmt = resource.get("format", "").lower()
-                if fmt not in ("csv", "json", "xlsx", "xls"):
+                if fmt not in ("csv", "json", "xlsx", "xls", "geojson", "txt", "ods", "zip", "xml"):
                     continue
 
                 columns = []

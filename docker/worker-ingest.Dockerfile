@@ -11,7 +11,9 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 COPY config/ config/
 RUN pip install --no-cache-dir uv && uv pip install --system -e '.' \
-    && python -c "import openpyxl; print(f'openpyxl {openpyxl.__version__} OK')"
+    && python -c "import openpyxl; print(f'openpyxl {openpyxl.__version__} OK')" \
+    && python -c "import xlrd; print(f'xlrd {xlrd.__version__} OK')" \
+    && python -c "import odf; print('odfpy OK')"
 
 ENV PYTHONPATH=/app/src
 ENV APP_ENV=local

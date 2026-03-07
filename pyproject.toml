@@ -36,6 +36,7 @@ dependencies = [
     "pandas>=2.2.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.1",
+    "odfpy>=1.4.1",
     "httpx>=0.28.0",
     "aiofiles>=24.1.0",
 
