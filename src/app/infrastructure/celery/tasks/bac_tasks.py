@@ -110,6 +110,19 @@ def ingest_bac(self):
         for file_type, url in BAC_FILES.items():
             table_name = f"cache_bac_{file_type}"
 
+            # Skip if already cached
+            with engine.begin() as conn:
+                cached = conn.execute(
+                    text(
+                        "SELECT id FROM cached_datasets "
+                        "WHERE table_name = :tn AND status = 'ready'"
+                    ),
+                    {"tn": table_name},
+                ).fetchone()
+            if cached:
+                results["skipped"] += 1
+                continue
+
             try:
                 # Stream download to temp file to avoid OOM
                 with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
