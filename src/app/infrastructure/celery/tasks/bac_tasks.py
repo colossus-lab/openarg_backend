@@ -165,7 +165,10 @@ def ingest_bac(self):
                         # Cast all columns to string to avoid type mismatches
                         # between chunks (e.g. NaN-only chunk infers float,
                         # next chunk has strings).
-                        chunk = chunk.astype(str).replace("nan", None)
+                        chunk = chunk.astype(str).replace(
+                            {"nan": None, "NaT": None, "None": None,
+                             "inf": None, "-inf": None, "": None}
+                        )
 
                         # First chunk replaces the table; subsequent chunks append
                         if_exists = "replace" if chunk_num == 0 else "append"

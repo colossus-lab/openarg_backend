@@ -117,7 +117,7 @@ def ingest_georef(self):
                 continue
 
             try:
-                with httpx.Client(timeout=60.0) as client:
+                with httpx.Client(timeout=60.0, follow_redirects=True) as client:
                     resp = client.get(
                         f"{API_URL}/{endpoint}",
                         params={"max": 5000},
@@ -134,10 +134,11 @@ def ingest_georef(self):
                 df = pd.DataFrame(records)
 
                 # Flatten nested dict columns (e.g. provincia, departamento inside localidades)
-                for col in df.columns:
+                for col in list(df.columns):
                     if df[col].apply(type).eq(dict).any():
                         nested = pd.json_normalize(df[col])
                         nested.columns = [f"{col}_{c}" for c in nested.columns]
+                        nested.index = df.index
                         df = df.drop(columns=[col]).join(nested)
 
                 df.to_sql(table_name, engine, if_exists="replace", index=False)
