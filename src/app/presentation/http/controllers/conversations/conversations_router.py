@@ -326,6 +326,8 @@ async def submit_feedback(
         role=updated.role,
         content=updated.content,
         sources=updated.sources or [],
+        chart_data=updated.chart_data,
+        documents=updated.documents,
         created_at=updated.created_at.isoformat(),
         feedback=updated.feedback,
         feedback_comment=updated.feedback_comment,

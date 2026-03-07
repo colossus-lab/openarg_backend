@@ -485,7 +485,7 @@ class SmartQueryService:
         for r in results:
             if r.source.startswith("ddjj:"):
                 for rec in r.records:
-                    if rec.get("nombre") and rec.get("patrimonio cierre") is not None:
+                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
                         documents.append({**rec, "doc_type": "ddjj"})
 
         tokens_used = response.tokens_used or 0
@@ -760,7 +760,7 @@ class SmartQueryService:
         for r in results:
             if r.source.startswith("ddjj:"):
                 for rec in r.records:
-                    if rec.get("nombre") and rec.get("patrimonio cierre") is not None:
+                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
                         documents.append({**rec, "doc_type": "ddjj"})
 
         yield {
@@ -1623,6 +1623,8 @@ class SmartQueryService:
                 )
             else:
                 columns = list(valid_records[0].keys()) if valid_records else []
+                # Humanize column names for LLM display (replace _ with spaces)
+                display_columns = [c.replace("_", " ") for c in columns]
                 total_rows = len(valid_records)
 
                 if total_rows > 50:
@@ -1632,7 +1634,12 @@ class SmartQueryService:
                     records_to_send = valid_records
                     truncation_note = ""
 
-                records_text = json.dumps(records_to_send, ensure_ascii=False, indent=2)
+                # Humanize keys in records for LLM context
+                display_records = [
+                    {k.replace("_", " "): v for k, v in rec.items()}
+                    for rec in records_to_send
+                ]
+                records_text = json.dumps(display_records, ensure_ascii=False, indent=2)
 
                 part = (
                     f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
@@ -1640,7 +1647,7 @@ class SmartQueryService:
                     f"URL: {result.portal_url}\n"
                     f"Formato: {result.format}\n"
                     f"Total de registros: {result.metadata.get('total_records', total_rows)}\n"
-                    f"Columnas: {', '.join(columns)}\n"
+                    f"Columnas: {', '.join(display_columns)}\n"
                 )
                 if result.metadata.get("description"):
                     part += f"Descripción: {result.metadata['description']}\n"
