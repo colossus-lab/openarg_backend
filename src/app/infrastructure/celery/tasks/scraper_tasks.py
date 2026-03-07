@@ -70,6 +70,8 @@ PORTAL_URLS = {
 }
 
 
+PORTALS_SKIP_SSL = {"salud"}
+
 class PortalUnavailableError(Exception):
     """Portal is down/maintenance — do NOT retry."""
 
@@ -127,6 +129,7 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
         timeout=httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=30.0),
         headers={"User-Agent": _USER_AGENT},
         follow_redirects=True,
+        verify=portal not in PORTALS_SKIP_SSL,
     )
 
     def _safe_json(resp, label: str) -> dict:

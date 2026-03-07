@@ -19,6 +19,8 @@ from sqlalchemy import text
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
+PORTALS_SKIP_SSL = {"salud"}
+
 logger = logging.getLogger(__name__)
 
 # After this many total attempts (across Celery retries AND external
@@ -136,7 +138,7 @@ def collect_dataset(self, dataset_id: str):
 
         # Download (with size guard: reject files > 500MB)
         max_download_bytes = 500 * 1024 * 1024  # 500 MB
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=120.0, verify=portal not in PORTALS_SKIP_SSL) as client:
             # HEAD to check Content-Length before downloading
             try:
                 head = client.head(download_url, follow_redirects=True)
