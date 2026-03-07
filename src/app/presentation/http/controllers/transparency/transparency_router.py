@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets as _secrets
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -415,11 +416,11 @@ async def get_session_topics(
 
 def _verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> str:
     """Validate admin API key for destructive transparency operations."""
-    import secrets as _secrets
-
     expected = os.getenv("ADMIN_API_KEY", os.getenv("BACKEND_API_KEY", ""))
-    if not expected or not _secrets.compare_digest(x_admin_key, expected):
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Admin key not configured")
+    if not _secrets.compare_digest(x_admin_key, expected):
+        raise HTTPException(status_code=401, detail="Invalid admin key")
     return x_admin_key
 
 
