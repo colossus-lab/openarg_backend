@@ -9,8 +9,6 @@ from uuid import uuid4
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy import text
 
 from app.domain.ports.cache.cache_port import ICacheService
@@ -19,11 +17,11 @@ from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
 from app.infrastructure.celery.tasks.analyst_tasks import analyze_query
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
+from app.setup.app_factory import limiter
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/query", tags=["query"])
-limiter = Limiter(key_func=get_remote_address)
 
 
 class QueryRequest(BaseModel):

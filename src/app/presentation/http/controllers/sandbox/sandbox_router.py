@@ -3,15 +3,13 @@ from __future__ import annotations
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.prompts import load_prompt
+from app.setup.app_factory import limiter
 
 router = APIRouter(prefix="/sandbox", tags=["sandbox"])
-limiter = Limiter(key_func=get_remote_address)
 
 
 # ---------------------------------------------------------------------------

@@ -51,15 +51,21 @@ def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
     """Override metadata format if URL extension clearly indicates a different format."""
     if not url:
         return metadata_fmt
-    path = url.split("?")[0].lower()
-    if path.endswith(".geojson"):
-        return "geojson"
-    if path.endswith(".zip"):
-        return "zip"
-    if path.endswith(".ods"):
-        return "ods"
-    if path.endswith(".txt"):
-        return "txt"
+    path = url.split("?")[0].split("#")[0].lower()
+    _ext_map = {
+        ".geojson": "geojson",
+        ".zip": "zip",
+        ".ods": "ods",
+        ".txt": "txt",
+        ".xml": "xml",
+        ".csv": "csv",
+        ".json": "json",
+        ".xlsx": "xlsx",
+        ".xls": "xls",
+    }
+    for ext, fmt in _ext_map.items():
+        if path.endswith(ext):
+            return fmt
     return metadata_fmt
 
 
@@ -81,6 +87,22 @@ def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -
         ContentDisposition=f'attachment; filename="{filename}"',
     )
     return key
+
+
+def _set_error_status(engine, dataset_id: str, error_msg: str):
+    """Update cached_datasets status to 'error' for early-return error paths."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE cached_datasets SET status = 'error', "
+                    "error_message = :msg, updated_at = NOW() "
+                    "WHERE dataset_id = CAST(:did AS uuid) AND status = 'downloading'"
+                ),
+                {"msg": error_msg[:500], "did": dataset_id},
+            )
+    except Exception:
+        logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
 
 
 @celery_app.task(name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=300, time_limit=360)
@@ -167,6 +189,7 @@ def collect_dataset(self, dataset_id: str):
                 content_length = int(head.headers.get("content-length", 0))
                 if content_length > max_download_bytes:
                     logger.warning(f"Dataset {dataset_id} too large: {content_length} bytes")
+                    _set_error_status(engine, dataset_id, f"file_too_large: {content_length} bytes")
                     return {"error": f"file_too_large: {content_length} bytes"}
             except Exception:
                 pass  # HEAD may fail; proceed with GET
@@ -176,6 +199,7 @@ def collect_dataset(self, dataset_id: str):
 
             if len(resp.content) > max_download_bytes:
                 logger.warning(f"Dataset {dataset_id} download too large: {len(resp.content)} bytes")
+                _set_error_status(engine, dataset_id, f"file_too_large: {len(resp.content)} bytes")
                 return {"error": f"file_too_large: {len(resp.content)} bytes"}
 
         # Upload raw file to S3
@@ -220,26 +244,38 @@ def collect_dataset(self, dataset_id: str):
                     raise
         elif fmt == "geojson":
             raw = json.loads(resp.content)
-            features = raw.get("features", [])
+            features = raw.get("features", []) if isinstance(raw, dict) else []
             if features:
                 # Extract properties from each GeoJSON feature
                 records = []
                 for f in features:
-                    props = f.get("properties", {})
-                    geom = f.get("geometry", {})
+                    props = f.get("properties", {}) or {}
+                    geom = f.get("geometry") or {}
                     if geom:
                         props["geometry_type"] = geom.get("type")
                         coords = geom.get("coordinates")
                         if coords:
-                            props["geometry_coordinates"] = str(coords)
+                            # Truncate large coordinate strings to avoid huge cells
+                            coord_str = str(coords)
+                            if len(coord_str) > 2000:
+                                coord_str = coord_str[:2000] + "..."
+                            props["geometry_coordinates"] = coord_str
                     records.append(props)
                 df = pd.DataFrame(records)
             else:
-                df = pd.json_normalize(raw if isinstance(raw, list) else [raw])
+                logger.warning(f"GeoJSON {dataset_id}: no features found")
+                _set_error_status(engine, dataset_id, "geojson_no_features")
+                return {"error": "geojson_no_features"}
         elif fmt == "zip":
             import zipfile
-            import tempfile as _tf
+            max_decompressed = 500 * 1024 * 1024  # 500 MB decompressed limit
             zf = zipfile.ZipFile(io.BytesIO(resp.content))
+            # Check total decompressed size to prevent zip bombs
+            total_size = sum(info.file_size for info in zf.infolist())
+            if total_size > max_decompressed:
+                logger.warning(f"ZIP {dataset_id}: decompressed size {total_size} exceeds limit")
+                _set_error_status(engine, dataset_id, f"zip_too_large: {total_size} bytes decompressed")
+                return {"error": f"zip_too_large: {total_size} bytes"}
             # Find first parseable file inside the zip
             parsed = False
             for name in zf.namelist():
@@ -259,21 +295,62 @@ def collect_dataset(self, dataset_id: str):
                     df = pd.read_excel(io.BytesIO(content))
                     parsed = True
                     break
-                elif lower.endswith(".json") or lower.endswith(".geojson"):
+                elif lower.endswith(".geojson"):
                     with zf.open(name) as f:
                         content = f.read()
-                    df = pd.read_json(io.BytesIO(content))
+                    raw_geo = json.loads(content)
+                    features = raw_geo.get("features", []) if isinstance(raw_geo, dict) else []
+                    if features:
+                        records = []
+                        for feat in features:
+                            props = feat.get("properties", {}) or {}
+                            geom = feat.get("geometry") or {}
+                            if geom:
+                                props["geometry_type"] = geom.get("type")
+                            records.append(props)
+                        df = pd.DataFrame(records)
+                    else:
+                        df = pd.json_normalize(raw_geo if isinstance(raw_geo, list) else [raw_geo])
+                    parsed = True
+                    break
+                elif lower.endswith(".json"):
+                    with zf.open(name) as f:
+                        content = f.read()
+                    try:
+                        df = pd.read_json(io.BytesIO(content))
+                    except ValueError:
+                        raw_j = json.loads(content)
+                        if isinstance(raw_j, list):
+                            df = pd.json_normalize(raw_j)
+                        elif isinstance(raw_j, dict):
+                            for k in ("data", "results", "records", "rows"):
+                                if k in raw_j and isinstance(raw_j[k], list):
+                                    df = pd.json_normalize(raw_j[k])
+                                    break
+                            else:
+                                df = pd.json_normalize([raw_j])
+                        else:
+                            continue
                     parsed = True
                     break
             if not parsed:
                 logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
+                _set_error_status(engine, dataset_id, "zip_no_parseable_file")
                 return {"error": "zip_no_parseable_file"}
         elif fmt in ("xlsx", "xls"):
             df = pd.read_excel(io.BytesIO(resp.content))
         elif fmt == "ods":
             df = pd.read_excel(io.BytesIO(resp.content), engine="odf")
+        elif fmt == "xml":
+            try:
+                df = pd.read_xml(io.BytesIO(resp.content))
+            except Exception:
+                logger.warning(f"XML {dataset_id}: pd.read_xml failed, skipping")
+                _set_error_status(engine, dataset_id, "xml_parse_failed")
+                return {"error": "xml_parse_failed"}
         else:
             logger.warning(f"Unsupported format: {fmt}")
+            _set_error_status(engine, dataset_id, f"unsupported_format: {fmt}")
             return {"error": f"unsupported_format: {fmt}"}
 
         # Limit size
