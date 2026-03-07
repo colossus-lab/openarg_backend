@@ -71,6 +71,8 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.senado_tasks",
             "app.infrastructure.celery.tasks.cordoba_leg_tasks",
             "app.infrastructure.celery.tasks.senado_staff_tasks",
+            "app.infrastructure.celery.tasks.georef_tasks",
+            "app.infrastructure.celery.tasks.series_tiempo_tasks",
         ],
     )
 
@@ -100,6 +102,8 @@ def create_celery() -> Celery:
         "openarg.scrape_senado": {"queue": "scraper"},
         "openarg.scrape_cordoba_legislatura": {"queue": "scraper"},
         "openarg.scrape_senado_staff": {"queue": "scraper"},
+        "openarg.ingest_georef": {"queue": "ingest"},
+        "openarg.ingest_series_tiempo": {"queue": "ingest"},
     }
 
     app.conf.task_default_queue = "scraper"
@@ -254,6 +258,16 @@ def create_celery() -> Celery:
             "task": "openarg.reset_failed_collectors",
             "schedule": crontab(day_of_week=0, hour=5, minute=0),  # Sunday 5:00 AM ART
             "options": {"queue": "collector"},
+        },
+        "ingest-georef": {
+            "task": "openarg.ingest_georef",
+            "schedule": crontab(day_of_month=1, hour=1, minute=0),  # Monthly, day 1
+            "options": {"queue": "ingest"},
+        },
+        "ingest-series-tiempo": {
+            "task": "openarg.ingest_series_tiempo",
+            "schedule": crontab(day_of_month=1, hour=1, minute=30),  # Monthly, day 1
+            "options": {"queue": "ingest"},
         },
     })
 
