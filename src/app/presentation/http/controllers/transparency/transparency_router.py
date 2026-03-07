@@ -63,29 +63,6 @@ class GhostDataset(BaseModel):
     last_updated: str | None
 
 
-class DdjjAnomaly(BaseModel):
-    nombre: str
-    cuit: str
-    anio_declaracion: str
-    patrimonio_cierre: float
-    bienes_inicio: float
-    bienes_cierre: float
-    ingresos_trabajo_neto: float
-    variacion_patrimonial: float
-    brecha_inexplicable: float
-    ratio_crecimiento: float
-    anomaly_type: str | None
-    severity: str | None
-
-
-class DdjjAnomalySummary(BaseModel):
-    total_analyzed: int
-    total_flagged: int
-    by_severity: dict[str, int]
-    by_type: dict[str, int]
-    anomalies: list[DdjjAnomaly]
-
-
 class SessionTopicEntry(BaseModel):
     periodo: int
     reunion: int
@@ -254,82 +231,6 @@ async def get_ghost_datasets(
 
 
 # ---------------------------------------------------------------------------
-# Feature 3: DDJJ Anomalies
-# ---------------------------------------------------------------------------
-
-@router.get("/ddjj/anomalies", response_model=DdjjAnomalySummary)
-@inject  # type: ignore[untyped-decorator]
-async def get_ddjj_anomalies(
-    session: FromDishka[MainAsyncSession],
-    severity: str | None = Query(default=None, pattern="^(low|medium|high)$"),
-    limit: int = Query(default=50, ge=1, le=200),
-) -> DdjjAnomalySummary:
-    """Anomalías patrimoniales detectadas en DDJJ de diputados."""
-    # Summary counts
-    totals = await session.execute(text("SELECT COUNT(*) FROM ddjj_anomalies"))
-    total_analyzed = totals.scalar() or 0
-
-    flagged = await session.execute(
-        text("SELECT COUNT(*) FROM ddjj_anomalies WHERE is_anomalous = true")
-    )
-    total_flagged = flagged.scalar() or 0
-
-    sev_rows = await session.execute(text(
-        "SELECT severity, COUNT(*) AS c FROM ddjj_anomalies "
-        "WHERE is_anomalous = true AND severity IS NOT NULL GROUP BY severity"
-    ))
-    by_severity = {row.severity: row.c for row in sev_rows.fetchall()}
-
-    type_rows = await session.execute(text(
-        "SELECT anomaly_type, COUNT(*) AS c FROM ddjj_anomalies "
-        "WHERE is_anomalous = true AND anomaly_type IS NOT NULL GROUP BY anomaly_type"
-    ))
-    by_type = {row.anomaly_type: row.c for row in type_rows.fetchall()}
-
-    # Detail list (only anomalous, sorted by ratio desc)
-    query = """
-        SELECT nombre, cuit, anio_declaracion, patrimonio_cierre,
-               bienes_inicio, bienes_cierre, ingresos_trabajo_neto,
-               variacion_patrimonial, brecha_inexplicable, ratio_crecimiento,
-               anomaly_type, severity
-        FROM ddjj_anomalies
-        WHERE is_anomalous = true
-    """
-    params: dict[str, Any] = {"limit": limit}
-    if severity:
-        query += " AND severity = :severity"
-        params["severity"] = severity
-    query += " ORDER BY ratio_crecimiento DESC LIMIT :limit"
-
-    detail_rows = await session.execute(text(query), params)
-    anomalies = [
-        DdjjAnomaly(
-            nombre=row.nombre,
-            cuit=row.cuit,
-            anio_declaracion=row.anio_declaracion,
-            patrimonio_cierre=row.patrimonio_cierre,
-            bienes_inicio=row.bienes_inicio,
-            bienes_cierre=row.bienes_cierre,
-            ingresos_trabajo_neto=row.ingresos_trabajo_neto,
-            variacion_patrimonial=row.variacion_patrimonial,
-            brecha_inexplicable=row.brecha_inexplicable,
-            ratio_crecimiento=row.ratio_crecimiento,
-            anomaly_type=row.anomaly_type,
-            severity=row.severity,
-        )
-        for row in detail_rows.fetchall()
-    ]
-
-    return DdjjAnomalySummary(
-        total_analyzed=total_analyzed,
-        total_flagged=total_flagged,
-        by_severity=by_severity,
-        by_type=by_type,
-        anomalies=anomalies,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Feature 4: Session Topics
 # ---------------------------------------------------------------------------
 
@@ -452,15 +353,6 @@ async def trigger_rescrape(portal: str | None = None) -> dict[str, Any]:
     return {"status": "dispatched", "scrape_portals": portals, "rescore_delay": "5min"}
 
 
-@router.post("/detect-anomalies", dependencies=[Depends(_verify_admin_key)])
-async def trigger_detect_anomalies() -> dict[str, str]:
-    """Trigger DDJJ anomaly detection (inflation-adjusted analysis)."""
-    from app.infrastructure.celery.tasks.transparency_tasks import detect_ddjj_anomalies
-
-    detect_ddjj_anomalies.delay()
-    return {"status": "dispatched", "task": "detect_ddjj_anomalies"}
-
-
 @router.post("/snapshot-staff", dependencies=[Depends(_verify_admin_key)])
 async def trigger_staff_snapshot() -> dict[str, str]:
     """Trigger HCDN staff snapshot (download nómina + diff against previous)."""
@@ -509,5 +401,5 @@ async def flush_query_cache(
     return {
         "status": "flushed",
         "semantic_cache_deleted": sem_deleted,
-        "note": "Redis cache entries will expire by TTL (max 2h for DDJJ)",
+        "note": "Redis cache entries will expire by TTL",
     }

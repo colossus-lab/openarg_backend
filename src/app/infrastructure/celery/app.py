@@ -85,7 +85,6 @@ def create_celery() -> Celery:
         "openarg.bulk_collect_all": {"queue": "collector"},
         "openarg.analyze_query": {"queue": "analyst"},
         "openarg.score_portal_health": {"queue": "transparency"},
-        "openarg.detect_ddjj_anomalies": {"queue": "transparency"},
         "openarg.analyze_session_topics": {"queue": "transparency"},
         "openarg.retry_s3_uploads": {"queue": "s3"},
         "openarg.upload_to_s3": {"queue": "s3"},
@@ -186,11 +185,6 @@ def create_celery() -> Celery:
         "transparency-health-scoring": {
             "task": "openarg.score_portal_health",
             "schedule": crontab(hour=6, minute=0),
-            "options": {"queue": "transparency"},
-        },
-        "transparency-ddjj-anomalies": {
-            "task": "openarg.detect_ddjj_anomalies",
-            "schedule": crontab(hour=6, minute=15),
             "options": {"queue": "transparency"},
         },
         "transparency-session-topics": {
@@ -327,7 +321,6 @@ def _initial_transparency(engine=None):
     from app.infrastructure.celery.tasks._db import get_sync_engine
     from app.infrastructure.celery.tasks.transparency_tasks import (
         analyze_session_topics,
-        detect_ddjj_anomalies,
         score_portal_health,
     )
 
@@ -339,15 +332,12 @@ def _initial_transparency(engine=None):
             health_count = conn.execute(
                 text("SELECT COUNT(*) FROM dataset_health_scores")
             ).scalar() or 0
-            anomaly_count = conn.execute(
-                text("SELECT COUNT(*) FROM ddjj_anomalies")
-            ).scalar() or 0
             topics_count = conn.execute(
                 text("SELECT COUNT(*) FROM session_topics")
             ).scalar() or 0
     except Exception:
         logger.warning("Could not check transparency tables — dispatching all")
-        health_count = anomaly_count = topics_count = 0
+        health_count = topics_count = 0
 
     # Portal health needs datasets — delay 120s to let scrapers finish
     if health_count == 0:
@@ -355,13 +345,6 @@ def _initial_transparency(engine=None):
         score_portal_health.apply_async(countdown=120)
     else:
         logger.info("Health scores already exist (%d) — skipping", health_count)
-
-    # DDJJ anomalies — can run immediately (uses pre-loaded DDJJ data)
-    if anomaly_count == 0:
-        logger.info("No DDJJ anomalies found — dispatching detect_ddjj_anomalies")
-        detect_ddjj_anomalies.delay()
-    else:
-        logger.info("DDJJ anomalies already exist (%d) — skipping", anomaly_count)
 
     # Session topics — can run immediately (uses pre-loaded session chunks)
     if topics_count == 0:
