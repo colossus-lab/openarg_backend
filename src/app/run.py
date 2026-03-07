@@ -46,4 +46,4 @@ def make_app(*di_providers: Provider, settings: AppSettings | None = None) -> Fa
     )
     setup_dishka(container=container, app=app)
 
-    return app
+    return app  # type: ignore[no-any-return]

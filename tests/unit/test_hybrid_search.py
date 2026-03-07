@@ -20,7 +20,10 @@ def adapter(mock_session: AsyncMock) -> PgVectorSearchAdapter:
 
 
 @pytest.mark.asyncio
-async def test_search_datasets_hybrid_returns_results(adapter: PgVectorSearchAdapter, mock_session: AsyncMock) -> None:
+async def test_search_datasets_hybrid_returns_results(
+    adapter: PgVectorSearchAdapter,
+    mock_session: AsyncMock,
+) -> None:
     """Test that hybrid search executes the fusion query and maps results."""
     mock_row = MagicMock()
     mock_row.dataset_id = "123"
@@ -50,7 +53,10 @@ async def test_search_datasets_hybrid_returns_results(adapter: PgVectorSearchAda
 
 
 @pytest.mark.asyncio
-async def test_search_datasets_hybrid_empty_results(adapter: PgVectorSearchAdapter, mock_session: AsyncMock) -> None:
+async def test_search_datasets_hybrid_empty_results(
+    adapter: PgVectorSearchAdapter,
+    mock_session: AsyncMock,
+) -> None:
     mock_result = MagicMock()
     mock_result.fetchall.return_value = []
     mock_session.execute.return_value = mock_result
@@ -64,7 +70,10 @@ async def test_search_datasets_hybrid_empty_results(adapter: PgVectorSearchAdapt
 
 
 @pytest.mark.asyncio
-async def test_search_datasets_hybrid_with_portal_filter(adapter: PgVectorSearchAdapter, mock_session: AsyncMock) -> None:
+async def test_search_datasets_hybrid_with_portal_filter(
+    adapter: PgVectorSearchAdapter,
+    mock_session: AsyncMock,
+) -> None:
     mock_result = MagicMock()
     mock_result.fetchall.return_value = []
     mock_session.execute.return_value = mock_result
@@ -82,7 +91,10 @@ async def test_search_datasets_hybrid_with_portal_filter(adapter: PgVectorSearch
 
 
 @pytest.mark.asyncio
-async def test_search_datasets_still_works(adapter: PgVectorSearchAdapter, mock_session: AsyncMock) -> None:
+async def test_search_datasets_still_works(
+    adapter: PgVectorSearchAdapter,
+    mock_session: AsyncMock,
+) -> None:
     """Ensure the original search_datasets method still works (backward compat)."""
     mock_result = MagicMock()
     mock_result.fetchall.return_value = []
@@ -96,7 +108,10 @@ async def test_search_datasets_still_works(adapter: PgVectorSearchAdapter, mock_
 
 
 @pytest.mark.asyncio
-async def test_hybrid_search_uses_websearch_to_tsquery(adapter: PgVectorSearchAdapter, mock_session: AsyncMock) -> None:
+async def test_hybrid_search_uses_websearch_to_tsquery(
+    adapter: PgVectorSearchAdapter,
+    mock_session: AsyncMock,
+) -> None:
     """Verify the SQL uses websearch_to_tsquery instead of plainto_tsquery."""
     mock_result = MagicMock()
     mock_result.fetchall.return_value = []
@@ -115,7 +130,10 @@ async def test_hybrid_search_uses_websearch_to_tsquery(adapter: PgVectorSearchAd
 
 
 @pytest.mark.asyncio
-async def test_hybrid_search_rrf_k_param(adapter: PgVectorSearchAdapter, mock_session: AsyncMock) -> None:
+async def test_hybrid_search_rrf_k_param(
+    adapter: PgVectorSearchAdapter,
+    mock_session: AsyncMock,
+) -> None:
     """Verify rrf_k is passed as a SQL parameter."""
     mock_result = MagicMock()
     mock_result.fetchall.return_value = []
@@ -134,7 +152,10 @@ async def test_hybrid_search_rrf_k_param(adapter: PgVectorSearchAdapter, mock_se
 
 
 @pytest.mark.asyncio
-async def test_hybrid_search_min_score_filters(adapter: PgVectorSearchAdapter, mock_session: AsyncMock) -> None:
+async def test_hybrid_search_min_score_filters(
+    adapter: PgVectorSearchAdapter,
+    mock_session: AsyncMock,
+) -> None:
     """Verify low-score results are filtered out by min_score."""
     mock_row_high = MagicMock()
     mock_row_high.dataset_id = "1"

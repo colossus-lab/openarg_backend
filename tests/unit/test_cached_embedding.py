@@ -31,7 +31,11 @@ def service(mock_base: AsyncMock, mock_cache: AsyncMock) -> CachedEmbeddingServi
 
 
 @pytest.mark.asyncio
-async def test_embed_cache_miss(service: CachedEmbeddingService, mock_base: AsyncMock, mock_cache: AsyncMock) -> None:
+async def test_embed_cache_miss(
+    service: CachedEmbeddingService,
+    mock_base: AsyncMock,
+    mock_cache: AsyncMock,
+) -> None:
     result = await service.embed("hello")
     assert result == [0.1, 0.2, 0.3]
     mock_base.embed.assert_called_once_with("hello")
@@ -39,7 +43,11 @@ async def test_embed_cache_miss(service: CachedEmbeddingService, mock_base: Asyn
 
 
 @pytest.mark.asyncio
-async def test_embed_cache_hit_json_string(service: CachedEmbeddingService, mock_base: AsyncMock, mock_cache: AsyncMock) -> None:
+async def test_embed_cache_hit_json_string(
+    service: CachedEmbeddingService,
+    mock_base: AsyncMock,
+    mock_cache: AsyncMock,
+) -> None:
     mock_cache.get.return_value = json.dumps([0.4, 0.5, 0.6])
     result = await service.embed("hello")
     assert result == [0.4, 0.5, 0.6]
@@ -47,7 +55,11 @@ async def test_embed_cache_hit_json_string(service: CachedEmbeddingService, mock
 
 
 @pytest.mark.asyncio
-async def test_embed_cache_hit_list(service: CachedEmbeddingService, mock_base: AsyncMock, mock_cache: AsyncMock) -> None:
+async def test_embed_cache_hit_list(
+    service: CachedEmbeddingService,
+    mock_base: AsyncMock,
+    mock_cache: AsyncMock,
+) -> None:
     mock_cache.get.return_value = [0.7, 0.8, 0.9]
     result = await service.embed("hello")
     assert result == [0.7, 0.8, 0.9]
@@ -55,7 +67,11 @@ async def test_embed_cache_hit_list(service: CachedEmbeddingService, mock_base: 
 
 
 @pytest.mark.asyncio
-async def test_embed_cache_read_error_falls_through(service: CachedEmbeddingService, mock_base: AsyncMock, mock_cache: AsyncMock) -> None:
+async def test_embed_cache_read_error_falls_through(
+    service: CachedEmbeddingService,
+    mock_base: AsyncMock,
+    mock_cache: AsyncMock,
+) -> None:
     mock_cache.get.side_effect = ConnectionError("Redis down")
     result = await service.embed("hello")
     assert result == [0.1, 0.2, 0.3]
@@ -63,14 +79,21 @@ async def test_embed_cache_read_error_falls_through(service: CachedEmbeddingServ
 
 
 @pytest.mark.asyncio
-async def test_embed_cache_write_error_does_not_raise(service: CachedEmbeddingService, mock_base: AsyncMock, mock_cache: AsyncMock) -> None:
+async def test_embed_cache_write_error_does_not_raise(
+    service: CachedEmbeddingService,
+    mock_base: AsyncMock,
+    mock_cache: AsyncMock,
+) -> None:
     mock_cache.set.side_effect = ConnectionError("Redis down")
     result = await service.embed("hello")
     assert result == [0.1, 0.2, 0.3]
 
 
 @pytest.mark.asyncio
-async def test_embed_batch_delegates_directly(service: CachedEmbeddingService, mock_base: AsyncMock) -> None:
+async def test_embed_batch_delegates_directly(
+    service: CachedEmbeddingService,
+    mock_base: AsyncMock,
+) -> None:
     result = await service.embed_batch(["a", "b"])
     assert result == [[0.1], [0.2]]
     mock_base.embed_batch.assert_called_once_with(["a", "b"])

@@ -207,9 +207,9 @@ class TestFormatHints:
         hints = resolve_hints("inflacion dolar blue presupuesto elecciones reservas")
         formatted = format_hints_for_prompt(hints)
         # Should have header + max 3 hint lines + optional taxonomy context
-        lines = [l for l in formatted.strip().split("\n") if l.strip()]
+        lines = [line for line in formatted.strip().split("\n") if line.strip()]
         # Count only the hint lines (numbered 1., 2., 3.)
-        hint_lines = [l for l in lines if l.strip().startswith(("1.", "2.", "3.", "4."))]
+        hint_lines = [line for line in lines if line.strip().startswith(("1.", "2.", "3.", "4."))]
         assert len(hint_lines) <= 3
 
     def test_includes_action_and_confidence(self):
@@ -234,7 +234,14 @@ class TestTaxonomy:
 
     def test_taxonomy_has_6_domains(self):
         assert len(TAXONOMY) == 6
-        expected = {"economia", "gobierno", "social", "infraestructura", "recursos_naturales", "ciencia"}
+        expected = {
+            "economia",
+            "gobierno",
+            "social",
+            "infraestructura",
+            "recursos_naturales",
+            "ciencia",
+        }
         assert set(TAXONOMY.keys()) == expected
 
     def test_each_domain_has_children(self):

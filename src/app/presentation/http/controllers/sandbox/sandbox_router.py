@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
@@ -22,7 +24,7 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     columns: list[str]
-    rows: list[dict]
+    rows: list[dict[str, Any]]
     row_count: int
     truncated: bool
     error: str | None = None
@@ -42,7 +44,7 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     sql: str
     columns: list[str]
-    rows: list[dict]
+    rows: list[dict[str, Any]]
     row_count: int
     truncated: bool
     error: str | None = None
@@ -53,8 +55,8 @@ class AskResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/query", response_model=QueryResponse)
-@limiter.limit("10/minute")
-@inject
+@limiter.limit("10/minute")  # type: ignore[untyped-decorator]
+@inject  # type: ignore[untyped-decorator]
 async def execute_query(
     request: Request,
     body: QueryRequest,
@@ -72,7 +74,7 @@ async def execute_query(
 
 
 @router.get("/tables", response_model=list[TableInfo])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def list_tables(
     sandbox: FromDishka[ISQLSandbox],
 ) -> list[TableInfo]:
@@ -90,8 +92,8 @@ async def list_tables(
 
 
 @router.post("/ask", response_model=AskResponse)
-@limiter.limit("10/minute")
-@inject
+@limiter.limit("10/minute")  # type: ignore[untyped-decorator]
+@inject  # type: ignore[untyped-decorator]
 async def ask_natural_language(
     request: Request,
     body: AskRequest,

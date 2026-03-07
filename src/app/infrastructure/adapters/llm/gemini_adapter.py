@@ -3,17 +3,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 import google.generativeai as genai
 
-from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage, LLMResponse
+from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage, LLMResponse  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
 LLM_TIMEOUT_SECONDS = 120
 
 
-class GeminiLLMAdapter(ILLMProvider):
+class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash") -> None:
         genai.configure(api_key=api_key)
         self._model_name = model
@@ -68,7 +69,7 @@ class GeminiLLMAdapter(ILLMProvider):
     async def chat_json(
         self,
         messages: list[LLMMessage],
-        json_schema: dict | None = None,
+        json_schema: dict[str, Any] | None = None,
         temperature: float = 0.0,
         max_tokens: int = 512,
     ) -> LLMResponse:

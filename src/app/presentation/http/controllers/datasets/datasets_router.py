@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query
@@ -36,7 +37,7 @@ class DownloadResponse(BaseModel):
 
 
 @router.get("/", response_model=list[DatasetSummary])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def list_datasets(
     session: FromDishka[MainAsyncSession],
     portal: str | None = None,
@@ -49,7 +50,7 @@ async def list_datasets(
         "organization, portal, format, is_cached, row_count "
         "FROM datasets"
     )
-    params: dict = {"limit": limit, "offset": offset}
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
 
     if portal:
         query += " WHERE portal = :portal"
@@ -76,7 +77,7 @@ async def list_datasets(
 
 
 @router.get("/stats", response_model=list[PortalStats])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_portal_stats(
     session: FromDishka[MainAsyncSession],
 ) -> list[PortalStats]:
@@ -88,11 +89,11 @@ async def get_portal_stats(
 
 
 @router.get("/{dataset_id}/download", response_model=DownloadResponse)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def download_dataset(
     dataset_id: str,
     session: FromDishka[MainAsyncSession],
-):
+) -> DownloadResponse:
     """Descarga el archivo original de un dataset (presigned S3 URL o redirect al portal)."""
     result = await session.execute(
         text(

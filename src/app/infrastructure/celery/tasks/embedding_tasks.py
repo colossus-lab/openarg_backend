@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
@@ -23,8 +24,8 @@ logger = logging.getLogger(__name__)
 _CHUNKS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "chunks"
 
 
-@celery_app.task(name="openarg.reindex_all_embeddings", bind=True)
-def reindex_all_embeddings(self, portal: str | None = None):
+@celery_app.task(name="openarg.reindex_all_embeddings", bind=True)  # type: ignore[misc]
+def reindex_all_embeddings(self: Any, portal: str | None = None) -> dict[str, Any]:
     """Re-genera embeddings para todos los datasets (o filtrado por portal)."""
     engine = get_sync_engine()
 
@@ -50,15 +51,15 @@ def reindex_all_embeddings(self, portal: str | None = None):
         engine.dispose()
 
 
-@celery_app.task(name="openarg.index_sesiones", bind=True, max_retries=2, soft_time_limit=1800, time_limit=2100)
-def index_sesiones_chunks(self, batch_size: int = 50):
+@celery_app.task(name="openarg.index_sesiones", bind=True, max_retries=2, soft_time_limit=1800, time_limit=2100)  # type: ignore[misc]
+def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
     """
     Load congressional session chunks from JSON files, generate embeddings,
     and index them in the sesion_chunks pgvector table.
 
     Processes in batches to avoid overwhelming the embedding API.
     """
-    import google.generativeai as genai
+    import google.generativeai as genai  # type: ignore[import-untyped]
 
     engine = get_sync_engine()
     gemini_key = os.getenv("GEMINI_API_KEY", "")
@@ -66,7 +67,7 @@ def index_sesiones_chunks(self, batch_size: int = 50):
         logger.error("GEMINI_API_KEY not set, cannot index sesiones")
         return {"error": "GEMINI_API_KEY not set"}
 
-    genai.configure(api_key=gemini_key)
+    genai.configure(api_key=gemini_key)  # type: ignore[attr-defined]
 
     try:
         # Check if already indexed
@@ -77,7 +78,7 @@ def index_sesiones_chunks(self, batch_size: int = 50):
                 return {"status": "already_indexed", "count": count}
 
         # Load all chunks from JSON files
-        all_chunks: list[dict] = []
+        all_chunks: list[dict[str, Any]] = []
         if not _CHUNKS_DIR.exists():
             logger.warning("Chunks directory not found: %s", _CHUNKS_DIR)
             return {"error": "chunks directory not found"}
@@ -110,12 +111,12 @@ def index_sesiones_chunks(self, batch_size: int = 50):
                     texts.append(chunk_text[:2000])
 
             # Generate embeddings in batch
-            resp = genai.embed_content(
+            resp = genai.embed_content(  # type: ignore[attr-defined]
                 model="models/gemini-embedding-001",
                 content=texts,
                 output_dimensionality=768,
             )
-            embeddings = resp["embedding"]
+            embeddings: list[list[float]] = resp["embedding"]
 
             # Insert into DB
             with engine.begin() as conn:

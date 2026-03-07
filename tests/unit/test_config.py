@@ -16,7 +16,14 @@ class TestPostgresSettings:
         with patch.dict(os.environ, {}, clear=False):
             # Ensure DATABASE_URL is not set
             os.environ.pop("DATABASE_URL", None)
-            s = PostgresSettings(USER="u", PASSWORD="p", DB="db", HOST="h", PORT=5432, DRIVER="psycopg")
+            s = PostgresSettings(
+                USER="u",
+                PASSWORD="p",
+                DB="db",
+                HOST="h",
+                PORT=5432,
+                DRIVER="psycopg",
+            )
             assert s.dsn == "postgresql+psycopg://u:p@h:5432/db"
 
     def test_dsn_from_env_override(self):
