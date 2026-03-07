@@ -149,6 +149,11 @@ def ingest_bac(self):
                         if len(chunk) > remaining:
                             chunk = chunk.head(remaining)
 
+                        # Cast all columns to string to avoid type mismatches
+                        # between chunks (e.g. NaN-only chunk infers float,
+                        # next chunk has strings).
+                        chunk = chunk.astype(str).replace("nan", None)
+
                         # First chunk replaces the table; subsequent chunks append
                         if_exists = "replace" if chunk_num == 0 else "append"
                         chunk.to_sql(table_name, engine, if_exists=if_exists, index=False)
