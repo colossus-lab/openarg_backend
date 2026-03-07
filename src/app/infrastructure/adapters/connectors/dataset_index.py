@@ -718,63 +718,66 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
 
     # ── Personal / Staff (Diputados + Senado) ───────────────────
+    # NOTE: Do NOT hardcode action=stats in params. The LLM planner
+    # chooses the sub-action (get_by_legislator, count, stats, search)
+    # based on the user query. The hint only tells it to use query_staff.
     "asesores": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
-        "description": "Asesores / personal legislativo (Diputados y Senado)",
+        "description": "Asesores / personal legislativo (Diputados y Senado). Usa action=get_by_legislator con name=NOMBRE para buscar por legislador, action=count para contar, action=stats para estadisticas generales.",
     },
     "personal diputados": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
         "description": "Personal de la Camara de Diputados",
     },
     "personal senado": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
         "description": "Personal del Senado de la Nacion",
     },
     "asesores del senado": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
         "description": "Asesores del Senado de la Nacion",
     },
     "asesores senadores": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
         "description": "Asesores de senadores",
     },
     "senador": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.75,
-        "description": "Personal / asesores de senador",
+        "description": "Personal / asesores de senador. Usa action=get_by_legislator con name=NOMBRE.",
     },
     "empleados del senado": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
         "description": "Empleados del Senado de la Nacion",
     },
     "empleados congreso": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.85,
         "description": "Empleados del Congreso (Diputados y Senado)",
     },
     "nomina personal": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
         "description": "Nomina de personal legislativo",
     },
     "nomina hcdn": {
         "action": "query_staff",
-        "params": {"action": "stats"},
+        "params": {},
         "confidence": 0.90,
         "description": "Nomina de personal de HCDN",
     },
