@@ -717,12 +717,12 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "description": "Transcripciones de sesiones",
     },
 
-    # ── Personal / Staff ───────────────────────────────────────
+    # ── Personal / Staff (Diputados + Senado) ───────────────────
     "asesores": {
         "action": "query_staff",
         "params": {"action": "stats"},
         "confidence": 0.90,
-        "description": "Asesores / personal de diputados",
+        "description": "Asesores / personal legislativo (Diputados y Senado)",
     },
     "personal diputados": {
         "action": "query_staff",
@@ -730,17 +730,47 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Personal de la Camara de Diputados",
     },
+    "personal senado": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Personal del Senado de la Nacion",
+    },
+    "asesores del senado": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Asesores del Senado de la Nacion",
+    },
+    "asesores senadores": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Asesores de senadores",
+    },
+    "senador": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.75,
+        "description": "Personal / asesores de senador",
+    },
+    "empleados del senado": {
+        "action": "query_staff",
+        "params": {"action": "stats"},
+        "confidence": 0.90,
+        "description": "Empleados del Senado de la Nacion",
+    },
     "empleados congreso": {
         "action": "query_staff",
         "params": {"action": "stats"},
         "confidence": 0.85,
-        "description": "Empleados del Congreso",
+        "description": "Empleados del Congreso (Diputados y Senado)",
     },
     "nomina personal": {
         "action": "query_staff",
         "params": {"action": "stats"},
         "confidence": 0.90,
-        "description": "Nomina de personal de HCDN",
+        "description": "Nomina de personal legislativo",
     },
     "nomina hcdn": {
         "action": "query_staff",
