@@ -1,5 +1,5 @@
 # Frontend - openarg.com.ar
-openarg.parlamentia.xyz {
+openarg.org {
 	encode gzip zstd
 
 	header {
@@ -7,7 +7,7 @@ openarg.parlamentia.xyz {
 		X-Frame-Options DENY
 		Referrer-Policy strict-origin-when-cross-origin
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.openarg.parlamentia.xyz wss://api.openarg.parlamentia.xyz; font-src 'self' data:; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://api.openarg.org wss://api.openarg.org; font-src 'self' data:; frame-ancestors 'none'"
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 	}
 
@@ -15,11 +15,11 @@ openarg.parlamentia.xyz {
 }
 
 # Backend API - api.openarg.com.ar
-api.openarg.parlamentia.xyz {
+api.openarg.org {
 	encode gzip zstd
 
 	header {
-		Access-Control-Allow-Origin https://openarg.parlamentia.xyz
+		Access-Control-Allow-Origin https://openarg.org
 		Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
 		Access-Control-Allow-Headers "Authorization, Content-Type, X-API-Key, X-User-Email"
 		Access-Control-Max-Age 86400
