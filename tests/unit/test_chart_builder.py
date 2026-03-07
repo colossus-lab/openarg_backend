@@ -78,7 +78,11 @@ class TestBuildDeterministicCharts:
 
 class TestExtractLLMCharts:
     def test_extracts_valid_chart(self):
-        text = 'Texto <!--CHART:{"type":"line_chart","title":"Test","data":[{"x":1,"y":2}],"xKey":"x","yKeys":["y"]}--> más texto'
+        text = (
+            'Texto <!--CHART:{"type":"line_chart","title":"Test",'
+            '"data":[{"x":1,"y":2}],"xKey":"x","yKeys":["y"]}'
+            '--> más texto'
+        )
         charts = _extract_llm_charts(text)
         assert len(charts) == 1
         assert charts[0]["type"] == "line_chart"

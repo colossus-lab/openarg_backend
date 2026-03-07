@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from dishka.integrations.fastapi import FromDishka, inject
@@ -32,7 +32,7 @@ class ConversationSummary(BaseModel):
 class MessageCreate(BaseModel):
     role: str
     content: str
-    sources: list[dict] | None = None
+    sources: list[dict[str, Any]] | None = None
 
 
 class MessageResponse(BaseModel):
@@ -40,7 +40,7 @@ class MessageResponse(BaseModel):
     conversation_id: str
     role: str
     content: str
-    sources: list[dict]
+    sources: list[dict[str, Any]]
     created_at: str
     feedback: str | None = None
     feedback_comment: str | None = None
@@ -65,7 +65,7 @@ class FeedbackCreate(BaseModel):
 
 # ---- Helpers ----
 
-async def _resolve_user(user_repo: IUserRepository, email: str):
+async def _resolve_user(user_repo: IUserRepository, email: str) -> Any:
     """Resolve user by email, raise 404 if not found."""
     user = await user_repo.get_by_email(email)
     if not user:
@@ -78,7 +78,7 @@ async def _get_owned_conversation(
     user_repo: IUserRepository,
     conversation_id: UUID,
     user_email: str,
-):
+) -> Any:
     """Fetch a conversation and verify it belongs to the user. Raises 404 or 403."""
     conv = await chat_repo.get_conversation(conversation_id)
     if not conv:
@@ -92,7 +92,7 @@ async def _get_owned_conversation(
 # ---- Endpoints ----
 
 @router.get("/", response_model=list[ConversationSummary])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def list_conversations(
     user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
@@ -124,7 +124,7 @@ async def list_conversations(
 
 
 @router.post("/", response_model=ConversationDetail)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def create_conversation(
     body: ConversationCreate,
     user_repo: FromDishka[IUserRepository],
@@ -149,7 +149,7 @@ async def create_conversation(
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_conversation(
     conversation_id: UUID,
     user_repo: FromDishka[IUserRepository],
@@ -182,13 +182,13 @@ async def get_conversation(
 
 
 @router.delete("/{conversation_id}")
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def delete_conversation(
     conversation_id: UUID,
     user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
     x_user_email: str = Header(alias="X-User-Email", default=""),
-) -> dict:
+) -> dict[str, str]:
     """Delete a conversation and all its messages (CASCADE)."""
     await _get_owned_conversation(chat_repo, user_repo, conversation_id, x_user_email)
     deleted = await chat_repo.delete_conversation(conversation_id)
@@ -198,7 +198,7 @@ async def delete_conversation(
 
 
 @router.patch("/{conversation_id}", response_model=ConversationSummary)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def update_conversation_title(
     conversation_id: UUID,
     body: TitleUpdate,
@@ -220,7 +220,7 @@ async def update_conversation_title(
 
 
 @router.post("/{conversation_id}/messages", response_model=MessageResponse)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def add_message(
     conversation_id: UUID,
     body: MessageCreate,
@@ -252,7 +252,7 @@ async def add_message(
 
 
 @router.get("/{conversation_id}/messages", response_model=list[MessageResponse])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_messages(
     conversation_id: UUID,
     user_repo: FromDishka[IUserRepository],
@@ -284,7 +284,7 @@ async def get_messages(
     "/{conversation_id}/messages/{message_id}/feedback",
     response_model=MessageResponse,
 )
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def submit_feedback(
     conversation_id: UUID,
     message_id: UUID,

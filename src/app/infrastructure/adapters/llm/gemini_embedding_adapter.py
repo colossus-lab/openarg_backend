@@ -4,10 +4,10 @@ import asyncio
 
 import google.generativeai as genai
 
-from app.domain.ports.llm.llm_provider import IEmbeddingProvider
+from app.domain.ports.llm.llm_provider import IEmbeddingProvider  # type: ignore[import-not-found]
 
 
-class GeminiEmbeddingAdapter(IEmbeddingProvider):
+class GeminiEmbeddingAdapter(IEmbeddingProvider):  # type: ignore[misc]
     def __init__(
         self,
         api_key: str,
@@ -25,7 +25,7 @@ class GeminiEmbeddingAdapter(IEmbeddingProvider):
             content=text,
             output_dimensionality=self._dimensions,
         )
-        return result["embedding"]
+        return result["embedding"]  # type: ignore[no-any-return]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         result = await asyncio.to_thread(
@@ -34,4 +34,4 @@ class GeminiEmbeddingAdapter(IEmbeddingProvider):
             content=texts,
             output_dimensionality=self._dimensions,
         )
-        return result["embedding"]
+        return result["embedding"]  # type: ignore[no-any-return]

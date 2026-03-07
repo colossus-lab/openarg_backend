@@ -3,6 +3,7 @@
 import contextlib
 import logging
 import os
+from typing import Any
 
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject
@@ -30,12 +31,12 @@ class SmartQueryRequest(BaseModel):
 
 class SmartQueryResponse(BaseModel):
     answer: str
-    sources: list[dict]
-    chart_data: list[dict] | None = None
+    sources: list[dict[str, Any]]
+    chart_data: list[dict[str, Any]] | None = None
     tokens_used: int = 0
     confidence: float = 1.0
-    citations: list[dict] = []
-    documents: list[dict] | None = None
+    citations: list[dict[str, Any]] = []
+    documents: list[dict[str, Any]] | None = None
     warnings: list[str] = []
 
 
@@ -63,14 +64,14 @@ async def _check_ws_rate_limit(cache: ICacheService, identifier: str) -> bool:
 
 
 @router.post("/smart", response_model=SmartQueryResponse)
-@limiter.limit("15/minute")
-@inject
+@limiter.limit("15/minute")  # type: ignore[untyped-decorator]
+@inject  # type: ignore[untyped-decorator]
 async def smart_query(
     request: Request,
     body: SmartQueryRequest,
     service: FromDishka[SmartQueryService],
     session: FromDishka[MainAsyncSession],
-) -> dict:
+) -> dict[str, Any] | ORJSONResponse:
     user_id = body.user_email or "anonymous"
 
     result = await service.execute(

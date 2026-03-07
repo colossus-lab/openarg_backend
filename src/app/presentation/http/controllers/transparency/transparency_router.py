@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets as _secrets
+from typing import Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -18,7 +19,7 @@ def _safe_json_loads(raw: str | None) -> dict[str, int]:
     if not raw:
         return {}
     try:
-        return json.loads(raw)
+        return json.loads(raw)  # type: ignore[no-any-return]
     except (json.JSONDecodeError, TypeError):
         return {}
 
@@ -108,7 +109,7 @@ class SessionTopicSummary(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.get("/health", response_model=list[PortalHealthSummary])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_portal_health(
     session: FromDishka[MainAsyncSession],
 ) -> list[PortalHealthSummary]:
@@ -141,7 +142,7 @@ async def get_portal_health(
 
 
 @router.get("/health/{portal}", response_model=list[DatasetHealthDetail])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_portal_datasets_health(
     portal: str,
     session: FromDishka[MainAsyncSession],
@@ -213,7 +214,7 @@ async def get_portal_datasets_health(
 # ---------------------------------------------------------------------------
 
 @router.get("/ghost-datasets", response_model=list[GhostDataset])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_ghost_datasets(
     session: FromDishka[MainAsyncSession],
     portal: str | None = None,
@@ -230,7 +231,7 @@ async def get_ghost_datasets(
         JOIN datasets d ON d.id = h.dataset_id
         WHERE h.freshness_status IN ('STALE', 'ABANDONED')
     """
-    params: dict = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit}
     if portal:
         query += " AND h.portal = :portal"
         params["portal"] = portal
@@ -257,7 +258,7 @@ async def get_ghost_datasets(
 # ---------------------------------------------------------------------------
 
 @router.get("/ddjj/anomalies", response_model=DdjjAnomalySummary)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_ddjj_anomalies(
     session: FromDishka[MainAsyncSession],
     severity: str | None = Query(default=None, pattern="^(low|medium|high)$"),
@@ -294,7 +295,7 @@ async def get_ddjj_anomalies(
         FROM ddjj_anomalies
         WHERE is_anomalous = true
     """
-    params: dict = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit}
     if severity:
         query += " AND severity = :severity"
         params["severity"] = severity
@@ -333,7 +334,7 @@ async def get_ddjj_anomalies(
 # ---------------------------------------------------------------------------
 
 @router.get("/sessions/topics", response_model=SessionTopicSummary)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_session_topics(
     session: FromDishka[MainAsyncSession],
     periodo: int | None = None,
@@ -342,7 +343,7 @@ async def get_session_topics(
     """Distribución temática de sesiones parlamentarias."""
     # Count distinct sessions
     sess_q = "SELECT COUNT(DISTINCT (periodo, reunion)) FROM session_topics"
-    sess_params: dict = {}
+    sess_params: dict[str, Any] = {}
     if periodo:
         sess_q += " WHERE periodo = :periodo"
         sess_params["periodo"] = periodo
@@ -354,8 +355,8 @@ async def get_session_topics(
         SELECT topic_category, SUM(mention_count) AS total
         FROM session_topics
     """
-    dist_params: dict = {}
-    conditions = []
+    dist_params: dict[str, Any] = {}
+    conditions: list[str] = []
     if periodo:
         conditions.append("periodo = :periodo")
         dist_params["periodo"] = periodo
@@ -375,7 +376,7 @@ async def get_session_topics(
                topic_category, mention_count, relevance_score, top_speakers_json
         FROM session_topics
     """
-    detail_params: dict = {}
+    detail_params: dict[str, Any] = {}
     conditions = []
     if periodo:
         conditions.append("periodo = :periodo")
@@ -425,7 +426,7 @@ def _verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> st
 
 
 @router.post("/rescore", dependencies=[Depends(_verify_admin_key)])
-async def trigger_rescore(portal: str | None = None):
+async def trigger_rescore(portal: str | None = None) -> dict[str, Any]:
     """Trigger health scoring task (re-scrape must happen first for last_updated_at)."""
     from app.infrastructure.celery.tasks.transparency_tasks import score_portal_health
 
@@ -437,7 +438,7 @@ async def trigger_rescore(portal: str | None = None):
 
 
 @router.post("/rescrape", dependencies=[Depends(_verify_admin_key)])
-async def trigger_rescrape(portal: str | None = None):
+async def trigger_rescrape(portal: str | None = None) -> dict[str, Any]:
     """Trigger catalog scrape + health rescore (with delay)."""
     from app.infrastructure.celery.tasks.scraper_tasks import PORTAL_URLS, scrape_catalog
     from app.infrastructure.celery.tasks.transparency_tasks import score_portal_health
@@ -452,7 +453,7 @@ async def trigger_rescrape(portal: str | None = None):
 
 
 @router.post("/detect-anomalies", dependencies=[Depends(_verify_admin_key)])
-async def trigger_detect_anomalies():
+async def trigger_detect_anomalies() -> dict[str, str]:
     """Trigger DDJJ anomaly detection (inflation-adjusted analysis)."""
     from app.infrastructure.celery.tasks.transparency_tasks import detect_ddjj_anomalies
 
@@ -461,7 +462,7 @@ async def trigger_detect_anomalies():
 
 
 @router.post("/snapshot-staff", dependencies=[Depends(_verify_admin_key)])
-async def trigger_staff_snapshot():
+async def trigger_staff_snapshot() -> dict[str, str]:
     """Trigger HCDN staff snapshot (download nómina + diff against previous)."""
     from app.infrastructure.celery.tasks.staff_tasks import snapshot_staff
 
@@ -470,10 +471,10 @@ async def trigger_staff_snapshot():
 
 
 @router.get("/staff/status")
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_staff_status(
     session: FromDishka[MainAsyncSession],
-):
+) -> dict[str, Any]:
     """Check staff snapshot status: latest snapshot date, total employees, recent changes."""
     snap = await session.execute(text(
         "SELECT snapshot_date, COUNT(*) AS total "
@@ -494,10 +495,10 @@ async def get_staff_status(
 
 
 @router.post("/flush-cache", dependencies=[Depends(_verify_admin_key)])
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def flush_query_cache(
     session: FromDishka[MainAsyncSession],
-):
+) -> dict[str, Any]:
     """Flush Redis query cache + pgvector semantic cache."""
 
     # Clear semantic cache (pgvector)

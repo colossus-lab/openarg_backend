@@ -18,7 +18,10 @@ class TestGeminiEmbeddingAdapter:
     async def test_embed_returns_vector(self, adapter):
         expected = [0.1] * 768
         mock_to_thread = AsyncMock(return_value={"embedding": expected})
-        with patch("app.infrastructure.adapters.llm.gemini_embedding_adapter.asyncio") as mock_asyncio:
+        with patch(
+            "app.infrastructure.adapters.llm"
+            ".gemini_embedding_adapter.asyncio",
+        ) as mock_asyncio:
             mock_asyncio.to_thread = mock_to_thread
             result = await adapter.embed("test query")
 
@@ -29,7 +32,10 @@ class TestGeminiEmbeddingAdapter:
         v1 = [0.1] * 768
         v2 = [0.2] * 768
         mock_to_thread = AsyncMock(return_value={"embedding": [v1, v2]})
-        with patch("app.infrastructure.adapters.llm.gemini_embedding_adapter.asyncio") as mock_asyncio:
+        with patch(
+            "app.infrastructure.adapters.llm"
+            ".gemini_embedding_adapter.asyncio",
+        ) as mock_asyncio:
             mock_asyncio.to_thread = mock_to_thread
             result = await adapter.embed_batch(["query1", "query2"])
 

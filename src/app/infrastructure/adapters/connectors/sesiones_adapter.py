@@ -5,21 +5,22 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.domain.entities.connectors.data_result import DataResult
-from app.domain.exceptions.connector_errors import ConnectorError
-from app.domain.exceptions.error_codes import ErrorCode
-from app.domain.ports.connectors.sesiones import ISesionesConnector
+from app.domain.entities.connectors.data_result import DataResult  # type: ignore[import-not-found]
+from app.domain.exceptions.connector_errors import ConnectorError  # type: ignore[import-not-found]
+from app.domain.exceptions.error_codes import ErrorCode  # type: ignore[import-not-found]
+from app.domain.ports.connectors.sesiones import ISesionesConnector  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
 _CHUNKS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "chunks"
 
 
-class SesionesAdapter(ISesionesConnector):
+class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
     """Congressional session search with pgvector (primary) + local keyword fallback."""
 
     def __init__(
@@ -29,7 +30,7 @@ class SesionesAdapter(ISesionesConnector):
     ) -> None:
         self._session_factory = session_factory
         self._gemini_api_key = gemini_api_key
-        self._chunks: list[dict] = []
+        self._chunks: list[dict[str, Any]] = []
         self._loaded = False
 
     async def _generate_embedding(self, text_input: str) -> list[float] | None:
@@ -48,7 +49,7 @@ class SesionesAdapter(ISesionesConnector):
                 content=text_input[:2000],
                 output_dimensionality=768,
             )
-            return result["embedding"]
+            return result["embedding"]  # type: ignore[no-any-return]
         except Exception:
             logger.error("Failed to generate Gemini embedding for sesiones — falling back to keyword search", exc_info=True)
             return None
@@ -59,7 +60,7 @@ class SesionesAdapter(ISesionesConnector):
         periodo: int | None = None,
         orador: str | None = None,
         limit: int = 15,
-    ) -> list[dict] | None:
+    ) -> list[dict[str, Any]] | None:
         """Search sesion_chunks using pgvector cosine similarity."""
         embedding = await self._generate_embedding(query)
         if not embedding:
@@ -68,7 +69,7 @@ class SesionesAdapter(ISesionesConnector):
         try:
             embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
-            params: dict = {"embedding": embedding_str, "limit": limit}
+            params: dict[str, Any] = {"embedding": embedding_str, "limit": limit}
             if periodo is not None:
                 params["periodo"] = periodo
                 sql = text(
@@ -157,7 +158,7 @@ class SesionesAdapter(ISesionesConnector):
         periodo: int | None = None,
         orador: str | None = None,
         limit: int = 15,
-    ) -> list[dict] | None:
+    ) -> list[dict[str, Any]] | None:
         """Local keyword search fallback."""
         self._ensure_loaded()
         if not self._chunks:
@@ -171,7 +172,7 @@ class SesionesAdapter(ISesionesConnector):
         if periodo is not None:
             filtered = [c for c in filtered if c.get("periodo") == periodo]
 
-        scored: list[tuple[dict, float]] = []
+        scored: list[tuple[dict[str, Any], float]] = []
         for chunk in filtered:
             text_lower = chunk.get("text", "").lower()
             speaker_lower = (chunk.get("speaker") or "").lower()
@@ -197,7 +198,7 @@ class SesionesAdapter(ISesionesConnector):
         top_chunks = [c for c, _ in scored[:limit]]
         return top_chunks if top_chunks else None
 
-    def _chunks_to_data_result(self, query: str, chunks: list[dict]) -> DataResult:
+    def _chunks_to_data_result(self, query: str, chunks: list[dict[str, Any]]) -> DataResult:
         """Convert chunks to DataResult."""
         records = [
             {

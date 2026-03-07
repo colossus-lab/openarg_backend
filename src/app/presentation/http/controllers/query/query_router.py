@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import time
+from typing import Any
 from uuid import uuid4
 
 from dishka.integrations.fastapi import FromDishka, inject
@@ -40,13 +41,13 @@ class QueryStatusResponse(BaseModel):
     status: str
     question: str
     analysis_result: str | None = None
-    sources: list[dict] | None = None
+    sources: list[dict[str, Any]] | None = None
     tokens_used: int = 0
     duration_ms: int = 0
 
 
 @router.post("/", response_model=QueryResponse)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def submit_query(
     body: QueryRequest,
     session: FromDishka[MainAsyncSession],
@@ -74,7 +75,7 @@ async def submit_query(
 
 
 @router.get("/{query_id}", response_model=QueryStatusResponse)
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def get_query_status(
     query_id: str,
     session: FromDishka[MainAsyncSession],
@@ -125,9 +126,9 @@ QUERY_CACHE_TTL = 3600  # 1 hour
 async def _fetch_sample_data(
     session: MainAsyncSession,
     dataset_ids: list[str],
-) -> dict[str, dict]:
+) -> dict[str, dict[str, Any]]:
     """Fetch sample rows from cached datasets for richer LLM context."""
-    samples: dict[str, dict] = {}
+    samples: dict[str, dict[str, Any]] = {}
     for did in dataset_ids[:3]:  # Max 3 datasets to keep context manageable
         try:
             row = await session.execute(
@@ -163,8 +164,8 @@ async def _fetch_sample_data(
 
 
 @router.post("/quick")
-@limiter.limit("15/minute")
-@inject
+@limiter.limit("15/minute")  # type: ignore[untyped-decorator]
+@inject  # type: ignore[untyped-decorator]
 async def quick_query(
     request: Request,
     body: QueryRequest,
@@ -173,7 +174,7 @@ async def quick_query(
     vector_search: FromDishka[IVectorSearch],
     cache: FromDishka[ICacheService],
     session: FromDishka[MainAsyncSession],
-) -> dict:
+) -> dict[str, Any]:
     """
     Quick synchronous query — searches datasets and returns answer directly.
     When cached data is available, fetches real sample rows for richer analysis.
@@ -187,7 +188,7 @@ async def quick_query(
     cached = await cache.get(cache_key)
     if cached:
         cached["cached"] = True
-        return cached
+        return cached  # type: ignore[no-any-return]
 
     # Search relevant datasets
     query_embedding = await embedding.embed(body.question)
@@ -197,7 +198,7 @@ async def quick_query(
     results = [r for r in all_results if r.score >= 0.30]
 
     if not results:
-        result = {"answer": "No encontré datasets relevantes para tu pregunta.", "sources": []}
+        result: dict[str, Any] = {"answer": "No encontré datasets relevantes para tu pregunta.", "sources": []}
         await cache.set(cache_key, result, ttl_seconds=300)
 
         # Save to conversation history even for empty results
@@ -289,7 +290,7 @@ async def quick_query(
         for r in results
     ]
 
-    result = {
+    result: dict[str, Any] = {  # type: ignore[no-redef]
         "answer": response.content,
         "sources": sources,
         "tokens_used": response.tokens_used,
@@ -326,11 +327,11 @@ async def quick_query(
 
 
 @router.delete("/cache/{question_hash}")
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def invalidate_cache(
     question_hash: str,
     cache: FromDishka[ICacheService],
-) -> dict:
+) -> dict[str, str]:
     """Invalidate a cached query result."""
     key = f"openarg:query:{question_hash}"
     await cache.delete(key)
@@ -349,13 +350,13 @@ def _validate_ws_api_key(websocket: WebSocket) -> bool:
 
 
 @router.websocket("/ws/stream")
-@inject
+@inject  # type: ignore[untyped-decorator]
 async def stream_query(
     websocket: WebSocket,
     llm: FromDishka[ILLMProvider],
     embedding: FromDishka[IEmbeddingProvider],
     vector_search: FromDishka[IVectorSearch],
-):
+) -> None:
     """WebSocket endpoint for streaming query responses."""
     if not _validate_ws_api_key(websocket):
         await websocket.close(code=4401, reason="Invalid or missing API key")

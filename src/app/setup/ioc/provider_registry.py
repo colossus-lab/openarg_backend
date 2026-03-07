@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator, Iterable
+from typing import TYPE_CHECKING
 
 import httpx
 from dishka import Provider, Scope, make_async_container, provide
@@ -17,10 +18,6 @@ from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.connectors.staff import IStaffConnector
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
-from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
-from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
-from app.domain.ports.search.vector_search import IVectorSearch
-from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmbeddingService
 from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdapter
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
@@ -51,41 +48,47 @@ from app.infrastructure.persistence_sqla.provider import (
     get_async_session_factory,
     get_main_async_session,
 )
-from app.setup.config.settings import AppSettings
+
+if TYPE_CHECKING:
+    from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
+    from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+    from app.domain.ports.search.vector_search import IVectorSearch
+    from app.domain.ports.user.user_repository import IUserRepository
+    from app.setup.config.settings import AppSettings
 
 
-class SettingsProvider(Provider):
+class SettingsProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self._settings = settings
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def settings(self) -> AppSettings:
         return self._settings
 
 
-class DatabaseProvider(Provider):
+class DatabaseProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def dsn(self, settings: AppSettings) -> PostgresDsn:
         return PostgresDsn(url=settings.postgres.dsn)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def engine_config(self, settings: AppSettings) -> SqlaEngineConfig:
         return SqlaEngineConfig.from_settings(settings.postgres, settings.sqla)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     async def engine(self, config: SqlaEngineConfig) -> AsyncEngine:
-        return await get_async_engine(config)
+        return await get_async_engine(config)  # type: ignore[no-any-return]
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def session_factory(self, engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-        return get_async_session_factory(engine)
+        return get_async_session_factory(engine)  # type: ignore[no-any-return]
 
-    @provide(scope=Scope.REQUEST)
+    @provide(scope=Scope.REQUEST)  # type: ignore[untyped-decorator]
     async def session(
         self, factory: async_sessionmaker[AsyncSession]
     ) -> AsyncIterator[MainAsyncSession]:
@@ -93,22 +96,22 @@ class DatabaseProvider(Provider):
             yield session
 
 
-class DatasetProvider(Provider):
+class DatasetProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def dataset_repository(self, session: MainAsyncSession) -> IDatasetRepository:
         return DatasetRepositorySQLA(session)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def vector_search(self, session: MainAsyncSession) -> IVectorSearch:
         return PgVectorSearchAdapter(session)
 
 
-class LLMProvider(Provider):
+class LLMProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def llm_provider(self, settings: AppSettings) -> ILLMProvider:
         return FallbackLLMAdapter(
             primary=GeminiLLMAdapter(
@@ -121,7 +124,7 @@ class LLMProvider(Provider):
             ),
         )
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def embedding_provider(self, settings: AppSettings, cache: ICacheService) -> IEmbeddingProvider:
         base = GeminiEmbeddingAdapter(
             api_key=settings.gemini.API_KEY,
@@ -131,55 +134,55 @@ class LLMProvider(Provider):
         return CachedEmbeddingService(base=base, cache=cache)
 
 
-class DataSourceProvider(Provider):
+class DataSourceProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def datos_gob_ar(self, settings: AppSettings) -> DatosGobArAdapter:
         return DatosGobArAdapter(base_url=settings.scraper.DATOS_GOB_AR_BASE_URL)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def caba(self, settings: AppSettings) -> CABADataAdapter:
         return CABADataAdapter(base_url=settings.scraper.CABA_BASE_URL)
 
 
-class CacheProvider(Provider):
+class CacheProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def cache_service(self) -> ICacheService:
         redis_url = os.getenv("REDIS_CACHE_URL", "redis://localhost:6379/2")
         return RedisCacheAdapter(redis_url=redis_url)
 
 
-class SandboxProvider(Provider):
+class SandboxProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def sql_sandbox(self) -> ISQLSandbox:
         return PgSandboxAdapter()
 
 
-class UserProvider(Provider):
+class UserProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def user_repository(self, session: MainAsyncSession) -> IUserRepository:
         return UserRepositorySQLA(session)
 
 
-class ChatProvider(Provider):
+class ChatProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def chat_repository(self, session: MainAsyncSession) -> IChatRepository:
         return ChatRepositorySQLA(session)
 
 
-class HttpClientProvider(Provider):
+class HttpClientProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def http_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             timeout=15.0,
@@ -189,20 +192,20 @@ class HttpClientProvider(Provider):
         )
 
 
-class SemanticCacheProvider(Provider):
+class SemanticCacheProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def semantic_cache(
         self, session_factory: async_sessionmaker[AsyncSession]
     ) -> SemanticCache:
         return SemanticCache(session_factory=session_factory)
 
 
-class MonitoringProvider(Provider):
+class MonitoringProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def health_check_service(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -216,26 +219,26 @@ class MonitoringProvider(Provider):
         )
 
 
-class ConnectorProvider(Provider):
+class ConnectorProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def series_tiempo(self, http_client: httpx.AsyncClient) -> ISeriesTiempoConnector:
         return SeriesTiempoAdapter(http_client=http_client)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def argentina_datos(self, http_client: httpx.AsyncClient) -> IArgentinaDatosConnector:
         return ArgentinaDatosAdapter(http_client=http_client)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def georef(self, settings: AppSettings) -> IGeorefConnector:
         return GeorefAdapter(base_url=settings.scraper.GEOREF_BASE_URL)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def ckan_search(self, http_client: httpx.AsyncClient) -> ICKANSearchConnector:
         return CKANSearchAdapter(http_client=http_client)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def sesiones(
         self,
         settings: AppSettings,
@@ -248,27 +251,27 @@ class ConnectorProvider(Provider):
         adapter._ensure_loaded()
         return adapter
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def ddjj(self) -> DDJJAdapter:
         adapter = DDJJAdapter()
         adapter._ensure_loaded()
         return adapter
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def staff(
         self, session_factory: async_sessionmaker[AsyncSession],
     ) -> IStaffConnector:
         return StaffAdapter(session_factory=session_factory)
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def bcra(self) -> BCRAAdapter:
         return BCRAAdapter()
 
 
-class ApplicationProvider(Provider):
+class ApplicationProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide
+    @provide  # type: ignore[untyped-decorator]
     def smart_query_service(
         self,
         llm: ILLMProvider,

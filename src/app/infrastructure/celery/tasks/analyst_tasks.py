@@ -10,8 +10,9 @@ import json
 import logging
 import os
 import time
+from typing import Any
 
-import google.generativeai as genai
+import google.generativeai as genai  # type: ignore[import-untyped]
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
@@ -24,8 +25,8 @@ from app.prompts import load_prompt
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="openarg.analyze_query", bind=True, max_retries=2, soft_time_limit=600, time_limit=720)
-def analyze_query(self, query_id: str, question: str):
+@celery_app.task(name="openarg.analyze_query", bind=True, max_retries=2, soft_time_limit=600, time_limit=720)  # type: ignore[misc]
+def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
     """
     Pipeline completo de análisis:
     1. Planner decide qué datasets necesita
@@ -45,11 +46,11 @@ def analyze_query(self, query_id: str, question: str):
                 {"id": query_id},
             )
 
-        genai.configure(api_key=gemini_key)
-        planner_model = genai.GenerativeModel(
+        genai.configure(api_key=gemini_key)  # type: ignore[attr-defined]
+        planner_model = genai.GenerativeModel(  # type: ignore[attr-defined]
             "gemini-2.5-flash",
             system_instruction=load_prompt("celery_planner"),
-            generation_config=genai.types.GenerationConfig(
+            generation_config=genai.types.GenerationConfig(  # type: ignore[attr-defined]
                 temperature=0.3,
                 max_output_tokens=1024,
                 response_mime_type="application/json",
@@ -80,7 +81,7 @@ def analyze_query(self, query_id: str, question: str):
 
         # --- STEP 2: Hybrid search (cosine + BM25 RRF) for relevant datasets ---
         logger.info(f"[{query_id}] Searching datasets (hybrid)...")
-        embed_resp = genai.embed_content(
+        embed_resp = genai.embed_content(  # type: ignore[attr-defined]
             model="models/gemini-embedding-001",
             content=question,
             output_dimensionality=768,
@@ -166,7 +167,7 @@ def analyze_query(self, query_id: str, question: str):
                 )
             return {"error": "no_datasets_found"}
 
-        datasets_info = []
+        datasets_info: list[dict[str, Any]] = []
         for row in results:
             datasets_info.append({
                 "id": row.dataset_id,
@@ -189,7 +190,7 @@ def analyze_query(self, query_id: str, question: str):
                 {"id": query_id},
             )
 
-        data_context = []
+        data_context: list[str] = []
         for ds in datasets_info:
             with engine.begin() as conn:
                 cached = conn.execute(
@@ -239,13 +240,13 @@ def analyze_query(self, query_id: str, question: str):
         # --- STEP 4: Analyst generates answer ---
         logger.info(f"[{query_id}] Analyzing...")
         context_str = "\n---\n".join(data_context)
-        analyst_model = genai.GenerativeModel(
+        analyst_model = genai.GenerativeModel(  # type: ignore[attr-defined]
             "gemini-2.5-flash",
             system_instruction=load_prompt("celery_analyst"),
         )
         analyst_response = analyst_model.generate_content(
             f"Pregunta: {question}\n\nDatos disponibles:\n{context_str}",
-            generation_config=genai.types.GenerationConfig(
+            generation_config=genai.types.GenerationConfig(  # type: ignore[attr-defined]
                 temperature=0.1,
                 max_output_tokens=4096,
             ),
