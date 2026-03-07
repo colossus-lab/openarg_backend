@@ -1014,10 +1014,11 @@ class SmartQueryService:
         action = params.get("action", "search")
         name = params.get("name", "")
 
-        if action == "get_by_legislator" and name:
+        if (action in ("get_by_legislator", "count") and name) or name:
+            # Always fetch full list — it includes the count and the names.
+            # Using get_by_legislator ensures the LLM gets the detail it
+            # needs regardless of whether the user asked "cuántos" or "quiénes".
             result = await self._staff.get_by_legislator(name)
-        elif action == "count" and name:
-            result = await self._staff.count_by_legislator(name)
         elif action == "changes":
             result = await self._staff.get_changes(name=name or None)
         elif action == "stats":
