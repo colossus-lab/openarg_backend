@@ -1348,6 +1348,102 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.75,
         "description": "Catalogo de datos abiertos",
     },
+
+    # ── Composite "datasets de [tema]" → search_ckan ─────────
+    # These override per-topic sandbox routes when the user
+    # explicitly asks for "datasets" of a given topic.
+    # Include "datasets de X" variant (with preposition) since
+    # normalize_query keeps "de" and keyword matching is contiguous.
+    "datasets de educacion": {
+        "action": "search_ckan",
+        "params": {"query": "educación", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de educacion en datos.gob.ar",
+    },
+    "datasets de salud": {
+        "action": "search_ckan",
+        "params": {"query": "salud", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de salud en datos.gob.ar",
+    },
+    "datasets de transporte": {
+        "action": "search_ckan",
+        "params": {"query": "transporte", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de transporte en datos.gob.ar",
+    },
+    "datasets de energia": {
+        "action": "search_ckan",
+        "params": {"query": "energía", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de energia en datos.gob.ar",
+    },
+    "datasets de seguridad": {
+        "action": "search_ckan",
+        "params": {"query": "seguridad", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de seguridad en datos.gob.ar",
+    },
+    "datasets de ambiente": {
+        "action": "search_ckan",
+        "params": {"query": "ambiente", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de ambiente en datos.gob.ar",
+    },
+    "datasets de justicia": {
+        "action": "search_ckan",
+        "params": {"query": "justicia", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de justicia en datos.gob.ar",
+    },
+    "datasets de cultura": {
+        "action": "search_ckan",
+        "params": {"query": "cultura", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de cultura en datos.gob.ar",
+    },
+    "datasets de empleo": {
+        "action": "search_ckan",
+        "params": {"query": "empleo", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de empleo en datos.gob.ar",
+    },
+    "datasets de genero": {
+        "action": "search_ckan",
+        "params": {"query": "género", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de genero en datos.gob.ar",
+    },
+    "datasets de economia": {
+        "action": "search_ckan",
+        "params": {"query": "economía", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de economia en datos.gob.ar",
+    },
+    "datasets de telecomunicaciones": {
+        "action": "search_ckan",
+        "params": {"query": "telecomunicaciones", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de telecomunicaciones en datos.gob.ar",
+    },
+    "datasets de vivienda": {
+        "action": "search_ckan",
+        "params": {"query": "vivienda", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de vivienda en datos.gob.ar",
+    },
+    "datasets de presupuesto": {
+        "action": "search_ckan",
+        "params": {"query": "presupuesto", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets de presupuesto en datos.gob.ar",
+    },
+    "datasets agro": {
+        "action": "search_ckan",
+        "params": {"query": "agropecuario", "portalId": "nacional", "rows": 20},
+        "confidence": 0.95,
+        "description": "Datasets agropecuarios en datos.gob.ar",
+    },
 }
 
 
@@ -1371,8 +1467,7 @@ DOMAIN_PATTERNS: list[DomainPattern] = [
     DomainPattern(re.compile(r"\bjusticia\b", re.IGNORECASE), "justicia", "Portal de datos de Justicia"),
     DomainPattern(re.compile(r"\bagro\b|\bagroindustria\b|\bagropecuari\w*\b", re.IGNORECASE), "agroindustria", "Portal de datos de Agroindustria"),
     DomainPattern(re.compile(r"\btransporte\b", re.IGNORECASE), "transporte", "Portal de datos de Transporte"),
-    DomainPattern(re.compile(r"\bambiente\b|\bmedioambient\w*\b", re.IGNORECASE), "ambiente", "Portal de datos de Ambiente"),
-    DomainPattern(re.compile(r"\bacumar\b", re.IGNORECASE), "acumar", "Portal de datos de ACUMAR"),
+    DomainPattern(re.compile(r"\bambiente\b|\bmedioambient\w*\b|\bacumar\b", re.IGNORECASE), "ambiente", "Portal de datos de Ambiente"),
     DomainPattern(re.compile(r"\bcultura\b", re.IGNORECASE), "cultura", "Portal de datos de Cultura"),
     DomainPattern(re.compile(r"\bproduccion\b", re.IGNORECASE), "produccion", "Portal de datos de Produccion"),
     DomainPattern(re.compile(r"\bmodernizacion\b", re.IGNORECASE), "modernizacion", "Portal de Modernizacion"),
@@ -1394,10 +1489,7 @@ DOMAIN_PATTERNS: list[DomainPattern] = [
     DomainPattern(re.compile(r"\bjujuy\b", re.IGNORECASE), "jujuy", "Portal de datos de Jujuy"),
     DomainPattern(re.compile(r"\bsalta\b", re.IGNORECASE), "salta", "Portal de datos de Salta"),
     DomainPattern(re.compile(r"\bla plata\b", re.IGNORECASE), "la_plata", "Portal de datos de La Plata"),
-    DomainPattern(re.compile(r"\bcorrientes\b", re.IGNORECASE), "corrientes", "Portal de datos de Corrientes"),
-    DomainPattern(re.compile(r"\bpami\b", re.IGNORECASE), "pami", "Portal de datos de PAMI"),
-    DomainPattern(re.compile(r"\bministerio\s+(?:del\s+)?interior\b|\bmininterior\b", re.IGNORECASE), "mininterior", "Portal de datos del Ministerio del Interior"),
-    DomainPattern(re.compile(r"\bmagyp\b|\bagricultura\b|\bganaderia\b", re.IGNORECASE), "magyp", "Portal de datos de Agricultura y Ganaderia"),
+    DomainPattern(re.compile(r"\bmagyp\b|\bagricultura\b|\bganaderia\b", re.IGNORECASE), "agroindustria", "Portal de datos de Agroindustria"),
     # Institucional
     DomainPattern(re.compile(r"\bdiputados\b|\bcongreso\b|\bcamara\b", re.IGNORECASE), "diputados", "Portal de Camara de Diputados"),
     DomainPattern(re.compile(r"\barsat\b", re.IGNORECASE), "arsat", "Portal de ARSAT"),
