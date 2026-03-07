@@ -20,13 +20,13 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/hacienda/buenos-aires-compras"
+BASE_URL = "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/ministerio-de-economia-y-finanzas/buenos-aires-compras"
 
 BAC_FILES = {
-    "tenders": f"{BASE_URL}/tenders.csv",
+    "tenders": f"{BASE_URL}/tender.csv",
     "parties": f"{BASE_URL}/parties.csv",
     "contracts": f"{BASE_URL}/contracts.csv",
-    "awards": f"{BASE_URL}/awards.csv",
+    "awards": f"{BASE_URL}/award.csv",
 }
 
 MAX_ROWS = 500_000
