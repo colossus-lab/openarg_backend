@@ -43,7 +43,7 @@ PORTAL_URLS = {
 }
 
 
-PORTALS_SKIP_SSL = {"salud"}
+PORTALS_SKIP_SSL = {"salud", "ambiente"}
 
 class PortalUnavailableError(Exception):
     """Portal is down/maintenance — do NOT retry."""
