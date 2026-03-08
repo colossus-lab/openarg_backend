@@ -23,17 +23,22 @@ ALL_PORTALS = [
     "cultura",
     "pami",
     "arsat",
-    "csjn",
+    "desarrollo_social",
+    "turismo",
+    "ssn",
     # CABA
     "caba",
+    "legislatura_caba",
     # Provincias
     "buenos_aires_prov",
     "cordoba_prov",
+    "cordoba_estadistica",
     "mendoza",
     "entre_rios",
     "neuquen_legislatura",
     "tucuman",
     "chaco",
+    "misiones",
     # Municipios
     "ciudad_mendoza",
     "corrientes",
@@ -87,6 +92,7 @@ def create_celery() -> Celery:
         "openarg.reindex_all_embeddings": {"queue": "embedding"},
         # New data source tasks (dedicated ingest queue)
         "openarg.ingest_presupuesto": {"queue": "ingest"},
+        "openarg.ingest_presupuesto_dimensiones": {"queue": "ingest"},
         "openarg.snapshot_bcra": {"queue": "ingest"},
         "openarg.ingest_bac": {"queue": "ingest"},
         "openarg.ingest_indec": {"queue": "ingest"},
@@ -139,16 +145,21 @@ def create_celery() -> Celery:
         "mininterior": (4, 30),
         "cultura": (4, 35),
         "pami": (4, 40),
-        "csjn": (4, 45),
+        "desarrollo_social": (4, 45),
         "mendoza": (4, 50),
         "entre_rios": (4, 55),
-        # 05:00 – 05:20 (provinces + municipalities)
+        # 05:00 – 05:35 (provinces + municipalities)
         "neuquen_legislatura": (5, 0),
         "tucuman": (5, 5),
         "chaco": (5, 10),
         "arsat": (5, 15),
-        "ciudad_mendoza": (5, 20),
-        "corrientes": (5, 25),
+        "misiones": (5, 20),
+        "ciudad_mendoza": (5, 25),
+        "corrientes": (5, 30),
+        "turismo": (5, 35),
+        "ssn": (5, 40),
+        "legislatura_caba": (5, 45),
+        "cordoba_estadistica": (5, 50),
     }
     app.conf.beat_schedule = {
         f"scrape-{portal.replace('_', '-')}": {
@@ -198,6 +209,11 @@ def create_celery() -> Celery:
         "ingest-presupuesto": {
             "task": "openarg.ingest_presupuesto",
             "schedule": crontab(day_of_month=5, hour=0, minute=0),  # Monthly, day 5
+            "options": {"queue": "ingest"},
+        },
+        "ingest-presupuesto-dimensiones": {
+            "task": "openarg.ingest_presupuesto_dimensiones",
+            "schedule": crontab(day_of_month=5, hour=0, minute=30),  # Monthly, day 5, 00:30
             "options": {"queue": "ingest"},
         },
         "snapshot-bcra": {

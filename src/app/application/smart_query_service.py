@@ -268,11 +268,17 @@ _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
 
 # ── INDEC fallback detection pattern ─────────────────────────
 _INDEC_PATTERN = re.compile(
-    r"(indec|ipc|inflaci[oó]n\s+mensual|emae|actividad\s+econ[oó]mica"
-    r"|pib\s+trimestral|comercio\s+exterior|exportacion|importacion"
-    r"|empleo\s+eph|canasta\s+b[aá]sica|salarios?\s+indec"
-    r"|pobreza|indigencia|construcci[oó]n\s+isac|industria\s+ipi"
-    r"|supermercados?\s+indec|turismo\s+internacional)",
+    r"(indec|ipc|inflaci[oó]n|emae|actividad\s+econ[oó]mica"
+    r"|pib|producto\s+bruto|comercio\s+exterior|exportaci[oó]n|importaci[oó]n|balanza\s+comercial"
+    r"|empleo|desempleo|eph|mercado\s+laboral|trabajo"
+    r"|canasta\s+b[aá]sica|cbt|cba"
+    r"|salario|sueldo"
+    r"|pobreza|indigencia"
+    r"|construcci[oó]n|isac|industria|ipi|producci[oó]n\s+industrial"
+    r"|supermercado"
+    r"|turismo"
+    r"|distribuci[oó]n\s+del\s+ingreso|gini|decil"
+    r"|balance\s+de\s+pagos|cuenta\s+corriente)",
     re.IGNORECASE,
 )
 
@@ -1395,21 +1401,22 @@ class SmartQueryService:
 
         query_lower = nl_query.lower()
         keyword_map = {
+            # IDs deben coincidir con INDEC_DATASETS en indec_tasks.py
             "ipc": ["ipc", "inflacion", "precios"],
             "emae": ["emae", "actividad economica", "actividad económica"],
             "pib": ["pib", "producto bruto", "producto interno"],
-            "comercio_exterior": ["exportacion", "importacion", "comercio exterior"],
-            "empleo": ["empleo", "eph", "desempleo", "trabajo"],
+            "comercio_exterior": ["exportacion", "importacion", "comercio exterior", "balanza comercial"],
+            "eph_tasas": ["empleo", "eph", "desempleo", "trabajo", "mercado laboral"],
             "canasta_basica": ["canasta basica", "canasta básica", "cbt", "cba"],
-            "salarios": ["salario", "salarios"],
-            "pobreza": ["pobreza", "indigencia"],
-            "construccion": ["construccion", "construcción", "isac"],
-            "industria": ["industria", "ipi", "manufacturero"],
+            "salarios_indice": ["salario", "salarios", "sueldo"],
+            "pobreza_informe": ["pobreza", "indigencia"],
+            "pobreza_historica": ["pobreza histor", "indigencia histor"],
+            "isac": ["construccion", "construcción", "isac"],
+            "ipi_manufacturero": ["industria", "ipi", "manufacturero", "produccion industrial"],
             "supermercados": ["supermercado"],
-            "turismo": ["turismo"],
-            "ipc_regiones": ["ipc region", "inflacion region"],
-            "pib_provincial": ["pib provincial"],
-            "uso_tiempo": ["uso del tiempo"],
+            "turismo_receptivo": ["turismo"],
+            "distribucion_ingreso": ["distribucion del ingreso", "distribución del ingreso", "gini", "decil"],
+            "balance_pagos": ["balance de pagos", "balanza de pagos", "cuenta corriente"],
         }
 
         matched_ids = []
@@ -1427,7 +1434,12 @@ class SmartQueryService:
                 continue
 
             try:
-                df = await _asyncio.to_thread(_download_and_parse, ds_info["url"])
+                sheets = await _asyncio.to_thread(_download_and_parse, ds_info["url"])
+                if not sheets:
+                    continue
+
+                # Tomar la primera hoja con datos
+                df = next(iter(sheets.values()))
                 if df is None or df.empty:
                     continue
 

@@ -17,6 +17,7 @@ import httpx
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
+from app.infrastructure.adapters.connectors.ckan_search_adapter import PORTALS
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.infrastructure.resilience.circuit_breaker import get_circuit_breaker
@@ -29,48 +30,17 @@ _USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-PORTAL_URLS = {
-    # Nacionales
-    "datos_gob_ar": "https://datos.gob.ar/api/3/action",
-    "diputados": "https://datos.hcdn.gob.ar/api/3/action",
-    "justicia": "https://datos.jus.gob.ar/api/3/action",
-    # CABA
-    "caba": "https://data.buenosaires.gob.ar/api/3/action",
-    # Provincias
-    "buenos_aires_prov": "https://catalogo.datos.gba.gob.ar/api/3/action",
-    "cordoba_prov": "https://datosgestionabierta.cba.gov.ar/api/3/action",
-    "mendoza": "https://datosabiertos.mendoza.gov.ar/api/3/action",
-    "entre_rios": "https://datos.entrerios.gov.ar/api/3/action",
-    "neuquen_legislatura": "https://datos.legislaturaneuquen.gob.ar/api/3/action",
-    "tucuman": "https://sep.tucuman.gob.ar/api/3/action",
-    "chaco": "https://datosabiertos.chaco.gob.ar/api/3/action",
-    # Nacionales sectoriales
-    "arsat": "https://datos.arsat.com.ar/api/3/action",
-    "energia": "http://datos.energia.gob.ar/api/3/action",  # HTTP only (no HTTPS)
-    "produccion": "https://datos.produccion.gob.ar/api/3/action",
-    "magyp": "https://datos.magyp.gob.ar/api/3/action",
-    "salud": "https://datos.salud.gob.ar/api/3/action",
-    "transporte": "https://datos.transporte.gob.ar/api/3/action",
-    "acumar": "https://datos.acumar.gob.ar/api/3/action",
-    "mininterior": "https://datos.mininterior.gob.ar/api/3/action",
-    "cultura": "https://datos.cultura.gob.ar/api/3/action",
-    "pami": "https://datos.pami.org.ar/api/3/action",
-    # Nuevos portales
-    "csjn": "https://datos.csjn.gov.ar/api/3/action",
-    # Municipios
-    "ciudad_mendoza": "https://datos.ciudaddemendoza.gov.ar/api/3/action",
-    "corrientes": "https://datos.ciudaddecorrientes.gov.ar/api/3/action",
+# Generado automáticamente desde PORTALS (ckan_search_adapter.py) — fuente única de verdad.
+# Aliases: el scraper guarda datos en la DB con estos IDs, que difieren del search adapter.
+_SCRAPER_ID_ALIASES = {
+    "nacional": "datos_gob_ar",
+    "pba": "buenos_aires_prov",
+    "entrerios": "entre_rios",
 }
-
-# Portals removed (verified offline as of Mar 2026):
-#   santa_fe        — datos.santafe.gob.ar: SSL broken, server drops connection
-#   modernizacion   — datos.modernizacion.gob.ar: DNS resolves but no server
-#   ambiente        — datos.ambiente.gob.ar: returns HTML redirect loop, CKAN dead
-#   rio_negro       — datos.rionegro.gov.ar: DNS dead
-#   salta           — datos.salta.gob.ar: DNS dead
-#   la_plata        — datos.laplata.gob.ar: DNS dead
-#   cordoba_muni    — gobiernoabierto.cordoba.gob.ar: returns HTML 404 on API endpoints
-#   jujuy           — migrated from CKAN to DKAN at datos.gajujuy.gob.ar (handled by dkan_tasks)
+PORTAL_URLS = {
+    _SCRAPER_ID_ALIASES.get(p["id"], p["id"]): f'{p["base_url"]}{p["api_path"]}'
+    for p in PORTALS
+}
 
 
 PORTALS_SKIP_SSL = {"salud"}
@@ -326,28 +296,20 @@ def scrape_all_portals():
 
 
 def _portal_display_name(portal: str) -> str:
-    """Nombre legible del portal para chunks."""
-    names = {
-        "datos_gob_ar": "Datos Abiertos Argentina (Nacional)",
-        "diputados": "Cámara de Diputados de la Nación",
-        "justicia": "Datos Abiertos de Justicia (incl. Oficina Anticorrupción)",
-        "caba": "Buenos Aires Ciudad (CABA)",
-        "buenos_aires_prov": "Buenos Aires Provincia",
-        "cordoba_prov": "Córdoba Provincia",
-        "santa_fe": "Santa Fe",
-        "mendoza": "Mendoza",
-        "entre_rios": "Entre Ríos",
-        "neuquen_legislatura": "Legislatura de Neuquén",
-        "modernizacion": "Modernización",
-        "ambiente": "Ambiente",
-        "arsat": "ARSAT",
-        "rio_negro": "Río Negro",
-        "jujuy": "Jujuy",
-        "salta": "Salta",
-        "cordoba_muni": "Córdoba Ciudad",
-        "la_plata": "La Plata",
-    }
-    return names.get(portal, portal)
+    """Nombre legible del portal para chunks. Usa PORTALS como fuente.
+
+    Soporta tanto IDs de search adapter (nacional, pba, entrerios)
+    como IDs de DB/scraper (datos_gob_ar, buenos_aires_prov, entre_rios).
+    """
+    _names = {p["id"]: p["name"] for p in PORTALS}
+    if portal in _names:
+        return _names[portal]
+    # Reverse alias: DB ID → search adapter ID → name
+    _reverse = {v: k for k, v in _SCRAPER_ID_ALIASES.items()}
+    canonical = _reverse.get(portal)
+    if canonical and canonical in _names:
+        return _names[canonical]
+    return portal
 
 
 def _get_data_statistics(engine, dataset_id: str) -> str | None:

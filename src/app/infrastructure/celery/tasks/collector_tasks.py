@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -91,6 +92,100 @@ def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -
     return key
 
 
+def _upload_file_to_s3(file_path: str, portal: str, dataset_id: str, filename: str) -> str:
+    """Upload a file from disk to S3, retorna la key."""
+    import boto3
+
+    bucket = os.getenv("S3_BUCKET", "openarg-datasets")
+    region = os.getenv("AWS_REGION", "us-east-1")
+    s3 = boto3.client("s3", region_name=region)
+    key = f"datasets/{portal}/{dataset_id}/{filename}"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
+    s3.upload_file(
+        file_path,
+        bucket,
+        key,
+        ExtraArgs={
+            "ContentType": content_type,
+            "ContentDisposition": f'attachment; filename="{filename}"',
+        },
+    )
+    return key
+
+
+def _stream_download(url: str, dest_path: str, verify_ssl: bool = True, max_bytes: int = 500 * 1024 * 1024) -> int:
+    """Stream-download a URL to a file on disk. Returns total bytes written.
+
+    Raises ValueError if the download exceeds max_bytes.
+    """
+    import httpx
+
+    total = 0
+    with httpx.Client(timeout=180.0, verify=verify_ssl) as client:
+        with client.stream("GET", url, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            with open(dest_path, "wb") as f:
+                for chunk in resp.iter_bytes(chunk_size=256 * 1024):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"file_too_large: {total}+ bytes (limit {max_bytes})")
+                    f.write(chunk)
+    return total
+
+
+def _detect_csv_params(file_path: str) -> dict:
+    """Read first few lines to detect encoding and separator."""
+    params: dict = {"on_bad_lines": "skip"}
+
+    # Try UTF-8 first
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            header = f.readline()
+        params["encoding"] = "utf-8"
+    except UnicodeDecodeError:
+        params["encoding"] = "latin-1"
+        with open(file_path, "r", encoding="latin-1") as f:
+            header = f.readline()
+
+    # Auto-detect separator
+    if header.count(";") > header.count(","):
+        params["sep"] = ";"
+
+    return params
+
+
+def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str]]:
+    """Load a CSV file into PostgreSQL in chunks. Returns (total_rows, columns)."""
+    csv_params = _detect_csv_params(file_path)
+    chunk_size = 50_000
+    total_rows = 0
+    columns: list[str] = []
+
+    reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
+    for i, chunk_df in enumerate(reader):
+        # First chunk: detect single-column CSVs and retry with semicolon
+        if i == 0 and chunk_df.shape[1] <= 1 and "sep" not in csv_params:
+            reader.close()
+            csv_params["sep"] = ";"
+            reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
+            for j, retry_df in enumerate(reader):
+                mode = "replace" if j == 0 else "append"
+                retry_df.to_sql(table_name, engine, if_exists=mode, index=False)
+                total_rows += len(retry_df)
+                if j == 0:
+                    columns = list(retry_df.columns)
+            return total_rows, columns
+
+        mode = "replace" if i == 0 else "append"
+        chunk_df.to_sql(table_name, engine, if_exists=mode, index=False)
+        total_rows += len(chunk_df)
+        if i == 0:
+            columns = list(chunk_df.columns)
+
+    return total_rows, columns
+
+
 def _set_error_status(engine, dataset_id: str, error_msg: str):
     """Mark cached_datasets as permanently_failed for deterministic errors.
 
@@ -113,7 +208,7 @@ def _set_error_status(engine, dataset_id: str, error_msg: str):
         logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
 
 
-@celery_app.task(name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=300, time_limit=360)
+@celery_app.task(name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=600, time_limit=720)
 def collect_dataset(self, dataset_id: str):
     """
     Descarga un dataset real, lo parsea y lo guarda como tabla SQL.
@@ -188,238 +283,267 @@ def collect_dataset(self, dataset_id: str):
                 {"did": dataset_id, "tn": table_name},
             )
 
-        # Download (with size guard: reject files > 500MB)
+        # Stream download to temp file (memory-safe for large files)
         max_download_bytes = 500 * 1024 * 1024  # 500 MB
-        with httpx.Client(timeout=120.0, verify=portal not in PORTALS_SKIP_SSL) as client:
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}", dir="/tmp")
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        file_size = 0
+
+        try:
             # HEAD to check Content-Length before downloading
             try:
-                head = client.head(download_url, follow_redirects=True)
-                content_length = int(head.headers.get("content-length", 0))
-                if content_length > max_download_bytes:
-                    logger.warning(f"Dataset {dataset_id} too large: {content_length} bytes")
-                    _set_error_status(engine, dataset_id, f"file_too_large: {content_length} bytes")
-                    return {"error": f"file_too_large: {content_length} bytes"}
+                with httpx.Client(timeout=30.0, verify=portal not in PORTALS_SKIP_SSL) as client:
+                    head = client.head(download_url, follow_redirects=True)
+                    content_length = int(head.headers.get("content-length", 0))
+                    if content_length > max_download_bytes:
+                        logger.warning(f"Dataset {dataset_id} too large: {content_length} bytes")
+                        _set_error_status(engine, dataset_id, f"file_too_large: {content_length} bytes")
+                        return {"error": f"file_too_large: {content_length} bytes"}
             except Exception:
-                pass  # HEAD may fail; proceed with GET
+                pass  # HEAD may fail; proceed with stream download
 
-            resp = client.get(download_url, follow_redirects=True)
-            resp.raise_for_status()
+            file_size = _stream_download(
+                download_url, tmp_path,
+                verify_ssl=portal not in PORTALS_SKIP_SSL,
+                max_bytes=max_download_bytes,
+            )
 
-            if len(resp.content) > max_download_bytes:
-                logger.warning(f"Dataset {dataset_id} download too large: {len(resp.content)} bytes")
-                _set_error_status(engine, dataset_id, f"file_too_large: {len(resp.content)} bytes")
-                return {"error": f"file_too_large: {len(resp.content)} bytes"}
-
-        # Upload raw file to S3
-        s3_key = None
-        try:
-            filename = f"{source_id}.{fmt}"
-            s3_key = _upload_to_s3(resp.content, portal, dataset_id, filename)
-            logger.info(f"Uploaded to S3: {s3_key}")
-        except Exception:
-            logger.warning(f"S3 upload failed for {dataset_id}, continuing without S3", exc_info=True)
-
-        # Parse with pandas
-        df: pd.DataFrame
-        if fmt == "csv" or fmt == "txt":
+            # Upload raw file to S3 (from disk, not memory)
+            s3_key = None
             try:
-                df = pd.read_csv(io.BytesIO(resp.content), encoding="utf-8", on_bad_lines="skip")
-            except UnicodeDecodeError:
-                df = pd.read_csv(io.BytesIO(resp.content), encoding="latin-1", on_bad_lines="skip")
-            if df.shape[1] <= 1:
-                # Retry with semicolon separator
+                filename = f"{source_id}.{fmt}"
+                s3_key = _upload_file_to_s3(tmp_path, portal, dataset_id, filename)
+                logger.info(f"Uploaded to S3: {s3_key}")
+            except Exception:
+                logger.warning(f"S3 upload failed for {dataset_id}, continuing without S3", exc_info=True)
+
+            # Parse and load into PostgreSQL
+            row_count = 0
+            columns: list[str] = []
+
+            if fmt in ("csv", "txt"):
+                # Chunked CSV loading — never loads full file into memory
+                row_count, columns = _load_csv_chunked(tmp_path, table_name, engine)
+
+            elif fmt == "zip":
+                import zipfile
+                max_decompressed = 500 * 1024 * 1024
                 try:
-                    df = pd.read_csv(io.BytesIO(resp.content), encoding="utf-8", sep=";", on_bad_lines="skip")
-                except UnicodeDecodeError:
-                    df = pd.read_csv(io.BytesIO(resp.content), encoding="latin-1", sep=";", on_bad_lines="skip")
-        elif fmt == "json":
-            try:
-                df = pd.read_json(io.BytesIO(resp.content))
-            except ValueError:
-                # Fallback: try json_normalize for nested JSON
-                raw = json.loads(resp.content)
-                if isinstance(raw, list):
-                    df = pd.json_normalize(raw)
-                elif isinstance(raw, dict):
-                    # Try common wrapper keys
-                    for key in ("data", "results", "records", "features", "rows"):
-                        if key in raw and isinstance(raw[key], list):
-                            df = pd.json_normalize(raw[key])
-                            break
-                    else:
-                        df = pd.json_normalize([raw])
-                else:
-                    raise
-        elif fmt == "geojson":
-            raw = json.loads(resp.content)
-            features = raw.get("features", []) if isinstance(raw, dict) else []
-            if features:
-                # Extract properties from each GeoJSON feature
-                records = []
-                for f in features:
-                    props = f.get("properties", {}) or {}
-                    geom = f.get("geometry") or {}
-                    if geom:
-                        props["geometry_type"] = geom.get("type")
-                        coords = geom.get("coordinates")
-                        if coords:
-                            # Truncate large coordinate strings to avoid huge cells
-                            coord_str = str(coords)
-                            if len(coord_str) > 2000:
-                                coord_str = coord_str[:2000] + "..."
-                            props["geometry_coordinates"] = coord_str
-                    records.append(props)
-                df = pd.DataFrame(records)
-            else:
-                logger.warning(f"GeoJSON {dataset_id}: no features found")
-                _set_error_status(engine, dataset_id, "geojson_no_features")
-                return {"error": "geojson_no_features"}
-        elif fmt == "zip":
-            import zipfile
-            max_decompressed = 500 * 1024 * 1024  # 500 MB decompressed limit
-            try:
-                zf = zipfile.ZipFile(io.BytesIO(resp.content))
-            except zipfile.BadZipFile:
-                logger.warning(f"ZIP {dataset_id}: not a valid ZIP file")
-                _set_error_status(engine, dataset_id, "bad_zip_file")
-                return {"error": "bad_zip_file"}
-            # Check total decompressed size to prevent zip bombs
-            total_size = sum(info.file_size for info in zf.infolist())
-            if total_size > max_decompressed:
-                logger.warning(f"ZIP {dataset_id}: decompressed size {total_size} exceeds limit")
-                _set_error_status(engine, dataset_id, f"zip_too_large: {total_size} bytes decompressed")
-                return {"error": f"zip_too_large: {total_size} bytes"}
-            # Find first parseable file inside the zip
-            parsed = False
-            for name in zf.namelist():
-                lower = name.lower()
-                if lower.endswith(".csv") or lower.endswith(".txt"):
-                    with zf.open(name) as f:
-                        content = f.read()
-                    try:
-                        df = pd.read_csv(io.BytesIO(content), encoding="utf-8", on_bad_lines="skip")
-                    except UnicodeDecodeError:
-                        df = pd.read_csv(io.BytesIO(content), encoding="latin-1", on_bad_lines="skip")
-                    parsed = True
-                    break
-                elif lower.endswith((".xlsx", ".xls")):
-                    with zf.open(name) as f:
-                        content = f.read()
-                    df = pd.read_excel(io.BytesIO(content))
-                    parsed = True
-                    break
-                elif lower.endswith(".geojson"):
-                    with zf.open(name) as f:
-                        content = f.read()
-                    raw_geo = json.loads(content)
-                    features = raw_geo.get("features", []) if isinstance(raw_geo, dict) else []
-                    if features:
-                        records = []
-                        for feat in features:
-                            props = feat.get("properties", {}) or {}
-                            geom = feat.get("geometry") or {}
-                            if geom:
-                                props["geometry_type"] = geom.get("type")
-                            records.append(props)
-                        df = pd.DataFrame(records)
-                    else:
-                        df = pd.json_normalize(raw_geo if isinstance(raw_geo, list) else [raw_geo])
-                    parsed = True
-                    break
-                elif lower.endswith(".json"):
-                    with zf.open(name) as f:
-                        content = f.read()
-                    try:
-                        df = pd.read_json(io.BytesIO(content))
-                    except ValueError:
-                        raw_j = json.loads(content)
-                        if isinstance(raw_j, list):
-                            df = pd.json_normalize(raw_j)
-                        elif isinstance(raw_j, dict):
-                            for k in ("data", "results", "records", "rows"):
-                                if k in raw_j and isinstance(raw_j[k], list):
-                                    df = pd.json_normalize(raw_j[k])
-                                    break
-                            else:
-                                df = pd.json_normalize([raw_j])
+                    zf = zipfile.ZipFile(tmp_path)
+                except zipfile.BadZipFile:
+                    logger.warning(f"ZIP {dataset_id}: not a valid ZIP file")
+                    _set_error_status(engine, dataset_id, "bad_zip_file")
+                    return {"error": "bad_zip_file"}
+                total_size = sum(info.file_size for info in zf.infolist())
+                if total_size > max_decompressed:
+                    logger.warning(f"ZIP {dataset_id}: decompressed size {total_size} exceeds limit")
+                    _set_error_status(engine, dataset_id, f"zip_too_large: {total_size} bytes decompressed")
+                    return {"error": f"zip_too_large: {total_size} bytes"}
+
+                parsed = False
+                for name in zf.namelist():
+                    lower = name.lower()
+                    if lower.endswith((".csv", ".txt")):
+                        # Extract CSV to temp file, then chunked load
+                        csv_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", dir="/tmp")
+                        csv_tmp_path = csv_tmp.name
+                        csv_tmp.close()
+                        try:
+                            with zf.open(name) as zf_entry, open(csv_tmp_path, "wb") as out:
+                                while True:
+                                    block = zf_entry.read(256 * 1024)
+                                    if not block:
+                                        break
+                                    out.write(block)
+                            row_count, columns = _load_csv_chunked(csv_tmp_path, table_name, engine)
+                        finally:
+                            try:
+                                os.unlink(csv_tmp_path)
+                            except OSError:
+                                pass
+                        parsed = True
+                        break
+                    elif lower.endswith((".xlsx", ".xls")):
+                        with zf.open(name) as f:
+                            content = f.read()
+                        df = pd.read_excel(io.BytesIO(content))
+                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        row_count, columns = len(df), list(df.columns)
+                        parsed = True
+                        break
+                    elif lower.endswith(".geojson"):
+                        with zf.open(name) as f:
+                            content = f.read()
+                        raw_geo = json.loads(content)
+                        features = raw_geo.get("features", []) if isinstance(raw_geo, dict) else []
+                        if features:
+                            records = []
+                            for feat in features:
+                                props = feat.get("properties", {}) or {}
+                                geom = feat.get("geometry") or {}
+                                if geom:
+                                    props["geometry_type"] = geom.get("type")
+                                records.append(props)
+                            df = pd.DataFrame(records)
                         else:
-                            continue
-                    parsed = True
-                    break
-            if not parsed:
-                logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
-                _set_error_status(engine, dataset_id, "zip_no_parseable_file")
-                return {"error": "zip_no_parseable_file"}
-        elif fmt in ("xlsx", "xls"):
-            df = pd.read_excel(io.BytesIO(resp.content))
-        elif fmt == "ods":
-            df = pd.read_excel(io.BytesIO(resp.content), engine="odf")
-        elif fmt == "xml":
+                            df = pd.json_normalize(raw_geo if isinstance(raw_geo, list) else [raw_geo])
+                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        row_count, columns = len(df), list(df.columns)
+                        parsed = True
+                        break
+                    elif lower.endswith(".json"):
+                        with zf.open(name) as f:
+                            content = f.read()
+                        try:
+                            df = pd.read_json(io.BytesIO(content))
+                        except ValueError:
+                            raw_j = json.loads(content)
+                            if isinstance(raw_j, list):
+                                df = pd.json_normalize(raw_j)
+                            elif isinstance(raw_j, dict):
+                                for k in ("data", "results", "records", "rows"):
+                                    if k in raw_j and isinstance(raw_j[k], list):
+                                        df = pd.json_normalize(raw_j[k])
+                                        break
+                                else:
+                                    df = pd.json_normalize([raw_j])
+                            else:
+                                continue
+                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        row_count, columns = len(df), list(df.columns)
+                        parsed = True
+                        break
+                if not parsed:
+                    logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
+                    _set_error_status(engine, dataset_id, "zip_no_parseable_file")
+                    return {"error": "zip_no_parseable_file"}
+
+            elif fmt == "json":
+                with open(tmp_path, "rb") as f:
+                    content = f.read()
+                try:
+                    df = pd.read_json(io.BytesIO(content))
+                except ValueError:
+                    raw = json.loads(content)
+                    if isinstance(raw, list):
+                        df = pd.json_normalize(raw)
+                    elif isinstance(raw, dict):
+                        for key in ("data", "results", "records", "features", "rows"):
+                            if key in raw and isinstance(raw[key], list):
+                                df = pd.json_normalize(raw[key])
+                                break
+                        else:
+                            df = pd.json_normalize([raw])
+                    else:
+                        raise
+                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                row_count, columns = len(df), list(df.columns)
+
+            elif fmt == "geojson":
+                with open(tmp_path, "rb") as f:
+                    raw = json.load(f)
+                features = raw.get("features", []) if isinstance(raw, dict) else []
+                if features:
+                    records = []
+                    for feat in features:
+                        props = feat.get("properties", {}) or {}
+                        geom = feat.get("geometry") or {}
+                        if geom:
+                            props["geometry_type"] = geom.get("type")
+                            coords = geom.get("coordinates")
+                            if coords:
+                                coord_str = str(coords)
+                                if len(coord_str) > 2000:
+                                    coord_str = coord_str[:2000] + "..."
+                                props["geometry_coordinates"] = coord_str
+                        records.append(props)
+                    df = pd.DataFrame(records)
+                else:
+                    logger.warning(f"GeoJSON {dataset_id}: no features found")
+                    _set_error_status(engine, dataset_id, "geojson_no_features")
+                    return {"error": "geojson_no_features"}
+                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                row_count, columns = len(df), list(df.columns)
+
+            elif fmt in ("xlsx", "xls"):
+                df = pd.read_excel(tmp_path)
+                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                row_count, columns = len(df), list(df.columns)
+
+            elif fmt == "ods":
+                df = pd.read_excel(tmp_path, engine="odf")
+                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                row_count, columns = len(df), list(df.columns)
+
+            elif fmt == "xml":
+                try:
+                    df = pd.read_xml(tmp_path)
+                except Exception:
+                    logger.warning(f"XML {dataset_id}: pd.read_xml failed, skipping")
+                    _set_error_status(engine, dataset_id, "xml_parse_failed")
+                    return {"error": "xml_parse_failed"}
+                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                row_count, columns = len(df), list(df.columns)
+
+            else:
+                logger.warning(f"Unsupported format: {fmt}")
+                _set_error_status(engine, dataset_id, f"unsupported_format: {fmt}")
+                return {"error": f"unsupported_format: {fmt}"}
+
+            # Update cache status
+            columns_json = json.dumps(columns)
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        UPDATE cached_datasets SET
+                            status = 'ready', row_count = :rows,
+                            columns_json = :cols, size_bytes = :size,
+                            s3_key = :s3key, updated_at = NOW()
+                        WHERE dataset_id = CAST(:did AS uuid)
+                    """),
+                    {
+                        "rows": row_count,
+                        "cols": columns_json,
+                        "size": file_size,
+                        "s3key": s3_key,
+                        "did": dataset_id,
+                    },
+                )
+
+            # Update dataset — track whether this is a new cache for conditional re-embedding
+            with engine.begin() as conn:
+                prev = conn.execute(
+                    text("SELECT is_cached FROM datasets WHERE id = CAST(:id AS uuid)"),
+                    {"id": dataset_id},
+                ).fetchone()
+                was_cached = prev.is_cached if prev else False
+                conn.execute(
+                    text("UPDATE datasets SET is_cached = true, row_count = :rows WHERE id = CAST(:id AS uuid)"),
+                    {"rows": row_count, "id": dataset_id},
+                )
+
+            # Re-embed only on first cache (enriches with sample rows); skip if already embedded
+            if not was_cached:
+                from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+
+                index_dataset_embedding.delay(dataset_id)
+
+            logger.info(f"Dataset {dataset_id} cached: {row_count} rows in table {table_name}")
+            return {
+                "dataset_id": dataset_id,
+                "table_name": table_name,
+                "rows": row_count,
+                "columns": columns,
+                "s3_key": s3_key,
+            }
+
+        finally:
+            # Always clean up temp file
             try:
-                df = pd.read_xml(io.BytesIO(resp.content))
-            except Exception:
-                logger.warning(f"XML {dataset_id}: pd.read_xml failed, skipping")
-                _set_error_status(engine, dataset_id, "xml_parse_failed")
-                return {"error": "xml_parse_failed"}
-        else:
-            logger.warning(f"Unsupported format: {fmt}")
-            _set_error_status(engine, dataset_id, f"unsupported_format: {fmt}")
-            return {"error": f"unsupported_format: {fmt}"}
-
-        # Limit size
-        if len(df) > 500_000:
-            df = df.head(500_000)
-            logger.warning(f"Dataset {dataset_id} truncated to 500k rows")
-
-        # Write to PostgreSQL
-        df.to_sql(table_name, engine, if_exists="replace", index=False)
-
-        # Update cache status
-        columns_json = json.dumps(list(df.columns))
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    UPDATE cached_datasets SET
-                        status = 'ready', row_count = :rows,
-                        columns_json = :cols, size_bytes = :size,
-                        s3_key = :s3key, updated_at = NOW()
-                    WHERE dataset_id = CAST(:did AS uuid)
-                """),
-                {
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "size": len(resp.content),
-                    "s3key": s3_key,
-                    "did": dataset_id,
-                },
-            )
-
-        # Update dataset — track whether this is a new cache for conditional re-embedding
-        with engine.begin() as conn:
-            prev = conn.execute(
-                text("SELECT is_cached FROM datasets WHERE id = CAST(:id AS uuid)"),
-                {"id": dataset_id},
-            ).fetchone()
-            was_cached = prev.is_cached if prev else False
-            conn.execute(
-                text("UPDATE datasets SET is_cached = true, row_count = :rows WHERE id = CAST(:id AS uuid)"),
-                {"rows": len(df), "id": dataset_id},
-            )
-
-        # Re-embed only on first cache (enriches with sample rows); skip if already embedded
-        if not was_cached:
-            from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
-
-            index_dataset_embedding.delay(dataset_id)
-
-        logger.info(f"Dataset {dataset_id} cached: {len(df)} rows in table {table_name}")
-        return {
-            "dataset_id": dataset_id,
-            "table_name": table_name,
-            "rows": len(df),
-            "columns": list(df.columns),
-            "s3_key": s3_key,
-        }
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     except SoftTimeLimitExceeded:
         logger.error(f"Task timed out for dataset {dataset_id}")
