@@ -71,6 +71,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.senado_staff_tasks",
             "app.infrastructure.celery.tasks.georef_tasks",
             "app.infrastructure.celery.tasks.series_tiempo_tasks",
+            "app.infrastructure.celery.tasks.orchestrator_tasks",
         ],
     )
 
@@ -103,6 +104,7 @@ def create_celery() -> Celery:
         "openarg.scrape_senado_staff": {"queue": "scraper"},
         "openarg.ingest_georef": {"queue": "ingest"},
         "openarg.ingest_series_tiempo": {"queue": "ingest"},
+        "openarg.run_pipeline": {"queue": "scraper"},
     }
 
     app.conf.task_default_queue = "scraper"

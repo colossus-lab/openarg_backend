@@ -85,12 +85,6 @@ TASK_REGISTRY: dict[str, dict] = {
         "params": ["portal"],
         "queue": "transparency",
     },
-    "detect_ddjj_anomalies": {
-        "celery_name": "openarg.detect_ddjj_anomalies",
-        "description": "Detect anomalies in DDJJ patrimoniales",
-        "params": [],
-        "queue": "transparency",
-    },
     "analyze_session_topics": {
         "celery_name": "openarg.analyze_session_topics",
         "description": "Analyze congressional session topics with LLM",
@@ -196,6 +190,20 @@ TASK_REGISTRY: dict[str, dict] = {
         "description": "Reset permanently failed collector tasks for retry",
         "params": [],
         "queue": "collector",
+    },
+    # --- Embeddings (full reindex) ---
+    "reindex_all_embeddings": {
+        "celery_name": "openarg.reindex_all_embeddings",
+        "description": "Re-generate embeddings for all datasets",
+        "params": [],
+        "queue": "embedding",
+    },
+    # --- Pipeline orchestrator ---
+    "run_pipeline": {
+        "celery_name": "openarg.run_pipeline",
+        "description": "Run full pipeline (all groups) or selected groups. Params: groups (list), skip_delays (bool)",
+        "params": ["groups", "skip_delays"],
+        "queue": "scraper",
     },
 }
 
