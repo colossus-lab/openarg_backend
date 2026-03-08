@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import tempfile
+from urllib.parse import urlparse
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -20,7 +21,30 @@ from sqlalchemy import text
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
-PORTALS_SKIP_SSL = {"salud"}
+# Domains with known SSL certificate issues (self-signed, missing intermediates).
+_DOMAINS_SKIP_SSL = frozenset({
+    "datos.salud.gob.ar",
+    "www.mecon.gob.ar",
+    "datos.yvera.gob.ar",
+    "datosabiertos.desarrollosocial.gob.ar",
+    "ide.transporte.gob.ar",
+    "datos.energia.gob.ar",
+    "www.energia.gob.ar",
+    "sgda.energia.gob.ar",
+    "datos.ambiente.gob.ar",
+    "datos.mininterior.gob.ar",
+    "datos.cultura.gob.ar",
+    "ciam.ambiente.gob.ar",
+})
+
+
+def _should_verify_ssl(url: str) -> bool:
+    """Return False if the URL domain has known SSL cert issues."""
+    try:
+        host = urlparse(url).hostname or ""
+        return host not in _DOMAINS_SKIP_SSL
+    except Exception:
+        return True
 
 logger = logging.getLogger(__name__)
 
@@ -155,16 +179,14 @@ def _detect_csv_params(file_path: str) -> dict:
     return params
 
 
-def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str]]:
-    """Load a CSV file into PostgreSQL in chunks. Returns (total_rows, columns)."""
-    csv_params = _detect_csv_params(file_path)
-    chunk_size = 50_000
+def _csv_load_inner(file_path: str, table_name: str, engine,
+                    csv_params: dict, chunk_size: int) -> tuple[int, list[str]]:
+    """Inner CSV loading loop."""
     total_rows = 0
     columns: list[str] = []
 
     reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
     for i, chunk_df in enumerate(reader):
-        # First chunk: detect single-column CSVs and retry with semicolon
         if i == 0 and chunk_df.shape[1] <= 1 and "sep" not in csv_params:
             reader.close()
             csv_params["sep"] = ";"
@@ -184,6 +206,18 @@ def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, lis
             columns = list(chunk_df.columns)
 
     return total_rows, columns
+
+
+def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str]]:
+    """Load a CSV file into PostgreSQL in chunks. Returns (total_rows, columns)."""
+    csv_params = _detect_csv_params(file_path)
+    chunk_size = 50_000
+    try:
+        return _csv_load_inner(file_path, table_name, engine, csv_params, chunk_size)
+    except pd.errors.ParserError:
+        logger.info("CSV C-parser failed, retrying with Python engine")
+        csv_params["engine"] = "python"
+        return _csv_load_inner(file_path, table_name, engine, csv_params, chunk_size)
 
 
 def _set_error_status(engine, dataset_id: str, error_msg: str):
@@ -293,7 +327,7 @@ def collect_dataset(self, dataset_id: str):
         try:
             # HEAD to check Content-Length before downloading
             try:
-                with httpx.Client(timeout=30.0, verify=portal not in PORTALS_SKIP_SSL) as client:
+                with httpx.Client(timeout=30.0, verify=_should_verify_ssl(download_url)) as client:
                     head = client.head(download_url, follow_redirects=True)
                     content_length = int(head.headers.get("content-length", 0))
                     if content_length > max_download_bytes:
@@ -305,7 +339,7 @@ def collect_dataset(self, dataset_id: str):
 
             file_size = _stream_download(
                 download_url, tmp_path,
-                verify_ssl=portal not in PORTALS_SKIP_SSL,
+                verify_ssl=_should_verify_ssl(download_url),
                 max_bytes=max_download_bytes,
             )
 
@@ -492,7 +526,7 @@ def collect_dataset(self, dataset_id: str):
                 return {"error": f"unsupported_format: {fmt}"}
 
             # Update cache status
-            columns_json = json.dumps(columns)
+            columns_json = json.dumps([str(c) for c in columns])
             with engine.begin() as conn:
                 conn.execute(
                     text("""
@@ -564,6 +598,21 @@ def collect_dataset(self, dataset_id: str):
             )
         raise
     except Exception as exc:
+        exc_str = str(exc)
+        # Non-retryable errors — mark permanently failed immediately
+        non_retryable = (
+            any(s in exc_str for s in (
+                "403 Forbidden", "401 Unauthorized",
+                "illegal status line", "Request Denied",
+                "Name or service not known",
+            ))
+            or "TooManyRedirects" in type(exc).__name__
+        )
+        if non_retryable:
+            logger.warning("Non-retryable error for %s: %s", dataset_id, exc_str[:200])
+            _set_error_status(engine, dataset_id, exc_str[:500])
+            return {"error": "non_retryable"}
+
         logger.exception(f"Collection failed for dataset {dataset_id}")
         with engine.begin() as conn:
             # Increment retry_count and check if we should give up

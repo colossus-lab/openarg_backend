@@ -96,7 +96,7 @@ def _register_dataset(engine, file_type: str, table_name: str,
 
 @celery_app.task(
     name="openarg.ingest_bac", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
+    soft_time_limit=1800, time_limit=1920,
 )
 def ingest_bac(self):
     """Download and cache Buenos Aires Compras OCDS datasets."""
