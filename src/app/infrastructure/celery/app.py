@@ -22,26 +22,19 @@ ALL_PORTALS = [
     "mininterior",
     "cultura",
     "pami",
-    "modernizacion",
-    "ambiente",
     "arsat",
+    "csjn",
     # CABA
     "caba",
     # Provincias
     "buenos_aires_prov",
     "cordoba_prov",
-    "santa_fe",
     "mendoza",
     "entre_rios",
     "neuquen_legislatura",
     "tucuman",
     "chaco",
-    "rio_negro",
-    "jujuy",
-    "salta",
     # Municipios
-    "cordoba_muni",
-    "la_plata",
     "ciudad_mendoza",
     "corrientes",
 ]
@@ -98,6 +91,7 @@ def create_celery() -> Celery:
         "openarg.ingest_bac": {"queue": "ingest"},
         "openarg.ingest_indec": {"queue": "ingest"},
         "openarg.scrape_dkan_rosario": {"queue": "scraper"},
+        "openarg.scrape_dkan_jujuy": {"queue": "scraper"},
         "openarg.scrape_senado": {"queue": "scraper"},
         "openarg.scrape_cordoba_legislatura": {"queue": "scraper"},
         "openarg.scrape_senado_staff": {"queue": "scraper"},
@@ -145,23 +139,16 @@ def create_celery() -> Celery:
         "mininterior": (4, 30),
         "cultura": (4, 35),
         "pami": (4, 40),
-        "santa_fe": (4, 45),
+        "csjn": (4, 45),
         "mendoza": (4, 50),
         "entre_rios": (4, 55),
-        # 05:00 – 05:40 (provinces + municipalities)
+        # 05:00 – 05:20 (provinces + municipalities)
         "neuquen_legislatura": (5, 0),
         "tucuman": (5, 5),
         "chaco": (5, 10),
-        "rio_negro": (5, 15),
-        "jujuy": (5, 20),
-        "salta": (5, 25),
-        "modernizacion": (5, 30),
-        "ambiente": (5, 32),
-        "arsat": (5, 34),
-        "cordoba_muni": (5, 36),
-        "la_plata": (5, 38),
-        "ciudad_mendoza": (5, 40),
-        "corrientes": (5, 42),
+        "arsat": (5, 15),
+        "ciudad_mendoza": (5, 20),
+        "corrientes": (5, 25),
     }
     app.conf.beat_schedule = {
         f"scrape-{portal.replace('_', '-')}": {
@@ -231,6 +218,11 @@ def create_celery() -> Celery:
         "scrape-dkan-rosario": {
             "task": "openarg.scrape_dkan_rosario",
             "schedule": crontab(day_of_week=6, hour=0, minute=30),  # Saturday 0:30 AM ART
+            "options": {"queue": "scraper"},
+        },
+        "scrape-dkan-jujuy": {
+            "task": "openarg.scrape_dkan_jujuy",
+            "schedule": crontab(day_of_week=6, hour=1, minute=0),  # Saturday 1:00 AM ART
             "options": {"queue": "scraper"},
         },
         "scrape-senado": {

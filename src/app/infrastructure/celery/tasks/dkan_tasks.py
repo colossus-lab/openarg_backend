@@ -1,7 +1,7 @@
 """
-Rosario DKAN — Scraper de datos abiertos de Rosario (DKAN API).
+DKAN — Scraper de datos abiertos para portales DKAN (Rosario, Jujuy).
 
-Consulta la API DKAN de Rosario, descarga CSVs y cachea en PostgreSQL.
+Consulta la API DKAN, descarga CSVs y cachea en PostgreSQL.
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -20,10 +21,41 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
-DKAN_API_URL = "https://datosabiertos.rosario.gob.ar/api/1/metastore/schemas/dataset/items"
-
 MAX_ROWS = 500_000
 MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class DKANPortal:
+    api_url: str
+    portal_key: str        # e.g. "rosario_dkan"
+    source_prefix: str     # e.g. "rosario"
+    table_prefix: str      # e.g. "cache_rosario"
+    organization: str
+    base_url: str          # for building dataset URLs
+    tags: str
+
+
+DKAN_PORTALS = {
+    "rosario": DKANPortal(
+        api_url="https://datosabiertos.rosario.gob.ar/api/1/metastore/schemas/dataset/items",
+        portal_key="rosario_dkan",
+        source_prefix="rosario",
+        table_prefix="cache_rosario",
+        organization="Municipalidad de Rosario",
+        base_url="https://datosabiertos.rosario.gob.ar/dataset",
+        tags="rosario,municipio,datos abiertos",
+    ),
+    "jujuy": DKANPortal(
+        api_url="https://datos.gajujuy.gob.ar/api/1/metastore/schemas/dataset/items",
+        portal_key="jujuy_dkan",
+        source_prefix="jujuy",
+        table_prefix="cache_jujuy",
+        organization="Gobierno de Jujuy",
+        base_url="https://datos.gajujuy.gob.ar/dataset",
+        tags="jujuy,provincia,datos abiertos",
+    ),
+}
 
 
 def _sanitize_name(name: str) -> str:
@@ -32,10 +64,10 @@ def _sanitize_name(name: str) -> str:
     return clean[:50]
 
 
-def _register_dataset(engine, ds_id: str, title: str, table_name: str, df: pd.DataFrame, url: str):
+def _register_dataset(engine, portal: DKANPortal, ds_id: str, title: str,
+                       table_name: str, df: pd.DataFrame, url: str):
     """Upsert into datasets and cached_datasets tables."""
-    source_id = f"rosario-{ds_id}"
-    portal = "rosario_dkan"
+    source_id = f"{portal.source_prefix}-{ds_id}"
     columns_json = json.dumps(list(df.columns))
     now = datetime.now(UTC)
 
@@ -54,13 +86,13 @@ def _register_dataset(engine, ds_id: str, title: str, table_name: str, df: pd.Da
             """),
             {
                 "sid": source_id, "title": title,
-                "desc": f"Dataset de Rosario Datos Abiertos: {title}",
-                "org": "Municipalidad de Rosario",
-                "portal": portal,
-                "url": f"https://datosabiertos.rosario.gob.ar/dataset/{ds_id}",
+                "desc": f"Dataset de {portal.organization}: {title}",
+                "org": portal.organization,
+                "portal": portal.portal_key,
+                "url": f"{portal.base_url}/{ds_id}",
                 "dl": url,
                 "cols": columns_json,
-                "tags": "rosario,municipio,datos abiertos",
+                "tags": portal.tags,
                 "now": now, "rows": len(df),
             },
         )
@@ -69,7 +101,7 @@ def _register_dataset(engine, ds_id: str, title: str, table_name: str, df: pd.Da
                 "SELECT CAST(id AS text) FROM datasets "
                 "WHERE source_id = :sid AND portal = :portal"
             ),
-            {"sid": source_id, "portal": portal},
+            {"sid": source_id, "portal": portal.portal_key},
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
@@ -90,26 +122,22 @@ def _register_dataset(engine, ds_id: str, title: str, table_name: str, df: pd.Da
     return dataset_id
 
 
-@celery_app.task(
-    name="openarg.scrape_dkan_rosario", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
-)
-def scrape_dkan_rosario(self):
-    """Scrape Rosario DKAN catalog and cache CSV datasets."""
+def _scrape_dkan_portal(portal: DKANPortal) -> dict:
+    """Generic DKAN scraper — fetches catalog and caches CSV datasets."""
     import httpx
 
     engine = get_sync_engine()
-    results = {"ingested": 0, "skipped": 0, "errors": 0}
+    results = {"portal": portal.portal_key, "ingested": 0, "skipped": 0, "errors": 0}
 
     try:
         with httpx.Client(timeout=60.0) as client:
-            resp = client.get(DKAN_API_URL)
+            resp = client.get(portal.api_url)
             resp.raise_for_status()
             catalog = resp.json()
 
         if not isinstance(catalog, list):
-            logger.warning("DKAN Rosario: unexpected response format")
-            return {"error": "unexpected_format"}
+            logger.warning("DKAN %s: unexpected response format", portal.portal_key)
+            return {"error": "unexpected_format", "portal": portal.portal_key}
 
         for dataset in catalog:
             try:
@@ -117,7 +145,6 @@ def scrape_dkan_rosario(self):
                 title = dataset.get("title", ds_id)
                 distributions = dataset.get("distribution", [])
 
-                # Find CSV distributions
                 csv_dists = [
                     d for d in distributions
                     if d.get("format", "").lower() == "csv"
@@ -132,7 +159,7 @@ def scrape_dkan_rosario(self):
                     results["skipped"] += 1
                     continue
 
-                table_name = f"cache_rosario_{_sanitize_name(ds_id)}"
+                table_name = f"{portal.table_prefix}_{_sanitize_name(ds_id)}"
 
                 with httpx.Client(timeout=120.0) as client:
                     try:
@@ -168,7 +195,7 @@ def scrape_dkan_rosario(self):
 
                 df.to_sql(table_name, engine, if_exists="replace", index=False)
 
-                dataset_id = _register_dataset(engine, ds_id, title, table_name, df, download_url)
+                dataset_id = _register_dataset(engine, portal, ds_id, title, table_name, df, download_url)
                 if dataset_id:
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
@@ -176,19 +203,46 @@ def scrape_dkan_rosario(self):
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1
-                logger.info("DKAN Rosario %s: %d rows", ds_id, len(df))
+                logger.info("DKAN %s %s: %d rows", portal.portal_key, ds_id, len(df))
 
             except Exception:
                 results["errors"] += 1
-                logger.warning("DKAN Rosario: failed %s", dataset.get("identifier", "?"), exc_info=True)
+                logger.warning("DKAN %s: failed %s", portal.portal_key,
+                               dataset.get("identifier", "?"), exc_info=True)
 
         return results
 
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.scrape_dkan_rosario", bind=True, max_retries=3,
+    soft_time_limit=600, time_limit=720,
+)
+def scrape_dkan_rosario(self):
+    """Scrape Rosario DKAN catalog and cache CSV datasets."""
+    try:
+        return _scrape_dkan_portal(DKAN_PORTALS["rosario"])
     except SoftTimeLimitExceeded:
         logger.error("DKAN Rosario scrape timed out")
         raise
     except Exception as exc:
         logger.exception("DKAN Rosario scrape failed")
         raise self.retry(exc=exc, countdown=120)
-    finally:
-        engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.scrape_dkan_jujuy", bind=True, max_retries=3,
+    soft_time_limit=600, time_limit=720,
+)
+def scrape_dkan_jujuy(self):
+    """Scrape Jujuy DKAN catalog and cache CSV datasets."""
+    try:
+        return _scrape_dkan_portal(DKAN_PORTALS["jujuy"])
+    except SoftTimeLimitExceeded:
+        logger.error("DKAN Jujuy scrape timed out")
+        raise
+    except Exception as exc:
+        logger.exception("DKAN Jujuy scrape failed")
+        raise self.retry(exc=exc, countdown=120)
