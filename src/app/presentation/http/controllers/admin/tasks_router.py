@@ -167,6 +167,36 @@ TASK_REGISTRY: dict[str, dict] = {
         "params": [],
         "queue": "scraper",
     },
+    "scrape_dkan_jujuy": {
+        "celery_name": "openarg.scrape_dkan_jujuy",
+        "description": "Scrape Jujuy DKAN catalog → CSVs → PG",
+        "params": [],
+        "queue": "scraper",
+    },
+    "ingest_presupuesto_dimensiones": {
+        "celery_name": "openarg.ingest_presupuesto_dimensiones",
+        "description": "ETL Presupuesto dimension tables (clasificadores DGSIAF → PG)",
+        "params": [],
+        "queue": "ingest",
+    },
+    "ingest_georef": {
+        "celery_name": "openarg.ingest_georef",
+        "description": "Ingest GeoRef geographic reference data → PG",
+        "params": [],
+        "queue": "ingest",
+    },
+    "ingest_series_tiempo": {
+        "celery_name": "openarg.ingest_series_tiempo",
+        "description": "Ingest Series de Tiempo economic indicators → PG",
+        "params": [],
+        "queue": "ingest",
+    },
+    "reset_failed_collectors": {
+        "celery_name": "openarg.reset_failed_collectors",
+        "description": "Reset permanently failed collector tasks for retry",
+        "params": [],
+        "queue": "collector",
+    },
 }
 
 

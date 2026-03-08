@@ -23,13 +23,71 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 
 INDEC_DATASETS = [
-    # Verified working as of 2026-03
+    # ── Verificados con HEAD 200 OK — Mar 2026 ──
+    # URLs con nombre fijo (se actualizan in-place en el FTP del INDEC).
+    # URLs con fecha en el nombre están marcadas con ⚠ — revisar periódicamente.
+
+    # ── Precios ──
     {"id": "ipc", "name": "IPC mensual — Aperturas",
      "url": "https://www.indec.gob.ar/ftp/cuadros/economia/sh_ipc_aperturas.xls"},
+
+    # ── Actividad Económica ──
     {"id": "emae", "name": "EMAE mensual (base 2004)",
      "url": "https://www.indec.gob.ar/ftp/cuadros/economia/sh_emae_mensual_base2004.xls"},
     {"id": "pib", "name": "PIB trimestral — Oferta y Demanda",
      "url": "https://www.indec.gob.ar/ftp/cuadros/economia/sh_oferta_demanda_12_24.xls"},
+
+    # ── Industria y Construcción ──
+    {"id": "ipi_manufacturero", "name": "IPI Manufacturero (producción industrial)",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/economia/sh_ipi_manufacturero_2026.xls"},  # ⚠ año en nombre
+    {"id": "isac", "name": "ISAC — Actividad de la Construcción",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/economia/sh_isac_2025.xls"},  # ⚠ año en nombre
+
+    # ── Comercio Exterior ──
+    {"id": "comercio_exterior", "name": "Índices de Comercio Exterior",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/economia/sh_indices_comext_04.xls"},
+
+    # ── Comercio Interior ──
+    {"id": "supermercados", "name": "Ventas en Supermercados",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/economia/serie_supermercados.xlsx"},
+
+    # ── Salarios ──
+    {"id": "salarios_cvs", "name": "CVS — Coeficiente de Variación Salarial (diario)",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/sh_cvs_diarios_2025.xls"},  # ⚠ año en nombre
+    {"id": "salarios_indice", "name": "Índice de Salarios",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/indice_salarios.csv"},
+    {"id": "salarios_variacion", "name": "Variación del Índice de Salarios",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/variacion_indice_salarios.csv"},
+
+    # ── Canasta Básica / Línea de Pobreza ──
+    {"id": "canasta_basica", "name": "CBA y CBT — Canasta Básica (serie histórica)",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/serie_cba_cbt.xls"},
+
+    # ── Pobreza e Indigencia ──
+    {"id": "pobreza_historica", "name": "Pobreza e Indigencia — Serie continua",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/sh_pobrezaeindigencia_continua.xls"},
+    {"id": "pobreza_informe", "name": "Informe de Pobreza — 31 aglomerados urbanos",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_informe_pobreza_09_25.xls"},  # ⚠ fecha
+
+    # ── Mercado de Trabajo (EPH) ──
+    {"id": "eph_tasas", "name": "EPH — Tasas e indicadores laborales",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_tasas_indicadores_eph_09_25.xls"},  # ⚠ fecha
+    {"id": "eph_hogares", "name": "EPH — Indicadores de hogares",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/eph_indicadores_hogares_1_sem_2025.xls"},  # ⚠ fecha
+
+    # ── Distribución del Ingreso ──
+    {"id": "distribucion_ingreso", "name": "Distribución del Ingreso (EPH)",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/sociedad/indicadores_eph_total_urbano_ingresos_3t_2025.xls"},  # ⚠ fecha
+
+    # ── Turismo Internacional ──
+    {"id": "turismo_receptivo", "name": "Turismo Receptivo — Total vías",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/economia/serie_turismo_receptivo_total_vias.xlsx"},
+    {"id": "turismo_emisivo", "name": "Turismo Emisivo — Total vías",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/economia/serie_turismo_emisivo_total_vias.xlsx"},
+
+    # ── Balance de Pagos ──
+    {"id": "balance_pagos", "name": "Balance de Pagos mensual",
+     "url": "https://www.indec.gob.ar/ftp/cuadros/economia/balanmensual.xls"},
 ]
 
 MAX_ROWS = 500_000
@@ -69,7 +127,7 @@ def _register_dataset(engine, ds_info: dict, table_name: str, df: pd.DataFrame):
                 "portal": portal,
                 "url": ds_info["url"],
                 "dl": ds_info["url"],
-                "fmt": "xls" if ds_info["url"].endswith(".xls") else "csv",
+                "fmt": "xlsx" if ds_info["url"].endswith(".xlsx") else "xls" if ds_info["url"].endswith(".xls") else "csv",
                 "cols": columns_json,
                 "tags": f"indec,estadísticas,{ds_info['id']}",
                 "now": now, "rows": len(df),
@@ -237,11 +295,11 @@ def _download_and_parse(url: str) -> dict[str, pd.DataFrame]:
                 result[sheet] = df
         return result
 
-    # Default: CSV
+    # Default: CSV (INDEC typically uses semicolons)
     try:
-        df = pd.read_csv(io.BytesIO(content), encoding="utf-8", on_bad_lines="skip")
+        df = pd.read_csv(io.BytesIO(content), encoding="utf-8", on_bad_lines="skip", sep=";")
     except Exception:
-        df = pd.read_csv(io.BytesIO(content), encoding="latin-1", on_bad_lines="skip")
+        df = pd.read_csv(io.BytesIO(content), encoding="latin-1", on_bad_lines="skip", sep=";")
     return {"main": df} if df is not None and not df.empty else {}
 
 
