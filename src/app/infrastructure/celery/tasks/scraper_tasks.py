@@ -39,13 +39,12 @@ PORTAL_URLS = {
     # Provincias
     "buenos_aires_prov": "https://catalogo.datos.gba.gob.ar/api/3/action",
     "cordoba_prov": "https://datosgestionabierta.cba.gov.ar/api/3/action",
-    "santa_fe": "https://datos.santafe.gob.ar/api/3/action",
     "mendoza": "https://datosabiertos.mendoza.gov.ar/api/3/action",
     "entre_rios": "https://datos.entrerios.gov.ar/api/3/action",
     "neuquen_legislatura": "https://datos.legislaturaneuquen.gob.ar/api/3/action",
+    "tucuman": "https://sep.tucuman.gob.ar/api/3/action",
+    "chaco": "https://datosabiertos.chaco.gob.ar/api/3/action",
     # Nacionales sectoriales
-    "modernizacion": "https://datos.modernizacion.gob.ar/api/3/action",
-    "ambiente": "https://datos.ambiente.gob.ar/api/3/action",
     "arsat": "https://datos.arsat.com.ar/api/3/action",
     "energia": "http://datos.energia.gob.ar/api/3/action",  # HTTP only (no HTTPS)
     "produccion": "https://datos.produccion.gob.ar/api/3/action",
@@ -56,18 +55,22 @@ PORTAL_URLS = {
     "mininterior": "https://datos.mininterior.gob.ar/api/3/action",
     "cultura": "https://datos.cultura.gob.ar/api/3/action",
     "pami": "https://datos.pami.org.ar/api/3/action",
-    # Provincias nuevas
-    "rio_negro": "https://datos.rionegro.gov.ar/api/3/action",
-    "jujuy": "https://datos.jujuy.gob.ar/api/3/action",
-    "salta": "https://datos.salta.gob.ar/api/3/action",
-    "tucuman": "https://sep.tucuman.gob.ar/api/3/action",
-    "chaco": "https://datosabiertos.chaco.gob.ar/api/3/action",
+    # Nuevos portales
+    "csjn": "https://datos.csjn.gov.ar/api/3/action",
     # Municipios
-    "cordoba_muni": "https://gobiernoabierto.cordoba.gob.ar/data/api/3/action",
-    "la_plata": "https://datos.laplata.gob.ar/api/3/action",
     "ciudad_mendoza": "https://datos.ciudaddemendoza.gov.ar/api/3/action",
     "corrientes": "https://datos.ciudaddecorrientes.gov.ar/api/3/action",
 }
+
+# Portals removed (verified offline as of Mar 2026):
+#   santa_fe        — datos.santafe.gob.ar: SSL broken, server drops connection
+#   modernizacion   — datos.modernizacion.gob.ar: DNS resolves but no server
+#   ambiente        — datos.ambiente.gob.ar: returns HTML redirect loop, CKAN dead
+#   rio_negro       — datos.rionegro.gov.ar: DNS dead
+#   salta           — datos.salta.gob.ar: DNS dead
+#   la_plata        — datos.laplata.gob.ar: DNS dead
+#   cordoba_muni    — gobiernoabierto.cordoba.gob.ar: returns HTML 404 on API endpoints
+#   jujuy           — migrated from CKAN to DKAN at datos.gajujuy.gob.ar (handled by dkan_tasks)
 
 
 PORTALS_SKIP_SSL = {"salud"}
