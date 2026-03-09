@@ -193,19 +193,48 @@ def _csv_load_inner(file_path: str, table_name: str, engine,
             reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
             for j, retry_df in enumerate(reader):
                 mode = "replace" if j == 0 else "append"
-                retry_df.to_sql(table_name, engine, if_exists=mode, index=False)
+                _to_sql_safe(retry_df, table_name, engine, if_exists=mode, index=False)
                 total_rows += len(retry_df)
                 if j == 0:
                     columns = list(retry_df.columns)
             return total_rows, columns
 
         mode = "replace" if i == 0 else "append"
-        chunk_df.to_sql(table_name, engine, if_exists=mode, index=False)
+        _to_sql_safe(chunk_df, table_name, engine, if_exists=mode, index=False)
         total_rows += len(chunk_df)
         if i == 0:
             columns = list(chunk_df.columns)
 
     return total_rows, columns
+
+
+def _drop_table_if_exists(engine, table_name: str):
+    """Explicitly DROP a cache table if it exists."""
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))  # noqa: S608
+    logger.info("Dropped table %s for schema refresh", table_name)
+
+
+def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
+    """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs."""
+    try:
+        df.to_sql(table_name, engine, **kwargs)
+    except Exception as exc:
+        exc_str = str(exc).lower()
+        schema_keywords = (
+            "column", "type mismatch", "incompatible", "does not exist",
+            "undefined column", "schema", "relation",
+        )
+        if any(kw in exc_str for kw in schema_keywords):
+            logger.warning(
+                "Schema mismatch on table %s, dropping and retrying: %s",
+                table_name, str(exc)[:200],
+            )
+            _drop_table_if_exists(engine, table_name)
+            kwargs["if_exists"] = "replace"
+            df.to_sql(table_name, engine, **kwargs)
+        else:
+            raise
 
 
 def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str]]:
@@ -324,10 +353,12 @@ def collect_dataset(self, dataset_id: str):
         tmp_file.close()
         file_size = 0
 
+        verify_ssl = _should_verify_ssl(download_url)
+
         try:
             # HEAD to check Content-Length before downloading
             try:
-                with httpx.Client(timeout=30.0, verify=_should_verify_ssl(download_url)) as client:
+                with httpx.Client(timeout=30.0, verify=verify_ssl) as client:
                     head = client.head(download_url, follow_redirects=True)
                     content_length = int(head.headers.get("content-length", 0))
                     if content_length > max_download_bytes:
@@ -337,11 +368,25 @@ def collect_dataset(self, dataset_id: str):
             except Exception:
                 pass  # HEAD may fail; proceed with stream download
 
-            file_size = _stream_download(
-                download_url, tmp_path,
-                verify_ssl=_should_verify_ssl(download_url),
-                max_bytes=max_download_bytes,
-            )
+            try:
+                file_size = _stream_download(
+                    download_url, tmp_path,
+                    verify_ssl=verify_ssl,
+                    max_bytes=max_download_bytes,
+                )
+            except Exception as ssl_exc:
+                if verify_ssl and ("SSL" in type(ssl_exc).__name__ or "CERTIFICATE_VERIFY_FAILED" in str(ssl_exc)):
+                    logger.warning(
+                        "SSL error for %s, retrying without verification: %s",
+                        dataset_id, str(ssl_exc)[:200],
+                    )
+                    file_size = _stream_download(
+                        download_url, tmp_path,
+                        verify_ssl=False,
+                        max_bytes=max_download_bytes,
+                    )
+                else:
+                    raise
 
             # Upload raw file to S3 (from disk, not memory)
             s3_key = None
@@ -402,7 +447,7 @@ def collect_dataset(self, dataset_id: str):
                         with zf.open(name) as f:
                             content = f.read()
                         df = pd.read_excel(io.BytesIO(content))
-                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -422,7 +467,7 @@ def collect_dataset(self, dataset_id: str):
                             df = pd.DataFrame(records)
                         else:
                             df = pd.json_normalize(raw_geo if isinstance(raw_geo, list) else [raw_geo])
-                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -444,7 +489,7 @@ def collect_dataset(self, dataset_id: str):
                                     df = pd.json_normalize([raw_j])
                             else:
                                 continue
-                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -471,7 +516,7 @@ def collect_dataset(self, dataset_id: str):
                             df = pd.json_normalize([raw])
                     else:
                         raise
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "geojson":
@@ -497,17 +542,17 @@ def collect_dataset(self, dataset_id: str):
                     logger.warning(f"GeoJSON {dataset_id}: no features found")
                     _set_error_status(engine, dataset_id, "geojson_no_features")
                     return {"error": "geojson_no_features"}
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
                 df = pd.read_excel(tmp_path)
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "ods":
                 df = pd.read_excel(tmp_path, engine="odf")
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "xml":
@@ -517,7 +562,7 @@ def collect_dataset(self, dataset_id: str):
                     logger.warning(f"XML {dataset_id}: pd.read_xml failed, skipping")
                     _set_error_status(engine, dataset_id, "xml_parse_failed")
                     return {"error": "xml_parse_failed"}
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             else:
@@ -661,12 +706,12 @@ def bulk_collect_all(self, portal: str | None = None):
     engine = get_sync_engine()
 
     try:
-        # Skip datasets that have permanently failed collection
+        # Select datasets that have no successful cache and are not permanently failed
         query = (
             "SELECT CAST(d.id AS text) FROM datasets d "
             "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
             "WHERE d.is_cached = false "
-            "AND (cd.status IS NULL OR cd.status != 'permanently_failed')"
+            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed'))"
         )
         params: dict = {}
         if portal:
@@ -701,7 +746,27 @@ def recover_stuck_tasks(self):
         recovered_downloads = 0
         recovered_queries = 0
 
-        # 1. Recover stuck cached_datasets (skip permanently failed)
+        # 1a. Transition stuck downloads that exhausted retries → permanently_failed
+        with engine.begin() as conn:
+            exhausted = conn.execute(
+                text("""
+                    UPDATE cached_datasets
+                    SET status = 'permanently_failed',
+                        error_message = 'Exhausted retries while stuck in downloading',
+                        updated_at = NOW()
+                    WHERE status = 'downloading'
+                      AND updated_at < NOW() - INTERVAL '30 minutes'
+                      AND retry_count >= :max
+                """),
+                {"max": MAX_TOTAL_ATTEMPTS},
+            )
+            if exhausted.rowcount:
+                logger.warning(
+                    "Marked %d stuck downloads as permanently_failed (retry >= %d)",
+                    exhausted.rowcount, MAX_TOTAL_ATTEMPTS,
+                )
+
+        # 1b. Recover stuck cached_datasets that still have retries left
         with engine.begin() as conn:
             stuck_downloads = conn.execute(
                 text("""
