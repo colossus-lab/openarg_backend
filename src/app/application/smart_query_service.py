@@ -1336,6 +1336,14 @@ class SmartQueryService:
                 elif any("indec" in h for h in table_hints):
                     logger.info("No cached INDEC tables, attempting live fallback")
                     return await self._indec_live_fallback(nl_query)
+                else:
+                    # Planner specified tables but none matched — return empty
+                    # so the fallback LLM can answer with general knowledge.
+                    logger.warning(
+                        "Sandbox: none of the hinted tables %s found in cache, skipping",
+                        table_hints,
+                    )
+                    return []
 
             tables_context_parts = []
             for t in tables[:50]:
