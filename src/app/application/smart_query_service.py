@@ -1812,7 +1812,7 @@ class SmartQueryService:
                     {k.replace("_", " "): v for k, v in rec.items()}
                     for rec in records_to_send
                 ]
-                records_text = json.dumps(display_records, ensure_ascii=False, indent=2)
+                records_text = json.dumps(display_records, ensure_ascii=False, indent=2, default=str)
 
                 part = (
                     f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
