@@ -422,20 +422,39 @@ class SmartQueryService:
                 + "\n".join(f"- {w}" for w in all_warnings)
             )
 
-        analysis_prompt = (
-            f'PREGUNTA DEL USUARIO: "{question}"\n'
-            f"FECHA ACTUAL: {today}\n"
-            f"INTENCIÓN: {plan.intent}\n\n"
-            f"DATOS RECOLECTADOS:\n{data_context}\n"
-            f"{errors_block}"
-            f"{memory_ctx}\n\n"
-            "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
-            "para no repetir contexto innecesariamente y para mantener coherencia "
-            "con respuestas anteriores.\n\n"
-            "Respondé de forma breve y conversacional. Destacá el dato más importante, "
-            "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
-            "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+        # If no data was collected, fall back to LLM general knowledge
+        no_data_fallback = not results or not any(
+            r.records for r in results
         )
+
+        if no_data_fallback:
+            analysis_prompt = (
+                f'PREGUNTA DEL USUARIO: "{question}"\n'
+                f"FECHA ACTUAL: {today}\n\n"
+                f"{memory_ctx}\n\n"
+                "No se encontraron datos en las fuentes de datos abiertos para esta consulta. "
+                "Respondé usando tu conocimiento general sobre Argentina, pero aclaralo brevemente "
+                "al final (ej: 'Según información pública disponible...' o 'Esta respuesta se basa en conocimiento general, "
+                "no en datos abiertos del sistema.').\n"
+                "Respondé de forma breve y conversacional en español argentino. "
+                "Después sugerí 2-3 preguntas de seguimiento que SÍ podamos responder con datos del sistema "
+                "(economía, presupuesto, legisladores, DDJJ, personal legislativo, etc)."
+            )
+        else:
+            analysis_prompt = (
+                f'PREGUNTA DEL USUARIO: "{question}"\n'
+                f"FECHA ACTUAL: {today}\n"
+                f"INTENCIÓN: {plan.intent}\n\n"
+                f"DATOS RECOLECTADOS:\n{data_context}\n"
+                f"{errors_block}"
+                f"{memory_ctx}\n\n"
+                "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
+                "para no repetir contexto innecesariamente y para mantener coherencia "
+                "con respuestas anteriores.\n\n"
+                "Respondé de forma breve y conversacional. Destacá el dato más importante, "
+                "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
+                "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+            )
 
         response = await self._llm.chat(
             messages=[
@@ -674,20 +693,38 @@ class SmartQueryService:
                 + "\n".join(f"- {w}" for w in all_warnings)
             )
 
-        analysis_prompt = (
-            f'PREGUNTA DEL USUARIO: "{question}"\n'
-            f"FECHA ACTUAL: {today}\n"
-            f"INTENCIÓN: {plan.intent}\n\n"
-            f"DATOS RECOLECTADOS:\n{data_context}\n"
-            f"{errors_block}"
-            f"{memory_ctx}\n\n"
-            "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
-            "para no repetir contexto innecesariamente y para mantener coherencia "
-            "con respuestas anteriores.\n\n"
-            "Respondé de forma breve y conversacional. Destacá el dato más importante, "
-            "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
-            "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+        no_data_fallback = not results or not any(
+            r.records for r in results
         )
+
+        if no_data_fallback:
+            analysis_prompt = (
+                f'PREGUNTA DEL USUARIO: "{question}"\n'
+                f"FECHA ACTUAL: {today}\n\n"
+                f"{memory_ctx}\n\n"
+                "No se encontraron datos en las fuentes de datos abiertos para esta consulta. "
+                "Respondé usando tu conocimiento general sobre Argentina, pero aclaralo brevemente "
+                "al final (ej: 'Según información pública disponible...' o 'Esta respuesta se basa en conocimiento general, "
+                "no en datos abiertos del sistema.').\n"
+                "Respondé de forma breve y conversacional en español argentino. "
+                "Después sugerí 2-3 preguntas de seguimiento que SÍ podamos responder con datos del sistema "
+                "(economía, presupuesto, legisladores, DDJJ, personal legislativo, etc)."
+            )
+        else:
+            analysis_prompt = (
+                f'PREGUNTA DEL USUARIO: "{question}"\n'
+                f"FECHA ACTUAL: {today}\n"
+                f"INTENCIÓN: {plan.intent}\n\n"
+                f"DATOS RECOLECTADOS:\n{data_context}\n"
+                f"{errors_block}"
+                f"{memory_ctx}\n\n"
+                "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
+                "para no repetir contexto innecesariamente y para mantener coherencia "
+                "con respuestas anteriores.\n\n"
+                "Respondé de forma breve y conversacional. Destacá el dato más importante, "
+                "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
+                "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+            )
 
         full_text = ""
         stream_buf = ""  # buffer for filtering <!--CHART/META--> tags
