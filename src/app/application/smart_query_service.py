@@ -1314,13 +1314,17 @@ class SmartQueryService:
                 "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
                 "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
                 "- The query must be valid PostgreSQL syntax.\n"
+                "- NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.\n"
+                "- Use ILIKE for case-insensitive text matching.\n"
             )
 
+            messages = [
+                LLMMessage(role="system", content=nl2sql_prompt),
+                LLMMessage(role="user", content=nl_query),
+            ]
+
             llm_response = await self._llm.chat(
-                messages=[
-                    LLMMessage(role="system", content=nl2sql_prompt),
-                    LLMMessage(role="user", content=nl_query),
-                ],
+                messages=messages,
                 temperature=0.0,
                 max_tokens=1024,
             )
@@ -1332,8 +1336,34 @@ class SmartQueryService:
                 generated_sql = "\n".join(lines).strip()
 
             result = await self._sandbox.execute_readonly(generated_sql)
+
+            # Self-correction loop: retry up to 2 times if SQL fails
+            for _attempt in range(2):
+                if not result.error:
+                    break
+                logger.warning("Sandbox query failed (attempt %d): %s", _attempt + 1, result.error)
+                messages.extend([
+                    LLMMessage(role="assistant", content=generated_sql),
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            f"That SQL returned an error: {result.error}\n"
+                            "Fix the query and return ONLY the corrected SQL."
+                        ),
+                    ),
+                ])
+                llm_response = await self._llm.chat(
+                    messages=messages, temperature=0.0, max_tokens=1024,
+                )
+                generated_sql = llm_response.content.strip()
+                if generated_sql.startswith("```"):
+                    lines = generated_sql.split("\n")
+                    lines = [l for l in lines if not l.strip().startswith("```")]
+                    generated_sql = "\n".join(lines).strip()
+                result = await self._sandbox.execute_readonly(generated_sql)
+
             if result.error:
-                logger.warning("Sandbox query failed: %s", result.error)
+                logger.warning("Sandbox query failed after retries: %s", result.error)
                 return []
 
             if not result.rows and _INDEC_PATTERN.search(nl_query):
