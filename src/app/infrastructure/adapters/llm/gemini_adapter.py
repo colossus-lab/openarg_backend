@@ -56,7 +56,16 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
             logger.error("Gemini chat timed out after %ds", LLM_TIMEOUT_SECONDS)
             raise
 
-        content = response.text or ""
+        try:
+            content = response.text or ""
+        except (ValueError, AttributeError):
+            # Gemini may return empty response (safety filter, no parts)
+            logger.warning("Gemini returned empty response (finish_reason=%s)", getattr(response.candidates[0] if response.candidates else None, "finish_reason", "unknown"))
+            content = ""
+
+        if not content:
+            raise RuntimeError("Gemini returned empty response")
+
         tokens = 0
         if response.usage_metadata:
             tokens = (
@@ -104,7 +113,15 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
             logger.error("Gemini chat_json timed out after 10s")
             raise
 
-        content = response.text or ""
+        try:
+            content = response.text or ""
+        except (ValueError, AttributeError):
+            logger.warning("Gemini chat_json returned empty response")
+            content = ""
+
+        if not content:
+            raise RuntimeError("Gemini returned empty response")
+
         tokens = 0
         if response.usage_metadata:
             tokens = (
@@ -143,6 +160,13 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
             stream=True,
         )
 
+        yielded_any = False
         async for chunk in response:
-            if chunk.text:
-                yield chunk.text
+            try:
+                if chunk.text:
+                    yield chunk.text
+                    yielded_any = True
+            except (ValueError, AttributeError):
+                continue
+        if not yielded_any:
+            raise RuntimeError("Gemini stream returned no content")
