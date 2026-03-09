@@ -38,15 +38,17 @@ _DOMAINS_SKIP_SSL = frozenset({
 })
 
 
+logger = logging.getLogger(__name__)
+
+
 def _should_verify_ssl(url: str) -> bool:
     """Return False if the URL domain has known SSL cert issues."""
     try:
         host = urlparse(url).hostname or ""
         return host not in _DOMAINS_SKIP_SSL
     except Exception:
+        logger.debug("Failed to parse URL for SSL check: %s", url, exc_info=True)
         return True
-
-logger = logging.getLogger(__name__)
 
 # After this many total attempts (across Celery retries AND external
 # re-dispatches) the task is marked permanently_failed and never retried.
@@ -366,7 +368,7 @@ def collect_dataset(self, dataset_id: str):
                         _set_error_status(engine, dataset_id, f"file_too_large: {content_length} bytes")
                         return {"error": f"file_too_large: {content_length} bytes"}
             except Exception:
-                pass  # HEAD may fail; proceed with stream download
+                logger.debug("HEAD request failed for %s, proceeding with stream download", dataset_id, exc_info=True)
 
             try:
                 file_size = _stream_download(
@@ -395,7 +397,7 @@ def collect_dataset(self, dataset_id: str):
                 s3_key = _upload_file_to_s3(tmp_path, portal, dataset_id, filename)
                 logger.info(f"Uploaded to S3: {s3_key}")
             except Exception:
-                logger.warning(f"S3 upload failed for {dataset_id}, continuing without S3", exc_info=True)
+                logger.warning("S3 upload failed for %s, continuing without S3", dataset_id, exc_info=True)
 
             # Parse and load into PostgreSQL
             row_count = 0
@@ -559,7 +561,7 @@ def collect_dataset(self, dataset_id: str):
                 try:
                     df = pd.read_xml(tmp_path)
                 except Exception:
-                    logger.warning(f"XML {dataset_id}: pd.read_xml failed, skipping")
+                    logger.warning("XML %s: pd.read_xml failed, skipping", dataset_id, exc_info=True)
                     _set_error_status(engine, dataset_id, "xml_parse_failed")
                     return {"error": "xml_parse_failed"}
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -790,7 +792,7 @@ def recover_stuck_tasks(self):
                         ).scalar()
                         table_has_data = (count_result or 0) > 0
                     except Exception:
-                        pass  # Table doesn't exist or can't be queried
+                        logger.debug("Could not query table %s for stuck download check", row.table_name, exc_info=True)
 
                 if table_has_data:
                     # Table has data — just fix the status to 'ready'
@@ -807,6 +809,7 @@ def recover_stuck_tasks(self):
                         ).fetchall()
                         columns = [r.column_name for r in col_result]
                     except Exception:
+                        logger.debug("Could not fetch column info for table %s", row.table_name, exc_info=True)
                         columns = []
                     columns_json = json.dumps(columns)
                     conn.execute(

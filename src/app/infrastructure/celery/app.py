@@ -6,6 +6,12 @@ import os
 from celery import Celery
 from celery.schedules import crontab
 
+from app.setup.logging_config import setup_logging, setup_sentry
+
+# Initialise structured logging and Sentry for Celery workers
+setup_logging(log_level=os.getenv("LOG_LEVEL", "INFO"))
+setup_sentry()
+
 logger = logging.getLogger(__name__)
 
 ALL_PORTALS = [
@@ -74,6 +80,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.mapa_estado_tasks",
             "app.infrastructure.celery.tasks.gobernadores_tasks",
             "app.infrastructure.celery.tasks.orchestrator_tasks",
+            "app.infrastructure.celery.tasks.reporting_tasks",
         ],
     )
 
@@ -109,6 +116,7 @@ def create_celery() -> Celery:
         "openarg.run_pipeline": {"queue": "scraper"},
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
         "openarg.scrape_gobernadores": {"queue": "scraper"},
+        "openarg.report_failed_tasks": {"queue": "collector"},
     }
 
     app.conf.task_default_queue = "scraper"
@@ -286,6 +294,12 @@ def create_celery() -> Celery:
             "task": "openarg.scrape_gobernadores",
             "schedule": crontab(day_of_month=1, hour=2, minute=15),  # Monthly, day 1
             "options": {"queue": "scraper"},
+        },
+        # --- Reporting / Dead Letter visibility ---
+        "report-failed-tasks": {
+            "task": "openarg.report_failed_tasks",
+            "schedule": crontab(hour=7, minute=0),  # Daily 7:00 AM ART (after all scraping/collecting)
+            "options": {"queue": "collector"},
         },
     })
 

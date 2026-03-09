@@ -59,6 +59,10 @@ dependencies = [
 
     # Monitoring
     "prometheus-client>=0.21.0",
+
+    # Structured logging & error tracking
+    "structlog>=24.0",
+    "sentry-sdk[fastapi]>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -108,6 +112,7 @@ module = [
     "prometheus_client.*",
     "boto3.*",
     "botocore.*",
+    "sentry_sdk.*",
 ]
 ignore_missing_imports = true
 

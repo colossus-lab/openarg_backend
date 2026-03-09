@@ -60,7 +60,7 @@ services:
 
   # ── Backend API ─────────────────────────────────────────────────
   backend:
-    image: ghcr.io/lucholeonel/openarg/api:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/api:latest
     container_name: openarg_backend
     restart: always
     command: >
@@ -100,7 +100,7 @@ services:
 
   # ── Celery Workers ──────────────────────────────────────────────
   worker-scraper:
-    image: ghcr.io/lucholeonel/openarg/worker-scraper:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/worker-scraper:latest
     container_name: openarg_worker_scraper
     restart: always
     networks:
@@ -130,7 +130,7 @@ services:
         condition: service_healthy
 
   worker-collector:
-    image: ghcr.io/lucholeonel/openarg/worker-collector:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/worker-collector:latest
     container_name: openarg_worker_collector
     restart: always
     command: ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "collector", "-c", "8", "--max-memory-per-child=400000", "--loglevel=info"]
@@ -164,7 +164,7 @@ services:
         condition: service_healthy
 
   worker-ingest:
-    image: ghcr.io/lucholeonel/openarg/worker-ingest:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/worker-ingest:latest
     container_name: openarg_worker_ingest
     restart: always
     command: ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "ingest", "-c", "2", "--max-memory-per-child=500000", "--loglevel=info"]
@@ -198,7 +198,7 @@ services:
         condition: service_healthy
 
   worker-embedding:
-    image: ghcr.io/lucholeonel/openarg/worker-embedding:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/worker-embedding:latest
     container_name: openarg_worker_embedding
     restart: always
     networks:
@@ -228,7 +228,7 @@ services:
         condition: service_healthy
 
   worker-analyst:
-    image: ghcr.io/lucholeonel/openarg/worker-analyst:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/worker-analyst:latest
     container_name: openarg_worker_analyst
     restart: always
     networks:
@@ -259,7 +259,7 @@ services:
         condition: service_healthy
 
   worker-transparency:
-    image: ghcr.io/lucholeonel/openarg/worker-transparency:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/worker-transparency:latest
     container_name: openarg_worker_transparency
     restart: always
     networks:
@@ -288,7 +288,7 @@ services:
         condition: service_healthy
 
   worker-s3:
-    image: ghcr.io/lucholeonel/openarg/worker-s3:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/worker-s3:latest
     container_name: openarg_worker_s3
     restart: always
     networks:
@@ -322,7 +322,7 @@ services:
 
   # ── Celery Beat (periodic tasks) ────────────────────────────────
   beat:
-    image: ghcr.io/lucholeonel/openarg/beat:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/beat:latest
     container_name: openarg_beat
     restart: always
     networks:
@@ -345,7 +345,7 @@ services:
 
   # ── Frontend ────────────────────────────────────────────────────
   frontend:
-    image: ghcr.io/lucholeonel/openarg/frontend:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/frontend:latest
     container_name: openarg_frontend
     restart: always
     networks:

@@ -114,7 +114,7 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
         try:
             return resp.json()
         except Exception:
-            logger.warning("Invalid JSON from %s: %s", label, resp.text[:200])
+            logger.warning("Invalid JSON from %s: %s", label, resp.text[:200], exc_info=True)
             return {}
 
     try:
@@ -174,7 +174,7 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                             attrs = json.loads(resource["attributesDescription"])
                             columns_list = list(attrs.keys()) if isinstance(attrs, dict) else []
                         except (json.JSONDecodeError, TypeError):
-                            pass
+                            logger.debug("Failed to parse attributesDescription for resource %s", resource.get("id", "?"), exc_info=True)
 
                     # Extract last-updated timestamp: prefer resource-level, fallback to package
                     last_updated = None
@@ -407,6 +407,7 @@ def _get_data_statistics(engine, dataset_id: str) -> str | None:
                             f"ej. {', '.join(sample_vals)}"
                         )
                 except Exception:
+                    logger.debug("Could not compute stats for column %s in table %s", col_name, table_name, exc_info=True)
                     continue
 
             # Show remaining column names if any

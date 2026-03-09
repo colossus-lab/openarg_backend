@@ -16,6 +16,7 @@ from app.infrastructure.persistence_sqla.mappings.all import map_tables
 from app.presentation.http.errors.handlers import register_exception_handlers
 from app.presentation.http.middleware.auth_middleware import APIKeyMiddleware
 from app.presentation.http.middleware.rate_limit_key import get_rate_limit_identifier
+from app.presentation.http.middleware.request_id_middleware import RequestIdMiddleware
 from app.presentation.http.middleware.security_headers import SecurityHeadersMiddleware
 from app.setup.config.settings import AppSettings
 
@@ -87,6 +88,7 @@ def configure_app(
 
     app.add_middleware(MetricsMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RequestIdMiddleware)
 
     # API key middleware (if configured)
     if settings and settings.security.BACKEND_API_KEY:
