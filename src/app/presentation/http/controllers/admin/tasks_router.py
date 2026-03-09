@@ -167,6 +167,18 @@ TASK_REGISTRY: dict[str, dict] = {
         "params": [],
         "queue": "scraper",
     },
+    "scrape_mapa_estado": {
+        "celery_name": "openarg.scrape_mapa_estado",
+        "description": "Scrape PEN authorities from Mapa del Estado (Jefatura de Gabinete)",
+        "params": [],
+        "queue": "scraper",
+    },
+    "scrape_gobernadores": {
+        "celery_name": "openarg.scrape_gobernadores",
+        "description": "Scrape provincial governors from Wikidata SPARQL",
+        "params": [],
+        "queue": "scraper",
+    },
     "ingest_presupuesto_dimensiones": {
         "celery_name": "openarg.ingest_presupuesto_dimensiones",
         "description": "ETL Presupuesto dimension tables (clasificadores DGSIAF → PG)",

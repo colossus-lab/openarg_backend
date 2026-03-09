@@ -14,6 +14,7 @@ Usage:
 Groups & phases (executed in order):
     1. scrapers  — CKAN portals + DKAN + Senado + Córdoba Legislatura
     1. staff     — Staff snapshots (Diputados + Senado)
+    1. autoridades — PEN authorities (Mapa del Estado) + Governors (Wikidata)
     2. ingest    — Presupuesto, BCRA, BAC, INDEC, Georef, Series de Tiempo
     3. collect   — bulk_collect_all (download & cache uncached datasets)
     4. embeddings— Session chunks + dataset embeddings
@@ -52,6 +53,15 @@ TASK_GROUPS: dict[str, dict] = {
         "tasks": [
             {"name": "openarg.snapshot_staff"},
             {"name": "openarg.scrape_senado_staff"},
+        ],
+    },
+    "autoridades": {
+        "phase": 1,
+        "delay_seconds": 0,
+        "description": "Scrape authorities (PEN from Mapa del Estado + Governors from Wikidata)",
+        "tasks": [
+            {"name": "openarg.scrape_mapa_estado"},
+            {"name": "openarg.scrape_gobernadores"},
         ],
     },
     "ingest": {

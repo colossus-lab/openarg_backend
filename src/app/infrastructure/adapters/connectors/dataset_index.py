@@ -1623,6 +1623,138 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.95,
         "description": "Datasets agropecuarios en datos.gob.ar",
     },
+
+    # ── Autoridades / Gobierno PEN → query_sandbox ────────────
+    "presidente": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "presidente de la nación"},
+        "confidence": 0.95,
+        "description": "Presidente de la Nación (Mapa del Estado)",
+    },
+    "presidente de argentina": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "presidente de la nación"},
+        "confidence": 0.95,
+        "description": "Presidente de la República Argentina",
+    },
+    "quien es el presidente": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "presidente de la nación"},
+        "confidence": 0.95,
+        "description": "Presidente de la Nación",
+    },
+    "vicepresidente": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "vicepresidente"},
+        "confidence": 0.95,
+        "description": "Vicepresidente de la Nación",
+    },
+    "jefe de gabinete": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "jefe de gabinete"},
+        "confidence": 0.95,
+        "description": "Jefe de Gabinete de Ministros",
+    },
+    "ministros": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "ministros"},
+        "confidence": 0.90,
+        "description": "Ministros del PEN",
+    },
+    "ministro": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "ministro"},
+        "confidence": 0.90,
+        "description": "Ministros del Poder Ejecutivo Nacional",
+    },
+    "gabinete": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "gabinete nacional"},
+        "confidence": 0.90,
+        "description": "Gabinete nacional (ministros y secretarios)",
+    },
+    "secretarios": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "secretarios"},
+        "confidence": 0.85,
+        "description": "Secretarios del PEN",
+    },
+    "autoridades nacionales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "autoridades principales"},
+        "confidence": 0.90,
+        "description": "Autoridades del Poder Ejecutivo Nacional",
+    },
+    "poder ejecutivo": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen", "cache_autoridades_pen_principales"], "query": "poder ejecutivo nacional"},
+        "confidence": 0.90,
+        "description": "Estructura del Poder Ejecutivo Nacional",
+    },
+    "autoridades pen": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "autoridades del PEN"},
+        "confidence": 0.95,
+        "description": "Autoridades del Poder Ejecutivo Nacional",
+    },
+    "estructura del estado": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen"], "query": "estructura orgánica del estado"},
+        "confidence": 0.85,
+        "description": "Estructura orgánica del Estado Nacional",
+    },
+    "organigrama": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_autoridades_pen"], "query": "organigrama del estado"},
+        "confidence": 0.85,
+        "description": "Organigrama del Estado Nacional",
+    },
+
+    # ── Gobernadores → query_sandbox ──────────────────────────
+    "gobernador": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_gobernadores"], "query": "gobernador de provincia"},
+        "confidence": 0.95,
+        "description": "Gobernadores de provincias argentinas",
+    },
+    "gobernadores": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_gobernadores"], "query": "gobernadores de provincias"},
+        "confidence": 0.95,
+        "description": "Gobernadores de las 23 provincias + CABA",
+    },
+    "gobernador de": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_gobernadores"], "query": "gobernador de provincia"},
+        "confidence": 0.95,
+        "description": "Gobernador de una provincia específica",
+    },
+    "quien gobierna": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_gobernadores", "cache_autoridades_pen_principales"], "query": "quien gobierna"},
+        "confidence": 0.85,
+        "description": "Autoridades de gobierno (gobernadores / PEN)",
+    },
+
+    # ── Diputados / Legisladores → query_sandbox ─────────────
+    "diputados nacionales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_diputados"], "query": "diputados nacionales"},
+        "confidence": 0.90,
+        "description": "Lista de diputados nacionales (HCDN)",
+    },
+    "legisladores": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_diputados", "cache_bloques"], "query": "legisladores"},
+        "confidence": 0.85,
+        "description": "Legisladores nacionales (diputados + bloques)",
+    },
+    "bloques parlamentarios": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_bloques"], "query": "bloques parlamentarios"},
+        "confidence": 0.90,
+        "description": "Bloques parlamentarios de Diputados",
+    },
 }
 
 
@@ -1807,7 +1939,8 @@ TAXONOMY: dict[str, dict] = {
             "presupuesto": {"label": "Presupuesto Nacional", "actions": ["query_sandbox"], "cache_pattern": ["cache_presupuesto_*"]},
             "compras_publicas": {"label": "Compras Públicas", "actions": ["query_sandbox"], "cache_pattern": ["cache_bac_*", "cache_*compras*", "cache_*licitaci*"]},
             "ddjj": {"label": "Declaraciones Juradas", "actions": ["query_ddjj"], "cache_pattern": []},
-            "congreso": {"label": "Congreso / Diputados", "actions": ["query_sesiones", "query_staff", "search_ckan"], "cache_pattern": ["cache_*comision*", "cache_*personal*"]},
+            "autoridades": {"label": "Autoridades Nacionales / PEN / Gobernadores", "actions": ["query_sandbox"], "cache_pattern": ["cache_autoridades_pen*", "cache_gobernadores"]},
+            "congreso": {"label": "Congreso / Diputados", "actions": ["query_sesiones", "query_staff", "query_sandbox", "search_ckan"], "cache_pattern": ["cache_*comision*", "cache_*personal*", "cache_diputados", "cache_bloques"]},
             "senado": {"label": "Senado", "actions": ["query_sandbox"], "cache_pattern": ["cache_senado_*"]},
             "elecciones": {"label": "Elecciones", "actions": ["query_sandbox"], "cache_pattern": ["cache_elecciones_*"]},
             "gobierno": {"label": "Gobierno y Normativa", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*gobierno*", "cache_*decreto*"]},

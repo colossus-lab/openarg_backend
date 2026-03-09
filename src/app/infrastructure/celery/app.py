@@ -71,6 +71,8 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.senado_staff_tasks",
             "app.infrastructure.celery.tasks.georef_tasks",
             "app.infrastructure.celery.tasks.series_tiempo_tasks",
+            "app.infrastructure.celery.tasks.mapa_estado_tasks",
+            "app.infrastructure.celery.tasks.gobernadores_tasks",
             "app.infrastructure.celery.tasks.orchestrator_tasks",
         ],
     )
@@ -105,6 +107,8 @@ def create_celery() -> Celery:
         "openarg.ingest_georef": {"queue": "ingest"},
         "openarg.ingest_series_tiempo": {"queue": "ingest"},
         "openarg.run_pipeline": {"queue": "scraper"},
+        "openarg.scrape_mapa_estado": {"queue": "scraper"},
+        "openarg.scrape_gobernadores": {"queue": "scraper"},
     }
 
     app.conf.task_default_queue = "scraper"
@@ -272,6 +276,16 @@ def create_celery() -> Celery:
             "task": "openarg.ingest_series_tiempo",
             "schedule": crontab(day_of_month=1, hour=1, minute=30),  # Monthly, day 1
             "options": {"queue": "ingest"},
+        },
+        "scrape-mapa-estado": {
+            "task": "openarg.scrape_mapa_estado",
+            "schedule": crontab(day_of_week=1, hour=2, minute=0),  # Monday 2:00 AM ART
+            "options": {"queue": "scraper"},
+        },
+        "scrape-gobernadores": {
+            "task": "openarg.scrape_gobernadores",
+            "schedule": crontab(day_of_month=1, hour=2, minute=15),  # Monthly, day 1
+            "options": {"queue": "scraper"},
         },
     })
 
