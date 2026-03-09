@@ -139,7 +139,7 @@ class PgSandboxAdapter(ISQLSandbox):
             with engine.connect() as conn:
                 # Set the transaction to read-only and apply statement timeout
                 conn.execute(text("SET TRANSACTION READ ONLY"))
-                conn.execute(text("SET statement_timeout = :timeout_ms"), {"timeout_ms": timeout_ms})
+                conn.execute(text(f"SET statement_timeout = {int(timeout_ms)}"))
 
                 result = conn.execute(text(sql))
                 columns = list(result.keys())
