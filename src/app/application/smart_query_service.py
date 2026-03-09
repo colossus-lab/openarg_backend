@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
     from app.domain.ports.connectors.sesiones import ISesionesConnector
     from app.domain.ports.connectors.staff import IStaffConnector
+    from app.domain.ports.chat.chat_repository import IChatRepository
     from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
     from app.domain.ports.search.vector_search import IVectorSearch
     from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
@@ -329,6 +330,7 @@ class SmartQueryService:
         staff: IStaffConnector | None = None,
         bcra: BCRAAdapter | None = None,
         sandbox: ISQLSandbox | None = None,
+        chat_repo: IChatRepository | None = None,
     ) -> None:
         self._llm = llm
         self._embedding = embedding
@@ -344,7 +346,39 @@ class SmartQueryService:
         self._staff = staff
         self._bcra = bcra
         self._sandbox = sandbox
+        self._chat_repo = chat_repo
         self._metrics = MetricsCollector()
+
+    async def _load_chat_history(self, conversation_id: str) -> str:
+        """Load recent messages from the DB to build conversation context.
+
+        Only called when there is a conversation_id and a chat_repo.
+        Returns a formatted string or empty if no history.
+        """
+        if not conversation_id or not self._chat_repo:
+            return ""
+        try:
+            from uuid import UUID
+            messages = await self._chat_repo.get_messages(UUID(conversation_id), limit=10)
+            if len(messages) <= 1:
+                return ""
+            # Skip the last message (it's the current question the frontend just saved)
+            recent = messages[:-1][-6:]
+            if not recent:
+                return ""
+            parts = ["\nHISTORIAL DE CONVERSACIÓN:"]
+            for m in recent:
+                label = "Usuario" if m.role == "user" else "Asistente"
+                content = m.content[:300].replace("\n", " ")
+                parts.append(f"  - {label}: {content}")
+            parts.append(
+                "INSTRUCCIÓN: Usá este historial solo si el usuario hace referencia "
+                "a algo previo. Priorizá siempre la pregunta actual.\n"
+            )
+            return "\n".join(parts)
+        except Exception:
+            logger.debug("Failed to load chat history for %s", conversation_id)
+            return ""
 
     # ── Public API ──────────────────────────────────────────
 
@@ -394,11 +428,14 @@ class SmartQueryService:
             if cached:
                 return cached
 
-        # 2. Memory
+        # 2. Memory (Redis summaries + DB chat history)
         session_id = conversation_id or ""
         memory = await load_memory(self._cache, session_id)
         memory_ctx = build_memory_context_prompt(memory)
         memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
+        chat_history = await self._load_chat_history(conversation_id)
+        # Planner gets chat history (real messages) for follow-up understanding
+        planner_ctx = chat_history or memory_ctx
 
         # 3. Preprocess query (expand synonyms, acronyms, normalize)
         _q = expand_acronyms(question)
@@ -407,7 +444,7 @@ class SmartQueryService:
         preprocessed_q = expand_synonyms(_q)
 
         # 4. Plan (1 LLM call)
-        plan = await generate_plan(self._llm, preprocessed_q, memory_context=memory_ctx)
+        plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
 
         # Inject search_datasets fallback if plan has no vector search step
         # and no high-confidence data-fetching step
@@ -670,6 +707,10 @@ class SmartQueryService:
         memory_ctx = build_memory_context_prompt(memory)
         memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
 
+        # Chat history from DB (preferred over Redis memory for planner)
+        chat_history = await self._load_chat_history(conversation_id)
+        planner_ctx = chat_history or memory_ctx
+
         # Preprocess query (expand synonyms, acronyms, normalize)
         _q = expand_acronyms(question)
         _q, _ = normalize_temporal(_q)
@@ -678,7 +719,7 @@ class SmartQueryService:
 
         # Plan (1 LLM call)
         yield {"type": "status", "step": "planning"}
-        plan = await generate_plan(self._llm, preprocessed_q, memory_context=memory_ctx)
+        plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
 
         # Inject search_datasets fallback if plan has no vector search step
         # and no high-confidence data-fetching step
