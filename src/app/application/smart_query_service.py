@@ -140,16 +140,10 @@ _FAREWELL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_CASUAL_PATTERNS = re.compile(
-    r"^("
-    r"hola|buenas|buen día|buenos días|buenas tardes|buenas noches"
-    r"|hey|qué tal|que tal|qué onda|que onda|cómo estás|como estas"
-    r"|cómo andás|como andas|qué hacés|que haces"
-    r"|gracias|muchas gracias|genial|perfecto|dale|ok|de una|buenísimo|buenisimo"
-    r"|chau|adiós|adios|hasta luego|nos vemos|hasta pronto"
-    r")[\s!?.,;:]*$",
-    re.IGNORECASE,
-)
+_DATA_ACTIONS = frozenset((
+    "query_sandbox", "query_series", "query_argentina_datos", "query_bcra",
+    "query_ddjj", "query_sesiones", "query_staff", "search_ckan", "query_georef",
+))
 
 _META_PATTERNS = re.compile(
     r"(qué pod[eé]s hacer|qu[eé] sab[eé]s|cu[aá]les son tus funciones"
@@ -360,7 +354,7 @@ class SmartQueryService:
             return ""
         try:
             from uuid import UUID
-            messages = await self._chat_repo.get_messages(UUID(conversation_id), limit=10)
+            messages = await self._chat_repo.get_messages(UUID(conversation_id), limit=7)
             if len(messages) <= 1:
                 return ""
             # Skip the last message (it's the current question the frontend just saved)
@@ -449,10 +443,6 @@ class SmartQueryService:
 
         # Inject search_datasets fallback if plan has no vector search step
         # and no high-confidence data-fetching step
-        _DATA_ACTIONS = frozenset((
-            "query_sandbox", "query_series", "query_argentina_datos", "query_bcra",
-            "query_ddjj", "query_sesiones", "query_staff", "search_ckan", "query_georef",
-        ))
         _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
         _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
         if not _has_vector_step and not _has_data_step:
@@ -602,12 +592,10 @@ class SmartQueryService:
         # 7. Audit
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=duration_ms)
 
-        # 8. Memory update (non-blocking)
-        try:
-            updated_memory = await update_memory(self._llm, memory, plan, results, clean_answer)
-            await save_memory(self._cache, session_id, updated_memory)
-        except Exception:
-            logger.debug("Memory update failed", exc_info=True)
+        # 8. Memory update (fire-and-forget — don't block the response)
+        asyncio.create_task(
+            self._update_memory_bg(session_id, memory, plan, results, clean_answer)
+        )
 
         # 9. Save conversation history
         if session:
@@ -724,10 +712,6 @@ class SmartQueryService:
 
         # Inject search_datasets fallback if plan has no vector search step
         # and no high-confidence data-fetching step
-        _DATA_ACTIONS = frozenset((
-            "query_sandbox", "query_series", "query_argentina_datos", "query_bcra",
-            "query_ddjj", "query_sesiones", "query_staff", "search_ckan", "query_georef",
-        ))
         _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
         _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
         if not _has_vector_step and not _has_data_step:
@@ -898,7 +882,15 @@ class SmartQueryService:
             **({"warnings": all_warnings} if all_warnings else {}),
         }
 
-        # Cache write (fire-and-forget)
+        # Audit (streaming was missing this)
+        audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=0)
+
+        # Memory update (fire-and-forget)
+        asyncio.create_task(
+            self._update_memory_bg(session_id, memory, plan, results, clean_answer)
+        )
+
+        # Cache write
         try:
             result_dict = {
                 "answer": clean_answer,
@@ -911,13 +903,30 @@ class SmartQueryService:
         except Exception:
             logger.debug("Cache write failed in streaming", exc_info=True)
 
+    # ── Background helpers ─────────────────────────────────
+
+    async def _update_memory_bg(
+        self,
+        session_id: str,
+        memory: Any,
+        plan: ExecutionPlan,
+        results: list[DataResult],
+        answer: str,
+    ) -> None:
+        """Fire-and-forget memory update — runs after the response is sent."""
+        try:
+            updated = await update_memory(self._llm, memory, plan, results, answer)
+            await save_memory(self._cache, session_id, updated)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("Background memory update failed", exc_info=True)
+
     # ── Classification helpers ──────────────────────────────
 
     @staticmethod
     def _get_casual_response(question: str) -> str | None:
         t = question.strip()
-        if not _CASUAL_PATTERNS.match(t):
-            return None
         if _GREETING_PATTERN.match(t):
             subtype = "greeting"
         elif _THANKS_PATTERN.match(t):
@@ -925,7 +934,7 @@ class SmartQueryService:
         elif _FAREWELL_PATTERN.match(t):
             subtype = "farewell"
         else:
-            subtype = "generic"
+            return None
         responses = _CASUAL_RESPONSES.get(subtype, _CASUAL_RESPONSES["generic"])
         return random.choice(responses)  # noqa: S311
 
@@ -952,7 +961,9 @@ class SmartQueryService:
 
     async def _get_embedding(self, question: str) -> list[float] | None:
         try:
-            return await self._embedding.embed(question)
+            emb = await self._embedding.embed(question)
+            self._last_embedding = emb
+            return emb
         except Exception:
             logger.debug("Embedding generation failed for cache", exc_info=True)
             return None
@@ -1023,7 +1034,10 @@ class SmartQueryService:
         except Exception:
             logger.warning("Failed to cache smart query result", exc_info=True)
         try:
-            q_embedding = await self._get_embedding(question)
+            # Reuse embedding already computed by _check_cache / _get_cached_dict
+            q_embedding = getattr(self, "_last_embedding", None)
+            if not q_embedding:
+                q_embedding = await self._get_embedding(question)
             if q_embedding:
                 await self._semantic_cache.set(question, q_embedding, result, ttl=ttl)
         except Exception:
@@ -1473,23 +1487,28 @@ class SmartQueryService:
 
             result = await self._sandbox.execute_readonly(generated_sql)
 
-            # Self-correction loop: retry up to 2 times if SQL fails
+            # Self-correction loop: retry up to 2 times with a minimal prompt
+            # to avoid re-sending the full system prompt + history on each retry
             for _attempt in range(2):
                 if not result.error:
                     break
                 logger.warning("Sandbox query failed (attempt %d): %s", _attempt + 1, result.error)
-                messages.extend([
-                    LLMMessage(role="assistant", content=generated_sql),
+                retry_messages = [
+                    LLMMessage(
+                        role="system",
+                        content="Fix this PostgreSQL query. Return ONLY the corrected SQL, no markdown.",
+                    ),
                     LLMMessage(
                         role="user",
                         content=(
-                            f"That SQL returned an error: {result.error}\n"
-                            "Fix the query and return ONLY the corrected SQL."
+                            f"SQL:\n{generated_sql}\n\n"
+                            f"Error: {result.error}\n\n"
+                            f"Tables:\n{tables_context[:2000]}"
                         ),
                     ),
-                ])
+                ]
                 llm_response = await self._llm.chat(
-                    messages=messages, temperature=0.0, max_tokens=1024,
+                    messages=retry_messages, temperature=0.0, max_tokens=1024,
                 )
                 generated_sql = llm_response.content.strip()
                 if generated_sql.startswith("```"):
@@ -1739,32 +1758,32 @@ class SmartQueryService:
         # Unreachable in practice, but keeps mypy happy.
         raise last_exc  # type: ignore[misc]
 
+    _NOOP_ACTIONS = frozenset(("analyze", "compare", "synthesize"))
+
     async def _dispatch_step(self, step: PlanStep, nl_query: str = "") -> list[DataResult]:
-        if step.action == "query_series":
-            return await self._execute_series_step(step)
-        elif step.action == "query_argentina_datos":
-            return await self._execute_argentina_datos_step(step)
-        elif step.action == "query_georef":
-            return await self._execute_georef_step(step)
-        elif step.action == "query_ddjj":
+        # Sync handler (ddjj is not async)
+        if step.action == "query_ddjj":
             return self._execute_ddjj_step(step)
-        elif step.action == "search_ckan":
-            return await self._execute_ckan_step(step)
-        elif step.action == "query_sesiones":
-            return await self._execute_sesiones_step(step)
-        elif step.action == "query_staff":
-            return await self._execute_staff_step(step)
-        elif step.action == "query_bcra":
-            return await self._execute_bcra_step(step)
-        elif step.action == "query_sandbox":
+
+        async_handlers = {
+            "query_series": self._execute_series_step,
+            "query_argentina_datos": self._execute_argentina_datos_step,
+            "query_georef": self._execute_georef_step,
+            "search_ckan": self._execute_ckan_step,
+            "query_sesiones": self._execute_sesiones_step,
+            "query_staff": self._execute_staff_step,
+            "query_bcra": self._execute_bcra_step,
+            "search_datasets": self._execute_search_datasets_step,
+        }
+        handler = async_handlers.get(step.action)
+        if handler:
+            return await handler(step)
+        if step.action == "query_sandbox":
             return await self._execute_sandbox_step(step, user_query=nl_query)
-        elif step.action == "search_datasets":
-            return await self._execute_search_datasets_step(step)
-        elif step.action in ("analyze", "compare", "synthesize"):
+        if step.action in self._NOOP_ACTIONS:
             return []
-        else:
-            logger.info("Unknown step action '%s', skipping", step.action)
-            return []
+        logger.info("Unknown step action '%s', skipping", step.action)
+        return []
 
     # ── Data context builder ────────────────────────────────
 
@@ -1834,7 +1853,7 @@ class SmartQueryService:
                 )
             elif is_metadata_only:
                 preview = valid_records[:20]
-                records_text = json.dumps(preview, ensure_ascii=False, indent=2)
+                records_text = json.dumps(preview, ensure_ascii=False, separators=(",", ":"), default=str)
                 part = (
                     f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
                     f"Fuente: {result.portal_name} ({result.source})\n"
@@ -1867,7 +1886,7 @@ class SmartQueryService:
                     {k.replace("_", " "): v for k, v in rec.items()}
                     for rec in records_to_send
                 ]
-                records_text = json.dumps(display_records, ensure_ascii=False, indent=2, default=str)
+                records_text = json.dumps(display_records, ensure_ascii=False, separators=(",", ":"), default=str)
 
                 part = (
                     f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
