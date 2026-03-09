@@ -69,6 +69,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _build_capabilities_block() -> str:
+    """Build a concise list of system capabilities from the taxonomy."""
+    try:
+        from app.infrastructure.adapters.connectors.dataset_index import TAXONOMY
+
+        lines = ["CAPACIDADES DEL SISTEMA — OpenArg tiene datos sobre:"]
+        for cat in TAXONOMY.values():
+            children = cat.get("children", {})
+            child_labels = [c["label"] for c in children.values()]
+            lines.append(f"• {cat['label']}: {', '.join(child_labels)}")
+        lines.append("• Georeferenciación: provincias, departamentos, municipios y localidades")
+        return "\n".join(lines)
+    except Exception:
+        return (
+            "CAPACIDADES DEL SISTEMA — OpenArg tiene datos sobre:\n"
+            "• Economía (inflación, dólar, empleo, actividad económica)\n"
+            "• Gobierno (presupuesto, autoridades, gobernadores, DDJJ)\n"
+            "• Congreso (legisladores, sesiones, personal, comisiones)\n"
+            "• Datos sociales (educación, salud, seguridad, género)\n"
+            "• Infraestructura (transporte, energía, telecomunicaciones)\n"
+            "• Georeferenciación (provincias, municipios, localidades)"
+        )
+
+
 # ── Result dataclass ────────────────────────────────────────
 
 
@@ -428,17 +452,20 @@ class SmartQueryService:
         )
 
         if no_data_fallback:
+            caps = _build_capabilities_block()
             analysis_prompt = (
                 f'PREGUNTA DEL USUARIO: "{question}"\n'
                 f"FECHA ACTUAL: {today}\n\n"
                 f"{memory_ctx}\n\n"
                 "No se encontraron datos en las fuentes de datos abiertos para esta consulta. "
-                "Respondé usando tu conocimiento general sobre Argentina, pero aclaralo brevemente "
-                "al final (ej: 'Según información pública disponible...' o 'Esta respuesta se basa en conocimiento general, "
+                "Respondé usando tu conocimiento general, pero aclaralo brevemente "
+                "al final (ej: 'Esta respuesta se basa en conocimiento general, "
                 "no en datos abiertos del sistema.').\n"
-                "Respondé de forma breve y conversacional en español argentino. "
-                "Después sugerí 2-3 preguntas de seguimiento que SÍ podamos responder con datos del sistema "
-                "(economía, presupuesto, legisladores, DDJJ, personal legislativo, etc)."
+                "Respondé de forma breve y conversacional en español argentino.\n\n"
+                f"{caps}\n\n"
+                "Al final de tu respuesta, sugerí 2-3 preguntas concretas de seguimiento "
+                "que SÍ podamos responder con datos del sistema, eligiendo de las categorías listadas arriba. "
+                "Formulalas como preguntas naturales, no como categorías."
             )
         else:
             analysis_prompt = (
@@ -699,17 +726,20 @@ class SmartQueryService:
         )
 
         if no_data_fallback:
+            caps = _build_capabilities_block()
             analysis_prompt = (
                 f'PREGUNTA DEL USUARIO: "{question}"\n'
                 f"FECHA ACTUAL: {today}\n\n"
                 f"{memory_ctx}\n\n"
                 "No se encontraron datos en las fuentes de datos abiertos para esta consulta. "
-                "Respondé usando tu conocimiento general sobre Argentina, pero aclaralo brevemente "
-                "al final (ej: 'Según información pública disponible...' o 'Esta respuesta se basa en conocimiento general, "
+                "Respondé usando tu conocimiento general, pero aclaralo brevemente "
+                "al final (ej: 'Esta respuesta se basa en conocimiento general, "
                 "no en datos abiertos del sistema.').\n"
-                "Respondé de forma breve y conversacional en español argentino. "
-                "Después sugerí 2-3 preguntas de seguimiento que SÍ podamos responder con datos del sistema "
-                "(economía, presupuesto, legisladores, DDJJ, personal legislativo, etc)."
+                "Respondé de forma breve y conversacional en español argentino.\n\n"
+                f"{caps}\n\n"
+                "Al final de tu respuesta, sugerí 2-3 preguntas concretas de seguimiento "
+                "que SÍ podamos responder con datos del sistema, eligiendo de las categorías listadas arriba. "
+                "Formulalas como preguntas naturales, no como categorías."
             )
         else:
             analysis_prompt = (
