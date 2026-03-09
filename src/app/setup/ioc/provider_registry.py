@@ -286,6 +286,7 @@ class ApplicationProvider(Provider):  # type: ignore[misc]
         staff: IStaffConnector,
         bcra: BCRAAdapter,
         sandbox: ISQLSandbox,
+        chat_repo: IChatRepository,
     ) -> SmartQueryService:
         return SmartQueryService(
             llm=llm,
@@ -302,6 +303,7 @@ class ApplicationProvider(Provider):  # type: ignore[misc]
             staff=staff,
             bcra=bcra,
             sandbox=sandbox,
+            chat_repo=chat_repo,
         )
 
 
