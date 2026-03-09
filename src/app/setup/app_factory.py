@@ -35,6 +35,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if not settings.security.BACKEND_API_KEY:
             raise RuntimeError("BACKEND_API_KEY must be set in production")
 
+    # Warm up DB connection pool — verify pgbouncer is reachable
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.ext.asyncio import create_async_engine as _create_engine
+
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url:
+        try:
+            _engine = _create_engine(db_url, pool_size=1)
+            async with _engine.connect() as conn:
+                await conn.execute(sa_text("SELECT 1"))
+            await _engine.dispose()
+            logger.info("DB connection warm-up OK")
+        except Exception as exc:
+            logger.warning("DB warm-up failed (will retry on first request): %s", exc)
+
     logger.info("OpenArg API started")
     yield
     if hasattr(app.state, "dishka_container"):
