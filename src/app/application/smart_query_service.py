@@ -1291,12 +1291,14 @@ class SmartQueryService:
             logger.warning("Vector-based table discovery failed, falling back", exc_info=True)
             return []
 
-    async def _execute_sandbox_step(self, step: PlanStep) -> list[DataResult]:
+    async def _execute_sandbox_step(self, step: PlanStep, user_query: str = "") -> list[DataResult]:
         if not self._sandbox:
             logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
             return []
         params = step.params
-        nl_query = params.get("query", step.description)
+        # Use the original user question for NL2SQL so specific filters
+        # (e.g. "gobernador de jujuy") are not lost to the planner's generic query.
+        nl_query = user_query or params.get("query", step.description)
 
         try:
             tables = await self._sandbox.list_cached_tables()
@@ -1577,7 +1579,7 @@ class SmartQueryService:
             step_start = time.monotonic()
             connector_name = step.action
             try:
-                data = await self._dispatch_step(step)
+                data = await self._dispatch_step(step, nl_query=nl_query)
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms)
                 return data, None
@@ -1602,7 +1604,7 @@ class SmartQueryService:
 
         return results, warnings
 
-    async def _dispatch_step(self, step: PlanStep) -> list[DataResult]:
+    async def _dispatch_step(self, step: PlanStep, nl_query: str = "") -> list[DataResult]:
         if step.action == "query_series":
             return await self._execute_series_step(step)
         elif step.action == "query_argentina_datos":
@@ -1620,7 +1622,7 @@ class SmartQueryService:
         elif step.action == "query_bcra":
             return await self._execute_bcra_step(step)
         elif step.action == "query_sandbox":
-            return await self._execute_sandbox_step(step)
+            return await self._execute_sandbox_step(step, user_query=nl_query)
         elif step.action == "search_datasets":
             return await self._execute_search_datasets_step(step)
         elif step.action in ("analyze", "compare", "synthesize"):
