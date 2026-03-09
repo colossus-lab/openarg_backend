@@ -73,7 +73,7 @@ class SemanticCache:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        similarity_threshold: float = 0.85,
+        similarity_threshold: float = 0.95,
     ) -> None:
         self._session_factory = session_factory
         self._similarity_threshold = similarity_threshold
