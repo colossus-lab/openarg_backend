@@ -398,6 +398,7 @@ class SmartQueryService:
         session_id = conversation_id or ""
         memory = await load_memory(self._cache, session_id)
         memory_ctx = build_memory_context_prompt(memory)
+        memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
 
         # 3. Preprocess query (expand synonyms, acronyms, normalize)
         _q = expand_acronyms(question)
@@ -456,7 +457,7 @@ class SmartQueryService:
             analysis_prompt = (
                 f'PREGUNTA DEL USUARIO: "{question}"\n'
                 f"FECHA ACTUAL: {today}\n\n"
-                f"{memory_ctx}\n\n"
+                f"{memory_ctx_analyst}\n\n"
                 "No se encontraron datos en las fuentes de datos abiertos para esta consulta. "
                 "Respondé usando tu conocimiento general, pero aclaralo brevemente "
                 "al final (ej: 'Esta respuesta se basa en conocimiento general, "
@@ -474,7 +475,7 @@ class SmartQueryService:
                 f"INTENCIÓN: {plan.intent}\n\n"
                 f"DATOS RECOLECTADOS:\n{data_context}\n"
                 f"{errors_block}"
-                f"{memory_ctx}\n\n"
+                f"{memory_ctx_analyst}\n\n"
                 "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
                 "para no repetir contexto innecesariamente y para mantener coherencia "
                 "con respuestas anteriores.\n\n"
@@ -667,6 +668,7 @@ class SmartQueryService:
         # Memory
         memory = await load_memory(self._cache, session_id)
         memory_ctx = build_memory_context_prompt(memory)
+        memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
 
         # Preprocess query (expand synonyms, acronyms, normalize)
         _q = expand_acronyms(question)
@@ -730,7 +732,7 @@ class SmartQueryService:
             analysis_prompt = (
                 f'PREGUNTA DEL USUARIO: "{question}"\n'
                 f"FECHA ACTUAL: {today}\n\n"
-                f"{memory_ctx}\n\n"
+                f"{memory_ctx_analyst}\n\n"
                 "No se encontraron datos en las fuentes de datos abiertos para esta consulta. "
                 "Respondé usando tu conocimiento general, pero aclaralo brevemente "
                 "al final (ej: 'Esta respuesta se basa en conocimiento general, "
@@ -748,7 +750,7 @@ class SmartQueryService:
                 f"INTENCIÓN: {plan.intent}\n\n"
                 f"DATOS RECOLECTADOS:\n{data_context}\n"
                 f"{errors_block}"
-                f"{memory_ctx}\n\n"
+                f"{memory_ctx_analyst}\n\n"
                 "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
                 "para no repetir contexto innecesariamente y para mantener coherencia "
                 "con respuestas anteriores.\n\n"
@@ -995,15 +997,18 @@ class SmartQueryService:
 
         query_text = params.get("query", step.description)
 
-        if not series_ids:
-            match = find_catalog_match(query_text)
-            if match:
+        # Always check catalog for defaults (collapse, representation)
+        # even when the planner already provided seriesIds, because
+        # the planner often omits representation=percent_change.
+        match = find_catalog_match(query_text)
+        if match:
+            if not series_ids:
                 series_ids = match["ids"]
-                if not collapse and "default_collapse" in match:
-                    collapse = match["default_collapse"]
-                if not representation and "default_representation" in match:
-                    representation = match["default_representation"]
-                logger.info("Series catalog match for '%s': %s", query_text[:60], series_ids)
+            if not collapse and "default_collapse" in match:
+                collapse = match["default_collapse"]
+            if not representation and "default_representation" in match:
+                representation = match["default_representation"]
+            logger.info("Series catalog match for '%s': %s", query_text[:60], series_ids)
 
         if not series_ids:
             search_results = await self._series.search(query_text)

@@ -117,8 +117,15 @@ async def update_memory(
         )
 
 
-def build_memory_context_prompt(memory: MemoryContext) -> str:
-    """Build a prompt section with memory context for the planner/analysis."""
+def build_memory_context_prompt(memory: MemoryContext, *, for_analyst: bool = False) -> str:
+    """Build a prompt section with memory context.
+
+    Args:
+        memory: The conversation memory.
+        for_analyst: If True, build a lightweight version without
+            key_findings and pending_questions to avoid contaminating
+            the analyst with specific data from previous turns.
+    """
     if memory.turn_number == 0:
         return ""
 
@@ -129,7 +136,7 @@ def build_memory_context_prompt(memory: MemoryContext) -> str:
         for s in memory.summaries[-3:]:
             parts.append(f"  - {s}")
 
-    if memory.key_findings:
+    if not for_analyst and memory.key_findings:
         parts.append("Hallazgos clave previos:")
         for f in memory.key_findings[-5:]:
             parts.append(f"  - {f}")
@@ -137,14 +144,20 @@ def build_memory_context_prompt(memory: MemoryContext) -> str:
     if memory.datasets_used:
         parts.append(f"Datasets ya consultados: {', '.join(memory.datasets_used[-10:])}")
 
-    if memory.pending_questions:
+    if not for_analyst and memory.pending_questions:
         parts.append("Preguntas sugeridas pendientes:")
         for q in memory.pending_questions:
             parts.append(f"  - {q}")
 
-    parts.append(
-        "INSTRUCCIÓN: Usá este contexto para dar continuidad a la conversación. "
-        "Si el usuario hace una pregunta de seguimiento, conectá con lo anterior. "
-        "Evitá repetir datasets ya consultados si no es necesario.\n"
-    )
+    if for_analyst:
+        parts.append(
+            "INSTRUCCIÓN: Priorizá siempre los datos recolectados en este turno. "
+            "Solo usá el contexto previo si el usuario hace referencia explícita a algo anterior.\n"
+        )
+    else:
+        parts.append(
+            "INSTRUCCIÓN: Usá este contexto para dar continuidad a la conversación. "
+            "Si el usuario hace una pregunta de seguimiento, conectá con lo anterior. "
+            "Evitá repetir datasets ya consultados si no es necesario.\n"
+        )
     return "\n".join(parts)
