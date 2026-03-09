@@ -367,8 +367,10 @@ class SmartQueryService:
                 content = m.content[:300].replace("\n", " ")
                 parts.append(f"  - {label}: {content}")
             parts.append(
-                "INSTRUCCIÓN: Usá este historial solo si el usuario hace referencia "
-                "a algo previo. Priorizá siempre la pregunta actual.\n"
+                "INSTRUCCIÓN: Si la pregunta actual es ambigua o le falta sujeto "
+                "(ej: 'a qué partido pertenece', 'cuánto gana', 'dónde queda'), "
+                "resolvé la referencia usando el historial. "
+                "Si la pregunta es autocontenida, ignorá el historial.\n"
             )
             return "\n".join(parts)
         except Exception:
