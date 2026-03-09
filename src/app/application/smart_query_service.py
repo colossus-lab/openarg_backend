@@ -1769,11 +1769,16 @@ class SmartQueryService:
             if not x_key:
                 continue
 
+            # Columns that are numeric but should never be charted
+            _SKIP_NUMERIC = {"centroide_lat", "centroide_lon", "lat", "lon", "latitud", "longitud",
+                             "latitude", "longitude", "id", "provincia_id", "departamento_id",
+                             "municipio_id", "localidad_censal_id"}
             numeric_keys = [
                 k
                 for k in keys
                 if k != x_key
                 and not k.startswith("_")
+                and k.lower() not in _SKIP_NUMERIC
                 and isinstance(first.get(k), int | float)
             ]
             if not numeric_keys:
