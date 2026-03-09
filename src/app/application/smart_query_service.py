@@ -1379,6 +1379,10 @@ class SmartQueryService:
         try:
             tables = await self._sandbox.list_cached_tables()
             table_hints = params.get("tables", [])
+            logger.info(
+                "Sandbox step %s: %d cached tables, hints=%s, query=%s",
+                step.id, len(tables), table_hints, nl_query[:80],
+            )
             if not tables:
                 if table_hints and any("indec" in h for h in table_hints):
                     logger.info("No cached tables at all, attempting INDEC live fallback")
@@ -1410,6 +1414,11 @@ class SmartQueryService:
                 if filtered:
                     tables = filtered
                 elif any("indec" in h for h in table_hints):
+                    indec_tables = [t.table_name for t in tables if "indec" in t.table_name]
+                    logger.info(
+                        "INDEC fnmatch miss: hints=%s, indec_tables_in_cache=%d (sample: %s)",
+                        table_hints, len(indec_tables), indec_tables[:3],
+                    )
                     logger.info("No cached INDEC tables, attempting live fallback")
                     return await self._indec_live_fallback(nl_query)
                 else:
