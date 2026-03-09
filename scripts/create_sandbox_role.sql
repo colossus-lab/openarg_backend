@@ -4,13 +4,13 @@
 -- Usage:
 --   psql -U postgres -d openarg_db -f scripts/create_sandbox_role.sql
 --
--- Then set SANDBOX_DATABASE_URL to:
---   postgresql+psycopg://openarg_sandbox_ro:<password>@<host>:5432/openarg_db
+-- The docker-compose.prod.yml already configures SANDBOX_DATABASE_URL
+-- using the same POSTGRES_PASSWORD, so no extra env var needed.
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'openarg_sandbox_ro') THEN
-        CREATE ROLE openarg_sandbox_ro WITH LOGIN PASSWORD 'CHANGE_ME';
+        CREATE ROLE openarg_sandbox_ro WITH LOGIN PASSWORD 'CHANGE_ME_PASSWORD';
     END IF;
 END
 $$;

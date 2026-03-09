@@ -229,3 +229,37 @@ class PgSandboxAdapter(ISQLSandbox):
     async def list_cached_tables(self) -> list[CachedTableInfo]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self._list_tables_sync)
+
+    def _get_column_types_sync(
+        self, table_names: list[str],
+    ) -> dict[str, list[tuple[str, str]]]:
+        engine = self._get_engine()
+        if not table_names:
+            return {}
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT table_name, column_name, data_type "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = ANY(:tables) "
+                    "ORDER BY table_name, ordinal_position"
+                ),
+                {"tables": table_names},
+            )
+            types: dict[str, list[tuple[str, str]]] = {}
+            for row in result.fetchall():
+                types.setdefault(row.table_name, []).append(
+                    (row.column_name, row.data_type)
+                )
+            conn.rollback()
+            return types
+
+    async def get_column_types(
+        self, table_names: list[str],
+    ) -> dict[str, list[tuple[str, str]]]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(self._get_column_types_sync, table_names),
+        )

@@ -29,3 +29,10 @@ class ISQLSandbox(ABC):
 
     @abstractmethod
     async def list_cached_tables(self) -> list[CachedTableInfo]: ...
+
+    @abstractmethod
+    async def get_column_types(
+        self, table_names: list[str],
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Return {table_name: [(column_name, data_type), ...]} for given tables."""
+        ...
