@@ -41,8 +41,8 @@ ORDER BY ?provinceLabel
 
 def _register_dataset(engine, table_name: str, df: pd.DataFrame):
     """Upsert into datasets and cached_datasets tables."""
-    source_id = "wikidata-gobernadores"
-    portal = "wikidata"
+    source_id = "gobernadores-provincias"
+    portal = "gobernaciones"
     title = "Gobernadores de Provincias Argentinas"
     columns_json = json.dumps(list(df.columns))
     now = datetime.now(UTC)
@@ -64,11 +64,11 @@ def _register_dataset(engine, table_name: str, df: pd.DataFrame):
                 "sid": source_id, "title": title,
                 "desc": (
                     "Gobernadores actuales de las 23 provincias argentinas y "
-                    "Jefe de Gobierno de CABA. Fuente: Wikidata."
+                    "Jefe de Gobierno de CABA."
                 ),
-                "org": "Wikidata — Datos enlazados",
+                "org": "Gobernaciones Provinciales",
                 "portal": portal,
-                "url": "https://www.wikidata.org/",
+                "url": "https://www.argentina.gob.ar/interior/gobernadores",
                 "cols": columns_json,
                 "tags": "gobernadores,provincias,gobierno,autoridades",
                 "now": now, "rows": len(df),
