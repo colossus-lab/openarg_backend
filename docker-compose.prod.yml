@@ -8,23 +8,19 @@ services:
   #   Requires pgvector extension: CREATE EXTENSION IF NOT EXISTS vector;
 
   pgbouncer:
-    image: bitnami/pgbouncer:latest
+    image: edoburu/pgbouncer:latest
     container_name: openarg_pgbouncer
     restart: always
     networks:
       - openarg_network
     environment:
-      PGBOUNCER_DATABASE: ${POSTGRES_DB}
-      POSTGRESQL_HOST: ${POSTGRES_HOST}
-      POSTGRESQL_PORT: "5432"
-      POSTGRESQL_USERNAME: ${POSTGRES_USER}
-      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
-      PGBOUNCER_POOL_MODE: session
-      PGBOUNCER_MAX_CLIENT_CONN: "200"
-      PGBOUNCER_DEFAULT_POOL_SIZE: "20"
-      PGBOUNCER_MIN_POOL_SIZE: "5"
-      PGBOUNCER_RESERVE_POOL_SIZE: "5"
-      PGBOUNCER_SERVER_IDLE_TIMEOUT: "300"
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      POOL_MODE: session
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "20"
+      MIN_POOL_SIZE: "5"
+      RESERVE_POOL_SIZE: "5"
+      SERVER_IDLE_TIMEOUT: "300"
     deploy:
       resources:
         limits:
@@ -33,7 +29,7 @@ services:
         reservations:
           memory: 64M
     healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6432' || exit 1"]
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10
