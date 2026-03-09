@@ -21,6 +21,8 @@ services:
       MIN_POOL_SIZE: "5"
       RESERVE_POOL_SIZE: "5"
       SERVER_IDLE_TIMEOUT: "300"
+      LISTEN_PORT: "6432"
+      AUTH_TYPE: scram-sha-256
     deploy:
       resources:
         limits:
@@ -29,7 +31,7 @@ services:
         reservations:
           memory: 64M
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 || exit 1"]
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 6432 || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10
