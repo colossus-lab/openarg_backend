@@ -476,7 +476,8 @@ class SmartQueryService:
 
         # 6a. Parse META confidence/citations
         confidence, citations = self._extract_meta(clean_answer)
-        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL).strip()
+        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL)
+        clean_answer = re.sub(r"<!--META:.*", "", clean_answer, flags=re.DOTALL).strip()
 
         # Add disclaimer for low confidence
         if confidence < 0.5:
@@ -760,10 +761,11 @@ class SmartQueryService:
                 yield {"type": "chunk", "content": stream_buf}
                 stream_buf = ""
 
-        # Flush any remaining buffer (shouldn't have unclosed tags)
+        # Flush any remaining buffer (strip complete + truncated tags)
         if stream_buf:
             cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
-            if cleaned:
+            cleaned = re.sub(r"<!--.*", "", cleaned, flags=re.DOTALL)
+            if cleaned.strip():
                 yield {"type": "chunk", "content": cleaned}
 
         # Complete
@@ -776,7 +778,8 @@ class SmartQueryService:
 
         # Parse META from streaming output
         confidence, citations = self._extract_meta(clean_answer)
-        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL).strip()
+        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL)
+        clean_answer = re.sub(r"<!--META:.*", "", clean_answer, flags=re.DOTALL).strip()
 
         # Policy analysis (optional, streamed)
         if policy_mode:
