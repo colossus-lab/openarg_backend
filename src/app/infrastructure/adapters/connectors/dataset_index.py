@@ -1489,6 +1489,66 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
 
     # ── Georef ─────────────────────────────────────────────────
+    "donde queda": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios", "cache_georef_departamentos", "cache_georef_provincias"], "query": "ubicación geográfica"},
+        "confidence": 0.90,
+        "description": "Ubicación geográfica (GeoRef)",
+    },
+    "donde esta": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios", "cache_georef_departamentos", "cache_georef_provincias"], "query": "ubicación geográfica"},
+        "confidence": 0.90,
+        "description": "Ubicación geográfica (GeoRef)",
+    },
+    "en que provincia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios"], "query": "provincia de localidad"},
+        "confidence": 0.90,
+        "description": "Provincia de una localidad/municipio (GeoRef)",
+    },
+    "ubicacion de": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios", "cache_georef_departamentos"], "query": "ubicación geográfica"},
+        "confidence": 0.85,
+        "description": "Ubicación geográfica (GeoRef)",
+    },
+    "coordenadas de": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios"], "query": "coordenadas geográficas"},
+        "confidence": 0.85,
+        "description": "Coordenadas geográficas (GeoRef)",
+    },
+    "localidades de": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_localidades"], "query": "localidades de provincia"},
+        "confidence": 0.85,
+        "description": "Localidades de una provincia (GeoRef)",
+    },
+    "municipios de": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_municipios"], "query": "municipios de provincia"},
+        "confidence": 0.85,
+        "description": "Municipios de una provincia (GeoRef)",
+    },
+    "departamentos de": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_departamentos"], "query": "departamentos de provincia"},
+        "confidence": 0.85,
+        "description": "Departamentos de una provincia (GeoRef)",
+    },
+    "cuantas localidades": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_localidades"], "query": "cantidad de localidades"},
+        "confidence": 0.85,
+        "description": "Cantidad de localidades (GeoRef)",
+    },
+    "cuantos municipios": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_georef_municipios"], "query": "cantidad de municipios"},
+        "confidence": 0.85,
+        "description": "Cantidad de municipios (GeoRef)",
+    },
     "provincia": {
         "action": "query_georef",
         "params": {},
