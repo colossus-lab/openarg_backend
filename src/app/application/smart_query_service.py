@@ -1369,8 +1369,8 @@ class SmartQueryService:
         query = params.get("query", step.description)
         try:
             q_embedding = await self._embedding.embed(query)
-            vector_results = await self._vector_search.search_datasets(
-                q_embedding, limit=params.get("limit", 10),
+            vector_results = await self._vector_search.search_datasets_hybrid(
+                q_embedding, query, limit=params.get("limit", 10),
             )
             if not vector_results:
                 return []

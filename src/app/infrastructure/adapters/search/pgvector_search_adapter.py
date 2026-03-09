@@ -15,10 +15,11 @@ class PgVectorSearchAdapter(IVectorSearch):
         query_embedding: list[float],
         limit: int = 10,
         portal_filter: str | None = None,
+        min_similarity: float = 0.40,
     ) -> list[SearchResult]:
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
-        params: dict = {"embedding": embedding_str, "limit": limit}
+        params: dict = {"embedding": embedding_str, "limit": limit, "min_sim": min_similarity}
         if portal_filter:
             params["portal"] = portal_filter
             query = text(
@@ -28,6 +29,7 @@ class PgVectorSearchAdapter(IVectorSearch):
                 " FROM dataset_chunks dc"
                 " JOIN datasets d ON d.id = dc.dataset_id"
                 " WHERE d.portal = :portal"
+                " AND 1 - (dc.embedding <=> CAST(:embedding AS vector)) >= :min_sim"
                 " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
                 " LIMIT :limit"
             )
@@ -38,6 +40,7 @@ class PgVectorSearchAdapter(IVectorSearch):
                 " 1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score"
                 " FROM dataset_chunks dc"
                 " JOIN datasets d ON d.id = dc.dataset_id"
+                " WHERE 1 - (dc.embedding <=> CAST(:embedding AS vector)) >= :min_sim"
                 " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
                 " LIMIT :limit"
             )

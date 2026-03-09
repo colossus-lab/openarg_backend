@@ -7,6 +7,37 @@ services:
   #   DB:   ${POSTGRES_DB}
   #   Requires pgvector extension: CREATE EXTENSION IF NOT EXISTS vector;
 
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    container_name: openarg_pgbouncer
+    restart: always
+    networks:
+      - openarg_network
+    environment:
+      PGBOUNCER_DATABASE: ${POSTGRES_DB}
+      POSTGRESQL_HOST: ${POSTGRES_HOST}
+      POSTGRESQL_PORT: "5432"
+      POSTGRESQL_USERNAME: ${POSTGRES_USER}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
+      PGBOUNCER_POOL_MODE: session
+      PGBOUNCER_MAX_CLIENT_CONN: "200"
+      PGBOUNCER_DEFAULT_POOL_SIZE: "20"
+      PGBOUNCER_MIN_POOL_SIZE: "5"
+      PGBOUNCER_RESERVE_POOL_SIZE: "5"
+      PGBOUNCER_SERVER_IDLE_TIMEOUT: "300"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          memory: 64M
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6432' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     container_name: openarg_redis
@@ -53,18 +84,20 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
       REDIS_CACHE_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
-      BACKEND_API_KEY: ${BACKEND_API_KEY:-}
-      SANDBOX_DATABASE_URL: ${SANDBOX_DATABASE_URL:-}
+      BACKEND_API_KEY: ${BACKEND_API_KEY}
+      SANDBOX_DATABASE_URL: postgresql+psycopg://openarg_sandbox_ro:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   # ── Celery Workers ──────────────────────────────────────────────
@@ -88,12 +121,14 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
 
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   worker-collector:
@@ -117,7 +152,7 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
@@ -126,6 +161,8 @@ services:
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   worker-ingest:
@@ -149,7 +186,7 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
@@ -158,6 +195,8 @@ services:
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   worker-embedding:
@@ -180,12 +219,14 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
 
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   worker-analyst:
@@ -208,13 +249,15 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
       GEMINI_API_KEY: ${GEMINI_API_KEY}
 
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   worker-transparency:
@@ -237,11 +280,13 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   worker-s3:
@@ -264,7 +309,7 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
@@ -273,6 +318,8 @@ services:
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   # ── Celery Beat (periodic tasks) ────────────────────────────────
@@ -289,11 +336,13 @@ services:
     environment:
       APP_ENV: prod
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
     depends_on:
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
 
   # ── Frontend ────────────────────────────────────────────────────
@@ -313,7 +362,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       ALLOWED_EMAILS: ${ALLOWED_EMAILS}
-      OPENARG_BACKEND_API_KEY: ${BACKEND_API_KEY:-}
+      OPENARG_BACKEND_API_KEY: ${BACKEND_API_KEY}
     depends_on:
       - backend
 

@@ -22,6 +22,7 @@ class IVectorSearch(ABC):
         query_embedding: list[float],
         limit: int = 10,
         portal_filter: str | None = None,
+        min_similarity: float = 0.40,
     ) -> list[SearchResult]: ...
 
     @abstractmethod
@@ -40,7 +41,7 @@ class IVectorSearch(ABC):
         limit: int = 10,
         portal_filter: str | None = None,
         rrf_k: int = 60,
-        min_score: float = 0.005,
+        min_score: float = 0.05,
     ) -> list[SearchResult]: ...
 
     @abstractmethod
