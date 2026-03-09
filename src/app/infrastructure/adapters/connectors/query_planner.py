@@ -11,6 +11,91 @@ from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
+# Actions recognised by _dispatch_step in SmartQueryService
+_VALID_ACTIONS: frozenset[str] = frozenset({
+    "search_ckan",
+    "query_series",
+    "query_ddjj",
+    "query_argentina_datos",
+    "query_georef",
+    "query_sesiones",
+    "query_bcra",
+    "query_staff",
+    "query_sandbox",
+    "search_datasets",
+    # Passthrough / meta-actions (return [] but are valid in a plan)
+    "analyze",
+    "compare",
+    "synthesize",
+})
+
+
+def _validate_plan(plan_data: dict) -> dict:
+    """Validate and sanitise the LLM-generated execution plan.
+
+    * Removes steps whose ``action`` is not a known connector/meta-action.
+    * Ensures every step has a string ``id``, a dict ``params`` and a list
+      ``dependsOn`` that only references previously-declared step IDs.
+    * Logs a warning for each step that is dropped or patched.
+    """
+    raw_steps = plan_data.get("steps", [])
+    if not isinstance(raw_steps, list):
+        logger.warning("Plan validation: 'steps' is not a list (%s), resetting", type(raw_steps).__name__)
+        plan_data["steps"] = []
+        return plan_data
+
+    valid_steps: list[dict] = []
+    valid_ids: set[str] = set()
+
+    for idx, step in enumerate(raw_steps):
+        if not isinstance(step, dict):
+            logger.warning("Plan validation: step %d is not a dict, skipping", idx)
+            continue
+
+        # ── id ──
+        step_id = step.get("id")
+        if not step_id or not isinstance(step_id, str):
+            step_id = f"step_{idx + 1}"
+            step["id"] = step_id
+
+        # ── action ──
+        action = step.get("action", "")
+        if action not in _VALID_ACTIONS:
+            logger.warning(
+                "Plan validation: step '%s' has invalid action '%s', skipping",
+                step_id, action,
+            )
+            continue
+
+        # ── params ──
+        if not isinstance(step.get("params"), dict):
+            step["params"] = {}
+
+        # ── dependsOn (camelCase key used by the LLM) ──
+        depends_key = "dependsOn" if "dependsOn" in step else "depends_on"
+        depends = step.get(depends_key, [])
+        if not isinstance(depends, list):
+            depends = []
+        cleaned_depends = [d for d in depends if isinstance(d, str) and d in valid_ids]
+        if len(cleaned_depends) != len(depends):
+            logger.warning(
+                "Plan validation: step '%s' had invalid depends_on refs removed "
+                "(before=%s, after=%s)",
+                step_id, depends, cleaned_depends,
+            )
+        step[depends_key] = cleaned_depends
+
+        valid_ids.add(step_id)
+        valid_steps.append(step)
+
+    if len(valid_steps) != len(raw_steps):
+        logger.info(
+            "Plan validation: kept %d / %d steps", len(valid_steps), len(raw_steps),
+        )
+
+    plan_data["steps"] = valid_steps
+    return plan_data
+
 
 def _resolve_routing_hints(question: str) -> str:
     """Resolve routing hints from the dataset index. Returns formatted text or empty string."""
@@ -64,6 +149,7 @@ async def generate_plan(
             text = json_match.group(1).strip()
 
         plan_data = json.loads(text)
+        plan_data = _validate_plan(plan_data)
 
         steps = []
         for i, s in enumerate(plan_data.get("steps", [])):

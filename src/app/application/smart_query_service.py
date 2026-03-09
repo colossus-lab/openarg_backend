@@ -83,6 +83,7 @@ def _build_capabilities_block() -> str:
         lines.append("• Georeferenciación: provincias, departamentos, municipios y localidades")
         return "\n".join(lines)
     except Exception:
+        logger.debug("Failed to build capabilities from taxonomy", exc_info=True)
         return (
             "CAPACIDADES DEL SISTEMA — OpenArg tiene datos sobre:\n"
             "• Economía (inflación, dólar, empleo, actividad económica)\n"
@@ -377,7 +378,7 @@ class SmartQueryService:
             )
             return "\n".join(parts)
         except Exception:
-            logger.debug("Failed to load chat history for %s", conversation_id)
+            logger.debug("Failed to load chat history for %s", conversation_id, exc_info=True)
             return ""
 
     # ── Public API ──────────────────────────────────────────
@@ -953,7 +954,7 @@ class SmartQueryService:
         try:
             return await self._embedding.embed(question)
         except Exception:
-            logger.debug("Embedding generation failed for cache")
+            logger.debug("Embedding generation failed for cache", exc_info=True)
             return None
 
     async def _check_cache(self, question: str, user_id: str) -> SmartQueryResult | None:
@@ -973,7 +974,7 @@ class SmartQueryService:
                     cached=True,
                 )
         except Exception:
-            logger.debug("Redis cache read failed")
+            logger.debug("Redis cache read failed", exc_info=True)
 
         # 2. Semantic cache (requires embedding, ~100-200ms)
         try:
@@ -992,7 +993,7 @@ class SmartQueryService:
                         cached=True,
                     )
         except Exception:
-            logger.debug("Semantic cache read failed")
+            logger.debug("Semantic cache read failed", exc_info=True)
 
         self._metrics.record_cache_miss()
         return None
@@ -1004,7 +1005,7 @@ class SmartQueryService:
             if cached and isinstance(cached, dict):
                 return cached
         except Exception:
-            logger.debug("WS Redis cache read failed")
+            logger.debug("WS Redis cache read failed", exc_info=True)
         try:
             q_embedding = await self._get_embedding(question)
             if q_embedding:
@@ -1012,7 +1013,7 @@ class SmartQueryService:
                 if sem and isinstance(sem, dict):
                     return sem
         except Exception:
-            logger.debug("WS semantic cache read failed")
+            logger.debug("WS semantic cache read failed", exc_info=True)
         return None
 
     async def _write_cache(self, question: str, result: dict[str, Any], intent: str = "") -> None:
@@ -1672,7 +1673,7 @@ class SmartQueryService:
             step_start = time.monotonic()
             connector_name = step.action
             try:
-                data = await self._dispatch_step(step, nl_query=nl_query)
+                data = await self._dispatch_step_with_retry(step, nl_query=nl_query)
                 step_ms = round((time.monotonic() - step_start) * 1000, 1)
                 self._metrics.record_connector_call(connector_name, step_ms)
                 return data, None
@@ -1696,6 +1697,47 @@ class SmartQueryService:
                     warnings.append(warning)
 
         return results, warnings
+
+    # ── Retry logic for transient step failures ───────────
+    _RETRYABLE_PATTERNS = ("timeout", "503", "502", "504", "connection", "reset", "refused")
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        """Return *True* if *exc* looks like a transient/network error."""
+        exc_str = str(exc).lower()
+        if any(p in exc_str for p in self._RETRYABLE_PATTERNS):
+            return True
+        if "Timeout" in type(exc).__name__:
+            return True
+        return False
+
+    async def _dispatch_step_with_retry(
+        self,
+        step: PlanStep,
+        nl_query: str = "",
+        max_retries: int = 2,
+    ) -> list[DataResult]:
+        """Call ``_dispatch_step`` with up to *max_retries* retries on transient errors."""
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await self._dispatch_step(step, nl_query=nl_query)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries and self._is_retryable(exc):
+                    delay = 1.5 * (attempt + 1)
+                    logger.warning(
+                        "Step %s attempt %d/%d failed (%s), retrying in %.1fs …",
+                        step.id,
+                        attempt + 1,
+                        max_retries + 1,
+                        exc,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        # Unreachable in practice, but keeps mypy happy.
+        raise last_exc  # type: ignore[misc]
 
     async def _dispatch_step(self, step: PlanStep, nl_query: str = "") -> list[DataResult]:
         if step.action == "query_series":
@@ -1753,8 +1795,12 @@ class SmartQueryService:
                 "concretas. Ofrecé 3-4 opciones temáticas."
             )
 
+        max_per_result = 8_000
+        max_results = 10
+        max_total = 80_000
+
         parts = []
-        for i, result in enumerate(results):
+        for i, result in enumerate(results[:max_results]):
             valid_records = [r for r in result.records if isinstance(r, dict)]
             if not valid_records and result.records:
                 continue
@@ -1842,12 +1888,16 @@ class SmartQueryService:
                     "datos proporcionados."
                 )
 
+            # Per-result truncation: prevent a single large result
+            # from consuming the entire context budget
+            if len(part) > max_per_result:
+                part = part[:max_per_result] + "\n... [truncado, datos parciales]\n"
+
             parts.append(part)
 
         joined = "\n\n".join(parts)
-        max_context_chars = 60_000
-        if len(joined) > max_context_chars:
-            joined = joined[:max_context_chars] + "\n\n[... datos truncados por límite de contexto ...]"
+        if len(joined) > max_total:
+            joined = joined[:max_total] + "\n\n[... datos truncados por límite de contexto ...]"
         return joined
 
     # ── META parser ─────────────────────────────────────────
@@ -1981,7 +2031,7 @@ class SmartQueryService:
                 chart["data"] = valid_rows
                 charts.append(chart)
             except (json.JSONDecodeError, KeyError):
-                pass
+                logger.debug("Failed to parse LLM chart tag", exc_info=True)
         return charts
 
     # ── History persistence ─────────────────────────────────

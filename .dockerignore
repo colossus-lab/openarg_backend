@@ -1,0 +1,44 @@
+# Python bytecode
+__pycache__
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv
+
+# Linters / type checkers / test caches
+.mypy_cache
+.pytest_cache
+.ruff_cache
+
+# Git
+.git
+.github
+
+# Environment / secrets
+.env
+.env.*
+
+# Build artifacts
+*.egg-info
+dist
+build
+
+# Documentation & tests (not needed in image)
+docs
+tests
+*.md
+!README.md
+
+# Coverage reports
+.coverage
+htmlcov
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Node (shouldn't exist, but just in case)
+node_modules
