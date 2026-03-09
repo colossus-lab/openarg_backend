@@ -108,6 +108,9 @@ REGLAS:
 - **NÓMINA DE PERSONAL HCDN — Para buscar si alguien trabaja/es empleado del Congreso por nombre específico → usá search_ckan con portalId: "diputados", resourceId: "6e49506e-6757-44cd-94e9-0e75f3bd8c38", q: "<nombre>".**
 - **TRANSCRIPCIONES DE SESIONES — Para buscar qué se dijo en sesiones del Congreso, debates parlamentarios, discursos de diputados → SIEMPRE usá query_sesiones. NUNCA uses search_ckan para buscar contenido de debates.**
 - **BCRA — Para cotización oficial del dólar del BCRA, reservas del BCRA, tasa de política monetaria, base monetaria, circulación monetaria → usá query_bcra. query_series también tiene estos datos; preferí query_bcra para datos en tiempo real y query_series para series históricas largas.**
+- **AUTORIDADES DEL PEN — Para preguntas sobre presidente, vicepresidente, ministros, secretarios, jefe de gabinete, autoridades del Poder Ejecutivo Nacional → usá query_sandbox con tables: ["cache_autoridades_pen_principales"]. Para la estructura orgánica completa (6000+ cargos) → tables: ["cache_autoridades_pen"]. Fuente: Mapa del Estado (Jefatura de Gabinete).**
+- **GOBERNADORES — Para preguntas sobre gobernadores de provincias argentinas, quién gobierna tal provincia → usá query_sandbox con tables: ["cache_gobernadores"]. Contiene las 23 provincias + CABA con gobernador, partido y fecha de inicio.**
+- **DIPUTADOS / LEGISLADORES — Para lista de diputados nacionales, bloques parlamentarios → usá query_sandbox con tables: ["cache_diputados", "cache_bloques"]. Para contenido de sesiones, debates, discursos → usá query_sesiones. Para personal/asesores → usá query_staff.**
 - **PRESUPUESTO NACIONAL — Para ejecución presupuestaria, crédito presupuestario, gasto público detallado, deuda pública, planta de personal estatal, transferencias → usá query_sandbox con tables: ["cache_presupuesto_*"]. NO uses search_ckan.**
 - **CLASIFICADORES PRESUPUESTARIOS — Para apertura programática, clasificador económico, finalidad y función, fuente de financiamiento, ubicación geográfica del gasto → usá query_sandbox con tables: ["cache_presupuesto_dim_*"]. Son las tablas de dimensiones del presupuesto (2016-2026).**
 - **COMPRAS PÚBLICAS CABA — Para licitaciones, contratos, proveedores de Buenos Aires Compras → usá query_sandbox con tables: ["cache_bac_*"].**
@@ -142,4 +145,91 @@ SCHEMA DE RESPUESTA:
     }
   ],
   "suggestedVisualizations": ["line_chart", "bar_chart", "pie_chart", "table", "map"]
+}
+
+EJEMPLOS:
+
+Pregunta: "¿Cómo viene la inflación en los últimos 12 meses?"
+Respuesta:
+{
+  "query": "¿Cómo viene la inflación en los últimos 12 meses?",
+  "intent": "tendencia de inflación mensual IPC últimos 12 meses",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_series",
+      "description": "Obtener variación porcentual mensual del IPC últimos 12 meses",
+      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2025-03-01", "endDate": "2026-03-08", "collapse": "month" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart"]
+}
+
+Pregunta: "¿Cuántos asesores tiene Cristina Kirchner?"
+Respuesta:
+{
+  "query": "¿Cuántos asesores tiene Cristina Kirchner?",
+  "intent": "cantidad de asesores del legislador",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_staff",
+      "description": "Buscar personal asignado a Cristina Kirchner",
+      "params": { "action": "get_by_legislator", "name": "Kirchner" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["table"]
+}
+
+Pregunta: "¿Cuál es el patrimonio de los diputados más ricos?"
+Respuesta:
+{
+  "query": "¿Cuál es el patrimonio de los diputados más ricos?",
+  "intent": "ranking patrimonial de diputados por DDJJ",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_ddjj",
+      "description": "Ranking de diputados por patrimonio declarado",
+      "params": { "action": "ranking", "sortBy": "patrimonio", "top": 20, "order": "desc" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["bar_chart", "table"]
+}
+
+Pregunta: "¿Cuánto gasta el Estado en educación vs defensa?"
+Respuesta:
+{
+  "query": "¿Cuánto gasta el Estado en educación vs defensa?",
+  "intent": "comparación de gasto público por finalidad educación vs defensa",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_sandbox",
+      "description": "Gasto por finalidad en educación y defensa del presupuesto nacional",
+      "params": { "query": "gasto total devengado por finalidad educación y defensa", "tables": ["cache_presupuesto_credito"] },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["bar_chart", "table"]
+}
+
+Pregunta: "¿A cuánto está el dólar blue hoy?"
+Respuesta:
+{
+  "query": "¿A cuánto está el dólar blue hoy?",
+  "intent": "cotización actual del dólar blue",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_argentina_datos",
+      "description": "Cotización actual del dólar blue",
+      "params": { "type": "dolar", "casa": "blue", "ultimo": true },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["table"]
 }

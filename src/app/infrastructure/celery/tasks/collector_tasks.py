@@ -716,34 +716,89 @@ def recover_stuck_tasks(self):
             ).fetchall()
 
             for row in stuck_downloads:
-                new_count = (row.retry_count or 0) + 1
-                if new_count >= MAX_TOTAL_ATTEMPTS:
+                # Check if the table already has data (task crashed after to_sql but before status update)
+                table_has_data = False
+                if row.table_name:
+                    try:
+                        count_result = conn.execute(
+                            text(f'SELECT COUNT(*) FROM "{row.table_name}"')  # noqa: S608
+                        ).scalar()
+                        table_has_data = (count_result or 0) > 0
+                    except Exception:
+                        pass  # Table doesn't exist or can't be queried
+
+                if table_has_data:
+                    # Table has data — just fix the status to 'ready'
+                    row_count = conn.execute(
+                        text(f'SELECT COUNT(*) FROM "{row.table_name}"')  # noqa: S608
+                    ).scalar() or 0
+                    try:
+                        col_result = conn.execute(
+                            text(
+                                "SELECT column_name FROM information_schema.columns "
+                                "WHERE table_name = :tn ORDER BY ordinal_position"
+                            ),
+                            {"tn": row.table_name},
+                        ).fetchall()
+                        columns = [r.column_name for r in col_result]
+                    except Exception:
+                        columns = []
+                    columns_json = json.dumps(columns)
                     conn.execute(
                         text("""
                             UPDATE cached_datasets
-                            SET status = 'permanently_failed',
-                                retry_count = :cnt,
-                                error_message = 'Permanently failed: stuck in downloading too many times',
+                            SET status = 'ready',
+                                row_count = :rows,
+                                columns_json = :cols,
+                                error_message = NULL,
                                 updated_at = NOW()
                             WHERE dataset_id = CAST(:did AS uuid)
                               AND status = 'downloading'
                         """),
-                        {"did": row.dataset_id, "cnt": new_count},
+                        {"did": row.dataset_id, "rows": row_count, "cols": columns_json},
+                    )
+                    # Also mark dataset as cached
+                    conn.execute(
+                        text(
+                            "UPDATE datasets SET is_cached = true, row_count = :rows "
+                            "WHERE id = CAST(:did AS uuid)"
+                        ),
+                        {"did": row.dataset_id, "rows": row_count},
+                    )
+                    logger.info(
+                        "Recovered stuck download %s: table %s has %d rows, set to ready",
+                        row.dataset_id, row.table_name, row_count,
                     )
                 else:
-                    conn.execute(
-                        text("""
-                            UPDATE cached_datasets
-                            SET status = 'error',
-                                retry_count = :cnt,
-                                error_message = 'Recovered: stuck in downloading state',
-                                updated_at = NOW()
-                            WHERE dataset_id = CAST(:did AS uuid)
-                              AND status = 'downloading'
-                        """),
-                        {"did": row.dataset_id, "cnt": new_count},
-                    )
-                    collect_dataset.delay(row.dataset_id)
+                    # Table has no data — re-dispatch or mark failed
+                    new_count = (row.retry_count or 0) + 1
+                    if new_count >= MAX_TOTAL_ATTEMPTS:
+                        conn.execute(
+                            text("""
+                                UPDATE cached_datasets
+                                SET status = 'permanently_failed',
+                                    retry_count = :cnt,
+                                    error_message = 'Permanently failed: stuck in downloading too many times',
+                                    updated_at = NOW()
+                                WHERE dataset_id = CAST(:did AS uuid)
+                                  AND status = 'downloading'
+                            """),
+                            {"did": row.dataset_id, "cnt": new_count},
+                        )
+                    else:
+                        conn.execute(
+                            text("""
+                                UPDATE cached_datasets
+                                SET status = 'error',
+                                    retry_count = :cnt,
+                                    error_message = 'Recovered: stuck in downloading state',
+                                    updated_at = NOW()
+                                WHERE dataset_id = CAST(:did AS uuid)
+                                  AND status = 'downloading'
+                            """),
+                            {"did": row.dataset_id, "cnt": new_count},
+                        )
+                        collect_dataset.delay(row.dataset_id)
                 recovered_downloads += 1
 
         # 2. Recover stuck user_queries
