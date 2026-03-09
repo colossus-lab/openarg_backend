@@ -159,7 +159,7 @@ async def generate_plan(
                     action=s.get("action", "search_ckan"),
                     description=s.get("description", ""),
                     params=s.get("params", {}),
-                    depends_on=s.get("dependsOn", []),
+                    depends_on=s.get("dependsOn") or s.get("depends_on", []),
                 )
             )
 

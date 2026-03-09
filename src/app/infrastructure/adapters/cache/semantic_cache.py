@@ -113,15 +113,19 @@ class SemanticCache:
                 # 2. Vector similarity (only if embedding provided)
                 if embedding:
                     emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
+                    # Pre-filter by distance so pgvector can use the HNSW index
+                    max_distance = 1 - self._similarity_threshold
                     result = await session.execute(
                         text("""
                             SELECT response, 1 - (embedding <=> CAST(:emb AS vector)) AS similarity
                             FROM query_cache
-                            WHERE expires_at > :now AND embedding IS NOT NULL
+                            WHERE expires_at > :now
+                              AND embedding IS NOT NULL
+                              AND embedding <=> CAST(:emb AS vector) < :max_dist
                             ORDER BY embedding <=> CAST(:emb AS vector)
                             LIMIT 1
                         """),
-                        {"emb": emb_str, "now": now},
+                        {"emb": emb_str, "now": now, "max_dist": max_distance},
                     )
                     row = result.fetchone()
                     if row and row[1] >= self._similarity_threshold:
