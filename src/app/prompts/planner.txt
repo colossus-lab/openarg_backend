@@ -96,7 +96,8 @@ REGLAS:
 - Identificá la intención principal (análisis, comparación, tendencia, exploración, evaluación_de_política)
 - **ANÁLISIS DE POLÍTICAS PÚBLICAS**: Si la consulta menciona "evaluación", "impacto", "eficiencia del gasto", "programa social", "política pública", "resultado de", "efectividad", o compara indicadores sociales con gasto/presupuesto → incluí "evaluación_de_política" en el intent. Esto activa el marco de análisis de políticas públicas en el agente de análisis. Combiná datos de múltiples fuentes cuando sea posible.
 - Sugerí visualizaciones apropiadas para los datos esperados
-- Si la consulta menciona lugares, incluí un paso de query_georef para normalizar
+- **GEOREFERENCIACIÓN — Para preguntas sobre "dónde queda", "dónde está", "en qué provincia está", ubicación de ciudades, localidades, municipios, departamentos → usá query_sandbox con tables: ["cache_georef_localidades", "cache_georef_municipios", "cache_georef_departamentos", "cache_georef_provincias"]. Contiene 4037 localidades, 2082 municipios, 529 departamentos y 24 provincias con coordenadas.**
+- Si la consulta menciona lugares como parte de otra búsqueda, incluí un paso de query_georef para normalizar
 - **Para indicadores económicos (presupuesto, inflación, tipo de cambio, PBI, EMAE, reservas, base monetaria, LELIQ, pases, desempleo, salarios, canasta básica, exportaciones, importaciones, balanza comercial, industria), SIEMPRE usá query_series con los seriesIds del catálogo. NO uses search_ckan para estos temas.**
 - **Para dólar blue, dólar cripto, dólar bolsa, CCL, dólar solidario → SIEMPRE usá query_argentina_datos con type: "dolar" y casa: "blue"/"cripto"/etc. NO uses query_series para estos.**
 - **Para riesgo país → SIEMPRE usá query_argentina_datos con type: "riesgo_pais". Para el valor actual, agregá ultimo: true.**
