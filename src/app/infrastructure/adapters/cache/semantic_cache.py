@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -73,7 +74,7 @@ class SemanticCache:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        similarity_threshold: float = 0.95,
+        similarity_threshold: float = 0.92,
     ) -> None:
         self._session_factory = session_factory
         self._similarity_threshold = similarity_threshold
@@ -147,6 +148,11 @@ class SemanticCache:
         q_hash = self._hash(question)
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=ttl)
+
+        if embedding:
+            if any(math.isnan(v) or math.isinf(v) for v in embedding):
+                logger.warning("Semantic cache write skipped: embedding contains NaN or Inf values")
+                return
 
         try:
             async with self._session_factory() as session:

@@ -93,6 +93,49 @@ def _validate_plan(plan_data: dict) -> dict:
             "Plan validation: kept %d / %d steps", len(valid_steps), len(raw_steps),
         )
 
+    # ── Cycle detection (DFS) ──
+    # Build adjacency from depends_on and detect circular dependencies.
+    adj: dict[str, list[str]] = {}
+    step_by_id: dict[str, dict] = {}
+    for step in valid_steps:
+        sid = step["id"]
+        dep_key = "dependsOn" if "dependsOn" in step else "depends_on"
+        adj[sid] = step.get(dep_key, [])
+        step_by_id[sid] = step
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {sid: WHITE for sid in adj}
+
+    def _dfs_cycle(node: str) -> bool:
+        """Return True if a cycle was found and broken."""
+        color[node] = GRAY
+        found_cycle = False
+        dep_key = "dependsOn" if "dependsOn" in step_by_id[node] else "depends_on"
+        for neighbour in list(adj[node]):
+            if neighbour not in color:
+                continue
+            if color[neighbour] == GRAY:
+                # Cycle detected: remove the back-edge by clearing depends_on
+                logger.warning(
+                    "Plan validation: circular dependency detected — "
+                    "step '%s' depends on '%s' which is still in progress. "
+                    "Removing depends_on for '%s'.",
+                    node, neighbour, node,
+                )
+                step_by_id[node][dep_key] = []
+                adj[node] = []
+                found_cycle = True
+                break
+            if color[neighbour] == WHITE:
+                if _dfs_cycle(neighbour):
+                    found_cycle = True
+        color[node] = BLACK
+        return found_cycle
+
+    for step_id in adj:
+        if color[step_id] == WHITE:
+            _dfs_cycle(step_id)
+
     plan_data["steps"] = valid_steps
     return plan_data
 

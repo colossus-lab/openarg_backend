@@ -234,3 +234,133 @@ Respuesta:
   ],
   "suggestedVisualizations": ["table"]
 }
+
+Pregunta: "¿Cuánto se gasta en educación y cómo viene el desempleo?"
+Respuesta:
+{
+  "query": "¿Cuánto se gasta en educación y cómo viene el desempleo?",
+  "intent": "comparación gasto educativo y tendencia desempleo",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_sandbox",
+      "description": "Gasto presupuestario en educación del presupuesto nacional",
+      "params": { "query": "gasto devengado en educación por año", "tables": ["cache_presupuesto_credito"] },
+      "dependsOn": []
+    },
+    {
+      "id": "step_2",
+      "action": "query_series",
+      "description": "Tasa de desempleo últimos trimestres",
+      "params": { "seriesIds": ["45.2_ECTDT_0_T_33"], "startDate": "2024-01-01", "endDate": "2026-03-09" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["bar_chart", "line_chart"]
+}
+
+Pregunta: "¿Y en Córdoba?" (historial previo: el usuario preguntó sobre inflación)
+Respuesta:
+{
+  "query": "¿Y en Córdoba?",
+  "intent": "inflación regional — Córdoba (referencia anafórica)",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_series",
+      "description": "Inflación IPC en Córdoba (región Pampeana) últimos 12 meses",
+      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2025-03-01", "endDate": "2026-03-09", "collapse": "month" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart"]
+}
+
+Pregunta: "¿El gasto social creció más que la inflación?"
+Respuesta:
+{
+  "query": "¿El gasto social creció más que la inflación?",
+  "intent": "evaluación_de_política — comparar evolución gasto social vs inflación",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_sandbox",
+      "description": "Gasto social devengado por año del presupuesto nacional",
+      "params": { "query": "gasto devengado en promoción y asistencia social y educación y salud por año", "tables": ["cache_presupuesto_credito"] },
+      "dependsOn": []
+    },
+    {
+      "id": "step_2",
+      "action": "query_series",
+      "description": "Inflación IPC acumulada anual",
+      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2020-01-01", "endDate": "2026-03-09", "collapse": "year" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart", "bar_chart"]
+}
+
+Pregunta: "Compará la ejecución presupuestaria en educación con la tasa de desempleo de los últimos 3 años"
+Respuesta:
+{
+  "query": "Compará la ejecución presupuestaria en educación con la tasa de desempleo de los últimos 3 años",
+  "intent": "comparación ejecución presupuestaria educación vs desempleo 2023-2026",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_sandbox",
+      "description": "Ejecución presupuestaria en educación últimos 3 años",
+      "params": { "query": "ejecución presupuestaria devengado en educación 2023 2024 2025 2026", "tables": ["cache_presupuesto_credito"] },
+      "dependsOn": []
+    },
+    {
+      "id": "step_2",
+      "action": "query_series",
+      "description": "Tasa de desempleo últimos 3 años",
+      "params": { "seriesIds": ["45.2_ECTDT_0_T_33"], "startDate": "2023-03-09", "endDate": "2026-03-09" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart", "bar_chart"]
+}
+
+Pregunta: "¿Y en Córdoba?" (con HISTORIAL que indica que se estaba consultando sobre desempleo)
+Respuesta:
+{
+  "query": "¿Y en Córdoba?",
+  "intent": "desempleo en Córdoba — follow-up con filtro geográfico",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_sandbox",
+      "description": "Datos de desempleo o empleo en Córdoba desde tablas INDEC",
+      "params": { "query": "desempleo empleo Córdoba", "tables": ["cache_indec_*"] },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart", "table"]
+}
+
+Pregunta: "¿El programa Potenciar Trabajo es efectivo?"
+Respuesta:
+{
+  "query": "¿El programa Potenciar Trabajo es efectivo?",
+  "intent": "evaluación_de_política programa Potenciar Trabajo",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_sandbox",
+      "description": "Ejecución presupuestaria del programa Potenciar Trabajo",
+      "params": { "query": "presupuesto programa Potenciar Trabajo devengado", "tables": ["cache_presupuesto_credito"] },
+      "dependsOn": []
+    },
+    {
+      "id": "step_2",
+      "action": "search_ckan",
+      "description": "Datos del programa Potenciar Trabajo en portales de datos abiertos",
+      "params": { "query": "Potenciar Trabajo", "portalId": "nacional" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart", "bar_chart", "table"]
+}

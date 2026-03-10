@@ -165,6 +165,12 @@ class ErrorCode(Enum):
         default_message="Staff data source is unavailable",
         http_status=502,
     )
+    CN_BCRA_UNAVAILABLE = ErrorDefinition(
+        code="CN_010",
+        i18n_key="errors.connector.bcra_unavailable",
+        default_message="BCRA API is unavailable",
+        http_status=502,
+    )
 
     # QUERY PLAN errors
     QR_PLAN_FAILED = ErrorDefinition(
