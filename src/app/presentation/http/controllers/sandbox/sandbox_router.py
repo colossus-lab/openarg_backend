@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
 from app.prompts import load_prompt
 from app.setup.app_factory import limiter
 
@@ -108,6 +109,18 @@ async def ask_natural_language(
     Includes column types in the schema context and a self-correction loop
     that retries up to 2 times if the generated SQL fails.
     """
+    # 0. Prompt injection check
+    suspicious, score = is_suspicious(body.question)
+    if suspicious:
+        return AskResponse(
+            sql="",
+            columns=[],
+            rows=[],
+            row_count=0,
+            truncated=False,
+            error=f"Entrada rechazada por filtro de seguridad (score={score:.2f}).",
+        )
+
     # 1. Gather table metadata for context
     tables = await sandbox.list_cached_tables()
     if not tables:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,9 +40,14 @@ def _summarize_assets(bienes: list[dict]) -> dict[str, float]:
 class DDJJAdapter:
     """In-memory DDJJ dataset loaded once at startup (singleton)."""
 
+    _BACKOFF_BASE = 60
+    _BACKOFF_CAP = 3600
+
     def __init__(self) -> None:
         self._dataset: list[dict] = []
         self._loaded = False
+        self._fail_count: int = 0
+        self._next_retry_at: float = 0.0
 
     @property
     def record_count(self) -> int:
@@ -52,19 +58,32 @@ class DDJJAdapter:
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
+        if self._fail_count > 0 and time.monotonic() < self._next_retry_at:
+            return
         try:
             raw = _DATA_PATH.read_text(encoding="utf-8")
             self._dataset = json.loads(raw)
             self._loaded = True
+            self._fail_count = 0
             logger.info("DDJJ dataset loaded: %d records from %s", len(self._dataset), _DATA_PATH)
         except FileNotFoundError:
-            logger.error("DDJJ dataset file not found: %s", _DATA_PATH)
+            self._fail_count += 1
+            delay = min(self._BACKOFF_BASE * (2 ** (self._fail_count - 1)), self._BACKOFF_CAP)
+            self._next_retry_at = time.monotonic() + delay
+            logger.error(
+                "DDJJ dataset file not found: %s (attempt %d, next retry in %ds)",
+                _DATA_PATH, self._fail_count, delay,
+            )
             self._dataset = []
-            # Don't set _loaded = True — allow retry if the file appears later
         except Exception:
-            logger.error("Failed to load DDJJ dataset from %s", _DATA_PATH, exc_info=True)
+            self._fail_count += 1
+            delay = min(self._BACKOFF_BASE * (2 ** (self._fail_count - 1)), self._BACKOFF_CAP)
+            self._next_retry_at = time.monotonic() + delay
+            logger.error(
+                "Failed to load DDJJ dataset from %s (attempt %d, next retry in %ds)",
+                _DATA_PATH, self._fail_count, delay, exc_info=True,
+            )
             self._dataset = []
-            # Don't set _loaded = True — allow retry on next call
 
     def search(self, query: str, limit: int = 20) -> DataResult:
         self._ensure_loaded()

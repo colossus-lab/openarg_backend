@@ -377,6 +377,39 @@ class SmartQueryService:
             logger.debug("Failed to load chat history for %s", conversation_id, exc_info=True)
             return ""
 
+    # ── Request classification (shared by execute + execute_streaming) ──
+
+    def _classify_request(
+        self, question: str, user_id: str,
+    ) -> tuple[str | None, str | None]:
+        """Check casual/meta/injection/educational patterns.
+
+        Returns (classification_type, response_text).
+        classification_type is one of "casual", "meta", "injection", "educational", or None.
+        """
+        casual = self._get_casual_response(question)
+        if casual:
+            return "casual", casual
+
+        meta = self._get_meta_response(question)
+        if meta:
+            return "meta", meta
+
+        suspicious, score = is_suspicious(question)
+        if suspicious:
+            audit_injection_blocked(user=user_id, question=question, score=score)
+            return "injection", (
+                "No pude procesar esa consulta. "
+                "Probá reformulándola con una pregunta sobre datos públicos argentinos, "
+                "por ejemplo: *¿Cuál fue la inflación del último mes?*"
+            )
+
+        edu = self._get_educational_response(question)
+        if edu:
+            return "educational", edu
+
+        return None, None
+
     # ── Public API ──────────────────────────────────────────
 
     async def execute(
@@ -390,34 +423,21 @@ class SmartQueryService:
         """Run the full pipeline synchronously and return a result."""
         start_time = time.monotonic()
 
-        # 0. Casual/meta/educational — instant responses (0 LLM calls)
-        casual = self._get_casual_response(question)
-        if casual:
-            return SmartQueryResult(answer=casual, sources=[], casual=True)
-
-        meta = self._get_meta_response(question)
-        if meta:
-            return SmartQueryResult(answer=meta, sources=[])
-
-        # 0b. Prompt injection check
-        suspicious, score = is_suspicious(question)
-        if suspicious:
-            audit_injection_blocked(user=user_id, question=question, score=score)
+        # 0. Casual/meta/injection/educational — instant responses (0 LLM calls)
+        cls_type, cls_text = self._classify_request(question, user_id)
+        if cls_type == "casual":
+            return SmartQueryResult(answer=cls_text, sources=[], casual=True)
+        if cls_type == "meta":
+            return SmartQueryResult(answer=cls_text, sources=[])
+        if cls_type == "injection":
             return SmartQueryResult(
-                answer=(
-                    "No pude procesar esa consulta. "
-                    "Probá reformulándola con una pregunta sobre datos públicos argentinos, "
-                    "por ejemplo: *¿Cuál fue la inflación del último mes?*"
-                ),
+                answer=cls_text,
                 sources=[],
                 intent="injection_blocked",
                 duration_ms=int((time.monotonic() - start_time) * 1000),
             )
-
-        # 0c. Educational
-        edu = self._get_educational_response(question)
-        if edu:
-            return SmartQueryResult(answer=edu, sources=[], educational=True)
+        if cls_type == "educational":
+            return SmartQueryResult(answer=cls_text, sources=[], educational=True)
 
         # 1. Cache lookup (skip in policy mode — always fetch fresh data)
         if not policy_mode:
@@ -636,44 +656,17 @@ class SmartQueryService:
         """Run the pipeline yielding status/chunk/complete/error events for WebSocket."""
         yield {"type": "status", "step": "classifying"}
 
-        # Injection check
-        suspicious, score = is_suspicious(question)
-        if suspicious:
-            audit_injection_blocked(user=user_id, question=question, score=score)
-            friendly_msg = (
-                "No pude procesar esa consulta. "
-                "Probá reformulándola con una pregunta sobre datos públicos argentinos, "
-                "por ejemplo: *¿Cuál fue la inflación del último mes?*"
-            )
-            yield {"type": "chunk", "content": friendly_msg}
-            yield {
-                "type": "complete", "answer": friendly_msg,
+        # Casual/meta/injection/educational — instant responses (0 LLM calls)
+        cls_type, cls_text = self._classify_request(question, user_id)
+        if cls_type is not None:
+            yield {"type": "chunk", "content": cls_text}
+            complete_evt: dict[str, Any] = {
+                "type": "complete", "answer": cls_text,
                 "sources": [], "chart_data": None,
             }
-            return
-
-        # Casual
-        casual = self._get_casual_response(question)
-        if casual:
-            yield {"type": "chunk", "content": casual}
-            yield {
-                "type": "complete", "answer": casual,
-                "sources": [], "chart_data": None, "casual": True,
-            }
-            return
-
-        # Meta
-        meta = self._get_meta_response(question)
-        if meta:
-            yield {"type": "chunk", "content": meta}
-            yield {"type": "complete", "answer": meta, "sources": [], "chart_data": None}
-            return
-
-        # Educational
-        edu = self._get_educational_response(question)
-        if edu:
-            yield {"type": "chunk", "content": edu}
-            yield {"type": "complete", "answer": edu, "sources": [], "chart_data": None}
+            if cls_type == "casual":
+                complete_evt["casual"] = True
+            yield complete_evt
             return
 
         # Cache check (skip in policy mode)
@@ -915,14 +908,35 @@ class SmartQueryService:
         results: list[DataResult],
         answer: str,
     ) -> None:
-        """Fire-and-forget memory update — runs after the response is sent."""
-        try:
-            updated = await update_memory(self._llm, memory, plan, results, answer)
-            await save_memory(self._cache, session_id, updated)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.debug("Background memory update failed", exc_info=True)
+        """Fire-and-forget memory update — runs after the response is sent.
+
+        Retries up to 2 times with exponential backoff (0.5s, 1s) before giving up.
+        """
+        max_retries = 2
+        backoff_base = 0.5
+        last_exc: Exception | None = None
+
+        for attempt in range(1 + max_retries):
+            try:
+                updated = await update_memory(self._llm, memory, plan, results, answer)
+                await save_memory(self._cache, session_id, updated)
+                return
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_retries:
+                    delay = backoff_base * (2 ** attempt)
+                    logger.debug(
+                        "Memory update attempt %d/%d failed, retrying in %.1fs",
+                        attempt + 1, 1 + max_retries, delay, exc_info=True,
+                    )
+                    await asyncio.sleep(delay)
+
+        logger.warning(
+            "Background memory update failed after %d attempts: %s",
+            1 + max_retries, last_exc,
+        )
 
     # ── Classification helpers ──────────────────────────────
 
@@ -971,28 +985,41 @@ class SmartQueryService:
             return None
 
     async def _check_cache(self, question: str, user_id: str) -> SmartQueryResult | None:
-        # 1. Redis cache first (cheap, ~1ms)
-        try:
-            cache_key = self._cache_key(question)
-            cached = await self._cache.get(cache_key)
-            if cached and isinstance(cached, dict):
-                self._metrics.record_cache_hit()
-                audit_cache_hit(user=user_id, question=question)
-                return SmartQueryResult(
-                    answer=cached.get("answer", ""),
-                    sources=cached.get("sources", []),
-                    chart_data=cached.get("chart_data"),
-                    tokens_used=cached.get("tokens_used", 0),
-                    documents=cached.get("documents"),
-                    cached=True,
-                )
-        except Exception:
-            logger.debug("Redis cache read failed", exc_info=True)
+        # Run Redis lookup and embedding generation in parallel.
+        # Redis is cheap (~1ms) and embedding takes ~100-200ms; overlapping
+        # them shaves latency on cache misses without hurting hits.
 
-        # 2. Semantic cache (requires embedding, ~100-200ms)
-        try:
-            q_embedding = await self._get_embedding(question)
-            if q_embedding:
+        async def _redis_lookup() -> dict[str, Any] | None:
+            try:
+                cache_key = self._cache_key(question)
+                cached = await self._cache.get(cache_key)
+                if cached and isinstance(cached, dict):
+                    return cached
+            except Exception:
+                logger.debug("Redis cache read failed", exc_info=True)
+            return None
+
+        redis_result, q_embedding = await asyncio.gather(
+            _redis_lookup(),
+            self._get_embedding(question),
+        )
+
+        # 1. Redis hit → return immediately (embedding is ignored)
+        if redis_result is not None:
+            self._metrics.record_cache_hit()
+            audit_cache_hit(user=user_id, question=question)
+            return SmartQueryResult(
+                answer=redis_result.get("answer", ""),
+                sources=redis_result.get("sources", []),
+                chart_data=redis_result.get("chart_data"),
+                tokens_used=redis_result.get("tokens_used", 0),
+                documents=redis_result.get("documents"),
+                cached=True,
+            )
+
+        # 2. Semantic cache (use the already-fetched embedding)
+        if q_embedding:
+            try:
                 sem_cached = await self._semantic_cache.get(question, embedding=q_embedding)
                 if sem_cached:
                     self._metrics.record_cache_hit()
@@ -1005,8 +1032,8 @@ class SmartQueryService:
                         documents=sem_cached.get("documents"),
                         cached=True,
                     )
-        except Exception:
-            logger.debug("Semantic cache read failed", exc_info=True)
+            except Exception:
+                logger.debug("Semantic cache read failed", exc_info=True)
 
         self._metrics.record_cache_miss()
         return None
