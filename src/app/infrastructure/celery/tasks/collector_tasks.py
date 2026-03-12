@@ -217,8 +217,18 @@ def _drop_table_if_exists(engine, table_name: str):
     logger.info("Dropped table %s for schema refresh", table_name)
 
 
+def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean column names: strip whitespace, non-breaking spaces, normalize."""
+    df.columns = [
+        col.replace("\xa0", "").strip() if isinstance(col, str) else col
+        for col in df.columns
+    ]
+    return df
+
+
 def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
     """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs."""
+    df = _sanitize_columns(df)
     try:
         df.to_sql(table_name, engine, **kwargs)
     except Exception as exc:
