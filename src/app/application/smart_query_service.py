@@ -463,27 +463,15 @@ class SmartQueryService:
         # 4. Plan (1 LLM call)
         plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
 
-        # Inject search_datasets fallback if plan has no vector search step
-        # and no high-confidence data-fetching step
-        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
-        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
-        if not _has_vector_step and not _has_data_step:
-            plan.steps.insert(0, PlanStep(
-                id="step_vector_fallback",
-                action="search_datasets",
-                description=f"Buscar datasets relevantes por similitud semántica: {question[:100]}",
-                params={"query": preprocessed_q, "limit": 5},
-                depends_on=[],
-            ))
-
-        # Handle clarification from planner
+        # Handle clarification from planner (before injecting fallback)
         _is_clar = (
             plan.intent == "clarification"
-            and plan.steps
-            and plan.steps[0].action == "clarification"
+            and any(s.action == "clarification" for s in plan.steps)
         )
         if _is_clar:
-            clar_step = plan.steps[0]
+            clar_step = next(
+                s for s in plan.steps if s.action == "clarification"
+            )
             clar_q = clar_step.params.get(
                 "question", "¿Podés ser más específico?",
             )
@@ -504,6 +492,25 @@ class SmartQueryService:
                     (time.monotonic() - start_time) * 1000
                 ),
             )
+
+        # Inject search_datasets fallback if plan has no vector search step
+        _has_vector_step = any(
+            s.action == "search_datasets" for s in plan.steps
+        )
+        _has_data_step = any(
+            s.action in _DATA_ACTIONS for s in plan.steps
+        )
+        if not _has_vector_step and not _has_data_step:
+            plan.steps.insert(0, PlanStep(
+                id="step_vector_fallback",
+                action="search_datasets",
+                description=(
+                    "Buscar datasets relevantes por similitud"
+                    f" semántica: {question[:100]}"
+                ),
+                params={"query": preprocessed_q, "limit": 5},
+                depends_on=[],
+            ))
 
         logger.info(
             "Plan for '%s': intent=%s, steps=%d",
@@ -738,27 +745,15 @@ class SmartQueryService:
         yield {"type": "status", "step": "planning"}
         plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
 
-        # Inject search_datasets fallback if plan has no vector search step
-        # and no high-confidence data-fetching step
-        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
-        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
-        if not _has_vector_step and not _has_data_step:
-            plan.steps.insert(0, PlanStep(
-                id="step_vector_fallback",
-                action="search_datasets",
-                description=f"Buscar datasets relevantes por similitud semántica: {question[:100]}",
-                params={"query": preprocessed_q, "limit": 5},
-                depends_on=[],
-            ))
-
-        # Handle clarification from planner
+        # Handle clarification from planner (before injecting fallback)
         _is_clar = (
             plan.intent == "clarification"
-            and plan.steps
-            and plan.steps[0].action == "clarification"
+            and any(s.action == "clarification" for s in plan.steps)
         )
         if _is_clar:
-            clar_step = plan.steps[0]
+            clar_step = next(
+                s for s in plan.steps if s.action == "clarification"
+            )
             yield {
                 "type": "clarification",
                 "question": clar_step.params.get(
@@ -767,6 +762,25 @@ class SmartQueryService:
                 "options": clar_step.params.get("options", []),
             }
             return
+
+        # Inject search_datasets fallback if plan has no vector search
+        _has_vector_step = any(
+            s.action == "search_datasets" for s in plan.steps
+        )
+        _has_data_step = any(
+            s.action in _DATA_ACTIONS for s in plan.steps
+        )
+        if not _has_vector_step and not _has_data_step:
+            plan.steps.insert(0, PlanStep(
+                id="step_vector_fallback",
+                action="search_datasets",
+                description=(
+                    "Buscar datasets relevantes por similitud"
+                    f" semántica: {question[:100]}"
+                ),
+                params={"query": preprocessed_q, "limit": 5},
+                depends_on=[],
+            ))
 
         yield {
             "type": "status",
