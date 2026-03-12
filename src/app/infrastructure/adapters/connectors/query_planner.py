@@ -192,6 +192,25 @@ async def generate_plan(
             text = json_match.group(1).strip()
 
         plan_data = json.loads(text)
+
+        # Handle clarification response from planner
+        if plan_data.get("type") == "clarification":
+            return ExecutionPlan(
+                query=question,
+                intent="clarification",
+                steps=[
+                    PlanStep(
+                        id="clarification",
+                        action="clarification",
+                        description=plan_data.get("question", "¿Podés ser más específico?"),
+                        params={
+                            "question": plan_data.get("question", "¿Podés ser más específico?"),
+                            "options": plan_data.get("options", []),
+                        },
+                    )
+                ],
+            )
+
         plan_data = _validate_plan(plan_data)
 
         steps = []

@@ -610,6 +610,11 @@ def collect_dataset(self, dataset_id: str):
 
                 index_dataset_embedding.delay(dataset_id)
 
+                # Auto-enrich with semantic catalog metadata
+                from app.infrastructure.celery.tasks.catalog_enrichment_tasks import enrich_single_table
+
+                enrich_single_table.delay(table_name)
+
             logger.info(f"Dataset {dataset_id} cached: {row_count} rows in table {table_name}")
             return {
                 "dataset_id": dataset_id,

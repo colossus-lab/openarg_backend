@@ -81,6 +81,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.gobernadores_tasks",
             "app.infrastructure.celery.tasks.orchestrator_tasks",
             "app.infrastructure.celery.tasks.reporting_tasks",
+            "app.infrastructure.celery.tasks.catalog_enrichment_tasks",
         ],
     )
 
@@ -117,6 +118,8 @@ def create_celery() -> Celery:
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
         "openarg.scrape_gobernadores": {"queue": "scraper"},
         "openarg.report_failed_tasks": {"queue": "collector"},
+        "openarg.enrich_single_table": {"queue": "embedding"},
+        "openarg.enrich_all_tables": {"queue": "embedding"},
     }
 
     app.conf.task_default_queue = "scraper"
