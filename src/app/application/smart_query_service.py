@@ -476,6 +476,35 @@ class SmartQueryService:
                 depends_on=[],
             ))
 
+        # Handle clarification from planner
+        _is_clar = (
+            plan.intent == "clarification"
+            and plan.steps
+            and plan.steps[0].action == "clarification"
+        )
+        if _is_clar:
+            clar_step = plan.steps[0]
+            clar_q = clar_step.params.get(
+                "question", "¿Podés ser más específico?",
+            )
+            clar_opts = clar_step.params.get("options", [])
+            opts_text = "\n".join(
+                f"- {o}" for o in clar_opts
+            ) if clar_opts else ""
+            answer = (
+                f"**{clar_q}**\n\n{opts_text}"
+                if opts_text
+                else f"**{clar_q}**"
+            )
+            return SmartQueryResult(
+                answer=answer,
+                sources=[],
+                intent="clarification",
+                duration_ms=int(
+                    (time.monotonic() - start_time) * 1000
+                ),
+            )
+
         logger.info(
             "Plan for '%s': intent=%s, steps=%d",
             question[:60], plan.intent, len(plan.steps),
@@ -514,9 +543,13 @@ class SmartQueryService:
                 "no en datos abiertos del sistema.').\n"
                 "Respondé de forma breve y conversacional en español argentino.\n\n"
                 f"{caps}\n\n"
-                "Al final de tu respuesta, sugerí 2-3 preguntas concretas de seguimiento "
-                "que SÍ podamos responder con datos del sistema, eligiendo de las categorías listadas arriba. "
-                "Formulalas como preguntas naturales, no como categorías."
+                "Al final, sugerí 2-3 preguntas de seguimiento "
+                "que cumplan TODAS estas reglas:\n"
+                "1. Relacionadas con el TEMA ORIGINAL del usuario\n"
+                "2. Respondibles con datos reales del sistema\n"
+                "3. Si no hay datos del tema, explicá qué temas SÍ "
+                "cubrimos y sugerí preguntas de esos temas\n"
+                "Formulalas como preguntas naturales, no categorías."
             )
         else:
             analysis_prompt = (
@@ -718,6 +751,23 @@ class SmartQueryService:
                 depends_on=[],
             ))
 
+        # Handle clarification from planner
+        _is_clar = (
+            plan.intent == "clarification"
+            and plan.steps
+            and plan.steps[0].action == "clarification"
+        )
+        if _is_clar:
+            clar_step = plan.steps[0]
+            yield {
+                "type": "clarification",
+                "question": clar_step.params.get(
+                    "question", "¿Podés ser más específico?",
+                ),
+                "options": clar_step.params.get("options", []),
+            }
+            return
+
         yield {
             "type": "status",
             "step": "planned",
@@ -760,9 +810,13 @@ class SmartQueryService:
                 "no en datos abiertos del sistema.').\n"
                 "Respondé de forma breve y conversacional en español argentino.\n\n"
                 f"{caps}\n\n"
-                "Al final de tu respuesta, sugerí 2-3 preguntas concretas de seguimiento "
-                "que SÍ podamos responder con datos del sistema, eligiendo de las categorías listadas arriba. "
-                "Formulalas como preguntas naturales, no como categorías."
+                "Al final, sugerí 2-3 preguntas de seguimiento "
+                "que cumplan TODAS estas reglas:\n"
+                "1. Relacionadas con el TEMA ORIGINAL del usuario\n"
+                "2. Respondibles con datos reales del sistema\n"
+                "3. Si no hay datos del tema, explicá qué temas SÍ "
+                "cubrimos y sugerí preguntas de esos temas\n"
+                "Formulalas como preguntas naturales, no categorías."
             )
         else:
             analysis_prompt = (
@@ -1370,6 +1424,87 @@ class SmartQueryService:
             logger.warning("BCRA step %s failed", step.id, exc_info=True)
             return []
 
+    async def _get_catalog_entries(self, table_names: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch table_catalog metadata for given table names.
+
+        Uses the sandbox's sync engine via run_in_executor to avoid
+        needing an async session.
+        """
+        if not table_names or not self._sandbox:
+            return {}
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+
+            def _fetch() -> dict[str, dict[str, Any]]:
+                engine = self._sandbox._get_engine()  # type: ignore[union-attr]
+                with engine.connect() as conn:
+                    result = conn.execute(
+                        text(
+                            "SELECT table_name, display_name, description, domain, subdomain, "
+                            "key_columns, column_types, sample_queries, tags "
+                            "FROM table_catalog WHERE table_name = ANY(:names)"
+                        ),
+                        {"names": table_names},
+                    )
+                    rows = result.fetchall()
+                    conn.rollback()
+                    return {
+                        r.table_name: {
+                            "display_name": r.display_name,
+                            "description": r.description,
+                            "domain": r.domain,
+                            "subdomain": r.subdomain,
+                            "key_columns": r.key_columns,
+                            "column_types": r.column_types,
+                            "sample_queries": r.sample_queries,
+                            "tags": r.tags,
+                        }
+                        for r in rows
+                    }
+
+            return await loop.run_in_executor(None, _fetch)
+        except Exception:
+            logger.debug(
+                "table_catalog lookup failed", exc_info=True,
+            )
+            return {}
+
+    async def _discover_tables_by_catalog_search(
+        self,
+        query: str,
+        limit: int = 5,
+    ) -> list[str]:
+        """Search table_catalog embeddings for relevant tables."""
+        if not self._sandbox:
+            return []
+        try:
+            import asyncio
+            q_embedding = await self._embedding.embed(query)
+            embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
+            loop = asyncio.get_running_loop()
+
+            def _search() -> list[str]:
+                engine = self._sandbox._get_engine()  # type: ignore[union-attr]
+                with engine.connect() as conn:
+                    result = conn.execute(
+                        text(
+                            "SELECT table_name FROM table_catalog "
+                            "WHERE catalog_embedding IS NOT NULL "
+                            "ORDER BY catalog_embedding <=> CAST(:emb AS vector) "
+                            "LIMIT :lim"
+                        ),
+                        {"emb": embedding_str, "lim": limit},
+                    )
+                    names = [r.table_name for r in result.fetchall()]
+                    conn.rollback()
+                    return names
+
+            return await loop.run_in_executor(None, _search)
+        except Exception:
+            logger.debug("catalog vector search failed", exc_info=True)
+            return []
+
     async def _discover_tables_by_vector_search(
         self,
         query: str,
@@ -1466,20 +1601,60 @@ class SmartQueryService:
                     logger.info("No cached INDEC tables, attempting live fallback")
                     return await self._indec_live_fallback(nl_query)
                 else:
-                    # Planner specified tables but none matched — return empty
-                    # so the fallback LLM can answer with general knowledge.
-                    logger.warning(
-                        "Sandbox: none of the hinted tables %s found in cache, skipping",
+                    # Planner specified tables but none matched via fnmatch.
+                    # Try vector search as last resort before giving up.
+                    logger.info(
+                        "Sandbox: fnmatch miss for hints %s, trying vector search fallback",
                         table_hints,
                     )
-                    return []
+                    vector_discovered = await self._discover_tables_by_vector_search(
+                        nl_query, tables,
+                    )
+                    if vector_discovered:
+                        hint_set = set(vector_discovered)
+                        filtered = [t for t in tables if t.table_name in hint_set]
+                        if filtered:
+                            tables = filtered
+                            logger.info(
+                                "Sandbox: vector search fallback found %d table(s): %s",
+                                len(filtered), [t.table_name for t in filtered[:5]],
+                            )
+                        else:
+                            return []
+                    else:
+                        logger.warning(
+                            "Sandbox: none of the hinted tables %s found in cache, skipping",
+                            table_hints,
+                        )
+                        return []
+
+            # Enrich tables with semantic catalog metadata if available
+            catalog_entries = await self._get_catalog_entries(
+                [t.table_name for t in tables[:50]]
+            )
 
             tables_context_parts = []
             for t in tables[:50]:
                 cols = ", ".join(t.columns) if t.columns else "(no column info)"
-                tables_context_parts.append(
-                    f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
-                )
+                entry = catalog_entries.get(t.table_name)
+                if entry:
+                    name = entry.get("display_name") or t.table_name
+                    desc = entry.get("description") or ""
+                    domain = entry.get("domain") or ""
+                    col_types = entry.get("column_types") or {}
+                    col_desc = ", ".join(
+                        f"{c} ({col_types[c]})" if c in col_types else c
+                        for c in (t.columns or [])
+                    ) or cols
+                    part = f"Table: {t.table_name} — {name}  (rows: {t.row_count or '?'})"
+                    if desc:
+                        part += f"\n  Descripción: {desc}"
+                    if domain:
+                        part += f"\n  Dominio: {domain}"
+                    part += f"\n  Columns: {col_desc}"
+                else:
+                    part = f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
+                tables_context_parts.append(part)
             tables_context = "\n\n".join(tables_context_parts)
 
             nl2sql_prompt = (

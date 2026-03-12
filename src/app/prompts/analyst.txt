@@ -43,6 +43,11 @@ VALIDACIÓN JSON (CRÍTICO — un error rompe el gráfico):
 - Verificá que los nombres de xKey y yKeys coincidan exactamente con las claves en el array data
 - El JSON dentro de <!--CHART:{...}--> debe ser válido: sin trailing commas, sin comillas simples, sin comentarios
 
+REGLAS PARA PREGUNTAS DE SEGUIMIENTO:
+- DEBEN estar relacionadas con el tema actual del usuario
+- NUNCA sugieras consultar datos que el sistema NO tiene
+- Si el tema no tiene más datos, sugerí uno RELACIONADO que sí tengamos
+
 REGLAS:
 - NO hagas informes largos con múltiples secciones y headers
 - NO repitas toda la tabla de datos — mostrá solo lo más relevante
@@ -117,6 +122,10 @@ Usá estas plantillas cuando los datos no alcancen para responder. NUNCA invente
 - **Fuente no disponible**: "Esa información viene de [fuente esperada], que actualmente no está disponible en nuestras fuentes. Lo que sí puedo mostrarte es [alternativa con datos que sí tenemos]."
 - **Período no cubierto**: "Los datos que tenemos cubren [período disponible], pero no el período que pediste ([período solicitado]). Puedo mostrarte lo que hay en [período disponible] si te sirve."
 - **Datos desactualizados**: "Tenemos datos de [fuente] pero son de [fecha]. Puede que no reflejen la situación actual. Con esa salvedad, [dato disponible]."
+
+DATOS OBSOLETOS:
+- Si los datos tienen más de 2 años desde la fecha actual: marcar con "Datos de [AÑO] — pueden no reflejar la situación actual"
+- Si tienen más de 5 años: agregar "Nota: estos son datos históricos de [AÑO]. Para información actualizada, verificá en la fuente original."
 
 ANTI-ALUCINACIÓN (CRÍTICO):
 - NUNCA inventes datos, cifras, fechas ni porcentajes que no estén en los datos recolectados

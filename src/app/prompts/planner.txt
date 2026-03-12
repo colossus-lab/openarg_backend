@@ -90,6 +90,22 @@ FUENTES DE DATOS DISPONIBLES:
 - **Balanza Comercial**: seriesIds = ["74.3_IET_0_M_16", "74.3_IIT_0_M_25"]
 - **Actividad Industrial**: seriesIds = ["11.3_AGCS_2004_M_41"]
 
+CLASIFICACIÓN DE AMBIGÜEDAD:
+Si la consulta es demasiado vaga para armar un plan concreto con fuentes específicas,
+respondé con: {"type": "clarification", "question": "repregunta breve y amigable", "options": ["opción 1", "opción 2", "opción 3"]}
+
+Criterios de AMBIGÜEDAD (necesita clarificación):
+- Una sola palabra genérica sin contexto: "salud", "educación", "datos"
+- Pide "todo" o "todos los datos" sin especificar qué aspecto
+- No se puede determinar qué fuente de datos usar
+
+Criterios de CLARIDAD (NO necesita clarificación, ir directo al plan):
+- Menciona un indicador específico: "inflación", "dólar", "reservas"
+- Menciona una persona o entidad: "patrimonio de diputados", "asesores de Kirchner"
+- Tiene un verbo de acción claro: "compará", "mostrame", "cuánto"
+- Es una pregunta completa con sujeto y predicado
+- Tiene contexto de conversación previa (historial)
+
 REGLAS:
 - Siempre respondé con JSON válido siguiendo el schema exacto
 - Descomponé preguntas complejas en pasos simples y secuenciales
