@@ -140,104 +140,41 @@ def _validate_plan(plan_data: dict) -> dict:
     return plan_data
 
 
-def _needs_clarification(question: str, has_history: bool) -> dict | None:
-    """Check if a query lacks enough context to produce a useful plan.
+async def _classify_ambiguity(
+    llm: ILLMProvider, question: str,
+) -> dict | None:
+    """Use a lightweight LLM call to classify query ambiguity.
 
     Returns a clarification dict if the query is too vague, None otherwise.
-    Queries with conversation history are assumed to have context.
     """
-    if has_history:
-        return None
-
-    q = question.strip()
-    # Strip punctuation for word counting
-    clean = re.sub(r"[¿?¡!.,;:\"'()]+", "", q).strip()
-    clean_words = clean.split()
-    n_words = len(clean_words)
-
-    if n_words == 0:
-        return None
-
-    # Queries with 4+ words likely have enough context
-    if n_words >= 4:
-        return None
-
-    # Check for specific indicators that make short queries clear
-    clear_re = re.compile(
-        r"(inflaci[oó]n|ipc|d[oó]lar|blue|reservas|emae|pbi"
-        r"|desempleo|riesgo\s*pa[ií]s|canasta\s*b[aá]sica"
-        r"|tipo\s*de\s*cambio|base\s*monetaria|leliq"
-        r"|gobernador|presidente|ministro"
-        r"|cu[aá]nto|cu[aá]ntos|qui[eé]n|d[oó]nde)",
-        re.IGNORECASE,
-    )
-    if clear_re.search(q):
-        return None
-
-    # Check for person names (capitalized words suggest specificity)
-    has_name = bool(re.search(
-        r"[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+ [A-ZÁÉÍÓÚÑ][a-záéíóúñ]+", q,
-    ))
-    if has_name:
-        return None
-
-    # Short queries (1-3 words) without clear indicators need context
-    topic = clean_words[0].capitalize()
-    return {
-        "type": "clarification",
-        "question": f"¿Qué aspecto de {topic.lower()} te interesa?",
-        "options": _generate_options(clean.lower()),
-    }
-
-
-def _generate_options(topic: str) -> list[str]:
-    """Generate contextual clarification options for a vague topic."""
-    topic_options: dict[str, list[str]] = {
-        "mortalidad": [
-            "Mortalidad infantil por provincia",
-            "Principales causas de muerte",
-            "Evolución de la tasa de mortalidad general",
-        ],
-        "salud": [
-            "Presupuesto nacional en salud",
-            "Indicadores sanitarios por provincia",
-            "Establecimientos de salud en Argentina",
-        ],
-        "educación": [
-            "Presupuesto en educación por año",
-            "Matrícula escolar por nivel y provincia",
-            "Cantidad de establecimientos educativos",
-        ],
-        "transporte": [
-            "Pasajeros por modo de transporte",
-            "Presupuesto nacional en transporte",
-            "Transporte público en CABA",
-        ],
-        "seguridad": [
-            "Estadísticas de delitos por provincia",
-            "Presupuesto en seguridad",
-            "Fuerzas de seguridad federales",
-        ],
-        "energía": [
-            "Producción de petróleo y gas",
-            "Generación eléctrica por fuente",
-            "Presupuesto en energía",
-        ],
-        "presupuesto": [
-            "Ejecución presupuestaria por finalidad",
-            "Evolución del gasto público total",
-            "Presupuesto en un área específica (salud, educación...)",
-        ],
-    }
-    for key, opts in topic_options.items():
-        if key in topic:
-            return opts
-    # Generic fallback
-    return [
-        f"{topic.capitalize()} por provincia",
-        f"Presupuesto nacional en {topic}",
-        f"Evolución histórica de {topic}",
+    messages = [
+        LLMMessage(
+            role="system",
+            content=load_prompt("ambiguity_classifier"),
+        ),
+        LLMMessage(
+            role="user",
+            content=f'Consulta: "{question}"',
+        ),
     ]
+    try:
+        response = await llm.chat(
+            messages, temperature=0.0, max_tokens=256,
+        )
+        text = response.content.strip()
+        # Strip markdown fences if present
+        md = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if md:
+            text = md.group(1).strip()
+        result = json.loads(text)
+        if result.get("type") == "clarification":
+            return result
+    except Exception:
+        logger.debug(
+            "Ambiguity classifier failed, proceeding to planner",
+            exc_info=True,
+        )
+    return None
 
 
 def _resolve_routing_hints(question: str) -> str:
@@ -260,26 +197,36 @@ async def generate_plan(
     llm: ILLMProvider, question: str, memory_context: str = ""
 ) -> ExecutionPlan:
     """Generate an execution plan from a user query using the LLM."""
-    # Check if query needs clarification before calling LLM
+    # Classify ambiguity with a lightweight LLM call (skip if history)
     has_history = bool(memory_context and memory_context.strip())
-    clar = _needs_clarification(question, has_history)
-    if clar:
-        logger.info("Query too vague, forcing clarification: %s", question)
-        return ExecutionPlan(
-            query=question,
-            intent="clarification",
-            steps=[
-                PlanStep(
-                    id="clarification",
-                    action="clarification",
-                    description=clar["question"],
-                    params={
-                        "question": clar["question"],
-                        "options": clar["options"],
-                    },
-                )
-            ],
-        )
+    if not has_history:
+        clar = await _classify_ambiguity(llm, question)
+        if clar:
+            logger.info(
+                "Ambiguity classifier triggered clarification: %s",
+                question,
+            )
+            return ExecutionPlan(
+                query=question,
+                intent="clarification",
+                steps=[
+                    PlanStep(
+                        id="clarification",
+                        action="clarification",
+                        description=clar.get(
+                            "question",
+                            "¿Podés ser más específico?",
+                        ),
+                        params={
+                            "question": clar.get(
+                                "question",
+                                "¿Podés ser más específico?",
+                            ),
+                            "options": clar.get("options", []),
+                        },
+                    )
+                ],
+            )
 
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
