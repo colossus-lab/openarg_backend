@@ -20,26 +20,30 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
         self._model_name = model
         self._model = genai.GenerativeModel(model)
 
-    async def chat(
-        self,
-        messages: list[LLMMessage],
-        temperature: float = 0.0,
-        max_tokens: int = 4096,
-    ) -> LLMResponse:
+    def _prepare_call(
+        self, messages: list[LLMMessage],
+    ) -> tuple[genai.GenerativeModel, list[dict[str, Any]]]:
+        """Extract system instructions, build chat messages, return (model, messages)."""
         system_parts = [m.content for m in messages if m.role == "system"]
-        chat_messages = []
-        for m in messages:
-            if m.role == "system":
-                continue
-            role = "user" if m.role == "user" else "model"
-            chat_messages.append({"role": role, "parts": [m.content]})
-
+        chat_messages = [
+            {"role": "user" if m.role == "user" else "model", "parts": [m.content]}
+            for m in messages if m.role != "system"
+        ]
         model = self._model
         if system_parts:
             model = genai.GenerativeModel(
                 self._model_name,
                 system_instruction="\n".join(system_parts),
             )
+        return model, chat_messages
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        model, chat_messages = self._prepare_call(messages)
 
         try:
             response = await asyncio.wait_for(
@@ -82,20 +86,7 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
         temperature: float = 0.0,
         max_tokens: int = 512,
     ) -> LLMResponse:
-        system_parts = [m.content for m in messages if m.role == "system"]
-        chat_messages = []
-        for m in messages:
-            if m.role == "system":
-                continue
-            role = "user" if m.role == "user" else "model"
-            chat_messages.append({"role": role, "parts": [m.content]})
-
-        model = self._model
-        if system_parts:
-            model = genai.GenerativeModel(
-                self._model_name,
-                system_instruction="\n".join(system_parts),
-            )
+        model, chat_messages = self._prepare_call(messages)
 
         gen_config = genai.types.GenerationConfig(
             temperature=temperature,
@@ -136,20 +127,7 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
         temperature: float = 0.0,
         max_tokens: int = 4096,
     ) -> AsyncIterator[str]:
-        system_parts = [m.content for m in messages if m.role == "system"]
-        chat_messages = []
-        for m in messages:
-            if m.role == "system":
-                continue
-            role = "user" if m.role == "user" else "model"
-            chat_messages.append({"role": role, "parts": [m.content]})
-
-        model = self._model
-        if system_parts:
-            model = genai.GenerativeModel(
-                self._model_name,
-                system_instruction="\n".join(system_parts),
-            )
+        model, chat_messages = self._prepare_call(messages)
 
         response = await model.generate_content_async(
             chat_messages,

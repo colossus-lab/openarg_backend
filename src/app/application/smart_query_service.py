@@ -46,7 +46,6 @@ from app.infrastructure.audit.audit_logger import (
     audit_injection_blocked,
     audit_query,
 )
-from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _download_and_parse
 from app.infrastructure.monitoring.metrics import MetricsCollector
 
 if TYPE_CHECKING:
@@ -1802,6 +1801,8 @@ class SmartQueryService:
         """Plan B: download INDEC XLS on-the-fly when cache tables don't exist."""
         import asyncio as _asyncio
 
+        from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _download_and_parse
+
         query_lower = nl_query.lower()
         keyword_map = {
             # IDs deben coincidir con INDEC_DATASETS en indec_tasks.py
@@ -1830,27 +1831,21 @@ class SmartQueryService:
         if not matched_ids:
             matched_ids = ["ipc", "emae", "pib"]
 
-        results: list[DataResult] = []
-        for ds_id in matched_ids[:3]:
+        async def _fetch_one(ds_id: str) -> DataResult | None:
             ds_info = next((d for d in INDEC_DATASETS if d["id"] == ds_id), None)
             if not ds_info:
-                continue
-
+                return None
             try:
                 sheets = await _asyncio.to_thread(_download_and_parse, ds_info["url"])
                 if not sheets:
-                    continue
-
-                # Tomar la primera hoja con datos
+                    return None
                 df = next(iter(sheets.values()))
                 if df is None or df.empty:
-                    continue
-
+                    return None
                 if len(df) > 500:
                     df = df.tail(500)
-
                 records = df.to_dict(orient="records")
-                results.append(DataResult(
+                return DataResult(
                     source="indec:live",
                     portal_name="INDEC (descarga en vivo)",
                     portal_url="https://www.indec.gob.ar",
@@ -1864,11 +1859,13 @@ class SmartQueryService:
                         "fallback": True,
                         "fetched_at": datetime.now(UTC).isoformat(),
                     },
-                ))
+                )
             except Exception:
                 logger.warning("INDEC live fallback failed for %s", ds_id, exc_info=True)
+                return None
 
-        return results
+        fetched = await _asyncio.gather(*[_fetch_one(ds_id) for ds_id in matched_ids[:3]])
+        return [r for r in fetched if r is not None]
 
     async def _execute_steps(
         self, plan: ExecutionPlan, nl_query: str = "",
