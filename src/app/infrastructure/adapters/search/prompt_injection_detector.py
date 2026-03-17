@@ -20,9 +20,9 @@ _PATTERNS: list[re.Pattern[str]] = [
         r"override\s+(your|the|all)\s+(instructions|rules|programming|guidelines)",
         r"new\s+instructions?\s*[:=]",
         r"nuevas?\s+instrucciones?\s*[:=]",
-        # Role hijacking
-        r"(you\s+are|act\s+as|pretend\s+(to\s+be|you\'?re))\s+(now\s+)?(a\s+)?",
-        r"(sos|eres|sé|se)\s+(ahora\s+)?(un|una|el|la)\s+",
+        # Role hijacking — require jailbreak-adjacent context after role assertion
+        r"(you\s+are|act\s+as|pretend\s+(to\s+be|you\'?re))\s+(now\s+)?(a\s+)?\w+.{0,30}(without|ignore|no\s+restrict|unrestrict|bypass)",
+        r"(sos|eres|sé|actua\s+como)\s+(ahora\s+)?(un|una|el|la)\s+\w+.{0,30}(sin\s+restricci|ignora|olvida|nueva)",
         r"switch\s+(to|into)\s+\w+\s+mode",
         r"enter\s+(developer|admin|debug|god|root)\s+mode",
         r"cambi[aá]\s+(a\s+)?modo\s+(desarrollador|admin|debug)",

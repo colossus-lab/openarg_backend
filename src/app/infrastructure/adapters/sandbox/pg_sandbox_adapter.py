@@ -30,6 +30,16 @@ _FORBIDDEN_PATTERNS = re.compile(
 )
 
 
+_ALLOWED_TABLE_PREFIXES = ("cache_",)
+_ALLOWED_SCHEMAS = ("public",)
+
+# Tables that sandbox queries are allowed to reference (regex for FROM/JOIN clauses)
+_TABLE_REF_PATTERN = re.compile(
+    r'\b(?:FROM|JOIN)\s+"?(\w+)"?(?:\."?(\w+)"?)?',
+    re.IGNORECASE,
+)
+
+
 def _validate_sql(sql: str) -> str | None:
     """Return an error message if the SQL is not allowed, else None."""
     stripped = sql.strip().rstrip(";").strip()
@@ -50,7 +60,20 @@ def _validate_sql(sql: str) -> str | None:
     if match:
         return f"Forbidden SQL operation: {match.group(0).upper()}"
 
-    # AST-level validation with sqlglot (defense-in-depth layer 2)
+    # Table allowlist — only cache_* tables and public schema (defense-in-depth layer 2)
+    for m in _TABLE_REF_PATTERN.finditer(no_comments):
+        first, second = m.group(1), m.group(2)
+        # schema.table or just table
+        if second:
+            schema, table = first, second
+            if schema.lower() not in _ALLOWED_SCHEMAS:
+                return f"Access to schema '{schema}' is not allowed."
+        else:
+            table = first
+        if not any(table.lower().startswith(p) for p in _ALLOWED_TABLE_PREFIXES):
+            return f"Access to table '{table}' is not allowed. Only cached dataset tables are accessible."
+
+    # AST-level validation with sqlglot (defense-in-depth layer 3)
     error = _validate_sql_ast(stripped)
     if error:
         return error
@@ -88,6 +111,17 @@ def _validate_sql_ast(sql: str) -> str | None:
         for node in stmt.walk():
             if isinstance(node, _DML_DDL):
                 return f"Forbidden SQL operation in subquery: {type(node).__name__}"
+
+            # Table allowlist — catches all references including comma-separated
+            if isinstance(node, exp.Table):
+                table_name = node.name
+                schema_name = node.db if hasattr(node, "db") else None
+                if schema_name and schema_name.lower() not in _ALLOWED_SCHEMAS:
+                    return f"Access to schema '{schema_name}' is not allowed."
+                if table_name and not any(
+                    table_name.lower().startswith(p) for p in _ALLOWED_TABLE_PREFIXES
+                ):
+                    return f"Access to table '{table_name}' is not allowed. Only cached dataset tables are accessible."
 
     except Exception:
         logger.debug("sqlglot validation failed, falling back to regex", exc_info=True)

@@ -65,12 +65,21 @@ limiter = Limiter(
 
 
 def create_app() -> FastAPI:
+    environment = os.getenv("APP_ENV", "local")
+    # Disable Swagger/ReDoc in production to avoid relaxed CSP exposure
+    docs_url: str | None = "/docs" if environment != "prod" else None
+    redoc_url: str | None = "/redoc" if environment != "prod" else None
+    openapi_url: str | None = "/openapi.json" if environment != "prod" else None
+
     app = FastAPI(
         title="OpenArg API",
         description="Inteligencia sobre Datos Abiertos de Argentina",
         version="0.1.0",
         lifespan=lifespan,
         default_response_class=ORJSONResponse,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
     )
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
