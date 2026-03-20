@@ -124,9 +124,8 @@ def _validate_sql_ast(sql: str) -> str | None:
                     return f"Access to table '{table_name}' is not allowed. Only cached dataset tables are accessible."
 
     except Exception:
-        logger.debug("sqlglot validation failed, falling back to regex", exc_info=True)
-
-    return None
+        logger.warning("sqlglot validation failed — rejecting query for safety", exc_info=True)
+        return "Could not validate SQL safely. Please simplify your query."
 
 
 class PgSandboxAdapter(ISQLSandbox):
