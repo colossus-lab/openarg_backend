@@ -31,5 +31,13 @@ api.openarg.org {
 	@options method OPTIONS
 	respond @options 204
 
+	# SECURITY: Block admin/docs endpoints
+	@blocked path /docs /docs/* /redoc /openapi.json /api/v1/admin/*
+	respond @blocked 404
+
+	# SECURITY: Require API key on all other routes
+	@nokey not header X-API-Key {$BACKEND_API_KEY}
+	respond @nokey "Unauthorized" 401
+
 	reverse_proxy backend:8080
 }
