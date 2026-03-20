@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import secrets
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -10,13 +11,11 @@ from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
-_PUBLIC_PATHS = frozenset({
-    "/health",
-    "/health/ready",
-    "/docs",
-    "/openapi.json",
-    "/redoc",
-})
+_ALWAYS_PUBLIC = frozenset({"/health", "/health/ready"})
+_DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})
+
+_env = os.getenv("APP_ENV", "local").lower()
+_PUBLIC_PATHS = _ALWAYS_PUBLIC | _DEV_PUBLIC if _env != "prod" else _ALWAYS_PUBLIC
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):

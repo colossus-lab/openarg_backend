@@ -115,20 +115,30 @@ async def smart_query(
 # ── WebSocket endpoint ─────────────────────────────────────
 
 
-def _validate_ws_api_key(ws: WebSocket) -> bool:
+def _validate_ws_api_key_from_params(ws: WebSocket) -> bool:
+    """Check api_key query param (backward compatibility)."""
     import secrets as _secrets
     expected = os.getenv("BACKEND_API_KEY", "")
     if not expected:
         return True
     provided = ws.query_params.get("api_key", "")
-    return _secrets.compare_digest(provided, expected)
+    return _secrets.compare_digest(provided, expected) if provided else False
+
+
+def _validate_api_key_value(provided: str) -> bool:
+    """Validate an API key value against BACKEND_API_KEY."""
+    import secrets as _secrets
+    expected = os.getenv("BACKEND_API_KEY", "")
+    if not expected:
+        return True
+    return _secrets.compare_digest(provided, expected) if provided else False
 
 
 @router.websocket("/ws/smart")
 async def ws_smart_query(ws: WebSocket) -> None:
-    if not _validate_ws_api_key(ws):
-        await ws.close(code=4401, reason="Invalid or missing API key")
-        return
+    # Try query-param auth first (backward compat)
+    has_query_param_auth = _validate_ws_api_key_from_params(ws)
+
     await ws.accept()
 
     try:
@@ -140,14 +150,6 @@ async def ws_smart_query(ws: WebSocket) -> None:
                 cache = await request_scope.get(ICacheService)
                 service = await request_scope.get(SmartQueryService)
 
-                # Rate limiting
-                ws_identifier = ws.query_params.get("api_key") or ws.client.host if ws.client else "unknown"
-                if await _check_ws_rate_limit(cache, ws_identifier):
-                    audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
-                    await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
-                    await ws.close(code=4429)
-                    return
-
                 raw_text = await ws.receive_text()
                 if len(raw_text) > 10_000:
                     await ws.send_json({"type": "error", "message": "Message too large (max 10KB)"})
@@ -155,6 +157,23 @@ async def ws_smart_query(ws: WebSocket) -> None:
                     return
                 import json as _json
                 raw = _json.loads(raw_text)
+
+                # Validate API key from either query params or message payload
+                if not has_query_param_auth:
+                    msg_api_key = raw.get("api_key", "")
+                    if not _validate_api_key_value(msg_api_key):
+                        await ws.send_json({"type": "error", "message": "Invalid or missing API key"})
+                        await ws.close(code=4401)
+                        return
+
+                # Rate limiting
+                ws_identifier = raw.get("user_email") or (ws.client.host if ws.client else "unknown")
+                if await _check_ws_rate_limit(cache, ws_identifier):
+                    audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
+                    await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
+                    await ws.close(code=4429)
+                    return
+
                 question = raw.get("question", "")
                 conversation_id = raw.get("conversation_id", "")
                 policy_mode = raw.get("policy_mode", False)
