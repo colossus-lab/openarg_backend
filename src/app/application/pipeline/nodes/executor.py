@@ -55,8 +55,7 @@ async def execute_steps_node(state: OpenArgState) -> dict:
     Steps are dispatched in parallel per dependency level through
     ``execute_steps()``, which handles retries and error isolation.
     """
-    deps = nodes_pkg._deps
-    assert deps is not None, "PipelineDeps not initialised"
+    deps = nodes_pkg.get_deps()
 
     plan = state.get("plan")
     if not plan:

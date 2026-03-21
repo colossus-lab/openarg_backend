@@ -18,8 +18,7 @@ async def cache_check_node(state: OpenArgState) -> dict:
     Skipped when *policy_mode* is True (always fetch fresh data).
     Sets *cached_result* and *last_embedding* when a hit is found.
     """
-    deps = nodes_pkg._deps
-    assert deps is not None, "PipelineDeps not initialised"
+    deps = nodes_pkg.get_deps()
 
     # Skip cache in policy mode — always fetch fresh data
     if state.get("policy_mode", False):

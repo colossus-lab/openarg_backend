@@ -23,8 +23,7 @@ async def load_memory_node(state: OpenArgState) -> dict:
     - *memory_ctx_analyst*: lightweight variant (used by analyst to avoid data bleed)
     - *planner_ctx*: chat_history if available, otherwise memory_ctx
     """
-    deps = nodes_pkg._deps
-    assert deps is not None, "PipelineDeps not initialised"
+    deps = nodes_pkg.get_deps()
 
     try:
         conversation_id = state.get("conversation_id", "")

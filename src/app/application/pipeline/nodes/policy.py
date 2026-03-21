@@ -17,8 +17,7 @@ async def policy_node(state: OpenArgState) -> dict:
     Appends a policy evaluation section to the existing *clean_answer*.
     If the policy agent fails, the original answer is preserved.
     """
-    deps = nodes_pkg._deps
-    assert deps is not None, "PipelineDeps not initialised"
+    deps = nodes_pkg.get_deps()
 
     if not state.get("policy_mode", False):
         return {"policy_text": None}

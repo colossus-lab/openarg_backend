@@ -50,8 +50,7 @@ async def finalize_node(state: OpenArgState) -> dict:
     This is the final node before the graph terminates for a normal
     data-retrieval flow.
     """
-    deps = nodes_pkg._deps
-    assert deps is not None, "PipelineDeps not initialised"
+    deps = nodes_pkg.get_deps()
 
     results = state.get("data_results", [])
     question = state["question"]
@@ -112,6 +111,7 @@ async def finalize_node(state: OpenArgState) -> dict:
 
     duration_ms = int((time.monotonic() - state.get("_start_time", time.monotonic())) * 1000)
     return {
+        "clean_answer": clean_answer,
         "sources": sources,
         "documents": documents,
         "warnings": all_warnings,

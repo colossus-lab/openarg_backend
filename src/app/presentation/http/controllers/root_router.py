@@ -23,6 +23,9 @@ from app.presentation.http.controllers.query.query_router import (
 from app.presentation.http.controllers.query.smart_query_router import (
     router as smart_query_router,
 )
+from app.presentation.http.controllers.query.smart_query_v2_router import (
+    router as smart_query_v2_router,
+)
 from app.presentation.http.controllers.sandbox.sandbox_router import (
     router as sandbox_router,
 )
@@ -47,6 +50,7 @@ def create_root_router() -> APIRouter:
     api_v1 = APIRouter(prefix="/api/v1")
     api_v1.include_router(query_router)
     api_v1.include_router(smart_query_router)
+    api_v1.include_router(smart_query_v2_router)
     api_v1.include_router(datasets_router)
     api_v1.include_router(sandbox_router)
     api_v1.include_router(conversations_router)

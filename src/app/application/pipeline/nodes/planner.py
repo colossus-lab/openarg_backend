@@ -17,8 +17,7 @@ async def planner_node(state: OpenArgState) -> dict:
 
     Writes *catalog_hints*, *plan*, and *plan_intent* to state.
     """
-    deps = nodes_pkg._deps
-    assert deps is not None, "PipelineDeps not initialised"
+    deps = nodes_pkg.get_deps()
 
     try:
         preprocessed_q = state.get("preprocessed_query", state["question"])
