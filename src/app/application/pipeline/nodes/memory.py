@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from langgraph.config import get_stream_writer
+
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.history import load_chat_history
 from app.application.pipeline.state import OpenArgState
@@ -23,6 +25,8 @@ async def load_memory_node(state: OpenArgState) -> dict:
     - *memory_ctx_analyst*: lightweight variant (used by analyst to avoid data bleed)
     - *planner_ctx*: chat_history if available, otherwise memory_ctx
     """
+    writer = get_stream_writer()
+    writer({"type": "status", "step": "loading_context", "detail": "Cargando contexto..."})
     deps = nodes_pkg.get_deps()
 
     try:

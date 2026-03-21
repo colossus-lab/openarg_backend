@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from langgraph.config import get_stream_writer
+
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.classifiers import DATA_ACTIONS
 from app.application.pipeline.state import OpenArgState
@@ -55,6 +57,8 @@ async def execute_steps_node(state: OpenArgState) -> dict:
     Steps are dispatched in parallel per dependency level through
     ``execute_steps()``, which handles retries and error isolation.
     """
+    writer = get_stream_writer()
+    writer({"type": "status", "step": "searching", "detail": "Consultando fuentes de datos..."})
     deps = nodes_pkg.get_deps()
 
     plan = state.get("plan")

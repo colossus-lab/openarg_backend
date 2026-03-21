@@ -7,6 +7,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from langgraph.config import get_stream_writer
+
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.chart_builder import (
     build_deterministic_charts,
@@ -111,6 +113,8 @@ async def analyst_node(state: OpenArgState) -> dict:
     in ``smart_query_service.py``), calls the LLM, extracts charts and
     META confidence/citations, and strips internal tags.
     """
+    writer = get_stream_writer()
+    writer({"type": "status", "step": "generating", "detail": "Generando análisis..."})
     deps = nodes_pkg.get_deps()
 
     try:
