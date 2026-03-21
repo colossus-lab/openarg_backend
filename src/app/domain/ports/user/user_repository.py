@@ -15,3 +15,11 @@ class IUserRepository(ABC):
 
     @abstractmethod
     async def get_by_id(self, user_id: UUID) -> User | None: ...
+
+    @abstractmethod
+    async def delete_user_and_data(self, user_id: UUID) -> None:
+        """Delete user and all associated data (conversations, messages, queries)."""
+
+    @abstractmethod
+    async def export_user_data(self, user_id: UUID) -> dict:
+        """Export all user data as a dictionary (data portability)."""
