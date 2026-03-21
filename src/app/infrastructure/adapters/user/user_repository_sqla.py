@@ -21,6 +21,9 @@ class UserRepositorySQLA(IUserRepository):
         if existing:
             existing.name = user.name
             existing.image_url = user.image_url
+            # Only set privacy_accepted_at if it's being provided and not already set
+            if user.privacy_accepted_at and not existing.privacy_accepted_at:
+                existing.privacy_accepted_at = user.privacy_accepted_at
             await self._session.flush()
             await self._session.commit()
             return existing

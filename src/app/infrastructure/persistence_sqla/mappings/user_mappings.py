@@ -33,6 +33,7 @@ def map_user_tables() -> None:
         Column("email", String(320), nullable=False, unique=True),
         Column("name", String(500), nullable=False, server_default=""),
         Column("image_url", String(2000), nullable=True),
+        Column("privacy_accepted_at", DateTime(timezone=True), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
         Column(
             "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

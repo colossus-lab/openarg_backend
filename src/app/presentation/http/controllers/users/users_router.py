@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
@@ -14,6 +16,7 @@ class UserSyncRequest(BaseModel):
     email: EmailStr
     name: str = ""
     image: str = ""
+    privacy_accepted_at: str | None = None
 
 
 class UserResponse(BaseModel):
@@ -22,6 +25,7 @@ class UserResponse(BaseModel):
     name: str
     image_url: str
     created_at: str
+    privacy_accepted_at: str | None = None
 
 
 @router.post("/sync", response_model=UserResponse)
@@ -34,10 +38,18 @@ async def sync_user(
     if not body.email:
         raise HTTPException(status_code=400, detail="email is required")
 
+    privacy_ts = None
+    if body.privacy_accepted_at:
+        try:
+            privacy_ts = datetime.fromisoformat(body.privacy_accepted_at)
+        except ValueError:
+            privacy_ts = datetime.now(timezone.utc)
+
     user = User(
         email=body.email,
         name=body.name,
         image_url=body.image,
+        privacy_accepted_at=privacy_ts,
     )
     saved = await user_repo.upsert_by_email(user)
 
@@ -47,6 +59,7 @@ async def sync_user(
         name=saved.name,
         image_url=saved.image_url or "",
         created_at=saved.created_at.isoformat(),
+        privacy_accepted_at=saved.privacy_accepted_at.isoformat() if saved.privacy_accepted_at else None,
     )
 
 
@@ -86,6 +99,7 @@ async def get_current_user(
         name=user.name,
         image_url=user.image_url or "",
         created_at=user.created_at.isoformat(),
+        privacy_accepted_at=user.privacy_accepted_at.isoformat() if user.privacy_accepted_at else None,
     )
 
 

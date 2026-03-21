@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 from app.domain.entities.base import BaseEntity
 
@@ -12,3 +13,4 @@ class User(BaseEntity):
     email: str = ""
     name: str = ""
     image_url: str = ""
+    privacy_accepted_at: datetime | None = field(default=None)
