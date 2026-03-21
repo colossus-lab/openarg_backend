@@ -1,4 +1,5 @@
 """Security integration tests — headers and rate limiting."""
+
 from __future__ import annotations
 
 

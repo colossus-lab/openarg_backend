@@ -46,9 +46,7 @@ class SecuritySettings(BaseModel):
             self.BACKEND_API_KEY = env_key
         env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
         if env_origins:
-            self.CORS_ALLOWED_ORIGINS = [
-                o.strip() for o in env_origins.split(",") if o.strip()
-            ]
+            self.CORS_ALLOWED_ORIGINS = [o.strip() for o in env_origins.split(",") if o.strip()]
 
 
 class LoggingSettings(BaseModel):
@@ -77,6 +75,7 @@ class GeminiSecrets(BaseModel):
 
     def model_post_init(self, __context: object) -> None:
         import os
+
         env_key = os.getenv("GEMINI_API_KEY", "")
         if env_key:
             self.API_KEY = env_key
@@ -91,6 +90,7 @@ class AnthropicSecrets(BaseModel):
 
     def model_post_init(self, __context: object) -> None:
         import os
+
         env_key = os.getenv("ANTHROPIC_API_KEY", "")
         if env_key:
             self.API_KEY = env_key

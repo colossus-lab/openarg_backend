@@ -1,4 +1,5 @@
 """Query preprocessor — acronym expansion, temporal normalization, province aliases, and LLM reformulation."""
+
 from __future__ import annotations
 
 import logging
@@ -131,16 +132,43 @@ SYNONYM_MAP: dict[str, list[str]] = {
     "presupuesto": ["gasto público", "ejecución presupuestaria", "partidas", "crédito vigente"],
     "gasto": ["erogación", "ejecución presupuestaria"],
     "gasto público": ["presupuesto", "ejecución presupuestaria", "gasto estatal"],
-    "recaudación": ["ingresos fiscales", "recursos tributarios", "recaudación impositiva", "recaudación tributaria"],
+    "recaudación": [
+        "ingresos fiscales",
+        "recursos tributarios",
+        "recaudación impositiva",
+        "recaudación tributaria",
+    ],
     "ingresos fiscales": ["recaudación", "recursos tributarios"],
     # ── Social ──
-    "educación": ["escuela", "universidad", "estudiantes", "matrícula", "docentes", "sistema educativo"],
+    "educación": [
+        "escuela",
+        "universidad",
+        "estudiantes",
+        "matrícula",
+        "docentes",
+        "sistema educativo",
+    ],
     "salud": ["hospital", "sanitario", "epidemiología", "vacunación", "mortalidad"],
     "mortalidad": ["defunciones", "fallecimientos"],
-    "seguridad": ["delito", "crimen", "homicidio", "robo", "inseguridad", "violencia", "hechos delictivos"],
+    "seguridad": [
+        "delito",
+        "crimen",
+        "homicidio",
+        "robo",
+        "inseguridad",
+        "violencia",
+        "hechos delictivos",
+    ],
     "delito": ["seguridad", "crimen", "inseguridad"],
     "vivienda": ["inmueble", "propiedad", "construcción", "déficit habitacional"],
-    "jubilación": ["pensión", "haber jubilatorio", "anses", "adulto mayor", "pami", "prestación previsional"],
+    "jubilación": [
+        "pensión",
+        "haber jubilatorio",
+        "anses",
+        "adulto mayor",
+        "pami",
+        "prestación previsional",
+    ],
     "pensión": ["jubilación", "haber jubilatorio", "anses"],
     "nacimientos": ["natalidad"],
     "obra pública": ["inversión pública", "obra de infraestructura"],

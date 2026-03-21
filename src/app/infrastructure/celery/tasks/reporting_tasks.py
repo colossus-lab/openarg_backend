@@ -4,6 +4,7 @@ Reporting Tasks — Daily summaries of failed and stuck datasets.
 Provides visibility into permanently_failed downloads and other
 error states so operators can take action without digging into logs.
 """
+
 from __future__ import annotations
 
 import logging
@@ -115,13 +116,16 @@ def report_failed_tasks():
         # 4. Stuck downloads (downloading > 30 min)
         # ------------------------------------------------------------------
         with engine.connect() as conn:
-            stuck_count = conn.execute(
-                text("""
+            stuck_count = (
+                conn.execute(
+                    text("""
                     SELECT COUNT(*) FROM cached_datasets
                     WHERE status = 'downloading'
                       AND updated_at < NOW() - INTERVAL '30 minutes'
                 """)
-            ).scalar() or 0
+                ).scalar()
+                or 0
+            )
 
         if stuck_count:
             logger.warning(

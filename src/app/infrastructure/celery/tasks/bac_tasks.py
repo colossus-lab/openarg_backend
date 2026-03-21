@@ -4,6 +4,7 @@ Buenos Aires Compras (BAC) — ETL de datos de compras públicas OCDS.
 Descarga CSVs de Buenos Aires Compras (estándar OCDS),
 los parsea en chunks y cachea en PostgreSQL.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,8 +34,7 @@ MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 CHUNK_SIZE = 50_000
 
 
-def _register_dataset(engine, file_type: str, table_name: str,
-                      total_rows: int, columns: list[str]):
+def _register_dataset(engine, file_type: str, table_name: str, total_rows: int, columns: list[str]):
     """Upsert into datasets and cached_datasets tables."""
     source_id = f"bac-{file_type}"
     portal = "bac"
@@ -56,7 +56,8 @@ def _register_dataset(engine, file_type: str, table_name: str,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": f"Datos de contrataciones públicas de CABA ({file_type}), estándar OCDS.",
                 "org": "Ministerio de Hacienda y Finanzas - CABA",
                 "portal": portal,
@@ -64,13 +65,13 @@ def _register_dataset(engine, file_type: str, table_name: str,
                 "dl": BAC_FILES[file_type],
                 "cols": columns_json,
                 "tags": f"compras,contrataciones,OCDS,{file_type},CABA",
-                "now": now, "rows": total_rows,
+                "now": now,
+                "rows": total_rows,
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -86,16 +87,24 @@ def _register_dataset(engine, file_type: str, table_name: str,
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": total_rows,
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": total_rows,
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
 
 
 @celery_app.task(
-    name="openarg.ingest_bac", bind=True, max_retries=3,
-    soft_time_limit=1800, time_limit=1920,
+    name="openarg.ingest_bac",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=1800,
+    time_limit=1920,
 )
 def ingest_bac(self):
     """Download and cache Buenos Aires Compras OCDS datasets."""
@@ -113,10 +122,7 @@ def ingest_bac(self):
             # Skip if already cached or permanently failed
             with engine.begin() as conn:
                 cached = conn.execute(
-                    text(
-                        "SELECT status, retry_count FROM cached_datasets "
-                        "WHERE table_name = :tn"
-                    ),
+                    text("SELECT status, retry_count FROM cached_datasets WHERE table_name = :tn"),
                     {"tn": table_name},
                 ).fetchone()
             if cached:
@@ -152,7 +158,9 @@ def ingest_bac(self):
                         },
                     )
                     row = conn.execute(
-                        text("SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = 'bac'"),
+                        text(
+                            "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = 'bac'"
+                        ),
                         {"sid": source_id},
                     ).fetchone()
                     dataset_id_pre = row[0] if row else None
@@ -178,7 +186,11 @@ def ingest_bac(self):
                                 tmp.write(data)
                                 downloaded += len(data)
                                 if downloaded > MAX_DOWNLOAD_BYTES:
-                                    logger.warning("BAC %s too large, stopping at %d bytes", file_type, downloaded)
+                                    logger.warning(
+                                        "BAC %s too large, stopping at %d bytes",
+                                        file_type,
+                                        downloaded,
+                                    )
                                     break
 
                     tmp.flush()
@@ -191,13 +203,17 @@ def ingest_bac(self):
                     chunk_num = 0
                     try:
                         csv_reader = pd.read_csv(
-                            tmp.name, encoding="utf-8",
-                            on_bad_lines="skip", chunksize=CHUNK_SIZE,
+                            tmp.name,
+                            encoding="utf-8",
+                            on_bad_lines="skip",
+                            chunksize=CHUNK_SIZE,
                         )
                     except UnicodeDecodeError:
                         csv_reader = pd.read_csv(
-                            tmp.name, encoding="latin-1",
-                            on_bad_lines="skip", chunksize=CHUNK_SIZE,
+                            tmp.name,
+                            encoding="latin-1",
+                            on_bad_lines="skip",
+                            chunksize=CHUNK_SIZE,
                         )
                     for chunk in csv_reader:
                         remaining = MAX_ROWS - total_rows
@@ -210,8 +226,14 @@ def ingest_bac(self):
                         # between chunks (e.g. NaN-only chunk infers float,
                         # next chunk has strings).
                         chunk = chunk.astype(str).replace(
-                            {"nan": None, "NaT": None, "None": None,
-                             "inf": None, "-inf": None, "": None}
+                            {
+                                "nan": None,
+                                "NaT": None,
+                                "None": None,
+                                "inf": None,
+                                "-inf": None,
+                                "": None,
+                            }
                         )
 
                         # First chunk replaces the table; subsequent chunks append
@@ -222,8 +244,12 @@ def ingest_bac(self):
                             columns = list(chunk.columns)
                         total_rows += len(chunk)
                         chunk_num += 1
-                        logger.debug("BAC %s: wrote chunk %d (%d rows so far)",
-                                     file_type, chunk_num, total_rows)
+                        logger.debug(
+                            "BAC %s: wrote chunk %d (%d rows so far)",
+                            file_type,
+                            chunk_num,
+                            total_rows,
+                        )
 
                         # Free chunk memory explicitly
                         del chunk
@@ -234,12 +260,17 @@ def ingest_bac(self):
 
                 # Register and dispatch embeddings
                 dataset_id = _register_dataset(
-                    engine, file_type, table_name, total_rows, columns,
+                    engine,
+                    file_type,
+                    table_name,
+                    total_rows,
+                    columns,
                 )
                 if dataset_id:
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
+
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

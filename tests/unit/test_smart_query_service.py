@@ -1,4 +1,5 @@
 """Unit tests for SmartQueryService — no real connectors or LLM calls."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -62,8 +63,13 @@ def mock_deps():
 
     ddjj = MagicMock()
     ddjj.search.return_value = DataResult(
-        source="ddjj", portal_name="DDJJ", portal_url="",
-        dataset_title="test", format="json", records=[], metadata={},
+        source="ddjj",
+        portal_name="DDJJ",
+        portal_url="",
+        dataset_title="test",
+        format="json",
+        records=[],
+        metadata={},
     )
 
     semantic_cache = AsyncMock()
@@ -158,19 +164,21 @@ class TestExecuteFullPipeline:
 
         from unittest.mock import patch
 
-        with patch(
-            "app.application.smart_query_service.generate_plan",
-            return_value=fake_plan,
-        ), patch(
-            "app.application.smart_query_service.load_memory",
-            return_value={},
-        ), patch(
-            "app.application.smart_query_service.build_memory_context_prompt",
-            return_value="",
+        with (
+            patch(
+                "app.application.smart_query_service.generate_plan",
+                return_value=fake_plan,
+            ),
+            patch(
+                "app.application.smart_query_service.load_memory",
+                return_value={},
+            ),
+            patch(
+                "app.application.smart_query_service.build_memory_context_prompt",
+                return_value="",
+            ),
         ):
-            result = await service.execute(
-                "¿a cuánto está el dólar hoy?", user_id="test@test.com"
-            )
+            result = await service.execute("¿a cuánto está el dólar hoy?", user_id="test@test.com")
 
         assert result.answer  # LLM should have responded
         assert result.tokens_used == 100  # From FakeLLMResponse
@@ -217,15 +225,19 @@ class TestConnectorFailureGraceful:
 
         from unittest.mock import patch
 
-        with patch(
-            "app.application.smart_query_service.generate_plan",
-            return_value=fake_plan,
-        ), patch(
-            "app.application.smart_query_service.load_memory",
-            return_value={},
-        ), patch(
-            "app.application.smart_query_service.build_memory_context_prompt",
-            return_value="",
+        with (
+            patch(
+                "app.application.smart_query_service.generate_plan",
+                return_value=fake_plan,
+            ),
+            patch(
+                "app.application.smart_query_service.load_memory",
+                return_value={},
+            ),
+            patch(
+                "app.application.smart_query_service.build_memory_context_prompt",
+                return_value="",
+            ),
         ):
             result = await service.execute("test query", user_id="test")
 
@@ -245,7 +257,8 @@ class TestCacheEmbeddingPassed:
         mock_deps["embedding"].embed.assert_called_once_with("test question")
         # And passed to semantic_cache.get
         mock_deps["semantic_cache"].get.assert_called_once_with(
-            "test question", embedding=mock_deps["embedding"].embed.return_value,
+            "test question",
+            embedding=mock_deps["embedding"].embed.return_value,
         )
 
     async def test_check_cache_returns_cached_on_redis_hit(self, service, mock_deps):

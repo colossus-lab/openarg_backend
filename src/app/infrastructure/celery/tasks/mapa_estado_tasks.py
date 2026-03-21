@@ -7,6 +7,7 @@ y lo cachea en PostgreSQL para consultas NL2SQL.
 
 Incluye: Presidente, Vicepresidente, Ministros, Secretarios, etc.
 """
+
 from __future__ import annotations
 
 import csv
@@ -47,7 +48,8 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": (
                     "Estructura orgánica y autoridades del Poder Ejecutivo Nacional. "
                     "Fuente: Mapa del Estado (Jefatura de Gabinete de Ministros)."
@@ -57,13 +59,13 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                 "url": "https://mapadelestado.jefatura.gob.ar/",
                 "cols": columns_json,
                 "tags": "autoridades,pen,presidente,ministros,gobierno,poder ejecutivo",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -79,16 +81,24 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
 
 
 @celery_app.task(
-    name="openarg.scrape_mapa_estado", bind=True, max_retries=3,
-    soft_time_limit=300, time_limit=360,
+    name="openarg.scrape_mapa_estado",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=300,
+    time_limit=360,
 )
 def scrape_mapa_estado(self):
     """Scrape PEN authorities from Mapa del Estado (Jefatura de Gabinete).
@@ -123,33 +133,44 @@ def scrape_mapa_estado(self):
         table_full = "cache_autoridades_pen"
         df.to_sql(table_full, engine, if_exists="replace", index=False)
         did_full = _register_dataset(
-            engine, "mapa-estado-pen", "Autoridades del Poder Ejecutivo Nacional",
-            table_full, df,
+            engine,
+            "mapa-estado-pen",
+            "Autoridades del Poder Ejecutivo Nacional",
+            table_full,
+            df,
         )
         logger.info("Mapa del Estado: %d autoridades cached → %s", len(df), table_full)
 
         # Filtered: only top officials with names (Autoridad Superior + named)
-        mask = (
-            df["autoridad_nombre"].notna()
-            & (df["autoridad_nombre"].str.strip() != "")
-        )
+        mask = df["autoridad_nombre"].notna() & (df["autoridad_nombre"].str.strip() != "")
         df_top = df[mask][
-            ["jurisdiccion", "cargo", "car_nivel", "autoridad_tratamiento",
-             "autoridad_nombre", "autoridad_apellido", "autoridad_sexo",
-             "autoridad_norma_designacion", "web"]
+            [
+                "jurisdiccion",
+                "cargo",
+                "car_nivel",
+                "autoridad_tratamiento",
+                "autoridad_nombre",
+                "autoridad_apellido",
+                "autoridad_sexo",
+                "autoridad_norma_designacion",
+                "web",
+            ]
         ].copy()
 
         table_top = "cache_autoridades_pen_principales"
         df_top.to_sql(table_top, engine, if_exists="replace", index=False)
         did_top = _register_dataset(
-            engine, "mapa-estado-pen-principales",
+            engine,
+            "mapa-estado-pen-principales",
             "Principales Autoridades del PEN (Presidente, Ministros, Secretarios)",
-            table_top, df_top,
+            table_top,
+            df_top,
         )
         logger.info("Mapa del Estado: %d principales cached → %s", len(df_top), table_top)
 
         # Dispatch embeddings
         from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+
         if did_full:
             index_dataset_embedding.delay(did_full)
         if did_top:

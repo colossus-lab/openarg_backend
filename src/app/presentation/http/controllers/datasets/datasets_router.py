@@ -141,5 +141,3 @@ async def download_dataset(
         )
 
     raise HTTPException(status_code=404, detail="No download URL available")
-
-

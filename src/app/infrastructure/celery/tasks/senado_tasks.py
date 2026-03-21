@@ -4,6 +4,7 @@ Senado — Scraper de datos abiertos del Senado de la Nación.
 Scrapea las páginas HTML de datos abiertos del Senado, descarga CSVs/XLS
 y cachea en PostgreSQL.
 """
+
 from __future__ import annotations
 
 import io
@@ -36,7 +37,15 @@ def _sanitize_name(name: str) -> str:
     return clean[:50]
 
 
-def _register_dataset(engine, source_id: str, title: str, table_name: str, df: pd.DataFrame, url: str, fmt: str = "csv"):
+def _register_dataset(
+    engine,
+    source_id: str,
+    title: str,
+    table_name: str,
+    df: pd.DataFrame,
+    url: str,
+    fmt: str = "csv",
+):
     """Upsert into datasets and cached_datasets tables."""
     portal = "senado"
     columns_json = json.dumps(list(df.columns))
@@ -68,13 +77,13 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                 "fmt": fmt_value,
                 "cols": columns_json,
                 "tags": f"senado,congreso,{_sanitize_name(title)}",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -90,8 +99,13 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
@@ -112,10 +126,7 @@ def _parse_response(content: bytes, url: str, fmt: str = "file") -> pd.DataFrame
                     records = data["table"].get("rows", [])
                 else:
                     records = (
-                        data.get("data")
-                        or data.get("results")
-                        or data.get("Records")
-                        or [data]
+                        data.get("data") or data.get("results") or data.get("Records") or [data]
                     )
             else:
                 return None
@@ -140,8 +151,10 @@ def _parse_response(content: bytes, url: str, fmt: str = "file") -> pd.DataFrame
         for sep in (",", ";"):
             try:
                 df = pd.read_csv(
-                    io.BytesIO(content), encoding=encoding,
-                    sep=sep, on_bad_lines="skip",
+                    io.BytesIO(content),
+                    encoding=encoding,
+                    sep=sep,
+                    on_bad_lines="skip",
                 )
                 if len(df.columns) > 1:
                     return df
@@ -202,7 +215,8 @@ def _extract_links(html: str) -> list[dict]:
 
     # Also match static file links (.csv, .xls, .xlsx)
     pattern2 = re.compile(
-        r'href="([^"]*\.(?:csv|xls|xlsx))"', re.IGNORECASE,
+        r'href="([^"]*\.(?:csv|xls|xlsx))"',
+        re.IGNORECASE,
     )
     for match in pattern2.finditer(html):
         href = match.group(1)
@@ -216,8 +230,11 @@ def _extract_links(html: str) -> list[dict]:
 
 
 @celery_app.task(
-    name="openarg.scrape_senado", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
+    name="openarg.scrape_senado",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def scrape_senado(self):
     """Scrape Senado datos abiertos and cache tabular datasets."""
@@ -301,6 +318,7 @@ def scrape_senado(self):
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
+
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

@@ -25,13 +25,15 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
         self._model = genai.GenerativeModel(model)
 
     def _prepare_call(
-        self, messages: list[LLMMessage],
+        self,
+        messages: list[LLMMessage],
     ) -> tuple[genai.GenerativeModel, list[dict[str, Any]]]:
         """Extract system instructions, build chat messages, return (model, messages)."""
         system_parts = [m.content for m in messages if m.role == "system"]
         chat_messages = [
             {"role": "user" if m.role == "user" else "model", "parts": [m.content]}
-            for m in messages if m.role != "system"
+            for m in messages
+            if m.role != "system"
         ]
         model = self._model
         if system_parts:
@@ -68,7 +70,14 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
             content = response.text or ""
         except (ValueError, AttributeError):
             # Gemini may return empty response (safety filter, no parts)
-            logger.warning("Gemini returned empty response (finish_reason=%s)", getattr(response.candidates[0] if response.candidates else None, "finish_reason", "unknown"))
+            logger.warning(
+                "Gemini returned empty response (finish_reason=%s)",
+                getattr(
+                    response.candidates[0] if response.candidates else None,
+                    "finish_reason",
+                    "unknown",
+                ),
+            )
             content = ""
 
         if not content:

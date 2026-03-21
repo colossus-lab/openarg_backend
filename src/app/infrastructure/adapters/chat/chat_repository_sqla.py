@@ -76,7 +76,10 @@ class ChatRepositorySQLA(IChatRepository):
         return list(result.scalars().all())
 
     async def update_message_feedback(
-        self, message_id: UUID, feedback: str, comment: str | None = None,
+        self,
+        message_id: UUID,
+        feedback: str,
+        comment: str | None = None,
     ) -> Message | None:
         stmt = (
             update(Message)

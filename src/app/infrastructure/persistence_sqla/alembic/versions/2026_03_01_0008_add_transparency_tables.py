@@ -5,6 +5,7 @@ Revises: 0007
 Create Date: 2026-03-01
 
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -21,7 +22,9 @@ def upgrade() -> None:
     # --- Feature 1 & 2: Dataset Health Index + Ghost Data Monitor ---
     op.create_table(
         "dataset_health_scores",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")
+        ),
         sa.Column("dataset_id", UUID(as_uuid=True), nullable=False, index=True),
         sa.Column("portal", sa.String(100), nullable=False, index=True),
         # 6 quality dimensions (0.0 to 1.0)
@@ -43,7 +46,9 @@ def upgrade() -> None:
     # --- Feature 3: DDJJ Anomaly Detector ---
     op.create_table(
         "ddjj_anomalies",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")
+        ),
         sa.Column("cuit", sa.String(20), nullable=False),
         sa.Column("nombre", sa.String(500), nullable=False),
         sa.Column("anio_declaracion", sa.String(10), nullable=False),
@@ -69,7 +74,9 @@ def upgrade() -> None:
     # --- Feature 4: Session Topic Analysis ---
     op.create_table(
         "session_topics",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")
+        ),
         sa.Column("periodo", sa.Integer, nullable=False),
         sa.Column("reunion", sa.Integer, nullable=False),
         sa.Column("fecha", sa.String(20), nullable=True),

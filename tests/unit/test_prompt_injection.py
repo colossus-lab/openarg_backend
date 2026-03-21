@@ -1,4 +1,5 @@
 """Tests for the prompt injection detector."""
+
 from __future__ import annotations
 
 import pytest

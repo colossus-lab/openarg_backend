@@ -5,6 +5,7 @@ Consulta la API de Georef (apis.datos.gob.ar/georef/api)
 y cachea provincias, departamentos, municipios y localidades
 en PostgreSQL para consultas NL2SQL.
 """
+
 from __future__ import annotations
 
 import json
@@ -52,20 +53,21 @@ def _register_dataset(engine, endpoint: str, table_name: str, df: pd.DataFrame):
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": f"Datos georreferenciados de {endpoint} de Argentina (API Georef).",
                 "org": "Ministerio de Modernización — Georef AR",
                 "portal": portal,
                 "url": f"{API_URL}/{endpoint}",
                 "cols": columns_json,
                 "tags": f"georef,{endpoint},geografía,argentina",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -81,16 +83,24 @@ def _register_dataset(engine, endpoint: str, table_name: str, df: pd.DataFrame):
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
 
 
 @celery_app.task(
-    name="openarg.ingest_georef", bind=True, max_retries=3,
-    soft_time_limit=300, time_limit=360,
+    name="openarg.ingest_georef",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=300,
+    time_limit=360,
 )
 def ingest_georef(self):
     """Fetch geographic reference data from the Georef API and cache it."""
@@ -107,8 +117,7 @@ def ingest_georef(self):
             with engine.begin() as conn:
                 cached = conn.execute(
                     text(
-                        "SELECT id FROM cached_datasets "
-                        "WHERE table_name = :tn AND status = 'ready'"
+                        "SELECT id FROM cached_datasets WHERE table_name = :tn AND status = 'ready'"
                     ),
                     {"tn": table_name},
                 ).fetchone()
@@ -148,6 +157,7 @@ def ingest_georef(self):
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
+
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

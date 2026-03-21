@@ -5,6 +5,7 @@ Revises: 0006
 Create Date: 2026-03-01
 
 """
+
 from collections.abc import Sequence
 
 from alembic import op
@@ -41,7 +42,9 @@ def upgrade() -> None:
     """)
 
     # GIN index for full-text search
-    op.execute("CREATE INDEX IF NOT EXISTS idx_dataset_chunks_tsv ON dataset_chunks USING GIN (tsv)")
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_dataset_chunks_tsv ON dataset_chunks USING GIN (tsv)"
+    )
 
 
 def downgrade() -> None:

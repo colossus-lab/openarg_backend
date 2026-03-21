@@ -17,9 +17,7 @@ _DATA_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "ddjj_data
 
 
 def _strip_accents(text: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
-    )
+    return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
 
 
 def _name_matches(nombre: str, query: str) -> bool:
@@ -72,7 +70,9 @@ class DDJJAdapter:
             self._next_retry_at = time.monotonic() + delay
             logger.error(
                 "DDJJ dataset file not found: %s (attempt %d, next retry in %ds)",
-                _DATA_PATH, self._fail_count, delay,
+                _DATA_PATH,
+                self._fail_count,
+                delay,
             )
             self._dataset = []
         except Exception:
@@ -81,7 +81,10 @@ class DDJJAdapter:
             self._next_retry_at = time.monotonic() + delay
             logger.error(
                 "Failed to load DDJJ dataset from %s (attempt %d, next retry in %ds)",
-                _DATA_PATH, self._fail_count, delay, exc_info=True,
+                _DATA_PATH,
+                self._fail_count,
+                delay,
+                exc_info=True,
             )
             self._dataset = []
 
@@ -123,11 +126,7 @@ class DDJJAdapter:
 
     def get_by_name(self, name: str) -> DataResult:
         self._ensure_loaded()
-        matches = [
-            r
-            for r in self._dataset
-            if _name_matches(r.get("nombre", ""), name)
-        ][:5]
+        matches = [r for r in self._dataset if _name_matches(r.get("nombre", ""), name)][:5]
         return self._to_data_result(f'DDJJ de "{name}"', matches)
 
     def stats(self) -> DataResult:
@@ -178,28 +177,30 @@ class DDJJAdapter:
         formatted = []
         for r in records:
             bienes = r.get("bienes", [])
-            formatted.append({
-                "cuit": r.get("cuit", ""),
-                "nombre": r.get("nombre", ""),
-                "sexo": r.get("sexo", ""),
-                "fecha_nacimiento": r.get("fechaNacimiento", ""),
-                "estado_civil": r.get("estadoCivil", ""),
-                "cargo": r.get("cargo", ""),
-                "organismo": r.get("organismo", ""),
-                "anio_declaracion": r.get("anioDeclaracion", ""),
-                "tipo_declaracion": r.get("tipoDeclaracion", ""),
-                "bienes_inicio": r.get("bienesInicio", 0),
-                "deudas_inicio": r.get("deudasInicio", 0),
-                "bienes_cierre": r.get("bienesCierre", 0),
-                "deudas_cierre": r.get("deudasCierre", 0),
-                "patrimonio_cierre": r.get("patrimonioCierre", 0),
-                "variacion_patrimonial": r.get("bienesCierre", 0) - r.get("bienesInicio", 0),
-                "ingresos_trabajo_neto": r.get("ingresosTrabajoNeto", 0),
-                "gastos_personales": r.get("gastosPersonales", 0),
-                "cantidad_bienes": len(bienes),
-                "bienes_detalle": bienes,
-                "resumen_bienes": _summarize_assets(bienes),
-            })
+            formatted.append(
+                {
+                    "cuit": r.get("cuit", ""),
+                    "nombre": r.get("nombre", ""),
+                    "sexo": r.get("sexo", ""),
+                    "fecha_nacimiento": r.get("fechaNacimiento", ""),
+                    "estado_civil": r.get("estadoCivil", ""),
+                    "cargo": r.get("cargo", ""),
+                    "organismo": r.get("organismo", ""),
+                    "anio_declaracion": r.get("anioDeclaracion", ""),
+                    "tipo_declaracion": r.get("tipoDeclaracion", ""),
+                    "bienes_inicio": r.get("bienesInicio", 0),
+                    "deudas_inicio": r.get("deudasInicio", 0),
+                    "bienes_cierre": r.get("bienesCierre", 0),
+                    "deudas_cierre": r.get("deudasCierre", 0),
+                    "patrimonio_cierre": r.get("patrimonioCierre", 0),
+                    "variacion_patrimonial": r.get("bienesCierre", 0) - r.get("bienesInicio", 0),
+                    "ingresos_trabajo_neto": r.get("ingresosTrabajoNeto", 0),
+                    "gastos_personales": r.get("gastosPersonales", 0),
+                    "cantidad_bienes": len(bienes),
+                    "bienes_detalle": bienes,
+                    "resumen_bienes": _summarize_assets(bienes),
+                }
+            )
 
         return DataResult(
             source="ddjj:oficina_anticorrupcion",

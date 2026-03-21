@@ -43,9 +43,7 @@ class StaffAdapter(IStaffConnector):
         )
 
     async def _latest_snapshot_date(self, session: AsyncSession) -> str | None:
-        row = await session.execute(
-            text("SELECT MAX(snapshot_date) FROM staff_snapshots")
-        )
+        row = await session.execute(text("SELECT MAX(snapshot_date) FROM staff_snapshots"))
         val = row.scalar()
         return str(val) if val else None
 
@@ -63,7 +61,10 @@ class StaffAdapter(IStaffConnector):
         return patterns
 
     async def _query_senado_staff(
-        self, session: AsyncSession, name: str, limit: int,
+        self,
+        session: AsyncSession,
+        name: str,
+        limit: int,
     ) -> list[dict]:
         """Find staff via senado_staff table (scraped from senator profiles)."""
         for pattern in self._smart_like_patterns(name):
@@ -81,14 +82,15 @@ class StaffAdapter(IStaffConnector):
         return []
 
     async def _count_senado_staff(
-        self, session: AsyncSession, name: str,
+        self,
+        session: AsyncSession,
+        name: str,
     ) -> int:
         """Count staff via senado_staff table."""
         for pattern in self._smart_like_patterns(name):
             row = await session.execute(
                 text(
-                    "SELECT COUNT(*) AS total "
-                    "FROM senado_staff WHERE senator_name ILIKE :pattern"
+                    "SELECT COUNT(*) AS total FROM senado_staff WHERE senator_name ILIKE :pattern"
                 ),
                 {"pattern": pattern},
             )
@@ -98,7 +100,11 @@ class StaffAdapter(IStaffConnector):
         return 0
 
     async def _suggest_similar_areas(
-        self, session: AsyncSession, snap: str, name: str, limit: int = 5,
+        self,
+        session: AsyncSession,
+        snap: str,
+        name: str,
+        limit: int = 5,
     ) -> list[dict]:
         """Return areas whose name partially matches any word in *name*."""
         words = [w for w in name.split() if len(w) >= 3]
@@ -142,9 +148,13 @@ class StaffAdapter(IStaffConnector):
                 # 1. Try senado staff first
                 senado_records = await self._query_senado_staff(session, name, limit)
                 if senado_records:
-                    logger.info("get_by_legislator('%s'): %d results (senado)", name, len(senado_records))
+                    logger.info(
+                        "get_by_legislator('%s'): %d results (senado)", name, len(senado_records)
+                    )
                     return self._result(
-                        f"Personal de {name}", senado_records, {"source": "senado_perfiles"},
+                        f"Personal de {name}",
+                        senado_records,
+                        {"source": "senado_perfiles"},
                     )
 
                 # 2. Fallback to area_desempeno
@@ -207,7 +217,13 @@ class StaffAdapter(IStaffConnector):
                     logger.info("count_by_legislator('%s'): %d (senado)", name, senado_total)
                     return self._result(
                         f"Cantidad de personal de {name}",
-                        [{"legislador": name, "cantidad_asesores": senado_total, "fuente": "senado_perfiles"}],
+                        [
+                            {
+                                "legislador": name,
+                                "cantidad_asesores": senado_total,
+                                "fuente": "senado_perfiles",
+                            }
+                        ],
                     )
 
                 # 2. Fallback to area_desempeno
@@ -360,12 +376,14 @@ class StaffAdapter(IStaffConnector):
                     {"snap": snap},
                 )
                 r = row.fetchone()
-                records = [{
-                    "total_empleados": r.total if r else 0,
-                    "areas_distintas": r.areas if r else 0,
-                    "escalafones_distintos": r.escalafones if r else 0,
-                    "snapshot_date": snap,
-                }]
+                records = [
+                    {
+                        "total_empleados": r.total if r else 0,
+                        "areas_distintas": r.areas if r else 0,
+                        "escalafones_distintos": r.escalafones if r else 0,
+                        "snapshot_date": snap,
+                    }
+                ]
                 logger.info("stats: %d employees", records[0]["total_empleados"])
                 return self._result("Estadísticas de personal HCDN", records)
         except ConnectorError:

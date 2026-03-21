@@ -1,4 +1,5 @@
 """Unit tests for evaluation framework — no LLM calls required."""
+
 from __future__ import annotations
 
 from tests.evaluation.evaluator import (
@@ -11,9 +12,7 @@ from tests.evaluation.evaluator import (
 
 class TestComputeRetrievalPrecision:
     def test_perfect_match(self):
-        assert compute_retrieval_precision(
-            ["Series de Tiempo"], ["Series de Tiempo API"]
-        ) == 1.0
+        assert compute_retrieval_precision(["Series de Tiempo"], ["Series de Tiempo API"]) == 1.0
 
     def test_partial_match(self):
         result = compute_retrieval_precision(
@@ -23,9 +22,7 @@ class TestComputeRetrievalPrecision:
         assert result == 0.5
 
     def test_no_match(self):
-        assert compute_retrieval_precision(
-            ["DDJJ"], ["Series de Tiempo"]
-        ) == 0.0
+        assert compute_retrieval_precision(["DDJJ"], ["Series de Tiempo"]) == 0.0
 
     def test_empty_expected(self):
         assert compute_retrieval_precision([], ["anything"]) == 1.0
@@ -34,37 +31,42 @@ class TestComputeRetrievalPrecision:
         assert compute_retrieval_precision(["DDJJ"], []) == 0.0
 
     def test_case_insensitive(self):
-        assert compute_retrieval_precision(
-            ["series de tiempo"], ["SERIES DE TIEMPO"]
-        ) == 1.0
+        assert compute_retrieval_precision(["series de tiempo"], ["SERIES DE TIEMPO"]) == 1.0
 
 
 class TestCheckAnswerContains:
     def test_all_keywords_present(self):
-        assert check_answer_contains(
-            "La inflación fue del 4.2% según el IPC",
-            ["inflación", "%"],
-        ) == 1.0
+        assert (
+            check_answer_contains(
+                "La inflación fue del 4.2% según el IPC",
+                ["inflación", "%"],
+            )
+            == 1.0
+        )
 
     def test_partial_keywords(self):
-        assert check_answer_contains(
-            "El dólar subió hoy",
-            ["dólar", "blue"],
-        ) == 0.5
+        assert (
+            check_answer_contains(
+                "El dólar subió hoy",
+                ["dólar", "blue"],
+            )
+            == 0.5
+        )
 
     def test_no_keywords_present(self):
-        assert check_answer_contains(
-            "Buenos días",
-            ["inflación", "PBI"],
-        ) == 0.0
+        assert (
+            check_answer_contains(
+                "Buenos días",
+                ["inflación", "PBI"],
+            )
+            == 0.0
+        )
 
     def test_empty_keywords(self):
         assert check_answer_contains("cualquier respuesta", []) == 1.0
 
     def test_case_insensitive(self):
-        assert check_answer_contains(
-            "El PBI creció", ["pbi"]
-        ) == 1.0
+        assert check_answer_contains("El PBI creció", ["pbi"]) == 1.0
 
 
 class TestAggregateResults:
@@ -97,16 +99,25 @@ class TestAggregateResults:
     def test_multiple_categories(self):
         results = [
             EvalResult(
-                question_id="s1", category="series_tiempo",
-                retrieval_precision=1.0, intent_match=True, connector_match=True,
+                question_id="s1",
+                category="series_tiempo",
+                retrieval_precision=1.0,
+                intent_match=True,
+                connector_match=True,
             ),
             EvalResult(
-                question_id="s2", category="series_tiempo",
-                retrieval_precision=0.5, intent_match=True, connector_match=False,
+                question_id="s2",
+                category="series_tiempo",
+                retrieval_precision=0.5,
+                intent_match=True,
+                connector_match=False,
             ),
             EvalResult(
-                question_id="d1", category="ddjj",
-                retrieval_precision=1.0, intent_match=False, connector_match=True,
+                question_id="d1",
+                category="ddjj",
+                retrieval_precision=1.0,
+                intent_match=False,
+                connector_match=True,
             ),
         ]
         summary = aggregate_results(results)

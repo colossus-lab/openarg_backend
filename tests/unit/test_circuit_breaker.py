@@ -1,4 +1,5 @@
 """Tests for circuit breaker state machine."""
+
 from __future__ import annotations
 
 import time

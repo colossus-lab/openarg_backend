@@ -91,9 +91,7 @@ async def get_query_status(
     row = result.fetchone()
 
     if not row:
-        return QueryStatusResponse(
-            query_id=query_id, status="not_found", question=""
-        )
+        return QueryStatusResponse(query_id=query_id, status="not_found", question="")
 
     sources = None
     if row.sources_json:
@@ -198,7 +196,10 @@ async def quick_query(
     results = [r for r in all_results if r.score >= 0.30]
 
     if not results:
-        result: dict[str, Any] = {"answer": "No encontré datasets relevantes para tu pregunta.", "sources": []}
+        result: dict[str, Any] = {
+            "answer": "No encontré datasets relevantes para tu pregunta.",
+            "sources": [],
+        }
         await cache.set(cache_key, result, ttl_seconds=300)
 
         # Save to conversation history even for empty results
@@ -240,12 +241,14 @@ async def quick_query(
 
         if r.dataset_id in sample_data:
             sd = sample_data[r.dataset_id]
-            part += f"\nDatos reales ({sd['row_count']} filas totales en tabla '{sd['table_name']}'):"
+            part += (
+                f"\nDatos reales ({sd['row_count']} filas totales en tabla '{sd['table_name']}'):"
+            )
             part += f"\nColumnas: {', '.join(sd['columns'])}"
             # Add sample rows as a compact table
             for i, row in enumerate(sd["sample_rows"][:5]):
                 row_str = " | ".join(f"{k}={v}" for k, v in row.items())
-                part += f"\n  Fila {i+1}: {row_str}"
+                part += f"\n  Fila {i + 1}: {row_str}"
 
         context_parts.append(part)
 
@@ -342,6 +345,7 @@ def _validate_ws_api_key(websocket: WebSocket) -> bool:
     """Check api_key query param against configured BACKEND_API_KEY (backward compat)."""
     import os
     import secrets as _secrets
+
     expected = os.getenv("BACKEND_API_KEY", "")
     if not expected:
         return True  # No key configured, allow all
@@ -353,6 +357,7 @@ def _validate_api_key_value(provided: str) -> bool:
     """Validate an API key value against BACKEND_API_KEY."""
     import os
     import secrets as _secrets
+
     expected = os.getenv("BACKEND_API_KEY", "")
     if not expected:
         return True
@@ -376,7 +381,9 @@ async def stream_query(
         while True:
             raw = await websocket.receive_text()
             if len(raw) > 10_000:
-                await websocket.send_json({"type": "error", "content": "Message too large (max 10KB)"})
+                await websocket.send_json(
+                    {"type": "error", "content": "Message too large (max 10KB)"}
+                )
                 continue
             data = json.loads(raw)
 
@@ -386,7 +393,9 @@ async def stream_query(
                 if not has_query_param_auth:
                     msg_api_key = data.get("api_key", "")
                     if not _validate_api_key_value(msg_api_key):
-                        await websocket.send_json({"type": "error", "content": "Invalid or missing API key"})
+                        await websocket.send_json(
+                            {"type": "error", "content": "Invalid or missing API key"}
+                        )
                         await websocket.close(code=4401)
                         return
 
@@ -402,11 +411,13 @@ async def stream_query(
             results = await vector_search.search_datasets(query_embedding, limit=5)
 
             if not results:
-                await websocket.send_json({
-                    "type": "complete",
-                    "content": "No encontré datasets relevantes.",
-                    "sources": [],
-                })
+                await websocket.send_json(
+                    {
+                        "type": "complete",
+                        "content": "No encontré datasets relevantes.",
+                        "sources": [],
+                    }
+                )
                 continue
 
             # Stream response
@@ -436,8 +447,7 @@ async def stream_query(
                 await websocket.send_json({"type": "chunk", "content": chunk})
 
             sources = [
-                {"title": r.title, "portal": r.portal, "score": round(r.score, 3)}
-                for r in results
+                {"title": r.title, "portal": r.portal, "score": round(r.score, 3)} for r in results
             ]
             await websocket.send_json({"type": "complete", "sources": sources})
 

@@ -1,4 +1,5 @@
 """Shared sync engine for Celery tasks."""
+
 from __future__ import annotations
 
 import os

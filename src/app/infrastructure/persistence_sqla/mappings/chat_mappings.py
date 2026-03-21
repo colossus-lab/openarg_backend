@@ -29,30 +29,40 @@ def map_chat_tables() -> None:
         "conversations",
         mapping_registry.metadata,
         Column(
-            "id", PG_UUID(as_uuid=True), primary_key=True,
+            "id",
+            PG_UUID(as_uuid=True),
+            primary_key=True,
             server_default=text("gen_random_uuid()"),
         ),
         Column(
-            "user_id", PG_UUID(as_uuid=True),
+            "user_id",
+            PG_UUID(as_uuid=True),
             ForeignKey("users.id", ondelete="CASCADE"),
-            nullable=False, index=True,
+            nullable=False,
+            index=True,
         ),
         Column("title", String(1000), nullable=False, server_default=""),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
-        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+        Column(
+            "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        ),
     )
 
     messages_table = Table(
         "messages",
         mapping_registry.metadata,
         Column(
-            "id", PG_UUID(as_uuid=True), primary_key=True,
+            "id",
+            PG_UUID(as_uuid=True),
+            primary_key=True,
             server_default=text("gen_random_uuid()"),
         ),
         Column(
-            "conversation_id", PG_UUID(as_uuid=True),
+            "conversation_id",
+            PG_UUID(as_uuid=True),
             ForeignKey("conversations.id", ondelete="CASCADE"),
-            nullable=False, index=True,
+            nullable=False,
+            index=True,
         ),
         Column("role", String(20), nullable=False),
         Column("content", Text, nullable=False),
@@ -62,7 +72,9 @@ def map_chat_tables() -> None:
         Column("feedback", String(10), nullable=True),
         Column("feedback_comment", Text, nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
-        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+        Column(
+            "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        ),
     )
 
     mapping_registry.map_imperatively(Conversation, conversations_table)

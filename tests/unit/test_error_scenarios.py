@@ -3,6 +3,7 @@
 Tests retry decorator behavior, circuit breaker state transitions,
 dispatch step retry logic, and Celery SoftTimeLimitExceeded handling.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -64,7 +65,9 @@ class TestRetryDecoratorRetriesOnTransientError:
             call_count += 1
             if call_count < 3:
                 raise httpx.HTTPStatusError(
-                    "503", request=AsyncMock(), response=mock_resp,
+                    "503",
+                    request=AsyncMock(),
+                    response=mock_resp,
                 )
             return "recovered"
 
@@ -125,6 +128,7 @@ class TestRetryDecoratorGivesUpAfterMaxRetries:
 
     async def test_circuit_breaker_records_failure_on_exhaust(self):
         """When retries are exhausted, the circuit breaker should record a failure."""
+
         @with_retry(max_retries=1, base_delay=0.01, service_name="test_cb_failure")
         async def always_fails():
             raise httpx.ReadTimeout("timeout")
@@ -191,8 +195,10 @@ class TestCircuitBreakerHalfOpenRecovery:
     def test_half_open_recovers_on_success(self):
         """In HALF_OPEN, enough successes transition back to CLOSED."""
         cb = CircuitBreaker(
-            "test_recover", failure_threshold=1,
-            recovery_timeout=0.01, success_threshold=2,
+            "test_recover",
+            failure_threshold=1,
+            recovery_timeout=0.01,
+            success_threshold=2,
         )
         cb.record_failure()
         time.sleep(0.02)
@@ -226,7 +232,9 @@ def _make_service():
 
     llm = AsyncMock()
     llm.chat.return_value = MagicMock(
-        content="test response", tokens_used=10, model="test",
+        content="test response",
+        tokens_used=10,
+        model="test",
     )
 
     return SmartQueryService(
@@ -255,15 +263,23 @@ class TestDispatchStepRetryOnTimeout:
             call_count += 1
             if call_count < 3:
                 raise TimeoutError("connection timed out")
-            return [DataResult(
-                source="test", portal_name="Test", portal_url="",
-                dataset_title="Test", format="json", records=[{"data": 1}],
-                metadata={},
-            )]
+            return [
+                DataResult(
+                    source="test",
+                    portal_name="Test",
+                    portal_url="",
+                    dataset_title="Test",
+                    format="json",
+                    records=[{"data": 1}],
+                    metadata={},
+                )
+            ]
 
         step = PlanStep(
-            id="step_1", action="query_series",
-            description="test", params={},
+            id="step_1",
+            action="query_series",
+            description="test",
+            params={},
         )
 
         with patch.object(service, "_dispatch_step", side_effect=flaky_dispatch):
@@ -285,8 +301,10 @@ class TestDispatchStepRetryOnTimeout:
             return []
 
         step = PlanStep(
-            id="step_1", action="query_series",
-            description="test", params={},
+            id="step_1",
+            action="query_series",
+            description="test",
+            params={},
         )
 
         with patch.object(service, "_dispatch_step", side_effect=flaky_dispatch):
@@ -307,15 +325,17 @@ class TestDispatchStepNoRetryOn400:
             raise ValueError("Bad request: invalid parameter")
 
         step = PlanStep(
-            id="step_1", action="query_series",
-            description="test", params={},
+            id="step_1",
+            action="query_series",
+            description="test",
+            params={},
         )
 
         with (
             patch.object(service, "_dispatch_step", side_effect=bad_request_dispatch),
             pytest.raises(ValueError, match="Bad request"),
         ):
-                await service._dispatch_step_with_retry(step, max_retries=2)
+            await service._dispatch_step_with_retry(step, max_retries=2)
 
         # Should have been called only once -- no retries for non-transient errors
         assert call_count == 1

@@ -5,6 +5,7 @@ Revises: 0014
 Create Date: 2026-03-02
 
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -26,8 +27,18 @@ def upgrade() -> None:
         sa.Column("provincia", sa.String(200), nullable=True),
         sa.Column("employee_name", sa.String(500), nullable=False),
         sa.Column("categoria", sa.String(20), nullable=True),
-        sa.Column("scraped_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("now()")),
-        sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column(
+            "scraped_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column(
+            "created_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
     )
     op.create_index("ix_senado_staff_senator_name", "senado_staff", ["senator_name"])
     op.create_index("ix_senado_staff_senator_id", "senado_staff", ["senator_id"])

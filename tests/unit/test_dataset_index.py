@@ -1,4 +1,5 @@
 """Tests for the deterministic keyword-to-action routing index."""
+
 from __future__ import annotations
 
 from app.infrastructure.adapters.connectors.dataset_index import (

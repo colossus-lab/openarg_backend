@@ -1,4 +1,5 @@
 """Cached embedding service — decorator over IEmbeddingProvider that caches embed() results in Redis."""
+
 from __future__ import annotations
 
 import hashlib

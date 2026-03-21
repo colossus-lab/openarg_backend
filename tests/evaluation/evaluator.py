@@ -3,6 +3,7 @@
 Provides metrics computation for retrieval precision, answer relevance,
 hallucination detection, and intent/connector matching.
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EvalResult:
     """Evaluation metrics for a single question-answer pair."""
+
     question_id: str
     category: str
     retrieval_precision: float = 0.0
@@ -31,6 +33,7 @@ class EvalResult:
 @dataclass
 class EvalSummary:
     """Aggregated evaluation results."""
+
     total: int = 0
     avg_retrieval_precision: float = 0.0
     avg_answer_relevance: float = 0.0
@@ -42,7 +45,8 @@ class EvalSummary:
 
 
 def compute_retrieval_precision(
-    expected_sources: list[str], actual_sources: list[str],
+    expected_sources: list[str],
+    actual_sources: list[str],
 ) -> float:
     """Compute precision of retrieved sources against expected sources.
 
@@ -77,7 +81,9 @@ def check_answer_contains(answer: str, expected_keywords: list[str]) -> float:
 
 
 async def judge_answer_relevance(
-    llm: ILLMProvider, question: str, answer: str,
+    llm: ILLMProvider,
+    question: str,
+    answer: str,
 ) -> float:
     """Use an LLM as judge to evaluate answer relevance (0.0-1.0)."""
     prompt = (

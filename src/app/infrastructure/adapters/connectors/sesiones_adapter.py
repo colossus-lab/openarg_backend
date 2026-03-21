@@ -53,7 +53,10 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
             )
             return result["embedding"]  # type: ignore[no-any-return]
         except Exception:
-            logger.error("Failed to generate Gemini embedding for sesiones — falling back to keyword search", exc_info=True)
+            logger.error(
+                "Failed to generate Gemini embedding for sesiones — falling back to keyword search",
+                exc_info=True,
+            )
             return None
 
     async def _search_pgvector(
@@ -102,27 +105,34 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
 
             chunks = []
             for row in rows:
-                chunks.append({
-                    "periodo": row.periodo,
-                    "reunion": row.reunion,
-                    "fecha": row.fecha or "",
-                    "tipoSesion": row.tipo_sesion or "",
-                    "pdfUrl": row.pdf_url or "",
-                    "totalPages": row.total_pages or 0,
-                    "speaker": row.speaker,
-                    "text": row.content or "",
-                    "score": float(row.score),
-                })
+                chunks.append(
+                    {
+                        "periodo": row.periodo,
+                        "reunion": row.reunion,
+                        "fecha": row.fecha or "",
+                        "tipoSesion": row.tipo_sesion or "",
+                        "pdfUrl": row.pdf_url or "",
+                        "totalPages": row.total_pages or 0,
+                        "speaker": row.speaker,
+                        "text": row.content or "",
+                        "score": float(row.score),
+                    }
+                )
 
             # Post-filter by orador if specified
             if orador:
                 orador_lower = orador.lower()
-                chunks = [c for c in chunks if c.get("speaker") and orador_lower in c["speaker"].lower()]
+                chunks = [
+                    c for c in chunks if c.get("speaker") and orador_lower in c["speaker"].lower()
+                ]
 
             logger.info("pgvector sesiones returned %d results for '%s'", len(chunks), query[:60])
             return chunks if chunks else None
         except Exception:
-            logger.error("pgvector sesiones search failed — falling back to local keyword search", exc_info=True)
+            logger.error(
+                "pgvector sesiones search failed — falling back to local keyword search",
+                exc_info=True,
+            )
             return None
 
     def _ensure_loaded(self) -> None:

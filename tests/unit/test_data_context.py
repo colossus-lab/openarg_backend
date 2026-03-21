@@ -1,4 +1,5 @@
 """Tests for _build_data_context in SmartQueryService."""
+
 from __future__ import annotations
 
 import json

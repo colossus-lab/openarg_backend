@@ -38,7 +38,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
         logger.warning(
             "Prompt injection blocked: score=%.3f user=%s",
-            exc.injection_score, exc.user,
+            exc.injection_score,
+            exc.user,
         )
         return ORJSONResponse(
             status_code=exc.http_status,
@@ -46,12 +47,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(ConnectorError)
-    async def connector_error_handler(
-        request: Request, exc: ConnectorError
-    ) -> ORJSONResponse:
+    async def connector_error_handler(request: Request, exc: ConnectorError) -> ORJSONResponse:
         logger.warning(
             "Connector error on %s %s: %s - %s",
-            request.method, request.url.path, exc.error_code.name, exc,
+            request.method,
+            request.url.path,
+            exc.error_code.name,
+            exc,
         )
         return ORJSONResponse(
             status_code=exc.http_status,
@@ -59,12 +61,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(ApplicationError)
-    async def application_error_handler(
-        request: Request, exc: ApplicationError
-    ) -> ORJSONResponse:
+    async def application_error_handler(request: Request, exc: ApplicationError) -> ORJSONResponse:
         logger.warning(
             "Application error on %s %s: %s - %s",
-            request.method, request.url.path, exc.error_code.name, exc,
+            request.method,
+            request.url.path,
+            exc.error_code.name,
+            exc,
         )
         return ORJSONResponse(
             status_code=exc.http_status,
@@ -78,11 +81,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         errors = []
         for err in exc.errors():
             loc = " → ".join(str(part) for part in err.get("loc", []))
-            errors.append({
-                "field": loc,
-                "message": err.get("msg", "Validation error"),
-                "type": err.get("type", ""),
-            })
+            errors.append(
+                {
+                    "field": loc,
+                    "message": err.get("msg", "Validation error"),
+                    "type": err.get("type", ""),
+                }
+            )
         logger.warning("Validation error: %s", errors)
         return ORJSONResponse(
             status_code=422,
@@ -96,9 +101,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def unhandled_error_handler(
-        request: Request, exc: Exception
-    ) -> ORJSONResponse:
+    async def unhandled_error_handler(request: Request, exc: Exception) -> ORJSONResponse:
         logger.exception(f"Unhandled error: {exc}")
         return ORJSONResponse(
             status_code=500,

@@ -1,4 +1,5 @@
 """Integration tests for improved health endpoint."""
+
 from __future__ import annotations
 
 

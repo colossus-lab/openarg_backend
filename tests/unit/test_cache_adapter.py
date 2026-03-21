@@ -39,9 +39,7 @@ class TestRedisCacheAdapter:
 
     async def test_set_serializes_dict(self, cache, mock_redis):
         await cache.set("key", {"data": 123}, ttl_seconds=60)
-        mock_redis.set.assert_awaited_once_with(
-            "key", json.dumps({"data": 123}), ex=60
-        )
+        mock_redis.set.assert_awaited_once_with("key", json.dumps({"data": 123}), ex=60)
 
     async def test_set_stores_string_directly(self, cache, mock_redis):
         await cache.set("key", "raw", ttl_seconds=30)

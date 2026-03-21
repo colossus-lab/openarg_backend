@@ -1,4 +1,5 @@
 """Structured audit logger — emits JSON audit events for security and analytics."""
+
 from __future__ import annotations
 
 import json

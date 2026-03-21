@@ -105,8 +105,13 @@ def _validate_sql_ast(sql: str) -> str | None:
 
         # Walk the AST to find DML/DDL nodes embedded in CTEs or subqueries
         _DML_DDL = (
-            exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create,
-            exp.Alter, exp.Command,
+            exp.Insert,
+            exp.Update,
+            exp.Delete,
+            exp.Drop,
+            exp.Create,
+            exp.Alter,
+            exp.Command,
         )
         for node in stmt.walk():
             if isinstance(node, _DML_DDL):
@@ -220,9 +225,7 @@ class PgSandboxAdapter(ISQLSandbox):
                 error=error_msg,
             )
 
-    async def execute_readonly(
-        self, sql: str, timeout_seconds: int = 10
-    ) -> SandboxResult:
+    async def execute_readonly(self, sql: str, timeout_seconds: int = 10) -> SandboxResult:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
@@ -264,7 +267,8 @@ class PgSandboxAdapter(ISQLSandbox):
         return await loop.run_in_executor(self._executor, self._list_tables_sync)
 
     def _get_column_types_sync(
-        self, table_names: list[str],
+        self,
+        table_names: list[str],
     ) -> dict[str, list[tuple[str, str]]]:
         engine = self._get_engine()
         if not table_names:
@@ -282,14 +286,13 @@ class PgSandboxAdapter(ISQLSandbox):
             )
             types: dict[str, list[tuple[str, str]]] = {}
             for row in result.fetchall():
-                types.setdefault(row.table_name, []).append(
-                    (row.column_name, row.data_type)
-                )
+                types.setdefault(row.table_name, []).append((row.column_name, row.data_type))
             conn.rollback()
             return types
 
     async def get_column_types(
-        self, table_names: list[str],
+        self,
+        table_names: list[str],
     ) -> dict[str, list[tuple[str, str]]]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(

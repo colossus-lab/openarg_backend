@@ -6,6 +6,7 @@ Feature 2: Monitor de Datos Fantasma (freshness/staleness)
 Feature 3: Detector de Anomalías Patrimoniales (DDJJ)
 Feature 4: Análisis Temático de Sesiones Parlamentarias
 """
+
 from __future__ import annotations
 
 import json
@@ -105,7 +106,13 @@ def _score_single_dataset(row) -> dict:
     }
 
 
-@celery_app.task(name="openarg.score_portal_health", bind=True, max_retries=2, soft_time_limit=300, time_limit=360)
+@celery_app.task(
+    name="openarg.score_portal_health",
+    bind=True,
+    max_retries=2,
+    soft_time_limit=300,
+    time_limit=360,
+)
 def score_portal_health(self, portal: str | None = None):
     """
     Score dataset health for all datasets (or a specific portal).
@@ -155,7 +162,8 @@ def score_portal_health(self, portal: str | None = None):
                             (CAST(:did AS uuid), :portal, :fs, :as_, :mr, :cs, :ls, :co, :os, :fst)
                     """),
                     {
-                        "did": row.id, "portal": row.portal,
+                        "did": row.id,
+                        "portal": row.portal,
                         "fs": scores["freshness_score"],
                         "as_": scores["accessibility_score"],
                         "mr": scores["machine_readability_score"],
@@ -175,7 +183,10 @@ def score_portal_health(self, portal: str | None = None):
             abandoned = sum(1 for s in scores_list if s < 0.3)
             logger.info(
                 "Portal %s: avg_score=%.2f, datasets=%d, abandoned=%d",
-                p, avg, len(scores_list), abandoned,
+                p,
+                avg,
+                len(scores_list),
+                abandoned,
             )
 
         logger.info("Scored %d datasets across %d portals", scored, len(portal_stats))
@@ -191,7 +202,6 @@ def score_portal_health(self, portal: str | None = None):
         engine.dispose()
 
 
-
 # ---------------------------------------------------------------------------
 # Feature 4: Session Topic Analysis
 # ---------------------------------------------------------------------------
@@ -199,76 +209,211 @@ def score_portal_health(self, portal: str | None = None):
 # Taxonomía de temas parlamentarios argentinos (keywords normalizados)
 TOPIC_TAXONOMY: dict[str, list[str]] = {
     "economia": [
-        "presupuesto", "gasto público", "deuda", "política fiscal", "impuesto",
-        "inflación", "dólar", "bcra", "banco central", "subsidio",
-        "tarifa", "precio", "exportación", "importación", "pbi",
-        "recaudación", "déficit", "superávit", "financiamiento",
-        "inversión", "economía", "económic", "tributari",
+        "presupuesto",
+        "gasto público",
+        "deuda",
+        "política fiscal",
+        "impuesto",
+        "inflación",
+        "dólar",
+        "bcra",
+        "banco central",
+        "subsidio",
+        "tarifa",
+        "precio",
+        "exportación",
+        "importación",
+        "pbi",
+        "recaudación",
+        "déficit",
+        "superávit",
+        "financiamiento",
+        "inversión",
+        "economía",
+        "económic",
+        "tributari",
     ],
     "seguridad": [
-        "seguridad", "policía", "policial", "delito", "crimen",
-        "narcotráfico", "droga", "fuerzas armadas", "defensa",
-        "penitenciar", "cárcel", "prisión", "femicidio",
-        "violencia", "arma", "terrorismo",
+        "seguridad",
+        "policía",
+        "policial",
+        "delito",
+        "crimen",
+        "narcotráfico",
+        "droga",
+        "fuerzas armadas",
+        "defensa",
+        "penitenciar",
+        "cárcel",
+        "prisión",
+        "femicidio",
+        "violencia",
+        "arma",
+        "terrorismo",
     ],
     "educacion": [
-        "educación", "escuela", "universidad", "docente", "maestr",
-        "alumno", "estudiant", "pedagóg", "curricular", "beca",
-        "investigación científica", "conicet", "ciencia",
-        "tecnología", "innovación",
+        "educación",
+        "escuela",
+        "universidad",
+        "docente",
+        "maestr",
+        "alumno",
+        "estudiant",
+        "pedagóg",
+        "curricular",
+        "beca",
+        "investigación científica",
+        "conicet",
+        "ciencia",
+        "tecnología",
+        "innovación",
     ],
     "salud": [
-        "salud", "hospital", "médic", "sanitari", "vacuna",
-        "epidemia", "pandemia", "medicamento", "obra social",
-        "prepaga", "enfermedad", "mortalidad", "natalidad",
-        "discapacidad", "mental",
+        "salud",
+        "hospital",
+        "médic",
+        "sanitari",
+        "vacuna",
+        "epidemia",
+        "pandemia",
+        "medicamento",
+        "obra social",
+        "prepaga",
+        "enfermedad",
+        "mortalidad",
+        "natalidad",
+        "discapacidad",
+        "mental",
     ],
     "trabajo": [
-        "trabajo", "empleo", "desempleo", "salar", "sindicat",
-        "convenio colectivo", "jubilación", "pensión", "anses",
-        "previsional", "retiro", "laboral", "trabajador",
-        "paritaria", "gremial",
+        "trabajo",
+        "empleo",
+        "desempleo",
+        "salar",
+        "sindicat",
+        "convenio colectivo",
+        "jubilación",
+        "pensión",
+        "anses",
+        "previsional",
+        "retiro",
+        "laboral",
+        "trabajador",
+        "paritaria",
+        "gremial",
     ],
     "justicia": [
-        "justicia", "judicial", "juez", "jueza", "ministerio público fiscal",
-        "tribunal", "corte suprema", "constitución", "constitucional",
-        "amparo", "recurso", "penal", "civil", "procesal",
-        "reforma judicial", "ministerio público",
+        "justicia",
+        "judicial",
+        "juez",
+        "jueza",
+        "ministerio público fiscal",
+        "tribunal",
+        "corte suprema",
+        "constitución",
+        "constitucional",
+        "amparo",
+        "recurso",
+        "penal",
+        "civil",
+        "procesal",
+        "reforma judicial",
+        "ministerio público",
     ],
     "derechos_humanos": [
-        "derechos humanos", "género", "diversidad", "igualdad",
-        "discriminación", "pueblos originarios", "indígena",
-        "migrante", "refugiad", "identidad de género",
-        "interrupción", "aborto", "memoria", "dictadura",
+        "derechos humanos",
+        "género",
+        "diversidad",
+        "igualdad",
+        "discriminación",
+        "pueblos originarios",
+        "indígena",
+        "migrante",
+        "refugiad",
+        "identidad de género",
+        "interrupción",
+        "aborto",
+        "memoria",
+        "dictadura",
     ],
     "medio_ambiente": [
-        "ambiente", "ambiental", "cambio climático", "contaminación",
-        "residuo", "reciclaje", "minería", "hidrocarburo",
-        "energía renovable", "deforestación", "biodiversidad",
-        "humedal", "agua", "río",
+        "ambiente",
+        "ambiental",
+        "cambio climático",
+        "contaminación",
+        "residuo",
+        "reciclaje",
+        "minería",
+        "hidrocarburo",
+        "energía renovable",
+        "deforestación",
+        "biodiversidad",
+        "humedal",
+        "agua",
+        "río",
     ],
     "infraestructura": [
-        "obra pública", "infraestructura", "transporte", "ruta",
-        "autopista", "ferrocarril", "tren", "aeropuerto",
-        "puerto", "vivienda", "urbanismo", "vialidad",
-        "construcción", "licitación",
+        "obra pública",
+        "infraestructura",
+        "transporte",
+        "ruta",
+        "autopista",
+        "ferrocarril",
+        "tren",
+        "aeropuerto",
+        "puerto",
+        "vivienda",
+        "urbanismo",
+        "vialidad",
+        "construcción",
+        "licitación",
     ],
     "politica_institucional": [
-        "elección", "electoral", "voto", "partido",
-        "congreso", "senado", "diputado", "legislat",
-        "decreto", "reglamento", "comisión", "reforma",
-        "federalismo", "coparticipación", "autonomía",
-        "república", "democracia",
+        "elección",
+        "electoral",
+        "voto",
+        "partido",
+        "congreso",
+        "senado",
+        "diputado",
+        "legislat",
+        "decreto",
+        "reglamento",
+        "comisión",
+        "reforma",
+        "federalismo",
+        "coparticipación",
+        "autonomía",
+        "república",
+        "democracia",
     ],
     "relaciones_exteriores": [
-        "relaciones exteriores", "cancillería", "tratado",
-        "mercosur", "internacional", "embajad", "diplomátic",
-        "soberanía", "malvinas", "fmi", "naciones unidas",
+        "relaciones exteriores",
+        "cancillería",
+        "tratado",
+        "mercosur",
+        "internacional",
+        "embajad",
+        "diplomátic",
+        "soberanía",
+        "malvinas",
+        "fmi",
+        "naciones unidas",
     ],
     "agro": [
-        "agropecuari", "campo", "rural", "agrícola", "ganader",
-        "cosecha", "soja", "trigo", "maíz", "retenciones",
-        "inta", "senasa", "fitosanitar",
+        "agropecuari",
+        "campo",
+        "rural",
+        "agrícola",
+        "ganader",
+        "cosecha",
+        "soja",
+        "trigo",
+        "maíz",
+        "retenciones",
+        "inta",
+        "senasa",
+        "fitosanitar",
     ],
 }
 
@@ -286,7 +431,13 @@ def _classify_text(text_content: str) -> dict[str, int]:
     return counts
 
 
-@celery_app.task(name="openarg.analyze_session_topics", bind=True, max_retries=2, soft_time_limit=300, time_limit=360)
+@celery_app.task(
+    name="openarg.analyze_session_topics",
+    bind=True,
+    max_retries=2,
+    soft_time_limit=300,
+    time_limit=360,
+)
 def analyze_session_topics(self):
     """
     Analiza los chunks de sesiones parlamentarias por tema.
@@ -368,18 +519,20 @@ def analyze_session_topics(self):
                 top_speakers = dict(
                     sorted(speaker_topics[cat].items(), key=lambda x: x[1], reverse=True)[:5]
                 )
-                results.append({
-                    "periodo": periodo,
-                    "reunion": reunion,
-                    "fecha": fecha,
-                    "tipo_sesion": tipo_sesion,
-                    "topic_name": _TOPIC_DISPLAY_NAMES.get(cat, cat.replace("_", " ").title()),
-                    "topic_category": cat,
-                    "mention_count": count,
-                    "relevance_score": round(count / total_mentions, 4),
-                    "top_speakers": top_speakers,
-                    "excerpts": topic_excerpts.get(cat, []),
-                })
+                results.append(
+                    {
+                        "periodo": periodo,
+                        "reunion": reunion,
+                        "fecha": fecha,
+                        "tipo_sesion": tipo_sesion,
+                        "topic_name": _TOPIC_DISPLAY_NAMES.get(cat, cat.replace("_", " ").title()),
+                        "topic_category": cat,
+                        "mention_count": count,
+                        "relevance_score": round(count / total_mentions, 4),
+                        "top_speakers": top_speakers,
+                        "excerpts": topic_excerpts.get(cat, []),
+                    }
+                )
 
         # Store in DB
         with engine.begin() as conn:
@@ -396,9 +549,12 @@ def analyze_session_topics(self):
                             (:per, :reu, :fecha, :tipo, :tn, :tc, :mc, :rs, :ts, :ex)
                     """),
                     {
-                        "per": r["periodo"], "reu": r["reunion"],
-                        "fecha": r["fecha"], "tipo": r["tipo_sesion"],
-                        "tn": r["topic_name"], "tc": r["topic_category"],
+                        "per": r["periodo"],
+                        "reu": r["reunion"],
+                        "fecha": r["fecha"],
+                        "tipo": r["tipo_sesion"],
+                        "tn": r["topic_name"],
+                        "tc": r["topic_category"],
                         "mc": r["mention_count"],
                         "rs": r["relevance_score"],
                         "ts": json.dumps(r["top_speakers"], ensure_ascii=False),
@@ -408,7 +564,8 @@ def analyze_session_topics(self):
 
         logger.info(
             "Session topic analysis complete: %d sessions, %d topic entries",
-            len(sessions), len(results),
+            len(sessions),
+            len(results),
         )
         return {"sessions_analyzed": len(sessions), "topic_entries": len(results)}
 

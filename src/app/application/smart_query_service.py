@@ -2,6 +2,7 @@
 
 Simplified pipeline: planner (1 LLM) → dispatch steps (0 LLM) → analysis (1 LLM) + optional policy (1 LLM).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -139,10 +140,19 @@ _FAREWELL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_DATA_ACTIONS = frozenset((
-    "query_sandbox", "query_series", "query_argentina_datos", "query_bcra",
-    "query_ddjj", "query_sesiones", "query_staff", "search_ckan", "query_georef",
-))
+_DATA_ACTIONS = frozenset(
+    (
+        "query_sandbox",
+        "query_series",
+        "query_argentina_datos",
+        "query_bcra",
+        "query_ddjj",
+        "query_sesiones",
+        "query_staff",
+        "search_ckan",
+        "query_georef",
+    )
+)
 
 _META_PATTERNS = re.compile(
     r"(qué pod[eé]s hacer|qu[eé] sab[eé]s|cu[aá]les son tus funciones"
@@ -188,7 +198,8 @@ _META_RESPONSE = (
 
 _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
     re.compile(
-        r"qu[eé]\s+(es|son)\s+(los\s+)?datos?\s+abiertos", re.IGNORECASE,
+        r"qu[eé]\s+(es|son)\s+(los\s+)?datos?\s+abiertos",
+        re.IGNORECASE,
     ): (
         "Los **datos abiertos** son datos que cualquier persona puede "
         "acceder, usar y compartir libremente. En Argentina, el portal "
@@ -197,7 +208,8 @@ _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
         "Probá preguntarme: *¿Qué datasets hay sobre educación?*"
     ),
     re.compile(
-        r"qu[eé]\s+(es|significa)\s+(el\s+)?pbi", re.IGNORECASE,
+        r"qu[eé]\s+(es|significa)\s+(el\s+)?pbi",
+        re.IGNORECASE,
     ): (
         "El **PBI (Producto Bruto Interno)** es el valor total de todos "
         "los bienes y servicios producidos en un país durante un período "
@@ -207,7 +219,8 @@ _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
         "años?*"
     ),
     re.compile(
-        r"qu[eé]\s+(es|significa)\s+(la\s+)?inflaci[oó]n", re.IGNORECASE,
+        r"qu[eé]\s+(es|significa)\s+(la\s+)?inflaci[oó]n",
+        re.IGNORECASE,
     ): (
         "La **inflación** es el aumento generalizado y sostenido de "
         "los precios de bienes y servicios en una economía. En "
@@ -224,7 +237,8 @@ _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
         "Probá preguntarme: *¿Cuánto está el riesgo país hoy?*"
     ),
     re.compile(
-        r"qu[eé]\s+(es|son)\s+(las\s+)?ddjj", re.IGNORECASE,
+        r"qu[eé]\s+(es|son)\s+(las\s+)?ddjj",
+        re.IGNORECASE,
     ): (
         "Las **DDJJ (Declaraciones Juradas)** son documentos donde "
         "los funcionarios públicos declaran su patrimonio. En OpenArg "
@@ -373,6 +387,7 @@ class SmartQueryService:
             return ""
         try:
             from uuid import UUID
+
             messages = await self._chat_repo.get_messages(UUID(conversation_id), limit=7)
             if len(messages) <= 1:
                 return ""
@@ -399,7 +414,9 @@ class SmartQueryService:
     # ── Request classification (shared by execute + execute_streaming) ──
 
     def _classify_request(
-        self, question: str, user_id: str,
+        self,
+        question: str,
+        user_id: str,
     ) -> tuple[str | None, str | None]:
         """Check casual/meta/injection/educational patterns.
 
@@ -500,57 +517,47 @@ class SmartQueryService:
         plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
 
         # Handle clarification from planner (before injecting fallback)
-        _is_clar = (
-            plan.intent == "clarification"
-            and any(s.action == "clarification" for s in plan.steps)
+        _is_clar = plan.intent == "clarification" and any(
+            s.action == "clarification" for s in plan.steps
         )
         if _is_clar:
-            clar_step = next(
-                s for s in plan.steps if s.action == "clarification"
-            )
+            clar_step = next(s for s in plan.steps if s.action == "clarification")
             clar_q = clar_step.params.get(
-                "question", "¿Podés ser más específico?",
+                "question",
+                "¿Podés ser más específico?",
             )
             clar_opts = clar_step.params.get("options", [])
-            opts_text = "\n".join(
-                f"- {o}" for o in clar_opts
-            ) if clar_opts else ""
-            answer = (
-                f"**{clar_q}**\n\n{opts_text}"
-                if opts_text
-                else f"**{clar_q}**"
-            )
+            opts_text = "\n".join(f"- {o}" for o in clar_opts) if clar_opts else ""
+            answer = f"**{clar_q}**\n\n{opts_text}" if opts_text else f"**{clar_q}**"
             return SmartQueryResult(
                 answer=answer,
                 sources=[],
                 intent="clarification",
-                duration_ms=int(
-                    (time.monotonic() - start_time) * 1000
-                ),
+                duration_ms=int((time.monotonic() - start_time) * 1000),
             )
 
         # Inject search_datasets fallback if plan has no vector search step
-        _has_vector_step = any(
-            s.action == "search_datasets" for s in plan.steps
-        )
-        _has_data_step = any(
-            s.action in _DATA_ACTIONS for s in plan.steps
-        )
+        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
+        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
         if not _has_vector_step and not _has_data_step:
-            plan.steps.insert(0, PlanStep(
-                id="step_vector_fallback",
-                action="search_datasets",
-                description=(
-                    "Buscar datasets relevantes por similitud"
-                    f" semántica: {question[:100]}"
+            plan.steps.insert(
+                0,
+                PlanStep(
+                    id="step_vector_fallback",
+                    action="search_datasets",
+                    description=(
+                        f"Buscar datasets relevantes por similitud semántica: {question[:100]}"
+                    ),
+                    params={"query": preprocessed_q, "limit": 5},
+                    depends_on=[],
                 ),
-                params={"query": preprocessed_q, "limit": 5},
-                depends_on=[],
-            ))
+            )
 
         logger.info(
             "Plan for '%s': intent=%s, steps=%d",
-            question[:60], plan.intent, len(plan.steps),
+            question[:60],
+            plan.intent,
+            len(plan.steps),
         )
 
         # 4. Dispatch steps (0 LLM calls — just connector calls)
@@ -564,15 +571,12 @@ class SmartQueryService:
 
         errors_block = ""
         if all_warnings:
-            errors_block = (
-                "\nERRORES EN LA RECOLECCIÓN:\n"
-                + "\n".join(f"- {w}" for w in all_warnings)
+            errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(
+                f"- {w}" for w in all_warnings
             )
 
         # If no data was collected, fall back to LLM general knowledge
-        no_data_fallback = not results or not any(
-            r.records for r in results
-        )
+        no_data_fallback = not results or not any(r.records for r in results)
 
         if no_data_fallback:
             caps = _build_capabilities_block()
@@ -653,7 +657,11 @@ class SmartQueryService:
         if policy_mode:
             try:
                 policy_text = await analyze_policy(
-                    self._llm, plan, results, clean_answer, memory_ctx,
+                    self._llm,
+                    plan,
+                    results,
+                    clean_answer,
+                    memory_ctx,
                 )
                 clean_answer += "\n\n---\n\n" + policy_text
             except Exception:
@@ -699,22 +707,22 @@ class SmartQueryService:
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=duration_ms)
 
         # 8. Memory update (fire-and-forget — don't block the response)
-        asyncio.create_task(
-            self._update_memory_bg(session_id, memory, plan, results, clean_answer)
-        )
+        asyncio.create_task(self._update_memory_bg(session_id, memory, plan, results, clean_answer))
 
         # 9. Save conversation history
         if session:
             plan_data = {
                 "intent": plan.intent,
-                "steps": [
-                    {"action": s.action, "params": s.params}
-                    for s in plan.steps
-                ],
+                "steps": [{"action": s.action, "params": s.params} for s in plan.steps],
             }
             await self._save_history(
-                session, question, user_id, clean_answer,
-                sources, tokens_used, duration_ms,
+                session,
+                question,
+                user_id,
+                clean_answer,
+                sources,
+                tokens_used,
+                duration_ms,
                 plan_json=json.dumps(plan_data, ensure_ascii=False),
             )
 
@@ -745,8 +753,10 @@ class SmartQueryService:
         if cls_type is not None:
             yield {"type": "chunk", "content": cls_text}
             complete_evt: dict[str, Any] = {
-                "type": "complete", "answer": cls_text,
-                "sources": [], "chart_data": None,
+                "type": "complete",
+                "answer": cls_text,
+                "sources": [],
+                "chart_data": None,
             }
             if cls_type == "casual":
                 complete_evt["casual"] = True
@@ -790,41 +800,37 @@ class SmartQueryService:
         plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
 
         # Handle clarification from planner (before injecting fallback)
-        _is_clar = (
-            plan.intent == "clarification"
-            and any(s.action == "clarification" for s in plan.steps)
+        _is_clar = plan.intent == "clarification" and any(
+            s.action == "clarification" for s in plan.steps
         )
         if _is_clar:
-            clar_step = next(
-                s for s in plan.steps if s.action == "clarification"
-            )
+            clar_step = next(s for s in plan.steps if s.action == "clarification")
             yield {
                 "type": "clarification",
                 "question": clar_step.params.get(
-                    "question", "¿Podés ser más específico?",
+                    "question",
+                    "¿Podés ser más específico?",
                 ),
                 "options": clar_step.params.get("options", []),
             }
             return
 
         # Inject search_datasets fallback if plan has no vector search
-        _has_vector_step = any(
-            s.action == "search_datasets" for s in plan.steps
-        )
-        _has_data_step = any(
-            s.action in _DATA_ACTIONS for s in plan.steps
-        )
+        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
+        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
         if not _has_vector_step and not _has_data_step:
-            plan.steps.insert(0, PlanStep(
-                id="step_vector_fallback",
-                action="search_datasets",
-                description=(
-                    "Buscar datasets relevantes por similitud"
-                    f" semántica: {question[:100]}"
+            plan.steps.insert(
+                0,
+                PlanStep(
+                    id="step_vector_fallback",
+                    action="search_datasets",
+                    description=(
+                        f"Buscar datasets relevantes por similitud semántica: {question[:100]}"
+                    ),
+                    params={"query": preprocessed_q, "limit": 5},
+                    depends_on=[],
                 ),
-                params={"query": preprocessed_q, "limit": 5},
-                depends_on=[],
-            ))
+            )
 
         yield {
             "type": "status",
@@ -847,14 +853,11 @@ class SmartQueryService:
 
         errors_block = ""
         if all_warnings:
-            errors_block = (
-                "\nERRORES EN LA RECOLECCIÓN:\n"
-                + "\n".join(f"- {w}" for w in all_warnings)
+            errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(
+                f"- {w}" for w in all_warnings
             )
 
-        no_data_fallback = not results or not any(
-            r.records for r in results
-        )
+        no_data_fallback = not results or not any(r.records for r in results)
 
         if no_data_fallback:
             caps = _build_capabilities_block()
@@ -959,7 +962,11 @@ class SmartQueryService:
             try:
                 yield {"type": "status", "step": "policy_analysis"}
                 policy_text = await analyze_policy(
-                    self._llm, plan, results, clean_answer, memory_ctx,
+                    self._llm,
+                    plan,
+                    results,
+                    clean_answer,
+                    memory_ctx,
                 )
                 separator = "\n\n---\n\n"
                 yield {"type": "chunk", "content": separator + policy_text}
@@ -1001,9 +1008,7 @@ class SmartQueryService:
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=0)
 
         # Memory update (fire-and-forget)
-        asyncio.create_task(
-            self._update_memory_bg(session_id, memory, plan, results, clean_answer)
-        )
+        asyncio.create_task(self._update_memory_bg(session_id, memory, plan, results, clean_answer))
 
         # Cache write
         try:
@@ -1046,16 +1051,20 @@ class SmartQueryService:
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries:
-                    delay = backoff_base * (2 ** attempt)
+                    delay = backoff_base * (2**attempt)
                     logger.debug(
                         "Memory update attempt %d/%d failed, retrying in %.1fs",
-                        attempt + 1, 1 + max_retries, delay, exc_info=True,
+                        attempt + 1,
+                        1 + max_retries,
+                        delay,
+                        exc_info=True,
                     )
                     await asyncio.sleep(delay)
 
         logger.warning(
             "Background memory update failed after %d attempts: %s",
-            1 + max_retries, last_exc,
+            1 + max_retries,
+            last_exc,
         )
 
     # ── Classification helpers ──────────────────────────────
@@ -1332,14 +1341,50 @@ class SmartQueryService:
         """
         # Common filler words the LLM likes to include
         _STOPWORDS = {
-            "buscar", "busca", "buscando", "datasets", "dataset", "datos",
-            "relacionados", "relacionado", "sobre", "acerca", "portal",
-            "nacional", "disponibles", "disponible", "listar", "mostrar",
-            "obtener", "consultar", "encontrar", "abiertos", "abierto",
-            "informacion", "información", "con", "del", "los", "las",
-            "que", "hay", "tiene", "para", "una", "por", "como", "son",
-            "mas", "más", "este", "esta", "estos", "estas",
-            "datos.gob.ar", "datos.gob", "gob.ar",
+            "buscar",
+            "busca",
+            "buscando",
+            "datasets",
+            "dataset",
+            "datos",
+            "relacionados",
+            "relacionado",
+            "sobre",
+            "acerca",
+            "portal",
+            "nacional",
+            "disponibles",
+            "disponible",
+            "listar",
+            "mostrar",
+            "obtener",
+            "consultar",
+            "encontrar",
+            "abiertos",
+            "abierto",
+            "informacion",
+            "información",
+            "con",
+            "del",
+            "los",
+            "las",
+            "que",
+            "hay",
+            "tiene",
+            "para",
+            "una",
+            "por",
+            "como",
+            "son",
+            "mas",
+            "más",
+            "este",
+            "esta",
+            "estos",
+            "estas",
+            "datos.gob.ar",
+            "datos.gob",
+            "gob.ar",
         }
         # Strip quotes and parenthetical text
         clean = re.sub(r"[\"'()]", " ", raw)
@@ -1387,7 +1432,9 @@ class SmartQueryService:
         return await self._ckan.search_datasets(query, portal_id=portal_id, rows=rows)
 
     async def _search_cached_tables(
-        self, query: str, limit: int = 10,
+        self,
+        query: str,
+        limit: int = 10,
     ) -> list[DataResult]:
         """Search locally cached tables (cache_*) for datasets matching *query*.
 
@@ -1412,10 +1459,7 @@ class SmartQueryService:
         if not keywords:
             return []
 
-        matched = [
-            t for t in all_tables
-            if any(kw in t.table_name.lower() for kw in keywords)
-        ]
+        matched = [t for t in all_tables if any(kw in t.table_name.lower() for kw in keywords)]
         if not matched:
             return []
 
@@ -1436,7 +1480,9 @@ class SmartQueryService:
                         source=f"cache:{table.table_name}",
                         portal_name="Base de datos local (cache)",
                         portal_url="",
-                        dataset_title=table.table_name.replace("cache_", "").replace("_", " ").title(),
+                        dataset_title=table.table_name.replace("cache_", "")
+                        .replace("_", " ")
+                        .title(),
                         format="json",
                         records=sandbox_result.rows[:50],
                         metadata={
@@ -1486,7 +1532,9 @@ class SmartQueryService:
                     result = await self._bcra.get_variable_historica(
                         id_variable=int(id_variable),
                         fecha_desde=params.get("fecha_desde", "2024-01-01"),
-                        fecha_hasta=params.get("fecha_hasta", datetime.now(UTC).strftime("%Y-%m-%d")),
+                        fecha_hasta=params.get(
+                            "fecha_hasta", datetime.now(UTC).strftime("%Y-%m-%d")
+                        ),
                     )
             else:
                 result = await self._bcra.get_cotizaciones()
@@ -1505,6 +1553,7 @@ class SmartQueryService:
             return {}
         try:
             import asyncio
+
             loop = asyncio.get_running_loop()
 
             def _fetch() -> dict[str, dict[str, Any]]:
@@ -1537,7 +1586,8 @@ class SmartQueryService:
             return await loop.run_in_executor(None, _fetch)
         except Exception:
             logger.debug(
-                "table_catalog lookup failed", exc_info=True,
+                "table_catalog lookup failed",
+                exc_info=True,
             )
             return {}
 
@@ -1551,6 +1601,7 @@ class SmartQueryService:
             return []
         try:
             import asyncio
+
             q_embedding = await self._embedding.embed(query)
             embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
             loop = asyncio.get_running_loop()
@@ -1591,7 +1642,8 @@ class SmartQueryService:
         try:
             q_embedding = await self._embedding.embed(query)
             vector_results = await self._vector_search.search_datasets(
-                q_embedding, limit=10,
+                q_embedding,
+                limit=10,
             )
             if not vector_results:
                 return []
@@ -1631,7 +1683,10 @@ class SmartQueryService:
             table_hints = params.get("tables", [])
             logger.info(
                 "Sandbox step %s: %d cached tables, hints=%s, query=%s",
-                step.id, len(tables), table_hints, nl_query[:80],
+                step.id,
+                len(tables),
+                table_hints,
+                nl_query[:80],
             )
             if not tables:
                 if table_hints and any("indec" in h for h in table_hints):
@@ -1655,6 +1710,7 @@ class SmartQueryService:
                 else:
                     # Planner returns glob patterns — use fnmatch
                     import fnmatch
+
                     filtered = []
                     for t in tables:
                         for pattern in table_hints:
@@ -1667,7 +1723,9 @@ class SmartQueryService:
                     indec_tables = [t.table_name for t in tables if "indec" in t.table_name]
                     logger.info(
                         "INDEC fnmatch miss: hints=%s, indec_tables_in_cache=%d (sample: %s)",
-                        table_hints, len(indec_tables), indec_tables[:3],
+                        table_hints,
+                        len(indec_tables),
+                        indec_tables[:3],
                     )
                     logger.info("No cached INDEC tables, attempting live fallback")
                     return await self._indec_live_fallback(nl_query)
@@ -1679,7 +1737,8 @@ class SmartQueryService:
                         table_hints,
                     )
                     vector_discovered = await self._discover_tables_by_vector_search(
-                        nl_query, tables,
+                        nl_query,
+                        tables,
                     )
                     if vector_discovered:
                         hint_set = set(vector_discovered)
@@ -1688,7 +1747,8 @@ class SmartQueryService:
                             tables = filtered
                             logger.info(
                                 "Sandbox: vector search fallback found %d table(s): %s",
-                                len(filtered), [t.table_name for t in filtered[:5]],
+                                len(filtered),
+                                [t.table_name for t in filtered[:5]],
                             )
                         else:
                             return []
@@ -1700,9 +1760,7 @@ class SmartQueryService:
                         return []
 
             # Enrich tables with semantic catalog metadata if available
-            catalog_entries = await self._get_catalog_entries(
-                [t.table_name for t in tables[:50]]
-            )
+            catalog_entries = await self._get_catalog_entries([t.table_name for t in tables[:50]])
 
             tables_context_parts = []
             for t in tables[:50]:
@@ -1713,10 +1771,13 @@ class SmartQueryService:
                     desc = entry.get("description") or ""
                     domain = entry.get("domain") or ""
                     col_types = entry.get("column_types") or {}
-                    col_desc = ", ".join(
-                        f"{c} ({col_types[c]})" if c in col_types else c
-                        for c in (t.columns or [])
-                    ) or cols
+                    col_desc = (
+                        ", ".join(
+                            f"{c} ({col_types[c]})" if c in col_types else c
+                            for c in (t.columns or [])
+                        )
+                        or cols
+                    )
                     part = f"Table: {t.table_name} — {name}  (rows: {t.row_count or '?'})"
                     if desc:
                         part += f"\n  Descripción: {desc}"
@@ -1735,7 +1796,7 @@ class SmartQueryService:
                 f"Available tables and their columns:\n\n{tables_context}\n\n"
                 "Rules:\n"
                 "- Only reference the tables and columns listed above.\n"
-                '- Always use double-quoted identifiers for column names that contain spaces or special characters.\n'
+                "- Always use double-quoted identifiers for column names that contain spaces or special characters.\n"
                 "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
                 "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
                 "- The query must be valid PostgreSQL syntax.\n"
@@ -1783,7 +1844,9 @@ class SmartQueryService:
                     ),
                 ]
                 llm_response = await self._llm.chat(
-                    messages=retry_messages, temperature=0.0, max_tokens=1024,
+                    messages=retry_messages,
+                    temperature=0.0,
+                    max_tokens=1024,
                 )
                 generated_sql = llm_response.content.strip()
                 if generated_sql.startswith("```"):
@@ -1830,7 +1893,8 @@ class SmartQueryService:
         try:
             q_embedding = await self._embedding.embed(query)
             vector_results = await self._vector_search.search_datasets(
-                q_embedding, limit=params.get("limit", 10),
+                q_embedding,
+                limit=params.get("limit", 10),
             )
             if not vector_results:
                 return []
@@ -1867,7 +1931,12 @@ class SmartQueryService:
             "ipc": ["ipc", "inflacion", "precios"],
             "emae": ["emae", "actividad economica", "actividad económica"],
             "pib": ["pib", "producto bruto", "producto interno"],
-            "comercio_exterior": ["exportacion", "importacion", "comercio exterior", "balanza comercial"],
+            "comercio_exterior": [
+                "exportacion",
+                "importacion",
+                "comercio exterior",
+                "balanza comercial",
+            ],
             "eph_tasas": ["empleo", "eph", "desempleo", "trabajo", "mercado laboral"],
             "canasta_basica": ["canasta basica", "canasta básica", "cbt", "cba"],
             "salarios_indice": ["salario", "salarios", "sueldo"],
@@ -1877,7 +1946,12 @@ class SmartQueryService:
             "ipi_manufacturero": ["industria", "ipi", "manufacturero", "produccion industrial"],
             "supermercados": ["supermercado"],
             "turismo_receptivo": ["turismo"],
-            "distribucion_ingreso": ["distribucion del ingreso", "distribución del ingreso", "gini", "decil"],
+            "distribucion_ingreso": [
+                "distribucion del ingreso",
+                "distribución del ingreso",
+                "gini",
+                "decil",
+            ],
             "balance_pagos": ["balance de pagos", "balanza de pagos", "cuenta corriente"],
         }
 
@@ -1926,7 +2000,9 @@ class SmartQueryService:
         return [r for r in fetched if r is not None]
 
     async def _execute_steps(
-        self, plan: ExecutionPlan, nl_query: str = "",
+        self,
+        plan: ExecutionPlan,
+        nl_query: str = "",
     ) -> tuple[list[DataResult], list[str]]:
         """Execute plan steps, catching ConnectorError per step.
 
@@ -1950,7 +2026,8 @@ class SmartQueryService:
         while remaining:
             # Steps whose dependencies are all completed (or absent)
             ready = [
-                s for s in remaining
+                s
+                for s in remaining
                 if all(dep in completed_ids or dep not in step_ids for dep in s.depends_on)
             ]
             if not ready:
@@ -2098,14 +2175,10 @@ class SmartQueryService:
                 continue
 
             # Vector search results: no records but have metadata
-            is_vector_result = (
-                not valid_records
-                and result.source.startswith("pgvector:")
-            )
+            is_vector_result = not valid_records and result.source.startswith("pgvector:")
 
             is_metadata_only = (
-                valid_records
-                and valid_records[0].get("_type") == "resource_metadata"
+                valid_records and valid_records[0].get("_type") == "resource_metadata"
             )
 
             if is_vector_result:
@@ -2126,7 +2199,9 @@ class SmartQueryService:
                 )
             elif is_metadata_only:
                 preview = valid_records[:20]
-                records_text = json.dumps(preview, ensure_ascii=False, separators=(",", ":"), default=str)
+                records_text = json.dumps(
+                    preview, ensure_ascii=False, separators=(",", ":"), default=str
+                )
                 part = (
                     f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
                     f"Fuente: {result.portal_name} ({result.source})\n"
@@ -2156,10 +2231,11 @@ class SmartQueryService:
 
                 # Humanize keys in records for LLM context
                 display_records = [
-                    {k.replace("_", " "): v for k, v in rec.items()}
-                    for rec in records_to_send
+                    {k.replace("_", " "): v for k, v in rec.items()} for rec in records_to_send
                 ]
-                records_text = json.dumps(display_records, ensure_ascii=False, separators=(",", ":"), default=str)
+                records_text = json.dumps(
+                    display_records, ensure_ascii=False, separators=(",", ":"), default=str
+                )
 
                 part = (
                     f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
@@ -2238,7 +2314,15 @@ class SmartQueryService:
             if not time_key:
                 for k in keys:
                     kl = k.lower()
-                    if kl in ("nombre", "name", "titulo", "title", "label", "categoria", "category"):
+                    if kl in (
+                        "nombre",
+                        "name",
+                        "titulo",
+                        "title",
+                        "label",
+                        "categoria",
+                        "category",
+                    ):
                         label_key = k
                         break
 
@@ -2247,9 +2331,21 @@ class SmartQueryService:
                 continue
 
             # Columns that are numeric but should never be charted
-            _SKIP_NUMERIC = {"centroide_lat", "centroide_lon", "lat", "lon", "latitud", "longitud",
-                             "latitude", "longitude", "id", "provincia_id", "departamento_id",
-                             "municipio_id", "localidad_censal_id"}
+            _SKIP_NUMERIC = {
+                "centroide_lat",
+                "centroide_lon",
+                "lat",
+                "lon",
+                "latitud",
+                "longitud",
+                "latitude",
+                "longitude",
+                "id",
+                "provincia_id",
+                "departamento_id",
+                "municipio_id",
+                "localidad_censal_id",
+            }
             numeric_keys = [
                 k
                 for k in keys
@@ -2265,8 +2361,12 @@ class SmartQueryService:
             if label_key and not time_key:
                 # Prefer patrimonio/value columns for rankings
                 preferred = [
-                    k for k in numeric_keys
-                    if any(t in k.lower() for t in ("patrimonio", "total", "monto", "valor", "cantidad", "importe"))
+                    k
+                    for k in numeric_keys
+                    if any(
+                        t in k.lower()
+                        for t in ("patrimonio", "total", "monto", "valor", "cantidad", "importe")
+                    )
                 ]
                 if preferred:
                     numeric_keys = preferred[:1]
@@ -2274,8 +2374,7 @@ class SmartQueryService:
                     numeric_keys = numeric_keys[:1]
 
             clean = [
-                row for row in result.records
-                if any(row.get(k) is not None for k in numeric_keys)
+                row for row in result.records if any(row.get(k) is not None for k in numeric_keys)
             ]
             if len(clean) < 2:
                 continue
@@ -2287,16 +2386,18 @@ class SmartQueryService:
             if units:
                 title += f" ({units})"
 
-            charts.append({
-                "type": chart_type,
-                "title": title,
-                "data": [
-                    {x_key: row[x_key], **{k: row.get(k) for k in numeric_keys}}
-                    for row in clean
-                ],
-                "xKey": x_key,
-                "yKeys": numeric_keys,
-            })
+            charts.append(
+                {
+                    "type": chart_type,
+                    "title": title,
+                    "data": [
+                        {x_key: row[x_key], **{k: row.get(k) for k in numeric_keys}}
+                        for row in clean
+                    ],
+                    "xKey": x_key,
+                    "yKeys": numeric_keys,
+                }
+            )
         return charts
 
     @staticmethod
@@ -2315,7 +2416,8 @@ class SmartQueryService:
                 # Validate that data rows actually contain numeric values
                 y_keys = chart["yKeys"]
                 valid_rows = [
-                    row for row in chart["data"]
+                    row
+                    for row in chart["data"]
                     if any(isinstance(row.get(k), int | float) for k in y_keys)
                 ]
                 if len(valid_rows) < 2:
@@ -2365,7 +2467,8 @@ class SmartQueryService:
             await session.commit()
         except Exception:
             logger.warning(
-                "Failed to save conversation history", exc_info=True,
+                "Failed to save conversation history",
+                exc_info=True,
             )
             with contextlib.suppress(Exception):
                 await session.rollback()

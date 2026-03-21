@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 logger = logging.getLogger(__name__)
 
 # TTL by data freshness (seconds)
-TTL_REALTIME = 300       # 5 min — dolar, riesgo pais
-TTL_DAILY = 1800         # 30 min — inflacion, series
-TTL_STATIC = 7200        # 2 hours — ddjj, sesiones, georef
+TTL_REALTIME = 300  # 5 min — dolar, riesgo pais
+TTL_DAILY = 1800  # 30 min — inflacion, series
+TTL_STATIC = 7200  # 2 hours — ddjj, sesiones, georef
 
 # Intent-based TTL mapping
 INTENT_TTL_MAP: dict[str, int] = {
@@ -53,6 +53,7 @@ def ttl_for_intent(intent: str) -> int:
     intent_lower = intent.lower()
     # Split on common separators (spaces, underscores, hyphens)
     import re
+
     tokens = set(re.split(r"[\s_\-]+", intent_lower))
 
     # Exact token match first (most precise)
@@ -89,9 +90,7 @@ class SemanticCache:
         normalized = SemanticCache._normalize(question)
         return hashlib.sha256(normalized.encode()).hexdigest()
 
-    async def get(
-        self, question: str, embedding: list[float] | None = None
-    ) -> dict | None:
+    async def get(self, question: str, embedding: list[float] | None = None) -> dict | None:
         """Try exact hash first, then vector similarity."""
         q_hash = self._hash(question)
         now = datetime.now(UTC)

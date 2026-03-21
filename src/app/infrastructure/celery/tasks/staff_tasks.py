@@ -1,4 +1,5 @@
 """Weekly HCDN staff snapshot: download payroll CSV from CKAN, diff, persist."""
+
 from __future__ import annotations
 
 import logging
@@ -60,10 +61,14 @@ def _normalize_record(raw: dict) -> dict:
         "legajo": _safe_str(raw.get("Legajo") or raw.get("legajo")),
         "apellido": _safe_str(raw.get("Apellido") or raw.get("apellido")),
         "nombre": _safe_str(raw.get("Nombre") or raw.get("nombre")),
-        "escalafon": _safe_str(raw.get("Escalafón") or raw.get("Escalafon") or raw.get("escalafon")),
+        "escalafon": _safe_str(
+            raw.get("Escalafón") or raw.get("Escalafon") or raw.get("escalafon")
+        ),
         "area_desempeno": _safe_str(
-            raw.get("Área de Desempeño") or raw.get("Area de Desempeño")
-            or raw.get("area_desempeno") or raw.get("estructura_desempeno")
+            raw.get("Área de Desempeño")
+            or raw.get("Area de Desempeño")
+            or raw.get("area_desempeno")
+            or raw.get("estructura_desempeno")
         ),
         "convenio": _safe_str(raw.get("Convenio") or raw.get("convenio")),
     }
@@ -141,14 +146,16 @@ def snapshot_staff(self):
             changes.append({**r, "tipo": "alta", "detected_at": now})
         for leg in bajas_legajos:
             info = prev_by_legajo.get(leg, {})
-            changes.append({
-                "legajo": leg,
-                "apellido": info.get("apellido", ""),
-                "nombre": info.get("nombre", ""),
-                "area_desempeno": info.get("area_desempeno", ""),
-                "tipo": "baja",
-                "detected_at": now,
-            })
+            changes.append(
+                {
+                    "legajo": leg,
+                    "apellido": info.get("apellido", ""),
+                    "nombre": info.get("nombre", ""),
+                    "area_desempeno": info.get("area_desempeno", ""),
+                    "tipo": "baja",
+                    "detected_at": now,
+                }
+            )
     else:
         logger.info("First staff snapshot — skipping change detection")
 
@@ -193,7 +200,10 @@ def snapshot_staff(self):
 
     logger.info(
         "Staff snapshot persisted: %d employees, %d altas, %d bajas (first_run=%s)",
-        len(current), len(altas), len(bajas_legajos), is_first_run,
+        len(current),
+        len(altas),
+        len(bajas_legajos),
+        is_first_run,
     )
     return {
         "status": "ok",

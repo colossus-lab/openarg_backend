@@ -5,6 +5,7 @@ Revises: 0009
 Create Date: 2026-03-01
 
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -21,7 +22,9 @@ def upgrade() -> None:
     # --- staff_snapshots: weekly full snapshot of the HCDN payroll ---
     op.create_table(
         "staff_snapshots",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")
+        ),
         sa.Column("legajo", sa.String(50), nullable=False),
         sa.Column("apellido", sa.String(300), nullable=False),
         sa.Column("nombre", sa.String(300), nullable=False),
@@ -34,12 +37,19 @@ def upgrade() -> None:
     )
     op.create_index("ix_staff_snapshots_snapshot_date", "staff_snapshots", ["snapshot_date"])
     op.create_index("ix_staff_snapshots_area", "staff_snapshots", ["area_desempeno"])
-    op.create_index("ix_staff_snapshots_legajo_date", "staff_snapshots", ["legajo", "snapshot_date"], unique=True)
+    op.create_index(
+        "ix_staff_snapshots_legajo_date",
+        "staff_snapshots",
+        ["legajo", "snapshot_date"],
+        unique=True,
+    )
 
     # --- staff_changes: altas/bajas detected by diffing consecutive snapshots ---
     op.create_table(
         "staff_changes",
-        sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")
+        ),
         sa.Column("legajo", sa.String(50), nullable=False),
         sa.Column("apellido", sa.String(300), nullable=False),
         sa.Column("nombre", sa.String(300), nullable=False),

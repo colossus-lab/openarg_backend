@@ -1,4 +1,5 @@
 """Tests for retry decorator with exponential backoff."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
@@ -12,6 +13,7 @@ from app.infrastructure.resilience.retry import with_retry
 @pytest.fixture(autouse=True)
 def _clear_circuit_breakers():
     from app.infrastructure.resilience.circuit_breaker import circuit_breakers
+
     circuit_breakers.clear()
     yield
     circuit_breakers.clear()

@@ -5,6 +5,7 @@ Usage:
     python -m tests.evaluation.run_eval --dry-run
     python -m tests.evaluation.run_eval --categories series_tiempo,ddjj
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,8 +37,12 @@ def validate_dataset(entries: list[dict]) -> list[str]:
     """Validate dataset entries and return list of errors."""
     errors: list[str] = []
     required_fields = {
-        "id", "category", "question", "expected_intent",
-        "expected_answer_contains", "difficulty",
+        "id",
+        "category",
+        "question",
+        "expected_intent",
+        "expected_answer_contains",
+        "difficulty",
     }
     seen_ids: set[str] = set()
 

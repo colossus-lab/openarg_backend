@@ -4,6 +4,7 @@ These tests mock external services (LLM, DB) but exercise the real orchestration
 logic in SmartQueryService, verifying that plan generation, step dispatch,
 error handling, and analysis work together correctly.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -64,8 +65,13 @@ def _make_mock_deps() -> dict:
 
     ddjj = MagicMock()
     ddjj.search.return_value = DataResult(
-        source="ddjj", portal_name="DDJJ", portal_url="",
-        dataset_title="test", format="json", records=[], metadata={},
+        source="ddjj",
+        portal_name="DDJJ",
+        portal_url="",
+        dataset_title="test",
+        format="json",
+        records=[],
+        metadata={},
     )
 
     semantic_cache = AsyncMock()
@@ -200,7 +206,8 @@ class TestPipelineWithEmptyPlan:
         patches = _common_patches(empty_plan)
         with patches[0], patches[1], patches[2], patches[3]:
             result = await service.execute(
-                "datos sobre educación", user_id="test@test.com",
+                "datos sobre educación",
+                user_id="test@test.com",
             )
 
         assert isinstance(result, SmartQueryResult)
@@ -247,7 +254,8 @@ class TestPipelineConnectorFailurePartial:
         patches = _common_patches(fake_plan)
         with patches[0], patches[1], patches[2], patches[3]:
             result = await service.execute(
-                "¿dólar e inflación?", user_id="test@test.com",
+                "¿dólar e inflación?",
+                user_id="test@test.com",
             )
 
         assert isinstance(result, SmartQueryResult)
@@ -301,7 +309,8 @@ class TestPipelineAllConnectorsFail:
         patches = _common_patches(fake_plan)
         with patches[0], patches[1], patches[2], patches[3]:
             result = await service.execute(
-                "reservas del BCRA", user_id="test@test.com",
+                "reservas del BCRA",
+                user_id="test@test.com",
             )
 
         assert isinstance(result, SmartQueryResult)
@@ -342,7 +351,8 @@ class TestPipelinePlanValidationFixesBadPlan:
         patches = _common_patches(fake_plan)
         with patches[0], patches[1], patches[2], patches[3]:
             result = await service.execute(
-                "datos del dólar", user_id="test@test.com",
+                "datos del dólar",
+                user_id="test@test.com",
             )
 
         assert isinstance(result, SmartQueryResult)

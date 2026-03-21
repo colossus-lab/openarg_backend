@@ -28,6 +28,7 @@ def _safe_json_loads(raw: str | None) -> dict[str, int]:
 # Schemas
 # ---------------------------------------------------------------------------
 
+
 class PortalHealthSummary(BaseModel):
     portal: str
     dataset_count: int
@@ -85,13 +86,15 @@ class SessionTopicSummary(BaseModel):
 # Feature 1: Portal Health Index
 # ---------------------------------------------------------------------------
 
+
 @router.get("/health", response_model=list[PortalHealthSummary])
 @inject  # type: ignore[untyped-decorator]
 async def get_portal_health(
     session: FromDishka[MainAsyncSession],
 ) -> list[PortalHealthSummary]:
     """Resumen de salud por portal: score promedio, datasets frescos/rancios/abandonados."""
-    result = await session.execute(text("""
+    result = await session.execute(
+        text("""
         SELECT
             portal,
             COUNT(*) AS dataset_count,
@@ -103,7 +106,8 @@ async def get_portal_health(
         FROM dataset_health_scores
         GROUP BY portal
         ORDER BY avg_score DESC
-    """))
+    """)
+    )
     return [
         PortalHealthSummary(
             portal=row.portal,
@@ -123,7 +127,9 @@ async def get_portal_health(
 async def get_portal_datasets_health(
     portal: str,
     session: FromDishka[MainAsyncSession],
-    sort_by: str = Query(default="overall_score", pattern="^(overall_score|freshness_score|completeness_score)$"),
+    sort_by: str = Query(
+        default="overall_score", pattern="^(overall_score|freshness_score|completeness_score)$"
+    ),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[DatasetHealthDetail]:
@@ -190,6 +196,7 @@ async def get_portal_datasets_health(
 # Feature 2: Ghost Dataset Monitor
 # ---------------------------------------------------------------------------
 
+
 @router.get("/ghost-datasets", response_model=list[GhostDataset])
 @inject  # type: ignore[untyped-decorator]
 async def get_ghost_datasets(
@@ -233,6 +240,7 @@ async def get_ghost_datasets(
 # ---------------------------------------------------------------------------
 # Feature 4: Session Topics
 # ---------------------------------------------------------------------------
+
 
 @router.get("/sessions/topics", response_model=SessionTopicSummary)
 @inject  # type: ignore[untyped-decorator]
@@ -316,6 +324,7 @@ async def get_session_topics(
 # Admin: trigger tasks manually
 # ---------------------------------------------------------------------------
 
+
 def _verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> str:
     """Validate admin API key for destructive transparency operations."""
     expected = os.getenv("ADMIN_API_KEY", os.getenv("BACKEND_API_KEY", ""))
@@ -368,15 +377,17 @@ async def get_staff_status(
     session: FromDishka[MainAsyncSession],
 ) -> dict[str, Any]:
     """Check staff snapshot status: latest snapshot date, total employees, recent changes."""
-    snap = await session.execute(text(
-        "SELECT snapshot_date, COUNT(*) AS total "
-        "FROM staff_snapshots GROUP BY snapshot_date ORDER BY snapshot_date DESC LIMIT 5"
-    ))
+    snap = await session.execute(
+        text(
+            "SELECT snapshot_date, COUNT(*) AS total "
+            "FROM staff_snapshots GROUP BY snapshot_date ORDER BY snapshot_date DESC LIMIT 5"
+        )
+    )
     snapshots = [{"date": str(r.snapshot_date), "total": r.total} for r in snap.fetchall()]
 
-    changes = await session.execute(text(
-        "SELECT tipo, COUNT(*) AS c FROM staff_changes GROUP BY tipo"
-    ))
+    changes = await session.execute(
+        text("SELECT tipo, COUNT(*) AS c FROM staff_changes GROUP BY tipo")
+    )
     changes_summary = {r.tipo: r.c for r in changes.fetchall()}
 
     return {

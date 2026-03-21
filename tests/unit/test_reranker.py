@@ -1,4 +1,5 @@
 """Tests for LLM-based re-ranker."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,19 +32,31 @@ def reranker(llm_mock):
 def sample_results():
     return [
         SearchResult(
-            dataset_id="1", title="Inflación IPC",
-            description="IPC mensual", portal="nacional",
-            download_url="", columns="", score=0.8,
+            dataset_id="1",
+            title="Inflación IPC",
+            description="IPC mensual",
+            portal="nacional",
+            download_url="",
+            columns="",
+            score=0.8,
         ),
         SearchResult(
-            dataset_id="2", title="PBI Argentina",
-            description="PBI trimestral", portal="nacional",
-            download_url="", columns="", score=0.7,
+            dataset_id="2",
+            title="PBI Argentina",
+            description="PBI trimestral",
+            portal="nacional",
+            download_url="",
+            columns="",
+            score=0.7,
         ),
         SearchResult(
-            dataset_id="3", title="Dólar Blue",
-            description="Cotización diaria", portal="nacional",
-            download_url="", columns="", score=0.6,
+            dataset_id="3",
+            title="Dólar Blue",
+            description="Cotización diaria",
+            portal="nacional",
+            download_url="",
+            columns="",
+            score=0.6,
         ),
     ]
 
@@ -62,10 +75,17 @@ class TestRerank:
         assert len(result) == 2
 
     async def test_rerank_single_result(self, reranker):
-        results = [SearchResult(
-            dataset_id="1", title="Test", description="",
-            portal="", download_url="", columns="", score=0.5,
-        )]
+        results = [
+            SearchResult(
+                dataset_id="1",
+                title="Test",
+                description="",
+                portal="",
+                download_url="",
+                columns="",
+                score=0.5,
+            )
+        ]
         result = await reranker.rerank("test", results)
         assert len(result) == 1
         assert result[0].dataset_id == "1"

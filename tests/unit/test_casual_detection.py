@@ -16,6 +16,7 @@ def _classify_casual_subtype(text: str) -> str | None:
         _GREETING_PATTERN,
         _THANKS_PATTERN,
     )
+
     t = text.strip()
     if _GREETING_PATTERN.match(t):
         return "greeting"

@@ -25,14 +25,18 @@ def map_user_tables() -> None:
         "users",
         mapping_registry.metadata,
         Column(
-            "id", PG_UUID(as_uuid=True), primary_key=True,
+            "id",
+            PG_UUID(as_uuid=True),
+            primary_key=True,
             server_default=text("gen_random_uuid()"),
         ),
         Column("email", String(320), nullable=False, unique=True),
         Column("name", String(500), nullable=False, server_default=""),
         Column("image_url", String(2000), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
-        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+        Column(
+            "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        ),
     )
 
     mapping_registry.map_imperatively(User, users_table)

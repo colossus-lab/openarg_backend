@@ -1,4 +1,5 @@
 """Integration tests for the smart pipeline via HTTP endpoint."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -92,9 +93,7 @@ class TestFullPipelineMocked:
                 "app.application.smart_query_service.generate_plan",
                 return_value=fake_plan,
             ),
-            patch(
-                "app.application.smart_query_service.QueryPreprocessor"
-            ) as mock_prep,
+            patch("app.application.smart_query_service.QueryPreprocessor") as mock_prep,
             patch(
                 "app.application.smart_query_service.load_memory",
                 return_value=MagicMock(turn_number=0, summaries=[], datasets_used=[]),
@@ -108,9 +107,7 @@ class TestFullPipelineMocked:
                 new_callable=AsyncMock,
             ),
         ):
-            mock_prep.return_value.reformulate = AsyncMock(
-                return_value="cotización dólar"
-            )
+            mock_prep.return_value.reformulate = AsyncMock(return_value="cotización dólar")
 
             # Patch the connectors at service level
             with (

@@ -20,54 +20,261 @@ MAX_CSV_ROWS = 500
 
 PORTALS: list[dict] = [
     # ── Nacionales ──
-    {"id": "nacional", "name": "Portal Nacional", "base_url": "https://datos.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "diputados", "name": "Cámara de Diputados", "base_url": "https://datos.hcdn.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "justicia", "name": "Justicia (incl. Anticorrupción)", "base_url": "https://datos.jus.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "energia", "name": "Energía", "base_url": "http://datos.energia.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "transporte", "name": "Transporte", "base_url": "https://datos.transporte.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "salud", "name": "Salud", "base_url": "https://datos.salud.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "cultura", "name": "Cultura", "base_url": "https://datos.cultura.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "produccion", "name": "Producción", "base_url": "https://datos.produccion.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "magyp", "name": "Agricultura, Ganadería y Pesca", "base_url": "https://datos.magyp.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "arsat", "name": "ARSAT", "base_url": "https://datos.arsat.com.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "acumar", "name": "ACUMAR", "base_url": "https://datos.acumar.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "mininterior", "name": "Interior", "base_url": "https://datos.mininterior.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "pami", "name": "PAMI", "base_url": "https://datos.pami.org.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "desarrollo_social", "name": "Desarrollo Social", "base_url": "https://datosabiertos.desarrollosocial.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "turismo", "name": "Turismo (Yvera)", "base_url": "http://datos.yvera.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
-    {"id": "ssn", "name": "Superintendencia de Seguros", "base_url": "https://datosabiertos.ssn.gob.ar", "api_path": "/api/3/action", "category": "nacional"},
+    {
+        "id": "nacional",
+        "name": "Portal Nacional",
+        "base_url": "https://datos.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "diputados",
+        "name": "Cámara de Diputados",
+        "base_url": "https://datos.hcdn.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "justicia",
+        "name": "Justicia (incl. Anticorrupción)",
+        "base_url": "https://datos.jus.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "energia",
+        "name": "Energía",
+        "base_url": "http://datos.energia.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "transporte",
+        "name": "Transporte",
+        "base_url": "https://datos.transporte.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "salud",
+        "name": "Salud",
+        "base_url": "https://datos.salud.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "cultura",
+        "name": "Cultura",
+        "base_url": "https://datos.cultura.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "produccion",
+        "name": "Producción",
+        "base_url": "https://datos.produccion.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "magyp",
+        "name": "Agricultura, Ganadería y Pesca",
+        "base_url": "https://datos.magyp.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "arsat",
+        "name": "ARSAT",
+        "base_url": "https://datos.arsat.com.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "acumar",
+        "name": "ACUMAR",
+        "base_url": "https://datos.acumar.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "mininterior",
+        "name": "Interior",
+        "base_url": "https://datos.mininterior.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "pami",
+        "name": "PAMI",
+        "base_url": "https://datos.pami.org.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "desarrollo_social",
+        "name": "Desarrollo Social",
+        "base_url": "https://datosabiertos.desarrollosocial.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "turismo",
+        "name": "Turismo (Yvera)",
+        "base_url": "http://datos.yvera.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
+    {
+        "id": "ssn",
+        "name": "Superintendencia de Seguros",
+        "base_url": "https://datosabiertos.ssn.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "nacional",
+    },
     # ── CABA ──
-    {"id": "caba", "name": "Buenos Aires Ciudad", "base_url": "https://data.buenosaires.gob.ar", "api_path": "/api/3/action", "category": "caba"},
-    {"id": "legislatura_caba", "name": "Legislatura CABA", "base_url": "http://datos.legislatura.gob.ar", "api_path": "/api/3/action", "category": "caba"},
+    {
+        "id": "caba",
+        "name": "Buenos Aires Ciudad",
+        "base_url": "https://data.buenosaires.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "caba",
+    },
+    {
+        "id": "legislatura_caba",
+        "name": "Legislatura CABA",
+        "base_url": "http://datos.legislatura.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "caba",
+    },
     # ── Provincias ──
-    {"id": "pba", "name": "Provincia de Buenos Aires", "base_url": "https://catalogo.datos.gba.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "cordoba_prov", "name": "Córdoba Provincia", "base_url": "https://datosgestionabierta.cba.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "cordoba_estadistica", "name": "Córdoba Estadística", "base_url": "https://datosestadistica.cba.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "mendoza", "name": "Mendoza", "base_url": "https://datosabiertos.mendoza.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "entrerios", "name": "Entre Ríos", "base_url": "https://datos.entrerios.gov.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "neuquen_legislatura", "name": "Legislatura de Neuquén", "base_url": "https://datos.legislaturaneuquen.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "tucuman", "name": "Tucumán", "base_url": "https://sep.tucuman.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "misiones", "name": "Misiones", "base_url": "https://datos.misiones.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
-    {"id": "chaco", "name": "Chaco", "base_url": "https://datosabiertos.chaco.gob.ar", "api_path": "/api/3/action", "category": "provincia"},
+    {
+        "id": "pba",
+        "name": "Provincia de Buenos Aires",
+        "base_url": "https://catalogo.datos.gba.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "cordoba_prov",
+        "name": "Córdoba Provincia",
+        "base_url": "https://datosgestionabierta.cba.gov.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "cordoba_estadistica",
+        "name": "Córdoba Estadística",
+        "base_url": "https://datosestadistica.cba.gov.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "mendoza",
+        "name": "Mendoza",
+        "base_url": "https://datosabiertos.mendoza.gov.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "entrerios",
+        "name": "Entre Ríos",
+        "base_url": "https://datos.entrerios.gov.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "neuquen_legislatura",
+        "name": "Legislatura de Neuquén",
+        "base_url": "https://datos.legislaturaneuquen.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "tucuman",
+        "name": "Tucumán",
+        "base_url": "https://sep.tucuman.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "misiones",
+        "name": "Misiones",
+        "base_url": "https://datos.misiones.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
+    {
+        "id": "chaco",
+        "name": "Chaco",
+        "base_url": "https://datosabiertos.chaco.gob.ar",
+        "api_path": "/api/3/action",
+        "category": "provincia",
+    },
     # ── Municipios ──
-    {"id": "ciudad_mendoza", "name": "Ciudad de Mendoza", "base_url": "https://datos.ciudaddemendoza.gov.ar", "api_path": "/api/3/action", "category": "municipio"},
-    {"id": "corrientes", "name": "Ciudad de Corrientes", "base_url": "https://datos.ciudaddecorrientes.gov.ar", "api_path": "/api/3/action", "category": "municipio"},
+    {
+        "id": "ciudad_mendoza",
+        "name": "Ciudad de Mendoza",
+        "base_url": "https://datos.ciudaddemendoza.gov.ar",
+        "api_path": "/api/3/action",
+        "category": "municipio",
+    },
+    {
+        "id": "corrientes",
+        "name": "Ciudad de Corrientes",
+        "base_url": "https://datos.ciudaddecorrientes.gov.ar",
+        "api_path": "/api/3/action",
+        "category": "municipio",
+    },
 ]
 
 # Portales verificados offline — Mar 2026.
 # No se scrapean. Revisar periódicamente por si vuelven.
 DEAD_PORTALS = {
-    "santafe": {"url": "https://datos.santafe.gob.ar", "reason": "CKAN Andino en mantenimiento (página estática, SSL chain incompleto). No migró — revisar periódicamente"},
-    "modernizacion": {"url": "https://datos.modernizacion.gob.ar", "reason": "Ministerio disuelto, DNS muerto. Datos absorbidos por datos.gob.ar"},
-    "ambiente": {"url": "https://datos.ambiente.gob.ar", "reason": "Redirige a datos.gob.ar (ya cubierto por datos_gob_ar)"},
-    "agroindustria": {"url": "https://datos.agroindustria.gob.ar", "reason": "DNS muerto. Reemplazado por magyp"},
-    "rio_negro": {"url": "https://datos.rionegro.gov.ar", "reason": "DNS muerto, sin reemplazo CKAN"},
-    "jujuy": {"url": "https://datos.jujuy.gob.ar", "reason": "DNS muerto. Migró a DKAN (datos.gajujuy.gob.ar) — incompatible"},
-    "salta": {"url": "https://datos.salta.gob.ar", "reason": "DNS muerto, sin portal de datos abiertos"},
-    "la_plata": {"url": "https://datos.laplata.gob.ar", "reason": "DNS muerto, portal caído desde 2024"},
-    "cordoba_muni": {"url": "https://gobiernoabierto.cordoba.gob.ar/data", "reason": "CKAN reemplazado por API Django REST (774 datasets, no compatible)"},
-    "rosario": {"url": "https://datos.rosario.gob.ar", "reason": "Migró a DKAN (datosabiertos.rosario.gob.ar) — incompatible"},
-    "bahia_blanca": {"url": "https://datos.bahiablanca.gob.ar", "reason": "URL vieja muerta. Portal nuevo en datos.bahia.gob.ar (221 datasets) — pendiente agregar"},
+    "santafe": {
+        "url": "https://datos.santafe.gob.ar",
+        "reason": "CKAN Andino en mantenimiento (página estática, SSL chain incompleto). No migró — revisar periódicamente",
+    },
+    "modernizacion": {
+        "url": "https://datos.modernizacion.gob.ar",
+        "reason": "Ministerio disuelto, DNS muerto. Datos absorbidos por datos.gob.ar",
+    },
+    "ambiente": {
+        "url": "https://datos.ambiente.gob.ar",
+        "reason": "Redirige a datos.gob.ar (ya cubierto por datos_gob_ar)",
+    },
+    "agroindustria": {
+        "url": "https://datos.agroindustria.gob.ar",
+        "reason": "DNS muerto. Reemplazado por magyp",
+    },
+    "rio_negro": {
+        "url": "https://datos.rionegro.gov.ar",
+        "reason": "DNS muerto, sin reemplazo CKAN",
+    },
+    "jujuy": {
+        "url": "https://datos.jujuy.gob.ar",
+        "reason": "DNS muerto. Migró a DKAN (datos.gajujuy.gob.ar) — incompatible",
+    },
+    "salta": {
+        "url": "https://datos.salta.gob.ar",
+        "reason": "DNS muerto, sin portal de datos abiertos",
+    },
+    "la_plata": {
+        "url": "https://datos.laplata.gob.ar",
+        "reason": "DNS muerto, portal caído desde 2024",
+    },
+    "cordoba_muni": {
+        "url": "https://gobiernoabierto.cordoba.gob.ar/data",
+        "reason": "CKAN reemplazado por API Django REST (774 datasets, no compatible)",
+    },
+    "rosario": {
+        "url": "https://datos.rosario.gob.ar",
+        "reason": "Migró a DKAN (datosabiertos.rosario.gob.ar) — incompatible",
+    },
+    "bahia_blanca": {
+        "url": "https://datos.bahiablanca.gob.ar",
+        "reason": "URL vieja muerta. Portal nuevo en datos.bahia.gob.ar (221 datasets) — pendiente agregar",
+    },
     "csjn": {"url": "https://datos.csjn.gov.ar", "reason": "API no responde desde Mar 2026"},
 }
 
@@ -124,7 +331,9 @@ class CKANSearchAdapter(ICKANSearchConnector):
             return []
         return data["result"]["results"]
 
-    async def _fetch_datastore(self, portal: dict, resource_id: str, q: str | None, limit: int) -> list[dict]:
+    async def _fetch_datastore(
+        self, portal: dict, resource_id: str, q: str | None, limit: int
+    ) -> list[dict]:
         url = f"{portal['base_url']}{portal['api_path']}/datastore_search"
         params: dict[str, str | int] = {"resource_id": resource_id, "limit": limit}
         if q:
@@ -164,18 +373,28 @@ class CKANSearchAdapter(ICKANSearchConnector):
                     now = datetime.now(UTC).isoformat()
                     for ds in datasets:
                         # Try datastore first
-                        suitable = [r for r in ds.get("resources", []) if r.get("format", "").upper() in ("CSV", "JSON")]
+                        suitable = [
+                            r
+                            for r in ds.get("resources", [])
+                            if r.get("format", "").upper() in ("CSV", "JSON")
+                        ]
                         records = None
                         for resource in suitable[:2]:
                             try:
-                                records = await self._fetch_datastore(portal, resource["id"], None, 50)
+                                records = await self._fetch_datastore(
+                                    portal, resource["id"], None, 50
+                                )
                                 if records:
                                     break
                             except Exception:
                                 continue
 
                         if not records:
-                            csv_resources = [r for r in ds.get("resources", []) if r.get("format", "").upper() == "CSV"]
+                            csv_resources = [
+                                r
+                                for r in ds.get("resources", [])
+                                if r.get("format", "").upper() == "CSV"
+                            ]
                             for resource in csv_resources[:1]:
                                 try:
                                     records = await self._fetch_csv(resource["url"])

@@ -1,4 +1,5 @@
 """Tests for the cached embedding service."""
+
 from __future__ import annotations
 
 import json

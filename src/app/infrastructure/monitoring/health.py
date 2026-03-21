@@ -53,11 +53,14 @@ class HealthCheckService:
                 any_cb_open = True
         components["circuit_breakers"] = cb_status
 
-        all_healthy = all(
-            c.get("status") in ("healthy", None)
-            for k, c in components.items()
-            if k != "circuit_breakers" and isinstance(c, dict) and "status" in c
-        ) and not any_cb_open
+        all_healthy = (
+            all(
+                c.get("status") in ("healthy", None)
+                for k, c in components.items()
+                if k != "circuit_breakers" and isinstance(c, dict) and "status" in c
+            )
+            and not any_cb_open
+        )
 
         return {
             "status": "healthy" if all_healthy else "degraded",

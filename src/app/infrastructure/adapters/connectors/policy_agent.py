@@ -22,10 +22,14 @@ async def analyze_policy(
 
         today = datetime.now(UTC).strftime("%Y-%m-%d")
 
-        data_summary = "\n".join(
-            f"- {r.dataset_title} ({r.portal_name}): {len(r.records)} registros"
-            for r in results if r.records
-        ) or "Sin datos tabulares recolectados"
+        data_summary = (
+            "\n".join(
+                f"- {r.dataset_title} ({r.portal_name}): {len(r.records)} registros"
+                for r in results
+                if r.records
+            )
+            or "Sin datos tabulares recolectados"
+        )
 
         user_content = (
             f"FECHA ACTUAL: {today}\n"

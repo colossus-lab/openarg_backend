@@ -4,6 +4,7 @@ Embedding Worker — Re-indexación masiva.
 Permite re-generar embeddings de todos los datasets o de un portal específico.
 También indexa chunks de sesiones parlamentarias en pgvector.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,11 +34,15 @@ def reindex_all_embeddings(self: Any, portal: str | None = None) -> dict[str, An
         with engine.begin() as conn:
             if portal:
                 rows = conn.execute(
-                    text("SELECT CAST(id AS text) FROM datasets WHERE portal = :portal LIMIT 10000"),
+                    text(
+                        "SELECT CAST(id AS text) FROM datasets WHERE portal = :portal LIMIT 10000"
+                    ),
                     {"portal": portal},
                 ).fetchall()
             else:
-                rows = conn.execute(text("SELECT CAST(id AS text) FROM datasets LIMIT 10000")).fetchall()
+                rows = conn.execute(
+                    text("SELECT CAST(id AS text) FROM datasets LIMIT 10000")
+                ).fetchall()
 
         dataset_ids = [row[0] for row in rows]
         logger.info(f"Reindexing {len(dataset_ids)} datasets")
@@ -51,7 +56,9 @@ def reindex_all_embeddings(self: Any, portal: str | None = None) -> dict[str, An
         engine.dispose()
 
 
-@celery_app.task(name="openarg.index_sesiones", bind=True, max_retries=2, soft_time_limit=1800, time_limit=2100)  # type: ignore[misc]
+@celery_app.task(
+    name="openarg.index_sesiones", bind=True, max_retries=2, soft_time_limit=1800, time_limit=2100
+)  # type: ignore[misc]
 def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
     """
     Load congressional session chunks from JSON files, generate embeddings,

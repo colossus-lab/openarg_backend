@@ -5,6 +5,7 @@ Revises:
 Create Date: 2026-02-26
 
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -24,7 +25,9 @@ def upgrade() -> None:
     # --- datasets ---
     op.create_table(
         "datasets",
-        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column(
+            "id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True
+        ),
         sa.Column("source_id", sa.String(500), nullable=False),
         sa.Column("title", sa.String(1000), nullable=False),
         sa.Column("description", sa.Text, nullable=True),
@@ -47,7 +50,9 @@ def upgrade() -> None:
     # --- dataset_chunks (with pgvector embedding) ---
     op.create_table(
         "dataset_chunks",
-        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column(
+            "id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True
+        ),
         sa.Column("dataset_id", UUID(as_uuid=True), nullable=False, index=True),
         sa.Column("content", sa.Text, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
@@ -64,7 +69,9 @@ def upgrade() -> None:
     # --- cached_datasets ---
     op.create_table(
         "cached_datasets",
-        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column(
+            "id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True
+        ),
         sa.Column("dataset_id", UUID(as_uuid=True), nullable=False, index=True),
         sa.Column("table_name", sa.String(255), nullable=False, unique=True),
         sa.Column("row_count", sa.Integer, server_default="0"),
@@ -79,7 +86,9 @@ def upgrade() -> None:
     # --- user_queries ---
     op.create_table(
         "user_queries",
-        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column(
+            "id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True
+        ),
         sa.Column("user_id", UUID(as_uuid=True), nullable=True, index=True),
         sa.Column("question", sa.Text, nullable=False),
         sa.Column("status", sa.String(50), server_default="pending", index=True),
@@ -97,7 +106,9 @@ def upgrade() -> None:
     # --- query_dataset_links ---
     op.create_table(
         "query_dataset_links",
-        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column(
+            "id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True
+        ),
         sa.Column("query_id", UUID(as_uuid=True), nullable=False, index=True),
         sa.Column("dataset_id", UUID(as_uuid=True), nullable=False, index=True),
         sa.Column("relevance_score", sa.Float, server_default="0.0"),
@@ -108,7 +119,9 @@ def upgrade() -> None:
     # --- agent_tasks ---
     op.create_table(
         "agent_tasks",
-        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column(
+            "id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True
+        ),
         sa.Column("query_id", UUID(as_uuid=True), nullable=False, index=True),
         sa.Column("agent_type", sa.String(50), nullable=False, index=True),
         sa.Column("status", sa.String(50), server_default="pending"),

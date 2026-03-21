@@ -1,4 +1,5 @@
 """Tests for semantic cache hash utility, TTL constants, and intent-based TTL."""
+
 from __future__ import annotations
 
 from app.infrastructure.adapters.cache.semantic_cache import (
@@ -45,6 +46,7 @@ class TestTTLConstants:
 class TestDefaultThreshold:
     def test_default_threshold_is_092(self):
         from unittest.mock import AsyncMock
+
         cache = SemanticCache(session_factory=AsyncMock())
         assert cache._similarity_threshold == 0.92
 

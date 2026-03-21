@@ -77,7 +77,11 @@ def with_retry(
                     delay = _backoff_delay(attempt, base_delay, max_delay)
                     logger.warning(
                         "%s attempt %d/%d failed (HTTP %d), retrying in %.1fs",
-                        cb_name, attempt + 1, max_retries + 1, status, delay,
+                        cb_name,
+                        attempt + 1,
+                        max_retries + 1,
+                        status,
+                        delay,
                     )
                     await asyncio.sleep(delay)
                 except RETRYABLE_EXCEPTIONS as exc:
@@ -88,7 +92,11 @@ def with_retry(
                     delay = _backoff_delay(attempt, base_delay, max_delay)
                     logger.warning(
                         "%s attempt %d/%d failed (%s), retrying in %.1fs",
-                        cb_name, attempt + 1, max_retries + 1, type(exc).__name__, delay,
+                        cb_name,
+                        attempt + 1,
+                        max_retries + 1,
+                        type(exc).__name__,
+                        delay,
                     )
                     await asyncio.sleep(delay)
 
@@ -104,6 +112,6 @@ def with_retry(
 
 def _backoff_delay(attempt: int, base: float, cap: float) -> float:
     """Exponential backoff with full jitter."""
-    exp_delay = base * (2 ** attempt)
+    exp_delay = base * (2**attempt)
     capped = min(exp_delay, cap)
     return random.uniform(0, capped)  # noqa: S311

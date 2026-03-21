@@ -1,4 +1,5 @@
 """Connector and infrastructure error types."""
+
 from __future__ import annotations
 
 from app.domain.exceptions.base import InfrastructureError

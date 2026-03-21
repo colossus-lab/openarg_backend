@@ -1,4 +1,5 @@
 """Integration tests for the smart query endpoint (mocked connectors)."""
+
 from __future__ import annotations
 
 

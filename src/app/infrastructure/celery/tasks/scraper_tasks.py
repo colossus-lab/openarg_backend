@@ -4,6 +4,7 @@ Scraper Worker — Agente de indexación del catálogo.
 Recorre los portales de datos abiertos, extrae metadata de cada dataset
 y la guarda en PostgreSQL. Luego dispara el embedding de cada uno.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,12 +39,12 @@ _SCRAPER_ID_ALIASES = {
     "entrerios": "entre_rios",
 }
 PORTAL_URLS = {
-    _SCRAPER_ID_ALIASES.get(p["id"], p["id"]): f'{p["base_url"]}{p["api_path"]}'
-    for p in PORTALS
+    _SCRAPER_ID_ALIASES.get(p["id"], p["id"]): f"{p['base_url']}{p['api_path']}" for p in PORTALS
 }
 
 
 PORTALS_SKIP_SSL = {"salud", "ambiente"}
+
 
 class PortalUnavailableError(Exception):
     """Portal is down/maintenance — do NOT retry."""
@@ -55,7 +56,7 @@ class PortalHTMLResponseError(PortalUnavailableError):
 
 def _retry_countdown(attempt: int, base: float = 30.0, cap: float = 300.0) -> float:
     """Exponential backoff with full jitter: uniform(0, min(base * 2^attempt, cap))."""
-    return random.uniform(0, min(base * (2 ** attempt), cap))
+    return random.uniform(0, min(base * (2**attempt), cap))
 
 
 def _check_html_response(resp, portal: str) -> None:
@@ -76,13 +77,17 @@ def _check_html_response(resp, portal: str) -> None:
         )
 
 
-@celery_app.task(name="openarg.scrape_catalog", bind=True, max_retries=2, soft_time_limit=900, time_limit=1080)
+@celery_app.task(
+    name="openarg.scrape_catalog", bind=True, max_retries=2, soft_time_limit=900, time_limit=1080
+)
 def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
     """
     Scrapea el catálogo completo de un portal de datos.
     Guarda metadata en tabla datasets. Dispara embedding para cada uno.
     """
-    logger.info(f"Starting catalog scrape for portal: {portal} (attempt {self.request.retries + 1}/{self.max_retries + 1})")
+    logger.info(
+        f"Starting catalog scrape for portal: {portal} (attempt {self.request.retries + 1}/{self.max_retries + 1})"
+    )
 
     base_url = PORTAL_URLS.get(portal)
     if not base_url:
@@ -149,7 +154,11 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                 consecutive_page_errors += 1
                 logger.warning(
                     "Page fetch failed for %s offset=%d (%d/%d consecutive): %s",
-                    portal, offset, consecutive_page_errors, max_consecutive_page_errors, page_exc,
+                    portal,
+                    offset,
+                    consecutive_page_errors,
+                    max_consecutive_page_errors,
+                    page_exc,
                 )
                 if consecutive_page_errors >= max_consecutive_page_errors:
                     logger.error(
@@ -165,7 +174,17 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
             for pkg in packages:
                 for resource in pkg.get("resources", []):
                     fmt = resource.get("format", "").lower()
-                    if fmt not in ("csv", "json", "xlsx", "xls", "geojson", "txt", "ods", "zip", "xml"):
+                    if fmt not in (
+                        "csv",
+                        "json",
+                        "xlsx",
+                        "xls",
+                        "geojson",
+                        "txt",
+                        "ods",
+                        "zip",
+                        "xml",
+                    ):
                         continue
 
                     columns_list = []
@@ -174,7 +193,11 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                             attrs = json.loads(resource["attributesDescription"])
                             columns_list = list(attrs.keys()) if isinstance(attrs, dict) else []
                         except (json.JSONDecodeError, TypeError):
-                            logger.debug("Failed to parse attributesDescription for resource %s", resource.get("id", "?"), exc_info=True)
+                            logger.debug(
+                                "Failed to parse attributesDescription for resource %s",
+                                resource.get("id", "?"),
+                                exc_info=True,
+                            )
 
                     # Extract last-updated timestamp: prefer resource-level, fallback to package
                     last_updated = None
@@ -192,20 +215,22 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                             except (ValueError, AttributeError):
                                 continue
 
-                    batch_rows.append({
-                        "sid": resource.get("id", ""),
-                        "title": pkg.get("title", ""),
-                        "desc": pkg.get("notes", ""),
-                        "org": pkg.get("organization", {}).get("title", ""),
-                        "portal": portal,
-                        "url": pkg.get("url", ""),
-                        "dl": resource.get("url", ""),
-                        "fmt": fmt,
-                        "cols": json.dumps(columns_list),
-                        "tags": ",".join(t.get("name", "") for t in pkg.get("tags", [])),
-                        "now": datetime.now(UTC),
-                        "last_upd": last_updated,
-                    })
+                    batch_rows.append(
+                        {
+                            "sid": resource.get("id", ""),
+                            "title": pkg.get("title", ""),
+                            "desc": pkg.get("notes", ""),
+                            "org": pkg.get("organization", {}).get("title", ""),
+                            "portal": portal,
+                            "url": pkg.get("url", ""),
+                            "dl": resource.get("url", ""),
+                            "fmt": fmt,
+                            "cols": json.dumps(columns_list),
+                            "tags": ",".join(t.get("name", "") for t in pkg.get("tags", [])),
+                            "now": datetime.now(UTC),
+                            "last_upd": last_updated,
+                        }
+                    )
 
             # Batch upsert using ON CONFLICT (eliminates N+1 SELECT per resource)
             if batch_rows:
@@ -334,6 +359,7 @@ def _get_data_statistics(engine, dataset_id: str) -> str | None:
         table_name = cache_row.table_name
         # Validate table name to prevent injection
         import re
+
         if not re.match(r"^cache_[a-z0-9_]{1,100}$", table_name):
             return None
 
@@ -359,7 +385,9 @@ def _get_data_statistics(engine, dataset_id: str) -> str | None:
                 try:
                     # Get column type and basic stats
                     info = conn.execute(
-                        text(f'SELECT pg_typeof("{safe_col}") as dtype FROM "{table_name}" LIMIT 1'),
+                        text(
+                            f'SELECT pg_typeof("{safe_col}") as dtype FROM "{table_name}" LIMIT 1'
+                        ),
                     ).fetchone()
                     dtype = str(info[0]) if info else "unknown"
 
@@ -375,7 +403,11 @@ def _get_data_statistics(engine, dataset_id: str) -> str | None:
                             stats_parts.append(
                                 f"- {col_name} (numérico): min={agg[0]}, max={agg[1]}, promedio={agg[2]}"
                             )
-                    elif dtype in ("date", "timestamp without time zone", "timestamp with time zone"):
+                    elif dtype in (
+                        "date",
+                        "timestamp without time zone",
+                        "timestamp with time zone",
+                    ):
                         agg = conn.execute(
                             text(
                                 f'SELECT MIN("{safe_col}"), MAX("{safe_col}") '
@@ -407,7 +439,12 @@ def _get_data_statistics(engine, dataset_id: str) -> str | None:
                             f"ej. {', '.join(sample_vals)}"
                         )
                 except Exception:
-                    logger.debug("Could not compute stats for column %s in table %s", col_name, table_name, exc_info=True)
+                    logger.debug(
+                        "Could not compute stats for column %s in table %s",
+                        col_name,
+                        table_name,
+                        exc_info=True,
+                    )
                     continue
 
             # Show remaining column names if any
@@ -445,9 +482,7 @@ def _get_sample_rows_text(engine, dataset_id: str, title: str, portal_name: str)
             return None
 
         with engine.begin() as conn:
-            rows = conn.execute(
-                text(f'SELECT * FROM "{table_name}" LIMIT 15')
-            ).fetchall()
+            rows = conn.execute(text(f'SELECT * FROM "{table_name}" LIMIT 15')).fetchall()
             if not rows:
                 return None
             col_desc = conn.execute(
@@ -470,7 +505,9 @@ def _get_sample_rows_text(engine, dataset_id: str, title: str, portal_name: str)
         return None
 
 
-@celery_app.task(name="openarg.index_dataset", bind=True, max_retries=3, soft_time_limit=120, time_limit=180)
+@celery_app.task(
+    name="openarg.index_dataset", bind=True, max_retries=3, soft_time_limit=120, time_limit=180
+)
 def index_dataset_embedding(self, dataset_id: str):
     """
     Genera múltiples chunks de embedding por dataset:
