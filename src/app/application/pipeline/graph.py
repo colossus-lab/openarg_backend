@@ -18,6 +18,8 @@ in ``smart_query_service.py``:
 
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph.graph import END, START, StateGraph
 
 import app.application.pipeline.nodes as nodes_pkg
@@ -48,12 +50,24 @@ from app.application.pipeline.nodes.replan import replan_node
 from app.application.pipeline.state import OpenArgState
 
 
-def build_pipeline_graph(deps: PipelineDeps):  # -> CompiledStateGraph
+def build_pipeline_graph(
+    deps: PipelineDeps,
+    checkpointer: Any | None = None,
+):  # -> CompiledStateGraph
     """Build and compile the LangGraph pipeline.
 
     Sets the module-level ``_deps`` so that all node functions can
     access shared dependencies (LLM, embedding, connectors, etc.)
     without requiring constructor injection.
+
+    Parameters
+    ----------
+    deps:
+        Shared pipeline dependencies (connectors, LLM, etc.).
+    checkpointer:
+        Optional LangGraph checkpointer (e.g. ``AsyncPostgresSaver``).
+        When provided the graph persists state per ``thread_id``,
+        enabling conversation memory and resumable runs.
 
     Returns a compiled ``StateGraph`` ready for invocation.
     """
@@ -147,4 +161,4 @@ def build_pipeline_graph(deps: PipelineDeps):  # -> CompiledStateGraph
     builder.add_edge("policy", "finalize")
     builder.add_edge("finalize", END)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
