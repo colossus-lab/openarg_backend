@@ -7,7 +7,7 @@ from app.setup.config.loader import load_full_config
 
 class PostgresSettings(BaseModel):
     USER: str = "postgres"
-    PASSWORD: str = "postgres"
+    PASSWORD: str = ""
     DB: str = "openarg_db"
     HOST: str = "localhost"
     PORT: int = 5432
@@ -31,7 +31,7 @@ class SqlaEngineSettings(BaseModel):
 
 
 class SecuritySettings(BaseModel):
-    JWT_SECRET_KEY: str = "change-me"
+    JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
