@@ -63,6 +63,9 @@ dependencies = [
     # Structured logging & error tracking
     "structlog>=24.0",
     "sentry-sdk[fastapi]>=2.0",
+
+    # Agent orchestration
+    "langgraph>=1.0.0",
 ]
 
 [project.optional-dependencies]
