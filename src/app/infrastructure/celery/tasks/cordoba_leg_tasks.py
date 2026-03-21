@@ -137,7 +137,7 @@ def _extract_download_links(html: str) -> list[dict]:
         r'href="(https?://[^"]*wp-content/uploads/[^"]*\.(?:csv|xls|xlsx))"',
         re.IGNORECASE,
     )
-    seen = {l["url"] for l in links}
+    seen = {lnk["url"] for lnk in links}
     for match in pattern2.finditer(html):
         href = match.group(1)
         if href not in seen:
