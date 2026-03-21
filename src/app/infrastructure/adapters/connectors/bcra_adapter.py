@@ -1,4 +1,5 @@
 """Adapter for BCRA public API — exchange rates and monetary variables."""
+
 from __future__ import annotations
 
 import logging

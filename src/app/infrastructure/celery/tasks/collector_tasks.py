@@ -4,6 +4,7 @@ Collector Worker — Agente recolector de datos.
 Dado un dataset_id, descarga el archivo real (CSV/JSON/XLSX),
 lo parsea con pandas y lo cachea en PostgreSQL para consultas SQL.
 """
+
 from __future__ import annotations
 
 import io
@@ -22,20 +23,22 @@ from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
 # Domains with known SSL certificate issues (self-signed, missing intermediates).
-_DOMAINS_SKIP_SSL = frozenset({
-    "datos.salud.gob.ar",
-    "www.mecon.gob.ar",
-    "datos.yvera.gob.ar",
-    "datosabiertos.desarrollosocial.gob.ar",
-    "ide.transporte.gob.ar",
-    "datos.energia.gob.ar",
-    "www.energia.gob.ar",
-    "sgda.energia.gob.ar",
-    "datos.ambiente.gob.ar",
-    "datos.mininterior.gob.ar",
-    "datos.cultura.gob.ar",
-    "ciam.ambiente.gob.ar",
-})
+_DOMAINS_SKIP_SSL = frozenset(
+    {
+        "datos.salud.gob.ar",
+        "www.mecon.gob.ar",
+        "datos.yvera.gob.ar",
+        "datosabiertos.desarrollosocial.gob.ar",
+        "ide.transporte.gob.ar",
+        "datos.energia.gob.ar",
+        "www.energia.gob.ar",
+        "sgda.energia.gob.ar",
+        "datos.ambiente.gob.ar",
+        "datos.mininterior.gob.ar",
+        "datos.cultura.gob.ar",
+        "ciam.ambiente.gob.ar",
+    }
+)
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,7 @@ def _should_verify_ssl(url: str) -> bool:
     except Exception:
         logger.debug("Failed to parse URL for SSL check: %s", url, exc_info=True)
         return True
+
 
 # After this many total attempts (across Celery retries AND external
 # re-dispatches) the task is marked permanently_failed and never retried.
@@ -140,7 +144,9 @@ def _upload_file_to_s3(file_path: str, portal: str, dataset_id: str, filename: s
     return key
 
 
-def _stream_download(url: str, dest_path: str, verify_ssl: bool = True, max_bytes: int = 500 * 1024 * 1024) -> int:
+def _stream_download(
+    url: str, dest_path: str, verify_ssl: bool = True, max_bytes: int = 500 * 1024 * 1024
+) -> int:
     """Stream-download a URL to a file on disk. Returns total bytes written.
 
     Raises ValueError if the download exceeds max_bytes.
@@ -181,8 +187,9 @@ def _detect_csv_params(file_path: str) -> dict:
     return params
 
 
-def _csv_load_inner(file_path: str, table_name: str, engine,
-                    csv_params: dict, chunk_size: int) -> tuple[int, list[str]]:
+def _csv_load_inner(
+    file_path: str, table_name: str, engine, csv_params: dict, chunk_size: int
+) -> tuple[int, list[str]]:
     """Inner CSV loading loop."""
     total_rows = 0
     columns: list[str] = []
@@ -220,8 +227,7 @@ def _drop_table_if_exists(engine, table_name: str):
 def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Clean column names: strip whitespace, non-breaking spaces, normalize."""
     df.columns = [
-        col.replace("\xa0", "").strip() if isinstance(col, str) else col
-        for col in df.columns
+        col.replace("\xa0", "").strip() if isinstance(col, str) else col for col in df.columns
     ]
     return df
 
@@ -234,13 +240,19 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
     except Exception as exc:
         exc_str = str(exc).lower()
         schema_keywords = (
-            "column", "type mismatch", "incompatible", "does not exist",
-            "undefined column", "schema", "relation",
+            "column",
+            "type mismatch",
+            "incompatible",
+            "does not exist",
+            "undefined column",
+            "schema",
+            "relation",
         )
         if any(kw in exc_str for kw in schema_keywords):
             logger.warning(
                 "Schema mismatch on table %s, dropping and retrying: %s",
-                table_name, str(exc)[:200],
+                table_name,
+                str(exc)[:200],
             )
             _drop_table_if_exists(engine, table_name)
             kwargs["if_exists"] = "replace"
@@ -283,7 +295,9 @@ def _set_error_status(engine, dataset_id: str, error_msg: str):
         logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
 
 
-@celery_app.task(name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=600, time_limit=720)
+@celery_app.task(
+    name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=600, time_limit=720
+)
 def collect_dataset(self, dataset_id: str):
     """
     Descarga un dataset real, lo parsea y lo guarda como tabla SQL.
@@ -321,8 +335,7 @@ def collect_dataset(self, dataset_id: str):
         with engine.begin() as conn:
             cd_row = conn.execute(
                 text(
-                    "SELECT retry_count FROM cached_datasets "
-                    "WHERE dataset_id = CAST(:did AS uuid)"
+                    "SELECT retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
                 ),
                 {"did": dataset_id},
             ).fetchone()
@@ -375,25 +388,36 @@ def collect_dataset(self, dataset_id: str):
                     content_length = int(head.headers.get("content-length", 0))
                     if content_length > max_download_bytes:
                         logger.warning(f"Dataset {dataset_id} too large: {content_length} bytes")
-                        _set_error_status(engine, dataset_id, f"file_too_large: {content_length} bytes")
+                        _set_error_status(
+                            engine, dataset_id, f"file_too_large: {content_length} bytes"
+                        )
                         return {"error": f"file_too_large: {content_length} bytes"}
             except Exception:
-                logger.debug("HEAD request failed for %s, proceeding with stream download", dataset_id, exc_info=True)
+                logger.debug(
+                    "HEAD request failed for %s, proceeding with stream download",
+                    dataset_id,
+                    exc_info=True,
+                )
 
             try:
                 file_size = _stream_download(
-                    download_url, tmp_path,
+                    download_url,
+                    tmp_path,
                     verify_ssl=verify_ssl,
                     max_bytes=max_download_bytes,
                 )
             except Exception as ssl_exc:
-                if verify_ssl and ("SSL" in type(ssl_exc).__name__ or "CERTIFICATE_VERIFY_FAILED" in str(ssl_exc)):
+                if verify_ssl and (
+                    "SSL" in type(ssl_exc).__name__ or "CERTIFICATE_VERIFY_FAILED" in str(ssl_exc)
+                ):
                     logger.warning(
                         "SSL error for %s, retrying without verification: %s",
-                        dataset_id, str(ssl_exc)[:200],
+                        dataset_id,
+                        str(ssl_exc)[:200],
                     )
                     file_size = _stream_download(
-                        download_url, tmp_path,
+                        download_url,
+                        tmp_path,
                         verify_ssl=False,
                         max_bytes=max_download_bytes,
                     )
@@ -407,7 +431,9 @@ def collect_dataset(self, dataset_id: str):
                 s3_key = _upload_file_to_s3(tmp_path, portal, dataset_id, filename)
                 logger.info(f"Uploaded to S3: {s3_key}")
             except Exception:
-                logger.warning("S3 upload failed for %s, continuing without S3", dataset_id, exc_info=True)
+                logger.warning(
+                    "S3 upload failed for %s, continuing without S3", dataset_id, exc_info=True
+                )
 
             # Parse and load into PostgreSQL
             row_count = 0
@@ -419,6 +445,7 @@ def collect_dataset(self, dataset_id: str):
 
             elif fmt == "zip":
                 import zipfile
+
                 max_decompressed = 500 * 1024 * 1024
                 try:
                     zf = zipfile.ZipFile(tmp_path)
@@ -428,8 +455,12 @@ def collect_dataset(self, dataset_id: str):
                     return {"error": "bad_zip_file"}
                 total_size = sum(info.file_size for info in zf.infolist())
                 if total_size > max_decompressed:
-                    logger.warning(f"ZIP {dataset_id}: decompressed size {total_size} exceeds limit")
-                    _set_error_status(engine, dataset_id, f"zip_too_large: {total_size} bytes decompressed")
+                    logger.warning(
+                        f"ZIP {dataset_id}: decompressed size {total_size} exceeds limit"
+                    )
+                    _set_error_status(
+                        engine, dataset_id, f"zip_too_large: {total_size} bytes decompressed"
+                    )
                     return {"error": f"zip_too_large: {total_size} bytes"}
 
                 parsed = False
@@ -437,7 +468,9 @@ def collect_dataset(self, dataset_id: str):
                     lower = name.lower()
                     if lower.endswith((".csv", ".txt")):
                         # Extract CSV to temp file, then chunked load
-                        csv_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", dir="/tmp")
+                        csv_tmp = tempfile.NamedTemporaryFile(
+                            delete=False, suffix=".csv", dir="/tmp"
+                        )
                         csv_tmp_path = csv_tmp.name
                         csv_tmp.close()
                         try:
@@ -478,7 +511,9 @@ def collect_dataset(self, dataset_id: str):
                                 records.append(props)
                             df = pd.DataFrame(records)
                         else:
-                            df = pd.json_normalize(raw_geo if isinstance(raw_geo, list) else [raw_geo])
+                            df = pd.json_normalize(
+                                raw_geo if isinstance(raw_geo, list) else [raw_geo]
+                            )
                         _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
@@ -571,7 +606,9 @@ def collect_dataset(self, dataset_id: str):
                 try:
                     df = pd.read_xml(tmp_path)
                 except Exception:
-                    logger.warning("XML %s: pd.read_xml failed, skipping", dataset_id, exc_info=True)
+                    logger.warning(
+                        "XML %s: pd.read_xml failed, skipping", dataset_id, exc_info=True
+                    )
                     _set_error_status(engine, dataset_id, "xml_parse_failed")
                     return {"error": "xml_parse_failed"}
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -610,7 +647,9 @@ def collect_dataset(self, dataset_id: str):
                 ).fetchone()
                 was_cached = prev.is_cached if prev else False
                 conn.execute(
-                    text("UPDATE datasets SET is_cached = true, row_count = :rows WHERE id = CAST(:id AS uuid)"),
+                    text(
+                        "UPDATE datasets SET is_cached = true, row_count = :rows WHERE id = CAST(:id AS uuid)"
+                    ),
                     {"rows": row_count, "id": dataset_id},
                 )
 
@@ -665,11 +704,16 @@ def collect_dataset(self, dataset_id: str):
         exc_str = str(exc)
         # Non-retryable errors — mark permanently failed immediately
         non_retryable = (
-            any(s in exc_str for s in (
-                "403 Forbidden", "401 Unauthorized",
-                "illegal status line", "Request Denied",
-                "Name or service not known",
-            ))
+            any(
+                s in exc_str
+                for s in (
+                    "403 Forbidden",
+                    "401 Unauthorized",
+                    "illegal status line",
+                    "Request Denied",
+                    "Name or service not known",
+                )
+            )
             or "TooManyRedirects" in type(exc).__name__
         )
         if non_retryable:
@@ -700,8 +744,7 @@ def collect_dataset(self, dataset_id: str):
             )
             current = conn.execute(
                 text(
-                    "SELECT retry_count FROM cached_datasets "
-                    "WHERE dataset_id = CAST(:did AS uuid)"
+                    "SELECT retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
                 ),
                 {"did": dataset_id},
             ).fetchone()
@@ -709,8 +752,7 @@ def collect_dataset(self, dataset_id: str):
         attempts = current.retry_count if current else 0
         if attempts >= MAX_TOTAL_ATTEMPTS:
             logger.warning(
-                f"Dataset {dataset_id} permanently failed "
-                f"after {attempts} attempts: {exc}"
+                f"Dataset {dataset_id} permanently failed after {attempts} attempts: {exc}"
             )
             return {"error": "permanently_failed", "attempts": attempts}
 
@@ -743,6 +785,7 @@ def bulk_collect_all(self, portal: str | None = None):
 
         logger.info(f"Bulk collect: {len(rows)} uncached datasets to process")
         from celery import group
+
         tasks = [collect_dataset.s(row[0]) for row in rows]
         if tasks:
             group(tasks).apply_async()
@@ -782,7 +825,8 @@ def recover_stuck_tasks(self):
             if exhausted.rowcount:
                 logger.warning(
                     "Marked %d stuck downloads as permanently_failed (retry >= %d)",
-                    exhausted.rowcount, MAX_TOTAL_ATTEMPTS,
+                    exhausted.rowcount,
+                    MAX_TOTAL_ATTEMPTS,
                 )
 
         # 1b. Recover stuck cached_datasets that still have retries left
@@ -809,13 +853,20 @@ def recover_stuck_tasks(self):
                         ).scalar()
                         table_has_data = (count_result or 0) > 0
                     except Exception:
-                        logger.debug("Could not query table %s for stuck download check", row.table_name, exc_info=True)
+                        logger.debug(
+                            "Could not query table %s for stuck download check",
+                            row.table_name,
+                            exc_info=True,
+                        )
 
                 if table_has_data:
                     # Table has data — just fix the status to 'ready'
-                    row_count = conn.execute(
-                        text(f'SELECT COUNT(*) FROM "{row.table_name}"')  # noqa: S608
-                    ).scalar() or 0
+                    row_count = (
+                        conn.execute(
+                            text(f'SELECT COUNT(*) FROM "{row.table_name}"')  # noqa: S608
+                        ).scalar()
+                        or 0
+                    )
                     try:
                         col_result = conn.execute(
                             text(
@@ -826,7 +877,11 @@ def recover_stuck_tasks(self):
                         ).fetchall()
                         columns = [r.column_name for r in col_result]
                     except Exception:
-                        logger.debug("Could not fetch column info for table %s", row.table_name, exc_info=True)
+                        logger.debug(
+                            "Could not fetch column info for table %s",
+                            row.table_name,
+                            exc_info=True,
+                        )
                         columns = []
                     columns_json = json.dumps(columns)
                     conn.execute(
@@ -852,7 +907,9 @@ def recover_stuck_tasks(self):
                     )
                     logger.info(
                         "Recovered stuck download %s: table %s has %d rows, set to ready",
-                        row.dataset_id, row.table_name, row_count,
+                        row.dataset_id,
+                        row.table_name,
+                        row_count,
                     )
                 else:
                     # Table has no data — re-dispatch or mark failed
@@ -911,7 +968,8 @@ def recover_stuck_tasks(self):
         if recovered_downloads or recovered_queries:
             logger.warning(
                 "Recovered stuck tasks: %d downloads, %d queries",
-                recovered_downloads, recovered_queries,
+                recovered_downloads,
+                recovered_queries,
             )
         else:
             logger.debug("No stuck tasks found")
@@ -951,8 +1009,8 @@ def reset_failed_collectors():
             count = result.rowcount
         if count:
             logger.info(
-                "Reset %d permanently_failed datasets "
-                "for retry", count,
+                "Reset %d permanently_failed datasets for retry",
+                count,
             )
         else:
             logger.debug("No permanently_failed datasets to reset")

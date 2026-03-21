@@ -136,15 +136,19 @@ class PgVectorSearchAdapter(IVectorSearch):
 
         if portal_filter:
             params["portal"] = portal_filter
-            query = text(_HYBRID_BASE.format(
-                where_vec="WHERE d.portal = :portal",
-                and_portal="AND d.portal = :portal",
-            ))
+            query = text(
+                _HYBRID_BASE.format(
+                    where_vec="WHERE d.portal = :portal",
+                    and_portal="AND d.portal = :portal",
+                )
+            )
         else:
-            query = text(_HYBRID_BASE.format(
-                where_vec="",
-                and_portal="",
-            ))
+            query = text(
+                _HYBRID_BASE.format(
+                    where_vec="",
+                    and_portal="",
+                )
+            )
 
         result = await self._session.execute(query, params)
         rows = result.fetchall()

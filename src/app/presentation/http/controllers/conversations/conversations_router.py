@@ -17,6 +17,7 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 # ---- Schemas ----
 
+
 class ConversationCreate(BaseModel):
     user_email: str
     title: str = ""
@@ -69,6 +70,7 @@ class FeedbackCreate(BaseModel):
 
 # ---- Helpers ----
 
+
 async def _resolve_user(user_repo: IUserRepository, email: str) -> Any:
     """Resolve user by email, raise 404 if not found."""
     user = await user_repo.get_by_email(email)
@@ -94,6 +96,7 @@ async def _get_owned_conversation(
 
 
 # ---- Endpoints ----
+
 
 @router.get("/", response_model=list[ConversationSummary])
 @inject  # type: ignore[untyped-decorator]
@@ -315,7 +318,9 @@ async def submit_feedback(
         raise HTTPException(status_code=404, detail="Message not found in this conversation")
 
     updated = await chat_repo.update_message_feedback(
-        message_id, body.feedback, body.comment,
+        message_id,
+        body.feedback,
+        body.comment,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Message not found")

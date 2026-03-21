@@ -4,6 +4,7 @@ Series de Tiempo — ETL de series temporales del gobierno argentino.
 Consulta la API de Series de Tiempo (apis.datos.gob.ar/series/api)
 y cachea los resultados en PostgreSQL para consultas NL2SQL.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,12 +23,21 @@ logger = logging.getLogger(__name__)
 API_URL = "https://apis.datos.gob.ar/series/api/series"
 
 SERIES_CATALOG = {
-    "inflacion_ipc": {"ids": "103.1_I2N_2016_M_19", "title": "IPC - Indice de Precios al Consumidor"},
+    "inflacion_ipc": {
+        "ids": "103.1_I2N_2016_M_19",
+        "title": "IPC - Indice de Precios al Consumidor",
+    },
     "tipo_cambio": {"ids": "92.2_TIPO_CAMBIION_0_0_21_24", "title": "Tipo de Cambio Peso/Dolar"},
-    "emae": {"ids": "143.3_NO_PR_2004_A_21", "title": "EMAE - Estimador Mensual de Actividad Economica"},
+    "emae": {
+        "ids": "143.3_NO_PR_2004_A_21",
+        "title": "EMAE - Estimador Mensual de Actividad Economica",
+    },
     "desempleo": {"ids": "45.2_ECTDT_0_T_33", "title": "Tasa de Desempleo"},
     "gasto_publico": {"ids": "451.3_GPNGPN_0_0_3_30", "title": "Gasto Publico Nacional"},
-    "reservas_internacionales": {"ids": "174.1_RRVAS_IDOS_0_0_36", "title": "Reservas Internacionales"},
+    "reservas_internacionales": {
+        "ids": "174.1_RRVAS_IDOS_0_0_36",
+        "title": "Reservas Internacionales",
+    },
     "base_monetaria": {"ids": "331.1_SALDO_BASERIA__15", "title": "Base Monetaria"},
     "salarios": {"ids": "149.1_TL_INDIIOS_OCTU_0_21", "title": "Indice de Salarios"},
     "canasta_basica": {"ids": "150.1_LA_POBREZA_0_D_13", "title": "Canasta Basica Total"},
@@ -60,20 +70,21 @@ def _register_dataset(engine, key: str, table_name: str, df: pd.DataFrame):
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": f"Serie temporal: {entry['title']}. Fuente: APIs de Datos Argentina.",
                 "org": "Ministerio de Economia — Series de Tiempo",
                 "portal": portal,
                 "url": f"{API_URL}?ids={entry['ids']}",
                 "cols": columns_json,
                 "tags": f"series de tiempo,{key.replace('_', ' ')},economia,indicadores",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -89,16 +100,24 @@ def _register_dataset(engine, key: str, table_name: str, df: pd.DataFrame):
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
 
 
 @celery_app.task(
-    name="openarg.ingest_series_tiempo", bind=True, max_retries=3,
-    soft_time_limit=300, time_limit=360,
+    name="openarg.ingest_series_tiempo",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=300,
+    time_limit=360,
 )
 def ingest_series_tiempo(self):
     """Fetch time series data from the Series de Tiempo API and cache it."""
@@ -115,8 +134,7 @@ def ingest_series_tiempo(self):
             with engine.begin() as conn:
                 cached = conn.execute(
                     text(
-                        "SELECT id FROM cached_datasets "
-                        "WHERE table_name = :tn AND status = 'ready'"
+                        "SELECT id FROM cached_datasets WHERE table_name = :tn AND status = 'ready'"
                     ),
                     {"tn": table_name},
                 ).fetchone()
@@ -170,6 +188,7 @@ def ingest_series_tiempo(self):
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
+
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1
@@ -178,7 +197,9 @@ def ingest_series_tiempo(self):
             except Exception:
                 results["errors"] += 1
                 logger.warning(
-                    "Failed to ingest series %s", key, exc_info=True,
+                    "Failed to ingest series %s",
+                    key,
+                    exc_info=True,
                 )
 
         return results

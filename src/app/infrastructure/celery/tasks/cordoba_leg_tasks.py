@@ -4,6 +4,7 @@ Córdoba Legislatura — Scraper de datos abiertos del portal legislativo.
 WordPress crawler: fetch page, extract download links (CSV/XLS),
 download and cache in PostgreSQL.
 """
+
 from __future__ import annotations
 
 import io
@@ -33,7 +34,9 @@ def _sanitize_name(name: str) -> str:
     return clean[:50]
 
 
-def _register_dataset(engine, source_id: str, title: str, table_name: str, df: pd.DataFrame, url: str):
+def _register_dataset(
+    engine, source_id: str, title: str, table_name: str, df: pd.DataFrame, url: str
+):
     """Upsert into datasets and cached_datasets tables."""
     portal = "cordoba_legislatura"
     columns_json = json.dumps(list(df.columns))
@@ -63,13 +66,13 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                 "fmt": url.rsplit(".", 1)[-1].lower() if "." in url else "csv",
                 "cols": columns_json,
                 "tags": f"cordoba,legislatura,{_sanitize_name(title)}",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -85,8 +88,13 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
@@ -107,8 +115,10 @@ def _parse_file(content: bytes, url: str) -> pd.DataFrame | None:
         for sep in (",", ";"):
             try:
                 df = pd.read_csv(
-                    io.BytesIO(content), encoding=encoding,
-                    sep=sep, on_bad_lines="skip",
+                    io.BytesIO(content),
+                    encoding=encoding,
+                    sep=sep,
+                    on_bad_lines="skip",
                 )
                 if len(df.columns) > 1:
                     return df
@@ -150,8 +160,11 @@ def _extract_download_links(html: str) -> list[dict]:
 
 
 @celery_app.task(
-    name="openarg.scrape_cordoba_legislatura", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
+    name="openarg.scrape_cordoba_legislatura",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def scrape_cordoba_legislatura(self):
     """Scrape Córdoba Legislatura datos abiertos portal."""
@@ -205,6 +218,7 @@ def scrape_cordoba_legislatura(self):
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
+
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1

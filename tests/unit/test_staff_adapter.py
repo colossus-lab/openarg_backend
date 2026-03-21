@@ -1,4 +1,5 @@
 """Tests for StaffAdapter with mocked DB sessions."""
+
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
@@ -135,8 +136,12 @@ class TestGetByLegislator:
 
         hit_rows = [
             _make_row(
-                legajo="1234", apellido="GOMEZ", nombre="JUAN",
-                escalafon="A", area_desempeno="YEZA", convenio="LEY",
+                legajo="1234",
+                apellido="GOMEZ",
+                nombre="JUAN",
+                escalafon="A",
+                area_desempeno="YEZA",
+                convenio="LEY",
             )
         ]
         hit_result = MagicMock()
@@ -145,8 +150,12 @@ class TestGetByLegislator:
         # snapshot → 3 senado misses → 2 area misses → area hit('%Yeza%')
         session.execute.side_effect = [
             date_result,
-            empty_rows, empty_rows, empty_rows,  # senado (3 patterns)
-            empty_rows, empty_rows, hit_result,   # area fallback (3 patterns)
+            empty_rows,
+            empty_rows,
+            empty_rows,  # senado (3 patterns)
+            empty_rows,
+            empty_rows,
+            hit_result,  # area fallback (3 patterns)
         ]
 
         result = await adapter.get_by_legislator("Martin Yeza")
@@ -343,8 +352,12 @@ class TestGetChanges:
 
         hit_rows = [
             _make_row(
-                legajo="5678", apellido="PEREZ", nombre="MARIA",
-                area_desempeno="YEZA", tipo="alta", detected_at=dt,
+                legajo="5678",
+                apellido="PEREZ",
+                nombre="MARIA",
+                area_desempeno="YEZA",
+                tipo="alta",
+                detected_at=dt,
             )
         ]
         hit_result = MagicMock()

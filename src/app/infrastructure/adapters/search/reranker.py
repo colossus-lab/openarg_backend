@@ -1,4 +1,5 @@
 """LLM-based re-ranker for search results."""
+
 from __future__ import annotations
 
 import json
@@ -16,7 +17,10 @@ class LLMReranker:
         self._llm = llm
 
     async def rerank(
-        self, question: str, results: list[SearchResult], top_k: int = 5,
+        self,
+        question: str,
+        results: list[SearchResult],
+        top_k: int = 5,
     ) -> list[SearchResult]:
         """Re-rank search results using LLM. Falls back to original order on failure."""
         if len(results) <= 1:
@@ -24,8 +28,7 @@ class LLMReranker:
 
         try:
             results_text = "\n".join(
-                f"[{i}] {r.title}: {r.description[:150]}"
-                for i, r in enumerate(results)
+                f"[{i}] {r.title}: {r.description[:150]}" for i, r in enumerate(results)
             )
 
             prompt = load_prompt("reranker", question=question, results_text=results_text)

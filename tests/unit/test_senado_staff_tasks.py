@@ -1,4 +1,5 @@
 """Tests for senado_staff_tasks parser and helpers."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -14,7 +15,7 @@ from app.infrastructure.celery.tasks.senado_staff_tasks import (
 
 class TestParseStaffFromHtml:
     def test_normal_html(self):
-        html = '''
+        html = """
         <div id="Personal">
           <table>
             <tr><th>Nombre</th><th>Categoría</th></tr>
@@ -22,7 +23,7 @@ class TestParseStaffFromHtml:
             <tr><td>MARIA JOSE LOPEZ</td><td>B-2</td></tr>
           </table>
         </div>
-        '''
+        """
         result = _parse_staff_from_html(html)
         assert len(result) == 2
         assert result[0] == ("DIEGO GASTON SALVO", "A-4")
@@ -30,14 +31,14 @@ class TestParseStaffFromHtml:
 
     def test_malformed_html_no_tr(self):
         """HTML with missing <tr> tags (common server bug) — regex still matches."""
-        html = '''
+        html = """
         <div id="Personal">
           <table>
             <td>JUAN PEREZ</td><td>A-1</td>
             <td>ANA GOMEZ</td><td>C-3</td>
           </table>
         </div>
-        '''
+        """
         result = _parse_staff_from_html(html)
         assert len(result) == 2
         assert result[0] == ("JUAN PEREZ", "A-1")
@@ -54,38 +55,38 @@ class TestParseStaffFromHtml:
         assert result == []
 
     def test_names_with_accents(self):
-        html = '''
+        html = """
         <div id="Personal">
           <table>
             <tr><td>JOSÉ MARÍA GONZÁLEZ</td><td>A-2</td></tr>
           </table>
         </div>
-        '''
+        """
         result = _parse_staff_from_html(html)
         assert len(result) == 1
         assert result[0] == ("JOSÉ MARÍA GONZÁLEZ", "A-2")
 
     def test_category_without_hyphen(self):
         """Categories like 'A4' (no hyphen) should also match."""
-        html = '''
+        html = """
         <div id="Personal">
           <table>
             <tr><td>PEDRO GARCIA</td><td>A4</td></tr>
           </table>
         </div>
-        '''
+        """
         result = _parse_staff_from_html(html)
         assert len(result) == 1
         assert result[0] == ("PEDRO GARCIA", "A4")
 
     def test_whitespace_trimmed(self):
-        html = '''
+        html = """
         <div id="Personal">
           <table>
             <tr><td>  SPACES NAME  </td><td>  B-1  </td></tr>
           </table>
         </div>
-        '''
+        """
         result = _parse_staff_from_html(html)
         assert len(result) == 1
         assert result[0] == ("SPACES NAME", "B-1")
@@ -103,10 +104,20 @@ class TestFetchSenators:
         resp.json.return_value = {
             "table": {
                 "rows": [
-                    {"ID": "546", "APELLIDO": "ABAD", "NOMBRE": "MAXIMILIANO",
-                     "BLOQUE": "UCR", "PROVINCIA": "BUENOS AIRES"},
-                    {"ID": "789", "APELLIDO": "LOPEZ", "NOMBRE": "ANA",
-                     "BLOQUE": "FdT", "PROVINCIA": "CABA"},
+                    {
+                        "ID": "546",
+                        "APELLIDO": "ABAD",
+                        "NOMBRE": "MAXIMILIANO",
+                        "BLOQUE": "UCR",
+                        "PROVINCIA": "BUENOS AIRES",
+                    },
+                    {
+                        "ID": "789",
+                        "APELLIDO": "LOPEZ",
+                        "NOMBRE": "ANA",
+                        "BLOQUE": "FdT",
+                        "PROVINCIA": "CABA",
+                    },
                 ]
             }
         }
@@ -203,8 +214,13 @@ class TestScrapeIntegration:
         senators_resp.json.return_value = {
             "table": {
                 "rows": [
-                    {"ID": "546", "APELLIDO": "ABAD", "NOMBRE": "MAXIMILIANO",
-                     "BLOQUE": "UCR", "PROVINCIA": "BUENOS AIRES"},
+                    {
+                        "ID": "546",
+                        "APELLIDO": "ABAD",
+                        "NOMBRE": "MAXIMILIANO",
+                        "BLOQUE": "UCR",
+                        "PROVINCIA": "BUENOS AIRES",
+                    },
                 ]
             }
         }
@@ -212,14 +228,14 @@ class TestScrapeIntegration:
         # Profile HTML response
         profile_resp = MagicMock()
         profile_resp.raise_for_status = MagicMock()
-        profile_resp.text = '''
+        profile_resp.text = """
         <div id="Personal">
           <table>
             <tr><td>DIEGO GASTON SALVO</td><td>A-4</td></tr>
             <tr><td>MARIA LOPEZ</td><td>B-2</td></tr>
           </table>
         </div>
-        '''
+        """
 
         mock_client.get.side_effect = [senators_resp, profile_resp]
 

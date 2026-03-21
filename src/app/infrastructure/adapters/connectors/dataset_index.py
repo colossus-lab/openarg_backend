@@ -9,6 +9,7 @@ pre-downloaded dataset data.  This index implements a "cache-first" strategy:
 queries that match known cached datasets are routed to ``query_sandbox``
 (NL2SQL) before falling back to internet APIs.
 """
+
 from __future__ import annotations
 
 import re
@@ -84,11 +85,16 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "ipc regional": {
         "action": "query_series",
-        "params": {"series_ids": ["103.1_I2N_2016_M_19", "148.3_INIVELNOA_DICI_M_21", "145.3_INGCUYUYO_DICI_M_11"]},
+        "params": {
+            "series_ids": [
+                "103.1_I2N_2016_M_19",
+                "148.3_INIVELNOA_DICI_M_21",
+                "145.3_INGCUYUYO_DICI_M_11",
+            ]
+        },
         "confidence": 0.90,
         "description": "IPC regional: GBA, NOA, Cuyo",
     },
-
     # ── Economia: Actividad ────────────────────────────────────
     "emae": {
         "action": "query_series",
@@ -150,7 +156,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Sector manufacturero",
     },
-
     # ── Empleo ─────────────────────────────────────────────────
     "desempleo": {
         "action": "query_series",
@@ -206,7 +211,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.75,
         "description": "Paritarias / negociacion salarial",
     },
-
     # ── Finanzas: Dolar ────────────────────────────────────────
     "dolar blue": {
         "action": "query_argentina_datos",
@@ -280,7 +284,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Cotizacion del dolar",
     },
-
     # ── Finanzas: Tipo de cambio (BCRA / series historicas) ────
     "tipo de cambio": {
         "action": "query_series",
@@ -294,7 +297,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Tipo de cambio oficial BCRA",
     },
-
     # ── Finanzas: Reservas / Monetarias ────────────────────────
     "reservas": {
         "action": "query_series",
@@ -368,7 +370,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Tasa de politica monetaria BCRA",
     },
-
     # ── Finanzas: Riesgo pais ──────────────────────────────────
     "riesgo pais": {
         "action": "query_argentina_datos",
@@ -382,7 +383,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Indice EMBI+ Argentina",
     },
-
     # ── Finanzas: Otras monedas ────────────────────────────────
     "euro": {
         "action": "query_bcra",
@@ -402,7 +402,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Cotizacion del real brasileno",
     },
-
     # ── Pobreza ────────────────────────────────────────────────
     "pobreza": {
         "action": "query_series",
@@ -446,7 +445,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.95,
         "description": "Linea de indigencia (CBA)",
     },
-
     # ── Comercio exterior ──────────────────────────────────────
     "exportaciones": {
         "action": "query_series",
@@ -478,7 +476,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Saldo de balanza comercial",
     },
-
     # ── Presupuesto → query_sandbox (cached) ───────────────────
     "presupuesto": {
         "action": "query_sandbox",
@@ -560,23 +557,37 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "resultado fiscal": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_resultado_financiero_*", "cache_presupuesto_resultado_primario_*"]},
+        "params": {
+            "tables": [
+                "cache_presupuesto_resultado_financiero_*",
+                "cache_presupuesto_resultado_primario_*",
+            ]
+        },
         "confidence": 0.85,
         "description": "Resultado fiscal / financiero",
     },
     "deficit fiscal": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_resultado_financiero_*", "cache_presupuesto_resultado_primario_*"]},
+        "params": {
+            "tables": [
+                "cache_presupuesto_resultado_financiero_*",
+                "cache_presupuesto_resultado_primario_*",
+            ]
+        },
         "confidence": 0.85,
         "description": "Deficit fiscal",
     },
     "superavit fiscal": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_resultado_financiero_*", "cache_presupuesto_resultado_primario_*"]},
+        "params": {
+            "tables": [
+                "cache_presupuesto_resultado_financiero_*",
+                "cache_presupuesto_resultado_primario_*",
+            ]
+        },
         "confidence": 0.85,
         "description": "Superavit fiscal",
     },
-
     # ── Presupuesto: Dimensiones / Clasificadores ──────────────
     "clasificador presupuestario": {
         "action": "query_sandbox",
@@ -614,7 +625,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Ubicacion geografica del gasto presupuestario",
     },
-
     # ── Presupuesto: Gasto publico (series de tiempo) ──────────
     "gasto publico historico": {
         "action": "query_series",
@@ -622,7 +632,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Gasto publico nacional historico (serie anual)",
     },
-
     # ── INDEC → query_sandbox (cached, 19 datasets) ────────────
     "indec": {
         "action": "query_sandbox",
@@ -774,7 +783,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "PIB provincial (INDEC)",
     },
-
     # ── DDJJ ───────────────────────────────────────────────────
     "declaracion jurada": {
         "action": "query_ddjj",
@@ -824,7 +832,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.95,
         "description": "Ranking de diputados con menor patrimonio",
     },
-
     # ── Sesiones ───────────────────────────────────────────────
     "sesion": {
         "action": "query_sesiones",
@@ -862,7 +869,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Transcripciones de sesiones",
     },
-
     # ── Personal / Staff (Diputados + Senado) ───────────────────
     # NOTE: Do NOT hardcode action=stats in params. The LLM planner
     # chooses the sub-action (get_by_legislator, count, stats, search)
@@ -927,7 +933,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Nomina de personal de HCDN",
     },
-
     # ── BCRA ───────────────────────────────────────────────────
     "bcra": {
         "action": "query_bcra",
@@ -947,7 +952,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Circulacion monetaria",
     },
-
     # ── BCRA cached → query_sandbox ────────────────────────────
     "cotizaciones bcra": {
         "action": "query_sandbox",
@@ -961,7 +965,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Variables monetarias BCRA historicas (datos cacheados)",
     },
-
     # ── Elecciones → query_sandbox (cached tables) ─────────────
     "elecciones": {
         "action": "query_sandbox",
@@ -1011,7 +1014,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.70,
         "description": "Resultados de votaciones",
     },
-
     # ── Votaciones nominales → query_sandbox ───────────────────
     "votaciones nominales": {
         "action": "query_sandbox",
@@ -1025,7 +1027,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Votos nominales de diputados",
     },
-
     # ── Buenos Aires Compras → query_sandbox ───────────────────
     "compras publicas": {
         "action": "query_sandbox",
@@ -1051,7 +1052,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Contratos publicos (BAC)",
     },
-
     # ── Rosario → query_sandbox ────────────────────────────────
     "datos rosario": {
         "action": "query_sandbox",
@@ -1059,7 +1059,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Datos abiertos de Rosario",
     },
-
     # ── Senado → query_sandbox ─────────────────────────────────
     "senado": {
         "action": "query_sandbox",
@@ -1073,7 +1072,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Datos de senadores",
     },
-
     # ── Cordoba Legislatura → query_sandbox ────────────────────
     "legislatura cordoba": {
         "action": "query_sandbox",
@@ -1087,7 +1085,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Datos de la legislatura de Cordoba",
     },
-
     # ── Siniestros viales → query_sandbox ──────────────────────
     "siniestros viales": {
         "action": "query_sandbox",
@@ -1101,11 +1098,18 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Accidentes de transito / siniestros viales",
     },
-
     # ── Educacion → query_sandbox (110 cache tables) ────────────
     "educacion": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*educaci*", "cache_*escuel*", "cache_*docent*", "cache_*universid*", "cache_*aprender*"]},
+        "params": {
+            "tables": [
+                "cache_*educaci*",
+                "cache_*escuel*",
+                "cache_*docent*",
+                "cache_*universid*",
+                "cache_*aprender*",
+            ]
+        },
         "confidence": 0.80,
         "description": "Datos de educacion (110 tablas cacheadas)",
     },
@@ -1139,11 +1143,12 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Matricula escolar",
     },
-
     # ── Salud → query_sandbox (119 cache tables) ──────────────
     "salud": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*salud*", "cache_*hospital*", "cache_*vacun*", "cache_*mortalid*"]},
+        "params": {
+            "tables": ["cache_*salud*", "cache_*hospital*", "cache_*vacun*", "cache_*mortalid*"]
+        },
         "confidence": 0.80,
         "description": "Datos de salud (119 tablas cacheadas)",
     },
@@ -1177,11 +1182,12 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Datos de COVID-19",
     },
-
     # ── Seguridad → query_sandbox (35 cache tables) ──────────
     "seguridad": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*seguridad*", "cache_*delito*", "cache_*polic*", "cache_*homicid*"]},
+        "params": {
+            "tables": ["cache_*seguridad*", "cache_*delito*", "cache_*polic*", "cache_*homicid*"]
+        },
         "confidence": 0.80,
         "description": "Datos de seguridad (35 tablas cacheadas)",
     },
@@ -1203,11 +1209,12 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Datos de femicidios",
     },
-
     # ── Transporte → query_sandbox (103 cache tables) ─────────
     "transporte": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*transport*", "cache_*transit*", "cache_*vehicul*", "cache_*subte*"]},
+        "params": {
+            "tables": ["cache_*transport*", "cache_*transit*", "cache_*vehicul*", "cache_*subte*"]
+        },
         "confidence": 0.80,
         "description": "Datos de transporte (103 tablas cacheadas)",
     },
@@ -1241,11 +1248,12 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de patentamiento de vehiculos",
     },
-
     # ── Energia → query_sandbox (78 cache tables) ─────────────
     "energia": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*energ*", "cache_*electri*", "cache_*petrole*", "cache_*hidrocarb*"]},
+        "params": {
+            "tables": ["cache_*energ*", "cache_*electri*", "cache_*petrole*", "cache_*hidrocarb*"]
+        },
         "confidence": 0.80,
         "description": "Datos de energia (78 tablas cacheadas)",
     },
@@ -1273,7 +1281,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de energia renovable",
     },
-
     # ── Agro → query_sandbox (125 cache tables) ───────────────
     "agro": {
         "action": "query_sandbox",
@@ -1317,7 +1324,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de lecheria y tambos",
     },
-
     # ── Justicia → query_sandbox (21 cache tables) ────────────
     "justicia": {
         "action": "query_sandbox",
@@ -1331,11 +1337,12 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de anticorrupcion",
     },
-
     # ── Ambiente → query_sandbox (71 cache tables) ────────────
     "ambiente": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*ambient*", "cache_*forestal*", "cache_*bosqu*", "cache_*residuo*"]},
+        "params": {
+            "tables": ["cache_*ambient*", "cache_*forestal*", "cache_*bosqu*", "cache_*residuo*"]
+        },
         "confidence": 0.80,
         "description": "Datos de medio ambiente (71 tablas cacheadas)",
     },
@@ -1363,7 +1370,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de incendios forestales",
     },
-
     # ── Genero → query_sandbox (47 cache tables) ──────────────
     "genero": {
         "action": "query_sandbox",
@@ -1383,11 +1389,17 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de violencia de genero",
     },
-
     # ── Telecomunicaciones → query_sandbox (60 cache tables) ──
     "telecomunicaciones": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*teleco*", "cache_*internet*", "cache_*telefon*", "cache_*conectivid*"]},
+        "params": {
+            "tables": [
+                "cache_*teleco*",
+                "cache_*internet*",
+                "cache_*telefon*",
+                "cache_*conectivid*",
+            ]
+        },
         "confidence": 0.80,
         "description": "Datos de telecomunicaciones (60 tablas cacheadas)",
     },
@@ -1415,7 +1427,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Datos de telefonia celular",
     },
-
     # ── Poblacion → query_sandbox (28 cache tables) ───────────
     "censo": {
         "action": "query_sandbox",
@@ -1435,7 +1446,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de migracion",
     },
-
     # ── Ciencia → query_sandbox (13 cache tables) ─────────────
     "ciencia y tecnologia": {
         "action": "query_sandbox",
@@ -1443,7 +1453,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Datos de ciencia y tecnologia",
     },
-
     # ── Vivienda → query_sandbox (19 cache tables) ────────────
     "vivienda": {
         "action": "query_sandbox",
@@ -1451,7 +1460,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Datos de vivienda y construccion",
     },
-
     # ── Social → query_sandbox (22 cache tables) ──────────────
     "programas sociales": {
         "action": "query_sandbox",
@@ -1465,7 +1473,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Datos de tarjeta alimentar",
     },
-
     # ── Derechos Humanos → query_sandbox ──────────────────────
     "derechos humanos": {
         "action": "query_sandbox",
@@ -1473,7 +1480,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de derechos humanos",
     },
-
     # ── Empleo adicional → query_sandbox (66 cache tables) ────
     "empleo formal": {
         "action": "query_sandbox",
@@ -1487,35 +1493,63 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de informalidad laboral",
     },
-
     # ── Georef ─────────────────────────────────────────────────
     "donde queda": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios", "cache_georef_departamentos", "cache_georef_provincias"], "query": "ubicación geográfica"},
+        "params": {
+            "tables": [
+                "cache_georef_localidades",
+                "cache_georef_municipios",
+                "cache_georef_departamentos",
+                "cache_georef_provincias",
+            ],
+            "query": "ubicación geográfica",
+        },
         "confidence": 0.90,
         "description": "Ubicación geográfica (GeoRef)",
     },
     "donde esta": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios", "cache_georef_departamentos", "cache_georef_provincias"], "query": "ubicación geográfica"},
+        "params": {
+            "tables": [
+                "cache_georef_localidades",
+                "cache_georef_municipios",
+                "cache_georef_departamentos",
+                "cache_georef_provincias",
+            ],
+            "query": "ubicación geográfica",
+        },
         "confidence": 0.90,
         "description": "Ubicación geográfica (GeoRef)",
     },
     "en que provincia": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios"], "query": "provincia de localidad"},
+        "params": {
+            "tables": ["cache_georef_localidades", "cache_georef_municipios"],
+            "query": "provincia de localidad",
+        },
         "confidence": 0.90,
         "description": "Provincia de una localidad/municipio (GeoRef)",
     },
     "ubicacion de": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios", "cache_georef_departamentos"], "query": "ubicación geográfica"},
+        "params": {
+            "tables": [
+                "cache_georef_localidades",
+                "cache_georef_municipios",
+                "cache_georef_departamentos",
+            ],
+            "query": "ubicación geográfica",
+        },
         "confidence": 0.85,
         "description": "Ubicación geográfica (GeoRef)",
     },
     "coordenadas de": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_georef_localidades", "cache_georef_municipios"], "query": "coordenadas geográficas"},
+        "params": {
+            "tables": ["cache_georef_localidades", "cache_georef_municipios"],
+            "query": "coordenadas geográficas",
+        },
         "confidence": 0.85,
         "description": "Coordenadas geográficas (GeoRef)",
     },
@@ -1567,7 +1601,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.60,
         "description": "Normalizacion geografica (localidades)",
     },
-
     # ── Datasets / catalogo → search_ckan ──────────────────────
     "datasets": {
         "action": "search_ckan",
@@ -1587,7 +1620,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.75,
         "description": "Catalogo de datos abiertos",
     },
-
     # ── Composite "datasets de [tema]" → search_ckan ─────────
     # These override per-topic sandbox routes when the user
     # explicitly asks for "datasets" of a given topic.
@@ -1683,23 +1715,31 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.95,
         "description": "Datasets agropecuarios en datos.gob.ar",
     },
-
     # ── Autoridades / Gobierno PEN → query_sandbox ────────────
     "presidente": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "presidente de la nación"},
+        "params": {
+            "tables": ["cache_autoridades_pen_principales"],
+            "query": "presidente de la nación",
+        },
         "confidence": 0.95,
         "description": "Presidente de la Nación (Mapa del Estado)",
     },
     "presidente de argentina": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "presidente de la nación"},
+        "params": {
+            "tables": ["cache_autoridades_pen_principales"],
+            "query": "presidente de la nación",
+        },
         "confidence": 0.95,
         "description": "Presidente de la República Argentina",
     },
     "quien es el presidente": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "presidente de la nación"},
+        "params": {
+            "tables": ["cache_autoridades_pen_principales"],
+            "query": "presidente de la nación",
+        },
         "confidence": 0.95,
         "description": "Presidente de la Nación",
     },
@@ -1741,13 +1781,19 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "autoridades nacionales": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_autoridades_pen_principales"], "query": "autoridades principales"},
+        "params": {
+            "tables": ["cache_autoridades_pen_principales"],
+            "query": "autoridades principales",
+        },
         "confidence": 0.90,
         "description": "Autoridades del Poder Ejecutivo Nacional",
     },
     "poder ejecutivo": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_autoridades_pen", "cache_autoridades_pen_principales"], "query": "poder ejecutivo nacional"},
+        "params": {
+            "tables": ["cache_autoridades_pen", "cache_autoridades_pen_principales"],
+            "query": "poder ejecutivo nacional",
+        },
         "confidence": 0.90,
         "description": "Estructura del Poder Ejecutivo Nacional",
     },
@@ -1769,7 +1815,6 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Organigrama del Estado Nacional",
     },
-
     # ── Gobernadores → query_sandbox ──────────────────────────
     "gobernador": {
         "action": "query_sandbox",
@@ -1791,11 +1836,13 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "quien gobierna": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_gobernadores", "cache_autoridades_pen_principales"], "query": "quien gobierna"},
+        "params": {
+            "tables": ["cache_gobernadores", "cache_autoridades_pen_principales"],
+            "query": "quien gobierna",
+        },
         "confidence": 0.85,
         "description": "Autoridades de gobierno (gobernadores / PEN)",
     },
-
     # ── Diputados / Legisladores → query_sandbox ─────────────
     "diputados nacionales": {
         "action": "query_sandbox",
@@ -1822,6 +1869,7 @@ KEYWORD_ROUTES: dict[str, dict] = {
 # 2. DOMAIN_PATTERNS — regex patterns matching domain topics to portals
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True, slots=True)
 class DomainPattern:
     """A regex pattern that maps a domain topic to a CKAN portal or action."""
@@ -1834,35 +1882,103 @@ class DomainPattern:
 DOMAIN_PATTERNS: list[DomainPattern] = [
     # Nacional sectorial
     DomainPattern(re.compile(r"\bsalud\b", re.IGNORECASE), "salud", "Portal de datos de Salud"),
-    DomainPattern(re.compile(r"\benerg[ií]a\b", re.IGNORECASE), "energia", "Portal de datos de Energia"),
-    DomainPattern(re.compile(r"\bjusticia\b", re.IGNORECASE), "justicia", "Portal de datos de Justicia"),
-    DomainPattern(re.compile(r"\btransporte\b", re.IGNORECASE), "transporte", "Portal de datos de Transporte"),
-    DomainPattern(re.compile(r"\bcultura\b", re.IGNORECASE), "cultura", "Portal de datos de Cultura"),
-    DomainPattern(re.compile(r"\bproduccion\b", re.IGNORECASE), "produccion", "Portal de datos de Produccion"),
-    DomainPattern(re.compile(r"\bmagyp\b|\bagricultura\b|\bganaderia\b|\bagropecuari\w*\b", re.IGNORECASE), "magyp", "Portal de Agricultura, Ganaderia y Pesca"),
+    DomainPattern(
+        re.compile(r"\benerg[ií]a\b", re.IGNORECASE), "energia", "Portal de datos de Energia"
+    ),
+    DomainPattern(
+        re.compile(r"\bjusticia\b", re.IGNORECASE), "justicia", "Portal de datos de Justicia"
+    ),
+    DomainPattern(
+        re.compile(r"\btransporte\b", re.IGNORECASE), "transporte", "Portal de datos de Transporte"
+    ),
+    DomainPattern(
+        re.compile(r"\bcultura\b", re.IGNORECASE), "cultura", "Portal de datos de Cultura"
+    ),
+    DomainPattern(
+        re.compile(r"\bproduccion\b", re.IGNORECASE), "produccion", "Portal de datos de Produccion"
+    ),
+    DomainPattern(
+        re.compile(r"\bmagyp\b|\bagricultura\b|\bganaderia\b|\bagropecuari\w*\b", re.IGNORECASE),
+        "magyp",
+        "Portal de Agricultura, Ganaderia y Pesca",
+    ),
     DomainPattern(re.compile(r"\bacumar\b", re.IGNORECASE), "acumar", "Portal de ACUMAR"),
-    DomainPattern(re.compile(r"\bministerio del interior\b|\binterior\b", re.IGNORECASE), "mininterior", "Portal de Interior"),
+    DomainPattern(
+        re.compile(r"\bministerio del interior\b|\binterior\b", re.IGNORECASE),
+        "mininterior",
+        "Portal de Interior",
+    ),
     DomainPattern(re.compile(r"\bpami\b", re.IGNORECASE), "pami", "Portal de PAMI"),
-    DomainPattern(re.compile(r"\bdesarrollo social\b|\bprogramas sociales\b", re.IGNORECASE), "desarrollo_social", "Portal de Desarrollo Social"),
-    DomainPattern(re.compile(r"\bturismo\b|\byvera\b", re.IGNORECASE), "turismo", "Portal de Turismo (Yvera)"),
-    DomainPattern(re.compile(r"\bseguro\w*\b|\bssn\b|\bsuperintendencia de seguros\b", re.IGNORECASE), "ssn", "Portal de Superintendencia de Seguros"),
+    DomainPattern(
+        re.compile(r"\bdesarrollo social\b|\bprogramas sociales\b", re.IGNORECASE),
+        "desarrollo_social",
+        "Portal de Desarrollo Social",
+    ),
+    DomainPattern(
+        re.compile(r"\bturismo\b|\byvera\b", re.IGNORECASE), "turismo", "Portal de Turismo (Yvera)"
+    ),
+    DomainPattern(
+        re.compile(r"\bseguro\w*\b|\bssn\b|\bsuperintendencia de seguros\b", re.IGNORECASE),
+        "ssn",
+        "Portal de Superintendencia de Seguros",
+    ),
     # CABA
-    DomainPattern(re.compile(r"\bcaba\b|\bciudad de buenos aires\b|\bbuenosaires\b", re.IGNORECASE), "caba", "Portal de CABA"),
-    DomainPattern(re.compile(r"\blegislatura caba\b|\blegislatura de la ciudad\b", re.IGNORECASE), "legislatura_caba", "Legislatura de CABA"),
+    DomainPattern(
+        re.compile(r"\bcaba\b|\bciudad de buenos aires\b|\bbuenosaires\b", re.IGNORECASE),
+        "caba",
+        "Portal de CABA",
+    ),
+    DomainPattern(
+        re.compile(r"\blegislatura caba\b|\blegislatura de la ciudad\b", re.IGNORECASE),
+        "legislatura_caba",
+        "Legislatura de CABA",
+    ),
     # Provincias
-    DomainPattern(re.compile(r"\bprovincia de buenos aires\b|\bpba\b|\bbonaerense\b", re.IGNORECASE), "pba", "Portal de Buenos Aires Provincia"),
-    DomainPattern(re.compile(r"\bcordoba estadistica\b", re.IGNORECASE), "cordoba_estadistica", "Portal de Cordoba Estadistica"),
-    DomainPattern(re.compile(r"\bcordoba\b", re.IGNORECASE), "cordoba_prov", "Portal de datos de Cordoba"),
-    DomainPattern(re.compile(r"\bmendoza\b", re.IGNORECASE), "mendoza", "Portal de datos de Mendoza"),
-    DomainPattern(re.compile(r"\bentre rios\b|\bentrerios\b", re.IGNORECASE), "entrerios", "Portal de datos de Entre Rios"),
-    DomainPattern(re.compile(r"\bneuquen\b", re.IGNORECASE), "neuquen_legislatura", "Legislatura de Neuquen"),
-    DomainPattern(re.compile(r"\btucuman\b", re.IGNORECASE), "tucuman", "Portal de datos de Tucuman"),
-    DomainPattern(re.compile(r"\bmisiones\b", re.IGNORECASE), "misiones", "Portal de datos de Misiones"),
+    DomainPattern(
+        re.compile(r"\bprovincia de buenos aires\b|\bpba\b|\bbonaerense\b", re.IGNORECASE),
+        "pba",
+        "Portal de Buenos Aires Provincia",
+    ),
+    DomainPattern(
+        re.compile(r"\bcordoba estadistica\b", re.IGNORECASE),
+        "cordoba_estadistica",
+        "Portal de Cordoba Estadistica",
+    ),
+    DomainPattern(
+        re.compile(r"\bcordoba\b", re.IGNORECASE), "cordoba_prov", "Portal de datos de Cordoba"
+    ),
+    DomainPattern(
+        re.compile(r"\bmendoza\b", re.IGNORECASE), "mendoza", "Portal de datos de Mendoza"
+    ),
+    DomainPattern(
+        re.compile(r"\bentre rios\b|\bentrerios\b", re.IGNORECASE),
+        "entrerios",
+        "Portal de datos de Entre Rios",
+    ),
+    DomainPattern(
+        re.compile(r"\bneuquen\b", re.IGNORECASE), "neuquen_legislatura", "Legislatura de Neuquen"
+    ),
+    DomainPattern(
+        re.compile(r"\btucuman\b", re.IGNORECASE), "tucuman", "Portal de datos de Tucuman"
+    ),
+    DomainPattern(
+        re.compile(r"\bmisiones\b", re.IGNORECASE), "misiones", "Portal de datos de Misiones"
+    ),
     DomainPattern(re.compile(r"\bchaco\b", re.IGNORECASE), "chaco", "Portal de datos de Chaco"),
-    DomainPattern(re.compile(r"\bciudad de mendoza\b", re.IGNORECASE), "ciudad_mendoza", "Portal de Ciudad de Mendoza"),
-    DomainPattern(re.compile(r"\bcorrientes\b", re.IGNORECASE), "corrientes", "Portal de Ciudad de Corrientes"),
+    DomainPattern(
+        re.compile(r"\bciudad de mendoza\b", re.IGNORECASE),
+        "ciudad_mendoza",
+        "Portal de Ciudad de Mendoza",
+    ),
+    DomainPattern(
+        re.compile(r"\bcorrientes\b", re.IGNORECASE), "corrientes", "Portal de Ciudad de Corrientes"
+    ),
     # Institucional
-    DomainPattern(re.compile(r"\bdiputados\b|\bcongreso\b|\bcamara\b", re.IGNORECASE), "diputados", "Portal de Camara de Diputados"),
+    DomainPattern(
+        re.compile(r"\bdiputados\b|\bcongreso\b|\bcamara\b", re.IGNORECASE),
+        "diputados",
+        "Portal de Camara de Diputados",
+    ),
     DomainPattern(re.compile(r"\barsat\b", re.IGNORECASE), "arsat", "Portal de ARSAT"),
 ]
 
@@ -1918,7 +2034,10 @@ def resolve_hints(query: str) -> list[RoutingHint]:
             param_key = str(sorted(hint.params.items()))
             dedup_key = f"{hint.action}:{param_key}"
 
-            if dedup_key not in seen_actions or hint.confidence > seen_actions[dedup_key].confidence:
+            if (
+                dedup_key not in seen_actions
+                or hint.confidence > seen_actions[dedup_key].confidence
+            ):
                 seen_actions[dedup_key] = hint
 
     # Also check domain patterns for portal-specific routing
@@ -1931,7 +2050,10 @@ def resolve_hints(query: str) -> list[RoutingHint]:
                 description=dp.description,
             )
             dedup_key = f"search_ckan:{dp.portal_id}"
-            if dedup_key not in seen_actions or hint.confidence > seen_actions[dedup_key].confidence:
+            if (
+                dedup_key not in seen_actions
+                or hint.confidence > seen_actions[dedup_key].confidence
+            ):
                 seen_actions[dedup_key] = hint
 
     # Sort by confidence descending
@@ -1961,8 +2083,7 @@ def format_hints_for_prompt(hints: list[RoutingHint]) -> str:
     for i, h in enumerate(top, 1):
         params_str = ", ".join(f"{k}={v!r}" for k, v in h.params.items())
         lines.append(
-            f"  {i}. {h.action}({params_str}) "
-            f"[confianza={h.confidence:.0%}] — {h.description}"
+            f"  {i}. {h.action}({params_str}) [confianza={h.confidence:.0%}] — {h.description}"
         )
 
     # Append taxonomy context if we can derive it from hints
@@ -1982,67 +2103,226 @@ TAXONOMY: dict[str, dict] = {
     "economia": {
         "label": "Economía y Finanzas",
         "children": {
-            "inflacion": {"label": "Inflación / Precios", "actions": ["query_series"], "cache_pattern": ["cache_*precio*", "cache_indec_ipc*"]},
-            "actividad": {"label": "Actividad Económica", "actions": ["query_series"], "cache_pattern": ["cache_indec_emae*"]},
-            "empleo": {"label": "Empleo y Salarios", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*empleo*", "cache_*laboral*", "cache_*asalariad*"]},
-            "comercio_exterior": {"label": "Comercio Exterior", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*export*", "cache_*import*"]},
-            "finanzas": {"label": "Finanzas / Dólar / BCRA", "actions": ["query_argentina_datos", "query_bcra", "query_series"], "cache_pattern": ["cache_bcra_*"]},
-            "deuda": {"label": "Deuda Pública", "actions": ["query_sandbox"], "cache_pattern": ["cache_presupuesto_deuda*"]},
-            "produccion": {"label": "Producción Industrial", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*producci*", "cache_*industrial*"]},
-            "pobreza": {"label": "Pobreza e Indigencia", "actions": ["query_series"], "cache_pattern": []},
-            "precios": {"label": "Precios y Canasta Básica", "actions": ["query_series", "query_sandbox"], "cache_pattern": ["cache_*precio*", "cache_*canasta*"]},
+            "inflacion": {
+                "label": "Inflación / Precios",
+                "actions": ["query_series"],
+                "cache_pattern": ["cache_*precio*", "cache_indec_ipc*"],
+            },
+            "actividad": {
+                "label": "Actividad Económica",
+                "actions": ["query_series"],
+                "cache_pattern": ["cache_indec_emae*"],
+            },
+            "empleo": {
+                "label": "Empleo y Salarios",
+                "actions": ["query_series", "query_sandbox"],
+                "cache_pattern": ["cache_*empleo*", "cache_*laboral*", "cache_*asalariad*"],
+            },
+            "comercio_exterior": {
+                "label": "Comercio Exterior",
+                "actions": ["query_series", "query_sandbox"],
+                "cache_pattern": ["cache_*export*", "cache_*import*"],
+            },
+            "finanzas": {
+                "label": "Finanzas / Dólar / BCRA",
+                "actions": ["query_argentina_datos", "query_bcra", "query_series"],
+                "cache_pattern": ["cache_bcra_*"],
+            },
+            "deuda": {
+                "label": "Deuda Pública",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_presupuesto_deuda*"],
+            },
+            "produccion": {
+                "label": "Producción Industrial",
+                "actions": ["query_series", "query_sandbox"],
+                "cache_pattern": ["cache_*producci*", "cache_*industrial*"],
+            },
+            "pobreza": {
+                "label": "Pobreza e Indigencia",
+                "actions": ["query_series"],
+                "cache_pattern": [],
+            },
+            "precios": {
+                "label": "Precios y Canasta Básica",
+                "actions": ["query_series", "query_sandbox"],
+                "cache_pattern": ["cache_*precio*", "cache_*canasta*"],
+            },
         },
     },
     "gobierno": {
         "label": "Gobierno y Transparencia",
         "children": {
-            "presupuesto": {"label": "Presupuesto Nacional", "actions": ["query_sandbox"], "cache_pattern": ["cache_presupuesto_*"]},
-            "compras_publicas": {"label": "Compras Públicas", "actions": ["query_sandbox"], "cache_pattern": ["cache_bac_*", "cache_*compras*", "cache_*licitaci*"]},
-            "ddjj": {"label": "Declaraciones Juradas", "actions": ["query_ddjj"], "cache_pattern": []},
-            "autoridades": {"label": "Autoridades Nacionales / PEN / Gobernadores", "actions": ["query_sandbox"], "cache_pattern": ["cache_autoridades_pen*", "cache_gobernadores"]},
-            "congreso": {"label": "Congreso / Diputados", "actions": ["query_sesiones", "query_staff", "query_sandbox", "search_ckan"], "cache_pattern": ["cache_*comision*", "cache_*personal*", "cache_diputados", "cache_bloques"]},
-            "senado": {"label": "Senado", "actions": ["query_sandbox"], "cache_pattern": ["cache_senado_*"]},
-            "elecciones": {"label": "Elecciones", "actions": ["query_sandbox"], "cache_pattern": ["cache_elecciones_*"]},
-            "gobierno": {"label": "Gobierno y Normativa", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*gobierno*", "cache_*decreto*"]},
-            "justicia": {"label": "Justicia", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*justici*"]},
+            "presupuesto": {
+                "label": "Presupuesto Nacional",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_presupuesto_*"],
+            },
+            "compras_publicas": {
+                "label": "Compras Públicas",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_bac_*", "cache_*compras*", "cache_*licitaci*"],
+            },
+            "ddjj": {
+                "label": "Declaraciones Juradas",
+                "actions": ["query_ddjj"],
+                "cache_pattern": [],
+            },
+            "autoridades": {
+                "label": "Autoridades Nacionales / PEN / Gobernadores",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_autoridades_pen*", "cache_gobernadores"],
+            },
+            "congreso": {
+                "label": "Congreso / Diputados",
+                "actions": ["query_sesiones", "query_staff", "query_sandbox", "search_ckan"],
+                "cache_pattern": [
+                    "cache_*comision*",
+                    "cache_*personal*",
+                    "cache_diputados",
+                    "cache_bloques",
+                ],
+            },
+            "senado": {
+                "label": "Senado",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_senado_*"],
+            },
+            "elecciones": {
+                "label": "Elecciones",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_elecciones_*"],
+            },
+            "gobierno": {
+                "label": "Gobierno y Normativa",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*gobierno*", "cache_*decreto*"],
+            },
+            "justicia": {
+                "label": "Justicia",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*justici*"],
+            },
         },
     },
     "social": {
         "label": "Desarrollo Social y Humano",
         "children": {
-            "educacion": {"label": "Educación", "actions": ["query_sandbox"], "cache_pattern": ["cache_*educaci*", "cache_*escuel*", "cache_*docent*", "cache_*universid*"]},
-            "salud": {"label": "Salud", "actions": ["query_sandbox"], "cache_pattern": ["cache_*salud*", "cache_*hospital*", "cache_*vacun*", "cache_*covid*"]},
-            "seguridad": {"label": "Seguridad", "actions": ["query_sandbox"], "cache_pattern": ["cache_*seguridad*", "cache_*delito*", "cache_*homicid*"]},
-            "genero": {"label": "Género", "actions": ["query_sandbox"], "cache_pattern": ["cache_*genero*", "cache_*mujer*", "cache_*femicid*"]},
-            "social": {"label": "Programas Sociales", "actions": ["query_sandbox"], "cache_pattern": ["cache_*social*", "cache_*asistenci*", "cache_*beneficiari*"]},
-            "poblacion": {"label": "Población y Demografía", "actions": ["query_sandbox"], "cache_pattern": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"]},
-            "vivienda": {"label": "Vivienda", "actions": ["query_sandbox"], "cache_pattern": ["cache_*viviend*", "cache_*construcci*"]},
-            "derechos_humanos": {"label": "Derechos Humanos", "actions": ["query_sandbox"], "cache_pattern": ["cache_*derecho*human*", "cache_*memoria*"]},
-            "cultura": {"label": "Cultura", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*cultur*", "cache_*museo*"]},
+            "educacion": {
+                "label": "Educación",
+                "actions": ["query_sandbox"],
+                "cache_pattern": [
+                    "cache_*educaci*",
+                    "cache_*escuel*",
+                    "cache_*docent*",
+                    "cache_*universid*",
+                ],
+            },
+            "salud": {
+                "label": "Salud",
+                "actions": ["query_sandbox"],
+                "cache_pattern": [
+                    "cache_*salud*",
+                    "cache_*hospital*",
+                    "cache_*vacun*",
+                    "cache_*covid*",
+                ],
+            },
+            "seguridad": {
+                "label": "Seguridad",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*seguridad*", "cache_*delito*", "cache_*homicid*"],
+            },
+            "genero": {
+                "label": "Género",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*genero*", "cache_*mujer*", "cache_*femicid*"],
+            },
+            "social": {
+                "label": "Programas Sociales",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*social*", "cache_*asistenci*", "cache_*beneficiari*"],
+            },
+            "poblacion": {
+                "label": "Población y Demografía",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"],
+            },
+            "vivienda": {
+                "label": "Vivienda",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*viviend*", "cache_*construcci*"],
+            },
+            "derechos_humanos": {
+                "label": "Derechos Humanos",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*derecho*human*", "cache_*memoria*"],
+            },
+            "cultura": {
+                "label": "Cultura",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*cultur*", "cache_*museo*"],
+            },
         },
     },
     "infraestructura": {
         "label": "Infraestructura y Servicios",
         "children": {
-            "transporte": {"label": "Transporte", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*transport*", "cache_*subte*", "cache_*ecobici*"]},
-            "energia": {"label": "Energía", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*energ*", "cache_*petrole*", "cache_*hidrocarb*"]},
-            "telecomunicaciones": {"label": "Telecomunicaciones", "actions": ["query_sandbox"], "cache_pattern": ["cache_*teleco*", "cache_*internet*", "cache_*telefon*"]},
-            "infraestructura": {"label": "Obra Pública", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*infraestr*", "cache_*obra_pub*"]},
+            "transporte": {
+                "label": "Transporte",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*transport*", "cache_*subte*", "cache_*ecobici*"],
+            },
+            "energia": {
+                "label": "Energía",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*energ*", "cache_*petrole*", "cache_*hidrocarb*"],
+            },
+            "telecomunicaciones": {
+                "label": "Telecomunicaciones",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*teleco*", "cache_*internet*", "cache_*telefon*"],
+            },
+            "infraestructura": {
+                "label": "Obra Pública",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*infraestr*", "cache_*obra_pub*"],
+            },
         },
     },
     "recursos_naturales": {
         "label": "Recursos Naturales y Ambiente",
         "children": {
-            "agro": {"label": "Agro y Ganadería", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*agro*", "cache_*ganad*", "cache_*senasa*"]},
-            "ambiente": {"label": "Medio Ambiente", "actions": ["query_sandbox", "search_ckan"], "cache_pattern": ["cache_*ambient*", "cache_*forestal*", "cache_*residuo*"]},
-            "turismo": {"label": "Turismo", "actions": ["query_sandbox"], "cache_pattern": ["cache_*turism*"]},
+            "agro": {
+                "label": "Agro y Ganadería",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*agro*", "cache_*ganad*", "cache_*senasa*"],
+            },
+            "ambiente": {
+                "label": "Medio Ambiente",
+                "actions": ["query_sandbox", "search_ckan"],
+                "cache_pattern": ["cache_*ambient*", "cache_*forestal*", "cache_*residuo*"],
+            },
+            "turismo": {
+                "label": "Turismo",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*turism*"],
+            },
         },
     },
     "ciencia": {
         "label": "Ciencia, Tecnología e Indicadores",
         "children": {
-            "ciencia": {"label": "Ciencia y Tecnología", "actions": ["query_sandbox"], "cache_pattern": ["cache_*ciencia*", "cache_*tecnolog*", "cache_*conicet*"]},
-            "indicadores": {"label": "Indicadores y Estadísticas", "actions": ["query_sandbox"], "cache_pattern": ["cache_*indice*", "cache_*indicador*", "cache_*estadistic*"]},
+            "ciencia": {
+                "label": "Ciencia y Tecnología",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*ciencia*", "cache_*tecnolog*", "cache_*conicet*"],
+            },
+            "indicadores": {
+                "label": "Indicadores y Estadísticas",
+                "actions": ["query_sandbox"],
+                "cache_pattern": ["cache_*indice*", "cache_*indicador*", "cache_*estadistic*"],
+            },
         },
     },
 }
@@ -2108,11 +2388,7 @@ def resolve_taxonomy_context_from_hints(hints: list[RoutingHint]) -> str:
         if hint_tables and len(tax_matches) > 4:
             filtered = []
             for domain_label, cat_label, patterns in tax_matches:
-                if patterns and any(
-                    hp in tp or tp in hp
-                    for hp in hint_tables
-                    for tp in patterns
-                ):
+                if patterns and any(hp in tp or tp in hp for hp in hint_tables for tp in patterns):
                     filtered.append((domain_label, cat_label, patterns))
             if filtered:
                 tax_matches = filtered

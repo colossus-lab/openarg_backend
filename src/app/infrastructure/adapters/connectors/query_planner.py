@@ -12,22 +12,24 @@ from app.prompts import load_prompt
 logger = logging.getLogger(__name__)
 
 # Actions recognised by _dispatch_step in SmartQueryService
-_VALID_ACTIONS: frozenset[str] = frozenset({
-    "search_ckan",
-    "query_series",
-    "query_ddjj",
-    "query_argentina_datos",
-    "query_georef",
-    "query_sesiones",
-    "query_bcra",
-    "query_staff",
-    "query_sandbox",
-    "search_datasets",
-    # Passthrough / meta-actions (return [] but are valid in a plan)
-    "analyze",
-    "compare",
-    "synthesize",
-})
+_VALID_ACTIONS: frozenset[str] = frozenset(
+    {
+        "search_ckan",
+        "query_series",
+        "query_ddjj",
+        "query_argentina_datos",
+        "query_georef",
+        "query_sesiones",
+        "query_bcra",
+        "query_staff",
+        "query_sandbox",
+        "search_datasets",
+        # Passthrough / meta-actions (return [] but are valid in a plan)
+        "analyze",
+        "compare",
+        "synthesize",
+    }
+)
 
 
 def _validate_plan(plan_data: dict) -> dict:
@@ -40,7 +42,9 @@ def _validate_plan(plan_data: dict) -> dict:
     """
     raw_steps = plan_data.get("steps", [])
     if not isinstance(raw_steps, list):
-        logger.warning("Plan validation: 'steps' is not a list (%s), resetting", type(raw_steps).__name__)
+        logger.warning(
+            "Plan validation: 'steps' is not a list (%s), resetting", type(raw_steps).__name__
+        )
         plan_data["steps"] = []
         return plan_data
 
@@ -63,7 +67,8 @@ def _validate_plan(plan_data: dict) -> dict:
         if action not in _VALID_ACTIONS:
             logger.warning(
                 "Plan validation: step '%s' has invalid action '%s', skipping",
-                step_id, action,
+                step_id,
+                action,
             )
             continue
 
@@ -81,7 +86,9 @@ def _validate_plan(plan_data: dict) -> dict:
             logger.warning(
                 "Plan validation: step '%s' had invalid depends_on refs removed "
                 "(before=%s, after=%s)",
-                step_id, depends, cleaned_depends,
+                step_id,
+                depends,
+                cleaned_depends,
             )
         step[depends_key] = cleaned_depends
 
@@ -90,7 +97,9 @@ def _validate_plan(plan_data: dict) -> dict:
 
     if len(valid_steps) != len(raw_steps):
         logger.info(
-            "Plan validation: kept %d / %d steps", len(valid_steps), len(raw_steps),
+            "Plan validation: kept %d / %d steps",
+            len(valid_steps),
+            len(raw_steps),
         )
 
     # ── Cycle detection (DFS) ──
@@ -120,7 +129,9 @@ def _validate_plan(plan_data: dict) -> dict:
                     "Plan validation: circular dependency detected — "
                     "step '%s' depends on '%s' which is still in progress. "
                     "Removing depends_on for '%s'.",
-                    node, neighbour, node,
+                    node,
+                    neighbour,
+                    node,
                 )
                 step_by_id[node][dep_key] = []
                 adj[node] = []
@@ -141,7 +152,8 @@ def _validate_plan(plan_data: dict) -> dict:
 
 
 async def _classify_ambiguity(
-    llm: ILLMProvider, question: str,
+    llm: ILLMProvider,
+    question: str,
 ) -> dict | None:
     """Use a lightweight LLM call to classify query ambiguity.
 
@@ -159,7 +171,9 @@ async def _classify_ambiguity(
     ]
     try:
         response = await llm.chat(
-            messages, temperature=0.0, max_tokens=256,
+            messages,
+            temperature=0.0,
+            max_tokens=256,
         )
         text = response.content.strip()
         # Strip markdown fences if present
@@ -240,7 +254,7 @@ async def generate_plan(
         user_content += f"\n\n{hints_text}"
     user_content += (
         "\n\nSi la pregunta del usuario hace referencia a algo mencionado antes "
-        "en el historial (ej: \"y eso?\", \"compará\", \"lo mismo pero...\"), "
+        'en el historial (ej: "y eso?", "compará", "lo mismo pero..."), '
         "usá el contexto del historial para entender a qué se refiere."
         "\n\nGenerá el plan de ejecución en JSON."
     )
@@ -308,18 +322,37 @@ def _fallback_plan(question: str) -> ExecutionPlan:
     """Regex-based classification fallback when LLM fails."""
     lower = question.lower()
 
-    is_national = bool(re.search(r"\b(nacional|nivel nacional|datos\.gob|cat[aá]logo|datasets?\s+(hay|tiene|disponibles))\b", lower, re.IGNORECASE))
-    is_list_all = bool(re.search(r"\b(todos|listado|cat[aá]logo|cu[aá]ntos|qu[eé]\s+(hay|tiene|datos))\b", lower, re.IGNORECASE))
+    is_national = bool(
+        re.search(
+            r"\b(nacional|nivel nacional|datos\.gob|cat[aá]logo|datasets?\s+(hay|tiene|disponibles))\b",
+            lower,
+            re.IGNORECASE,
+        )
+    )
+    is_list_all = bool(
+        re.search(
+            r"\b(todos|listado|cat[aá]logo|cu[aá]ntos|qu[eé]\s+(hay|tiene|datos))\b",
+            lower,
+            re.IGNORECASE,
+        )
+    )
 
     # Detect economic queries for series de tiempo fallback
-    is_economic = bool(re.search(
-        r"(inflaci[oó]n|ipc|d[oó]lar|tipo\s+de\s+cambio|pbi|emae|reservas|tasa|salario|desempleo"
-        r"|exportaci|importaci|canasta|presupuesto|base\s+monetaria|leliq)",
-        lower, re.IGNORECASE,
-    ))
+    is_economic = bool(
+        re.search(
+            r"(inflaci[oó]n|ipc|d[oó]lar|tipo\s+de\s+cambio|pbi|emae|reservas|tasa|salario|desempleo"
+            r"|exportaci|importaci|canasta|presupuesto|base\s+monetaria|leliq)",
+            lower,
+            re.IGNORECASE,
+        )
+    )
 
     # Detect DDJJ queries
-    is_ddjj = bool(re.search(r"(ddjj|declaraci[oó]n\s+jurada|patrimonio\s+de\s+diputado)", lower, re.IGNORECASE))
+    is_ddjj = bool(
+        re.search(
+            r"(ddjj|declaraci[oó]n\s+jurada|patrimonio\s+de\s+diputado)", lower, re.IGNORECASE
+        )
+    )
 
     if is_economic:
         return ExecutionPlan(
@@ -360,12 +393,16 @@ def _fallback_plan(question: str) -> ExecutionPlan:
 
     return ExecutionPlan(
         query=question,
-        intent="Explorar catálogo nacional de datos abiertos" if is_national else "Búsqueda general de datos",
+        intent="Explorar catálogo nacional de datos abiertos"
+        if is_national
+        else "Búsqueda general de datos",
         steps=[
             PlanStep(
                 id="step_1",
                 action="search_ckan",
-                description="Listar datasets del portal nacional" if is_national else f"Buscar datasets: {question}",
+                description="Listar datasets del portal nacional"
+                if is_national
+                else f"Buscar datasets: {question}",
                 params={
                     "query": "*" if is_list_all else question,
                     **({"portalId": "nacional"} if is_national else {}),

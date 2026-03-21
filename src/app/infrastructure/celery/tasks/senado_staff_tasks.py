@@ -1,4 +1,5 @@
 """Scrape Senado senator profiles for staff assignments."""
+
 from __future__ import annotations
 
 import logging
@@ -14,15 +15,11 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
-_SENATORS_URL = (
-    "https://www.senado.gob.ar/micrositios/DatosAbiertos/ExportarListadoSenadores/json"
-)
+_SENATORS_URL = "https://www.senado.gob.ar/micrositios/DatosAbiertos/ExportarListadoSenadores/json"
 _PROFILE_URL = "https://www.senado.gob.ar/senadores/senador/{senator_id}"
 _REQUEST_DELAY = 1.5  # seconds between requests
 
-_RE_STAFF_ENTRY = re.compile(
-    r"<td>\s*([^<]+?)\s*</td>\s*<td>\s*([A-Z]-?\d+)\s*</td>"
-)
+_RE_STAFF_ENTRY = re.compile(r"<td>\s*([^<]+?)\s*</td>\s*<td>\s*([A-Z]-?\d+)\s*</td>")
 
 
 def _fetch_senators(client: httpx.Client) -> list[dict]:
@@ -128,32 +125,39 @@ def scrape_senado_staff(self):
                 except (httpx.HTTPError, ValueError) as exc:
                     logger.warning(
                         "Failed to fetch profile for senator %s (%s): %s",
-                        senator_id, senator_name, exc,
+                        senator_id,
+                        senator_name,
+                        exc,
                     )
                     time.sleep(_REQUEST_DELAY)
                     continue
 
                 for employee_name, categoria in staff:
-                    all_records.append({
-                        "senator_id": senator_id,
-                        "senator_name": senator_name,
-                        "bloque": bloque,
-                        "provincia": provincia,
-                        "employee_name": employee_name.upper(),
-                        "categoria": categoria,
-                    })
+                    all_records.append(
+                        {
+                            "senator_id": senator_id,
+                            "senator_name": senator_name,
+                            "bloque": bloque,
+                            "provincia": provincia,
+                            "employee_name": employee_name.upper(),
+                            "categoria": categoria,
+                        }
+                    )
 
                 senators_scraped += 1
                 logger.debug(
                     "Senator %s (%s): %d staff members",
-                    senator_id, senator_name, len(staff),
+                    senator_id,
+                    senator_name,
+                    len(staff),
                 )
                 time.sleep(_REQUEST_DELAY)
 
         inserted = _persist_all(engine, all_records)
         logger.info(
             "Senado staff scrape complete: %d senators, %d staff inserted",
-            senators_scraped, inserted,
+            senators_scraped,
+            inserted,
         )
 
     except SoftTimeLimitExceeded:

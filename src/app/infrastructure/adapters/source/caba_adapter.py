@@ -10,9 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class CABADataAdapter(IDataSource):
-    def __init__(
-        self, base_url: str = "https://data.buenosaires.gob.ar/api/3/action"
-    ) -> None:
+    def __init__(self, base_url: str = "https://data.buenosaires.gob.ar/api/3/action") -> None:
         self._base_url = base_url
         self._client = httpx.AsyncClient(timeout=60.0)
 
@@ -20,9 +18,7 @@ class CABADataAdapter(IDataSource):
     def portal_name(self) -> str:
         return "caba"
 
-    async def fetch_catalog(
-        self, limit: int = 100, offset: int = 0
-    ) -> list[CatalogEntry]:
+    async def fetch_catalog(self, limit: int = 100, offset: int = 0) -> list[CatalogEntry]:
         url = f"{self._base_url}/package_search"
         params = {"rows": limit, "start": offset}
 

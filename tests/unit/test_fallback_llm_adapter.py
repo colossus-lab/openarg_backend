@@ -16,9 +16,7 @@ from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdap
 class FakeLLM(ILLMProvider):
     """Minimal LLM stub for testing."""
 
-    def __init__(
-        self, name: str, answer: str | None = None, error: Exception | None = None
-    ):
+    def __init__(self, name: str, answer: str | None = None, error: Exception | None = None):
         self._name = name
         self._answer = answer
         self._error = error

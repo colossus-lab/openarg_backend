@@ -4,6 +4,7 @@ Analyst Worker — Agente analista.
 Recibe una query del usuario, busca datasets relevantes via vector search,
 recolecta los datos necesarios, y genera un análisis real con código Python.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,7 +26,9 @@ from app.prompts import load_prompt
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="openarg.analyze_query", bind=True, max_retries=2, soft_time_limit=600, time_limit=720)  # type: ignore[misc]
+@celery_app.task(
+    name="openarg.analyze_query", bind=True, max_retries=2, soft_time_limit=600, time_limit=720
+)  # type: ignore[misc]
 def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
     """
     Pipeline completo de análisis:
@@ -71,11 +74,17 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
         try:
             plan = json.loads(plan_text)
         except json.JSONDecodeError:
-            plan = {"datasets_needed": [question], "analysis_steps": ["analyze"], "output_format": "text"}
+            plan = {
+                "datasets_needed": [question],
+                "analysis_steps": ["analyze"],
+                "output_format": "text",
+            }
 
         with engine.begin() as conn:
             conn.execute(
-                text("UPDATE user_queries SET plan_json = :plan, status = 'collecting' WHERE id = CAST(:id AS uuid)"),
+                text(
+                    "UPDATE user_queries SET plan_json = :plan, status = 'collecting' WHERE id = CAST(:id AS uuid)"
+                ),
                 {"plan": json.dumps(plan), "id": query_id},
             )
 
@@ -169,14 +178,16 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
 
         datasets_info: list[dict[str, Any]] = []
         for row in results:
-            datasets_info.append({
-                "id": row.dataset_id,
-                "title": row.title,
-                "description": row.description or "",
-                "portal": row.portal,
-                "columns": row.columns or "",
-                "score": float(row.score),
-            })
+            datasets_info.append(
+                {
+                    "id": row.dataset_id,
+                    "title": row.title,
+                    "description": row.description or "",
+                    "portal": row.portal,
+                    "columns": row.columns or "",
+                    "score": float(row.score),
+                }
+            )
 
             # Ensure dataset is cached
             if not row.is_cached and row.download_url:
@@ -213,9 +224,7 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
                         cols = conn.execute(text(cols_sql)).keys()
 
                     col_names = list(cols)
-                    rows_str = "\n".join(
-                        ["\t".join(str(v) for v in row) for row in sample]
-                    )
+                    rows_str = "\n".join(["\t".join(str(v) for v in row) for row in sample])
                     data_context.append(
                         f"Dataset: {ds['title']} (portal: {ds['portal']})\n"
                         f"Columnas: {', '.join(col_names)}\n"
@@ -263,7 +272,10 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
         duration_ms = int((time.time() - start) * 1000)
 
         # Save results
-        sources = [{"title": ds["title"], "portal": ds["portal"], "score": ds["score"]} for ds in datasets_info]
+        sources = [
+            {"title": ds["title"], "portal": ds["portal"], "score": ds["score"]}
+            for ds in datasets_info
+        ]
 
         with engine.begin() as conn:
             conn.execute(

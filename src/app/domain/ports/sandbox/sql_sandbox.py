@@ -23,16 +23,15 @@ class SandboxResult:
 
 class ISQLSandbox(ABC):
     @abstractmethod
-    async def execute_readonly(
-        self, sql: str, timeout_seconds: int = 10
-    ) -> SandboxResult: ...
+    async def execute_readonly(self, sql: str, timeout_seconds: int = 10) -> SandboxResult: ...
 
     @abstractmethod
     async def list_cached_tables(self) -> list[CachedTableInfo]: ...
 
     @abstractmethod
     async def get_column_types(
-        self, table_names: list[str],
+        self,
+        table_names: list[str],
     ) -> dict[str, list[tuple[str, str]]]:
         """Return {table_name: [(column_name, data_type), ...]} for given tables."""
         ...

@@ -53,8 +53,7 @@ def upgrade() -> None:
 
     # GIN index on tags for fast tag-based filtering
     op.execute(
-        "CREATE INDEX IF NOT EXISTS idx_table_catalog_tags_gin "
-        "ON table_catalog USING gin (tags)"
+        "CREATE INDEX IF NOT EXISTS idx_table_catalog_tags_gin ON table_catalog USING gin (tags)"
     )
 
     # B-tree index on (domain, subdomain) for category lookups

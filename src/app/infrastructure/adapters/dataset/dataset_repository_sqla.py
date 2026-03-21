@@ -30,9 +30,7 @@ class DatasetRepositorySQLA(IDatasetRepository):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_by_portal(
-        self, portal: str, limit: int = 100, offset: int = 0
-    ) -> list[Dataset]:
+    async def list_by_portal(self, portal: str, limit: int = 100, offset: int = 0) -> list[Dataset]:
         stmt = (
             select(Dataset)
             .where(Dataset.portal == portal)

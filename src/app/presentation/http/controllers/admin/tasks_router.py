@@ -4,6 +4,7 @@ Admin Tasks Router — Manual trigger and status for all background tasks.
 Protected by ADMIN_API_KEY (env var). Falls back to BACKEND_API_KEY.
 Header: X-Admin-Key
 """
+
 from __future__ import annotations
 
 import logging
@@ -222,6 +223,7 @@ TASK_REGISTRY: dict[str, dict] = {
 
 # ── List all tasks ───────────────────────────────────────────────
 
+
 @router.get("/", dependencies=[Depends(verify_admin_key)])
 async def list_tasks():
     """List all available background tasks with their descriptions."""
@@ -236,6 +238,7 @@ async def list_tasks():
 
 
 # ── Trigger a task ──────────────────────────────────────────────
+
 
 @router.post("/{task_id}/run", dependencies=[Depends(verify_admin_key)])
 async def run_task(task_id: str, params: dict | None = None):
@@ -281,6 +284,7 @@ async def run_task(task_id: str, params: dict | None = None):
 
 # ── Check task status ───────────────────────────────────────────
 
+
 @router.get("/status/{celery_task_id}", dependencies=[Depends(verify_admin_key)])
 async def get_task_status(celery_task_id: str):
     """
@@ -325,6 +329,7 @@ async def get_task_status(celery_task_id: str):
 
 # ── Bulk status for all recent tasks ─────────────────────────────
 
+
 @router.get("/active", dependencies=[Depends(verify_admin_key)])
 async def get_active_tasks():
     """
@@ -340,13 +345,15 @@ async def get_active_tasks():
         items = []
         for worker, tasks in tasks_by_worker.items():
             for t in tasks:
-                items.append({
-                    "worker": worker,
-                    "celery_task_id": t.get("id", ""),
-                    "name": t.get("name", ""),
-                    "args": t.get("args", ""),
-                    "started": t.get("time_start"),
-                })
+                items.append(
+                    {
+                        "worker": worker,
+                        "celery_task_id": t.get("id", ""),
+                        "name": t.get("name", ""),
+                        "args": t.get("args", ""),
+                        "started": t.get("time_start"),
+                    }
+                )
         return items
 
     return {
@@ -357,6 +364,7 @@ async def get_active_tasks():
 
 
 # ── Data source status (DB-level) ────────────────────────────────
+
 
 @router.get("/sources/status", dependencies=[Depends(verify_admin_key)])
 async def get_sources_status():
@@ -369,7 +377,8 @@ async def get_sources_status():
     try:
         with engine.connect() as conn:
             # Datasets per portal
-            portal_stats = conn.execute(text("""
+            portal_stats = conn.execute(
+                text("""
                 SELECT portal,
                        COUNT(*) AS total_datasets,
                        SUM(CASE WHEN is_cached THEN 1 ELSE 0 END) AS cached,
@@ -377,19 +386,24 @@ async def get_sources_status():
                 FROM datasets
                 GROUP BY portal
                 ORDER BY portal
-            """)).fetchall()
+            """)
+            ).fetchall()
 
             # Cached tables status
-            cache_stats = conn.execute(text("""
+            cache_stats = conn.execute(
+                text("""
                 SELECT status, COUNT(*) AS count
                 FROM cached_datasets
                 GROUP BY status
-            """)).fetchall()
+            """)
+            ).fetchall()
 
             # Total rows in cache
-            total_cached_rows = conn.execute(text(
-                "SELECT COALESCE(SUM(row_count), 0) FROM cached_datasets WHERE status = 'ready'"
-            )).scalar()
+            total_cached_rows = conn.execute(
+                text(
+                    "SELECT COALESCE(SUM(row_count), 0) FROM cached_datasets WHERE status = 'ready'"
+                )
+            ).scalar()
 
         return {
             "portals": [
@@ -409,6 +423,7 @@ async def get_sources_status():
 
 
 # ── Cancel a task ────────────────────────────────────────────────
+
 
 @router.post("/cancel/{celery_task_id}", dependencies=[Depends(verify_admin_key)])
 async def cancel_task(celery_task_id: str):

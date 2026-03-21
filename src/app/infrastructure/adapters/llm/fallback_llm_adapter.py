@@ -112,6 +112,4 @@ class FallbackLLMAdapter(ILLMProvider):
                         len(self.chain),
                         exc,
                     )
-        raise RuntimeError(
-            f"All {len(self.chain)} LLM services failed to stream"
-        ) from last_exc
+        raise RuntimeError(f"All {len(self.chain)} LLM services failed to stream") from last_exc

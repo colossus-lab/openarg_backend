@@ -1,4 +1,5 @@
 """Prometheus metrics definitions for OpenArg."""
+
 from __future__ import annotations
 
 from prometheus_client import Counter, Gauge, Histogram

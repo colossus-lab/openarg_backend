@@ -3,6 +3,7 @@
 Scores input text against known prompt-injection patterns and critical keywords.
 A score >= 0.6 is considered suspicious.
 """
+
 from __future__ import annotations
 
 import re

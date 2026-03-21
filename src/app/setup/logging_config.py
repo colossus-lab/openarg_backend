@@ -1,4 +1,5 @@
 """Structured logging (structlog) and Sentry error tracking configuration."""
+
 from __future__ import annotations
 
 import logging

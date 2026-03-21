@@ -1,4 +1,5 @@
 """Tests for advanced query preprocessor — acronyms, temporal, provinces, LLM reformulation."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -63,9 +64,30 @@ class TestExpandAcronyms:
         assert "Producto Bruto Interno" in result
 
     def test_all_acronyms_defined(self):
-        expected = {"PBI", "IPC", "BCRA", "INDEC", "EMAE", "CBT", "CBA", "DDJJ",
-                    "HCDN", "ANSES", "AFIP", "ARCA", "CCL", "MEP", "LELIQ",
-                    "EMI", "FMI", "EMBI", "EPH", "UVA", "INTA", "CONICET"}
+        expected = {
+            "PBI",
+            "IPC",
+            "BCRA",
+            "INDEC",
+            "EMAE",
+            "CBT",
+            "CBA",
+            "DDJJ",
+            "HCDN",
+            "ANSES",
+            "AFIP",
+            "ARCA",
+            "CCL",
+            "MEP",
+            "LELIQ",
+            "EMI",
+            "FMI",
+            "EMBI",
+            "EPH",
+            "UVA",
+            "INTA",
+            "CONICET",
+        }
         assert expected.issubset(set(ACRONYM_MAP.keys()))
 
 

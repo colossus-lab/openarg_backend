@@ -1,4 +1,5 @@
 """Tests for chart builder functions."""
+
 from __future__ import annotations
 
 from app.application.smart_query_service import SmartQueryService
@@ -81,7 +82,7 @@ class TestExtractLLMCharts:
         text = (
             'Texto <!--CHART:{"type":"line_chart","title":"Test",'
             '"data":[{"x":1,"y":2},{"x":3,"y":4}],"xKey":"x","yKeys":["y"]}'
-            '--> más texto'
+            "--> más texto"
         )
         charts = _extract_llm_charts(text)
         assert len(charts) == 1

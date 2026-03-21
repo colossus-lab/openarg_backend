@@ -7,6 +7,7 @@ y cachea los resultados en PostgreSQL para consultas NL2SQL.
 Además descarga tablas de dimensiones (clasificadores presupuestarios)
 desde el repositorio DGSIAF del Ministerio de Economía.
 """
+
 from __future__ import annotations
 
 import io
@@ -32,29 +33,59 @@ DGSIAF_URL = "https://dgsiaf-repo.mecon.gob.ar/repository/pa/datasets"
 # ── API Endpoints (requieren PRESUPUESTO_API_TOKEN) ──────────
 ENDPOINTS = {
     "credito": [
-        "ejercicio_presupuestario", "jurisdiccion_desc", "subjurisdiccion_desc",
-        "entidad_desc", "finalidad_desc", "funcion_desc", "programa_desc",
-        "fuente_financiamiento_desc", "ubicacion_geografica_desc",
-        "credito_presupuestado", "credito_vigente",
-        "credito_comprometido", "credito_devengado", "credito_pagado",
+        "ejercicio_presupuestario",
+        "jurisdiccion_desc",
+        "subjurisdiccion_desc",
+        "entidad_desc",
+        "finalidad_desc",
+        "funcion_desc",
+        "programa_desc",
+        "fuente_financiamiento_desc",
+        "ubicacion_geografica_desc",
+        "credito_presupuestado",
+        "credito_vigente",
+        "credito_comprometido",
+        "credito_devengado",
+        "credito_pagado",
     ],
     "recurso": [
-        "ejercicio_presupuestario", "sector_desc", "tipo_desc", "clase_desc",
-        "concepto_desc", "subconcepto_desc", "fuente_financiamiento_desc",
-        "recurso_inicial", "recurso_vigente", "recurso_ingresado_percibido",
+        "ejercicio_presupuestario",
+        "sector_desc",
+        "tipo_desc",
+        "clase_desc",
+        "concepto_desc",
+        "subconcepto_desc",
+        "fuente_financiamiento_desc",
+        "recurso_inicial",
+        "recurso_vigente",
+        "recurso_ingresado_percibido",
     ],
     "pef": [
-        "ejercicio_presupuestario", "trimestre", "jurisdiccion_desc",
-        "programa_desc", "actividad_desc", "medicion_fisica_desc",
-        "unidad_medida_desc", "ubicacion_geografica_desc",
-        "programacion_inicial_DA", "programacion_anual_vig_trim",
+        "ejercicio_presupuestario",
+        "trimestre",
+        "jurisdiccion_desc",
+        "programa_desc",
+        "actividad_desc",
+        "medicion_fisica_desc",
+        "unidad_medida_desc",
+        "ubicacion_geografica_desc",
+        "programacion_inicial_DA",
+        "programacion_anual_vig_trim",
         "ejecutado_acumulado_trim",
     ],
     "transversal_financiero": [
-        "ejercicio_presupuestario", "jurisdiccion_desc", "programa_desc",
-        "finalidad_desc", "funcion_desc", "fuente_financiamiento_desc",
-        "ubicacion_geografica_desc", "inciso_desc", "etiqueta_desc",
-        "credito_inicial", "credito_vigente", "credito_ejecutado",
+        "ejercicio_presupuestario",
+        "jurisdiccion_desc",
+        "programa_desc",
+        "finalidad_desc",
+        "funcion_desc",
+        "fuente_financiamiento_desc",
+        "ubicacion_geografica_desc",
+        "inciso_desc",
+        "etiqueta_desc",
+        "credito_inicial",
+        "credito_vigente",
+        "credito_ejecutado",
     ],
 }
 
@@ -117,20 +148,21 @@ def _register_dataset(engine, endpoint: str, year: int, table_name: str, df: pd.
                     columns = EXCLUDED.columns, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": f"Datos de {endpoint} del presupuesto nacional, ejercicio {year}.",
                 "org": "Ministerio de Economía — Presupuesto Abierto",
                 "portal": portal,
                 "url": f"{API_URL}/{endpoint}",
                 "cols": columns_json,
                 "tags": f"presupuesto,{endpoint},{year},finanzas públicas",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -146,16 +178,24 @@ def _register_dataset(engine, endpoint: str, year: int, table_name: str, df: pd.
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
 
 
 @celery_app.task(
-    name="openarg.ingest_presupuesto", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
+    name="openarg.ingest_presupuesto",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def ingest_presupuesto(self):
     """Fetch budget data from the Presupuesto Abierto API and cache it."""
@@ -225,6 +265,7 @@ def ingest_presupuesto(self):
                         from app.infrastructure.celery.tasks.scraper_tasks import (
                             index_dataset_embedding,
                         )
+
                         index_dataset_embedding.delay(dataset_id)
 
                     results["ingested"] += 1
@@ -233,7 +274,10 @@ def ingest_presupuesto(self):
                 except Exception:
                     results["errors"] += 1
                     logger.warning(
-                        "Failed to ingest presupuesto %s %d", endpoint, year, exc_info=True,
+                        "Failed to ingest presupuesto %s %d",
+                        endpoint,
+                        year,
+                        exc_info=True,
                     )
 
         return results
@@ -252,7 +296,9 @@ def _dimension_table_name(dim_key: str, year: int) -> str:
     return f"cache_presupuesto_dim_{dim_key}_{year}"
 
 
-def _register_dimension(engine, dim_key: str, dim_info: dict, year: int, table_name: str, df: pd.DataFrame):
+def _register_dimension(
+    engine, dim_key: str, dim_info: dict, year: int, table_name: str, df: pd.DataFrame
+):
     """Upsert dimension table into datasets + cached_datasets."""
     source_id = f"presupuesto-dim-{dim_key}-{year}"
     portal = "presupuesto_abierto"
@@ -274,7 +320,8 @@ def _register_dimension(engine, dim_key: str, dim_info: dict, year: int, table_n
                     columns = EXCLUDED.columns, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": f"Clasificador presupuestario: {dim_info['name']}, ejercicio {year}.",
                 "org": "Ministerio de Economía — DGSIAF",
                 "portal": portal,
@@ -282,13 +329,13 @@ def _register_dimension(engine, dim_key: str, dim_info: dict, year: int, table_n
                 "dl": f"{DGSIAF_URL}/{year}/d-{dim_info['slug']}-{year}.zip",
                 "cols": columns_json,
                 "tags": f"presupuesto,clasificador,{dim_key},{year}",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -304,16 +351,24 @@ def _register_dimension(engine, dim_key: str, dim_info: dict, year: int, table_n
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
 
 
 @celery_app.task(
-    name="openarg.ingest_presupuesto_dimensiones", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
+    name="openarg.ingest_presupuesto_dimensiones",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def ingest_presupuesto_dimensiones(self):
     """Download budget dimension tables (clasificadores) from DGSIAF and cache in PG.
@@ -380,22 +435,32 @@ def ingest_presupuesto_dimensiones(self):
 
                     df.to_sql(table_name, engine, if_exists="replace", index=False)
 
-                    dataset_id = _register_dimension(engine, dim_key, dim_info, year, table_name, df)
+                    dataset_id = _register_dimension(
+                        engine, dim_key, dim_info, year, table_name, df
+                    )
                     if dataset_id:
                         from app.infrastructure.celery.tasks.scraper_tasks import (
                             index_dataset_embedding,
                         )
+
                         index_dataset_embedding.delay(dataset_id)
 
                     results["ingested"] += 1
                     logger.info(
-                        "Dimension %s %d: %d rows cached → %s", dim_key, year, len(df), table_name,
+                        "Dimension %s %d: %d rows cached → %s",
+                        dim_key,
+                        year,
+                        len(df),
+                        table_name,
                     )
 
                 except Exception:
                     results["errors"] += 1
                     logger.warning(
-                        "Failed to ingest dimension %s %d", dim_key, year, exc_info=True,
+                        "Failed to ingest dimension %s %d",
+                        dim_key,
+                        year,
+                        exc_info=True,
                     )
 
         return results

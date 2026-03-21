@@ -39,9 +39,7 @@ class MetricsCollector:
             if error:
                 self._request_errors += 1
 
-    def record_connector_call(
-        self, connector: str, latency_ms: float, error: bool = False
-    ) -> None:
+    def record_connector_call(self, connector: str, latency_ms: float, error: bool = False) -> None:
         with self._lock_data:
             self._connector_calls[connector] = self._connector_calls.get(connector, 0) + 1
             if error:

@@ -4,6 +4,7 @@ Uses LLM to generate display names, descriptions, tags, and domains
 for each cached dataset table.  Generates vector embeddings for
 semantic search over the catalog.
 """
+
 from __future__ import annotations
 
 import json
@@ -53,7 +54,9 @@ def _generate_metadata_for_table(
     sample_text = ""
     if sample_rows:
         raw = json.dumps(
-            sample_rows[:3], ensure_ascii=False, default=str,
+            sample_rows[:3],
+            ensure_ascii=False,
+            default=str,
         )[:2000]
         sample_text = f"Filas de ejemplo:\n{raw}"
 
@@ -149,11 +152,13 @@ def _enrich_table(engine, table_name: str) -> bool:
         metadata = _generate_metadata_for_table(table_name, columns, sample_rows, row_count)
 
         # Generate embedding from display_name + description + tags
-        embed_text = " ".join([
-            metadata.get("display_name", ""),
-            metadata.get("description", ""),
-            " ".join(metadata.get("tags", [])),
-        ]).strip()
+        embed_text = " ".join(
+            [
+                metadata.get("display_name", ""),
+                metadata.get("description", ""),
+                " ".join(metadata.get("tags", [])),
+            ]
+        ).strip()
 
         embedding = _embed_text(embed_text) if embed_text else None
         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]" if embedding else None

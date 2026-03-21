@@ -1,4 +1,5 @@
 """Tests for _validate_plan in query_planner."""
+
 from __future__ import annotations
 
 from app.infrastructure.adapters.connectors.query_planner import _validate_plan

@@ -1,4 +1,5 @@
 """Tests for DDJJAdapter in-memory dataset operations."""
+
 from __future__ import annotations
 
 import pytest

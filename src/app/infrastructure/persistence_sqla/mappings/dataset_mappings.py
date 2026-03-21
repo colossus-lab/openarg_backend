@@ -29,7 +29,9 @@ def map_dataset_tables() -> None:
         "datasets",
         mapping_registry.metadata,
         Column(
-            "id", PG_UUID(as_uuid=True), primary_key=True,
+            "id",
+            PG_UUID(as_uuid=True),
+            primary_key=True,
             server_default=text("gen_random_uuid()"),
         ),
         Column("source_id", String(500), nullable=False),
@@ -47,14 +49,18 @@ def map_dataset_tables() -> None:
         Column("is_cached", Boolean, server_default="false"),
         Column("row_count", Integer, nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
-        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+        Column(
+            "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        ),
     )
 
     dataset_chunks_table = Table(
         "dataset_chunks",
         mapping_registry.metadata,
         Column(
-            "id", PG_UUID(as_uuid=True), primary_key=True,
+            "id",
+            PG_UUID(as_uuid=True),
+            primary_key=True,
             server_default=text("gen_random_uuid()"),
         ),
         Column("dataset_id", PG_UUID(as_uuid=True), nullable=False, index=True),
@@ -68,7 +74,9 @@ def map_dataset_tables() -> None:
         "cached_datasets",
         mapping_registry.metadata,
         Column(
-            "id", PG_UUID(as_uuid=True), primary_key=True,
+            "id",
+            PG_UUID(as_uuid=True),
+            primary_key=True,
             server_default=text("gen_random_uuid()"),
         ),
         Column("dataset_id", PG_UUID(as_uuid=True), nullable=False, index=True),
@@ -80,7 +88,9 @@ def map_dataset_tables() -> None:
         Column("error_message", Text, nullable=True),
         Column("s3_key", String(500), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
-        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+        Column(
+            "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        ),
     )
 
     mapping_registry.map_imperatively(Dataset, datasets_table)

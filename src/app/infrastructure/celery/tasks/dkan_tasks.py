@@ -3,6 +3,7 @@ DKAN — Scraper de datos abiertos para portales DKAN (Rosario, Jujuy).
 
 Consulta la API DKAN, descarga CSVs y cachea en PostgreSQL.
 """
+
 from __future__ import annotations
 
 import io
@@ -28,11 +29,11 @@ MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024
 @dataclass(frozen=True)
 class DKANPortal:
     api_url: str
-    portal_key: str        # e.g. "rosario_dkan"
-    source_prefix: str     # e.g. "rosario"
-    table_prefix: str      # e.g. "cache_rosario"
+    portal_key: str  # e.g. "rosario_dkan"
+    source_prefix: str  # e.g. "rosario"
+    table_prefix: str  # e.g. "cache_rosario"
     organization: str
-    base_url: str          # for building dataset URLs
+    base_url: str  # for building dataset URLs
     tags: str
 
 
@@ -64,8 +65,9 @@ def _sanitize_name(name: str) -> str:
     return clean[:50]
 
 
-def _register_dataset(engine, portal: DKANPortal, ds_id: str, title: str,
-                       table_name: str, df: pd.DataFrame, url: str):
+def _register_dataset(
+    engine, portal: DKANPortal, ds_id: str, title: str, table_name: str, df: pd.DataFrame, url: str
+):
     """Upsert into datasets and cached_datasets tables."""
     source_id = f"{portal.source_prefix}-{ds_id}"
     columns_json = json.dumps(list(df.columns))
@@ -85,7 +87,8 @@ def _register_dataset(engine, portal: DKANPortal, ds_id: str, title: str,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": f"Dataset de {portal.organization}: {title}",
                 "org": portal.organization,
                 "portal": portal.portal_key,
@@ -93,13 +96,13 @@ def _register_dataset(engine, portal: DKANPortal, ds_id: str, title: str,
                 "dl": url,
                 "cols": columns_json,
                 "tags": portal.tags,
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal.portal_key},
         ).fetchone()
@@ -115,8 +118,13 @@ def _register_dataset(engine, portal: DKANPortal, ds_id: str, title: str,
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
@@ -146,7 +154,8 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
                 distributions = dataset.get("distribution", [])
 
                 csv_dists = [
-                    d for d in distributions
+                    d
+                    for d in distributions
                     if d.get("format", "").lower() == "csv"
                     or d.get("mediaType", "").lower() == "text/csv"
                 ]
@@ -195,11 +204,14 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
 
                 df.to_sql(table_name, engine, if_exists="replace", index=False)
 
-                dataset_id = _register_dataset(engine, portal, ds_id, title, table_name, df, download_url)
+                dataset_id = _register_dataset(
+                    engine, portal, ds_id, title, table_name, df, download_url
+                )
                 if dataset_id:
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
+
                     index_dataset_embedding.delay(dataset_id)
 
                 results["ingested"] += 1
@@ -207,8 +219,12 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
 
             except Exception:
                 results["errors"] += 1
-                logger.warning("DKAN %s: failed %s", portal.portal_key,
-                               dataset.get("identifier", "?"), exc_info=True)
+                logger.warning(
+                    "DKAN %s: failed %s",
+                    portal.portal_key,
+                    dataset.get("identifier", "?"),
+                    exc_info=True,
+                )
 
         return results
 
@@ -217,8 +233,11 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
 
 
 @celery_app.task(
-    name="openarg.scrape_dkan_rosario", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
+    name="openarg.scrape_dkan_rosario",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def scrape_dkan_rosario(self):
     """Scrape Rosario DKAN catalog and cache CSV datasets."""
@@ -233,8 +252,11 @@ def scrape_dkan_rosario(self):
 
 
 @celery_app.task(
-    name="openarg.scrape_dkan_jujuy", bind=True, max_retries=3,
-    soft_time_limit=600, time_limit=720,
+    name="openarg.scrape_dkan_jujuy",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=600,
+    time_limit=720,
 )
 def scrape_dkan_jujuy(self):
     """Scrape Jujuy DKAN catalog and cache CSV datasets."""

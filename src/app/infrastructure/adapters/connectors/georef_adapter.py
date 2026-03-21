@@ -25,19 +25,13 @@ class GeorefAdapter(IGeorefConnector):
         )
 
     @with_retry(max_retries=2, base_delay=1.0, service_name="georef")
-    async def _get_entities_internal(
-        self, entity_type: str, params: dict[str, str]
-    ) -> list[dict]:
-        resp = await self._client.get(
-            f"{self._base_url}/{entity_type}", params=params
-        )
+    async def _get_entities_internal(self, entity_type: str, params: dict[str, str]) -> list[dict]:
+        resp = await self._client.get(f"{self._base_url}/{entity_type}", params=params)
         resp.raise_for_status()
         data = resp.json()
         return data.get(entity_type, [])
 
-    async def _get_entities(
-        self, entity_type: str, params: dict[str, str]
-    ) -> list[dict]:
+    async def _get_entities(self, entity_type: str, params: dict[str, str]) -> list[dict]:
         try:
             return await self._get_entities_internal(entity_type, params)
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:

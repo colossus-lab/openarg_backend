@@ -5,6 +5,7 @@ Revises: 0003
 Create Date: 2026-02-28
 
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -20,7 +21,9 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.create_table(
         "sesion_chunks",
-        sa.Column("id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True),
+        sa.Column(
+            "id", UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()"), primary_key=True
+        ),
         sa.Column("periodo", sa.Integer, nullable=False),
         sa.Column("reunion", sa.Integer, nullable=False),
         sa.Column("fecha", sa.String(20), nullable=True),

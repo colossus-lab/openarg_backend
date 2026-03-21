@@ -193,9 +193,7 @@ class SemanticCacheProvider(Provider):  # type: ignore[misc]
     scope = Scope.APP
 
     @provide  # type: ignore[untyped-decorator]
-    def semantic_cache(
-        self, session_factory: async_sessionmaker[AsyncSession]
-    ) -> SemanticCache:
+    def semantic_cache(self, session_factory: async_sessionmaker[AsyncSession]) -> SemanticCache:
         return SemanticCache(session_factory=session_factory)
 
 
@@ -256,7 +254,8 @@ class ConnectorProvider(Provider):  # type: ignore[misc]
 
     @provide  # type: ignore[untyped-decorator]
     def staff(
-        self, session_factory: async_sessionmaker[AsyncSession],
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
     ) -> IStaffConnector:
         return StaffAdapter(session_factory=session_factory)
 

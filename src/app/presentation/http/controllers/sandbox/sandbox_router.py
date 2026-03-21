@@ -19,6 +19,7 @@ router = APIRouter(prefix="/sandbox", tags=["sandbox"])
 # Request / Response schemas
 # ---------------------------------------------------------------------------
 
+
 class QueryRequest(BaseModel):
     sql: str = Field(..., min_length=1, max_length=5000)
 
@@ -54,6 +55,7 @@ class AskResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @router.post("/query", response_model=QueryResponse)
 @limiter.limit("10/minute")  # type: ignore[untyped-decorator]
@@ -172,18 +174,22 @@ async def ask_natural_language(
         if not result.error:
             break
         # Ask the LLM to fix the SQL with error context
-        messages.extend([
-            LLMMessage(role="assistant", content=generated_sql),
-            LLMMessage(
-                role="user",
-                content=(
-                    f"Esa query SQL devolvió un error: {result.error}\n"
-                    "Corregí la query y devolvé solo el SQL corregido."
+        messages.extend(
+            [
+                LLMMessage(role="assistant", content=generated_sql),
+                LLMMessage(
+                    role="user",
+                    content=(
+                        f"Esa query SQL devolvió un error: {result.error}\n"
+                        "Corregí la query y devolvé solo el SQL corregido."
+                    ),
                 ),
-            ),
-        ])
+            ]
+        )
         llm_response = await llm.chat(
-            messages=messages, temperature=0.0, max_tokens=1024,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=1024,
         )
         generated_sql = _strip_sql_fences(llm_response.content.strip())
         result = await sandbox.execute_readonly(generated_sql)

@@ -4,6 +4,7 @@ Gobernadores — ETL de gobernadores provinciales desde Wikidata.
 Consulta Wikidata SPARQL para obtener los gobernadores actuales
 de las 23 provincias argentinas + CABA y los cachea en PostgreSQL.
 """
+
 from __future__ import annotations
 
 import json
@@ -61,7 +62,8 @@ def _register_dataset(engine, table_name: str, df: pd.DataFrame):
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": (
                     "Gobernadores actuales de las 23 provincias argentinas y "
                     "Jefe de Gobierno de CABA."
@@ -71,13 +73,13 @@ def _register_dataset(engine, table_name: str, df: pd.DataFrame):
                 "url": "https://www.argentina.gob.ar/interior/gobernadores",
                 "cols": columns_json,
                 "tags": "gobernadores,provincias,gobierno,autoridades",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -93,16 +95,24 @@ def _register_dataset(engine, table_name: str, df: pd.DataFrame):
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
 
 
 @celery_app.task(
-    name="openarg.scrape_gobernadores", bind=True, max_retries=3,
-    soft_time_limit=120, time_limit=180,
+    name="openarg.scrape_gobernadores",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=120,
+    time_limit=180,
 )
 def scrape_gobernadores(self):
     """Fetch current Argentine province governors from Wikidata SPARQL."""
@@ -130,20 +140,18 @@ def scrape_gobernadores(self):
         for b in bindings:
             provincia = b.get("provinceLabel", {}).get("value", "")
             # Clean "Provincia de " prefix
-            provincia = (
-                provincia
-                .replace("Provincia de ", "")
-                .replace("Provincia del ", "")
-            )
+            provincia = provincia.replace("Provincia de ", "").replace("Provincia del ", "")
             if "Ciudad Autónoma" in provincia:
                 provincia = "CABA"
 
-            records.append({
-                "provincia": provincia,
-                "gobernador": b.get("governorLabel", {}).get("value", ""),
-                "partido": b.get("partyLabel", {}).get("value", ""),
-                "inicio_mandato": b.get("startDate", {}).get("value", ""),
-            })
+            records.append(
+                {
+                    "provincia": provincia,
+                    "gobernador": b.get("governorLabel", {}).get("value", ""),
+                    "partido": b.get("partyLabel", {}).get("value", ""),
+                    "inicio_mandato": b.get("startDate", {}).get("value", ""),
+                }
+            )
 
         df = pd.DataFrame(records)
         # Deduplicate (Wikidata may return multiple party entries)
@@ -157,6 +165,7 @@ def scrape_gobernadores(self):
 
         if dataset_id:
             from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+
             index_dataset_embedding.delay(dataset_id)
 
         return {"table": table_name, "rows": len(df)}

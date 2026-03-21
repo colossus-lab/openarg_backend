@@ -66,7 +66,11 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
 
     async def fetch_riesgo_pais(self, ultimo: bool = False) -> DataResult | None:
         try:
-            path = "/finanzas/indices/riesgo-pais/ultimo" if ultimo else "/finanzas/indices/riesgo-pais"
+            path = (
+                "/finanzas/indices/riesgo-pais/ultimo"
+                if ultimo
+                else "/finanzas/indices/riesgo-pais"
+            )
             resp = await self._http.get(f"{BASE_URL}{path}")
             resp.raise_for_status()
             data = resp.json()

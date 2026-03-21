@@ -1,4 +1,5 @@
 """Tests for hybrid search (BM25 + vector + RRF) in PgVectorSearchAdapter."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock

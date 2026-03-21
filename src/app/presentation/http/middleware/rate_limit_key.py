@@ -1,4 +1,5 @@
 """Rate limit key function — identifies clients by API key or IP."""
+
 from __future__ import annotations
 
 from slowapi.util import get_remote_address

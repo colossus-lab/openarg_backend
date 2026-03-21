@@ -1,4 +1,5 @@
 """Security headers middleware — adds defense-in-depth HTTP headers to all responses."""
+
 from __future__ import annotations
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -18,9 +19,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         # HSTS only when behind HTTPS
         if request.url.scheme == "https":
-            response.headers["Strict-Transport-Security"] = (
-                "max-age=31536000; includeSubDomains"
-            )
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         # Relaxed CSP for Swagger/ReDoc docs, stricter for the rest
         path = request.url.path

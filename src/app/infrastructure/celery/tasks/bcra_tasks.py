@@ -4,6 +4,7 @@ BCRA Snapshot — Daily snapshot of exchange rates and monetary variables.
 Downloads cotizaciones and principales variables from BCRA API,
 caches them in PostgreSQL for NL2SQL queries.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,20 +42,21 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
-                "sid": source_id, "title": title,
+                "sid": source_id,
+                "title": title,
                 "desc": f"Datos del BCRA: {title}",
                 "org": "Banco Central de la República Argentina",
                 "portal": portal,
                 "url": "https://www.bcra.gob.ar/Estadisticas/Datos_Abiertos.asp",
                 "cols": columns_json,
                 "tags": "bcra,monetario,cambiario,finanzas",
-                "now": now, "rows": len(df),
+                "now": now,
+                "rows": len(df),
             },
         )
         dataset_row = conn.execute(
             text(
-                "SELECT CAST(id AS text) FROM datasets "
-                "WHERE source_id = :sid AND portal = :portal"
+                "SELECT CAST(id AS text) FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": source_id, "portal": portal},
         ).fetchone()
@@ -70,8 +72,13 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                         status = 'ready', row_count = EXCLUDED.row_count,
                         columns_json = EXCLUDED.columns_json, updated_at = :now
                 """),
-                {"did": dataset_id, "tn": table_name, "rows": len(df),
-                 "cols": columns_json, "now": now},
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": len(df),
+                    "cols": columns_json,
+                    "now": now,
+                },
             )
 
     return dataset_id
@@ -90,8 +97,11 @@ def _fetch_bcra_data():
 
 
 @celery_app.task(
-    name="openarg.snapshot_bcra", bind=True, max_retries=3,
-    soft_time_limit=300, time_limit=360,
+    name="openarg.snapshot_bcra",
+    bind=True,
+    max_retries=3,
+    soft_time_limit=300,
+    time_limit=360,
 )
 def snapshot_bcra(self):
     """Daily snapshot of BCRA exchange rates and monetary variables."""
@@ -108,13 +118,17 @@ def snapshot_bcra(self):
                 table_name = "cache_bcra_cotizaciones"
                 df.to_sql(table_name, engine, if_exists="replace", index=False)
                 dataset_id = _register_dataset(
-                    engine, "bcra-cotizaciones", "Cotizaciones Cambiarias BCRA",
-                    table_name, df,
+                    engine,
+                    "bcra-cotizaciones",
+                    "Cotizaciones Cambiarias BCRA",
+                    table_name,
+                    df,
                 )
                 if dataset_id:
                     from app.infrastructure.celery.tasks.scraper_tasks import (
                         index_dataset_embedding,
                     )
+
                     index_dataset_embedding.delay(dataset_id)
                 results["tables"].append({"table": table_name, "rows": len(df)})
                 logger.info("BCRA cotizaciones: %d records cached", len(df))

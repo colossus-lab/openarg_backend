@@ -64,9 +64,7 @@ class CircuitBreaker:
             logger.warning("Circuit %s → OPEN (half-open failure)", self.service_name)
         elif self.failure_count >= self.failure_threshold:
             self.state = CircuitState.OPEN
-            logger.warning(
-                "Circuit %s → OPEN (failures=%d)", self.service_name, self.failure_count
-            )
+            logger.warning("Circuit %s → OPEN (failures=%d)", self.service_name, self.failure_count)
 
     def to_dict(self) -> dict:
         return {

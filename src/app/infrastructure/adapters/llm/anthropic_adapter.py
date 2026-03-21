@@ -18,9 +18,7 @@ class AnthropicLLMAdapter(ILLMProvider):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
 
-    def _build_messages(
-        self, messages: list[LLMMessage]
-    ) -> tuple[str | None, list[dict]]:
+    def _build_messages(self, messages: list[LLMMessage]) -> tuple[str | None, list[dict]]:
         system_prompt = None
         api_messages = []
         for msg in messages:

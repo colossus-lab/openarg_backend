@@ -7,26 +7,22 @@ from app.domain.entities.connectors.data_result import DataResult
 
 class IGeorefConnector(ABC):
     @abstractmethod
-    async def get_provincias(self, nombre: str | None = None) -> list[dict]:
-        ...
+    async def get_provincias(self, nombre: str | None = None) -> list[dict]: ...
 
     @abstractmethod
     async def get_departamentos(
         self, provincia: str | None = None, nombre: str | None = None
-    ) -> list[dict]:
-        ...
+    ) -> list[dict]: ...
 
     @abstractmethod
     async def get_municipios(
         self, provincia: str | None = None, nombre: str | None = None
-    ) -> list[dict]:
-        ...
+    ) -> list[dict]: ...
 
     @abstractmethod
     async def get_localidades(
         self, provincia: str | None = None, nombre: str | None = None
-    ) -> list[dict]:
-        ...
+    ) -> list[dict]: ...
 
     @abstractmethod
     async def normalize_location(self, query: str) -> DataResult | None:

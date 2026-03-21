@@ -21,6 +21,7 @@ Groups & phases (executed in order):
     5. transparency — Portal health scoring + session topic analysis
     6. maintenance  — Recover stuck tasks, retry S3, reset failed collectors
 """
+
 from __future__ import annotations
 
 import logging
@@ -174,7 +175,10 @@ def run_pipeline(
             group_tasks.append(task_name)
             logger.info(
                 "Dispatched %s (group=%s, phase=%d, countdown=%ds)",
-                task_name, group_key, group["phase"], countdown,
+                task_name,
+                group_key,
+                group["phase"],
+                countdown,
             )
 
         dispatched[group_key] = group_tasks

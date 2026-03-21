@@ -27,7 +27,9 @@ def map_agent_tables() -> None:
         "agent_tasks",
         mapping_registry.metadata,
         Column(
-            "id", PG_UUID(as_uuid=True), primary_key=True,
+            "id",
+            PG_UUID(as_uuid=True),
+            primary_key=True,
             server_default=text("gen_random_uuid()"),
         ),
         Column("query_id", PG_UUID(as_uuid=True), nullable=False, index=True),
@@ -39,7 +41,9 @@ def map_agent_tables() -> None:
         Column("tokens_used", Integer, server_default="0"),
         Column("duration_ms", Integer, server_default="0"),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
-        Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()),
+        Column(
+            "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        ),
     )
 
     mapping_registry.map_imperatively(AgentTask, agent_tasks_table)

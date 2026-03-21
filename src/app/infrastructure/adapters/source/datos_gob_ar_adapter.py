@@ -19,9 +19,7 @@ class DatosGobArAdapter(IDataSource):
     def portal_name(self) -> str:
         return "datos_gob_ar"
 
-    async def fetch_catalog(
-        self, limit: int = 100, offset: int = 0
-    ) -> list[CatalogEntry]:
+    async def fetch_catalog(self, limit: int = 100, offset: int = 0) -> list[CatalogEntry]:
         url = f"{self._base_url}/package_search"
         params = {"rows": limit, "start": offset}
 

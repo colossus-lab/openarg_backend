@@ -3,6 +3,7 @@
 Provides a FastAPI app with Dishka DI wired to mock providers,
 so @inject endpoints work without real infrastructure.
 """
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,15 +12,20 @@ from dishka.integrations.fastapi import setup_dishka
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.smart_query_service import SmartQueryService
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
 from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
 from app.domain.ports.connectors.georef import IGeorefConnector
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
+from app.domain.ports.connectors.staff import IStaffConnector
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
+from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
+from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 from app.infrastructure.monitoring.health import HealthCheckService
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
@@ -36,7 +42,9 @@ class MockProvider(Provider):
     def llm(self) -> ILLMProvider:
         mock = AsyncMock()
         mock.chat.return_value = MagicMock(
-            content="Mock response", tokens_used=10, model="test",
+            content="Mock response",
+            tokens_used=10,
+            model="test",
         )
         return mock
 
@@ -95,6 +103,66 @@ class MockProvider(Provider):
     @provide
     def session(self) -> MainAsyncSession:
         return AsyncMock(spec=AsyncSession)
+
+    @provide
+    def staff(self) -> IStaffConnector:
+        return AsyncMock()
+
+    @provide
+    def bcra(self) -> BCRAAdapter:
+        return AsyncMock(spec=BCRAAdapter)
+
+    @provide
+    def sandbox(self) -> ISQLSandbox:
+        mock = AsyncMock()
+        mock.execute_readonly.return_value = MagicMock(
+            rows=[], columns=[], row_count=0, truncated=False, error=None
+        )
+        mock.list_cached_tables.return_value = []
+        return mock
+
+    @provide
+    def chat_repo(self) -> IChatRepository:
+        mock = AsyncMock()
+        mock.get_conversation_messages.return_value = []
+        return mock
+
+    @provide
+    def smart_query_service(
+        self,
+        llm: ILLMProvider,
+        embedding: IEmbeddingProvider,
+        vector_search: IVectorSearch,
+        cache: ICacheService,
+        series: ISeriesTiempoConnector,
+        arg_datos: IArgentinaDatosConnector,
+        georef: IGeorefConnector,
+        ckan: ICKANSearchConnector,
+        sesiones: ISesionesConnector,
+        ddjj: DDJJAdapter,
+        semantic_cache: SemanticCache,
+        staff: IStaffConnector,
+        bcra: BCRAAdapter,
+        sandbox: ISQLSandbox,
+        chat_repo: IChatRepository,
+    ) -> SmartQueryService:
+        return SmartQueryService(
+            llm=llm,
+            embedding=embedding,
+            vector_search=vector_search,
+            cache=cache,
+            series=series,
+            arg_datos=arg_datos,
+            georef=georef,
+            ckan=ckan,
+            sesiones=sesiones,
+            ddjj=ddjj,
+            semantic_cache=semantic_cache,
+            staff=staff,
+            bcra=bcra,
+            sandbox=sandbox,
+            chat_repo=chat_repo,
+        )
 
     @provide
     def health_service(self) -> HealthCheckService:

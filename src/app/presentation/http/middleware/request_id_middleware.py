@@ -1,4 +1,5 @@
 """Middleware that binds a unique request_id to structlog context vars for log correlation."""
+
 from __future__ import annotations
 
 import uuid

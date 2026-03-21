@@ -1,4 +1,5 @@
 """Tests for in-memory MetricsCollector."""
+
 from __future__ import annotations
 
 import pytest
