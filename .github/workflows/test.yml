@@ -94,7 +94,7 @@ jobs:
         CELERY_RESULT_BACKEND: redis://localhost:6379/1
         REDIS_CACHE_URL: redis://localhost:6379/2
       run: |
-        pytest tests/unit/ -v --maxfail=5 --tb=short
+        pytest tests/unit/ -q --no-header --maxfail=5 --tb=short
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -151,7 +151,7 @@ jobs:
         CELERY_RESULT_BACKEND: redis://localhost:6379/1
         REDIS_CACHE_URL: redis://localhost:6379/2
       run: |
-        pytest tests/integration/ -v --maxfail=5 --tb=short
+        pytest tests/integration/ -q --no-header --maxfail=5 --tb=short
 
   type-check:
     runs-on: ubuntu-latest
