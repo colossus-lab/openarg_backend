@@ -226,7 +226,9 @@ class PgSandboxAdapter(ISQLSandbox):
                 error=error_msg,
             )
 
-    async def execute_readonly(self, sql: str, timeout_seconds: int = _SANDBOX_TIMEOUT_MS // 1000) -> SandboxResult:
+    async def execute_readonly(
+        self, sql: str, timeout_seconds: int = _SANDBOX_TIMEOUT_MS // 1000
+    ) -> SandboxResult:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
