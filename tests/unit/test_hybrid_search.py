@@ -32,7 +32,7 @@ async def test_search_datasets_hybrid_returns_results(
     mock_row.portal = "datos.gob.ar"
     mock_row.download_url = "https://example.com/data.csv"
     mock_row.columns = "col1,col2"
-    mock_row.score = 0.032
+    mock_row.score = 0.06
 
     mock_result = MagicMock()
     mock_result.fetchall.return_value = [mock_row]
@@ -48,7 +48,7 @@ async def test_search_datasets_hybrid_returns_results(
     assert len(results) == 1
     assert results[0].dataset_id == "123"
     assert results[0].title == "Test Dataset"
-    assert results[0].score == 0.032
+    assert results[0].score == 0.06
     mock_session.execute.assert_called_once()
 
 

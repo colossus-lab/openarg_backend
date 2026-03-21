@@ -48,10 +48,10 @@ class TestBuildDeterministicCharts:
         charts = _build_deterministic_charts([_make_result(records)])
         assert len(charts) == 0
 
-    def test_skips_without_time_key(self):
+    def test_skips_without_time_or_label_key(self):
         records = [
-            {"nombre": "A", "valor": 10},
-            {"nombre": "B", "valor": 20},
+            {"codigo": "A", "valor": 10},
+            {"codigo": "B", "valor": 20},
         ]
         charts = _build_deterministic_charts([_make_result(records)])
         assert len(charts) == 0
@@ -80,7 +80,7 @@ class TestExtractLLMCharts:
     def test_extracts_valid_chart(self):
         text = (
             'Texto <!--CHART:{"type":"line_chart","title":"Test",'
-            '"data":[{"x":1,"y":2}],"xKey":"x","yKeys":["y"]}'
+            '"data":[{"x":1,"y":2},{"x":3,"y":4}],"xKey":"x","yKeys":["y"]}'
             '--> más texto'
         )
         charts = _extract_llm_charts(text)

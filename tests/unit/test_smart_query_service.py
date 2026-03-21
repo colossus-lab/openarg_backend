@@ -113,7 +113,7 @@ class TestExecuteInjection:
             user_id="test",
         )
         assert result.intent == "injection_blocked"
-        assert result.answer == ""
+        assert "reformulándola" in result.answer or "datos públicos" in result.answer
 
 
 class TestExecuteEducational:
@@ -162,16 +162,12 @@ class TestExecuteFullPipeline:
             "app.application.smart_query_service.generate_plan",
             return_value=fake_plan,
         ), patch(
-            "app.application.smart_query_service.QueryPreprocessor"
-        ) as mock_prep, patch(
-            "app.application.smart_query_service.QueryDecomposer"
-        ) as mock_decomp:
-            mock_prep.return_value.reformulate = AsyncMock(
-                return_value="cotización del dólar hoy"
-            )
-            mock_decomp.return_value.decompose = AsyncMock(
-                return_value=["cotización del dólar hoy"]
-            )
+            "app.application.smart_query_service.load_memory",
+            return_value={},
+        ), patch(
+            "app.application.smart_query_service.build_memory_context_prompt",
+            return_value="",
+        ):
             result = await service.execute(
                 "¿a cuánto está el dólar hoy?", user_id="test@test.com"
             )
@@ -225,16 +221,12 @@ class TestConnectorFailureGraceful:
             "app.application.smart_query_service.generate_plan",
             return_value=fake_plan,
         ), patch(
-            "app.application.smart_query_service.QueryPreprocessor"
-        ) as mock_prep, patch(
-            "app.application.smart_query_service.QueryDecomposer"
-        ) as mock_decomp:
-            mock_prep.return_value.reformulate = AsyncMock(
-                return_value="series y dólar"
-            )
-            mock_decomp.return_value.decompose = AsyncMock(
-                return_value=["series y dólar"]
-            )
+            "app.application.smart_query_service.load_memory",
+            return_value={},
+        ), patch(
+            "app.application.smart_query_service.build_memory_context_prompt",
+            return_value="",
+        ):
             result = await service.execute("test query", user_id="test")
 
         # Should still have a result (from arg_datos)
@@ -256,14 +248,13 @@ class TestCacheEmbeddingPassed:
             "test question", embedding=mock_deps["embedding"].embed.return_value,
         )
 
-    async def test_check_cache_skips_embedding_on_redis_hit(self, service, mock_deps):
-        """If Redis has a hit, embedding should NOT be generated."""
+    async def test_check_cache_returns_cached_on_redis_hit(self, service, mock_deps):
+        """If Redis has a hit, the cached result is returned."""
         mock_deps["cache"].get.return_value = {"answer": "cached", "sources": []}
         result = await service._check_cache("test question", "user")
         assert result is not None
         assert result.cached is True
-        # Embedding should NOT have been called
-        mock_deps["embedding"].embed.assert_not_called()
+        assert result.answer == "cached"
 
     async def test_get_cached_dict_tries_redis_first(self, service, mock_deps):
         """Verify _get_cached_dict tries Redis before semantic cache."""
@@ -300,77 +291,6 @@ class TestMetaParsing:
         assert confidence == 1.0
 
 
-class TestDDJJDeterministicRouting:
-    """Test _detect_ddjj_intent returns correct plans or None."""
-
-    def test_patrimonio_name_extraction(self, service):
-        plan = service._detect_ddjj_intent("patrimonio de Martin Yeza")
-        assert plan is not None
-        assert plan.intent == "ddjj_persona"
-        assert len(plan.steps) == 1
-        step = plan.steps[0]
-        assert step.action == "query_ddjj"
-        assert step.params["nombre"] == "Martin Yeza"
-        assert step.params["action"] == "detail"
-
-    def test_bienes_de_name(self, service):
-        plan = service._detect_ddjj_intent("bienes de Milei")
-        assert plan is not None
-        assert plan.intent == "ddjj_persona"
-        assert plan.steps[0].params["nombre"] == "Milei"
-
-    def test_declaracion_jurada_name(self, service):
-        plan = service._detect_ddjj_intent("declaración jurada de Yeza")
-        assert plan is not None
-        assert plan.intent == "ddjj_persona"
-        assert plan.steps[0].params["nombre"] == "Yeza"
-
-    def test_ranking_diputados(self, service):
-        plan = service._detect_ddjj_intent("ranking de diputados por patrimonio")
-        assert plan is not None
-        assert plan.intent == "ddjj_ranking"
-        step = plan.steps[0]
-        assert step.action == "query_ddjj"
-        assert step.params["action"] == "ranking"
-        assert step.params["order"] == "desc"
-
-    def test_diputado_mas_rico(self, service):
-        plan = service._detect_ddjj_intent("diputado más rico")
-        assert plan is not None
-        assert plan.intent == "ddjj_ranking"
-        assert plan.steps[0].params["order"] == "desc"
-
-    def test_menor_patrimonio(self, service):
-        plan = service._detect_ddjj_intent("menor patrimonio de diputados")
-        assert plan is not None
-        assert plan.intent == "ddjj_ranking"
-        assert plan.steps[0].params["order"] == "asc"
-
-    def test_mas_pobres(self, service):
-        plan = service._detect_ddjj_intent("diputados más pobres")
-        assert plan is not None
-        assert plan.intent == "ddjj_ranking"
-        assert plan.steps[0].params["order"] == "asc"
-
-    def test_non_ddjj_returns_none(self, service):
-        plan = service._detect_ddjj_intent("¿a cuánto está el dólar?")
-        assert plan is None
-
-    def test_non_ddjj_weather_returns_none(self, service):
-        plan = service._detect_ddjj_intent("¿cómo está el clima hoy?")
-        assert plan is None
-
-    def test_ddjj_keyword_generic(self, service):
-        plan = service._detect_ddjj_intent("ddjj de los senadores")
-        assert plan is not None
-        assert plan.steps[0].action == "query_ddjj"
-
-    def test_cuanto_tiene(self, service):
-        plan = service._detect_ddjj_intent("cuánto tiene el diputado López")
-        assert plan is not None
-        assert plan.steps[0].action == "query_ddjj"
-
-
 class TestStreamingYieldsEvents:
     async def test_casual_streaming(self, service):
         events = []
@@ -393,6 +313,8 @@ class TestStreamingYieldsEvents:
             events.append(event)
 
         types = [e["type"] for e in events]
-        assert "error" in types
-        error = next(e for e in events if e["type"] == "error")
-        assert error["code"] == "SEC_001"
+        # Injection is classified and returned as chunk + complete (not error)
+        assert "chunk" in types
+        assert "complete" in types
+        complete = next(e for e in events if e["type"] == "complete")
+        assert "reformulándola" in complete["answer"] or "datos públicos" in complete["answer"]

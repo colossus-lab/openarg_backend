@@ -285,6 +285,26 @@ _EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
     ),
 }
 
+# ── Off-topic detection ──────────────────────────────────────
+_OFF_TOPIC_PATTERNS = re.compile(
+    r"(?:"
+    r"escrib[íi](me)?\s+(un\s+)?(poema|cuento|canción|cancion|historia|chiste|ensayo|carta|novela)"
+    r"|traduc[íi]|translate|traducime"
+    r"|escrib[íi]\s+c[oó]digo|write\s+(me\s+)?(a\s+)?(code|program|script|function)"
+    r"|programa\s+en\s+(python|java|javascript|c\+\+|rust|go|php|ruby)"
+    r"|receta\s+de\s+cocina|recipe\s+for"
+    r"|(?:resolv[eé]|calculá|calculate)\s+(?:\d|la\s+ecuaci[oó]n|equation|integral|derivada)"
+    r"|(?:quién|quien)\s+gan[oó]\s+(?:el\s+)?(?:mundial|world\s+cup|champions|superbowl|oscar)"
+    r"|hor[oó]scopo|horoscope"
+    r"|(?:dibuj[aá]|draw)\s+(?:me\s+)?(?:un|una|a|the)?"
+    r"|roleplay|act[uú]a\s+como|pretend\s+you|fingí\s+que"
+    r"|(?:cant[aá]|sing)\s+(?:me\s+)?(?:una?\s+)?(?:canci[oó]n|song)"
+    r"|(?:cont[aá]|tell)\s+(?:me\s+)?(?:un\s+)?(?:chiste|joke)"
+    r"|hac[eé](?:me)?\s+(?:un\s+)?(?:resumen|summary)\s+(?:de|of)\s+(?:un|a)\s+(?:libro|book|película|movie)"
+    r")",
+    re.IGNORECASE,
+)
+
 # ── INDEC fallback detection pattern ─────────────────────────
 _INDEC_PATTERN = re.compile(
     r"(indec|ipc|inflaci[oó]n|emae|actividad\s+econ[oó]mica"
@@ -403,6 +423,16 @@ class SmartQueryService:
                 "por ejemplo: *¿Cuál fue la inflación del último mes?*"
             )
 
+        if self._is_off_topic(question):
+            return "off_topic", (
+                "Solo puedo ayudarte con consultas sobre datos abiertos de Argentina, "
+                "transparencia gubernamental, presupuesto público y temas afines.\n\n"
+                "Probá con algo como:\n"
+                "- *¿Cuál fue la inflación del último mes?*\n"
+                "- *¿Cuántos empleados tiene el Senado?*\n"
+                "- *¿Qué dice la última declaración jurada de [diputado]?*"
+            )
+
         edu = self._get_educational_response(question)
         if edu:
             return "educational", edu
@@ -433,6 +463,13 @@ class SmartQueryService:
                 answer=cls_text,
                 sources=[],
                 intent="injection_blocked",
+                duration_ms=int((time.monotonic() - start_time) * 1000),
+            )
+        if cls_type == "off_topic":
+            return SmartQueryResult(
+                answer=cls_text,
+                sources=[],
+                intent="off_topic",
                 duration_ms=int((time.monotonic() - start_time) * 1000),
             )
         if cls_type == "educational":
@@ -1033,6 +1070,11 @@ class SmartQueryService:
             if pattern.search(text.strip()):
                 return response
         return None
+
+    @staticmethod
+    def _is_off_topic(question: str) -> bool:
+        """Return True if the question is clearly outside the Argentine open data domain."""
+        return bool(_OFF_TOPIC_PATTERNS.search(question))
 
     # ── Cache helpers ───────────────────────────────────────
 

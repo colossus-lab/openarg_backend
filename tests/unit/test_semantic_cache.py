@@ -43,10 +43,10 @@ class TestTTLConstants:
 
 
 class TestDefaultThreshold:
-    def test_default_threshold_is_088(self):
+    def test_default_threshold_is_092(self):
         from unittest.mock import AsyncMock
         cache = SemanticCache(session_factory=AsyncMock())
-        assert cache._similarity_threshold == 0.88
+        assert cache._similarity_threshold == 0.92
 
 
 class TestTTLForIntent:
