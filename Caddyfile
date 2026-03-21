@@ -35,5 +35,6 @@ api.openarg.org {
 	@blocked path /docs /docs/* /redoc /openapi.json /api/v1/admin/*
 	respond @blocked 404
 
+
 	reverse_proxy backend:8080
 }

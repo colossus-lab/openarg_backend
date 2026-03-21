@@ -106,7 +106,7 @@ def _validate_sql_ast(sql: str) -> str | None:
         # Walk the AST to find DML/DDL nodes embedded in CTEs or subqueries
         _DML_DDL = (
             exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Create,
-            exp.AlterTable, exp.Command,
+            exp.Alter, exp.Command,
         )
         for node in stmt.walk():
             if isinstance(node, _DML_DDL):
@@ -124,9 +124,8 @@ def _validate_sql_ast(sql: str) -> str | None:
                     return f"Access to table '{table_name}' is not allowed. Only cached dataset tables are accessible."
 
     except Exception:
-        logger.debug("sqlglot validation failed, falling back to regex", exc_info=True)
-
-    return None
+        logger.warning("sqlglot validation failed — rejecting query for safety", exc_info=True)
+        return "Could not validate SQL safely. Please simplify your query."
 
 
 class PgSandboxAdapter(ISQLSandbox):
