@@ -38,12 +38,8 @@ async def sync_user(
     if not body.email:
         raise HTTPException(status_code=400, detail="email is required")
 
-    privacy_ts = None
-    if body.privacy_accepted_at:
-        try:
-            privacy_ts = datetime.fromisoformat(body.privacy_accepted_at)
-        except ValueError:
-            privacy_ts = datetime.now(timezone.utc)
+    # SECURITY: Always use server timestamp — never trust client-provided time
+    privacy_ts = datetime.now(timezone.utc) if body.privacy_accepted_at else None
 
     user = User(
         email=body.email,
@@ -85,10 +81,14 @@ async def export_my_data(
 @router.get("/me", response_model=UserResponse)
 @inject
 async def get_current_user(
-    email: str,
+    request: Request,
     user_repo: FromDishka[IUserRepository],
 ) -> UserResponse:
-    """Get user by email."""
+    """Get user by email (from X-User-Email header, not query params)."""
+    email = request.headers.get("X-User-Email", "")
+    if not email:
+        raise HTTPException(status_code=401, detail="User email required")
+
     user = await user_repo.get_by_email(email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
