@@ -5,13 +5,22 @@ on:
     branches:
       - main
       - staging
-      - development
+    paths:
+      - 'src/**'
+      - 'docker/**'
+      - 'pyproject.toml'
+      - 'alembic.ini'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
       build_all:
         description: 'Build all services (yes/no)'
         required: false
         default: 'yes'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
