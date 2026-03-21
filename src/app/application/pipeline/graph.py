@@ -12,7 +12,7 @@ in ``smart_query_service.py``:
       -> (clarify_reply | inject_fallbacks)
       -> execute_steps
       -> analyst
-      -> (policy | finalize)
+      -> (replan -> execute_steps -> analyst | policy | finalize)
       -> END
 """
 
@@ -44,6 +44,7 @@ from app.application.pipeline.nodes.memory import load_memory_node
 from app.application.pipeline.nodes.planner import clarify_reply_node, planner_node
 from app.application.pipeline.nodes.policy import policy_node
 from app.application.pipeline.nodes.preprocess import preprocess_node
+from app.application.pipeline.nodes.replan import replan_node
 from app.application.pipeline.state import OpenArgState
 
 
@@ -74,6 +75,7 @@ def build_pipeline_graph(deps: PipelineDeps):  # -> CompiledStateGraph
     builder.add_node("execute_steps", execute_steps_node)
     builder.add_node("analyst", analyst_node)
     builder.add_node("policy", policy_node)
+    builder.add_node("replan", replan_node)
     builder.add_node("finalize", finalize_node)
 
     # ── Edges ───────────────────────────────────────────────
@@ -131,12 +133,15 @@ def build_pipeline_graph(deps: PipelineDeps):  # -> CompiledStateGraph
     builder.add_edge("inject_fallbacks", "execute_steps")
     builder.add_edge("execute_steps", "analyst")
 
-    # After analyst: policy (if policy_mode) or finalize
+    # After analyst: replan (if no data + retries remain), policy, or finalize
     builder.add_conditional_edges(
         "analyst",
         route_after_analysis,
-        {"policy": "policy", "finalize": "finalize"},
+        {"replan": "replan", "policy": "policy", "finalize": "finalize"},
     )
+
+    # replan -> execute_steps -> analyst (second pass)
+    builder.add_edge("replan", "execute_steps")
 
     # policy -> finalize -> END
     builder.add_edge("policy", "finalize")

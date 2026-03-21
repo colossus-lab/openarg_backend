@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from langgraph.config import get_stream_writer
+
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.cache_manager import check_cache
 from app.application.pipeline.state import OpenArgState
@@ -18,6 +20,8 @@ async def cache_check_node(state: OpenArgState) -> dict:
     Skipped when *policy_mode* is True (always fetch fresh data).
     Sets *cached_result* and *last_embedding* when a hit is found.
     """
+    writer = get_stream_writer()
+    writer({"type": "status", "step": "cache_check", "detail": "Buscando en caché..."})
     deps = nodes_pkg.get_deps()
 
     # Skip cache in policy mode — always fetch fresh data

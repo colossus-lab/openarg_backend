@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from langgraph.config import get_stream_writer
+
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.state import OpenArgState
 from app.infrastructure.adapters.connectors.policy_agent import analyze_policy
@@ -17,6 +19,10 @@ async def policy_node(state: OpenArgState) -> dict:
     Appends a policy evaluation section to the existing *clean_answer*.
     If the policy agent fails, the original answer is preserved.
     """
+    writer = get_stream_writer()
+    writer(
+        {"type": "status", "step": "policy_analysis", "detail": "Evaluando políticas públicas..."}
+    )
     deps = nodes_pkg.get_deps()
 
     if not state.get("policy_mode", False):

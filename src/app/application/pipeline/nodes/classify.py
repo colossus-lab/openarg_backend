@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import time
 
+from langgraph.config import get_stream_writer
+
 from app.application.pipeline.classifiers import classify_request
 from app.application.pipeline.state import OpenArgState
 
@@ -18,6 +20,8 @@ async def classify_node(state: OpenArgState) -> dict:
     does NOT need the full pipeline (greeting, meta, injection, etc.).
     Both remain ``None`` when the request should proceed to data retrieval.
     """
+    writer = get_stream_writer()
+    writer({"type": "status", "step": "classifying", "detail": "Analizando consulta..."})
     try:
         question = state["question"]
         user_id = state["user_id"]

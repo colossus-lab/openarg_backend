@@ -73,5 +73,8 @@ class OpenArgState(TypedDict, total=False):
     # ── Timing ──────────────────────────────────────────────
     _start_time: float  # time.monotonic() at pipeline start
 
+    # ── Re-planning ────────────────────────────────────────
+    replan_count: int  # 0 initially, max 1
+
     # ── Error ───────────────────────────────────────────────
     error: str | None

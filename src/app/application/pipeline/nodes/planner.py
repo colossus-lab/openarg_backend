@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from langgraph.config import get_stream_writer
+
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.connectors.sandbox import discover_catalog_hints_for_planner
 from app.application.pipeline.state import OpenArgState
@@ -17,6 +19,8 @@ async def planner_node(state: OpenArgState) -> dict:
 
     Writes *catalog_hints*, *plan*, and *plan_intent* to state.
     """
+    writer = get_stream_writer()
+    writer({"type": "status", "step": "planning", "detail": "Planificando estrategia..."})
     deps = nodes_pkg.get_deps()
 
     try:
