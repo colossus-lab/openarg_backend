@@ -1757,7 +1757,7 @@ class SmartQueryService:
             generated_sql = llm_response.content.strip()
             if generated_sql.startswith("```"):
                 lines = generated_sql.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
+                lines = [ln for ln in lines if not ln.strip().startswith("```")]
                 generated_sql = "\n".join(lines).strip()
 
             result = await self._sandbox.execute_readonly(generated_sql)
@@ -1788,7 +1788,7 @@ class SmartQueryService:
                 generated_sql = llm_response.content.strip()
                 if generated_sql.startswith("```"):
                     lines = generated_sql.split("\n")
-                    lines = [l for l in lines if not l.strip().startswith("```")]
+                    lines = [ln for ln in lines if not ln.strip().startswith("```")]
                     generated_sql = "\n".join(lines).strip()
                 result = await self._sandbox.execute_readonly(generated_sql)
 
