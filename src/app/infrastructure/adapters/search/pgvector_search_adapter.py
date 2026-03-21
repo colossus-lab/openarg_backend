@@ -15,7 +15,7 @@ class PgVectorSearchAdapter(IVectorSearch):
         query_embedding: list[float],
         limit: int = 10,
         portal_filter: str | None = None,
-        min_similarity: float = 0.35,
+        min_similarity: float = 0.55,
     ) -> list[SearchResult]:
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
