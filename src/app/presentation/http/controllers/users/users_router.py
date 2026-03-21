@@ -26,6 +26,11 @@ class UserResponse(BaseModel):
     image_url: str
     created_at: str
     privacy_accepted_at: str | None = None
+    save_history: bool = True
+
+
+class UpdateSettingsRequest(BaseModel):
+    save_history: bool
 
 
 @router.post("/sync", response_model=UserResponse)
@@ -56,6 +61,7 @@ async def sync_user(
         image_url=saved.image_url or "",
         created_at=saved.created_at.isoformat(),
         privacy_accepted_at=saved.privacy_accepted_at.isoformat() if saved.privacy_accepted_at else None,
+        save_history=saved.save_history,
     )
 
 
@@ -100,6 +106,41 @@ async def get_current_user(
         image_url=user.image_url or "",
         created_at=user.created_at.isoformat(),
         privacy_accepted_at=user.privacy_accepted_at.isoformat() if user.privacy_accepted_at else None,
+        save_history=user.save_history,
+    )
+
+
+@router.patch("/me/settings", response_model=UserResponse)
+@inject
+async def update_settings(
+    request: Request,
+    body: UpdateSettingsRequest,
+    user_repo: FromDishka[IUserRepository],
+) -> UserResponse:
+    """Update user settings (e.g., save_history toggle)."""
+    email = request.headers.get("X-User-Email", "")
+    if not email:
+        raise HTTPException(status_code=401, detail="User email required")
+
+    user = await user_repo.get_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # If disabling history, delete existing conversations
+    if not body.save_history and user.save_history:
+        await user_repo.delete_user_conversations(user.id)
+
+    user.save_history = body.save_history
+    await user_repo.update(user)
+
+    return UserResponse(
+        id=str(user.id),
+        email=user.email,
+        name=user.name,
+        image_url=user.image_url or "",
+        created_at=user.created_at.isoformat(),
+        privacy_accepted_at=user.privacy_accepted_at.isoformat() if user.privacy_accepted_at else None,
+        save_history=user.save_history,
     )
 
 

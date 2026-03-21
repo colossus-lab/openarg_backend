@@ -1789,6 +1789,9 @@ class SmartQueryService:
                 tables_context_parts.append(part)
             tables_context = "\n\n".join(tables_context_parts)
 
+            # Retrieve dynamic few-shot examples from successful past queries
+            few_shot_block = await self._get_few_shot_examples(nl_query)
+
             nl2sql_prompt = (
                 "You are a SQL assistant for Argentine public datasets stored in PostgreSQL.\n"
                 "You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, "
@@ -1803,6 +1806,8 @@ class SmartQueryService:
                 "- NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.\n"
                 "- Use ILIKE for case-insensitive text matching.\n"
             )
+            if few_shot_block:
+                nl2sql_prompt += f"\n{few_shot_block}\n"
 
             messages = [
                 LLMMessage(role="system", content=nl2sql_prompt),
@@ -1888,6 +1893,17 @@ class SmartQueryService:
                 fallback = await self._indec_live_fallback(nl_query)
                 if fallback:
                     return fallback
+
+            # Save successful query for future few-shot examples
+            if result.rows and not result.error:
+                asyncio.create_task(
+                    self._save_successful_query(
+                        nl_query,
+                        generated_sql,
+                        tables[0].table_name if tables else "",
+                        result.row_count,
+                    )
+                )
 
             return [
                 DataResult(
@@ -2192,7 +2208,17 @@ class SmartQueryService:
         max_results = 10
         max_total = 80_000
 
+        # Warn analyst about truncated results so it can inform the user
+        total_available = len(results)
         parts = []
+        if total_available > max_results:
+            parts.append(
+                f"⚠ NOTA PARA EL ANALISTA: Se recopilaron {total_available} fuentes de datos "
+                f"pero solo se incluyen las {max_results} más relevantes por límites de contexto. "
+                f"Advertí al usuario que la respuesta se basa en un subconjunto de los datos disponibles "
+                f"y que puede refinar su consulta para obtener resultados más específicos."
+            )
+
         for i, result in enumerate(results[:max_results]):
             valid_records = [r for r in result.records if isinstance(r, dict)]
             if not valid_records and result.records:
@@ -2291,6 +2317,65 @@ class SmartQueryService:
         if len(joined) > max_total:
             joined = joined[:max_total] + "\n\n[... datos truncados por límite de contexto ...]"
         return joined
+
+    # ── Few-shot NL2SQL helpers ─────────────────────────────
+
+    async def _save_successful_query(
+        self,
+        question: str,
+        sql: str,
+        table_name: str,
+        row_count: int,
+    ) -> None:
+        """Save a successful NL2SQL query for future few-shot examples."""
+        try:
+            embedding = await self._embedding.embed(question)
+            emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
+            async with self._semantic_cache._session_factory() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO successful_queries (question, sql, table_name, row_count, embedding) "
+                        "VALUES (:q, :s, :t, :r, CAST(:e AS vector))"
+                    ),
+                    {
+                        "q": question[:500],
+                        "s": sql[:2000],
+                        "t": table_name,
+                        "r": row_count,
+                        "e": emb_str,
+                    },
+                )
+                await session.commit()
+        except Exception:
+            logger.debug("Failed to save successful query for few-shot", exc_info=True)
+
+    async def _get_few_shot_examples(self, question: str, limit: int = 3) -> str:
+        """Retrieve similar successful queries as few-shot examples for NL2SQL."""
+        try:
+            embedding = await self._embedding.embed(question)
+            emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
+            async with self._semantic_cache._session_factory() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT question, sql, "
+                        "1 - (embedding <=> CAST(:emb AS vector)) AS score "
+                        "FROM successful_queries "
+                        "WHERE 1 - (embedding <=> CAST(:emb AS vector)) > 0.6 "
+                        "ORDER BY embedding <=> CAST(:emb AS vector) "
+                        "LIMIT :lim"
+                    ),
+                    {"emb": emb_str, "lim": limit},
+                )
+                rows = result.fetchall()
+            if not rows:
+                return ""
+            lines = ["Successful similar queries (use as reference):"]
+            for r in rows:
+                lines.append(f"\nQuestion: {r.question}\nSQL: {r.sql}")
+            return "\n".join(lines)
+        except Exception:
+            logger.debug("Failed to retrieve few-shot examples", exc_info=True)
+            return ""
 
     # ── META parser ─────────────────────────────────────────
 

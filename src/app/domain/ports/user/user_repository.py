@@ -17,6 +17,13 @@ class IUserRepository(ABC):
     async def get_by_id(self, user_id: UUID) -> User | None: ...
 
     @abstractmethod
+    async def update(self, user: User) -> User: ...
+
+    @abstractmethod
+    async def delete_user_conversations(self, user_id: UUID) -> None:
+        """Delete all conversations and messages (but keep the user)."""
+
+    @abstractmethod
     async def delete_user_and_data(self, user_id: UUID) -> None:
         """Delete user and all associated data (conversations, messages, queries)."""
 
