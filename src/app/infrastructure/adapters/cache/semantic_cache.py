@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -75,7 +76,7 @@ class SemanticCache:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        similarity_threshold: float = 0.92,
+        similarity_threshold: float = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.92")),
     ) -> None:
         self._session_factory = session_factory
         self._similarity_threshold = similarity_threshold
