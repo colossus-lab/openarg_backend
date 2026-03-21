@@ -339,14 +339,24 @@ async def invalidate_cache(
 
 
 def _validate_ws_api_key(websocket: WebSocket) -> bool:
-    """Check api_key query param against configured BACKEND_API_KEY."""
+    """Check api_key query param against configured BACKEND_API_KEY (backward compat)."""
     import os
     import secrets as _secrets
     expected = os.getenv("BACKEND_API_KEY", "")
     if not expected:
         return True  # No key configured, allow all
     provided = websocket.query_params.get("api_key", "")
-    return _secrets.compare_digest(provided, expected)
+    return _secrets.compare_digest(provided, expected) if provided else False
+
+
+def _validate_api_key_value(provided: str) -> bool:
+    """Validate an API key value against BACKEND_API_KEY."""
+    import os
+    import secrets as _secrets
+    expected = os.getenv("BACKEND_API_KEY", "")
+    if not expected:
+        return True
+    return _secrets.compare_digest(provided, expected) if provided else False
 
 
 @router.websocket("/ws/stream")
@@ -358,18 +368,28 @@ async def stream_query(
     vector_search: FromDishka[IVectorSearch],
 ) -> None:
     """WebSocket endpoint for streaming query responses."""
-    if not _validate_ws_api_key(websocket):
-        await websocket.close(code=4401, reason="Invalid or missing API key")
-        return
+    has_query_param_auth = _validate_ws_api_key(websocket)
     await websocket.accept()
 
     try:
+        first_message = True
         while True:
             raw = await websocket.receive_text()
             if len(raw) > 10_000:
                 await websocket.send_json({"type": "error", "content": "Message too large (max 10KB)"})
                 continue
             data = json.loads(raw)
+
+            # Validate API key on first message (from payload or query params)
+            if first_message:
+                first_message = False
+                if not has_query_param_auth:
+                    msg_api_key = data.get("api_key", "")
+                    if not _validate_api_key_value(msg_api_key):
+                        await websocket.send_json({"type": "error", "content": "Invalid or missing API key"})
+                        await websocket.close(code=4401)
+                        return
+
             question = data.get("question", "")
 
             if not question or len(question) > 2000:
