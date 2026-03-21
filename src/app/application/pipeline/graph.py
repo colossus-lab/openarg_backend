@@ -56,8 +56,8 @@ def build_pipeline_graph(deps: PipelineDeps):  # -> CompiledStateGraph
 
     Returns a compiled ``StateGraph`` ready for invocation.
     """
-    # Wire up dependency injection for all nodes
-    nodes_pkg._deps = deps
+    # Wire up dependency injection for all nodes (ContextVar — request-safe)
+    nodes_pkg.set_deps(deps)
 
     builder = StateGraph(OpenArgState)
 

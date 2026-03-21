@@ -7,6 +7,7 @@ import httpx
 from dishka import Provider, Scope, make_async_container, provide
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.application.pipeline.nodes import PipelineDeps
 from app.application.smart_query_service import SmartQueryService
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
@@ -305,6 +306,57 @@ class ApplicationProvider(Provider):  # type: ignore[misc]
         )
 
 
+class LangGraphProvider(Provider):  # type: ignore[misc]
+    """Provides PipelineDeps per-request and a compiled graph (APP-scoped).
+
+    The graph topology is compiled once. Dependencies (LLM, cache, etc.)
+    are injected per-request via PipelineDeps and set on the nodes module
+    before each invocation.
+    """
+
+    scope = Scope.REQUEST
+
+    @provide  # type: ignore[untyped-decorator]
+    def pipeline_deps(
+        self,
+        llm: ILLMProvider,
+        embedding: IEmbeddingProvider,
+        vector_search: IVectorSearch,
+        cache: ICacheService,
+        series: ISeriesTiempoConnector,
+        arg_datos: IArgentinaDatosConnector,
+        georef: IGeorefConnector,
+        ckan: ICKANSearchConnector,
+        sesiones: ISesionesConnector,
+        ddjj: DDJJAdapter,
+        semantic_cache: SemanticCache,
+        staff: IStaffConnector,
+        bcra: BCRAAdapter,
+        sandbox: ISQLSandbox,
+        chat_repo: IChatRepository,
+    ) -> PipelineDeps:
+        from app.infrastructure.monitoring.metrics import MetricsCollector
+
+        return PipelineDeps(
+            llm=llm,
+            embedding=embedding,
+            vector_search=vector_search,
+            cache=cache,
+            series=series,
+            arg_datos=arg_datos,
+            georef=georef,
+            ckan=ckan,
+            sesiones=sesiones,
+            ddjj=ddjj,
+            staff=staff,
+            bcra=bcra,
+            sandbox=sandbox,
+            semantic_cache=semantic_cache,
+            chat_repo=chat_repo,
+            metrics=MetricsCollector(),
+        )
+
+
 def get_providers() -> Iterable[Provider]:
     return (
         DatabaseProvider(),
@@ -320,6 +372,7 @@ def get_providers() -> Iterable[Provider]:
         SemanticCacheProvider(),
         MonitoringProvider(),
         ApplicationProvider(),
+        LangGraphProvider(),
     )
 
 

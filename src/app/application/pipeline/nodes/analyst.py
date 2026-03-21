@@ -111,8 +111,7 @@ async def analyst_node(state: OpenArgState) -> dict:
     in ``smart_query_service.py``), calls the LLM, extracts charts and
     META confidence/citations, and strips internal tags.
     """
-    deps = nodes_pkg._deps
-    assert deps is not None, "PipelineDeps not initialised"
+    deps = nodes_pkg.get_deps()
 
     try:
         question = state["question"]
