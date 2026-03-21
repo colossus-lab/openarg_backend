@@ -5,7 +5,7 @@
 If you discover a security vulnerability in OpenArg, please report it responsibly:
 
 1. **Do NOT open a public GitHub issue**
-2. Email: security@colossuslab.org
+2. Email: admin@colossuslab.org
 3. Include: description, steps to reproduce, potential impact
 
 We will acknowledge receipt within 48 hours and provide a timeline for a fix.
