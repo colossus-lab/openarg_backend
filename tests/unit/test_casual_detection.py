@@ -12,21 +12,18 @@ _get_meta_response = SmartQueryService._get_meta_response
 def _classify_casual_subtype(text: str) -> str | None:
     """Helper that mirrors the old router function using the service's static method."""
     from app.application.smart_query_service import (
-        _CASUAL_PATTERNS,
         _FAREWELL_PATTERN,
         _GREETING_PATTERN,
         _THANKS_PATTERN,
     )
     t = text.strip()
-    if not _CASUAL_PATTERNS.match(t):
-        return None
     if _GREETING_PATTERN.match(t):
         return "greeting"
     if _THANKS_PATTERN.match(t):
         return "thanks"
     if _FAREWELL_PATTERN.match(t):
         return "farewell"
-    return "generic"
+    return None
 
 
 class TestCasualDetection:

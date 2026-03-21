@@ -90,16 +90,16 @@ class TestBuildDataContextMultiple:
 class TestBuildDataContextTruncation:
     """Context is capped at 60k characters."""
 
-    def test_truncates_at_60k(self):
-        # Generate enough DataResults so that the joined text exceeds 60k chars.
+    def test_truncates_at_80k(self):
+        # Generate enough DataResults so that the joined text exceeds 80k chars.
         # Each result with 30 records (under 50 threshold, so no slicing)
         # and long string values ensures we blow past the limit.
         results = []
-        for i in range(40):
+        for i in range(50):
             records = [{"key": "x" * 800, "val": j} for j in range(30)]
             results.append(_make_result(records, title=f"BigDataset_{i}"))
         ctx = _build_data_context(results)
-        assert len(ctx) <= 60_000 + 200  # allow for the truncation suffix
+        assert len(ctx) <= 80_000 + 200  # allow for the truncation suffix
         assert "datos truncados" in ctx
 
     def test_short_context_not_truncated(self):

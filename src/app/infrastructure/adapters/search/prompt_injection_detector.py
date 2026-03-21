@@ -63,6 +63,8 @@ _CRITICAL_KEYWORDS: list[str] = [
     "tu prompt",
     "prompt del sistema",
     "nuevas instrucciones",
+    "forget everything",
+    "do anything now",
 ]
 
 

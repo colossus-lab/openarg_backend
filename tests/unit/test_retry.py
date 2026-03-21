@@ -89,6 +89,7 @@ class TestWithRetry:
 
     @pytest.mark.anyio
     async def test_circuit_breaker_skips_when_open(self):
+        from app.domain.exceptions.connector_errors import ConnectorError
         from app.infrastructure.resilience.circuit_breaker import CircuitState, get_circuit_breaker
 
         cb = get_circuit_breaker("test_open_cb")
@@ -99,5 +100,5 @@ class TestWithRetry:
         async def fn():
             return "should not reach"
 
-        result = await fn()
-        assert result is None  # Skipped due to open circuit
+        with pytest.raises(ConnectorError):
+            await fn()

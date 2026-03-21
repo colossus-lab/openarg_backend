@@ -31,5 +31,9 @@ api.openarg.org {
 	@options method OPTIONS
 	respond @options 204
 
+	# SECURITY: Block admin/docs endpoints in production
+	@blocked path /docs /docs/* /redoc /openapi.json /api/v1/admin/*
+	respond @blocked 404
+
 	reverse_proxy backend:8080
 }

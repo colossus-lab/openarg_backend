@@ -31,7 +31,6 @@ concurrency:
 
 jobs:
   unit-tests:
-    if: false  # temporarily disabled
     runs-on: ubuntu-latest
     name: Unit Tests
     timeout-minutes: 15
@@ -98,7 +97,6 @@ jobs:
         pytest tests/unit/ -v --maxfail=5 --tb=short
 
   integration-tests:
-    if: false  # temporarily disabled
     runs-on: ubuntu-latest
     name: Integration Tests
     timeout-minutes: 20
@@ -156,7 +154,6 @@ jobs:
         pytest tests/integration/ -v --maxfail=5 --tb=short
 
   type-check:
-    if: false  # temporarily disabled
     runs-on: ubuntu-latest
     name: Type Checking
     timeout-minutes: 10

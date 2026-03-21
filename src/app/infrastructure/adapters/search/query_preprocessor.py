@@ -84,6 +84,7 @@ _PROVINCE_ALIASES: dict[str, str] = {
     "cordoba": "Córdoba",
     "chu": "Chubut",
     "fsa": "Formosa",
+    "cba": "Córdoba",
 }
 
 # Pre-compiled province patterns (compiled once, longest-first order preserved)

@@ -5,13 +5,13 @@ from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
 
 class TestSQLValidation:
     def test_select_allowed(self):
-        assert _validate_sql("SELECT * FROM cached_table") is None
+        assert _validate_sql("SELECT * FROM cache_table") is None
 
     def test_select_with_where(self):
-        assert _validate_sql("SELECT col1, col2 FROM t WHERE col1 > 10") is None
+        assert _validate_sql("SELECT col1, col2 FROM cache_datos WHERE col1 > 10") is None
 
     def test_with_cte_allowed(self):
-        assert _validate_sql("WITH cte AS (SELECT 1) SELECT * FROM cte") is None
+        assert _validate_sql("WITH cache_cte AS (SELECT 1 AS x) SELECT * FROM cache_cte") is None
 
     def test_empty_rejected(self):
         assert _validate_sql("") is not None
@@ -56,8 +56,8 @@ class TestSQLValidation:
         assert _validate_sql("  SELECT 1") is None
 
     def test_case_insensitive_select(self):
-        assert _validate_sql("select * from t") is None
-        assert _validate_sql("SELECT * FROM t") is None
+        assert _validate_sql("select * from cache_t") is None
+        assert _validate_sql("SELECT * FROM cache_t") is None
 
     def test_grant_rejected(self):
         result = _validate_sql("GRANT ALL ON table1 TO public")
