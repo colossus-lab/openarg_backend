@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -159,6 +160,22 @@ async def dispatch_step_with_retry(
     raise last_exc  # type: ignore[misc]
 
 
+# ── Friendly connector labels (Spanish UX) ────────────────────
+
+_CONNECTOR_LABELS: dict[str, str] = {
+    "query_series": "Series de Tiempo",
+    "query_argentina_datos": "Argentina Datos",
+    "query_georef": "Georef",
+    "search_ckan": "Portales CKAN",
+    "query_sesiones": "Sesiones del Congreso",
+    "query_ddjj": "Declaraciones Juradas",
+    "query_staff": "Personal legislativo",
+    "query_bcra": "BCRA",
+    "search_datasets": "Búsqueda semántica",
+    "query_sandbox": "Sandbox SQL",
+}
+
+
 # ── Parallel step execution ───────────────────────────────────
 
 
@@ -167,6 +184,7 @@ async def execute_steps(
     deps: ConnectorDeps,
     metrics: MetricsCollector,
     nl_query: str = "",
+    on_step_start: Callable[[PlanStep], None] | None = None,
 ) -> tuple[list[DataResult], list[str]]:
     """Execute plan steps, catching ConnectorError per step.
 
@@ -203,6 +221,8 @@ async def execute_steps(
 
     # --- wrapper that runs a single step with error handling ---
     async def _run_step(step: PlanStep) -> tuple[list[DataResult], str | None]:
+        if on_step_start is not None:
+            on_step_start(step)
         step_start = time.monotonic()
         connector_name = step.action
         try:

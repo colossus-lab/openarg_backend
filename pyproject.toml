@@ -66,6 +66,7 @@ dependencies = [
 
     # Agent orchestration
     "langgraph>=1.0.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
 ]
 
 [project.optional-dependencies]

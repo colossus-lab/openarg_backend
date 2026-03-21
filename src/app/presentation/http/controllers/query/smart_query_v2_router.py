@@ -6,6 +6,7 @@ the existing SmartQueryService. Activated by USE_LANGGRAPH=true.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -28,9 +29,57 @@ from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
 _graph_lock = threading.Lock()
+_checkpointer_lock = asyncio.Lock()
 _compiled_graph = None
+_checkpointer = None  # AsyncPostgresSaver instance (lazy)
+_checkpointer_attempted = False  # Prevent repeated init attempts
 
 logger = logging.getLogger(__name__)
+
+
+async def _get_checkpointer():
+    """Lazily create an ``AsyncPostgresSaver`` if DATABASE_URL is set.
+
+    Returns the singleton checkpointer or *None* when checkpointing is
+    unavailable (missing dependency or missing env var).
+    Thread-safe via asyncio.Lock with double-check pattern.
+    """
+    global _checkpointer, _checkpointer_attempted  # noqa: PLW0603
+
+    if _checkpointer is not None:
+        return _checkpointer
+    if _checkpointer_attempted:
+        return None  # Already tried and failed — don't retry
+
+    async with _checkpointer_lock:
+        # Double-check after acquiring lock
+        if _checkpointer is not None:
+            return _checkpointer
+        if _checkpointer_attempted:
+            return None
+
+        _checkpointer_attempted = True
+
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return None
+
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+            conn_str = db_url.replace("postgresql+psycopg://", "postgresql://")
+            saver = AsyncPostgresSaver.from_conn_string(conn_str)
+            await saver.setup()
+            _checkpointer = saver
+            logger.info("LangGraph checkpointer initialised (PostgreSQL)")
+            return saver
+        except Exception:
+            logger.warning(
+                "LangGraph checkpointer not available — running without persistence",
+                exc_info=True,
+            )
+            return None
+
 
 router = APIRouter(prefix="/query", tags=["smart-query-v2"])
 
@@ -68,23 +117,32 @@ async def smart_query_v2(
     global _compiled_graph  # noqa: PLW0603
 
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
+    checkpointer = await _get_checkpointer()
     if _compiled_graph is None:
         with _graph_lock:
             if _compiled_graph is None:
-                _compiled_graph = build_pipeline_graph(deps)
+                _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
     set_deps(deps)
 
     user_id = body.user_email or "anonymous"
+    conversation_id = body.conversation_id or ""
 
     initial_state: OpenArgState = {
         "question": body.question,
         "user_id": user_id,
-        "conversation_id": body.conversation_id or "",
+        "conversation_id": conversation_id,
         "policy_mode": body.policy_mode,
+        "replan_count": 0,
     }
 
+    # When a checkpointer is active, pass thread_id so LangGraph
+    # persists state per conversation (enables memory / resumable runs).
+    invoke_config: dict[str, Any] = {}
+    if checkpointer and conversation_id:
+        invoke_config["configurable"] = {"thread_id": conversation_id}
+
     try:
-        result = await _compiled_graph.ainvoke(initial_state)
+        result = await _compiled_graph.ainvoke(initial_state, config=invoke_config)
     except Exception:
         logger.exception("LangGraph pipeline failed")
         return ORJSONResponse(
@@ -177,10 +235,11 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
 
                 # Compile graph once (thread-safe), set deps per-request
                 global _compiled_graph  # noqa: PLW0603
+                checkpointer = await _get_checkpointer()
                 if _compiled_graph is None:
                     with _graph_lock:
                         if _compiled_graph is None:
-                            _compiled_graph = build_pipeline_graph(deps)
+                            _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
                 set_deps(deps)
                 graph = _compiled_graph
 
@@ -228,9 +287,15 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     "policy_mode": policy_mode,
                 }
 
+                # When a checkpointer is active, pass thread_id for persistence
+                stream_config: dict[str, Any] = {}
+                if checkpointer and conversation_id:
+                    stream_config["configurable"] = {"thread_id": conversation_id}
+
                 # Stream the graph execution
                 async for mode, payload in graph.astream(
                     initial_state,
+                    config=stream_config,
                     stream_mode=["updates", "custom"],
                 ):
                     if mode == "custom":

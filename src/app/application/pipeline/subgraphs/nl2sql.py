@@ -1,5 +1,9 @@
 """NL2SQL subgraph: encapsulates SQL generation, execution, and retry loop.
 
+NOTE: This subgraph is NOT yet integrated into the main pipeline graph.
+The sandbox connector (connectors/sandbox.py) still handles NL2SQL directly.
+This subgraph will replace the inline logic in Phase 4 (fan-out refactor).
+
 Extracts the SQL gen/exec/retry logic from ``connectors/sandbox.py`` into a
 proper LangGraph subgraph with explicit nodes and conditional edges.
 

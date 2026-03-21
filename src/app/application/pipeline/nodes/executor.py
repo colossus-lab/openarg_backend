@@ -9,7 +9,11 @@ from langgraph.config import get_stream_writer
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.classifiers import DATA_ACTIONS
 from app.application.pipeline.state import OpenArgState
-from app.application.pipeline.step_executor import ConnectorDeps, execute_steps
+from app.application.pipeline.step_executor import (
+    _CONNECTOR_LABELS,
+    ConnectorDeps,
+    execute_steps,
+)
 from app.domain.entities.connectors.data_result import PlanStep
 
 logger = logging.getLogger(__name__)
@@ -56,6 +60,8 @@ async def execute_steps_node(state: OpenArgState) -> dict:
 
     Steps are dispatched in parallel per dependency level through
     ``execute_steps()``, which handles retries and error isolation.
+    Per-connector status events are streamed so the frontend can show
+    which data source is being queried in real time.
     """
     writer = get_stream_writer()
     writer({"type": "status", "step": "searching", "detail": "Consultando fuentes de datos..."})
@@ -87,8 +93,23 @@ async def execute_steps_node(state: OpenArgState) -> dict:
             semantic_cache=deps.semantic_cache,
         )
 
+        def _on_step_start(step: PlanStep) -> None:
+            label = _CONNECTOR_LABELS.get(step.action, step.action)
+            writer(
+                {
+                    "type": "status",
+                    "step": "searching",
+                    "detail": f"Consultando {label}...",
+                    "connector": step.action,
+                }
+            )
+
         results, step_warnings = await execute_steps(
-            plan, connector_deps, deps.metrics, nl_query=question
+            plan,
+            connector_deps,
+            deps.metrics,
+            nl_query=question,
+            on_step_start=_on_step_start,
         )
 
         return {
