@@ -92,7 +92,8 @@ line-length = 100
 src = ["src"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+# TC (flake8-type-checking) disabled: Dishka DI + FastAPI require runtime imports
 
 [tool.mypy]
 python_version = "3.12"

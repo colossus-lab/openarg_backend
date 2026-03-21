@@ -1,8 +1,6 @@
 """Tests for the deterministic keyword-to-action routing index."""
 from __future__ import annotations
 
-import pytest
-
 from app.infrastructure.adapters.connectors.dataset_index import (
     KEYWORD_ROUTES,
     TAXONOMY,

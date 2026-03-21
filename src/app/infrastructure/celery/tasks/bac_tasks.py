@@ -6,7 +6,6 @@ los parsea en chunks y cachea en PostgreSQL.
 """
 from __future__ import annotations
 
-import io
 import json
 import logging
 from datetime import UTC, datetime
@@ -100,8 +99,9 @@ def _register_dataset(engine, file_type: str, table_name: str,
 )
 def ingest_bac(self):
     """Download and cache Buenos Aires Compras OCDS datasets."""
-    import httpx
     import tempfile
+
+    import httpx
 
     engine = get_sync_engine()
     results = {"ingested": 0, "skipped": 0, "errors": 0}
