@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 
 from app.domain.entities.user.user import User
@@ -50,6 +50,25 @@ async def sync_user(
     )
 
 
+@router.get("/me/data")
+@inject
+async def export_my_data(
+    request: Request,
+    user_repo: FromDishka[IUserRepository],
+) -> dict:
+    """Export all user data (Ley 25.326 ARCO right of access / data portability)."""
+    email = request.headers.get("X-User-Email", "")
+    if not email:
+        raise HTTPException(status_code=401, detail="User email required")
+
+    user = await user_repo.get_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    data = await user_repo.export_user_data(user.id)
+    return data
+
+
 @router.get("/me", response_model=UserResponse)
 @inject
 async def get_current_user(
@@ -68,3 +87,22 @@ async def get_current_user(
         image_url=user.image_url or "",
         created_at=user.created_at.isoformat(),
     )
+
+
+@router.delete("/me")
+@inject
+async def delete_my_account(
+    request: Request,
+    user_repo: FromDishka[IUserRepository],
+) -> dict:
+    """Delete current user and all associated data (Ley 25.326 ARCO right to erasure)."""
+    email = request.headers.get("X-User-Email", "")
+    if not email:
+        raise HTTPException(status_code=401, detail="User email required")
+
+    user = await user_repo.get_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await user_repo.delete_user_and_data(user.id)
+    return {"status": "deleted", "email": email}
