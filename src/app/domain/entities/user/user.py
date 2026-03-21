@@ -14,3 +14,4 @@ class User(BaseEntity):
     name: str = ""
     image_url: str = ""
     privacy_accepted_at: datetime | None = field(default=None)
+    save_history: bool = field(default=True)
