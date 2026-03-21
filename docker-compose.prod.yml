@@ -345,7 +345,7 @@ services:
 
   # ── Frontend ────────────────────────────────────────────────────
   frontend:
-    image: ghcr.io/dantedeagostino-dot/openarg/frontend:latest
+    image: ghcr.io/dantedeagostino-dot/openarg/openarg-frontend:latest
     container_name: openarg_frontend
     restart: always
     networks:
@@ -360,6 +360,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       ALLOWED_EMAILS: ${ALLOWED_EMAILS}
+      OPEN_BETA: ${OPEN_BETA}
       OPENARG_BACKEND_API_KEY: ${BACKEND_API_KEY}
     depends_on:
       - backend
