@@ -93,7 +93,9 @@ class TestFullPipelineMocked:
                 "app.application.smart_query_service.generate_plan",
                 return_value=fake_plan,
             ),
-            patch("app.application.smart_query_service.QueryPreprocessor") as mock_prep,
+            patch(
+                "app.infrastructure.adapters.search.query_preprocessor.QueryPreprocessor"
+            ) as mock_prep,
             patch(
                 "app.application.smart_query_service.load_memory",
                 return_value=MagicMock(turn_number=0, summaries=[], datasets_used=[]),
