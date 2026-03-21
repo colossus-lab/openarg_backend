@@ -6,11 +6,8 @@ error handling, and analysis work together correctly.
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 from app.application.smart_query_service import SmartQueryResult, SmartQueryService
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep

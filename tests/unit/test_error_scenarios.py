@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
+from app.domain.entities.connectors.data_result import DataResult, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
 from app.infrastructure.resilience.circuit_breaker import (
@@ -290,7 +290,7 @@ class TestDispatchStepRetryOnTimeout:
         )
 
         with patch.object(service, "_dispatch_step", side_effect=flaky_dispatch):
-            results = await service._dispatch_step_with_retry(step, max_retries=2)
+            await service._dispatch_step_with_retry(step, max_retries=2)
 
         assert call_count == 2
 
@@ -311,8 +311,10 @@ class TestDispatchStepNoRetryOn400:
             description="test", params={},
         )
 
-        with patch.object(service, "_dispatch_step", side_effect=bad_request_dispatch):
-            with pytest.raises(ValueError, match="Bad request"):
+        with (
+            patch.object(service, "_dispatch_step", side_effect=bad_request_dispatch),
+            pytest.raises(ValueError, match="Bad request"),
+        ):
                 await service._dispatch_step_with_retry(step, max_retries=2)
 
         # Should have been called only once -- no retries for non-transient errors
@@ -361,10 +363,7 @@ class TestSoftTimeLimitHandling:
 
         # Simulate the handler logic (from collector_tasks.py)
         new_retry_count = retry_count + 1
-        if new_retry_count >= MAX_TOTAL_ATTEMPTS:
-            new_status = "permanently_failed"
-        else:
-            new_status = "error"
+        new_status = "permanently_failed" if new_retry_count >= MAX_TOTAL_ATTEMPTS else "error"
 
         assert new_status == "error"
         assert new_retry_count == 1
@@ -377,10 +376,7 @@ class TestSoftTimeLimitHandling:
         retry_count = MAX_TOTAL_ATTEMPTS - 1
 
         new_retry_count = retry_count + 1
-        if new_retry_count >= MAX_TOTAL_ATTEMPTS:
-            new_status = "permanently_failed"
-        else:
-            new_status = "error"
+        new_status = "permanently_failed" if new_retry_count >= MAX_TOTAL_ATTEMPTS else "error"
 
         assert new_status == "permanently_failed"
         assert new_retry_count == MAX_TOTAL_ATTEMPTS

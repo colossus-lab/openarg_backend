@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.domain.entities.connectors.data_result import DataResult  # type: ignore[import-not-found]
 from app.domain.exceptions.connector_errors import ConnectorError  # type: ignore[import-not-found]
 from app.domain.exceptions.error_codes import ErrorCode  # type: ignore[import-not-found]
-from app.domain.ports.connectors.sesiones import ISesionesConnector  # type: ignore[import-not-found]
+from app.domain.ports.connectors.sesiones import (
+    ISesionesConnector,  # type: ignore[import-not-found]
+)
 
 logger = logging.getLogger(__name__)
 

@@ -36,7 +36,10 @@ def register_exception_handlers(app: FastAPI) -> None:
             question=str(exc.details.get("question", "")),
             score=exc.injection_score,
         )
-        logger.warning("Prompt injection blocked: score=%.3f user=%s", exc.injection_score, exc.user)
+        logger.warning(
+            "Prompt injection blocked: score=%.3f user=%s",
+            exc.injection_score, exc.user,
+        )
         return ORJSONResponse(
             status_code=exc.http_status,
             content={"error": exc.to_dict()},
@@ -74,7 +77,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     ) -> ORJSONResponse:
         errors = []
         for err in exc.errors():
-            loc = " → ".join(str(l) for l in err.get("loc", []))
+            loc = " → ".join(str(part) for part in err.get("loc", []))
             errors.append({
                 "field": loc,
                 "message": err.get("msg", "Validation error"),

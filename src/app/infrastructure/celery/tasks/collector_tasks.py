@@ -166,12 +166,12 @@ def _detect_csv_params(file_path: str) -> dict:
 
     # Try UTF-8 first
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             header = f.readline()
         params["encoding"] = "utf-8"
     except UnicodeDecodeError:
         params["encoding"] = "latin-1"
-        with open(file_path, "r", encoding="latin-1") as f:
+        with open(file_path, encoding="latin-1") as f:
             header = f.readline()
 
     # Auto-detect separator
@@ -621,7 +621,9 @@ def collect_dataset(self, dataset_id: str):
                 index_dataset_embedding.delay(dataset_id)
 
                 # Auto-enrich with semantic catalog metadata
-                from app.infrastructure.celery.tasks.catalog_enrichment_tasks import enrich_single_table
+                from app.infrastructure.celery.tasks.catalog_enrichment_tasks import (
+                    enrich_single_table,
+                )
 
                 enrich_single_table.delay(table_name)
 

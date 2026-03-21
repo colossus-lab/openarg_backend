@@ -32,21 +32,21 @@ from app.infrastructure.adapters.connectors.memory_agent import (
 )
 from app.infrastructure.adapters.connectors.policy_agent import analyze_policy
 from app.infrastructure.adapters.connectors.query_planner import generate_plan
+from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
+from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
 from app.infrastructure.adapters.search.query_preprocessor import (
     expand_acronyms,
     expand_synonyms,
     normalize_provinces,
     normalize_temporal,
 )
-from app.prompts import load_prompt
-from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
-from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
 from app.infrastructure.audit.audit_logger import (
     audit_cache_hit,
     audit_injection_blocked,
     audit_query,
 )
 from app.infrastructure.monitoring.metrics import MetricsCollector
+from app.prompts import load_prompt
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -54,13 +54,13 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from app.domain.ports.cache.cache_port import ICacheService
+    from app.domain.ports.chat.chat_repository import IChatRepository
     from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
     from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
     from app.domain.ports.connectors.georef import IGeorefConnector
     from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
     from app.domain.ports.connectors.sesiones import ISesionesConnector
     from app.domain.ports.connectors.staff import IStaffConnector
-    from app.domain.ports.chat.chat_repository import IChatRepository
     from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
     from app.domain.ports.search.vector_search import IVectorSearch
     from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter

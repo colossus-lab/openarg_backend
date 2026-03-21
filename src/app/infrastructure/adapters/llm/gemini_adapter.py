@@ -7,7 +7,11 @@ from typing import Any
 
 import google.generativeai as genai
 
-from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage, LLMResponse  # type: ignore[import-not-found]
+from app.domain.ports.llm.llm_provider import (  # type: ignore[import-not-found]
+    ILLMProvider,
+    LLMMessage,
+    LLMResponse,
+)
 
 logger = logging.getLogger(__name__)
 

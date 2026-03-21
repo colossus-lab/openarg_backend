@@ -17,6 +17,10 @@ from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.connectors.staff import IStaffConnector
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
+from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
+from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+from app.domain.ports.search.vector_search import IVectorSearch
+from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmbeddingService
 from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdapter
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
@@ -47,11 +51,6 @@ from app.infrastructure.persistence_sqla.provider import (
     get_async_session_factory,
     get_main_async_session,
 )
-
-from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
-from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
-from app.domain.ports.search.vector_search import IVectorSearch
-from app.domain.ports.user.user_repository import IUserRepository
 from app.setup.config.settings import AppSettings
 
 

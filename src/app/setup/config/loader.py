@@ -18,8 +18,9 @@ def get_current_env() -> ValidEnvs:
     env = os.getenv("APP_ENV", "local")
     try:
         return ValidEnvs(env)
-    except ValueError:
-        raise ValueError(f"Invalid APP_ENV: {env}. Must be one of {[e.value for e in ValidEnvs]}")
+    except ValueError as err:
+        msg = f"Invalid APP_ENV: {env}. Must be one of {[e.value for e in ValidEnvs]}"
+        raise ValueError(msg) from err
 
 
 def _find_config_dir() -> Path:
