@@ -1,30 +1,63 @@
 """Application service for the smart query pipeline.
 
-Simplified pipeline: planner (1 LLM) → dispatch steps (0 LLM) → analysis (1 LLM) + optional policy (1 LLM).
+Thin orchestrator that delegates to pipeline modules:
+  - pipeline.classifiers     — casual/meta/injection/educational detection
+  - pipeline.cache_manager   — Redis + semantic cache read/write
+  - pipeline.history         — chat history load/save
+  - pipeline.step_executor   — connector dispatch with retry + parallelism
+  - pipeline.context_builder — LLM data context + capabilities block
+  - pipeline.chart_builder   — deterministic charts, LLM chart extraction, META parsing
+  - pipeline.connectors.sandbox — catalog hints for planner
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import hashlib
 import json
 import logging
-import random
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
-from sqlalchemy import text
-
-from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
-from app.domain.exceptions.connector_errors import ConnectorError
-from app.domain.exceptions.error_codes import ErrorCode
-from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider, LLMMessage
-from app.infrastructure.adapters.cache.semantic_cache import SemanticCache, ttl_for_intent
+from app.application.pipeline.cache_manager import (
+    check_cache,
+    get_cached_dict,
+    write_cache,
+)
+from app.application.pipeline.chart_builder import (
+    build_deterministic_charts,
+    extract_llm_charts,
+    extract_meta,
+)
+from app.application.pipeline.classifiers import (
+    _CASUAL_RESPONSES,  # noqa: F401 — re-export for tests
+    _FAREWELL_PATTERN,  # noqa: F401 — re-export for tests
+    _GREETING_PATTERN,  # noqa: F401 — re-export for tests
+    _META_PATTERNS,  # noqa: F401 — re-export for tests
+    _META_RESPONSE,  # noqa: F401 — re-export for tests
+    _THANKS_PATTERN,  # noqa: F401 — re-export for tests
+    DATA_ACTIONS,
+    classify_request,
+)
+from app.application.pipeline.connectors.sandbox import (
+    discover_catalog_hints_for_planner,
+)
+from app.application.pipeline.context_builder import (
+    build_capabilities_block,
+    build_data_context,
+)
+from app.application.pipeline.history import (
+    load_chat_history,
+    save_history,
+)
+from app.application.pipeline.step_executor import (
+    ConnectorDeps,
+    execute_steps,
+)
+from app.domain.entities.connectors.data_result import ExecutionPlan, PlanStep
+from app.domain.ports.llm.llm_provider import LLMMessage
 from app.infrastructure.adapters.connectors.memory_agent import (
     build_memory_context_prompt,
     load_memory,
@@ -33,19 +66,13 @@ from app.infrastructure.adapters.connectors.memory_agent import (
 )
 from app.infrastructure.adapters.connectors.policy_agent import analyze_policy
 from app.infrastructure.adapters.connectors.query_planner import generate_plan
-from app.infrastructure.adapters.connectors.series_tiempo_adapter import find_catalog_match
-from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
 from app.infrastructure.adapters.search.query_preprocessor import (
     expand_acronyms,
     expand_synonyms,
     normalize_provinces,
     normalize_temporal,
 )
-from app.infrastructure.audit.audit_logger import (
-    audit_cache_hit,
-    audit_injection_blocked,
-    audit_query,
-)
+from app.infrastructure.audit.audit_logger import audit_query
 from app.infrastructure.monitoring.metrics import MetricsCollector
 from app.prompts import load_prompt
 
@@ -62,37 +89,17 @@ if TYPE_CHECKING:
     from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
     from app.domain.ports.connectors.sesiones import ISesionesConnector
     from app.domain.ports.connectors.staff import IStaffConnector
+    from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
     from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
     from app.domain.ports.search.vector_search import IVectorSearch
+    from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
     from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
     from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 
 logger = logging.getLogger(__name__)
 
-
-def _build_capabilities_block() -> str:
-    """Build a concise list of system capabilities from the taxonomy."""
-    try:
-        from app.infrastructure.adapters.connectors.dataset_index import TAXONOMY
-
-        lines = ["CAPACIDADES DEL SISTEMA — OpenArg tiene datos sobre:"]
-        for cat in TAXONOMY.values():
-            children = cat.get("children", {})
-            child_labels = [c["label"] for c in children.values()]
-            lines.append(f"• {cat['label']}: {', '.join(child_labels)}")
-        lines.append("• Georeferenciación: provincias, departamentos, municipios y localidades")
-        return "\n".join(lines)
-    except Exception:
-        logger.debug("Failed to build capabilities from taxonomy", exc_info=True)
-        return (
-            "CAPACIDADES DEL SISTEMA — OpenArg tiene datos sobre:\n"
-            "• Economía (inflación, dólar, empleo, actividad económica)\n"
-            "• Gobierno (presupuesto, autoridades, gobernadores, DDJJ)\n"
-            "• Congreso (legisladores, sesiones, personal, comisiones)\n"
-            "• Datos sociales (educación, salud, seguridad, género)\n"
-            "• Infraestructura (transporte, energía, telecomunicaciones)\n"
-            "• Georeferenciación (provincias, municipios, localidades)"
-        )
+# Keep module-level alias so old `from smart_query_service import _DATA_ACTIONS` works
+_DATA_ACTIONS = DATA_ACTIONS
 
 
 # ── Result dataclass ────────────────────────────────────────
@@ -115,232 +122,23 @@ class SmartQueryResult:
     warnings: list[str] = field(default_factory=list)
 
 
-# ── Casual / meta / educational patterns ────────────────────
-
-_GREETING_PATTERN = re.compile(
-    r"^("
-    r"hola|buenas|buen día|buenos días|buenas tardes|buenas noches"
-    r"|hey|qué tal|que tal|qué onda|que onda|cómo estás|como estas"
-    r"|cómo andás|como andas|qué hacés|que haces"
-    r")[\s!?.,;:]*$",
-    re.IGNORECASE,
-)
-
-_THANKS_PATTERN = re.compile(
-    r"^("
-    r"gracias|muchas gracias|genial|perfecto|dale|ok|de una|buenísimo|buenisimo"
-    r")[\s!?.,;:]*$",
-    re.IGNORECASE,
-)
-
-_FAREWELL_PATTERN = re.compile(
-    r"^("
-    r"chau|adiós|adios|hasta luego|nos vemos|hasta pronto"
-    r")[\s!?.,;:]*$",
-    re.IGNORECASE,
-)
-
-_DATA_ACTIONS = frozenset(
-    (
-        "query_sandbox",
-        "query_series",
-        "query_argentina_datos",
-        "query_bcra",
-        "query_ddjj",
-        "query_sesiones",
-        "query_staff",
-        "search_ckan",
-        "query_georef",
+def _dict_to_result(d: dict[str, Any]) -> SmartQueryResult:
+    """Convert a cached dict to a SmartQueryResult."""
+    return SmartQueryResult(
+        answer=d.get("answer", ""),
+        sources=d.get("sources", []),
+        chart_data=d.get("chart_data"),
+        tokens_used=d.get("tokens_used", 0),
+        documents=d.get("documents"),
+        cached=True,
     )
-)
-
-_META_PATTERNS = re.compile(
-    r"(qué pod[eé]s hacer|qu[eé] sab[eé]s|cu[aá]les son tus funciones"
-    r"|c[oó]mo funcion[aá]s|para qu[eé] serv[ií]s|ayuda"
-    r"|qu[eé] sos|qui[eé]n sos|qu[eé] es openarg)",
-    re.IGNORECASE,
-)
-
-_CASUAL_RESPONSES: dict[str, list[str]] = {
-    "greeting": [
-        "¡Hola! ¿Qué querés saber sobre datos abiertos de Argentina?",
-        "¡Buenas! Estoy listo para ayudarte con datos públicos argentinos.",
-        "¡Hola! Preguntame sobre economía, presupuesto, educación o cualquier dato público.",
-    ],
-    "thanks": [
-        "¡De nada! Si tenés más consultas sobre datos públicos, acá estoy.",
-        "¡Con gusto! ¿Necesitás analizar algo más?",
-        "¡No hay de qué! Preguntame lo que necesites.",
-    ],
-    "farewell": [
-        "¡Hasta luego! Volvé cuando necesites datos.",
-        "¡Chau! Que andes bien.",
-        "¡Nos vemos! Estoy acá para cuando necesites.",
-    ],
-    "generic": [
-        "¡Hola! ¿Qué querés saber sobre datos abiertos de Argentina?",
-        "¿En qué puedo ayudarte hoy?",
-    ],
-}
-
-_META_RESPONSE = (
-    "Soy **OpenArg**, un asistente de inteligencia artificial especializado "
-    "en datos abiertos de Argentina.\n\n"
-    "Puedo ayudarte con:\n"
-    "- **Series de tiempo** — inflación, tipo de cambio, PBI, reservas del BCRA\n"
-    "- **Economía** — dólar, riesgo país, cotizaciones\n"
-    "- **Datos gubernamentales** — datasets de datos.gob.ar y portales provinciales\n"
-    "- **Declaraciones juradas** — patrimonio de diputados nacionales\n"
-    "- **Sesiones legislativas** — transcripciones del Congreso\n"
-    "- **Georeferenciación** — normalización de direcciones y localidades\n\n"
-    "Probá preguntándome algo como: *¿Cómo viene la inflación en los últimos meses?*"
-)
-
-_EDUCATIONAL_PATTERNS: dict[re.Pattern[str], str] = {
-    re.compile(
-        r"qu[eé]\s+(es|son)\s+(los\s+)?datos?\s+abiertos",
-        re.IGNORECASE,
-    ): (
-        "Los **datos abiertos** son datos que cualquier persona puede "
-        "acceder, usar y compartir libremente. En Argentina, el portal "
-        "datos.gob.ar publica miles de datasets de gobierno nacional, "
-        "provincias y municipios.\n\n"
-        "Probá preguntarme: *¿Qué datasets hay sobre educación?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|significa)\s+(el\s+)?pbi",
-        re.IGNORECASE,
-    ): (
-        "El **PBI (Producto Bruto Interno)** es el valor total de todos "
-        "los bienes y servicios producidos en un país durante un período "
-        "determinado. Es el principal indicador de la actividad "
-        "económica.\n\n"
-        "Probá preguntarme: *¿Cómo evolucionó el PBI en los últimos "
-        "años?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|significa)\s+(la\s+)?inflaci[oó]n",
-        re.IGNORECASE,
-    ): (
-        "La **inflación** es el aumento generalizado y sostenido de "
-        "los precios de bienes y servicios en una economía. En "
-        "Argentina, el INDEC la mide mensualmente a través del IPC.\n\n"
-        "Probá preguntarme: *¿Cuál fue la inflación del último mes?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|significa)\s+(el\s+)?riesgo\s+pa[ií]s",
-        re.IGNORECASE,
-    ): (
-        "El **riesgo país** mide la diferencia de tasa de interés que "
-        "pagan los bonos de un país respecto de los bonos del Tesoro "
-        "de EE.UU. Un valor alto indica mayor percepción de riesgo.\n\n"
-        "Probá preguntarme: *¿Cuánto está el riesgo país hoy?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|son)\s+(las\s+)?ddjj",
-        re.IGNORECASE,
-    ): (
-        "Las **DDJJ (Declaraciones Juradas)** son documentos donde "
-        "los funcionarios públicos declaran su patrimonio. En OpenArg "
-        "tenemos 195 declaraciones juradas de diputados nacionales.\n\n"
-        "Probá preguntarme: *¿Quién es el diputado con mayor "
-        "patrimonio?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|significa)\s+(el\s+)?tipo\s+de\s+cambio",
-        re.IGNORECASE,
-    ): (
-        "El **tipo de cambio** es el precio de una moneda en términos "
-        "de otra. En Argentina se habla del dólar oficial, blue, MEP, "
-        "CCL, entre otros.\n\n"
-        "Probá preguntarme: *¿A cuánto está el dólar hoy?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|son)\s+(las\s+)?reservas\s+(del\s+)?bcra",
-        re.IGNORECASE,
-    ): (
-        "Las **reservas del BCRA** son los activos en moneda "
-        "extranjera que posee el Banco Central de la República "
-        "Argentina. Se usan para respaldar la moneda y las "
-        "obligaciones de deuda.\n\n"
-        "Probá preguntarme: *¿Cómo vienen las reservas del BCRA?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|significa)\s+(el\s+)?presupuesto"
-        r"\s+(nacional|p[uú]blico)",
-        re.IGNORECASE,
-    ): (
-        "El **presupuesto nacional** es la ley que estima los "
-        "ingresos y autoriza los gastos del Estado para cada año "
-        "fiscal. Define las prioridades de gasto público.\n\n"
-        "Probá preguntarme: *¿Cuánto se destina a educación en el "
-        "presupuesto?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|son)\s+(las\s+)?sesiones\s+(del\s+)?congreso",
-        re.IGNORECASE,
-    ): (
-        "Las **sesiones del Congreso** son las reuniones de la "
-        "Cámara de Diputados y el Senado donde se debaten y votan "
-        "proyectos de ley. Tenemos transcripciones de sesiones "
-        "disponibles.\n\n"
-        "Probá preguntarme: *¿Qué se debatió sobre educación en el "
-        "Congreso?*"
-    ),
-    re.compile(
-        r"qu[eé]\s+(es|significa)\s+(el\s+)?[ií]ndice\s+de\s+pobreza",
-        re.IGNORECASE,
-    ): (
-        "El **índice de pobreza** mide el porcentaje de personas u "
-        "hogares cuyos ingresos no alcanzan para cubrir una canasta "
-        "básica. El INDEC lo publica semestralmente en Argentina.\n\n"
-        "Probá preguntarme: *¿Cuál es el porcentaje de pobreza "
-        "actual?*"
-    ),
-}
-
-# ── Off-topic detection ──────────────────────────────────────
-_OFF_TOPIC_PATTERNS = re.compile(
-    r"(?:"
-    r"escrib[íi](me)?\s+(un\s+)?(poema|cuento|canción|cancion|historia|chiste|ensayo|carta|novela)"
-    r"|traduc[íi]|translate|traducime"
-    r"|escrib[íi]\s+c[oó]digo|write\s+(me\s+)?(a\s+)?(code|program|script|function)"
-    r"|programa\s+en\s+(python|java|javascript|c\+\+|rust|go|php|ruby)"
-    r"|receta\s+de\s+cocina|recipe\s+for"
-    r"|(?:resolv[eé]|calculá|calculate)\s+(?:\d|la\s+ecuaci[oó]n|equation|integral|derivada)"
-    r"|(?:quién|quien)\s+gan[oó]\s+(?:el\s+)?(?:mundial|world\s+cup|champions|superbowl|oscar)"
-    r"|hor[oó]scopo|horoscope"
-    r"|(?:dibuj[aá]|draw)\s+(?:me\s+)?(?:un|una|a|the)?"
-    r"|roleplay|act[uú]a\s+como|pretend\s+you|fingí\s+que"
-    r"|(?:cant[aá]|sing)\s+(?:me\s+)?(?:una?\s+)?(?:canci[oó]n|song)"
-    r"|(?:cont[aá]|tell)\s+(?:me\s+)?(?:un\s+)?(?:chiste|joke)"
-    r"|hac[eé](?:me)?\s+(?:un\s+)?(?:resumen|summary)\s+(?:de|of)\s+(?:un|a)\s+(?:libro|book|película|movie)"
-    r")",
-    re.IGNORECASE,
-)
-
-# ── INDEC fallback detection pattern ─────────────────────────
-_INDEC_PATTERN = re.compile(
-    r"(indec|ipc|inflaci[oó]n|emae|actividad\s+econ[oó]mica"
-    r"|pib|producto\s+bruto|comercio\s+exterior|exportaci[oó]n|importaci[oó]n|balanza\s+comercial"
-    r"|empleo|desempleo|eph|mercado\s+laboral|trabajo"
-    r"|canasta\s+b[aá]sica|cbt|cba"
-    r"|salario|sueldo"
-    r"|pobreza|indigencia"
-    r"|construcci[oó]n|isac|industria|ipi|producci[oó]n\s+industrial"
-    r"|supermercado"
-    r"|turismo"
-    r"|distribuci[oó]n\s+del\s+ingreso|gini|decil"
-    r"|balance\s+de\s+pagos|cuenta\s+corriente)",
-    re.IGNORECASE,
-)
 
 
 # ── Service ─────────────────────────────────────────────────
 
 
 class SmartQueryService:
-    """Orchestrates the full smart-query pipeline: plan → dispatch → analyze."""
+    """Orchestrates the full smart-query pipeline: plan -> dispatch -> analyze."""
 
     def __init__(
         self,
@@ -377,84 +175,80 @@ class SmartQueryService:
         self._chat_repo = chat_repo
         self._metrics = MetricsCollector()
 
-    async def _load_chat_history(self, conversation_id: str) -> str:
-        """Load recent messages from the DB to build conversation context.
+    # ── Backwards-compatible static methods (used by tests) ──
 
-        Only called when there is a conversation_id and a chat_repo.
-        Returns a formatted string or empty if no history.
-        """
-        if not conversation_id or not self._chat_repo:
-            return ""
-        try:
-            from uuid import UUID
+    @staticmethod
+    def _get_casual_response(question: str) -> str | None:
+        from app.application.pipeline.classifiers import get_casual_response
 
-            messages = await self._chat_repo.get_messages(UUID(conversation_id), limit=7)
-            if len(messages) <= 1:
-                return ""
-            # Skip the last message (it's the current question the frontend just saved)
-            recent = messages[:-1][-6:]
-            if not recent:
-                return ""
-            parts = ["\nHISTORIAL DE CONVERSACIÓN:"]
-            for m in recent:
-                label = "Usuario" if m.role == "user" else "Asistente"
-                content = m.content[:300].replace("\n", " ")
-                parts.append(f"  - {label}: {content}")
-            parts.append(
-                "INSTRUCCIÓN: Si la pregunta actual es ambigua o le falta sujeto "
-                "(ej: 'a qué partido pertenece', 'cuánto gana', 'dónde queda'), "
-                "resolvé la referencia usando el historial. "
-                "Si la pregunta es autocontenida, ignorá el historial.\n"
-            )
-            return "\n".join(parts)
-        except Exception:
-            logger.debug("Failed to load chat history for %s", conversation_id, exc_info=True)
-            return ""
+        return get_casual_response(question)
 
-    # ── Request classification (shared by execute + execute_streaming) ──
+    @staticmethod
+    def _get_meta_response(question: str) -> str | None:
+        from app.application.pipeline.classifiers import get_meta_response
 
-    def _classify_request(
-        self,
-        question: str,
-        user_id: str,
-    ) -> tuple[str | None, str | None]:
-        """Check casual/meta/injection/educational patterns.
+        return get_meta_response(question)
 
-        Returns (classification_type, response_text).
-        classification_type is one of "casual", "meta", "injection", "educational", or None.
-        """
-        casual = self._get_casual_response(question)
-        if casual:
-            return "casual", casual
+    @staticmethod
+    def _get_educational_response(text: str) -> str | None:
+        from app.application.pipeline.classifiers import get_educational_response
 
-        meta = self._get_meta_response(question)
-        if meta:
-            return "meta", meta
+        return get_educational_response(text)
 
-        suspicious, score = is_suspicious(question)
-        if suspicious:
-            audit_injection_blocked(user=user_id, question=question, score=score)
-            return "injection", (
-                "No pude procesar esa consulta. "
-                "Probá reformulándola con una pregunta sobre datos públicos argentinos, "
-                "por ejemplo: *¿Cuál fue la inflación del último mes?*"
-            )
+    @staticmethod
+    def _is_off_topic(question: str) -> bool:
+        from app.application.pipeline.classifiers import is_off_topic
 
-        if self._is_off_topic(question):
-            return "off_topic", (
-                "Solo puedo ayudarte con consultas sobre datos abiertos de Argentina, "
-                "transparencia gubernamental, presupuesto público y temas afines.\n\n"
-                "Probá con algo como:\n"
-                "- *¿Cuál fue la inflación del último mes?*\n"
-                "- *¿Cuántos empleados tiene el Senado?*\n"
-                "- *¿Qué dice la última declaración jurada de [diputado]?*"
-            )
+        return is_off_topic(question)
 
-        edu = self._get_educational_response(question)
-        if edu:
-            return "educational", edu
+    @staticmethod
+    def _build_data_context(results: list) -> str:
+        return build_data_context(results)
 
-        return None, None
+    @staticmethod
+    def _build_deterministic_charts(results: list) -> list[dict[str, Any]]:
+        return build_deterministic_charts(results)
+
+    @staticmethod
+    def _extract_llm_charts(text: str) -> list[dict[str, Any]]:
+        return extract_llm_charts(text)
+
+    @staticmethod
+    def _extract_meta(text: str) -> tuple[float, list[dict[str, Any]]]:
+        return extract_meta(text)
+
+    async def _check_cache(self, question: str, user_id: str) -> SmartQueryResult | None:
+        cached_dict, _ = await check_cache(
+            question, user_id, self._cache, self._embedding, self._semantic_cache, self._metrics
+        )
+        if cached_dict:
+            return _dict_to_result(cached_dict)
+        return None
+
+    async def _get_cached_dict(self, question: str) -> dict[str, Any] | None:
+        cached_dict, _ = await get_cached_dict(
+            question, self._cache, self._embedding, self._semantic_cache
+        )
+        return cached_dict
+
+    # ── Helper to build ConnectorDeps ──
+
+    def _build_deps(self) -> ConnectorDeps:
+        return ConnectorDeps(
+            series=self._series,
+            arg_datos=self._arg_datos,
+            georef=self._georef,
+            ckan=self._ckan,
+            sesiones=self._sesiones,
+            ddjj=self._ddjj,
+            staff=self._staff,
+            bcra=self._bcra,
+            sandbox=self._sandbox,
+            vector_search=self._vector_search,
+            llm=self._llm,
+            embedding=self._embedding,
+            semantic_cache=self._semantic_cache,
+        )
 
     # ── Public API ──────────────────────────────────────────
 
@@ -469,8 +263,8 @@ class SmartQueryService:
         """Run the full pipeline synchronously and return a result."""
         start_time = time.monotonic()
 
-        # 0. Casual/meta/injection/educational — instant responses (0 LLM calls)
-        cls_type, cls_text = self._classify_request(question, user_id)
+        # 0. Casual/meta/injection/educational -- instant responses (0 LLM calls)
+        cls_type, cls_text = classify_request(question, user_id)
         if cls_type == "casual":
             return SmartQueryResult(answer=cls_text, sources=[], casual=True)
         if cls_type == "meta":
@@ -492,29 +286,38 @@ class SmartQueryService:
         if cls_type == "educational":
             return SmartQueryResult(answer=cls_text, sources=[], educational=True)
 
-        # 1. Cache lookup (skip in policy mode — always fetch fresh data)
+        # 1. Cache lookup (skip in policy mode -- always fetch fresh data)
+        last_embedding: list[float] | None = None
         if not policy_mode:
-            cached = await self._check_cache(question, user_id)
-            if cached:
-                return cached
+            cached_dict, last_embedding = await check_cache(
+                question,
+                user_id,
+                self._cache,
+                self._embedding,
+                self._semantic_cache,
+                self._metrics,
+            )
+            if cached_dict is not None:
+                return _dict_to_result(cached_dict)
 
         # 2. Memory (Redis summaries + DB chat history)
         session_id = conversation_id or ""
         memory = await load_memory(self._cache, session_id)
         memory_ctx = build_memory_context_prompt(memory)
         memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
-        chat_history = await self._load_chat_history(conversation_id)
-        # Planner gets chat history (real messages) for follow-up understanding
+        chat_history = await load_chat_history(conversation_id, self._chat_repo)
         planner_ctx = chat_history or memory_ctx
 
-        # 3. Preprocess query (expand synonyms, acronyms, normalize)
+        # 3. Preprocess query
         _q = expand_acronyms(question)
         _q, _ = normalize_temporal(_q)
         _q = normalize_provinces(_q)
         preprocessed_q = expand_synonyms(_q)
 
         # 4. Discover relevant cached tables for the planner
-        catalog_hints = await self._discover_catalog_hints_for_planner(preprocessed_q)
+        catalog_hints = await discover_catalog_hints_for_planner(
+            preprocessed_q, self._sandbox, self._embedding
+        )
 
         # 5. Plan (1 LLM call)
         plan = await generate_plan(
@@ -524,16 +327,13 @@ class SmartQueryService:
             catalog_hints=catalog_hints,
         )
 
-        # Handle clarification from planner (before injecting fallback)
+        # Handle clarification from planner
         _is_clar = plan.intent == "clarification" and any(
             s.action == "clarification" for s in plan.steps
         )
         if _is_clar:
             clar_step = next(s for s in plan.steps if s.action == "clarification")
-            clar_q = clar_step.params.get(
-                "question",
-                "¿Podés ser más específico?",
-            )
+            clar_q = clar_step.params.get("question", "¿Podés ser más específico?")
             clar_opts = clar_step.params.get("options", [])
             opts_text = "\n".join(f"- {o}" for o in clar_opts) if clar_opts else ""
             answer = f"**{clar_q}**\n\n{opts_text}" if opts_text else f"**{clar_q}**"
@@ -544,22 +344,8 @@ class SmartQueryService:
                 duration_ms=int((time.monotonic() - start_time) * 1000),
             )
 
-        # Inject search_datasets fallback if plan has no vector search step
-        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
-        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
-        if not _has_vector_step and not _has_data_step:
-            plan.steps.insert(
-                0,
-                PlanStep(
-                    id="step_vector_fallback",
-                    action="search_datasets",
-                    description=(
-                        f"Buscar datasets relevantes por similitud semántica: {question[:100]}"
-                    ),
-                    params={"query": preprocessed_q, "limit": 5},
-                    depends_on=[],
-                ),
-            )
+        # Inject search_datasets fallback if plan has no vector/data step
+        _inject_vector_fallback(plan, question, preprocessed_q)
 
         logger.info(
             "Plan for '%s': intent=%s, steps=%d",
@@ -568,67 +354,16 @@ class SmartQueryService:
             len(plan.steps),
         )
 
-        # 4. Dispatch steps (0 LLM calls — just connector calls)
+        # 6. Dispatch steps (0 LLM calls -- just connector calls)
+        deps = self._build_deps()
         all_warnings: list[str] = []
-        results, step_warnings = await self._execute_steps(plan, nl_query=question)
+        results, step_warnings = await execute_steps(plan, deps, self._metrics, nl_query=question)
         all_warnings.extend(step_warnings)
 
-        # 5. LLM analysis (1 LLM call)
-        data_context = self._build_data_context(results)
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-
-        errors_block = ""
-        if all_warnings:
-            errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(
-                f"- {w}" for w in all_warnings
-            )
-
-        # If no data was collected, fall back to LLM general knowledge
-        no_data_fallback = not results or not any(r.records for r in results)
-
-        if no_data_fallback:
-            caps = _build_capabilities_block()
-            analysis_prompt = (
-                f'PREGUNTA DEL USUARIO: "{question}"\n'
-                f"FECHA ACTUAL: {today}\n\n"
-                f"{memory_ctx_analyst}\n\n"
-                "No se encontraron datos en las fuentes de datos abiertos para esta consulta.\n\n"
-                "REGLA CRÍTICA: Sos OpenArg, un asistente EXCLUSIVAMENTE especializado en datos "
-                "abiertos y análisis de datos públicos de Argentina. "
-                "Si la pregunta NO está relacionada con Argentina, datos públicos, gobierno, "
-                "economía, sociedad, política, infraestructura, o temas argentinos, "
-                "RECHAZÁ la pregunta cortésmente. Respondé algo como: "
-                "'No puedo ayudarte con eso. Soy OpenArg y estoy especializado en datos "
-                "abiertos de Argentina. Probá preguntarme sobre inflación, presupuesto, "
-                "educación, o cualquier tema de datos públicos argentinos.'\n\n"
-                "Ejemplos de preguntas que DEBÉS RECHAZAR:\n"
-                "- Escribir poemas, código, traducciones, o cualquier tarea genérica de IA\n"
-                "- Resumir libros, películas, o contenido no argentino\n"
-                "- Preguntas sobre otros países sin relación con Argentina\n\n"
-                "Si la pregunta SÍ es sobre Argentina pero no hay datos, respondé brevemente "
-                "usando tu conocimiento general, aclarando que no proviene del sistema de datos abiertos.\n\n"
-                f"{caps}\n\n"
-                "Al final, sugerí 2-3 preguntas de seguimiento "
-                "que cumplan TODAS estas reglas:\n"
-                "1. Relacionadas con datos públicos argentinos\n"
-                "2. Respondibles con datos reales del sistema\n"
-                "Formulalas como preguntas naturales, no categorías."
-            )
-        else:
-            analysis_prompt = (
-                f'PREGUNTA DEL USUARIO: "{question}"\n'
-                f"FECHA ACTUAL: {today}\n"
-                f"INTENCIÓN: {plan.intent}\n\n"
-                f"DATOS RECOLECTADOS:\n{data_context}\n"
-                f"{errors_block}"
-                f"{memory_ctx_analyst}\n\n"
-                "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
-                "para no repetir contexto innecesariamente y para mantener coherencia "
-                "con respuestas anteriores.\n\n"
-                "Respondé de forma breve y conversacional. Destacá el dato más importante, "
-                "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
-                "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
-            )
+        # 7. LLM analysis (1 LLM call)
+        analysis_prompt = _build_analysis_prompt(
+            question, plan, results, memory_ctx_analyst, all_warnings
+        )
 
         response = await self._llm.chat(
             messages=[
@@ -639,60 +374,37 @@ class SmartQueryService:
             max_tokens=8192,
         )
 
-        # 6. Charts
-        det_charts = self._build_deterministic_charts(results)
-        llm_charts = self._extract_llm_charts(response.content)
+        # 8. Charts
+        det_charts = build_deterministic_charts(results)
+        llm_charts = extract_llm_charts(response.content)
         charts = det_charts if det_charts else llm_charts
 
-        clean_answer = re.sub(r"<!--CHART:.*?-->", "", response.content, flags=re.DOTALL)
-        # Also strip truncated/unclosed chart tags (LLM ran out of tokens)
-        clean_answer = re.sub(r"<!--CHART:.*", "", clean_answer, flags=re.DOTALL).strip()
+        clean_answer = _strip_tags(response.content)
 
-        # 6a. Parse META confidence/citations
-        confidence, citations = self._extract_meta(clean_answer)
-        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL)
-        clean_answer = re.sub(r"<!--META:.*", "", clean_answer, flags=re.DOTALL).strip()
+        # 8a. Parse META confidence/citations
+        confidence, citations = extract_meta(clean_answer)
+        clean_answer = _strip_meta(clean_answer)
 
         # Add disclaimer for low confidence
         if confidence < 0.5:
             clean_answer = (
                 "**Nota:** La información disponible es limitada. "
-                "Los datos presentados podrían ser parciales o requerir verificación adicional.\n\n"
-                + clean_answer
+                "Los datos presentados podrían ser parciales o requerir "
+                "verificación adicional.\n\n" + clean_answer
             )
 
-        # 6b. Policy analysis (optional, 1 LLM call)
+        # 8b. Policy analysis (optional, 1 LLM call)
         if policy_mode:
             try:
                 policy_text = await analyze_policy(
-                    self._llm,
-                    plan,
-                    results,
-                    clean_answer,
-                    memory_ctx,
+                    self._llm, plan, results, clean_answer, memory_ctx
                 )
                 clean_answer += "\n\n---\n\n" + policy_text
             except Exception:
                 logger.warning("Policy agent failed", exc_info=True)
 
-        sources = [
-            {
-                "name": r.dataset_title,
-                "url": r.portal_url,
-                "portal": r.portal_name,
-                "accessed_at": r.metadata.get("fetched_at", ""),
-            }
-            for r in results
-            if r.records
-        ]
-
-        # Extract structured documents for frontend card rendering
-        documents: list[dict[str, Any]] = []
-        for r in results:
-            if r.source.startswith("ddjj:"):
-                for rec in r.records:
-                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
-                        documents.append({**rec, "doc_type": "ddjj"})
+        sources = _extract_sources(results)
+        documents = _extract_documents(results)
 
         tokens_used = response.tokens_used or 0
         self._metrics.record_tokens_used(tokens_used)
@@ -711,19 +423,19 @@ class SmartQueryService:
             warnings=all_warnings,
         )
 
-        # 7. Audit
+        # 9. Audit
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=duration_ms)
 
-        # 8. Memory update (fire-and-forget — don't block the response)
+        # 10. Memory update (fire-and-forget)
         asyncio.create_task(self._update_memory_bg(session_id, memory, plan, results, clean_answer))
 
-        # 9. Save conversation history
+        # 11. Save conversation history
         if session:
             plan_data = {
                 "intent": plan.intent,
                 "steps": [{"action": s.action, "params": s.params} for s in plan.steps],
             }
-            await self._save_history(
+            await save_history(
                 session,
                 question,
                 user_id,
@@ -734,7 +446,7 @@ class SmartQueryService:
                 plan_json=json.dumps(plan_data, ensure_ascii=False),
             )
 
-        # 10. Cache write
+        # 12. Cache write
         result_dict = {
             "answer": clean_answer,
             "sources": sources,
@@ -742,7 +454,15 @@ class SmartQueryService:
             "tokens_used": tokens_used,
             "documents": documents if documents else None,
         }
-        await self._write_cache(question, result_dict, intent=plan.intent)
+        await write_cache(
+            question,
+            result_dict,
+            plan.intent,
+            self._cache,
+            self._embedding,
+            self._semantic_cache,
+            last_embedding=last_embedding,
+        )
 
         return result
 
@@ -756,8 +476,8 @@ class SmartQueryService:
         """Run the pipeline yielding status/chunk/complete/error events for WebSocket."""
         yield {"type": "status", "step": "classifying"}
 
-        # Casual/meta/injection/educational — instant responses (0 LLM calls)
-        cls_type, cls_text = self._classify_request(question, user_id)
+        # Casual/meta/injection/educational -- instant responses
+        cls_type, cls_text = classify_request(question, user_id)
         if cls_type is not None:
             yield {"type": "chunk", "content": cls_text}
             complete_evt: dict[str, Any] = {
@@ -774,7 +494,12 @@ class SmartQueryService:
         # Cache check (skip in policy mode)
         session_id = conversation_id or ""
         if not policy_mode:
-            cached_result = await self._get_cached_dict(question)
+            cached_result, _ = await get_cached_dict(
+                question,
+                self._cache,
+                self._embedding,
+                self._semantic_cache,
+            )
             if cached_result:
                 yield {"type": "status", "step": "cache_hit"}
                 answer = cached_result.get("answer", "")
@@ -793,18 +518,19 @@ class SmartQueryService:
         memory_ctx = build_memory_context_prompt(memory)
         memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
 
-        # Chat history from DB (preferred over Redis memory for planner)
-        chat_history = await self._load_chat_history(conversation_id)
+        chat_history = await load_chat_history(conversation_id, self._chat_repo)
         planner_ctx = chat_history or memory_ctx
 
-        # Preprocess query (expand synonyms, acronyms, normalize)
+        # Preprocess query
         _q = expand_acronyms(question)
         _q, _ = normalize_temporal(_q)
         _q = normalize_provinces(_q)
         preprocessed_q = expand_synonyms(_q)
 
         # Discover relevant cached tables for the planner
-        catalog_hints = await self._discover_catalog_hints_for_planner(preprocessed_q)
+        catalog_hints = await discover_catalog_hints_for_planner(
+            preprocessed_q, self._sandbox, self._embedding
+        )
 
         # Plan (1 LLM call)
         yield {"type": "status", "step": "planning"}
@@ -815,7 +541,7 @@ class SmartQueryService:
             catalog_hints=catalog_hints,
         )
 
-        # Handle clarification from planner (before injecting fallback)
+        # Handle clarification
         _is_clar = plan.intent == "clarification" and any(
             s.action == "clarification" for s in plan.steps
         )
@@ -823,30 +549,13 @@ class SmartQueryService:
             clar_step = next(s for s in plan.steps if s.action == "clarification")
             yield {
                 "type": "clarification",
-                "question": clar_step.params.get(
-                    "question",
-                    "¿Podés ser más específico?",
-                ),
+                "question": clar_step.params.get("question", "¿Podés ser más específico?"),
                 "options": clar_step.params.get("options", []),
             }
             return
 
-        # Inject search_datasets fallback if plan has no vector search
-        _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
-        _has_data_step = any(s.action in _DATA_ACTIONS for s in plan.steps)
-        if not _has_vector_step and not _has_data_step:
-            plan.steps.insert(
-                0,
-                PlanStep(
-                    id="step_vector_fallback",
-                    action="search_datasets",
-                    description=(
-                        f"Buscar datasets relevantes por similitud semántica: {question[:100]}"
-                    ),
-                    params={"query": preprocessed_q, "limit": 5},
-                    depends_on=[],
-                ),
-            )
+        # Inject search_datasets fallback
+        _inject_vector_fallback(plan, question, preprocessed_q)
 
         yield {
             "type": "status",
@@ -857,70 +566,20 @@ class SmartQueryService:
 
         # Dispatch steps (0 LLM calls)
         yield {"type": "status", "step": "searching"}
+        deps = self._build_deps()
         all_warnings: list[str] = []
-        results, step_warnings = await self._execute_steps(plan, nl_query=question)
+        results, step_warnings = await execute_steps(plan, deps, self._metrics, nl_query=question)
         all_warnings.extend(step_warnings)
 
         # Analysis (1 LLM call, streamed)
         yield {"type": "status", "step": "generating"}
 
-        data_context = self._build_data_context(results)
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-
-        errors_block = ""
-        if all_warnings:
-            errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(
-                f"- {w}" for w in all_warnings
-            )
-
-        no_data_fallback = not results or not any(r.records for r in results)
-
-        if no_data_fallback:
-            caps = _build_capabilities_block()
-            analysis_prompt = (
-                f'PREGUNTA DEL USUARIO: "{question}"\n'
-                f"FECHA ACTUAL: {today}\n\n"
-                f"{memory_ctx_analyst}\n\n"
-                "No se encontraron datos en las fuentes de datos abiertos para esta consulta.\n\n"
-                "REGLA CRÍTICA: Sos OpenArg, un asistente EXCLUSIVAMENTE especializado en datos "
-                "abiertos y análisis de datos públicos de Argentina. "
-                "Si la pregunta NO está relacionada con Argentina, datos públicos, gobierno, "
-                "economía, sociedad, política, infraestructura, o temas argentinos, "
-                "RECHAZÁ la pregunta cortésmente. Respondé algo como: "
-                "'No puedo ayudarte con eso. Soy OpenArg y estoy especializado en datos "
-                "abiertos de Argentina. Probá preguntarme sobre inflación, presupuesto, "
-                "educación, o cualquier tema de datos públicos argentinos.'\n\n"
-                "Ejemplos de preguntas que DEBÉS RECHAZAR:\n"
-                "- Escribir poemas, código, traducciones, o cualquier tarea genérica de IA\n"
-                "- Resumir libros, películas, o contenido no argentino\n"
-                "- Preguntas sobre otros países sin relación con Argentina\n\n"
-                "Si la pregunta SÍ es sobre Argentina pero no hay datos, respondé brevemente "
-                "usando tu conocimiento general, aclarando que no proviene del sistema de datos abiertos.\n\n"
-                f"{caps}\n\n"
-                "Al final, sugerí 2-3 preguntas de seguimiento "
-                "que cumplan TODAS estas reglas:\n"
-                "1. Relacionadas con datos públicos argentinos\n"
-                "2. Respondibles con datos reales del sistema\n"
-                "Formulalas como preguntas naturales, no categorías."
-            )
-        else:
-            analysis_prompt = (
-                f'PREGUNTA DEL USUARIO: "{question}"\n'
-                f"FECHA ACTUAL: {today}\n"
-                f"INTENCIÓN: {plan.intent}\n\n"
-                f"DATOS RECOLECTADOS:\n{data_context}\n"
-                f"{errors_block}"
-                f"{memory_ctx_analyst}\n\n"
-                "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
-                "para no repetir contexto innecesariamente y para mantener coherencia "
-                "con respuestas anteriores.\n\n"
-                "Respondé de forma breve y conversacional. Destacá el dato más importante, "
-                "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
-                "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
-            )
+        analysis_prompt = _build_analysis_prompt(
+            question, plan, results, memory_ctx_analyst, all_warnings
+        )
 
         full_text = ""
-        stream_buf = ""  # buffer for filtering <!--CHART/META--> tags
+        stream_buf = ""
         async for chunk in self._llm.chat_stream(
             messages=[
                 LLMMessage(role="system", content=load_prompt("analyst")),
@@ -935,25 +594,20 @@ class SmartQueryService:
             # If we're inside a tag, keep buffering
             if "<!--" in stream_buf:
                 tag_start = stream_buf.index("<!--")
-                # Flush everything before the tag
                 if tag_start > 0:
                     yield {"type": "chunk", "content": stream_buf[:tag_start]}
                     stream_buf = stream_buf[tag_start:]
-                # Check if the tag is complete
                 if "-->" in stream_buf:
-                    # Drop the tag entirely, keep anything after it
                     tag_end = stream_buf.index("-->") + 3
                     stream_buf = stream_buf[tag_end:]
-                    # Flush remaining if no new tag is starting
                     if stream_buf and "<!--" not in stream_buf:
                         yield {"type": "chunk", "content": stream_buf}
                         stream_buf = ""
-                # else: tag not yet complete, keep buffering
             else:
                 yield {"type": "chunk", "content": stream_buf}
                 stream_buf = ""
 
-        # Flush any remaining buffer (strip complete + truncated tags)
+        # Flush remaining buffer
         if stream_buf:
             cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
             cleaned = re.sub(r"<!--.*", "", cleaned, flags=re.DOTALL)
@@ -961,28 +615,20 @@ class SmartQueryService:
                 yield {"type": "chunk", "content": cleaned}
 
         # Complete
-        det_charts = self._build_deterministic_charts(results)
-        llm_charts = self._extract_llm_charts(full_text)
+        det_charts = build_deterministic_charts(results)
+        llm_charts = extract_llm_charts(full_text)
         charts = det_charts if det_charts else llm_charts
-        clean_answer = re.sub(r"<!--CHART:.*?-->", "", full_text, flags=re.DOTALL)
-        # Also strip truncated/unclosed chart tags (LLM ran out of tokens)
-        clean_answer = re.sub(r"<!--CHART:.*", "", clean_answer, flags=re.DOTALL).strip()
+        clean_answer = _strip_tags(full_text)
 
-        # Parse META from streaming output
-        confidence, citations = self._extract_meta(clean_answer)
-        clean_answer = re.sub(r"<!--META:.*?-->", "", clean_answer, flags=re.DOTALL)
-        clean_answer = re.sub(r"<!--META:.*", "", clean_answer, flags=re.DOTALL).strip()
+        confidence, citations = extract_meta(clean_answer)
+        clean_answer = _strip_meta(clean_answer)
 
         # Policy analysis (optional, streamed)
         if policy_mode:
             try:
                 yield {"type": "status", "step": "policy_analysis"}
                 policy_text = await analyze_policy(
-                    self._llm,
-                    plan,
-                    results,
-                    clean_answer,
-                    memory_ctx,
+                    self._llm, plan, results, clean_answer, memory_ctx
                 )
                 separator = "\n\n---\n\n"
                 yield {"type": "chunk", "content": separator + policy_text}
@@ -990,24 +636,8 @@ class SmartQueryService:
             except Exception:
                 logger.warning("Policy agent failed in streaming", exc_info=True)
 
-        sources = [
-            {
-                "name": r.dataset_title,
-                "url": r.portal_url,
-                "portal": r.portal_name,
-                "accessed_at": r.metadata.get("fetched_at", ""),
-            }
-            for r in results
-            if r.records
-        ]
-
-        # Extract structured documents for frontend card rendering
-        documents: list[dict[str, Any]] = []
-        for r in results:
-            if r.source.startswith("ddjj:"):
-                for rec in r.records:
-                    if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
-                        documents.append({**rec, "doc_type": "ddjj"})
+        sources = _extract_sources(results)
+        documents = _extract_documents(results)
 
         yield {
             "type": "complete",
@@ -1020,7 +650,7 @@ class SmartQueryService:
             **({"warnings": all_warnings} if all_warnings else {}),
         }
 
-        # Audit (streaming was missing this)
+        # Audit
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=0)
 
         # Memory update (fire-and-forget)
@@ -1035,7 +665,14 @@ class SmartQueryService:
                 "tokens_used": 0,
                 "documents": documents if documents else None,
             }
-            await self._write_cache(question, result_dict, intent=plan.intent)
+            await write_cache(
+                question,
+                result_dict,
+                plan.intent,
+                self._cache,
+                self._embedding,
+                self._semantic_cache,
+            )
         except Exception:
             logger.debug("Cache write failed in streaming", exc_info=True)
 
@@ -1046,13 +683,10 @@ class SmartQueryService:
         session_id: str,
         memory: Any,
         plan: ExecutionPlan,
-        results: list[DataResult],
+        results: list,
         answer: str,
     ) -> None:
-        """Fire-and-forget memory update — runs after the response is sent.
-
-        Retries up to 2 times with exponential backoff (0.5s, 1s) before giving up.
-        """
+        """Fire-and-forget memory update -- runs after the response is sent."""
         max_retries = 2
         backoff_base = 0.5
         last_exc: Exception | None = None
@@ -1083,1590 +717,127 @@ class SmartQueryService:
             last_exc,
         )
 
-    # ── Classification helpers ──────────────────────────────
 
-    @staticmethod
-    def _get_casual_response(question: str) -> str | None:
-        t = question.strip()
-        if _GREETING_PATTERN.match(t):
-            subtype = "greeting"
-        elif _THANKS_PATTERN.match(t):
-            subtype = "thanks"
-        elif _FAREWELL_PATTERN.match(t):
-            subtype = "farewell"
-        else:
-            return None
-        responses = _CASUAL_RESPONSES.get(subtype, _CASUAL_RESPONSES["generic"])
-        return random.choice(responses)  # noqa: S311
-
-    @staticmethod
-    def _get_meta_response(question: str) -> str | None:
-        if _META_PATTERNS.search(question.strip()):
-            return _META_RESPONSE
-        return None
-
-    @staticmethod
-    def _get_educational_response(text: str) -> str | None:
-        for pattern, response in _EDUCATIONAL_PATTERNS.items():
-            if pattern.search(text.strip()):
-                return response
-        return None
-
-    @staticmethod
-    def _is_off_topic(question: str) -> bool:
-        """Return True if the question is clearly outside the Argentine open data domain."""
-        return bool(_OFF_TOPIC_PATTERNS.search(question))
-
-    # ── Cache helpers ───────────────────────────────────────
-
-    @staticmethod
-    def _cache_key(question: str) -> str:
-        normalized = question.strip().lower()
-        h = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-        return f"openarg:smart:{h}"
-
-    async def _get_embedding(self, question: str) -> list[float] | None:
-        try:
-            emb = await self._embedding.embed(question)
-            self._last_embedding = emb
-            return emb
-        except Exception:
-            logger.debug("Embedding generation failed for cache", exc_info=True)
-            return None
-
-    async def _check_cache(self, question: str, user_id: str) -> SmartQueryResult | None:
-        # Run Redis lookup and embedding generation in parallel.
-        # Redis is cheap (~1ms) and embedding takes ~100-200ms; overlapping
-        # them shaves latency on cache misses without hurting hits.
-
-        async def _redis_lookup() -> dict[str, Any] | None:
-            try:
-                cache_key = self._cache_key(question)
-                cached = await self._cache.get(cache_key)
-                if cached and isinstance(cached, dict):
-                    return cached
-            except Exception:
-                logger.debug("Redis cache read failed", exc_info=True)
-            return None
-
-        redis_result, q_embedding = await asyncio.gather(
-            _redis_lookup(),
-            self._get_embedding(question),
-        )
-
-        # 1. Redis hit → return immediately (embedding is ignored)
-        if redis_result is not None:
-            self._metrics.record_cache_hit()
-            audit_cache_hit(user=user_id, question=question)
-            return SmartQueryResult(
-                answer=redis_result.get("answer", ""),
-                sources=redis_result.get("sources", []),
-                chart_data=redis_result.get("chart_data"),
-                tokens_used=redis_result.get("tokens_used", 0),
-                documents=redis_result.get("documents"),
-                cached=True,
-            )
-
-        # 2. Semantic cache (use the already-fetched embedding)
-        if q_embedding:
-            try:
-                sem_cached = await self._semantic_cache.get(question, embedding=q_embedding)
-                if sem_cached:
-                    self._metrics.record_cache_hit()
-                    audit_cache_hit(user=user_id, question=question)
-                    return SmartQueryResult(
-                        answer=sem_cached.get("answer", ""),
-                        sources=sem_cached.get("sources", []),
-                        chart_data=sem_cached.get("chart_data"),
-                        tokens_used=sem_cached.get("tokens_used", 0),
-                        documents=sem_cached.get("documents"),
-                        cached=True,
-                    )
-            except Exception:
-                logger.debug("Semantic cache read failed", exc_info=True)
-
-        self._metrics.record_cache_miss()
-        return None
-
-    async def _get_cached_dict(self, question: str) -> dict[str, Any] | None:
-        """Return raw cached dict for streaming endpoint."""
-        try:
-            cached = await self._cache.get(self._cache_key(question))
-            if cached and isinstance(cached, dict):
-                return cached
-        except Exception:
-            logger.debug("WS Redis cache read failed", exc_info=True)
-        try:
-            q_embedding = await self._get_embedding(question)
-            if q_embedding:
-                sem = await self._semantic_cache.get(question, embedding=q_embedding)
-                if sem and isinstance(sem, dict):
-                    return sem
-        except Exception:
-            logger.debug("WS semantic cache read failed", exc_info=True)
-        return None
-
-    async def _write_cache(self, question: str, result: dict[str, Any], intent: str = "") -> None:
-        ttl = ttl_for_intent(intent)
-        try:
-            await self._cache.set(self._cache_key(question), result, ttl_seconds=ttl)
-        except Exception:
-            logger.warning("Failed to cache smart query result", exc_info=True)
-        try:
-            # Reuse embedding already computed by _check_cache / _get_cached_dict
-            q_embedding = getattr(self, "_last_embedding", None)
-            if not q_embedding:
-                q_embedding = await self._get_embedding(question)
-            if q_embedding:
-                await self._semantic_cache.set(question, q_embedding, result, ttl=ttl)
-        except Exception:
-            logger.debug("Semantic cache write failed", exc_info=True)
-
-    # ── Step executors ──────────────────────────────────────
-
-    async def _execute_series_step(self, step: PlanStep) -> list[DataResult]:
-        params = step.params
-        series_ids = params.get("seriesIds", [])
-        collapse = params.get("collapse")
-        representation = params.get("representation")
-
-        query_text = params.get("query", step.description)
-
-        # Always check catalog for defaults (collapse, representation)
-        # even when the planner already provided seriesIds, because
-        # the planner often omits representation=percent_change.
-        match = find_catalog_match(query_text)
-        if match:
-            if not series_ids:
-                series_ids = match["ids"]
-            if not collapse and "default_collapse" in match:
-                collapse = match["default_collapse"]
-            if not representation and "default_representation" in match:
-                representation = match["default_representation"]
-            logger.info("Series catalog match for '%s': %s", query_text[:60], series_ids)
-
-        if not series_ids:
-            search_results = await self._series.search(query_text)
-            if search_results:
-                series_ids = [r["id"] for r in search_results[:3]]
-                logger.info("Series dynamic search for '%s': %s", query_text[:60], series_ids)
-
-        if not series_ids:
-            raise ConnectorError(
-                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-                details={"query": query_text[:100], "reason": "No se encontraron series matching"},
-            )
-
-        start_date = params.get("startDate")
-        end_date = params.get("endDate")
-        if not end_date:
-            end_date = datetime.now(UTC).strftime("%Y-%m-%d")
-
-        result = await self._series.fetch(
-            series_ids=series_ids,
-            start_date=start_date,
-            end_date=end_date,
-            collapse=collapse,
-            representation=representation,
-        )
-        if not result:
-            raise ConnectorError(
-                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-                details={"series_ids": series_ids, "reason": "API respondió sin datos"},
-            )
-        return [result]
-
-    async def _execute_argentina_datos_step(self, step: PlanStep) -> list[DataResult]:
-        params = step.params
-        data_type = params.get("type", "dolar")
-
-        if data_type == "dolar":
-            result = await self._arg_datos.fetch_dolar(casa=params.get("casa"))
-            return [result] if result else []
-        elif data_type == "riesgo_pais":
-            result = await self._arg_datos.fetch_riesgo_pais(ultimo=params.get("ultimo", False))
-            return [result] if result else []
-        elif data_type == "inflacion":
-            result = await self._arg_datos.fetch_inflacion()
-            return [result] if result else []
-        return []
-
-    async def _execute_georef_step(self, step: PlanStep) -> list[DataResult]:
-        query = step.params.get("query", step.description)
-        result = await self._georef.normalize_location(query)
-        return [result] if result else []
-
-    def _execute_ddjj_step(self, step: PlanStep) -> list[DataResult]:
-        params = step.params
-        action = params.get("action", "search")
-
-        if action == "ranking":
-            result = self._ddjj.ranking(
-                sort_by=params.get("sortBy", "patrimonio"),
-                top=params.get("top", 10),
-                order=params.get("order", "desc"),
-            )
-            position = params.get("position")
-            if position and result.records and len(result.records) >= position:
-                result = DataResult(
-                    source=result.source,
-                    portal_name=result.portal_name,
-                    portal_url=result.portal_url,
-                    dataset_title=result.dataset_title,
-                    format=result.format,
-                    records=[result.records[position - 1]],
-                    metadata={**result.metadata, "position": position},
-                )
-        elif action == "stats":
-            result = self._ddjj.stats()
-        elif action == "detail" or params.get("nombre"):
-            result = self._ddjj.get_by_name(params.get("nombre", ""))
-        else:
-            result = self._ddjj.search(params.get("query", params.get("nombre", "")))
-
-        return [result] if result.records else []
-
-    async def _execute_staff_step(self, step: PlanStep) -> list[DataResult]:
-        if not self._staff:
-            logger.warning("Staff adapter not configured, skipping step %s", step.id)
-            return []
-        params = step.params
-        action = params.get("action", "search")
-        name = params.get("name", "")
-
-        if (action in ("get_by_legislator", "count") and name) or name:
-            # Always fetch full list — it includes the count and the names.
-            # Using get_by_legislator ensures the LLM gets the detail it
-            # needs regardless of whether the user asked "cuántos" or "quiénes".
-            result = await self._staff.get_by_legislator(name)
-        elif action == "changes":
-            result = await self._staff.get_changes(name=name or None)
-        elif action == "stats":
-            result = await self._staff.stats()
-        else:
-            result = await self._staff.search(params.get("query", name or step.description))
-
-        return [result] if result.records else []
-
-    @staticmethod
-    def _sanitize_ckan_query(raw: str) -> str:
-        """Extract meaningful keywords from a potentially verbose LLM-generated query.
-
-        CKAN's Solr search works best with short keyword queries, not full
-        sentences like "Buscar datasets relacionados con educación en el portal".
-        """
-        # Common filler words the LLM likes to include
-        _STOPWORDS = {
-            "buscar",
-            "busca",
-            "buscando",
-            "datasets",
-            "dataset",
-            "datos",
-            "relacionados",
-            "relacionado",
-            "sobre",
-            "acerca",
-            "portal",
-            "nacional",
-            "disponibles",
-            "disponible",
-            "listar",
-            "mostrar",
-            "obtener",
-            "consultar",
-            "encontrar",
-            "abiertos",
-            "abierto",
-            "informacion",
-            "información",
-            "con",
-            "del",
-            "los",
-            "las",
-            "que",
-            "hay",
-            "tiene",
-            "para",
-            "una",
-            "por",
-            "como",
-            "son",
-            "mas",
-            "más",
-            "este",
-            "esta",
-            "estos",
-            "estas",
-            "datos.gob.ar",
-            "datos.gob",
-            "gob.ar",
-        }
-        # Strip quotes and parenthetical text
-        clean = re.sub(r"[\"'()]", " ", raw)
-        # Extract words, keep only meaningful ones
-        words = [w for w in clean.lower().split() if len(w) > 2 and w not in _STOPWORDS]
-        if not words:
-            # If everything was filtered, use the original minus obvious filler
-            return raw.strip()[:100]
-        return " ".join(words[:5])
-
-    async def _execute_ckan_step(self, step: PlanStep) -> list[DataResult]:
-        params = step.params
-        raw_query = params.get("query", step.description)
-        query = self._sanitize_ckan_query(raw_query) if raw_query not in ("*", "*:*") else raw_query
-        portal_id = params.get("portalId")
-        rows = params.get("rows", 10)
-
-        resource_id = params.get("resourceId") or params.get("resource_id")
-        if resource_id and portal_id:
-            q = params.get("q")
-            records = await self._ckan.query_datastore(portal_id, resource_id, q=q)
-            if records:
-                return [
-                    DataResult(
-                        source=f"ckan:{portal_id}",
-                        portal_name=f"CKAN {portal_id}",
-                        portal_url="",
-                        dataset_title=f"Datastore query: {q or 'all'}",
-                        format="json",
-                        records=records,
-                        metadata={
-                            "total_records": len(records),
-                            "fetched_at": datetime.now(UTC).isoformat(),
-                        },
-                    )
-                ]
-
-        # --- Try local cached tables first ---
-        local_results = await self._search_cached_tables(query, limit=rows)
-        if local_results:
-            logger.info("CKAN step resolved from %d local cached table(s)", len(local_results))
-            return local_results
-
-        # --- Fallback: live CKAN search ---
-        return await self._ckan.search_datasets(query, portal_id=portal_id, rows=rows)
-
-    async def _search_cached_tables(
-        self,
-        query: str,
-        limit: int = 10,
-    ) -> list[DataResult]:
-        """Search locally cached tables (cache_*) for datasets matching *query*.
-
-        Uses a simple keyword match against table names.  If matches are found,
-        fetches a sample of rows via the sandbox so we avoid hitting the
-        internet entirely.
-        """
-        if not self._sandbox:
-            return []
-
-        try:
-            all_tables = await self._sandbox.list_cached_tables()
-        except Exception:
-            logger.debug("Failed to list cached tables", exc_info=True)
-            return []
-
-        if not all_tables:
-            return []
-
-        # Normalise query keywords for matching
-        keywords = [k.lower() for k in query.split() if len(k) > 2]
-        if not keywords:
-            return []
-
-        matched = [t for t in all_tables if any(kw in t.table_name.lower() for kw in keywords)]
-        if not matched:
-            return []
-
-        matched = matched[:limit]
-        results: list[DataResult] = []
-        now = datetime.now(UTC).isoformat()
-
-        for table in matched:
-            try:
-                cols = ", ".join(f'"{c}"' for c in table.columns[:30]) if table.columns else "*"
-                sql = f'SELECT {cols} FROM "{table.table_name}" LIMIT 50'
-                sandbox_result = await self._sandbox.execute_readonly(sql, timeout_seconds=5)
-                if sandbox_result.error or not sandbox_result.rows:
-                    continue
-
-                results.append(
-                    DataResult(
-                        source=f"cache:{table.table_name}",
-                        portal_name="Base de datos local (cache)",
-                        portal_url="",
-                        dataset_title=table.table_name.replace("cache_", "")
-                        .replace("_", " ")
-                        .title(),
-                        format="json",
-                        records=sandbox_result.rows[:50],
-                        metadata={
-                            "total_records": table.row_count or len(sandbox_result.rows),
-                            "columns": table.columns,
-                            "fetched_at": now,
-                            "source": "local_cache",
-                        },
-                    )
-                )
-            except Exception:
-                logger.debug("Failed to query cached table %s", table.table_name, exc_info=True)
-                continue
-
-        return results
-
-    async def _execute_sesiones_step(self, step: PlanStep) -> list[DataResult]:
-        params = step.params
-        result = await self._sesiones.search(
-            query=params.get("query", step.description),
-            periodo=params.get("periodo"),
-            orador=params.get("orador"),
-            limit=params.get("limit", 15),
-        )
-        return [result] if result else []
-
-    async def _execute_bcra_step(self, step: PlanStep) -> list[DataResult]:
-        if not self._bcra:
-            logger.warning("BCRAAdapter not configured, skipping step %s", step.id)
-            return []
-        params = step.params
-        tipo = params.get("tipo", "cotizaciones")
-        try:
-            if tipo == "cotizaciones":
-                result = await self._bcra.get_cotizaciones(
-                    moneda=params.get("moneda", "USD"),
-                    fecha_desde=params.get("fecha_desde"),
-                    fecha_hasta=params.get("fecha_hasta"),
-                )
-            elif tipo == "variables":
-                result = await self._bcra.get_principales_variables()
-            elif tipo == "historica":
-                id_variable = params.get("id_variable")
-                if not id_variable:
-                    result = await self._bcra.get_principales_variables()
-                else:
-                    result = await self._bcra.get_variable_historica(
-                        id_variable=int(id_variable),
-                        fecha_desde=params.get("fecha_desde", "2024-01-01"),
-                        fecha_hasta=params.get(
-                            "fecha_hasta", datetime.now(UTC).strftime("%Y-%m-%d")
-                        ),
-                    )
-            else:
-                result = await self._bcra.get_cotizaciones()
-            return [result] if result else []
-        except Exception:
-            logger.warning("BCRA step %s failed", step.id, exc_info=True)
-            return []
-
-    async def _get_catalog_entries(self, table_names: list[str]) -> dict[str, dict[str, Any]]:
-        """Fetch table_catalog metadata for given table names.
-
-        Uses the sandbox's sync engine via run_in_executor to avoid
-        needing an async session.
-        """
-        if not table_names or not self._sandbox:
-            return {}
-        try:
-            import asyncio
-
-            loop = asyncio.get_running_loop()
-
-            def _fetch() -> dict[str, dict[str, Any]]:
-                engine = self._sandbox._get_engine()  # type: ignore[union-attr]
-                with engine.connect() as conn:
-                    result = conn.execute(
-                        text(
-                            "SELECT table_name, display_name, description, domain, subdomain, "
-                            "key_columns, column_types, sample_queries, tags "
-                            "FROM table_catalog WHERE table_name = ANY(:names)"
-                        ),
-                        {"names": table_names},
-                    )
-                    rows = result.fetchall()
-                    conn.rollback()
-                    return {
-                        r.table_name: {
-                            "display_name": r.display_name,
-                            "description": r.description,
-                            "domain": r.domain,
-                            "subdomain": r.subdomain,
-                            "key_columns": r.key_columns,
-                            "column_types": r.column_types,
-                            "sample_queries": r.sample_queries,
-                            "tags": r.tags,
-                        }
-                        for r in rows
-                    }
-
-            return await loop.run_in_executor(None, _fetch)
-        except Exception:
-            logger.debug(
-                "table_catalog lookup failed",
-                exc_info=True,
-            )
-            return {}
-
-    async def _discover_tables_by_catalog_search(
-        self,
-        query: str,
-        limit: int = 5,
-    ) -> list[str]:
-        """Search table_catalog embeddings for relevant tables."""
-        if not self._sandbox:
-            return []
-        try:
-            import asyncio
-
-            q_embedding = await self._embedding.embed(query)
-            embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
-            loop = asyncio.get_running_loop()
-
-            def _search() -> list[str]:
-                engine = self._sandbox._get_engine()  # type: ignore[union-attr]
-                with engine.connect() as conn:
-                    result = conn.execute(
-                        text(
-                            "SELECT table_name FROM table_catalog "
-                            "WHERE catalog_embedding IS NOT NULL "
-                            "ORDER BY catalog_embedding <=> CAST(:emb AS vector) "
-                            "LIMIT :lim"
-                        ),
-                        {"emb": embedding_str, "lim": limit},
-                    )
-                    names = [r.table_name for r in result.fetchall()]
-                    conn.rollback()
-                    return names
-
-            return await loop.run_in_executor(None, _search)
-        except Exception:
-            logger.debug("catalog vector search failed", exc_info=True)
-            return []
-
-    async def _discover_catalog_hints_for_planner(
-        self,
-        query: str,
-        limit: int = 5,
-    ) -> str:
-        """Search table_catalog for relevant tables and format as planner hints.
-
-        This runs BEFORE the planner LLM so it knows which cached tables exist
-        for the user's question. Without this, the planner only knows about
-        tables matched by keyword routing in dataset_index.py.
-        """
-        if not self._sandbox:
-            return ""
-        try:
-            import asyncio
-
-            q_embedding = await self._embedding.embed(query)
-            embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
-            loop = asyncio.get_running_loop()
-
-            def _search() -> list[tuple[str, str, str, int]]:
-                engine = self._sandbox._get_engine()  # type: ignore[union-attr]
-                with engine.connect() as conn:
-                    result = conn.execute(
-                        text(
-                            "SELECT tc.table_name, tc.display_name, tc.description, "
-                            "COALESCE(tc.row_count, 0) AS row_count, "
-                            "1 - (tc.catalog_embedding <=> CAST(:emb AS vector)) AS score "
-                            "FROM table_catalog tc "
-                            "WHERE tc.catalog_embedding IS NOT NULL "
-                            "AND 1 - (tc.catalog_embedding <=> CAST(:emb AS vector)) > 0.55 "
-                            "ORDER BY tc.catalog_embedding <=> CAST(:emb AS vector) "
-                            "LIMIT :lim"
-                        ),
-                        {"emb": embedding_str, "lim": limit},
-                    )
-                    rows = [
-                        (
-                            r.table_name,
-                            r.display_name or "",
-                            r.description or "",
-                            r.row_count,
-                            round(r.score, 2),
-                        )
-                        for r in result.fetchall()
-                    ]
-                    conn.rollback()
-                    return rows
-
-            rows = await loop.run_in_executor(None, _search)
-            if not rows:
-                return ""
-
-            lines = ["TABLAS CACHEADAS RELEVANTES (datos reales descargados, usar query_sandbox):"]
-            for table_name, display_name, description, row_count, score in rows:
-                line = f"  - {table_name}"
-                if display_name:
-                    line += f" ({display_name})"
-                line += f" — {row_count} filas"
-                if description:
-                    line += f" — {description[:120]}"
-                line += f" [relevancia: {score}]"
-                lines.append(line)
-
-            lines.append(
-                "\nSi alguna de estas tablas es relevante para la pregunta, "
-                "usá la acción query_sandbox con table_hints incluyendo el nombre exacto de la tabla."
-            )
-            return "\n".join(lines)
-        except Exception:
-            logger.debug("catalog hints for planner failed", exc_info=True)
-            return ""
-
-    async def _discover_tables_by_vector_search(
-        self,
-        query: str,
-        cached_tables: list[Any],
-    ) -> list[str]:
-        """Use vector search to find relevant cached table names for a query.
-
-        Embeds the query, searches for similar datasets, and returns the
-        table names of any that are cached.  *cached_tables* is the
-        already-fetched list of ``CachedTableInfo`` to avoid a redundant DB
-        round-trip.
-        """
-        try:
-            q_embedding = await self._embedding.embed(query)
-            vector_results = await self._vector_search.search_datasets(
-                q_embedding,
-                limit=10,
-            )
-            if not vector_results:
-                return []
-
-            # Collect dataset_ids from vector search results
-            hit_dataset_ids = {vr.dataset_id for vr in vector_results}
-
-            # Match against cached tables by dataset_id
-            matched_names = [
-                t.table_name
-                for t in cached_tables
-                if t.dataset_id and t.dataset_id in hit_dataset_ids
-            ]
-
-            if matched_names:
-                logger.info(
-                    "Vector search discovered %d cached table(s) for sandbox: %s",
-                    len(matched_names),
-                    matched_names[:5],
-                )
-            return matched_names
-        except Exception:
-            logger.warning("Vector-based table discovery failed, falling back", exc_info=True)
-            return []
-
-    async def _execute_sandbox_step(self, step: PlanStep, user_query: str = "") -> list[DataResult]:
-        if not self._sandbox:
-            logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
-            return []
-        params = step.params
-        # Use the original user question for NL2SQL so specific filters
-        # (e.g. "gobernador de jujuy") are not lost to the planner's generic query.
-        nl_query = user_query or params.get("query", step.description)
-
-        try:
-            tables = await self._sandbox.list_cached_tables()
-            table_hints = params.get("tables", [])
-            logger.info(
-                "Sandbox step %s: %d cached tables, hints=%s, query=%s",
-                step.id,
-                len(tables),
-                table_hints,
-                nl_query[:80],
-            )
-            if not tables:
-                if table_hints and any("indec" in h for h in table_hints):
-                    logger.info("No cached tables at all, attempting INDEC live fallback")
-                    return await self._indec_live_fallback(nl_query)
-                return []
-
-            # When no table_hints from planner, use vector search to discover relevant tables
-            _from_vector_search = False
-            if not table_hints:
-                discovered = await self._discover_tables_by_vector_search(nl_query, tables)
-                if discovered:
-                    table_hints = discovered
-                    _from_vector_search = True
-
-            if table_hints:
-                if _from_vector_search:
-                    # Vector search returns exact table names — use set lookup
-                    hint_set = set(table_hints)
-                    filtered = [t for t in tables if t.table_name in hint_set]
-                else:
-                    # Planner returns glob patterns — use fnmatch
-                    import fnmatch
-
-                    filtered = []
-                    for t in tables:
-                        for pattern in table_hints:
-                            if fnmatch.fnmatch(t.table_name, pattern):
-                                filtered.append(t)
-                                break
-                if filtered:
-                    tables = filtered
-                elif any("indec" in h for h in table_hints):
-                    indec_tables = [t.table_name for t in tables if "indec" in t.table_name]
-                    logger.info(
-                        "INDEC fnmatch miss: hints=%s, indec_tables_in_cache=%d (sample: %s)",
-                        table_hints,
-                        len(indec_tables),
-                        indec_tables[:3],
-                    )
-                    logger.info("No cached INDEC tables, attempting live fallback")
-                    return await self._indec_live_fallback(nl_query)
-                else:
-                    # Planner specified tables but none matched via fnmatch.
-                    # Try vector search as last resort before giving up.
-                    logger.info(
-                        "Sandbox: fnmatch miss for hints %s, trying vector search fallback",
-                        table_hints,
-                    )
-                    vector_discovered = await self._discover_tables_by_vector_search(
-                        nl_query,
-                        tables,
-                    )
-                    if vector_discovered:
-                        hint_set = set(vector_discovered)
-                        filtered = [t for t in tables if t.table_name in hint_set]
-                        if filtered:
-                            tables = filtered
-                            logger.info(
-                                "Sandbox: vector search fallback found %d table(s): %s",
-                                len(filtered),
-                                [t.table_name for t in filtered[:5]],
-                            )
-                        else:
-                            return []
-                    else:
-                        logger.warning(
-                            "Sandbox: none of the hinted tables %s found in cache, skipping",
-                            table_hints,
-                        )
-                        return []
-
-            # Enrich tables with semantic catalog metadata if available
-            catalog_entries = await self._get_catalog_entries([t.table_name for t in tables[:50]])
-
-            tables_context_parts = []
-            for t in tables[:50]:
-                cols = ", ".join(t.columns) if t.columns else "(no column info)"
-                entry = catalog_entries.get(t.table_name)
-                if entry:
-                    name = entry.get("display_name") or t.table_name
-                    desc = entry.get("description") or ""
-                    domain = entry.get("domain") or ""
-                    col_types = entry.get("column_types") or {}
-                    col_desc = (
-                        ", ".join(
-                            f"{c} ({col_types[c]})" if c in col_types else c
-                            for c in (t.columns or [])
-                        )
-                        or cols
-                    )
-                    part = f"Table: {t.table_name} — {name}  (rows: {t.row_count or '?'})"
-                    if desc:
-                        part += f"\n  Descripción: {desc}"
-                    if domain:
-                        part += f"\n  Dominio: {domain}"
-                    part += f"\n  Columns: {col_desc}"
-                else:
-                    part = f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
-                tables_context_parts.append(part)
-            tables_context = "\n\n".join(tables_context_parts)
-
-            # Retrieve dynamic few-shot examples from successful past queries
-            few_shot_block = await self._get_few_shot_examples(nl_query)
-
-            nl2sql_prompt = (
-                "You are a SQL assistant for Argentine public datasets stored in PostgreSQL.\n"
-                "You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, "
-                "DROP, or any DDL/DML statement.\n\n"
-                f"Available tables and their columns:\n\n{tables_context}\n\n"
-                "Rules:\n"
-                "- Only reference the tables and columns listed above.\n"
-                "- Always use double-quoted identifiers for column names that contain spaces or special characters.\n"
-                "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
-                "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
-                "- The query must be valid PostgreSQL syntax.\n"
-                "- NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.\n"
-                "- Use ILIKE for case-insensitive text matching.\n"
-            )
-            if few_shot_block:
-                nl2sql_prompt += f"\n{few_shot_block}\n"
-
-            messages = [
-                LLMMessage(role="system", content=nl2sql_prompt),
-                LLMMessage(role="user", content=nl_query),
-            ]
-
-            llm_response = await self._llm.chat(
-                messages=messages,
-                temperature=0.0,
-                max_tokens=1024,
-            )
-
-            generated_sql = llm_response.content.strip()
-            if generated_sql.startswith("```"):
-                lines = generated_sql.split("\n")
-                lines = [ln for ln in lines if not ln.strip().startswith("```")]
-                generated_sql = "\n".join(lines).strip()
-
-            result = await self._sandbox.execute_readonly(generated_sql)
-
-            # Self-correction loop: retry up to 2 times with a minimal prompt
-            # to avoid re-sending the full system prompt + history on each retry
-            for _attempt in range(2):
-                if not result.error:
-                    break
-                logger.warning("Sandbox query failed (attempt %d): %s", _attempt + 1, result.error)
-                retry_messages = [
-                    LLMMessage(
-                        role="system",
-                        content="Fix this PostgreSQL query. Return ONLY the corrected SQL, no markdown.",
-                    ),
-                    LLMMessage(
-                        role="user",
-                        content=(
-                            f"SQL:\n{generated_sql}\n\n"
-                            f"Error: {result.error}\n\n"
-                            f"Tables:\n{tables_context[:2000]}"
-                        ),
-                    ),
-                ]
-                llm_response = await self._llm.chat(
-                    messages=retry_messages,
-                    temperature=0.0,
-                    max_tokens=1024,
-                )
-                generated_sql = llm_response.content.strip()
-                if generated_sql.startswith("```"):
-                    lines = generated_sql.split("\n")
-                    lines = [ln for ln in lines if not ln.strip().startswith("```")]
-                    generated_sql = "\n".join(lines).strip()
-                result = await self._sandbox.execute_readonly(generated_sql)
-
-            if result.error:
-                logger.warning("Sandbox query failed after retries: %s", result.error)
-                # Last-resort fallback: try SELECT * LIMIT 10 on the first matched table
-                if tables:
-                    fallback_table = tables[0].table_name
-                    fallback_sql = f'SELECT * FROM "{fallback_table}" LIMIT 10'
-                    logger.info("NL2SQL fallback: trying simple query on %s", fallback_table)
-                    result = await self._sandbox.execute_readonly(fallback_sql, timeout_seconds=5)
-                    if result.error:
-                        logger.warning("NL2SQL fallback also failed: %s", result.error)
-                        return [
-                            DataResult(
-                                source="sandbox:nl2sql",
-                                portal_name="Cache Local (NL2SQL)",
-                                portal_url="",
-                                dataset_title=f"Consulta SQL fallida: {nl_query[:100]}",
-                                format="json",
-                                records=[],
-                                metadata={
-                                    "error": result.error,
-                                    "fetched_at": datetime.now(UTC).isoformat(),
-                                },
-                            )
-                        ]
-                    generated_sql = fallback_sql
-                else:
-                    return []
-
-            if not result.rows and _INDEC_PATTERN.search(nl_query):
-                logger.info("Sandbox returned empty for INDEC query, trying live fallback")
-                fallback = await self._indec_live_fallback(nl_query)
-                if fallback:
-                    return fallback
-
-            # Save successful query for future few-shot examples
-            if result.rows and not result.error:
-                asyncio.create_task(
-                    self._save_successful_query(
-                        nl_query,
-                        generated_sql,
-                        tables[0].table_name if tables else "",
-                        result.row_count,
-                    )
-                )
-
-            return [
-                DataResult(
-                    source="sandbox:nl2sql",
-                    portal_name="Cache Local (NL2SQL)",
-                    portal_url="",
-                    dataset_title=f"Consulta SQL: {nl_query[:100]}",
-                    format="json",
-                    records=result.rows[:200],
-                    metadata={
-                        "total_records": result.row_count,
-                        "generated_sql": generated_sql,
-                        "truncated": result.truncated,
-                        "columns": result.columns,
-                        "fetched_at": datetime.now(UTC).isoformat(),
-                    },
-                )
-            ]
-        except Exception:
-            logger.warning("Sandbox step %s failed", step.id, exc_info=True)
-            return []
-
-    async def _execute_search_datasets_step(self, step: PlanStep) -> list[DataResult]:
-        """Vector search over cached dataset chunks in pgvector."""
-        params = step.params
-        query = params.get("query", step.description)
-        try:
-            q_embedding = await self._embedding.embed(query)
-            vector_results = await self._vector_search.search_datasets(
-                q_embedding,
-                limit=params.get("limit", 10),
-            )
-            if not vector_results:
-                return []
-            return [
-                DataResult(
-                    source=f"pgvector:{vr.portal}",
-                    portal_name=vr.portal,
-                    portal_url=vr.download_url or "",
-                    dataset_title=vr.title,
-                    format="json",
-                    records=[],
-                    metadata={
-                        "total_records": 0,
-                        "description": vr.description,
-                        "columns": vr.columns,
-                        "score": round(vr.score, 3),
-                    },
-                )
-                for vr in vector_results
-            ]
-        except Exception:
-            logger.warning("search_datasets step failed", exc_info=True)
-            return []
-
-    async def _indec_live_fallback(self, nl_query: str) -> list[DataResult]:
-        """Plan B: download INDEC XLS on-the-fly when cache tables don't exist."""
-        import asyncio as _asyncio
-
-        from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _download_and_parse
-
-        query_lower = nl_query.lower()
-        keyword_map = {
-            # IDs deben coincidir con INDEC_DATASETS en indec_tasks.py
-            "ipc": ["ipc", "inflacion", "precios"],
-            "emae": ["emae", "actividad economica", "actividad económica"],
-            "pib": ["pib", "producto bruto", "producto interno"],
-            "comercio_exterior": [
-                "exportacion",
-                "importacion",
-                "comercio exterior",
-                "balanza comercial",
-            ],
-            "eph_tasas": ["empleo", "eph", "desempleo", "trabajo", "mercado laboral"],
-            "canasta_basica": ["canasta basica", "canasta básica", "cbt", "cba"],
-            "salarios_indice": ["salario", "salarios", "sueldo"],
-            "pobreza_informe": ["pobreza", "indigencia"],
-            "pobreza_historica": ["pobreza histor", "indigencia histor"],
-            "isac": ["construccion", "construcción", "isac"],
-            "ipi_manufacturero": ["industria", "ipi", "manufacturero", "produccion industrial"],
-            "supermercados": ["supermercado"],
-            "turismo_receptivo": ["turismo"],
-            "distribucion_ingreso": [
-                "distribucion del ingreso",
-                "distribución del ingreso",
-                "gini",
-                "decil",
-            ],
-            "balance_pagos": ["balance de pagos", "balanza de pagos", "cuenta corriente"],
-        }
-
-        matched_ids = []
-        for ds_id, keywords in keyword_map.items():
-            if any(kw in query_lower for kw in keywords):
-                matched_ids.append(ds_id)
-
-        if not matched_ids:
-            matched_ids = ["ipc", "emae", "pib"]
-
-        async def _fetch_one(ds_id: str) -> DataResult | None:
-            ds_info = next((d for d in INDEC_DATASETS if d["id"] == ds_id), None)
-            if not ds_info:
-                return None
-            try:
-                sheets = await _asyncio.to_thread(_download_and_parse, ds_info["url"])
-                if not sheets:
-                    return None
-                df = next(iter(sheets.values()))
-                if df is None or df.empty:
-                    return None
-                if len(df) > 500:
-                    df = df.tail(500)
-                records = df.to_dict(orient="records")
-                return DataResult(
-                    source="indec:live",
-                    portal_name="INDEC (descarga en vivo)",
-                    portal_url="https://www.indec.gob.ar",
-                    dataset_title=f"INDEC - {ds_info['name']} (live)",
-                    format="json",
-                    records=records[:200],
-                    metadata={
-                        "total_records": len(records),
-                        "columns": list(df.columns),
-                        "source_url": ds_info["url"],
-                        "fallback": True,
-                        "fetched_at": datetime.now(UTC).isoformat(),
-                    },
-                )
-            except Exception:
-                logger.warning("INDEC live fallback failed for %s", ds_id, exc_info=True)
-                return None
-
-        fetched = await _asyncio.gather(*[_fetch_one(ds_id) for ds_id in matched_ids[:3]])
-        return [r for r in fetched if r is not None]
-
-    async def _execute_steps(
-        self,
-        plan: ExecutionPlan,
-        nl_query: str = "",
-    ) -> tuple[list[DataResult], list[str]]:
-        """Execute plan steps, catching ConnectorError per step.
-
-        Steps are grouped by dependency level and executed in parallel
-        within each level using ``asyncio.gather()``.
-        """
-        results: list[DataResult] = []
-        warnings: list[str] = []
-        steps = plan.steps[:5]
-
-        if not steps:
-            return results, warnings
-
-        # --- build a lookup and group steps by dependency level ---
-        step_by_id: dict[str, PlanStep] = {s.id: s for s in steps}
-        step_ids = set(step_by_id)
-        remaining = list(steps)
-        levels: list[list[PlanStep]] = []
-
-        completed_ids: set[str] = set()
-        while remaining:
-            # Steps whose dependencies are all completed (or absent)
-            ready = [
-                s
-                for s in remaining
-                if all(dep in completed_ids or dep not in step_ids for dep in s.depends_on)
-            ]
-            if not ready:
-                # Avoid infinite loop: treat remaining steps as ready
-                ready = list(remaining)
-            levels.append(ready)
-            completed_ids.update(s.id for s in ready)
-            remaining = [s for s in remaining if s.id not in completed_ids]
-
-        # --- wrapper that runs a single step with error handling ---
-        async def _run_step(step: PlanStep) -> tuple[list[DataResult], str | None]:
-            step_start = time.monotonic()
-            connector_name = step.action
-            try:
-                data = await self._dispatch_step_with_retry(step, nl_query=nl_query)
-                step_ms = round((time.monotonic() - step_start) * 1000, 1)
-                self._metrics.record_connector_call(connector_name, step_ms)
-                return data, None
-            except ConnectorError as exc:
-                step_ms = round((time.monotonic() - step_start) * 1000, 1)
-                self._metrics.record_connector_call(connector_name, step_ms, error=True)
-                logger.warning("Step %s failed (ConnectorError)", step.id, exc_info=True)
-                return [], f"Conector '{connector_name}' no disponible: {exc}"
-            except Exception as exc:
-                step_ms = round((time.monotonic() - step_start) * 1000, 1)
-                self._metrics.record_connector_call(connector_name, step_ms, error=True)
-                logger.warning("Step %s failed", step.id, exc_info=True)
-                return [], f"Conector '{connector_name}' falló: {type(exc).__name__}"
-
-        # --- execute level by level, parallelising within each level ---
-        for level in levels:
-            outcomes = await asyncio.gather(*[_run_step(s) for s in level])
-            for data, warning in outcomes:
-                results.extend(data)
-                if warning:
-                    warnings.append(warning)
-
-        return results, warnings
-
-    # ── Retry logic for transient step failures ───────────
-    _RETRYABLE_PATTERNS = ("timeout", "503", "502", "504", "connection", "reset", "refused")
-
-    def _is_retryable(self, exc: Exception) -> bool:
-        """Return *True* if *exc* looks like a transient/network error."""
-        exc_str = str(exc).lower()
-        if any(p in exc_str for p in self._RETRYABLE_PATTERNS):
-            return True
-        if "Timeout" in type(exc).__name__:
-            return True
-        return False
-
-    async def _dispatch_step_with_retry(
-        self,
-        step: PlanStep,
-        nl_query: str = "",
-        max_retries: int = 2,
-    ) -> list[DataResult]:
-        """Call ``_dispatch_step`` with up to *max_retries* retries on transient errors."""
-        last_exc: Exception | None = None
-        for attempt in range(max_retries + 1):
-            try:
-                return await self._dispatch_step(step, nl_query=nl_query)
-            except Exception as exc:
-                last_exc = exc
-                if attempt < max_retries and self._is_retryable(exc):
-                    delay = 1.5 * (attempt + 1)
-                    logger.warning(
-                        "Step %s attempt %d/%d failed (%s), retrying in %.1fs …",
-                        step.id,
-                        attempt + 1,
-                        max_retries + 1,
-                        exc,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    raise
-        # Unreachable in practice, but keeps mypy happy.
-        raise last_exc  # type: ignore[misc]
-
-    _NOOP_ACTIONS = frozenset(("analyze", "compare", "synthesize"))
-
-    async def _dispatch_step(self, step: PlanStep, nl_query: str = "") -> list[DataResult]:
-        # Sync handler (ddjj is not async)
-        if step.action == "query_ddjj":
-            return self._execute_ddjj_step(step)
-
-        async_handlers = {
-            "query_series": self._execute_series_step,
-            "query_argentina_datos": self._execute_argentina_datos_step,
-            "query_georef": self._execute_georef_step,
-            "search_ckan": self._execute_ckan_step,
-            "query_sesiones": self._execute_sesiones_step,
-            "query_staff": self._execute_staff_step,
-            "query_bcra": self._execute_bcra_step,
-            "search_datasets": self._execute_search_datasets_step,
-        }
-        handler = async_handlers.get(step.action)
-        if handler:
-            return await handler(step)
-        if step.action == "query_sandbox":
-            return await self._execute_sandbox_step(step, user_query=nl_query)
-        if step.action in self._NOOP_ACTIONS:
-            return []
-        logger.info("Unknown step action '%s', skipping", step.action)
-        return []
-
-    # ── Data context builder ────────────────────────────────
-
-    @staticmethod
-    def _build_data_context(results: list[DataResult]) -> str:
-        if not results:
-            return (
-                "No se obtuvieron resultados directos en esta búsqueda. "
-                "Sin embargo, TENÉS acceso en tiempo real a estos "
-                "portales de datos abiertos:\n"
-                "- **Portal Nacional** (datos.gob.ar): 1200+ datasets "
-                "de economía, salud, educación, transporte, energía\n"
-                "- **CABA** (data.buenosaires.gob.ar): movilidad, "
-                "presupuesto, educación\n"
-                "- **Buenos Aires Provincia** "
-                "(catalogo.datos.gba.gob.ar): salud, estadísticas\n"
-                "- **Córdoba, Santa Fe, Mendoza, Entre Ríos, "
-                "Neuquén** y más\n"
-                "- **Cámara de Diputados** (datos.hcdn.gob.ar): "
-                "legisladores, proyectos, leyes\n"
-                "- **Series de Tiempo**: inflación, tipo de cambio, "
-                "PBI, presupuesto\n"
-                "- **DDJJ**: 195 declaraciones juradas patrimoniales "
-                "de diputados\n\n"
-                "INSTRUCCIÓN: NO digas que 'no pudiste acceder' o "
-                "'no tenés datos'. En cambio, explicale al usuario "
-                "qué fuentes están disponibles y sugerí búsquedas "
-                "concretas. Ofrecé 3-4 opciones temáticas."
-            )
-
-        max_per_result = 8_000
-        max_results = 10
-        max_total = 80_000
-
-        # Warn analyst about truncated results so it can inform the user
-        total_available = len(results)
-        parts = []
-        if total_available > max_results:
-            parts.append(
-                f"⚠ NOTA PARA EL ANALISTA: Se recopilaron {total_available} fuentes de datos "
-                f"pero solo se incluyen las {max_results} más relevantes por límites de contexto. "
-                f"Advertí al usuario que la respuesta se basa en un subconjunto de los datos disponibles "
-                f"y que puede refinar su consulta para obtener resultados más específicos."
-            )
-
-        for i, result in enumerate(results[:max_results]):
-            valid_records = [r for r in result.records if isinstance(r, dict)]
-            if not valid_records and result.records:
-                continue
-
-            # Vector search results: no records but have metadata
-            is_vector_result = not valid_records and result.source.startswith("pgvector:")
-
-            is_metadata_only = (
-                valid_records and valid_records[0].get("_type") == "resource_metadata"
-            )
-
-            if is_vector_result:
-                part = (
-                    f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
-                    f"Portal: {result.portal_name}\n"
-                    f"URL: {result.portal_url}\n"
-                )
-                if result.metadata.get("description"):
-                    part += f"Descripción: {result.metadata['description']}\n"
-                if result.metadata.get("columns"):
-                    part += f"Columnas: {result.metadata['columns']}\n"
-                if result.metadata.get("score"):
-                    part += f"Relevancia: {result.metadata['score']}\n"
-                part += (
-                    "\nEste dataset está indexado en la base de datos. "
-                    "Listalo al usuario con su título, descripción y URL."
-                )
-            elif is_metadata_only:
-                preview = valid_records[:20]
-                records_text = json.dumps(
-                    preview, ensure_ascii=False, separators=(",", ":"), default=str
-                )
-                part = (
-                    f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
-                    f"Fuente: {result.portal_name} ({result.source})\n"
-                    f"URL: {result.portal_url}\n"
-                    "NOTA: Este dataset no tiene Datastore "
-                    "habilitado. Solo metadatos de los recursos.\n"
-                )
-                if result.metadata.get("description"):
-                    part += f"Descripción: {result.metadata['description']}\n"
-                part += (
-                    f"Recursos disponibles:\n{records_text}\n\n"
-                    "Explicale al usuario qué datos contiene "
-                    "y proporcioná el link."
-                )
-            else:
-                columns = list(valid_records[0].keys()) if valid_records else []
-                # Humanize column names for LLM display (replace _ with spaces)
-                display_columns = [c.replace("_", " ") for c in columns]
-                total_rows = len(valid_records)
-
-                if total_rows > 50:
-                    records_to_send = valid_records[:25] + valid_records[-25:]
-                    truncation_note = f", primeros 25 + últimos 25 de {total_rows} totales"
-                else:
-                    records_to_send = valid_records
-                    truncation_note = ""
-
-                # Humanize keys in records for LLM context
-                display_records = [
-                    {k.replace("_", " "): v for k, v in rec.items()} for rec in records_to_send
-                ]
-                records_text = json.dumps(
-                    display_records, ensure_ascii=False, separators=(",", ":"), default=str
-                )
-
-                part = (
-                    f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
-                    f"Fuente: {result.portal_name} ({result.source})\n"
-                    f"URL: {result.portal_url}\n"
-                    f"Formato: {result.format}\n"
-                    f"Total de registros: {result.metadata.get('total_records', total_rows)}\n"
-                    f"Columnas: {', '.join(display_columns)}\n"
-                )
-                if result.metadata.get("description"):
-                    part += f"Descripción: {result.metadata['description']}\n"
-                part += (
-                    f"Datos ({len(records_to_send)} registros{truncation_note}):\n"
-                    f"{records_text}\n\n"
-                    "IMPORTANTE: Si hay una columna temporal "
-                    "(año, fecha, mes), generá un gráfico de línea "
-                    "temporal con <!--CHART:{}--> usando TODOS los "
-                    "datos proporcionados."
-                )
-
-            # Per-result truncation: prevent a single large result
-            # from consuming the entire context budget
-            if len(part) > max_per_result:
-                part = part[:max_per_result] + "\n... [truncado, datos parciales]\n"
-
-            parts.append(part)
-
-        joined = "\n\n".join(parts)
-        if len(joined) > max_total:
-            joined = joined[:max_total] + "\n\n[... datos truncados por límite de contexto ...]"
-        return joined
-
-    # ── Few-shot NL2SQL helpers ─────────────────────────────
-
-    async def _save_successful_query(
-        self,
-        question: str,
-        sql: str,
-        table_name: str,
-        row_count: int,
-    ) -> None:
-        """Save a successful NL2SQL query for future few-shot examples."""
-        try:
-            embedding = await self._embedding.embed(question)
-            emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
-            async with self._semantic_cache._session_factory() as session:
-                await session.execute(
-                    text(
-                        "INSERT INTO successful_queries (question, sql, table_name, row_count, embedding) "
-                        "VALUES (:q, :s, :t, :r, CAST(:e AS vector))"
-                    ),
-                    {
-                        "q": question[:500],
-                        "s": sql[:2000],
-                        "t": table_name,
-                        "r": row_count,
-                        "e": emb_str,
-                    },
-                )
-                await session.commit()
-        except Exception:
-            logger.debug("Failed to save successful query for few-shot", exc_info=True)
-
-    async def _get_few_shot_examples(self, question: str, limit: int = 3) -> str:
-        """Retrieve similar successful queries as few-shot examples for NL2SQL."""
-        try:
-            embedding = await self._embedding.embed(question)
-            emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
-            async with self._semantic_cache._session_factory() as session:
-                result = await session.execute(
-                    text(
-                        "SELECT question, sql, "
-                        "1 - (embedding <=> CAST(:emb AS vector)) AS score "
-                        "FROM successful_queries "
-                        "WHERE 1 - (embedding <=> CAST(:emb AS vector)) > 0.6 "
-                        "ORDER BY embedding <=> CAST(:emb AS vector) "
-                        "LIMIT :lim"
-                    ),
-                    {"emb": emb_str, "lim": limit},
-                )
-                rows = result.fetchall()
-            if not rows:
-                return ""
-            lines = ["Successful similar queries (use as reference):"]
-            for r in rows:
-                lines.append(f"\nQuestion: {r.question}\nSQL: {r.sql}")
-            return "\n".join(lines)
-        except Exception:
-            logger.debug("Failed to retrieve few-shot examples", exc_info=True)
-            return ""
-
-    # ── META parser ─────────────────────────────────────────
-
-    @staticmethod
-    def _extract_meta(text: str) -> tuple[float, list[dict[str, Any]]]:
-        match = re.search(r"<!--META:(.*?)-->", text, re.DOTALL)
-        if not match:
-            return 1.0, []
-        try:
-            meta = json.loads(match.group(1))
-            confidence = max(0.0, min(1.0, float(meta.get("confidence", 1.0))))
-            citations = meta.get("citations", [])
-            if not isinstance(citations, list):
-                citations = []
-            return confidence, citations
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return 1.0, []
-
-    # ── Chart builders ──────────────────────────────────────
-
-    @staticmethod
-    def _build_deterministic_charts(results: list[DataResult]) -> list[dict[str, Any]]:
-        charts: list[dict[str, Any]] = []
-        for result in results:
-            if not result.records or len(result.records) < 2:
-                continue
-            first = result.records[0]
-            if not isinstance(first, dict):
-                continue
-            if first.get("_type") == "resource_metadata":
-                continue
-
-            keys = list(first.keys())
-
-            # Detect temporal key
-            time_key = None
-            for k in keys:
-                kl = k.lower()
-                if k == "fecha" or "date" in kl or kl in ("año", "year", "mes"):
-                    time_key = k
-                    break
-
-            # Detect label key for categorical data (e.g., "nombre")
-            label_key = None
-            if not time_key:
-                for k in keys:
-                    kl = k.lower()
-                    if kl in (
-                        "nombre",
-                        "name",
-                        "titulo",
-                        "title",
-                        "label",
-                        "categoria",
-                        "category",
-                    ):
-                        label_key = k
-                        break
-
-            x_key = time_key or label_key
-            if not x_key:
-                continue
-
-            # Columns that are numeric but should never be charted
-            _SKIP_NUMERIC = {
-                "centroide_lat",
-                "centroide_lon",
-                "lat",
-                "lon",
-                "latitud",
-                "longitud",
-                "latitude",
-                "longitude",
-                "id",
-                "provincia_id",
-                "departamento_id",
-                "municipio_id",
-                "localidad_censal_id",
-            }
-            numeric_keys = [
-                k
-                for k in keys
-                if k != x_key
-                and not k.startswith("_")
-                and k.lower() not in _SKIP_NUMERIC
-                and isinstance(first.get(k), int | float)
-            ]
-            if not numeric_keys:
-                continue
-
-            # For categorical charts, pick the most relevant numeric column
-            if label_key and not time_key:
-                # Prefer patrimonio/value columns for rankings
-                preferred = [
-                    k
-                    for k in numeric_keys
-                    if any(
-                        t in k.lower()
-                        for t in ("patrimonio", "total", "monto", "valor", "cantidad", "importe")
-                    )
-                ]
-                if preferred:
-                    numeric_keys = preferred[:1]
-                else:
-                    numeric_keys = numeric_keys[:1]
-
-            clean = [
-                row for row in result.records if any(row.get(k) is not None for k in numeric_keys)
-            ]
-            if len(clean) < 2:
-                continue
-
-            is_time = result.format == "time_series" or time_key == "fecha"
-            chart_type = "line_chart" if is_time else "bar_chart"
-            title = result.dataset_title
-            units = result.metadata.get("units")
-            if units:
-                title += f" ({units})"
-
-            charts.append(
-                {
-                    "type": chart_type,
-                    "title": title,
-                    "data": [
-                        {x_key: row[x_key], **{k: row.get(k) for k in numeric_keys}}
-                        for row in clean
-                    ],
-                    "xKey": x_key,
-                    "yKeys": numeric_keys,
-                }
-            )
-        return charts
-
-    @staticmethod
-    def _extract_llm_charts(text: str) -> list[dict[str, Any]]:
-        charts: list[dict[str, Any]] = []
-        for match in re.finditer(r"<!--CHART:(.*?)-->", text, re.DOTALL):
-            try:
-                chart = json.loads(match.group(1))
-                if not (
-                    chart.get("type")
-                    and chart.get("data")
-                    and chart.get("xKey")
-                    and chart.get("yKeys")
-                ):
-                    continue
-                # Validate that data rows actually contain numeric values
-                y_keys = chart["yKeys"]
-                valid_rows = [
-                    row
-                    for row in chart["data"]
-                    if any(isinstance(row.get(k), int | float) for k in y_keys)
-                ]
-                if len(valid_rows) < 2:
-                    continue
-                chart["data"] = valid_rows
-                charts.append(chart)
-            except (json.JSONDecodeError, KeyError):
-                logger.debug("Failed to parse LLM chart tag", exc_info=True)
-        return charts
-
-    # ── History persistence ─────────────────────────────────
-
-    @staticmethod
-    async def _save_history(
-        session: AsyncSession,
-        question: str,
-        user_id: str,
-        answer: str,
-        sources: list[dict[str, Any]],
-        tokens_used: int,
-        duration_ms: int,
-        plan_json: str = "",
-    ) -> None:
-        try:
-            query_id = str(uuid4())
-            await session.execute(
-                text(
-                    "INSERT INTO user_queries "
-                    "(id, question, user_id, status, "
-                    "analysis_result, sources_json, "
-                    "tokens_used, duration_ms, plan_json) "
-                    "VALUES (CAST(:id AS uuid), :question, "
-                    ":user_id, 'completed', :result, "
-                    ":sources, :tokens, :duration_ms, :plan)"
+# ── Module-level helpers ────────────────────────────────────
+
+
+def _inject_vector_fallback(
+    plan: ExecutionPlan,
+    question: str,
+    preprocessed_q: str,
+) -> None:
+    """Add a search_datasets step if the plan has no vector/data step."""
+    _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
+    _has_data_step = any(s.action in DATA_ACTIONS for s in plan.steps)
+    if not _has_vector_step and not _has_data_step:
+        plan.steps.insert(
+            0,
+            PlanStep(
+                id="step_vector_fallback",
+                action="search_datasets",
+                description=(
+                    f"Buscar datasets relevantes por similitud semántica: {question[:100]}"
                 ),
-                {
-                    "id": query_id,
-                    "question": question,
-                    "user_id": user_id,
-                    "result": answer,
-                    "sources": json.dumps(sources, ensure_ascii=False),
-                    "tokens": tokens_used,
-                    "duration_ms": duration_ms,
-                    "plan": plan_json,
-                },
-            )
-            await session.commit()
-        except Exception:
-            logger.warning(
-                "Failed to save conversation history",
-                exc_info=True,
-            )
-            with contextlib.suppress(Exception):
-                await session.rollback()
+                params={"query": preprocessed_q, "limit": 5},
+                depends_on=[],
+            ),
+        )
+
+
+def _build_analysis_prompt(
+    question: str,
+    plan: ExecutionPlan,
+    results: list,
+    memory_ctx_analyst: str,
+    all_warnings: list[str],
+) -> str:
+    """Build the analyst LLM prompt from data context and warnings."""
+    data_context = build_data_context(results)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+    errors_block = ""
+    if all_warnings:
+        errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {w}" for w in all_warnings)
+
+    no_data_fallback = not results or not any(r.records for r in results)
+
+    if no_data_fallback:
+        caps = build_capabilities_block()
+        return (
+            f'PREGUNTA DEL USUARIO: "{question}"\n'
+            f"FECHA ACTUAL: {today}\n\n"
+            f"{memory_ctx_analyst}\n\n"
+            "No se encontraron datos en las fuentes de datos abiertos para esta consulta.\n\n"
+            "REGLA CRÍTICA: Sos OpenArg, un asistente EXCLUSIVAMENTE especializado en datos "
+            "abiertos y análisis de datos públicos de Argentina. "
+            "Si la pregunta NO está relacionada con Argentina, datos públicos, gobierno, "
+            "economía, sociedad, política, infraestructura, o temas argentinos, "
+            "RECHAZÁ la pregunta cortésmente. Respondé algo como: "
+            "'No puedo ayudarte con eso. Soy OpenArg y estoy especializado en datos "
+            "abiertos de Argentina. Probá preguntarme sobre inflación, presupuesto, "
+            "educación, o cualquier tema de datos públicos argentinos.'\n\n"
+            "Ejemplos de preguntas que DEBÉS RECHAZAR:\n"
+            "- Escribir poemas, código, traducciones, o cualquier tarea genérica de IA\n"
+            "- Resumir libros, películas, o contenido no argentino\n"
+            "- Preguntas sobre otros países sin relación con Argentina\n\n"
+            "Si la pregunta SÍ es sobre Argentina pero no hay datos, respondé brevemente "
+            "usando tu conocimiento general, aclarando que no proviene del sistema de datos abiertos.\n\n"
+            f"{caps}\n\n"
+            "Al final, sugerí 2-3 preguntas de seguimiento "
+            "que cumplan TODAS estas reglas:\n"
+            "1. Relacionadas con datos públicos argentinos\n"
+            "2. Respondibles con datos reales del sistema\n"
+            "Formulalas como preguntas naturales, no categorías."
+        )
+
+    return (
+        f'PREGUNTA DEL USUARIO: "{question}"\n'
+        f"FECHA ACTUAL: {today}\n"
+        f"INTENCIÓN: {plan.intent}\n\n"
+        f"DATOS RECOLECTADOS:\n{data_context}\n"
+        f"{errors_block}"
+        f"{memory_ctx_analyst}\n\n"
+        "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
+        "para no repetir contexto innecesariamente y para mantener coherencia "
+        "con respuestas anteriores.\n\n"
+        "Respondé de forma breve y conversacional. Destacá el dato más importante, "
+        "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
+        "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+    )
+
+
+def _strip_tags(text: str) -> str:
+    """Strip <!--CHART:...--> tags (complete and truncated) from text."""
+    text = re.sub(r"<!--CHART:.*?-->", "", text, flags=re.DOTALL)
+    return re.sub(r"<!--CHART:.*", "", text, flags=re.DOTALL).strip()
+
+
+def _strip_meta(text: str) -> str:
+    """Strip <!--META:...--> tags (complete and truncated) from text."""
+    text = re.sub(r"<!--META:.*?-->", "", text, flags=re.DOTALL)
+    return re.sub(r"<!--META:.*", "", text, flags=re.DOTALL).strip()
+
+
+def _extract_sources(results: list) -> list[dict[str, Any]]:
+    """Build the sources list from data results."""
+    return [
+        {
+            "name": r.dataset_title,
+            "url": r.portal_url,
+            "portal": r.portal_name,
+            "accessed_at": r.metadata.get("fetched_at", ""),
+        }
+        for r in results
+        if r.records
+    ]
+
+
+def _extract_documents(results: list) -> list[dict[str, Any]] | None:
+    """Extract structured documents for frontend card rendering."""
+    documents: list[dict[str, Any]] = []
+    for r in results:
+        if r.source.startswith("ddjj:"):
+            for rec in r.records:
+                if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
+                    documents.append({**rec, "doc_type": "ddjj"})
+    return documents if documents else None

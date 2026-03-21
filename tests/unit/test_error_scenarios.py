@@ -258,7 +258,7 @@ class TestDispatchStepRetryOnTimeout:
         service = _make_service()
         call_count = 0
 
-        async def flaky_dispatch(step, nl_query=""):
+        async def flaky_dispatch(step, deps=None, nl_query=""):
             nonlocal call_count
             call_count += 1
             if call_count < 3:
@@ -282,8 +282,18 @@ class TestDispatchStepRetryOnTimeout:
             params={},
         )
 
-        with patch.object(service, "_dispatch_step", side_effect=flaky_dispatch):
-            results = await service._dispatch_step_with_retry(step, max_retries=2)
+        with patch(
+            "app.application.pipeline.step_executor.dispatch_step",
+            side_effect=flaky_dispatch,
+        ):
+            from app.application.pipeline.step_executor import (
+                ConnectorDeps,
+                dispatch_step_with_retry,
+            )
+
+            results = await dispatch_step_with_retry(
+                step, ConnectorDeps.__new__(ConnectorDeps), max_retries=2
+            )
 
         assert len(results) == 1
         assert call_count == 3  # 1 initial + 2 retries
@@ -293,7 +303,7 @@ class TestDispatchStepRetryOnTimeout:
         service = _make_service()
         call_count = 0
 
-        async def flaky_dispatch(step, nl_query=""):
+        async def flaky_dispatch(step, deps=None, nl_query=""):
             nonlocal call_count
             call_count += 1
             if call_count < 2:
@@ -307,8 +317,18 @@ class TestDispatchStepRetryOnTimeout:
             params={},
         )
 
-        with patch.object(service, "_dispatch_step", side_effect=flaky_dispatch):
-            await service._dispatch_step_with_retry(step, max_retries=2)
+        with patch(
+            "app.application.pipeline.step_executor.dispatch_step",
+            side_effect=flaky_dispatch,
+        ):
+            from app.application.pipeline.step_executor import (
+                ConnectorDeps,
+                dispatch_step_with_retry,
+            )
+
+            await dispatch_step_with_retry(
+                step, ConnectorDeps.__new__(ConnectorDeps), max_retries=2
+            )
 
         assert call_count == 2
 
@@ -319,7 +339,7 @@ class TestDispatchStepNoRetryOn400:
         service = _make_service()
         call_count = 0
 
-        async def bad_request_dispatch(step, nl_query=""):
+        async def bad_request_dispatch(step, deps=None, nl_query=""):
             nonlocal call_count
             call_count += 1
             raise ValueError("Bad request: invalid parameter")
@@ -332,29 +352,41 @@ class TestDispatchStepNoRetryOn400:
         )
 
         with (
-            patch.object(service, "_dispatch_step", side_effect=bad_request_dispatch),
+            patch(
+                "app.application.pipeline.step_executor.dispatch_step",
+                side_effect=bad_request_dispatch,
+            ),
             pytest.raises(ValueError, match="Bad request"),
         ):
-            await service._dispatch_step_with_retry(step, max_retries=2)
+            from app.application.pipeline.step_executor import (
+                ConnectorDeps,
+                dispatch_step_with_retry,
+            )
+
+            await dispatch_step_with_retry(
+                step, ConnectorDeps.__new__(ConnectorDeps), max_retries=2
+            )
 
         # Should have been called only once -- no retries for non-transient errors
         assert call_count == 1
 
     async def test_is_retryable_returns_false_for_non_transient(self):
-        """_is_retryable returns False for non-transient error messages."""
-        service = _make_service()
-        assert service._is_retryable(ValueError("invalid parameter")) is False
-        assert service._is_retryable(KeyError("missing key")) is False
-        assert service._is_retryable(RuntimeError("unexpected error")) is False
+        """is_retryable returns False for non-transient error messages."""
+        from app.application.pipeline.step_executor import is_retryable
+
+        assert is_retryable(ValueError("invalid parameter")) is False
+        assert is_retryable(KeyError("missing key")) is False
+        assert is_retryable(RuntimeError("unexpected error")) is False
 
     async def test_is_retryable_returns_true_for_transient(self):
-        """_is_retryable returns True for transient error messages."""
-        service = _make_service()
-        assert service._is_retryable(RuntimeError("connection refused")) is True
-        assert service._is_retryable(RuntimeError("HTTP 503")) is True
-        assert service._is_retryable(RuntimeError("read timeout")) is True
-        assert service._is_retryable(RuntimeError("connection reset by peer")) is True
-        assert service._is_retryable(TimeoutError("timed out")) is True
+        """is_retryable returns True for transient error messages."""
+        from app.application.pipeline.step_executor import is_retryable
+
+        assert is_retryable(RuntimeError("connection refused")) is True
+        assert is_retryable(RuntimeError("HTTP 503")) is True
+        assert is_retryable(RuntimeError("read timeout")) is True
+        assert is_retryable(RuntimeError("connection reset by peer")) is True
+        assert is_retryable(TimeoutError("timed out")) is True
 
 
 # ── SoftTimeLimitExceeded handling in collector tasks ──────────
