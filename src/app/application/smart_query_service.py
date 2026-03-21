@@ -513,8 +513,16 @@ class SmartQueryService:
         _q = normalize_provinces(_q)
         preprocessed_q = expand_synonyms(_q)
 
-        # 4. Plan (1 LLM call)
-        plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
+        # 4. Discover relevant cached tables for the planner
+        catalog_hints = await self._discover_catalog_hints_for_planner(preprocessed_q)
+
+        # 5. Plan (1 LLM call)
+        plan = await generate_plan(
+            self._llm,
+            preprocessed_q,
+            memory_context=planner_ctx,
+            catalog_hints=catalog_hints,
+        )
 
         # Handle clarification from planner (before injecting fallback)
         _is_clar = plan.intent == "clarification" and any(
@@ -795,9 +803,17 @@ class SmartQueryService:
         _q = normalize_provinces(_q)
         preprocessed_q = expand_synonyms(_q)
 
+        # Discover relevant cached tables for the planner
+        catalog_hints = await self._discover_catalog_hints_for_planner(preprocessed_q)
+
         # Plan (1 LLM call)
         yield {"type": "status", "step": "planning"}
-        plan = await generate_plan(self._llm, preprocessed_q, memory_context=planner_ctx)
+        plan = await generate_plan(
+            self._llm,
+            preprocessed_q,
+            memory_context=planner_ctx,
+            catalog_hints=catalog_hints,
+        )
 
         # Handle clarification from planner (before injecting fallback)
         _is_clar = plan.intent == "clarification" and any(
@@ -1626,6 +1642,79 @@ class SmartQueryService:
         except Exception:
             logger.debug("catalog vector search failed", exc_info=True)
             return []
+
+    async def _discover_catalog_hints_for_planner(
+        self,
+        query: str,
+        limit: int = 5,
+    ) -> str:
+        """Search table_catalog for relevant tables and format as planner hints.
+
+        This runs BEFORE the planner LLM so it knows which cached tables exist
+        for the user's question. Without this, the planner only knows about
+        tables matched by keyword routing in dataset_index.py.
+        """
+        if not self._sandbox:
+            return ""
+        try:
+            import asyncio
+
+            q_embedding = await self._embedding.embed(query)
+            embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
+            loop = asyncio.get_running_loop()
+
+            def _search() -> list[tuple[str, str, str, int]]:
+                engine = self._sandbox._get_engine()  # type: ignore[union-attr]
+                with engine.connect() as conn:
+                    result = conn.execute(
+                        text(
+                            "SELECT tc.table_name, tc.display_name, tc.description, "
+                            "COALESCE(tc.row_count, 0) AS row_count, "
+                            "1 - (tc.catalog_embedding <=> CAST(:emb AS vector)) AS score "
+                            "FROM table_catalog tc "
+                            "WHERE tc.catalog_embedding IS NOT NULL "
+                            "AND 1 - (tc.catalog_embedding <=> CAST(:emb AS vector)) > 0.55 "
+                            "ORDER BY tc.catalog_embedding <=> CAST(:emb AS vector) "
+                            "LIMIT :lim"
+                        ),
+                        {"emb": embedding_str, "lim": limit},
+                    )
+                    rows = [
+                        (
+                            r.table_name,
+                            r.display_name or "",
+                            r.description or "",
+                            r.row_count,
+                            round(r.score, 2),
+                        )
+                        for r in result.fetchall()
+                    ]
+                    conn.rollback()
+                    return rows
+
+            rows = await loop.run_in_executor(None, _search)
+            if not rows:
+                return ""
+
+            lines = ["TABLAS CACHEADAS RELEVANTES (datos reales descargados, usar query_sandbox):"]
+            for table_name, display_name, description, row_count, score in rows:
+                line = f"  - {table_name}"
+                if display_name:
+                    line += f" ({display_name})"
+                line += f" — {row_count} filas"
+                if description:
+                    line += f" — {description[:120]}"
+                line += f" [relevancia: {score}]"
+                lines.append(line)
+
+            lines.append(
+                "\nSi alguna de estas tablas es relevante para la pregunta, "
+                "usá la acción query_sandbox con table_hints incluyendo el nombre exacto de la tabla."
+            )
+            return "\n".join(lines)
+        except Exception:
+            logger.debug("catalog hints for planner failed", exc_info=True)
+            return ""
 
     async def _discover_tables_by_vector_search(
         self,

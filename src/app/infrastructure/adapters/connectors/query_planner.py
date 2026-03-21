@@ -208,7 +208,10 @@ def _resolve_routing_hints(question: str) -> str:
 
 
 async def generate_plan(
-    llm: ILLMProvider, question: str, memory_context: str = ""
+    llm: ILLMProvider,
+    question: str,
+    memory_context: str = "",
+    catalog_hints: str = "",
 ) -> ExecutionPlan:
     """Generate an execution plan from a user query using the LLM."""
     # Classify ambiguity with a lightweight LLM call (skip if history)
@@ -252,6 +255,8 @@ async def generate_plan(
         user_content += f"\n\n{memory_context}"
     if hints_text:
         user_content += f"\n\n{hints_text}"
+    if catalog_hints:
+        user_content += f"\n\n{catalog_hints}"
     user_content += (
         "\n\nSi la pregunta del usuario hace referencia a algo mencionado antes "
         'en el historial (ej: "y eso?", "compará", "lo mismo pero..."), '
