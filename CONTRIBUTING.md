@@ -22,10 +22,18 @@ Thank you for your interest in contributing to OpenArg. This guide will help you
    make dev
    ```
 
+## Related Repository
+
+OpenArg has two repositories:
+- **Backend** (this repo): Python/FastAPI API, Celery workers, data pipeline
+- **Frontend**: [OpenArg Frontend](https://github.com/dantedeagostino-dot/OpenArg-Frontend) — Next.js 16, React 19, TypeScript
+
 ## Development Workflow
 
-1. Create a feature branch from `main`:
+1. Create a feature branch from `staging`:
    ```bash
+   git checkout staging
+   git pull origin staging
    git checkout -b feature/my-feature
    ```
 2. Make your changes
@@ -34,7 +42,9 @@ Thank you for your interest in contributing to OpenArg. This guide will help you
    make code.check    # Runs lint + tests
    ```
 4. Commit with a clear, meaningful message
-5. Push to your fork and open a Pull Request
+5. Push to your fork and open a Pull Request **against the `staging` branch** (not `main`)
+
+> **Important**: All PRs must target `staging`. The `main` branch is reserved for production releases and is only updated via merges from `staging`.
 
 ## Code Style
 
