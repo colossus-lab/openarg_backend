@@ -1857,7 +1857,31 @@ class SmartQueryService:
 
             if result.error:
                 logger.warning("Sandbox query failed after retries: %s", result.error)
-                return []
+                # Last-resort fallback: try SELECT * LIMIT 10 on the first matched table
+                if tables:
+                    fallback_table = tables[0].table_name
+                    fallback_sql = f'SELECT * FROM "{fallback_table}" LIMIT 10'
+                    logger.info("NL2SQL fallback: trying simple query on %s", fallback_table)
+                    result = await self._sandbox.execute_readonly(fallback_sql, timeout_seconds=5)
+                    if result.error:
+                        logger.warning("NL2SQL fallback also failed: %s", result.error)
+                        return [
+                            DataResult(
+                                source="sandbox:nl2sql",
+                                portal_name="Cache Local (NL2SQL)",
+                                portal_url="",
+                                dataset_title=f"Consulta SQL fallida: {nl_query[:100]}",
+                                format="json",
+                                records=[],
+                                metadata={
+                                    "error": result.error,
+                                    "fetched_at": datetime.now(UTC).isoformat(),
+                                },
+                            )
+                        ]
+                    generated_sql = fallback_sql
+                else:
+                    return []
 
             if not result.rows and _INDEC_PATTERN.search(nl_query):
                 logger.info("Sandbox returned empty for INDEC query, trying live fallback")
