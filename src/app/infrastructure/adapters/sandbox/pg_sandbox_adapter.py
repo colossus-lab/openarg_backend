@@ -19,7 +19,8 @@ from app.domain.ports.sandbox.sql_sandbox import (
 
 logger = logging.getLogger(__name__)
 
-MAX_ROWS = 1000
+MAX_ROWS = int(os.getenv("SANDBOX_MAX_ROWS", "1000"))
+_SANDBOX_TIMEOUT_MS = int(os.getenv("SANDBOX_TIMEOUT_MS", "10000"))
 
 # Patterns that indicate write/DDL operations (case-insensitive)
 _FORBIDDEN_PATTERNS = re.compile(
@@ -30,7 +31,7 @@ _FORBIDDEN_PATTERNS = re.compile(
 )
 
 
-_ALLOWED_TABLE_PREFIXES = ("cache_",)
+_ALLOWED_TABLE_PREFIXES = tuple(os.getenv("SANDBOX_TABLE_PREFIX", "cache_").split(","))
 _ALLOWED_SCHEMAS = ("public",)
 
 # Tables that sandbox queries are allowed to reference (regex for FROM/JOIN clauses)
@@ -225,7 +226,7 @@ class PgSandboxAdapter(ISQLSandbox):
                 error=error_msg,
             )
 
-    async def execute_readonly(self, sql: str, timeout_seconds: int = 10) -> SandboxResult:
+    async def execute_readonly(self, sql: str, timeout_seconds: int = _SANDBOX_TIMEOUT_MS // 1000) -> SandboxResult:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,

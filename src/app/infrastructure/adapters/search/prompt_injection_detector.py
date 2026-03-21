@@ -1,12 +1,15 @@
 """Prompt injection detector — ported from parlamentia with OpenArg domain adaptations.
 
 Scores input text against known prompt-injection patterns and critical keywords.
-A score >= 0.6 is considered suspicious.
+Threshold is configurable via INJECTION_THRESHOLD env var (default 0.6).
 """
 
 from __future__ import annotations
 
+import os
 import re
+
+_INJECTION_THRESHOLD = float(os.getenv("INJECTION_THRESHOLD", "0.6"))
 
 # Each compiled regex adds 0.4 to the score when matched
 _PATTERNS: list[re.Pattern[str]] = [
@@ -75,7 +78,7 @@ def is_suspicious(text: str) -> tuple[bool, float]:
     Score thresholds:
     - pattern match: +0.4
     - keyword match: +0.2
-    - threshold: 0.6
+    - threshold: configurable via INJECTION_THRESHOLD env var (default 0.6)
     """
     if not text or not text.strip():
         return False, 0.0
@@ -86,13 +89,13 @@ def is_suspicious(text: str) -> tuple[bool, float]:
     for pattern in _PATTERNS:
         if pattern.search(text):
             score += 0.4
-            if score >= 0.6:
+            if score >= _INJECTION_THRESHOLD:
                 return True, min(score, 1.0)
 
     for kw in _CRITICAL_KEYWORDS:
         if kw in lower:
             score += 0.2
-            if score >= 0.6:
+            if score >= _INJECTION_THRESHOLD:
                 return True, min(score, 1.0)
 
-    return score >= 0.6, min(score, 1.0)
+    return score >= _INJECTION_THRESHOLD, min(score, 1.0)
