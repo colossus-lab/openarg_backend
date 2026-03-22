@@ -4,6 +4,7 @@ Revision ID: 0021
 Revises: 0020
 Create Date: 2026-03-21
 """
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -14,7 +15,10 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("save_history", sa.Boolean, nullable=False, server_default=sa.text("true")))
+    op.add_column(
+        "users",
+        sa.Column("save_history", sa.Boolean, nullable=False, server_default=sa.text("true")),
+    )
 
 
 def downgrade() -> None:

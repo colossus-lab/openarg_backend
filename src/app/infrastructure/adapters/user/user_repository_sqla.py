@@ -60,13 +60,9 @@ class UserRepositorySQLA(IUserRepository):
             await self._session.execute(
                 delete(Message).where(Message.conversation_id.in_(conv_ids))
             )
-            await self._session.execute(
-                delete(Conversation).where(Conversation.user_id == user_id)
-            )
+            await self._session.execute(delete(Conversation).where(Conversation.user_id == user_id))
         # Also delete user queries
-        await self._session.execute(
-            delete(UserQuery).where(UserQuery.user_id == str(user_id))
-        )
+        await self._session.execute(delete(UserQuery).where(UserQuery.user_id == str(user_id)))
         await self._session.flush()
         await self._session.commit()
 

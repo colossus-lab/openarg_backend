@@ -20,7 +20,9 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "successful_queries",
-        sa.Column("id", sa.Text, primary_key=True, server_default=sa.text("gen_random_uuid()::text")),
+        sa.Column(
+            "id", sa.Text, primary_key=True, server_default=sa.text("gen_random_uuid()::text")
+        ),
         sa.Column("question", sa.Text, nullable=False),
         sa.Column("sql", sa.Text, nullable=False),
         sa.Column("table_name", sa.Text, nullable=False),

@@ -4,6 +4,7 @@ Revision ID: 0020
 Revises: 0019
 Create Date: 2026-03-21
 """
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -14,7 +15,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("privacy_accepted_at", sa.DateTime(timezone=True), nullable=True))
+    op.add_column(
+        "users", sa.Column("privacy_accepted_at", sa.DateTime(timezone=True), nullable=True)
+    )
 
 
 def downgrade() -> None:
