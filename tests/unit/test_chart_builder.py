@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from app.application.smart_query_service import SmartQueryService
+from app.application.pipeline.chart_builder import build_deterministic_charts, extract_llm_charts
 from app.domain.entities.connectors.data_result import DataResult
 
 # Bind static methods for convenience
-_build_deterministic_charts = SmartQueryService._build_deterministic_charts
-_extract_llm_charts = SmartQueryService._extract_llm_charts
+_build_deterministic_charts = build_deterministic_charts
+_extract_llm_charts = extract_llm_charts
 
 
 def _make_result(records, format="time_series", title="Test") -> DataResult:

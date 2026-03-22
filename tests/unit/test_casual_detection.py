@@ -2,11 +2,11 @@
 
 import pytest
 
-from app.application.smart_query_service import SmartQueryService
+from app.application.pipeline.classifiers import get_casual_response, get_meta_response
 
 # Bind static methods for convenience
-_get_casual_response = SmartQueryService._get_casual_response
-_get_meta_response = SmartQueryService._get_meta_response
+_get_casual_response = get_casual_response
+_get_meta_response = get_meta_response
 
 
 def _classify_casual_subtype(text: str) -> str | None:

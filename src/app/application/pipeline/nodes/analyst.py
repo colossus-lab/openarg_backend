@@ -151,8 +151,6 @@ async def analyst_node(state: OpenArgState) -> dict:
                     continue  # Wait for tag to close
 
                 # Strip any complete tags from the buffer before sending
-                import re
-
                 cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
                 if cleaned:
                     writer({"type": "chunk", "content": cleaned})
@@ -195,7 +193,7 @@ async def analyst_node(state: OpenArgState) -> dict:
 
         return {
             "analysis_prompt": analysis_prompt,
-            "analysis_response": response.content,
+            "analysis_response": full_text,
             "clean_answer": clean_answer,
             "chart_data": charts if charts else None,
             "confidence": confidence,

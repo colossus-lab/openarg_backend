@@ -110,17 +110,6 @@ class S3Settings(BaseModel):
         self.REGION = os.getenv("AWS_REGION", self.REGION)
 
 
-class PipelineSettings(BaseModel):
-    USE_LANGGRAPH: bool = False
-
-    def model_post_init(self, __context: object) -> None:
-        import os
-
-        val = os.getenv("USE_LANGGRAPH", "")
-        if val.lower() in ("1", "true", "yes"):
-            self.USE_LANGGRAPH = True
-
-
 class AppSettings(BaseModel):
     postgres: PostgresSettings = PostgresSettings()
     sqla: SqlaEngineSettings = SqlaEngineSettings()
@@ -131,7 +120,6 @@ class AppSettings(BaseModel):
     gemini: GeminiSecrets = GeminiSecrets()
     anthropic: AnthropicSecrets = AnthropicSecrets()
     s3: S3Settings = S3Settings()
-    pipeline: PipelineSettings = PipelineSettings()
 
 
 def load_settings() -> AppSettings:
