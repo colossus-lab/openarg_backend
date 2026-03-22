@@ -518,8 +518,6 @@ def index_dataset_embedding(self, dataset_id: str):
 
     Esto mejora la búsqueda vectorial al tener más puntos de entrada semánticos.
     """
-    import google.generativeai as genai
-
     logger.info(f"Generating embeddings for dataset: {dataset_id}")
     engine = get_sync_engine()
 
