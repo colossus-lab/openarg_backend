@@ -55,7 +55,7 @@ class LoggingSettings(BaseModel):
 
 class AgentSettings(BaseModel):
     EMBEDDING_MODEL: str = "gemini-embedding-001"
-    EMBEDDING_DIMENSIONS: int = 768
+    EMBEDDING_DIMENSIONS: int = 1024
     MAX_CONCURRENT_COLLECTORS: int = 5
     SANDBOX_TIMEOUT_SECONDS: int = 30
 
@@ -99,6 +99,19 @@ class AnthropicSecrets(BaseModel):
             self.MODEL = env_model
 
 
+class BedrockSettings(BaseModel):
+    REGION: str = "us-east-1"
+    LLM_MODEL: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
+    EMBEDDING_MODEL: str = "cohere.embed-multilingual-v3"
+
+    def model_post_init(self, __context: object) -> None:
+        import os
+
+        self.REGION = os.getenv("AWS_REGION", self.REGION)
+        self.LLM_MODEL = os.getenv("BEDROCK_LLM_MODEL", self.LLM_MODEL)
+        self.EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", self.EMBEDDING_MODEL)
+
+
 class S3Settings(BaseModel):
     BUCKET: str = "openarg-datasets"
     REGION: str = "us-east-1"
@@ -119,6 +132,7 @@ class AppSettings(BaseModel):
     scraper: ScraperSettings = ScraperSettings()
     gemini: GeminiSecrets = GeminiSecrets()
     anthropic: AnthropicSecrets = AnthropicSecrets()
+    bedrock: BedrockSettings = BedrockSettings()
     s3: S3Settings = S3Settings()
 
 

@@ -60,5 +60,5 @@ class TestAnthropicSecrets:
 class TestAppSettings:
     def test_default_values(self):
         s = AppSettings()
-        assert s.agents.EMBEDDING_DIMENSIONS == 768
+        assert s.agents.EMBEDDING_DIMENSIONS == 1024
         assert s.scraper.DATOS_GOB_AR_BASE_URL == "https://datos.gob.ar/api/3/action"

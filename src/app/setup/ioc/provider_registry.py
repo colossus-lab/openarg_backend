@@ -36,9 +36,9 @@ from app.infrastructure.adapters.connectors.sesiones_adapter import SesionesAdap
 from app.infrastructure.adapters.connectors.staff_adapter import StaffAdapter
 from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetRepositorySQLA
 from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
+from app.infrastructure.adapters.llm.bedrock_embedding_adapter import BedrockEmbeddingAdapter
+from app.infrastructure.adapters.llm.bedrock_llm_adapter import BedrockLLMAdapter
 from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdapter
-from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
-from app.infrastructure.adapters.llm.gemini_embedding_adapter import GeminiEmbeddingAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
@@ -112,9 +112,9 @@ class LLMProvider(Provider):  # type: ignore[misc]
     @provide  # type: ignore[untyped-decorator]
     def llm_provider(self, settings: AppSettings) -> ILLMProvider:
         return FallbackLLMAdapter(
-            primary=GeminiLLMAdapter(
-                api_key=settings.gemini.API_KEY,
-                model=settings.gemini.MODEL,
+            primary=BedrockLLMAdapter(
+                region=settings.bedrock.REGION,
+                model=settings.bedrock.LLM_MODEL,
             ),
             fallback=AnthropicLLMAdapter(
                 api_key=settings.anthropic.API_KEY,
@@ -124,9 +124,9 @@ class LLMProvider(Provider):  # type: ignore[misc]
 
     @provide  # type: ignore[untyped-decorator]
     def embedding_provider(self, settings: AppSettings, cache: ICacheService) -> IEmbeddingProvider:
-        base = GeminiEmbeddingAdapter(
-            api_key=settings.gemini.API_KEY,
-            model=settings.agents.EMBEDDING_MODEL,
+        base = BedrockEmbeddingAdapter(
+            region=settings.bedrock.REGION,
+            model=settings.bedrock.EMBEDDING_MODEL,
             dimensions=settings.agents.EMBEDDING_DIMENSIONS,
         )
         return CachedEmbeddingService(base=base, cache=cache)
