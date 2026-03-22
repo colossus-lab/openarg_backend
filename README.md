@@ -211,5 +211,5 @@ CI runs unit tests, integration tests, and type checking against PostgreSQL 16 +
 
 <p align="center">
   Created by <b>Dante De Agostino</b><br/>
-  Powered by <a href="https://colossuslab.tech"><b>ColossusLab</b></a>
+  Powered by <a href="https://colossuslab.org"><b>ColossusLab</b></a>
 </p>
