@@ -10,7 +10,8 @@ on:
     branches: [main, staging]
     paths:
       - 'src/**'
-      - 'tests/e2e/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - '.github/workflows/e2e.yml'
 
 concurrency:

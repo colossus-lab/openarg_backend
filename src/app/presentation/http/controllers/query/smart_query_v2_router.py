@@ -10,10 +10,9 @@ import contextlib
 import json
 import logging
 import os
+import secrets as _secrets_mod
 import threading
 from typing import Any
-
-import secrets as _secrets_mod
 
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject
