@@ -5,11 +5,13 @@ Backend service for OpenArg — AI-powered analysis of Argentine government open
 ## Stack
 
 - **Framework:** FastAPI 0.115 + Uvicorn (async, UVLoop)
-- **Database:** PostgreSQL 16 + pgvector (HNSW indexing, 1536-dim embeddings)
+- **Database:** PostgreSQL 16 + pgvector (HNSW indexing, 1024-dim embeddings)
 - **ORM:** SQLAlchemy 2.0 (async) + Alembic migrations
 - **DI:** Dishka 1.6 (IoC container)
 - **Workers:** Celery 5.4 + Redis 7 (broker + cache + results)
-- **AI:** Google Generative AI (Gemini 2.5 Flash + gemini-embedding-001 for vectors) + Anthropic (Claude Sonnet fallback)
+- **AI:** AWS Bedrock Claude Haiku 3.5 (primary LLM) + Anthropic API Claude Sonnet (fallback)
+- **Embeddings:** AWS Bedrock Cohere Embed Multilingual v3 (1024-dim)
+- **Pipeline:** LangGraph (stateful graph with checkpointing)
 - **HTTP:** HTTPX (async client)
 - **Auth:** PyJWT + bcrypt
 - **Rate Limiting:** SlowAPI
@@ -41,8 +43,9 @@ src/app/
 │   │   │   ├── datos_gob_ar_adapter.py          # IDataSource → datos.gob.ar CKAN
 │   │   │   └── caba_adapter.py                  # IDataSource → CABA CKAN
 │   │   ├── llm/
-│   │   │   ├── anthropic_adapter.py             # ILLMProvider → Claude Sonnet (fallback)
-│   │   │   ├── gemini_embedding_adapter.py      # IEmbeddingProvider → gemini-embedding-001
+│   │   │   ├── bedrock_llm_adapter.py           # ILLMProvider → Claude Haiku 3.5 (AWS Bedrock, primary)
+│   │   │   ├── bedrock_embedding_adapter.py     # IEmbeddingProvider → Cohere Embed Multilingual v3 (1024-dim)
+│   │   │   ├── anthropic_adapter.py             # ILLMProvider → Claude Sonnet (Anthropic API fallback)
 │   │   ├── search/
 │   │   │   └── pgvector_search_adapter.py       # IVectorSearch → pgvector
 │   │   ├── sandbox/
@@ -75,8 +78,11 @@ src/app/
 │   ├── health/health_router.py                  # GET /health, /health/ready (DI-based component checks)
 │   ├── datasets/datasets_router.py              # CRUD + scrape trigger
 │   ├── query/query_router.py                    # Query submission + WebSocket stream
-│   ├── query/smart_query_router.py              # Smart pipeline + WS /ws/smart streaming
+│   ├── query/smart_query_v2_router.py           # LangGraph pipeline (POST /smart + WS /ws/smart)
 │   ├── sandbox/sandbox_router.py                # SQL sandbox + NL2SQL
+│   ├── taxonomy/taxonomy_router.py              # Taxonomy management
+│   ├── transparency/transparency_router.py      # Transparency data
+│   ├── admin/tasks_router.py                    # Admin task management
 │   └── monitoring/metrics_router.py             # GET /api/v1/metrics
 │
 └── setup/
@@ -93,13 +99,22 @@ src/app/
 scrape_catalog → scraper queue (concurrency 2)
     ↓ dispatches per dataset
 index_dataset_embedding → embedding queue (concurrency 8)
-    → 3 chunks per dataset (main, columns, contextual) with 1536-dim embeddings
+    → 3 chunks per dataset (main, columns, contextual) with 1024-dim embeddings (Bedrock Cohere)
 
 collect_dataset → collector queue (concurrency 4)
     → downloads file, parses with pandas, caches in PG table
 
 analyze_query → analyst queue (concurrency 2)
-    → 4 steps: plan (Gemini 2.5 Flash) → vector search → gather sample rows → analyze (Gemini 2.5 Flash)
+    → 4 steps: plan (Bedrock Claude Haiku) → vector search → gather sample rows → analyze
+
+transparency_tasks → transparency queue (concurrency 2)
+    → presupuesto, DDJJ processing
+
+ingest_tasks → ingest queue (concurrency 2)
+    → senado, staff, series tiempo structured data
+
+s3_tasks → s3 queue (concurrency 2)
+    → large dataset storage on S3
 ```
 
 ### Resilience
@@ -121,8 +136,8 @@ analyze_query → analyst queue (concurrency 2)
 | GET | `/api/v1/query/{query_id}` | Check query status |
 | POST | `/api/v1/query/quick` | Synchronous query (rate limited) |
 | WS | `/api/v1/query/ws/stream` | Stream query responses |
-| POST | `/api/v1/query/smart` | Smart pipeline (planner → connectors → analysis) |
-| WS | `/ws/smart` | Smart pipeline with streaming (status + chunks + complete) |
+| POST | `/api/v1/query/smart` | LangGraph pipeline (plan → collect → analyze) |
+| WS | `/api/v1/query/ws/smart` | LangGraph pipeline with WebSocket streaming |
 | POST | `/api/v1/sandbox/query` | Execute raw SQL (read-only) |
 | GET | `/api/v1/sandbox/tables` | List cached tables |
 | POST | `/api/v1/sandbox/ask` | NL2SQL query |
@@ -133,12 +148,14 @@ analyze_query → analyst queue (concurrency 2)
 | Table | Purpose |
 |-------|---------|
 | `datasets` | Indexed dataset metadata (source_id + portal UNIQUE) |
-| `dataset_chunks` | Vector-embedded chunks (pgvector 1536-dim, HNSW index) |
+| `dataset_chunks` | Vector-embedded chunks (pgvector 1024-dim, HNSW index) |
 | `cached_datasets` | References to cached data tables (status: pending/downloading/ready/error) |
 | `user_queries` | Query history with plan, analysis, sources, token usage |
 | `query_dataset_links` | Query ↔ dataset many-to-many with relevance score |
 | `agent_tasks` | Individual agent task execution logs |
-| `query_cache` | Semantic cache (pgvector 1536-dim, HNSW index, TTL-based expiry) |
+| `query_cache` | Semantic cache (pgvector 1024-dim, HNSW index, TTL-based expiry) |
+| `table_catalog` | Cached table metadata with vector(1024) + HNSW for NL2SQL matching |
+| `successful_queries` | Log of successfully answered queries for analytics |
 
 ## Conventions
 
@@ -166,6 +183,9 @@ make workers.scraper        # Run scraper worker
 make workers.collector      # Run collector worker
 make workers.embedding      # Run embedding worker
 make workers.analyst        # Run analyst worker
+make workers.transparency   # Run transparency worker
+make workers.ingest         # Run ingest worker
+make workers.s3             # Run S3 worker
 make flower                 # Celery monitoring UI
 make docker.up              # Start all services (API + workers)
 make docker.down            # Stop all services
@@ -184,10 +204,13 @@ DATABASE_URL=postgresql+psycopg://openarg:openarg@localhost:5435/openarg
 CELERY_BROKER_URL=redis://localhost:6381/0
 CELERY_RESULT_BACKEND=redis://localhost:6381/1
 REDIS_CACHE_URL=redis://localhost:6381/2
-GEMINI_API_KEY=...
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+ANTHROPIC_API_KEY=...              # Fallback LLM
 ```
 
 ## CI/CD
 
 - **`.github/workflows/test.yml`** — Unit tests, integration tests, type checking (pgvector:pg16 + redis:7 services)
-- **`.github/workflows/build.yml`** — Build & push 9 Docker images (API + 7 workers + beat) to GHCR
+- **`.github/workflows/build.yml`** — Build & push Docker images (API + workers + beat) to GHCR

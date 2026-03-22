@@ -34,34 +34,30 @@ Implements `IDatasetRepository`. Standard CRUD with an `upsert()` that checks `s
 
 All implement `ILLMProvider` (chat + chat_stream) with different backends.
 
-#### GeminiLLMAdapter (`adapters/llm/gemini_adapter.py`)
+#### BedrockLLMAdapter (`adapters/llm/bedrock_llm_adapter.py`)
 
-Uses `google-generativeai` SDK. Model: `gemini-2.5-flash`.
+**Primary LLM adapter.** Uses `boto3` Bedrock Converse API. Model: `anthropic.claude-3-5-haiku-20241022-v1:0`.
 
-- Handles system messages by passing them as `system_instruction`.
-- Supports streaming via `generate_content(stream=True)`.
-- Counts tokens from `response.usage_metadata`.
+- Uses AWS credentials (env vars or instance profile).
+- Handles system messages via Converse API system parameter.
+- Supports streaming via `converse_stream()`.
+- Runs boto3 sync calls in a thread pool for async compatibility.
 
-#### OpenAILLMAdapter (`adapters/llm/openai_adapter.py`)
+#### BedrockEmbeddingAdapter (`adapters/llm/bedrock_embedding_adapter.py`)
 
-Uses `openai` SDK (async). Model: `gpt-4o` (configurable).
+**Primary embedding adapter.** Implements `IEmbeddingProvider`. Model: `cohere.embed-multilingual-v3`, 1024 dimensions.
 
-- Maps `LLMMessage` to OpenAI chat format.
-- Streaming via `stream=True` in completions.
+- `embed()` — Single text embedding via Bedrock `invoke_model()`.
+- `embed_batch()` — Batch embedding (all texts in one API call).
+- Uses `input_type` parameter (search_query vs search_document) for optimal retrieval.
 
 #### AnthropicLLMAdapter (`adapters/llm/anthropic_adapter.py`)
 
-Uses `anthropic` SDK (async). Model: `claude-sonnet-4-20250514`.
+**Fallback LLM adapter.** Uses `anthropic` SDK (async). Model: `claude-sonnet-4-20250514`.
 
 - Extracts system prompt from messages (Anthropic requires separate `system` parameter).
 - Streaming via `client.messages.stream()`.
-
-#### OpenAIEmbeddingAdapter (`adapters/llm/openai_embedding_adapter.py`)
-
-Implements `IEmbeddingProvider`. Model: `text-embedding-3-small`, 1536 dimensions.
-
-- `embed()` — Single text embedding.
-- `embed_batch()` — Batch embedding (all texts in one API call).
+- Used as fallback when Bedrock is unavailable.
 
 ### Search Adapter
 

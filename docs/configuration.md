@@ -33,9 +33,10 @@ class AppSettings:
     logs: LoggingSettings
     agents: AgentSettings
     scraper: ScraperSettings
-    openai: OpenAISecrets
     gemini: GeminiSecrets
     anthropic: AnthropicSecrets
+    bedrock: BedrockSettings
+    s3: S3Settings
 ```
 
 ### PostgresSettings
@@ -66,10 +67,10 @@ If `DATABASE_URL` env var is set, it overrides the entire DSN.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `DEFAULT_LLM_PROVIDER` | str | `"gemini"` | Active LLM (gemini/openai/anthropic) |
-| `EMBEDDING_MODEL` | str | `"text-embedding-3-small"` | OpenAI embedding model |
-| `EMBEDDING_DIMENSIONS` | int | `1536` | Vector dimensions |
-| `SANDBOX_TIMEOUT` | int | `30` | SQL sandbox timeout (seconds) |
+| `EMBEDDING_MODEL` | str | `"cohere.embed-multilingual-v3"` | Bedrock embedding model |
+| `EMBEDDING_DIMENSIONS` | int | `1024` | Vector dimensions |
+| `MAX_CONCURRENT_COLLECTORS` | int | `5` | Max parallel collector tasks |
+| `SANDBOX_TIMEOUT_SECONDS` | int | `30` | SQL sandbox timeout (seconds) |
 
 ### ScraperSettings
 
@@ -99,9 +100,29 @@ Set via `.secrets.toml` or environment variables:
 
 | Setting | Env Variable | Used By |
 |---------|-------------|---------|
-| `openai.API_KEY` | `OPENAI_API_KEY` | Embeddings (text-embedding-3-small) |
-| `gemini.API_KEY` | `GEMINI_API_KEY` | LLM (Gemini 2.5 Flash) |
-| `anthropic.API_KEY` | `ANTHROPIC_API_KEY` | LLM (Claude Sonnet) |
+| `bedrock.REGION` | `AWS_REGION` | AWS Bedrock region (default: us-east-1) |
+| `bedrock.LLM_MODEL` | `BEDROCK_LLM_MODEL` | Bedrock LLM model (default: claude-3-5-haiku) |
+| `bedrock.EMBEDDING_MODEL` | `BEDROCK_EMBEDDING_MODEL` | Bedrock embedding model (default: cohere.embed-multilingual-v3) |
+| `gemini.API_KEY` | `GEMINI_API_KEY` | LLM (Gemini 2.5 Flash, optional) |
+| `anthropic.API_KEY` | `ANTHROPIC_API_KEY` | LLM fallback (Claude Sonnet via Anthropic API) |
+| `s3.BUCKET` | `S3_BUCKET` | S3 bucket for dataset storage |
+
+## Environment-Specific Configs
+
+### BedrockSettings
+
+| Field | Type | Default | Env Override |
+|-------|------|---------|-------------|
+| `REGION` | str | `"us-east-1"` | `AWS_REGION` |
+| `LLM_MODEL` | str | `"anthropic.claude-3-5-haiku-20241022-v1:0"` | `BEDROCK_LLM_MODEL` |
+| `EMBEDDING_MODEL` | str | `"cohere.embed-multilingual-v3"` | `BEDROCK_EMBEDDING_MODEL` |
+
+### S3Settings
+
+| Field | Type | Default | Env Override |
+|-------|------|---------|-------------|
+| `BUCKET` | str | `"openarg-datasets"` | `S3_BUCKET` |
+| `REGION` | str | `"us-east-1"` | `AWS_REGION` |
 
 ## Environment-Specific Configs
 
@@ -110,9 +131,6 @@ Set via `.secrets.toml` or environment variables:
 ```toml
 [app]
 DEBUG = true
-
-[agents]
-DEFAULT_LLM_PROVIDER = "gemini"
 
 [postgres]
 HOST = "localhost"
@@ -127,8 +145,6 @@ POOL_SIZE = 5
 ### Dev (`config/dev/config.toml`)
 
 ```toml
-[agents]
-DEFAULT_LLM_PROVIDER = "anthropic"
 
 [sqla]
 POOL_SIZE = 30
@@ -140,9 +156,6 @@ SCRAPE_INTERVAL_HOURS = 12
 ### Prod (`config/prod/config.toml`)
 
 ```toml
-[agents]
-DEFAULT_LLM_PROVIDER = "gemini"
-
 [sqla]
 POOL_SIZE = 20
 
@@ -161,9 +174,14 @@ These override TOML settings:
 | `CELERY_BROKER_URL` | Redis broker URL | Yes (for workers) |
 | `CELERY_RESULT_BACKEND` | Redis results URL | Yes (for workers) |
 | `REDIS_CACHE_URL` | Redis cache URL | Yes |
-| `GEMINI_API_KEY` | Google AI API key | Yes (if using Gemini LLM) |
-| `OPENAI_API_KEY` | OpenAI API key | Yes (always, for embeddings) |
-| `ANTHROPIC_API_KEY` | Anthropic API key | Only if using Claude |
+| `AWS_REGION` | AWS region for Bedrock | No (default: us-east-1) |
+| `AWS_ACCESS_KEY_ID` | AWS credentials | Yes (for Bedrock + S3) |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials | Yes (for Bedrock + S3) |
+| `BEDROCK_LLM_MODEL` | Bedrock LLM model ID | No (default: claude-3-5-haiku) |
+| `BEDROCK_EMBEDDING_MODEL` | Bedrock embedding model ID | No (default: cohere.embed-multilingual-v3) |
+| `GEMINI_API_KEY` | Google AI API key | No (optional, if using Gemini) |
+| `ANTHROPIC_API_KEY` | Anthropic API key | No (fallback LLM) |
+| `S3_BUCKET` | S3 bucket for datasets | No (default: openarg-datasets) |
 
 ## Config Loading
 

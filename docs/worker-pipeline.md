@@ -1,6 +1,6 @@
 # Worker Pipeline
 
-OpenArg uses Celery with Redis as broker for background processing. The system runs 4 specialized worker types, each with its own queue.
+OpenArg uses Celery with Redis as broker for background processing. The system runs 7+ specialized worker types, each with its own queue.
 
 ## Architecture
 
@@ -10,12 +10,12 @@ OpenArg uses Celery with Redis as broker for background processing. The system r
                               │  (redis://...:6379)  │
                               └──────────┬──────────┘
                                          │
-              ┌──────────┬───────────────┼───────────────┬──────────┐
-              ▼          ▼               ▼               ▼          ▼
-    ┌─────────────┐ ┌──────────┐ ┌────────────┐ ┌───────────┐ ┌────────┐
-    │   scraper   │ │embedding │ │ collector  │ │  analyst  │ │  beat  │
-    │  queue (2)  │ │queue (8) │ │ queue (4)  │ │ queue (2) │ │scheduler│
-    └─────────────┘ └──────────┘ └────────────┘ └───────────┘ └────────┘
+              ┌──────────┬───────────────┼───────────────┬──────────┬──────────┬──────────┬──────────┐
+              ▼          ▼               ▼               ▼          ▼          ▼          ▼          ▼
+    ┌─────────────┐ ┌──────────┐ ┌────────────┐ ┌───────────┐ ┌────────────┐ ┌────────┐ ┌──────┐ ┌────────┐
+    │   scraper   │ │embedding │ │ collector  │ │  analyst  │ │transparency│ │ ingest │ │  s3  │ │  beat  │
+    │  queue (2)  │ │queue (8) │ │ queue (4)  │ │ queue (2) │ │ queue (2)  │ │queue(2)│ │q.(2) │ │scheduler│
+    └─────────────┘ └──────────┘ └────────────┘ └───────────┘ └────────────┘ └────────┘ └──────┘ └────────┘
 ```
 
 ## Celery Configuration (`infrastructure/celery/app.py`)
@@ -65,7 +65,7 @@ Generates vector embeddings for a dataset's metadata.
    - **Chunk 2 (Columns):** Column names + contextual description
    - **Chunk 3 (Use-case):** How to query, what data is available, relevance hints
 3. Delete existing chunks for this dataset.
-4. Batch embed all chunks via OpenAI `text-embedding-3-small` (1536 dims).
+4. Batch embed all chunks via AWS Bedrock Cohere Embed Multilingual v3 (1024 dims).
 5. Insert chunks with embeddings into `dataset_chunks` table.
 
 ### Embedding Tasks (`tasks/embedding_tasks.py`)
@@ -101,7 +101,7 @@ Downloads a dataset file and caches it as a PostgreSQL table.
 Full multi-agent analysis pipeline.
 
 **Flow:**
-1. **Plan Phase** — LLM (Gemini 2.5 Flash) generates JSON execution plan:
+1. **Plan Phase** — LLM (AWS Bedrock Claude Haiku 3.5) generates JSON execution plan:
    ```json
    {
      "approach": "...",
@@ -136,10 +136,13 @@ Configured in `celery/app.py`:
 
 ```bash
 # Individual workers
-make workers.scraper     # Scraper queue, concurrency 2
-make workers.collector   # Collector queue, concurrency 4
-make workers.embedding   # Embedding queue, concurrency 8
-make workers.analyst     # Analyst queue, concurrency 2
+make workers.scraper        # Scraper queue, concurrency 2
+make workers.collector      # Collector queue, concurrency 4
+make workers.embedding      # Embedding queue, concurrency 8
+make workers.analyst        # Analyst queue, concurrency 2
+make workers.transparency   # Transparency queue, concurrency 2
+make workers.ingest         # Ingest queue, concurrency 2
+make workers.s3             # S3 queue, concurrency 2
 
 # Scheduler
 make beat               # Celery Beat for scheduled tasks
@@ -152,11 +155,14 @@ make flower             # Flower UI on port 5556
 
 In production/docker, each worker runs as a separate container:
 
-| Service | Queue | API Keys Needed |
-|---------|-------|-----------------|
-| `worker-scraper` | scraper | OPENAI_API_KEY |
+| Service | Queue | API Keys / Credentials Needed |
+|---------|-------|-------------------------------|
+| `worker-scraper` | scraper | AWS credentials (Bedrock embeddings) |
 | `worker-collector` | collector | — |
-| `worker-embedding` | embedding | OPENAI_API_KEY |
-| `worker-analyst` | analyst | GEMINI_API_KEY, OPENAI_API_KEY |
+| `worker-embedding` | embedding | AWS credentials (Bedrock Cohere) |
+| `worker-analyst` | analyst | AWS credentials (Bedrock Claude Haiku) |
+| `worker-transparency` | transparency | — |
+| `worker-ingest` | ingest | — |
+| `worker-s3` | s3 | AWS credentials (S3) |
 | `beat` | — (scheduler) | — |
 | `flower` | — (monitoring) | — |

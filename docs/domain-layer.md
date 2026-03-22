@@ -79,7 +79,7 @@ A vector-embedded chunk of dataset metadata used for semantic search.
 |-------|------|---------|-------------|
 | `dataset_id` | str | `""` | Reference to parent dataset |
 | `content` | str | `""` | Combined text for embedding |
-| `embedding` | list[float] | `[]` | 1536-dim vector |
+| `embedding` | list[float] | `[]` | 1024-dim vector (Cohere Embed Multilingual v3) |
 
 ### CachedDataset (`entities/dataset/cached_data.py`)
 

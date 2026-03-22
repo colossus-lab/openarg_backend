@@ -13,7 +13,7 @@ PostgreSQL 16 with pgvector extension. All primary keys are UUID v4 with `gen_ra
 │ datasets │──1:N──│ dataset_chunks │       │ cached_datasets   │
 │          │──1:N──│                │       │  (download cache) │
 └──────────┘       └────────────────┘       └──────────────────┘
-                          ↑ pgvector(1536)
+                          ↑ pgvector(1024)
 
 ┌──────────────┐       ┌──────────────────────┐       ┌──────────────┐
 │ user_queries │──1:N──│ query_dataset_links   │       │ agent_tasks  │
@@ -101,7 +101,7 @@ Vector-embedded chunks for semantic search.
 | `id` | UUID | PK, default `gen_random_uuid()` | |
 | `dataset_id` | UUID | NOT NULL, INDEX | Reference to parent dataset |
 | `content` | TEXT | NOT NULL | Chunk text (metadata combination) |
-| `embedding` | vector(1536) | pgvector | OpenAI text-embedding-3-small |
+| `embedding` | vector(1024) | pgvector | AWS Bedrock Cohere Embed Multilingual v3 |
 | `created_at` | TIMESTAMPTZ | default `now()` | |
 | `updated_at` | TIMESTAMPTZ | default `now()` | |
 
@@ -179,6 +179,34 @@ Execution log for individual agent steps within a query.
 | `duration_ms` | INTEGER | default `0` | |
 | `created_at` | TIMESTAMPTZ | default `now()` | |
 | `updated_at` | TIMESTAMPTZ | default `now()` | |
+
+### `table_catalog`
+
+Metadata catalog for cached tables with vector embeddings for NL2SQL matching.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK, default `gen_random_uuid()` | |
+| `table_name` | VARCHAR(255) | UNIQUE, NOT NULL | Name of the cached table |
+| `description` | TEXT | nullable | Natural language description |
+| `columns_json` | TEXT | nullable | Column metadata as JSON |
+| `embedding` | vector(1024) | pgvector | Cohere Embed Multilingual v3 |
+| `created_at` | TIMESTAMPTZ | default `now()` | |
+| `updated_at` | TIMESTAMPTZ | default `now()` | |
+
+**Indexes:** `ix_table_catalog_embedding` HNSW using `vector_cosine_ops`
+
+### `successful_queries`
+
+Log of successfully answered queries for analytics and quality tracking.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK, default `gen_random_uuid()` | |
+| `question` | TEXT | NOT NULL | Original user question |
+| `intent` | VARCHAR(100) | nullable | Classified intent |
+| `duration_ms` | INTEGER | default `0` | Total processing time |
+| `created_at` | TIMESTAMPTZ | default `now()` | |
 
 ### Dynamic `cache_*` tables
 

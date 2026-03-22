@@ -296,7 +296,7 @@ Invalidate a cached query result.
 
 ### `WS /api/v1/query/ws/stream`
 
-WebSocket endpoint for streaming query responses.
+WebSocket endpoint for streaming query responses (legacy).
 
 **Client sends:**
 ```json
@@ -310,6 +310,62 @@ WebSocket endpoint for streaming query responses.
 { "type": "chunk", "content": "Segun los datos..." }
 { "type": "chunk", "content": " del presupuesto..." }
 { "type": "complete", "sources": [...] }
+```
+
+### `POST /api/v1/query/smart`
+
+LangGraph pipeline endpoint. Executes the full multi-agent query pipeline: classify, cache, plan, execute, analyze, and finalize.
+
+**Rate limit:** 15 requests/minute
+
+**Request Body:**
+```json
+{
+  "question": "Cuanto gasta el gobierno en educacion?",
+  "user_email": "user@example.com",
+  "conversation_id": "optional-uuid",
+  "policy_mode": false
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "answer": "Segun los datos del presupuesto nacional...",
+  "sources": [
+    { "name": "Presupuesto 2025", "url": "https://...", "portal": "datos_gob_ar", "accessed_at": "..." }
+  ],
+  "chart_data": [...],
+  "tokens_used": 1200,
+  "confidence": 0.85,
+  "citations": [...],
+  "documents": [...],
+  "warnings": []
+}
+```
+
+### `WS /api/v1/query/ws/smart`
+
+LangGraph pipeline via WebSocket. Streams real-time progress events as the pipeline executes.
+
+**Client sends (after connecting):**
+```json
+{
+  "question": "Cuanto gasta el gobierno en educacion?",
+  "conversation_id": "optional-uuid",
+  "policy_mode": false
+}
+```
+
+**Server streams:**
+```json
+{ "type": "status", "step": "classifying" }
+{ "type": "status", "step": "planning" }
+{ "type": "status", "step": "planned", "intent": "economic_data", "steps_count": 2 }
+{ "type": "status", "step": "searching" }
+{ "type": "status", "step": "generating" }
+{ "type": "chunk", "content": "Segun los datos..." }
+{ "type": "complete", "answer": "...", "sources": [...], "chart_data": [...], "confidence": 0.85, "citations": [...] }
 ```
 
 ---

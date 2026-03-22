@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.application.pipeline.cache_manager import check_cache, get_cached_dict
+from app.application.pipeline.chart_builder import extract_meta
 from app.application.smart_query_service import SmartQueryService
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
@@ -247,10 +249,20 @@ class TestConnectorFailureGraceful:
 
 class TestCacheEmbeddingPassed:
     async def test_check_cache_tries_redis_first(self, service, mock_deps):
-        """Verify _check_cache tries Redis before generating embedding."""
+        """Verify check_cache tries Redis before generating embedding."""
         mock_deps["cache"].get.return_value = None
         mock_deps["semantic_cache"].get.return_value = None
-        await service._check_cache("test question", "user")
+        from app.infrastructure.monitoring.metrics import MetricsCollector
+
+        metrics = MetricsCollector()
+        await check_cache(
+            "test question",
+            "user",
+            mock_deps["cache"],
+            mock_deps["embedding"],
+            mock_deps["semantic_cache"],
+            metrics,
+        )
         # Redis should have been tried
         mock_deps["cache"].get.assert_called_once()
         # Embedding should have been generated (for semantic cache)
@@ -264,43 +276,57 @@ class TestCacheEmbeddingPassed:
     async def test_check_cache_returns_cached_on_redis_hit(self, service, mock_deps):
         """If Redis has a hit, the cached result is returned."""
         mock_deps["cache"].get.return_value = {"answer": "cached", "sources": []}
-        result = await service._check_cache("test question", "user")
-        assert result is not None
-        assert result.cached is True
-        assert result.answer == "cached"
+        from app.infrastructure.monitoring.metrics import MetricsCollector
+
+        metrics = MetricsCollector()
+        cached_dict, _ = await check_cache(
+            "test question",
+            "user",
+            mock_deps["cache"],
+            mock_deps["embedding"],
+            mock_deps["semantic_cache"],
+            metrics,
+        )
+        assert cached_dict is not None
+        assert cached_dict["answer"] == "cached"
 
     async def test_get_cached_dict_tries_redis_first(self, service, mock_deps):
-        """Verify _get_cached_dict tries Redis before semantic cache."""
+        """Verify get_cached_dict tries Redis before semantic cache."""
         mock_deps["cache"].get.return_value = None
         mock_deps["semantic_cache"].get.return_value = None
-        await service._get_cached_dict("test question")
+        await get_cached_dict(
+            "test question",
+            mock_deps["cache"],
+            mock_deps["embedding"],
+            mock_deps["semantic_cache"],
+        )
         mock_deps["cache"].get.assert_called_once()
         mock_deps["embedding"].embed.assert_called_once()
         mock_deps["semantic_cache"].get.assert_called_once()
 
 
 class TestMetaParsing:
-    def test_extract_meta_with_valid_block(self, service):
+    def test_extract_meta_with_valid_block(self):
         text = (
             'answer text <!--META:{"confidence": 0.8,'
             ' "citations": [{"claim": "test", "source": "src"}]}-->'
         )
-        confidence, citations = service._extract_meta(text)
+        confidence, citations = extract_meta(text)
         assert confidence == 0.8
         assert len(citations) == 1
 
-    def test_extract_meta_no_block(self, service):
-        confidence, citations = service._extract_meta("just an answer")
+    def test_extract_meta_no_block(self):
+        confidence, citations = extract_meta("just an answer")
         assert confidence == 1.0
         assert citations == []
 
-    def test_extract_meta_invalid_json(self, service):
-        confidence, citations = service._extract_meta("<!--META:not json-->")
+    def test_extract_meta_invalid_json(self):
+        confidence, citations = extract_meta("<!--META:not json-->")
         assert confidence == 1.0
         assert citations == []
 
-    def test_extract_meta_clamped(self, service):
-        confidence, _ = service._extract_meta('<!--META:{"confidence": 1.5}-->')
+    def test_extract_meta_clamped(self):
+        confidence, _ = extract_meta('<!--META:{"confidence": 1.5}-->')
         assert confidence == 1.0
 
 

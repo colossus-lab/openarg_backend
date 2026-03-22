@@ -13,6 +13,7 @@ OpenArg is an AI-powered multi-agent platform for analyzing Argentine government
 | [Infrastructure Layer](./infrastructure-layer.md) | Adapters, persistence, Celery workers |
 | [Configuration](./configuration.md) | Settings, TOML config, environment variables |
 | [Deployment](./deployment.md) | Docker Compose, services, Make commands |
+| [Query Pipeline](./pipeline-map.md) | LangGraph pipeline nodes, flow diagram |
 | [Worker Pipeline](./worker-pipeline.md) | Celery tasks, queues, scheduled jobs |
 
 ## Quick Start
@@ -32,17 +33,22 @@ make workers.scraper
 make workers.collector
 make workers.embedding
 make workers.analyst
+make workers.transparency
+make workers.ingest
+make workers.s3
 ```
 
 ## Tech Stack
 
 - **Runtime:** Python 3.12+
 - **Framework:** FastAPI 0.115 + Uvicorn (async, UVLoop)
-- **Database:** PostgreSQL 16 + pgvector (HNSW indexing, 1536-dim embeddings)
+- **Database:** PostgreSQL 16 + pgvector (HNSW indexing, 1024-dim embeddings)
 - **ORM:** SQLAlchemy 2.0 (async) + Alembic migrations
 - **DI:** Dishka 1.6 (IoC container)
 - **Workers:** Celery 5.4 + Redis 7 (broker + cache + results)
-- **AI:** Google Generative AI (Gemini 2.5 Flash) + OpenAI (text-embedding-3-small) + Anthropic (Claude Sonnet)
+- **AI:** AWS Bedrock Claude Haiku 3.5 (primary LLM) + Anthropic API Claude Sonnet (fallback)
+- **Embeddings:** AWS Bedrock Cohere Embed Multilingual v3 (1024-dim)
+- **Pipeline:** LangGraph (stateful graph with checkpointing)
 - **HTTP Client:** HTTPX (async)
 - **Rate Limiting:** SlowAPI
 - **Config:** TOML + Pydantic settings
