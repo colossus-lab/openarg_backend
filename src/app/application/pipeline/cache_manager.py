@@ -116,6 +116,9 @@ async def get_cached_dict(
     return None, q_embedding
 
 
+_ERROR_MARKERS = ("ocurrió un error", "error al analizar", "pipeline_error")
+
+
 async def write_cache(
     question: str,
     result: dict[str, Any],
@@ -125,7 +128,11 @@ async def write_cache(
     semantic_cache: SemanticCache,
     last_embedding: list[float] | None = None,
 ) -> None:
-    """Write to both Redis and semantic cache."""
+    """Write to both Redis and semantic cache. Skip error responses."""
+    answer = (result.get("answer") or "").lower()
+    if any(marker in answer for marker in _ERROR_MARKERS):
+        logger.debug("Skipping cache write for error response")
+        return
     ttl = ttl_for_intent(intent)
     try:
         await cache.set(cache_key(question), result, ttl_seconds=ttl)

@@ -74,6 +74,25 @@ jobs:
           sleep 1
         done
 
+    - name: Flush caches before E2E
+      env:
+        DATABASE_URL: postgresql+psycopg://openarg:${{ secrets.STAGING_DB_PASSWORD }}@localhost:5432/openarg_staging
+      run: |
+        python -c "
+        import asyncio
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy import text
+        async def flush():
+            engine = create_async_engine('$DATABASE_URL')
+            async with engine.begin() as conn:
+                r = await conn.execute(text('DELETE FROM query_cache'))
+                print(f'Flushed {r.rowcount} query_cache entries')
+            await engine.dispose()
+        asyncio.run(flush())
+        "
+        redis-cli -h localhost -p 6379 FLUSHALL || true
+        echo "Caches flushed"
+
     - name: Run E2E tests
       env:
         APP_ENV: e2e
