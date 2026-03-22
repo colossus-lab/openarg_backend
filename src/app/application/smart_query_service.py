@@ -175,26 +175,6 @@ class SmartQueryService:
         self._chat_repo = chat_repo
         self._metrics = MetricsCollector()
 
-    # ── Shims for tests that call internal methods ──
-
-    @staticmethod
-    def _extract_meta(text: str) -> tuple[float, list[dict[str, Any]]]:
-        return extract_meta(text)
-
-    async def _check_cache(self, question: str, user_id: str) -> SmartQueryResult | None:
-        cached_dict, _ = await check_cache(
-            question, user_id, self._cache, self._embedding, self._semantic_cache, self._metrics
-        )
-        if cached_dict:
-            return _dict_to_result(cached_dict)
-        return None
-
-    async def _get_cached_dict(self, question: str) -> dict[str, Any] | None:
-        cached_dict, _ = await get_cached_dict(
-            question, self._cache, self._embedding, self._semantic_cache
-        )
-        return cached_dict
-
     # ── Helper to build ConnectorDeps ──
 
     def _build_deps(self) -> ConnectorDeps:

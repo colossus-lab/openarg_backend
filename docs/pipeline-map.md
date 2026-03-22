@@ -2,7 +2,7 @@
 
 ## Resumen
 
-Cuando un usuario envía una pregunta, pasa por un pipeline de hasta **15 pasos** orquestado por `SmartQueryService`. El pipeline usa entre **0 y 3 llamadas a LLM** dependiendo del tipo de consulta.
+Cuando un usuario envía una pregunta, pasa por un pipeline implementado como un **LangGraph state machine** con nodos especializados. El pipeline usa entre **0 y 3 llamadas a LLM** (AWS Bedrock Claude Haiku 3.5) dependiendo del tipo de consulta. Incluye soporte para replanning automático cuando los datos son insuficientes.
 
 ---
 
@@ -11,27 +11,29 @@ Cuando un usuario envía una pregunta, pasa por un pipeline de hasta **15 pasos*
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  FRONTEND (Next.js)                                                  │
-│  POST /api/chat → proxy al backend                                   │
+│  POST /api/chat → proxy al backend via WebSocket                     │
 └──────────────┬───────────────────────────────────────────────────────┘
                │
                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  BACKEND — Router (smart_query_router.py)                            │
+│  BACKEND — Router (smart_query_v2_router.py)                         │
 │                                                                      │
-│  POST /api/v1/query/smart   → execute() → respuesta JSON            │
-│  WS   /ws/smart             → execute_streaming() → eventos SSE      │
+│  POST /api/v1/query/smart     → LangGraph ainvoke() → respuesta JSON │
+│  WS   /api/v1/query/ws/smart  → LangGraph astream() → eventos WS    │
 │                                                                      │
 │  • Validación de API key                                             │
 │  • Rate limiting (15/min HTTP, 20/min WS)                            │
 │  • Inyección de dependencias (Dishka)                                │
+│  • Checkpointing via PostgreSQL (per conversation_id)                │
 └──────────────┬───────────────────────────────────────────────────────┘
                │
                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  SmartQueryService.execute()                                         │
-│  (app/application/smart_query_service.py)                            │
+│  LangGraph Pipeline (app/application/pipeline/graph.py)              │
 │                                                                      │
-│  Pasos 0–10 detallados abajo                                        │
+│  Nodes: classify → cache → preprocess → planner → executor           │
+│         → analyst → replan (conditional) → finalize                  │
+│  Fast paths: fast_reply, cache_reply, clarify_reply                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -114,7 +116,7 @@ Pregunta original
 Pregunta preprocesada + contexto de memoria
     │
     ▼
-generate_plan() → Gemini 2.5 Flash
+generate_plan() → AWS Bedrock Claude Haiku 3.5
     │
     └─ Prompt: planner.txt (con 5 few-shot examples)
        Salida: ExecutionPlan {
@@ -189,7 +191,7 @@ Si no hay resultados, se genera un contexto genérico listando las fuentes dispo
 Contexto de datos + pregunta + memoria + errores de recolección
     │
     ▼
-Gemini 2.5 Flash (o Claude Sonnet fallback)
+AWS Bedrock Claude Haiku 3.5 (o Anthropic API Claude Sonnet fallback)
     │
     ├─ System prompt: analyst.txt
     │   • Templates para datos insuficientes
@@ -303,7 +305,7 @@ Usuario envía pregunta
   └──────┬──────┘
          ▼
   ┌─────────────┐
-  │ PLANNER     │ ◀── 1ra llamada LLM (Gemini 2.5 Flash)
+  │ PLANNER     │ ◀── 1ra llamada LLM (AWS Bedrock Claude Haiku 3.5)
   │ (planner.txt)│    genera ExecutionPlan con steps
   └──────┬──────┘
          ▼
@@ -323,7 +325,7 @@ Usuario envía pregunta
   └──────┬──────┘
          ▼
   ┌─────────────┐
-  │ ANALYST     │ ◀── 2da llamada LLM (Gemini 2.5 Flash)
+  │ ANALYST     │ ◀── 2da llamada LLM (AWS Bedrock Claude Haiku 3.5)
   │(analyst.txt)│    genera respuesta + gráficos + confianza
   └──────┬──────┘
          ▼
@@ -373,7 +375,7 @@ Usuario envía pregunta
 
 ## Modo Streaming (WebSocket)
 
-El endpoint WS `/ws/smart` emite eventos en tiempo real:
+El endpoint WS `/api/v1/query/ws/smart` emite eventos en tiempo real via LangGraph `astream()`:
 
 ```
 → {"type": "status", "step": "classifying"}

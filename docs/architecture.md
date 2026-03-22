@@ -9,8 +9,8 @@ OpenArg follows **Hexagonal Architecture** (Ports & Adapters), with clear separa
 │  Presentation Layer (HTTP Controllers)                   │
 │  FastAPI routers with Pydantic request/response schemas  │
 ├──────────────────────────────────────────────────────────┤
-│  Application Layer (currently minimal)                   │
-│  Use cases / orchestration (future)                      │
+│  Application Layer (LangGraph pipeline)                  │
+│  SmartQueryService + LangGraph state machine             │
 ├──────────────────────────────────────────────────────────┤
 │  Domain Layer (Entities + Ports)                         │
 │  Dataclass entities, ABC interfaces, exceptions          │
@@ -50,7 +50,7 @@ src/app/
 │   │   ├── user/                    # UserRepositorySQLA
 │   │   ├── chat/                    # ChatRepositorySQLA
 │   │   ├── dataset/                 # DatasetRepositorySQLA
-│   │   ├── llm/                     # Gemini, OpenAI, Anthropic adapters
+│   │   ├── llm/                     # Bedrock (primary), Anthropic (fallback) adapters
 │   │   ├── search/                  # PgVectorSearchAdapter
 │   │   ├── sandbox/                 # PgSandboxAdapter (read-only SQL)
 │   │   ├── source/                  # DatosGobAr, CABA CKAN adapters
@@ -63,7 +63,7 @@ src/app/
 │   │   └── alembic/                 # Migration files
 │   └── celery/                      # Background workers
 │       ├── app.py                   # Celery config + queue routing
-│       └── tasks/                   # Scraper, collector, embedding, analyst
+│       └── tasks/                   # Scraper, collector, embedding, analyst, transparency, ingest, s3
 │
 ├── presentation/                    # HTTP interface
 │   └── http/
@@ -71,10 +71,13 @@ src/app/
 │       │   ├── root_router.py       # Composes all routers under /api/v1
 │       │   ├── health/              # GET /health, /health/ready
 │       │   ├── datasets/            # CRUD + scrape trigger
-│       │   ├── query/               # Submit, status, quick, WebSocket
+│       │   ├── query/               # Submit, status, quick, LangGraph smart, WebSocket
 │       │   ├── sandbox/             # SQL sandbox + NL2SQL
 │       │   ├── conversations/       # Conversation + message CRUD
-│       │   └── users/               # User sync (OAuth)
+│       │   ├── taxonomy/            # Taxonomy management
+│       │   ├── transparency/       # Transparency data
+│       │   ├── admin/              # Admin task management
+│       │   └── users/              # User sync (OAuth)
 │       └── errors/                  # Exception handlers
 │
 └── setup/                           # Application bootstrap
@@ -104,7 +107,7 @@ All wiring happens in `setup/ioc/provider_registry.py`. Providers are organized 
 | `DatasetProvider` | `IDatasetRepository`, `IVectorSearch` | SQLAlchemy + pgvector |
 | `UserProvider` | `IUserRepository` | `UserRepositorySQLA` |
 | `ChatProvider` | `IChatRepository` | `ChatRepositorySQLA` |
-| `LLMProvider` | `ILLMProvider`, `IEmbeddingProvider` | Selected by config (Gemini/OpenAI/Anthropic) |
+| `LLMProvider` | `ILLMProvider`, `IEmbeddingProvider` | AWS Bedrock (primary) / Anthropic API (fallback) |
 | `DataSourceProvider` | Data source adapters | DatosGobAr, CABA CKAN |
 | `SandboxProvider` | `ISQLSandbox` | `PgSandboxAdapter` |
 
@@ -140,8 +143,10 @@ async def my_endpoint(
 
 2. **Async-First** — All I/O uses `async/await`. The only exception is Celery tasks (sync workers) which create their own sync database sessions.
 
-3. **LLM Provider Abstraction** — `ILLMProvider` abstracts over Gemini, OpenAI, and Anthropic. The active provider is selected via config (`DEFAULT_LLM_PROVIDER` setting).
+3. **LLM Provider Abstraction** — `ILLMProvider` abstracts over AWS Bedrock (Claude Haiku 3.5) and Anthropic API (Claude Sonnet). The active provider is selected via config.
 
-4. **Vector Search via pgvector** — Embeddings are stored in PostgreSQL using the pgvector extension with HNSW indexes for fast approximate nearest neighbor search.
+4. **Vector Search via pgvector** — Embeddings (1024-dim, Cohere Embed Multilingual v3 via Bedrock) are stored in PostgreSQL using the pgvector extension with HNSW indexes for fast approximate nearest neighbor search.
 
-5. **Dual Query Paths** — Async queries go through Celery (`POST /query/`), synchronous queries go through the quick endpoint (`POST /query/quick`).
+5. **LangGraph Pipeline** — The main query endpoint (`/smart`) runs a LangGraph state machine with nodes for classification, caching, planning, execution, analysis, replanning, and finalization. Supports checkpointing via PostgreSQL.
+
+6. **Dual Query Paths** — Async queries go through Celery (`POST /query/`), synchronous queries go through the quick endpoint (`POST /query/quick`), and the LangGraph pipeline runs via `/smart` (POST) or `/ws/smart` (WebSocket).

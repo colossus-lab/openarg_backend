@@ -1,7 +1,6 @@
-"""Smart query v2 router — LangGraph pipeline endpoint.
+"""Smart query router — LangGraph pipeline endpoint.
 
-Parallel endpoint for A/B testing the LangGraph pipeline against
-the existing SmartQueryService.
+Canonical /smart and /ws/smart endpoints running the LangGraph pipeline.
 """
 
 from __future__ import annotations
@@ -81,7 +80,7 @@ async def _get_checkpointer():
             return None
 
 
-router = APIRouter(prefix="/query", tags=["smart-query-v2"])
+router = APIRouter(prefix="/query", tags=["smart-query"])
 
 
 class SmartQueryV2Request(BaseModel):
@@ -105,7 +104,7 @@ class SmartQueryV2Response(BaseModel):
 # ── POST endpoint ──────────────────────────────────────────
 
 
-@router.post("/smart-v2", response_model=SmartQueryV2Response)
+@router.post("/smart", response_model=SmartQueryV2Response)
 @limiter.limit("15/minute")  # type: ignore[untyped-decorator]
 @inject  # type: ignore[untyped-decorator]
 async def smart_query_v2(
@@ -212,7 +211,7 @@ def _validate_api_key_value(provided: str) -> bool:
 # ── WebSocket endpoint ─────────────────────────────────────
 
 
-@router.websocket("/ws/smart-v2")
+@router.websocket("/ws/smart")
 async def ws_smart_query_v2(ws: WebSocket) -> None:
     """Stream the LangGraph pipeline via WebSocket."""
     # Try query-param auth first (backward compat)
@@ -266,7 +265,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     ws.client.host if ws.client else "unknown"
                 )
                 if await _check_ws_rate_limit(cache, ws_identifier):
-                    audit_rate_limited(user=ws_identifier, endpoint="ws/smart-v2")
+                    audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
                     await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
                     await ws.close(code=4429)
                     return

@@ -12,7 +12,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=for-the-badge&logo=fastapi" />
   <img src="https://img.shields.io/badge/PostgreSQL-16+pgvector-4169E1?style=for-the-badge&logo=postgresql" />
-  <img src="https://img.shields.io/badge/Gemini_2.5-AI-blue?style=for-the-badge&logo=google" />
+  <img src="https://img.shields.io/badge/AWS_Bedrock-Claude_Haiku_3.5-blue?style=for-the-badge&logo=amazonaws" />
+  <img src="https://img.shields.io/badge/LangGraph-Pipeline-orange?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python" />
 </p>
 
@@ -20,7 +21,7 @@
 
 ## Overview
 
-OpenArg Backend is the analysis engine behind [openarg.org](https://openarg.org) -- a platform that answers natural-language questions about Argentine public data. It orchestrates a multi-step query pipeline that classifies user intent, searches across 9 data connectors, generates SQL against cached datasets, and produces structured analyses with citations and chart data. Built with FastAPI, PostgreSQL + pgvector, Redis, Celery, and Gemini 2.5 Flash (with Claude Sonnet fallback).
+OpenArg Backend is the analysis engine behind [openarg.org](https://openarg.org) -- a platform that answers natural-language questions about Argentine public data. It orchestrates a multi-step query pipeline that classifies user intent, searches across 9 data connectors, generates SQL against cached datasets, and produces structured analyses with citations and chart data. Built with FastAPI, PostgreSQL + pgvector, Redis, Celery, LangGraph, and AWS Bedrock Claude Haiku 3.5 (with Anthropic API fallback).
 
 ---
 
@@ -33,7 +34,7 @@ Hexagonal (Ports & Adapters) architecture with four layers:
 | **Presentation** | HTTP + WebSocket endpoints, auth middleware | FastAPI controllers, SlowAPI rate limiting |
 | **Application** | Query orchestration, pipeline coordination | SmartQueryService, connectors |
 | **Domain** | Pure entities, ports (interfaces), value objects | Dataclass entities, ABC port definitions |
-| **Infrastructure** | External system adapters, persistence | PostgreSQL/pgvector, Redis, Celery, Gemini/Claude LLMs |
+| **Infrastructure** | External system adapters, persistence | PostgreSQL/pgvector, Redis, Celery, AWS Bedrock, LangGraph |
 
 Domain ports define abstract interfaces (`IDataSource`, `ILLMProvider`, `IVectorSearch`, `ISQLSandbox`, `ICacheService`). Infrastructure adapters implement them. All wiring is handled by Dishka (IoC container).
 
@@ -43,16 +44,19 @@ Domain ports define abstract interfaces (`IDataSource`, `ILLMProvider`, `IVector
 
 When a user submits a question, the smart query pipeline executes these steps:
 
+The query pipeline is implemented as a **LangGraph** state machine with the following nodes:
+
 1. **Classification** -- Categorize as casual, meta, injection, or off-topic (0 LLM calls, regex + keyword scoring)
 2. **Semantic cache lookup** -- Check Redis + pgvector for a similar recent answer
 3. **Query preprocessing** -- Expand acronyms, resolve temporal references, normalize province names
-4. **Planning** -- Gemini 2.5 Flash generates a structured execution plan (1 LLM call)
+4. **Planning** -- AWS Bedrock Claude Haiku 3.5 generates a structured execution plan (1 LLM call)
 5. **Parallel data collection** -- Dispatch to 9 connectors concurrently
 6. **Table catalog matching** -- Match collected data against cached tables via vector search
 7. **NL2SQL generation** -- Generate read-only SQL queries against matched tables
 8. **SQL validation** -- 3-layer validation (regex, table allowlist, AST parsing via sqlglot)
-9. **Analysis generation** -- Gemini 2.5 Flash synthesizes findings (1 LLM call)
-10. **Response assembly** -- Return analysis with citations, chart data, and source links
+9. **Analysis generation** -- AWS Bedrock Claude Haiku 3.5 synthesizes findings (1 LLM call)
+10. **Replanning** -- If data is insufficient, the pipeline can replan with a different strategy
+11. **Response assembly** -- Return analysis with citations, chart data, and source links
 
 ---
 
@@ -77,12 +81,13 @@ When a user submits a question, the smart query pipeline executes these steps:
 | Component | Technology |
 |-----------|-----------|
 | Framework | FastAPI 0.115 + Uvicorn (async, UVLoop) |
-| Database | PostgreSQL 16 + pgvector (HNSW indexing, 1536-dim) |
+| Database | PostgreSQL 16 + pgvector (HNSW indexing, 1024-dim) |
 | ORM | SQLAlchemy 2.0 (async) + Alembic migrations |
 | Cache / Broker | Redis 7 |
-| Task Queue | Celery 5.4 (7 workers + beat scheduler) |
-| AI Models | Gemini 2.5 Flash (primary) + Claude Sonnet (fallback) |
-| Embeddings | gemini-embedding-001 (1536-dim) |
+| Task Queue | Celery 5.4 (10 workers + beat scheduler) |
+| AI Models | AWS Bedrock Claude Haiku 3.5 (primary) + Anthropic API Claude Sonnet (fallback) |
+| Embeddings | AWS Bedrock Cohere Embed Multilingual v3 (1024-dim) |
+| Pipeline | LangGraph (stateful graph with checkpointing) |
 | DI Container | Dishka 1.6 |
 | Auth | PyJWT + bcrypt + SlowAPI rate limiting |
 | Monitoring | structlog + in-memory metrics + health checks |
@@ -118,9 +123,9 @@ make dev            # Start API with hot reload on port 8080
 |----------|--------|------|---------|
 | Health | GET | `/health` | Component-level health check |
 | Health | GET | `/health/ready` | Readiness probe |
-| Query | POST | `/api/v1/query/smart` | Smart pipeline (plan + collect + analyze) |
+| Query | POST | `/api/v1/query/smart` | LangGraph pipeline (plan + collect + analyze) |
+| Query | WS | `/api/v1/query/ws/smart` | LangGraph pipeline with WebSocket streaming |
 | Query | POST | `/api/v1/query/quick` | Synchronous single-step query |
-| Query | WS | `/ws/smart` | Smart pipeline with SSE streaming |
 | Query | POST | `/api/v1/query/` | Submit async query |
 | Query | GET | `/api/v1/query/{query_id}` | Check query status |
 | Datasets | GET | `/api/v1/datasets/` | List indexed datasets |
@@ -129,6 +134,9 @@ make dev            # Start API with hot reload on port 8080
 | Sandbox | POST | `/api/v1/sandbox/query` | Execute read-only SQL |
 | Sandbox | POST | `/api/v1/sandbox/ask` | Natural language to SQL |
 | Sandbox | GET | `/api/v1/sandbox/tables` | List cached tables |
+| Taxonomy | GET | `/api/v1/taxonomy/*` | Taxonomy and category management |
+| Transparency | GET/POST | `/api/v1/transparency/*` | Transparency and budget data |
+| Admin | GET/POST | `/api/v1/admin/*` | Admin task management |
 | Monitoring | GET | `/api/v1/metrics` | Request, connector, cache, and token metrics |
 
 ---
@@ -139,11 +147,11 @@ make dev            # Start API with hot reload on port 8080
 |--------|-------|-------------|---------|
 | **Scraper** | `scraper` | 2 | Scrape CKAN portal catalogs |
 | **Collector** | `collector` | 4 | Download datasets, parse with pandas, cache in PostgreSQL |
-| **Embedding** | `embedding` | 8 | Generate vector embeddings (3 chunks per dataset, 1536-dim) |
+| **Embedding** | `embedding` | 8 | Generate vector embeddings (3 chunks per dataset, 1024-dim via Bedrock Cohere) |
 | **Analyst** | `analyst` | 2 | Execute query analysis pipeline |
-| **Transparency** | `transparency` | 2 | Process transparency/budget data |
-| **Ingest** | `ingest` | 2 | Ingest structured data sources (512MB memory limit) |
-| **S3** | `s3` | 2 | Handle S3 storage operations |
+| **Transparency** | `transparency` | 2 | Process transparency/budget data (presupuesto, DDJJ) |
+| **Ingest** | `ingest` | 2 | Ingest structured data sources (senado, staff, series tiempo) |
+| **S3** | `s3` | 2 | Handle S3 storage operations for large datasets |
 | **Beat** | -- | 1 | Celery Beat scheduler for periodic tasks |
 
 ---

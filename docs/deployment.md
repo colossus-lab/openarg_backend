@@ -15,6 +15,9 @@ The `docker-compose.yaml` defines the complete stack:
 | `worker-collector` | Custom | — | Celery collector worker (concurrency 4) |
 | `worker-embedding` | Custom | — | Celery embedding worker (concurrency 8) |
 | `worker-analyst` | Custom | — | Celery analyst worker (concurrency 2) |
+| `worker-transparency` | Custom | — | Celery transparency worker (concurrency 2) |
+| `worker-ingest` | Custom | — | Celery ingest worker (concurrency 2) |
+| `worker-s3` | Custom | — | Celery S3 worker (concurrency 2) |
 | `beat` | Custom | — | Celery Beat scheduler |
 | `flower` | `mher/flower:2.0.0` | 5556 → 5555 | Celery monitoring UI |
 
@@ -45,7 +48,7 @@ The API service automatically runs `alembic upgrade head` before starting uvicor
 
 - Python 3.12+
 - Docker (for PostgreSQL + Redis)
-- API keys: GEMINI_API_KEY, OPENAI_API_KEY
+- AWS credentials (for Bedrock + S3)
 
 ### Setup
 
@@ -59,14 +62,17 @@ make db.up
 # 3. Run migrations
 make db.migrate
 
-# 4. Configure API keys
+# 4. Configure credentials
+# Set AWS credentials for Bedrock + S3:
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=your-access-key
+export AWS_SECRET_ACCESS_KEY=your-secret-key
+
+# Optional: Anthropic API fallback
 # Create config/local/.secrets.toml:
 cat > config/local/.secrets.toml << 'EOF'
-[gemini]
-API_KEY = "your-gemini-key"
-
-[openai]
-API_KEY = "your-openai-key"
+[anthropic]
+API_KEY = "your-anthropic-key"
 EOF
 
 # 5. Start dev server
@@ -92,7 +98,16 @@ make workers.embedding
 # Terminal 4: Analyst
 make workers.analyst
 
-# Terminal 5 (optional): Beat scheduler
+# Terminal 5: Transparency
+make workers.transparency
+
+# Terminal 6: Ingest
+make workers.ingest
+
+# Terminal 7: S3
+make workers.s3
+
+# Terminal 8 (optional): Beat scheduler
 make beat
 
 # Terminal 6 (optional): Flower monitoring
@@ -114,6 +129,9 @@ make flower    # Opens at http://localhost:5556
 | `make workers.collector` | Start collector worker |
 | `make workers.embedding` | Start embedding worker |
 | `make workers.analyst` | Start analyst worker |
+| `make workers.transparency` | Start transparency worker |
+| `make workers.ingest` | Start ingest worker |
+| `make workers.s3` | Start S3 worker |
 | `make beat` | Start Celery Beat scheduler |
 | `make flower` | Start Flower monitoring (port 5556) |
 | `make docker.up` | Start full stack via Docker Compose |
@@ -143,10 +161,10 @@ Defined in `pyproject.toml`:
 | `dishka` | >= 1.6.0 | Dependency injection |
 | `celery[redis]` | >= 5.4.0 | Background workers |
 | `redis` | >= 5.0.0 | Cache + broker client |
-| `google-generativeai` | >= 0.8.0 | Gemini LLM |
-| `openai` | >= 1.60.0 | OpenAI API (embeddings + optional LLM) |
-| `anthropic` | >= 0.40.0 | Claude LLM |
-| `tiktoken` | >= 0.8.0 | Token counting |
+| `boto3` | >= 1.35.0 | AWS Bedrock + S3 |
+| `anthropic` | >= 0.40.0 | Claude LLM (Anthropic API fallback) |
+| `langgraph` | >= 0.3.0 | LangGraph pipeline orchestration |
+| `langgraph-checkpoint-postgres` | >= 2.0.0 | LangGraph PostgreSQL checkpointing |
 | `pandas` | >= 2.2.0 | Data processing (CSV/JSON/XLSX parsing) |
 | `httpx` | >= 0.28.0 | Async HTTP client |
 | `pydantic` | >= 2.10.0 | Data validation |
