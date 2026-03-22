@@ -618,6 +618,8 @@ def index_dataset_embedding(self, dataset_id: str):
             "bedrock-runtime",
             region_name=os.getenv("AWS_REGION", "us-east-1"),
         )
+        # Cohere embed via Bedrock validates maxLength=2048 chars per text
+        chunks = [c[:2048] for c in chunks]
         embeddings = []
         batch_size = 96  # Cohere max batch size
         for batch_start in range(0, len(chunks), batch_size):

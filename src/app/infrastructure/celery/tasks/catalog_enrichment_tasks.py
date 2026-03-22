@@ -13,7 +13,6 @@ import logging
 import os
 
 import boto3
-import google.generativeai as genai
 from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
@@ -21,15 +20,9 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
-_GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 _EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3")
+_LLM_MODEL = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-haiku-20241022-v1:0")
 _EMBEDDING_DIMS = 1024
-
-
-def _get_gemini_client():
-    """Configure and return Gemini for sync usage in Celery."""
-    genai.configure(api_key=_GEMINI_API_KEY)
-    return genai
 
 
 def _get_bedrock_client():
@@ -59,9 +52,8 @@ def _generate_metadata_for_table(
     sample_rows: list[dict],
     row_count: int,
 ) -> dict:
-    """Use Gemini to generate semantic metadata for a table."""
-    client = _get_gemini_client()
-    model = client.GenerativeModel("gemini-2.0-flash")
+    """Use Bedrock Claude Haiku to generate semantic metadata for a table."""
+    bedrock = _get_bedrock_client()
 
     sample_text = ""
     if sample_rows:
@@ -94,8 +86,12 @@ def _generate_metadata_for_table(
     )
 
     try:
-        response = model.generate_content(prompt)
-        text_resp = response.text.strip()
+        resp = bedrock.converse(
+            modelId=_LLM_MODEL,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": 1024, "temperature": 0.1},
+        )
+        text_resp = resp["output"]["message"]["content"][0]["text"].strip()
         # Strip markdown code blocks if present
         if text_resp.startswith("```"):
             lines = text_resp.split("\n")
@@ -235,9 +231,9 @@ def _enrich_table(engine, table_name: str) -> bool:
 )
 def enrich_single_table(self, table_name: str):
     """Enrich a single cached table with semantic metadata."""
-    if not _GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set, skipping catalog enrichment")
-        return {"error": "no_api_key"}
+    if not os.getenv("AWS_ACCESS_KEY_ID"):
+        logger.warning("AWS credentials not set, skipping catalog enrichment")
+        return {"error": "no_aws_credentials"}
 
     engine = get_sync_engine()
     try:
@@ -258,9 +254,9 @@ def enrich_single_table(self, table_name: str):
 )
 def enrich_all_tables(self, batch_size: int = 50):
     """Enrich all cached tables that don't have a catalog entry yet."""
-    if not _GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set, skipping catalog enrichment")
-        return {"error": "no_api_key"}
+    if not os.getenv("AWS_ACCESS_KEY_ID"):
+        logger.warning("AWS credentials not set, skipping catalog enrichment")
+        return {"error": "no_aws_credentials"}
 
     engine = get_sync_engine()
     try:

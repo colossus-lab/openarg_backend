@@ -14,7 +14,6 @@ import time
 from typing import Any
 
 import boto3
-import google.generativeai as genai  # type: ignore[import-untyped]
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
@@ -40,7 +39,7 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
     """
     start = time.time()
     engine = get_sync_engine()
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    _llm_model = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-haiku-20241022-v1:0")
 
     try:
         # Update query status
@@ -50,27 +49,25 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
                 {"id": query_id},
             )
 
-        genai.configure(api_key=gemini_key)  # type: ignore[attr-defined]
-        planner_model = genai.GenerativeModel(  # type: ignore[attr-defined]
-            "gemini-2.5-flash",
-            system_instruction=load_prompt("celery_planner"),
-            generation_config=genai.types.GenerationConfig(  # type: ignore[attr-defined]
-                temperature=0.3,
-                max_output_tokens=1024,
-                response_mime_type="application/json",
-            ),
+        bedrock_llm = boto3.client(
+            "bedrock-runtime",
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
         )
 
         # --- STEP 1: Planner ---
         logger.info(f"[{query_id}] Planning...")
-        plan_response = planner_model.generate_content(question)
-        plan_text = plan_response.text or "{}"
-        plan_tokens = 0
-        if plan_response.usage_metadata:
-            plan_tokens = (
-                plan_response.usage_metadata.prompt_token_count
-                + plan_response.usage_metadata.candidates_token_count
-            )
+        planner_system = load_prompt("celery_planner")
+        plan_resp = bedrock_llm.converse(
+            modelId=_llm_model,
+            system=[{"text": planner_system}],
+            messages=[{"role": "user", "content": [{"text": question}]}],
+            inferenceConfig={"maxTokens": 1024, "temperature": 0.3},
+        )
+        plan_text = plan_resp["output"]["message"]["content"][0]["text"] or "{}"
+        plan_tokens = (
+            plan_resp.get("usage", {}).get("inputTokens", 0)
+            + plan_resp.get("usage", {}).get("outputTokens", 0)
+        )
 
         try:
             plan = json.loads(plan_text)
@@ -258,24 +255,25 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
         # --- STEP 4: Analyst generates answer ---
         logger.info(f"[{query_id}] Analyzing...")
         context_str = "\n---\n".join(data_context)
-        analyst_model = genai.GenerativeModel(  # type: ignore[attr-defined]
-            "gemini-2.5-flash",
-            system_instruction=load_prompt("celery_analyst"),
+        analyst_system = load_prompt("celery_analyst")
+        analyst_resp = bedrock_llm.converse(
+            modelId=_llm_model,
+            system=[{"text": analyst_system}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"text": f"Pregunta: {question}\n\nDatos disponibles:\n{context_str}"}
+                    ],
+                }
+            ],
+            inferenceConfig={"maxTokens": 4096, "temperature": 0.1},
         )
-        analyst_response = analyst_model.generate_content(
-            f"Pregunta: {question}\n\nDatos disponibles:\n{context_str}",
-            generation_config=genai.types.GenerationConfig(  # type: ignore[attr-defined]
-                temperature=0.1,
-                max_output_tokens=4096,
-            ),
+        analysis = analyst_resp["output"]["message"]["content"][0]["text"] or ""
+        analyst_tokens = (
+            analyst_resp.get("usage", {}).get("inputTokens", 0)
+            + analyst_resp.get("usage", {}).get("outputTokens", 0)
         )
-        analysis = analyst_response.text or ""
-        analyst_tokens = 0
-        if analyst_response.usage_metadata:
-            analyst_tokens = (
-                analyst_response.usage_metadata.prompt_token_count
-                + analyst_response.usage_metadata.candidates_token_count
-            )
         total_tokens = plan_tokens + analyst_tokens
 
         duration_ms = int((time.time() - start) * 1000)
