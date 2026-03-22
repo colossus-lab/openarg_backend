@@ -42,9 +42,7 @@ class TestE2EQueries:
         """DDJJ connector: patrimonio declarado de diputados."""
         resp = await client.post(
             "/api/v1/query/smart",
-            json=_smart_payload(
-                "¿Quienes son los 10 diputados con mayor patrimonio declarado?"
-            ),
+            json=_smart_payload("¿Quienes son los 10 diputados con mayor patrimonio declarado?"),
             headers=_headers(),
         )
 
@@ -53,9 +51,9 @@ class TestE2EQueries:
 
         assert data["answer"], "Answer should not be empty"
         answer_lower = data["answer"].lower()
-        assert any(
-            kw in answer_lower for kw in ["diputado", "patrimonio", "declarad"]
-        ), f"Answer should mention diputados/patrimonio: {data['answer'][:200]}"
+        assert any(kw in answer_lower for kw in ["diputado", "patrimonio", "declarad"]), (
+            f"Answer should mention diputados/patrimonio: {data['answer'][:200]}"
+        )
 
     async def test_inflacion(self, client):
         """Series de Tiempo connector: inflacion / IPC."""
@@ -70,9 +68,9 @@ class TestE2EQueries:
 
         assert data["answer"], "Answer should not be empty"
         answer_lower = data["answer"].lower()
-        assert any(
-            kw in answer_lower for kw in ["inflaci", "ipc", "precio", "%", "porcentaje"]
-        ), f"Answer should mention inflacion/IPC: {data['answer'][:200]}"
+        assert any(kw in answer_lower for kw in ["inflaci", "ipc", "precio", "%", "porcentaje"]), (
+            f"Answer should mention inflacion/IPC: {data['answer'][:200]}"
+        )
 
     async def test_reservas_bcra(self, client):
         """BCRA connector: reservas internacionales."""
@@ -104,9 +102,9 @@ class TestE2EQueries:
 
         assert data["answer"], "Answer should not be empty"
         answer_lower = data["answer"].lower()
-        assert any(
-            kw in answer_lower for kw in ["educaci", "dataset", "escuela", "universidad"]
-        ), f"Answer should mention educacion/datasets: {data['answer'][:200]}"
+        assert any(kw in answer_lower for kw in ["educaci", "dataset", "escuela", "universidad"]), (
+            f"Answer should mention educacion/datasets: {data['answer'][:200]}"
+        )
 
     async def test_query_fuera_de_alcance(self, client):
         """Off-topic query: should still return 200 with a response."""
@@ -145,7 +143,7 @@ class TestE2EResponseStructure:
         assert "sources" in data
         assert isinstance(data["sources"], list)
         assert "confidence" in data
-        assert isinstance(data["confidence"], (int, float))
+        assert isinstance(data["confidence"], int | float)
         assert 0 <= data["confidence"] <= 1
 
     async def test_empty_question_rejected(self, client):

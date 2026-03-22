@@ -85,6 +85,7 @@ jobs:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_REGION: us-east-1
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
       run: |
         pytest tests/e2e/ -v --tb=short --timeout=120 -x -m e2e -o "addopts="
