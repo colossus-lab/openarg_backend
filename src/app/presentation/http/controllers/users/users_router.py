@@ -60,7 +60,9 @@ async def sync_user(
         name=saved.name,
         image_url=saved.image_url or "",
         created_at=saved.created_at.isoformat(),
-        privacy_accepted_at=saved.privacy_accepted_at.isoformat() if saved.privacy_accepted_at else None,
+        privacy_accepted_at=saved.privacy_accepted_at.isoformat()
+        if saved.privacy_accepted_at
+        else None,
         save_history=saved.save_history,
     )
 
@@ -105,7 +107,9 @@ async def get_current_user(
         name=user.name,
         image_url=user.image_url or "",
         created_at=user.created_at.isoformat(),
-        privacy_accepted_at=user.privacy_accepted_at.isoformat() if user.privacy_accepted_at else None,
+        privacy_accepted_at=user.privacy_accepted_at.isoformat()
+        if user.privacy_accepted_at
+        else None,
         save_history=user.save_history,
     )
 
@@ -139,7 +143,9 @@ async def update_settings(
         name=user.name,
         image_url=user.image_url or "",
         created_at=user.created_at.isoformat(),
-        privacy_accepted_at=user.privacy_accepted_at.isoformat() if user.privacy_accepted_at else None,
+        privacy_accepted_at=user.privacy_accepted_at.isoformat()
+        if user.privacy_accepted_at
+        else None,
         save_history=user.save_history,
     )
 
