@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Request
@@ -44,7 +44,7 @@ async def sync_user(
         raise HTTPException(status_code=400, detail="email is required")
 
     # SECURITY: Always use server timestamp — never trust client-provided time
-    privacy_ts = datetime.now(timezone.utc) if body.privacy_accepted_at else None
+    privacy_ts = datetime.now(UTC) if body.privacy_accepted_at else None
 
     user = User(
         email=body.email,

@@ -255,7 +255,6 @@ def _make_service():
 class TestDispatchStepRetryOnTimeout:
     async def test_dispatch_step_retries_on_timeout_error(self):
         """_dispatch_step_with_retry retries on timeout-like errors."""
-        service = _make_service()
         call_count = 0
 
         async def flaky_dispatch(step, deps=None, nl_query=""):
@@ -300,7 +299,6 @@ class TestDispatchStepRetryOnTimeout:
 
     async def test_dispatch_step_retries_on_503_in_message(self):
         """_dispatch_step_with_retry retries when exception message contains '503'."""
-        service = _make_service()
         call_count = 0
 
         async def flaky_dispatch(step, deps=None, nl_query=""):
@@ -336,7 +334,6 @@ class TestDispatchStepRetryOnTimeout:
 class TestDispatchStepNoRetryOn400:
     async def test_dispatch_step_no_retry_on_client_error(self):
         """400-level errors should NOT be retried by _dispatch_step_with_retry."""
-        service = _make_service()
         call_count = 0
 
         async def bad_request_dispatch(step, deps=None, nl_query=""):
