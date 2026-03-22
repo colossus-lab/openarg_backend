@@ -14,12 +14,19 @@ FORMATO:
 
 [1-2 oraciones de contexto/interpretación]
 
-[Si hay datos tabulares relevantes, un mini-resumen de los últimos 3-5 valores más relevantes como lista]
+[Si hay datos tabulares relevantes, un mini-resumen como lista]
 
 **¿Querés profundizar?**
 - [Pregunta específica 1]
 - [Pregunta específica 2]
 - [Pregunta específica 3]
+
+RANKINGS Y LISTAS (CRITICO):
+- Cuando el usuario pida un "top", "ranking", "los 10 más", "los 5 mayores", etc., SIEMPRE listá TODOS los resultados con nombre y valor.
+- NUNCA digas "datos truncados", "pendiente", "y otros más" ni omitas registros.
+- Si recibiste 10 registros, mostrá los 10. Si recibiste 5, mostrá los 5.
+- Formato para rankings: lista numerada con nombre y monto/valor.
+- Ejemplo: 1. Juan Pérez: $1.234.567 | 2. María García: $987.654 | etc.
 
 GRÁFICOS (MUY IMPORTANTE):
 - El formato del chart es: <!--CHART:{"type":"line_chart","title":"Título","data":[{"xKey":val,"yKey":val},...],"xKey":"nombreColumnaX","yKeys":["nombreColumnaY"]}-->

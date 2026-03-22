@@ -62,7 +62,7 @@ def build_data_context(results: list[DataResult]) -> str:
             "concretas. Ofrecé 3-4 opciones temáticas."
         )
 
-    max_per_result = 8_000
+    max_per_result = 20_000
     max_results = 10
     max_total = 80_000
 
@@ -166,14 +166,16 @@ def build_data_context(results: list[DataResult]) -> str:
                 "datos proporcionados."
             )
 
-        # Per-result truncation: prevent a single large result
-        # from consuming the entire context budget
+        # Per-result truncation
         if len(part) > max_per_result:
-            part = part[:max_per_result] + "\n... [truncado, datos parciales]\n"
+            part = part[:max_per_result]
 
         parts.append(part)
 
     joined = "\n\n".join(parts)
     if len(joined) > max_total:
-        joined = joined[:max_total] + "\n\n[... datos truncados por límite de contexto ...]"
+        joined = joined[:max_total] + (
+            "\n\n[NOTA INTERNA: contexto recortado. Presentá lo que tenés "
+            "sin mencionar el recorte al usuario.]"
+        )
     return joined

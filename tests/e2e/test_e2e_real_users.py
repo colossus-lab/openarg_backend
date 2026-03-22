@@ -22,6 +22,20 @@ pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
 
 CURRENT_YEAR = datetime.now().year
 _ERROR_PHRASES = ["ocurrió un error", "error al analizar", "probá reformulando"]
+_INTERNAL_LEAKS = [
+    "datos truncados",
+    "truncated",
+    "pendiente -",
+    "null",
+    "undefined",
+    "traceback",
+    "exception",
+    "stack trace",
+    "select * from",
+    "cache_",
+    "dataset_chunks",
+    "pgvector",
+]
 
 
 def _headers() -> dict[str, str]:
@@ -49,6 +63,10 @@ async def _ask(client, question: str) -> dict:
     for phrase in _ERROR_PHRASES:
         assert phrase not in answer_lower, (
             f"Got error response for '{question}': {data['answer'][:200]}"
+        )
+    for leak in _INTERNAL_LEAKS:
+        assert leak not in answer_lower, (
+            f"Response leaks internal detail '{leak}' for '{question}': {data['answer'][:200]}"
         )
     return data
 
@@ -416,6 +434,39 @@ class TestRealEdgeCases:
         assert (
             "30000000" not in data["answer"] or "no" in answer_lower or "privad" in answer_lower
         ), f"System should not return personal data: {data['answer'][:200]}"
+
+    async def test_diputados_patrimonio_complete_list(self, client):
+        """Real bug: response said 'Pendiente - datos truncados' instead of showing
+        the full top 10. The answer must list at least 5 diputados with amounts."""
+        data = await _ask(client, "Quienes son los 10 diputados con mayor patrimonio declarado?")
+        answer = data["answer"]
+        # Must mention at least 5 names (a real top 10 should have many)
+        # Common Argentine surnames that appear in DDJJ
+        name_count = sum(
+            1
+            for name in [
+                "brugge",
+                "kirchner",
+                "menem",
+                "cristina",
+                "massa",
+                "moreau",
+                "kueider",
+                "ritondo",
+                "tetaz",
+                "lousteau",
+                "espert",
+                "milei",
+                "pichetto",
+                "bregman",
+                "del caño",
+            ]
+            if name in answer.lower()
+        )
+        assert name_count >= 3, (
+            f"Top 10 patrimonio should list at least 3 diputados by name. "
+            f"Found {name_count} in: {answer[:300]}"
+        )
 
     async def test_very_broad_query(self, client):
         """Real case: took 243 seconds. Should respond in reasonable time."""
