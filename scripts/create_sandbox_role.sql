@@ -2,7 +2,7 @@
 -- Run this in production to limit what the sandbox can do.
 --
 -- Usage:
---   psql -U postgres -d openarg_db -f scripts/create_sandbox_role.sql
+--   psql -U postgres -d openarg_db -v sandbox_password="'YOUR_PASSWORD'" -f scripts/create_sandbox_role.sql
 --
 -- The docker-compose.prod.yml already configures SANDBOX_DATABASE_URL
 -- using the same POSTGRES_PASSWORD, so no extra env var needed.
@@ -10,7 +10,7 @@
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'openarg_sandbox_ro') THEN
-        CREATE ROLE openarg_sandbox_ro WITH LOGIN PASSWORD 'CHANGE_ME_PASSWORD';
+        CREATE ROLE openarg_sandbox_ro WITH LOGIN PASSWORD :'sandbox_password';
     END IF;
 END
 $$;

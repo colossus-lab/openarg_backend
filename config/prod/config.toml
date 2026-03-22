@@ -2,7 +2,7 @@
 USER = "postgres"
 PASSWORD = ""
 DB = "openarg_db"
-HOST = "localhost"
+HOST = "localhost"  # Override via DATABASE_URL env var in production
 PORT = 5432
 DRIVER = "psycopg"
 
