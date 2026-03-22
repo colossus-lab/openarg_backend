@@ -7,7 +7,7 @@ on:
         description: "Reason for manual run"
         required: false
   push:
-    branches: [ main, staging, development ]
+    branches: [ main, staging ]
     paths:
       - 'src/**'
       - 'tests/**'
@@ -16,7 +16,7 @@ on:
       - 'config/**'
       - '.github/workflows/**'
   pull_request:
-    branches: [ main, staging, development ]
+    branches: [ main, staging ]
     paths:
       - 'src/**'
       - 'tests/**'
