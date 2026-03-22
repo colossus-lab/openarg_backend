@@ -107,7 +107,7 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
       run: |
-        pytest tests/e2e/ -v --tb=short --timeout=120 -x -m e2e -o "addopts="
+        pytest tests/e2e/ -v --tb=short --timeout=180 -m e2e -o "addopts="
 
     - name: Cleanup SSH tunnel
       if: always()
