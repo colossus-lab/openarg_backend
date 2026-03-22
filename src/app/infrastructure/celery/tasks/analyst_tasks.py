@@ -64,10 +64,9 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
             inferenceConfig={"maxTokens": 1024, "temperature": 0.3},
         )
         plan_text = plan_resp["output"]["message"]["content"][0]["text"] or "{}"
-        plan_tokens = (
-            plan_resp.get("usage", {}).get("inputTokens", 0)
-            + plan_resp.get("usage", {}).get("outputTokens", 0)
-        )
+        plan_tokens = plan_resp.get("usage", {}).get("inputTokens", 0) + plan_resp.get(
+            "usage", {}
+        ).get("outputTokens", 0)
 
         try:
             plan = json.loads(plan_text)
@@ -270,10 +269,9 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
             inferenceConfig={"maxTokens": 4096, "temperature": 0.1},
         )
         analysis = analyst_resp["output"]["message"]["content"][0]["text"] or ""
-        analyst_tokens = (
-            analyst_resp.get("usage", {}).get("inputTokens", 0)
-            + analyst_resp.get("usage", {}).get("outputTokens", 0)
-        )
+        analyst_tokens = analyst_resp.get("usage", {}).get("inputTokens", 0) + analyst_resp.get(
+            "usage", {}
+        ).get("outputTokens", 0)
         total_tokens = plan_tokens + analyst_tokens
 
         duration_ms = int((time.time() - start) * 1000)
