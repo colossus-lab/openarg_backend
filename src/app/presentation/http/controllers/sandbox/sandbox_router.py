@@ -86,7 +86,7 @@ async def list_tables(
     return [
         TableInfo(
             table_name=t.table_name,
-            dataset_id=t.dataset_id,
+            dataset_id=str(t.dataset_id) if t.dataset_id else "",
             row_count=t.row_count,
             columns=t.columns,
         )
