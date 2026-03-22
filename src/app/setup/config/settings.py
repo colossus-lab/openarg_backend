@@ -101,7 +101,7 @@ class AnthropicSecrets(BaseModel):
 
 class BedrockSettings(BaseModel):
     REGION: str = "us-east-1"
-    LLM_MODEL: str = "anthropic.claude-3-5-haiku-20241022-v1:0"
+    LLM_MODEL: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
     EMBEDDING_MODEL: str = "cohere.embed-multilingual-v3"
 
     def model_post_init(self, __context: object) -> None:

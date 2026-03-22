@@ -13,10 +13,13 @@ import os
 import threading
 from typing import Any
 
+import secrets as _secrets_mod
+
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import ORJSONResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 from app.application.pipeline.graph import build_pipeline_graph
@@ -82,6 +85,17 @@ async def _get_checkpointer():
 
 router = APIRouter(prefix="/query", tags=["smart-query"])
 
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def _verify_api_key(api_key: str | None = Depends(_api_key_header)) -> None:
+    """Validate API key for POST endpoints. Skip if BACKEND_API_KEY is not set."""
+    expected = os.getenv("BACKEND_API_KEY", "")
+    if not expected:
+        return
+    if not api_key or not _secrets_mod.compare_digest(api_key, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 
 class SmartQueryV2Request(BaseModel):
     question: str = Field(..., min_length=1, max_length=10000)
@@ -104,7 +118,7 @@ class SmartQueryV2Response(BaseModel):
 # ── POST endpoint ──────────────────────────────────────────
 
 
-@router.post("/smart", response_model=SmartQueryV2Response)
+@router.post("/smart", response_model=SmartQueryV2Response, dependencies=[Depends(_verify_api_key)])
 @limiter.limit("15/minute")  # type: ignore[untyped-decorator]
 @inject  # type: ignore[untyped-decorator]
 async def smart_query_v2(

@@ -32,6 +32,8 @@ class BedrockEmbeddingAdapter(IEmbeddingProvider):
 
     def _invoke(self, texts: list[str], input_type: str) -> list[list[float]]:
         """Synchronous Bedrock invoke_model call (run in thread for async)."""
+        # Cohere via Bedrock validates maxLength=2048 chars before truncation
+        texts = [t[:2048] for t in texts]
         body = json.dumps(
             {
                 "texts": texts,

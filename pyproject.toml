@@ -117,3 +117,7 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "e2e: end-to-end tests requiring real infrastructure (staging DB, LLMs)",
+]
+addopts = "-m 'not e2e'"

@@ -1,0 +1,94 @@
+name: E2E Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for manual run"
+        required: false
+  push:
+    branches: [main, staging]
+    paths:
+      - 'src/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/e2e.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-tests:
+    runs-on: ubuntu-latest
+    name: E2E Tests (Staging DB)
+    timeout-minutes: 30
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: |
+        uv pip install -e '.[dev,test]' --system
+
+    - name: Set up SSH tunnel to staging DB
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/staging_key
+        chmod 600 ~/.ssh/staging_key
+
+        # Tunnel: localhost:5432 -> staging EC2 -> RDS:5432
+        ssh -f -N -L 5432:${{ secrets.STAGING_DB_HOST }}:5432 \
+          -i ~/.ssh/staging_key \
+          -o StrictHostKeyChecking=no \
+          -o ServerAliveInterval=30 \
+          ec2-user@${{ secrets.STAGING_HOST }}
+
+        # Wait for tunnel to be ready
+        for i in $(seq 1 10); do
+          if pg_isready -h localhost -p 5432 2>/dev/null; then
+            echo "SSH tunnel ready"
+            break
+          fi
+          sleep 1
+        done
+
+    - name: Run E2E tests
+      env:
+        APP_ENV: e2e
+        DATABASE_URL: postgresql+psycopg://openarg:${{ secrets.STAGING_DB_PASSWORD }}@localhost:5432/openarg_staging
+        SANDBOX_DATABASE_URL: postgresql+psycopg://openarg:${{ secrets.STAGING_DB_PASSWORD }}@localhost:5432/openarg_staging
+        CELERY_BROKER_URL: redis://localhost:6379/0
+        CELERY_RESULT_BACKEND: redis://localhost:6379/1
+        REDIS_CACHE_URL: redis://localhost:6379/2
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+      run: |
+        pytest tests/e2e/ -v --tb=short --timeout=120 -x -m e2e -o "addopts="
+
+    - name: Cleanup SSH tunnel
+      if: always()
+      run: |
+        pkill -f "ssh.*-L 5432" || true

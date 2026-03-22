@@ -35,10 +35,10 @@ from app.infrastructure.adapters.connectors.series_tiempo_adapter import SeriesT
 from app.infrastructure.adapters.connectors.sesiones_adapter import SesionesAdapter
 from app.infrastructure.adapters.connectors.staff_adapter import StaffAdapter
 from app.infrastructure.adapters.dataset.dataset_repository_sqla import DatasetRepositorySQLA
-from app.infrastructure.adapters.llm.anthropic_adapter import AnthropicLLMAdapter
 from app.infrastructure.adapters.llm.bedrock_embedding_adapter import BedrockEmbeddingAdapter
 from app.infrastructure.adapters.llm.bedrock_llm_adapter import BedrockLLMAdapter
 from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdapter
+from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
@@ -116,9 +116,9 @@ class LLMProvider(Provider):  # type: ignore[misc]
                 region=settings.bedrock.REGION,
                 model=settings.bedrock.LLM_MODEL,
             ),
-            fallback=AnthropicLLMAdapter(
-                api_key=settings.anthropic.API_KEY,
-                model=settings.anthropic.MODEL,
+            fallback=GeminiLLMAdapter(
+                api_key=settings.gemini.API_KEY,
+                model=settings.gemini.MODEL,
             ),
         )
 
