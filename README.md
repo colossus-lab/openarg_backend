@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/logo.svg" alt="OpenArg Logo" width="80" />
-</p>
-
 <h1 align="center">OpenArg Backend</h1>
 
 <p align="center">
