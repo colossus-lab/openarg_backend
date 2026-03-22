@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/openarg-logo.png" alt="OpenArg Logo" width="120" />
+  <img src="docs/logo.svg" alt="OpenArg Logo" width="80" />
 </p>
 
 <h1 align="center">OpenArg Backend</h1>
@@ -7,6 +7,10 @@
 <p align="center">
   <b>AI-powered analysis engine for Argentine open government data</b><br/>
   Query pipeline, data connectors, and LLM orchestration for openarg.org
+</p>
+
+<p align="center">
+  <img src="docs/landing.png" alt="OpenArg Landing" width="700" />
 </p>
 
 <p align="center">

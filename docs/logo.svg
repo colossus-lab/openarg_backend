@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#74ACDF"/>
+      <stop offset="50%" stop-color="#5A8FBD"/>
+      <stop offset="100%" stop-color="#4A7DAA"/>
+    </linearGradient>
+    <linearGradient id="sol-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFD04A"/>
+      <stop offset="100%" stop-color="#F6B40E"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- Background -->
+  <rect width="64" height="64" rx="15" fill="url(#bg)"/>
+  <!-- Flag stripe -->
+  <rect y="22" width="64" height="20" fill="#FFFFFF" opacity="0.95"/>
+  <!-- Subtle top/bottom bar accent -->
+  <rect y="22" width="64" height="0.5" fill="rgba(0,0,0,0.06)"/>
+  <rect y="41.5" width="64" height="0.5" fill="rgba(0,0,0,0.06)"/>
+  <!-- Sol de Mayo — outer glow -->
+  <circle cx="32" cy="32" r="7" fill="url(#sol-grad)" filter="url(#glow)" opacity="0.3"/>
+  <!-- Sol de Mayo — main -->
+  <circle cx="32" cy="32" r="5.8" fill="url(#sol-grad)"/>
+  <circle cx="32" cy="32" r="4" fill="#FCCE42"/>
+  <!-- Straight rays -->
+  <g stroke="#F6B40E" stroke-width="1.2" stroke-linecap="round" opacity="0.85">
+    <line x1="32" y1="23" x2="32" y2="25.2"/>
+    <line x1="32" y1="38.8" x2="32" y2="41"/>
+    <line x1="23" y1="32" x2="25.2" y2="32"/>
+    <line x1="38.8" y1="32" x2="41" y2="32"/>
+  </g>
+  <!-- Diagonal rays -->
+  <g stroke="#F6B40E" stroke-width="1" stroke-linecap="round" opacity="0.7">
+    <line x1="25.6" y1="25.6" x2="27.4" y2="27.4"/>
+    <line x1="36.6" y1="36.6" x2="38.4" y2="38.4"/>
+    <line x1="38.4" y1="25.6" x2="36.6" y2="27.4"/>
+    <line x1="27.4" y1="36.6" x2="25.6" y2="38.4"/>
+  </g>
+  <!-- Wavy rays (between straight & diagonal) -->
+  <g stroke="#FCCE42" stroke-width="0.7" stroke-linecap="round" opacity="0.5">
+    <line x1="28.2" y1="23.8" x2="29.2" y2="26"/>
+    <line x1="35.8" y1="23.8" x2="34.8" y2="26"/>
+    <line x1="23.8" y1="28.2" x2="26" y2="29.2"/>
+    <line x1="23.8" y1="35.8" x2="26" y2="34.8"/>
+    <line x1="40.2" y1="28.2" x2="38" y2="29.2"/>
+    <line x1="40.2" y1="35.8" x2="38" y2="34.8"/>
+    <line x1="28.2" y1="40.2" x2="29.2" y2="38"/>
+    <line x1="35.8" y1="40.2" x2="34.8" y2="38"/>
+  </g>
+  <!-- Face -->
+  <circle cx="30.5" cy="31" r="0.65" fill="#C8920A"/>
+  <circle cx="33.5" cy="31" r="0.65" fill="#C8920A"/>
+  <path d="M30.5 33.3 Q32 34.2 33.5 33.3" fill="none" stroke="#C8920A" stroke-width="0.55" stroke-linecap="round"/>
+</svg>
