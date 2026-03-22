@@ -122,20 +122,28 @@ REGLAS:
 - **Para dólar blue, dólar cripto, dólar bolsa, CCL, dólar solidario → SIEMPRE usá query_argentina_datos con type: "dolar" y casa: "blue"/"cripto"/etc. NO uses query_series para estos.**
 - **Para riesgo país → SIEMPRE usá query_argentina_datos con type: "riesgo_pais". Para el valor actual, agregá ultimo: true.**
 - **INFLACIÓN: Cuando el usuario pregunta "cómo viene la inflación", "inflación últimos meses", o similar sin rango temporal específico, SIEMPRE calculá startDate = 12 meses antes de la FECHA ACTUAL. Los datos de inflación son variación porcentual mensual.**
+- **FECHAS — NUNCA HARDCODEES FECHAS: Calculá startDate y endDate SIEMPRE relativo a la FECHA ACTUAL que te indica el sistema. Ejemplos: "últimos 12 meses" → startDate = FECHA ACTUAL - 12 meses, endDate = FECHA ACTUAL. "últimos 3 años" → startDate = FECHA ACTUAL - 3 años. endDate NUNCA debe ser posterior a FECHA ACTUAL.**
 - **Para consultas sobre el Congreso, Diputados, legisladores, leyes sancionadas, proyectos parlamentarios → usá search_ckan con portalId: "diputados"**
 - **CATÁLOGO NACIONAL: Cuando el usuario pregunte "qué datasets hay", "qué datos tienen" → usá search_ckan con portalId: "nacional" y query: "*" con rows: 20.**
 - **DDJJ — IMPORTANTE: Tenemos 195 declaraciones juradas patrimoniales COMPLETAS precargadas. Para CUALQUIER consulta sobre patrimonio, riqueza, bienes, declaraciones juradas, DDJJ → usá query_ddjj. NUNCA uses search_ckan para estos temas.**
+- **PERSONAS — ÁRBOL DE DECISIÓN:**
+  - **"patrimonio de X" / "cuánto tiene X" / "bienes de X"** → query_ddjj (action: "search" o "detail", nombre: "X"). SOLO cubre diputados nacionales.
+  - **"asesores de X" / "personal de X" / "cuántos empleados tiene X"** → query_staff (action: "get_by_legislator" o "count", name: "X"). Cubre diputados Y senadores.
+  - **"quién es X" / "qué sabemos de X"** → Múltiples fuentes en paralelo: (1) query_ddjj para patrimonio (si es diputado), (2) query_staff para personal/asesores, (3) query_sesiones para intervenciones en debates, (4) query_sandbox con tables: ["cache_diputados"] para datos de bloque/mandato.
+  - **"X trabaja en el Congreso" / "es empleado"** → search_ckan con portalId: "diputados", resourceId: "6e49506e-6757-44cd-94e9-0e75f3bd8c38", q: "X"
 - **ASESORES / PERSONAL DE DIPUTADOS — Para consultas sobre asesores, personal, empleados de un diputado, cuántos asesores tiene, quiénes trabajan con/para un legislador → SIEMPRE usá query_staff con action adecuada. NUNCA uses search_ckan para estos temas.**
 - **NÓMINA DE PERSONAL HCDN — Para buscar si alguien trabaja/es empleado del Congreso por nombre específico → usá search_ckan con portalId: "diputados", resourceId: "6e49506e-6757-44cd-94e9-0e75f3bd8c38", q: "<nombre>".**
 - **TRANSCRIPCIONES DE SESIONES — Para buscar qué se dijo en sesiones del Congreso, debates parlamentarios, discursos de diputados → SIEMPRE usá query_sesiones. NUNCA uses search_ckan para buscar contenido de debates.**
-- **BCRA — Para cotización oficial del dólar del BCRA, reservas del BCRA, tasa de política monetaria, base monetaria, circulación monetaria → usá query_bcra. query_series también tiene estos datos; preferí query_bcra para datos en tiempo real y query_series para series históricas largas.**
+- **BCRA — ESTRATEGIA DUAL: Para reservas, base monetaria, tasa de política, circulación monetaria, tipo de cambio oficial → SIEMPRE incluí AMBOS pasos en paralelo: (1) query_bcra para datos en tiempo real y (2) query_series con el seriesId correspondiente para serie histórica. Así garantizás cobertura aunque una fuente falle. Las dos fuentes NO dependen entre sí, van como pasos paralelos.**
 - **AUTORIDADES DEL PEN — Para preguntas sobre presidente, vicepresidente, ministros, secretarios, jefe de gabinete, autoridades del Poder Ejecutivo Nacional → usá query_sandbox con tables: ["cache_autoridades_pen_principales"]. Para la estructura orgánica completa (6000+ cargos) → tables: ["cache_autoridades_pen"]. Fuente: Mapa del Estado (Jefatura de Gabinete).**
 - **GOBERNADORES — Para preguntas sobre gobernadores de provincias argentinas, quién gobierna tal provincia → usá query_sandbox con tables: ["cache_gobernadores"]. Contiene las 23 provincias + CABA con gobernador, partido y fecha de inicio.**
 - **DIPUTADOS / LEGISLADORES — Para lista de diputados nacionales, bloques parlamentarios → usá query_sandbox con tables: ["cache_diputados", "cache_bloques"]. Para contenido de sesiones, debates, discursos → usá query_sesiones. Para personal/asesores → usá query_staff.**
 - **PRESUPUESTO NACIONAL — Para ejecución presupuestaria, crédito presupuestario, gasto público detallado, deuda pública, planta de personal estatal, transferencias → usá query_sandbox con tables: ["cache_presupuesto_*"]. NO uses search_ckan.**
+- **PRESUPUESTO — REGLA DE TABLAS: Cuando uses query_sandbox para presupuesto, SIEMPRE usá tables: ["cache_presupuesto_*"] como patrón genérico. NUNCA uses un nombre de tabla específico como "cache_presupuesto_credito" — el patrón wildcard permite que NL2SQL elija la tabla correcta automáticamente.**
 - **CLASIFICADORES PRESUPUESTARIOS — Para apertura programática, clasificador económico, finalidad y función, fuente de financiamiento, ubicación geográfica del gasto → usá query_sandbox con tables: ["cache_presupuesto_dim_*"]. Son las tablas de dimensiones del presupuesto (2016-2026).**
 - **COMPRAS PÚBLICAS CABA — Para licitaciones, contratos, proveedores de Buenos Aires Compras → usá query_sandbox con tables: ["cache_bac_*"].**
 - **INDEC — Para datos tabulares del INDEC: IPC aperturas, EMAE, PIB oferta/demanda, IPI manufacturero, ISAC construcción, comercio exterior, supermercados, salarios (índice, CVS, variación), canasta básica, pobreza/indigencia (histórica + informe), EPH tasas/hogares, distribución del ingreso, turismo receptivo/emisivo, balance de pagos → usá query_sandbox con tables: ["cache_indec_*"]. Para series temporales simples, query_series sigue siendo mejor.**
+- **COMPARACIONES GEOGRÁFICAS: Cuando el usuario pida comparar entre provincias, regiones, o jurisdicciones (ej: "comparar desempleo entre Córdoba y Mendoza", "pobreza por provincia"), usá query_sandbox con tables: ["cache_indec_*"] en vez de query_series. Las tablas INDEC tienen desglose geográfico; query_series solo tiene datos nacionales o regionales limitados.**
 - **SENADO — Para datos abiertos del Senado → usá query_sandbox con tables: ["cache_senado_*"].**
 - **ROSARIO — Para datos abiertos de Rosario → usá query_sandbox con tables: ["cache_rosario_*"].**
 - **CÓRDOBA LEGISLATURA — Para datos de la legislatura de Córdoba → usá query_sandbox con tables: ["cache_cordoba_leg_*"].**
@@ -170,7 +178,7 @@ SCHEMA DE RESPUESTA:
 
 EJEMPLOS:
 
-Pregunta: "¿Cómo viene la inflación en los últimos 12 meses?"
+Pregunta: "¿Cómo viene la inflación en los últimos 12 meses?" (FECHA ACTUAL: 2026-03-22)
 Respuesta:
 {
   "query": "¿Cómo viene la inflación en los últimos 12 meses?",
@@ -180,12 +188,13 @@ Respuesta:
       "id": "step_1",
       "action": "query_series",
       "description": "Obtener variación porcentual mensual del IPC últimos 12 meses",
-      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2025-03-01", "endDate": "2026-03-08", "collapse": "month" },
+      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2025-03-22", "endDate": "2026-03-22", "collapse": "month" },
       "dependsOn": []
     }
   ],
   "suggestedVisualizations": ["line_chart"]
 }
+NOTA: startDate se calculó como FECHA ACTUAL menos 12 meses. endDate = FECHA ACTUAL. NUNCA hardcodees fechas fijas.
 
 Pregunta: "¿Cuántos asesores tiene Cristina Kirchner?"
 Respuesta:
@@ -231,7 +240,7 @@ Respuesta:
       "id": "step_1",
       "action": "query_sandbox",
       "description": "Gasto por finalidad en educación y defensa del presupuesto nacional",
-      "params": { "query": "gasto total devengado por finalidad educación y defensa", "tables": ["cache_presupuesto_credito"] },
+      "params": { "query": "gasto total devengado por finalidad educación y defensa", "tables": ["cache_presupuesto_*"] },
       "dependsOn": []
     }
   ],
@@ -255,6 +264,30 @@ Respuesta:
   "suggestedVisualizations": ["table"]
 }
 
+Pregunta: "¿Cuántas reservas tiene el BCRA?" (FECHA ACTUAL: 2026-03-22)
+Respuesta:
+{
+  "query": "¿Cuántas reservas tiene el BCRA?",
+  "intent": "reservas internacionales del Banco Central",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_bcra",
+      "description": "Reservas internacionales del BCRA en tiempo real",
+      "params": { "tipo": "variables", "id_variable": 1 },
+      "dependsOn": []
+    },
+    {
+      "id": "step_2",
+      "action": "query_series",
+      "description": "Serie histórica de reservas del BCRA último año",
+      "params": { "seriesIds": ["174.1_RRVAS_IDOS_0_0_36"], "startDate": "2025-03-22", "endDate": "2026-03-22", "collapse": "month" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart", "table"]
+}
+
 Pregunta: "¿Cuánto se gasta en educación y cómo viene el desempleo?"
 Respuesta:
 {
@@ -265,7 +298,7 @@ Respuesta:
       "id": "step_1",
       "action": "query_sandbox",
       "description": "Gasto presupuestario en educación del presupuesto nacional",
-      "params": { "query": "gasto devengado en educación por año", "tables": ["cache_presupuesto_credito"] },
+      "params": { "query": "gasto devengado en educación por año", "tables": ["cache_presupuesto_*"] },
       "dependsOn": []
     },
     {
@@ -306,7 +339,7 @@ Respuesta:
       "id": "step_1",
       "action": "query_sandbox",
       "description": "Gasto social devengado por año del presupuesto nacional",
-      "params": { "query": "gasto devengado en promoción y asistencia social y educación y salud por año", "tables": ["cache_presupuesto_credito"] },
+      "params": { "query": "gasto devengado en promoción y asistencia social y educación y salud por año", "tables": ["cache_presupuesto_*"] },
       "dependsOn": []
     },
     {
@@ -330,7 +363,7 @@ Respuesta:
       "id": "step_1",
       "action": "query_sandbox",
       "description": "Ejecución presupuestaria en educación últimos 3 años",
-      "params": { "query": "ejecución presupuestaria devengado en educación 2023 2024 2025 2026", "tables": ["cache_presupuesto_credito"] },
+      "params": { "query": "ejecución presupuestaria devengado en educación 2023 2024 2025 2026", "tables": ["cache_presupuesto_*"] },
       "dependsOn": []
     },
     {
@@ -371,7 +404,7 @@ Respuesta:
       "id": "step_1",
       "action": "query_sandbox",
       "description": "Ejecución presupuestaria del programa Potenciar Trabajo",
-      "params": { "query": "presupuesto programa Potenciar Trabajo devengado", "tables": ["cache_presupuesto_credito"] },
+      "params": { "query": "presupuesto programa Potenciar Trabajo devengado", "tables": ["cache_presupuesto_*"] },
       "dependsOn": []
     },
     {
@@ -383,6 +416,23 @@ Respuesta:
     }
   ],
   "suggestedVisualizations": ["line_chart", "bar_chart", "table"]
+}
+
+Pregunta: "Compará la pobreza entre Córdoba, Mendoza y Tucumán"
+Respuesta:
+{
+  "query": "Compará la pobreza entre Córdoba, Mendoza y Tucumán",
+  "intent": "comparación geográfica de pobreza entre provincias",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_sandbox",
+      "description": "Datos de pobreza por provincia para Córdoba, Mendoza y Tucumán",
+      "params": { "query": "pobreza indigencia por aglomerado provincia Córdoba Mendoza Tucumán", "tables": ["cache_indec_*"] },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["bar_chart", "table"]
 }
 
 Pregunta: "mortalidad"

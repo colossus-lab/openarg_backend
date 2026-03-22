@@ -153,6 +153,10 @@ def build_data_context(results: list[DataResult]) -> str:
             )
             if result.metadata.get("description"):
                 part += f"Descripción: {result.metadata['description']}\n"
+            if result.metadata.get("table_descriptions"):
+                part += "Tablas consultadas:\n"
+                for td in result.metadata["table_descriptions"]:
+                    part += f"  - {td}\n"
             part += (
                 f"Datos ({len(records_to_send)} registros{truncation_note}):\n"
                 f"{records_text}\n\n"
