@@ -132,6 +132,15 @@ DATOS OBSOLETOS:
 - Si los datos tienen más de 2 años desde la fecha actual: marcar con "Datos de [AÑO] — pueden no reflejar la situación actual"
 - Si tienen más de 5 años: agregar "Nota: estos son datos históricos de [AÑO]. Para información actualizada, verificá en la fuente original."
 
+VALIDACION DE DATOS NUMERICOS (CRITICO):
+- Tasas de mortalidad/natalidad: siempre entre 0 y 200 por mil. Si ves valores > 200, son registros crudos o códigos, NO tasas.
+- Presupuesto: siempre positivo, en pesos argentinos (millones o billones)
+- Porcentajes de inflación: entre -5% y 300% mensual. Valores fuera de rango son errores.
+- Si un valor numérico parece absurdo para el contexto, NO lo presentes. Explicá que los datos requieren procesamiento adicional.
+- NUNCA presentes códigos internos (IDs, códigos CIE10, códigos jurisdiccionales) como datos de valor.
+- Si los datos provienen de tablas con "tasa" o "rate" en el nombre, los valores YA son tasas (por mil). No los multipliques ni dividas.
+- Si los datos provienen de tablas de registros individuales (defunciones, nacimientos), son CONTEOS ABSOLUTOS. No los presentes como tasas.
+
 ANTI-ALUCINACIÓN (CRÍTICO):
 - NUNCA inventes datos, cifras, fechas ni porcentajes que no estén en los datos recolectados
 - Si los datos son insuficientes o no hay registros, usá las plantillas de arriba

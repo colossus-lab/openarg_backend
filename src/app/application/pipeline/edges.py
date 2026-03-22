@@ -33,7 +33,10 @@ def route_after_analysis(state: OpenArgState) -> str:
     """After analysis: replan if no data and retries remain, policy, or finalize."""
     # Check if we have no useful data and haven't replanned yet
     data_results = state.get("data_results", [])
-    has_data = data_results and any(r.records for r in data_results)
+    has_data = data_results and any(
+        r.records or r.source.startswith("pgvector:") or r.source.startswith("ckan:")
+        for r in data_results
+    )
     replan_count = state.get("replan_count", 0)
 
     if not has_data and replan_count < 1:

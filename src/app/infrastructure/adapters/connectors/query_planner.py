@@ -148,7 +148,55 @@ def _validate_plan(plan_data: dict) -> dict:
             _dfs_cycle(step_id)
 
     plan_data["steps"] = valid_steps
+
+    # ── Date clamping: prevent future end-dates ──
+    today_str = datetime.now(UTC).strftime("%Y-%m-%d")
+    for step in valid_steps:
+        params = step.get("params", {})
+        for date_key in ("endDate", "end_date", "fecha_hasta"):
+            if date_key in params and isinstance(params[date_key], str):
+                if params[date_key] > today_str:
+                    logger.warning(
+                        "Clamping future %s=%s to %s",
+                        date_key,
+                        params[date_key],
+                        today_str,
+                    )
+                    params[date_key] = today_str
+
     return plan_data
+
+
+# Regex patterns that indicate a query is ALWAYS clear (never ambiguous).
+# These match common, high-value queries that mention a specific economic
+# indicator or a concrete entity — even if the temporal range is vague
+# (e.g. "últimos meses"), the system can infer reasonable defaults.
+_ALWAYS_CLEAR_RE = re.compile(
+    r"("
+    # Economic indicators (single keyword is enough)
+    r"inflaci[oó]n|ipc|d[oó]lar|tipo\s+de\s+cambio|pbi|emae"
+    r"|reservas?\b|tasa\s+de\s+inter[eé]s|salarios?|desempleo"
+    r"|exportaci|importaci|canasta|base\s+monetaria|leliq"
+    r"|riesgo\s+pa[ií]s|actividad\s+econ[oó]mica|actividad\s+industrial"
+    r"|pobreza|indigencia|balanza\s+comercial"
+    r"|bcra|deuda\s+externa|gasto\s+p[uú]blico|presupuesto"
+    # Concrete entities / transparency
+    r"|diputado.*patrimonio|patrimonio.*diputado"
+    r"|ddjj|declaraci[oó]n\s+jurada|senador"
+    r"|asesores?\s+de\s|personal\s+de\s|empleados?\s+de"
+    r"|gasto\s+(en|social)"
+    # Action verbs that imply a concrete question
+    r"|cu[aá]nto|cu[aá]ntos|cu[aá]l\s+es"
+    r"|mostr[aá]me\s|mostrame\s"
+    r"|lista(?:do|me)\b"
+    r"|evoluci[oó]n\s+de"
+    r"|c[oó]mo\s+viene"
+    r"|compar[aá]\s"
+    # Any year mentioned makes the query concrete
+    r"|\b20[12]\d\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 async def _classify_ambiguity(
@@ -159,6 +207,12 @@ async def _classify_ambiguity(
 
     Returns a clarification dict if the query is too vague, None otherwise.
     """
+    # Fast-path: skip the LLM call entirely for queries that match
+    # well-known indicators or complete question patterns.
+    if _ALWAYS_CLEAR_RE.search(question):
+        logger.debug("Ambiguity classifier: fast-path CLEAR for '%s'", question)
+        return None
+
     messages = [
         LLMMessage(
             role="system",

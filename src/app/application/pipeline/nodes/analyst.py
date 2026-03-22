@@ -59,7 +59,10 @@ def _build_analysis_prompt(
     if all_warnings:
         errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {w}" for w in all_warnings)
 
-    no_data_fallback = not results or not any(r.records for r in results)
+    no_data_fallback = not results or not any(
+        r.records or r.source.startswith("pgvector:") or r.source.startswith("ckan:")
+        for r in results
+    )
 
     if no_data_fallback:
         caps = build_capabilities_block()
@@ -80,8 +83,9 @@ def _build_analysis_prompt(
             "- Escribir poemas, código, traducciones, o cualquier tarea genérica de IA\n"
             "- Resumir libros, películas, o contenido no argentino\n"
             "- Preguntas sobre otros países sin relación con Argentina\n\n"
-            "Si la pregunta SÍ es sobre Argentina pero no hay datos, respondé brevemente "
-            "usando tu conocimiento general, aclarando que no proviene del sistema de datos abiertos.\n\n"
+            "Si la pregunta SÍ es sobre Argentina pero no hay datos, "
+            "explicá qué fuentes tiene OpenArg y sugerí consultas alternativas que SÍ podrían "
+            "tener datos. NO inventes datos.\n\n"
             f"{caps}\n\n"
             "Al final, sugerí 2-3 preguntas de seguimiento "
             "que cumplan TODAS estas reglas:\n"
@@ -140,7 +144,7 @@ async def analyst_node(state: OpenArgState) -> dict:
         try:
             async for chunk_text in deps.llm.chat_stream(
                 messages=messages,
-                temperature=0.4,
+                temperature=0.2,
                 max_tokens=8192,
             ):
                 full_text += chunk_text

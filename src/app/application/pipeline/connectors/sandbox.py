@@ -85,8 +85,13 @@ async def discover_tables_by_catalog_search(
     sandbox: ISQLSandbox | None,
     embedding: IEmbeddingProvider,
     limit: int = 5,
-) -> list[str]:
-    """Search table_catalog embeddings for relevant tables."""
+    min_score: float = 0.45,
+) -> list[tuple[str, float]]:
+    """Search table_catalog embeddings for relevant tables.
+
+    Returns a list of (table_name, similarity_score) tuples filtered by
+    *min_score* and ordered by descending similarity.
+    """
     if not sandbox:
         return []
     try:
@@ -94,21 +99,24 @@ async def discover_tables_by_catalog_search(
         embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
         loop = asyncio.get_running_loop()
 
-        def _search() -> list[str]:
+        def _search() -> list[tuple[str, float]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
                 result = conn.execute(
                     text(
-                        "SELECT table_name FROM table_catalog "
+                        "SELECT table_name, "
+                        "1 - (catalog_embedding <=> CAST(:emb AS vector)) AS score "
+                        "FROM table_catalog "
                         "WHERE catalog_embedding IS NOT NULL "
+                        "AND 1 - (catalog_embedding <=> CAST(:emb AS vector)) >= :min_score "
                         "ORDER BY catalog_embedding <=> CAST(:emb AS vector) "
                         "LIMIT :lim"
                     ),
-                    {"emb": embedding_str, "lim": limit},
+                    {"emb": embedding_str, "lim": limit, "min_score": min_score},
                 )
-                names = [r.table_name for r in result.fetchall()]
+                rows = [(r.table_name, round(r.score, 3)) for r in result.fetchall()]
                 conn.rollback()
-                return names
+                return rows
 
         return await loop.run_in_executor(None, _search)
     except Exception:
@@ -207,6 +215,7 @@ async def discover_tables_by_vector_search(
         vector_results = await vector_search.search_datasets(
             q_embedding,
             limit=10,
+            min_similarity=0.65,
         )
         if not vector_results:
             return []
@@ -360,19 +369,39 @@ async def execute_sandbox_step(
                 return await indec_live_fallback(nl_query)
             return []
 
-        # When no table_hints from planner, use vector search to discover relevant tables
-        _from_vector_search = False
+        # When no table_hints from planner, try catalog search first, then vector search
+        _from_catalog_or_vector = False
         if not table_hints:
-            discovered = await discover_tables_by_vector_search(
-                nl_query, tables, embedding, vector_search
+            catalog_results = await discover_tables_by_catalog_search(
+                nl_query, sandbox, embedding, limit=10, min_score=0.45
             )
-            if discovered:
-                table_hints = discovered
-                _from_vector_search = True
+            if catalog_results:
+                table_hints = [name for name, _score in catalog_results]
+                _from_catalog_or_vector = True
+                logger.info(
+                    "Catalog search discovered %d table(s): %s",
+                    len(catalog_results),
+                    [(name, score) for name, score in catalog_results[:5]],
+                )
+            else:
+                logger.info(
+                    "Catalog search found no tables (min_score=0.45), falling back to vector search"
+                )
+                discovered = await discover_tables_by_vector_search(
+                    nl_query, tables, embedding, vector_search
+                )
+                if discovered:
+                    table_hints = discovered
+                    _from_catalog_or_vector = True
+                    logger.info(
+                        "Vector search fallback discovered %d table(s): %s",
+                        len(discovered),
+                        discovered[:5],
+                    )
 
         if table_hints:
-            if _from_vector_search:
-                # Vector search returns exact table names — use set lookup
+            if _from_catalog_or_vector:
+                # Catalog/vector search returns exact table names — use set lookup
                 hint_set = set(table_hints)
                 filtered = [t for t in tables if t.table_name in hint_set]
             else:
@@ -474,6 +503,26 @@ async def execute_sandbox_step(
             "- The query must be valid PostgreSQL syntax.\n"
             "- NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.\n"
             "- Use ILIKE for case-insensitive text matching.\n"
+            "\nTable selection guidelines:\n"
+            "- When the user asks for a RATE (tasa), prefer tables with 'tasa' in the name "
+            "or small row counts with pre-aggregated data. Do NOT query raw record tables "
+            "(hundreds of thousands of rows) and try to compute rates from them.\n"
+            "- When multiple tables match, prefer the one whose name and description best "
+            "match the user's question. A table named 'tasa_de_mortalidad_infantil' is better "
+            "for a mortality rate question than a generic 'defunciones' raw-records table.\n"
+            "- Tables with 'tasa', 'indice', 'porcentaje' in the name contain pre-calculated "
+            "statistics. Prefer them over raw-data tables when the user asks for rates or indices.\n"
+            "- IMPORTANT: Do NOT select internal ID columns, row numbers, or code columns "
+            "(like jurisdiction codes or diagnostic codes) as if they were data values.\n"
+            "\nSELECCION DE TABLAS:\n"
+            '- Si hay tablas con "tasa" o "indice" en el nombre, preferilas para consultas '
+            "sobre tasas/indices\n"
+            '- Si hay tablas con "credito" o "presupuesto", preferilas para consultas de '
+            "presupuesto\n"
+            "- Tablas más pequeñas con datos agregados suelen ser más útiles que tablas con "
+            "millones de registros crudos\n"
+            "- NUNCA selecciones columnas que parezcan códigos internos (IDs, códigos CIE, "
+            "códigos numéricos de jurisdicción) como valores de datos\n"
         )
         if few_shot_block:
             nl2sql_prompt += f"\n{few_shot_block}\n"
@@ -576,6 +625,19 @@ async def execute_sandbox_step(
                 )
             )
 
+        # Build description from catalog entries for the queried table(s)
+        _table_descriptions = []
+        for t in tables[:5]:
+            entry = catalog_entries.get(t.table_name)
+            if entry:
+                desc_parts = []
+                if entry.get("display_name"):
+                    desc_parts.append(entry["display_name"])
+                if entry.get("description"):
+                    desc_parts.append(entry["description"])
+                if desc_parts:
+                    _table_descriptions.append(f"{t.table_name}: {' — '.join(desc_parts)}")
+
         return [
             DataResult(
                 source="sandbox:nl2sql",
@@ -590,6 +652,7 @@ async def execute_sandbox_step(
                     "truncated": result.truncated,
                     "columns": result.columns,
                     "fetched_at": datetime.now(UTC).isoformat(),
+                    "table_descriptions": _table_descriptions,
                 },
             )
         ]
