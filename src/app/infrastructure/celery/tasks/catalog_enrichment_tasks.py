@@ -8,9 +8,11 @@ semantic search over the catalog.
 from __future__ import annotations
 
 import json
+import json as _json
 import logging
 import os
 
+import boto3
 import google.generativeai as genai
 from sqlalchemy import text
 
@@ -20,8 +22,8 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 
 _GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-_EMBEDDING_MODEL = "models/gemini-embedding-001"
-_EMBEDDING_DIMS = 768
+_EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3")
+_EMBEDDING_DIMS = 1024
 
 
 def _get_gemini_client():
@@ -30,15 +32,25 @@ def _get_gemini_client():
     return genai
 
 
-def _embed_text(text_to_embed: str) -> list[float]:
-    """Generate a 768-dim embedding synchronously."""
-    client = _get_gemini_client()
-    result = client.embed_content(
-        model=_EMBEDDING_MODEL,
-        content=text_to_embed,
-        output_dimensionality=_EMBEDDING_DIMS,
+def _get_bedrock_client():
+    """Return a Bedrock Runtime client for embedding calls."""
+    return boto3.client(
+        "bedrock-runtime",
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
     )
-    return result["embedding"]
+
+
+def _embed_text(text_to_embed: str) -> list[float]:
+    """Generate an embedding via Bedrock Cohere."""
+    bedrock = _get_bedrock_client()
+    resp = bedrock.invoke_model(
+        modelId=_EMBEDDING_MODEL,
+        body=_json.dumps(
+            {"texts": [text_to_embed], "input_type": "search_document", "truncate": "END"}
+        ),
+    )
+    result = _json.loads(resp["body"].read())
+    return result["embeddings"][0]
 
 
 def _generate_metadata_for_table(

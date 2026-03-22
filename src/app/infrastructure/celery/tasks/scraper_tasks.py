@@ -611,14 +611,27 @@ def index_dataset_embedding(self, dataset_id: str):
             if sample_text:
                 chunks.append(sample_text)
 
-        # Generate embeddings in batch
-        genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
-        resp = genai.embed_content(
-            model="models/gemini-embedding-001",
-            content=chunks,
-            output_dimensionality=768,
+        # Generate embeddings in batch via Bedrock Cohere
+        import json as _json
+
+        import boto3
+
+        bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
         )
-        embeddings = resp["embedding"]
+        embeddings = []
+        batch_size = 96  # Cohere max batch size
+        for batch_start in range(0, len(chunks), batch_size):
+            batch = chunks[batch_start : batch_start + batch_size]
+            resp = bedrock.invoke_model(
+                modelId=os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3"),
+                body=_json.dumps(
+                    {"texts": batch, "input_type": "search_document", "truncate": "END"}
+                ),
+            )
+            result = _json.loads(resp["body"].read())
+            embeddings.extend(result["embeddings"])
 
         with engine.begin() as conn:
             # Delete old chunks

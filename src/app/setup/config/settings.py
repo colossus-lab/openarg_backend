@@ -54,7 +54,7 @@ class LoggingSettings(BaseModel):
 
 
 class AgentSettings(BaseModel):
-    EMBEDDING_MODEL: str = "gemini-embedding-001"
+    EMBEDDING_MODEL: str = "cohere.embed-multilingual-v3"
     EMBEDDING_DIMENSIONS: int = 1024
     MAX_CONCURRENT_COLLECTORS: int = 5
     SANDBOX_TIMEOUT_SECONDS: int = 30

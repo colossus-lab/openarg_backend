@@ -13,6 +13,7 @@ import os
 import time
 from typing import Any
 
+import boto3
 import google.generativeai as genai  # type: ignore[import-untyped]
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
@@ -90,12 +91,20 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
 
         # --- STEP 2: Hybrid search (cosine + BM25 RRF) for relevant datasets ---
         logger.info(f"[{query_id}] Searching datasets (hybrid)...")
-        embed_resp = genai.embed_content(  # type: ignore[attr-defined]
-            model="models/gemini-embedding-001",
-            content=question,
-            output_dimensionality=768,
+        import json as _json
+
+        _bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
         )
-        query_embedding = embed_resp["embedding"]
+        _emb_resp = _bedrock.invoke_model(
+            modelId=os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3"),
+            body=_json.dumps(
+                {"texts": [question], "input_type": "search_query", "truncate": "END"}
+            ),
+        )
+        _emb_result = _json.loads(_emb_resp["body"].read())
+        query_embedding = _emb_result["embeddings"][0]
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
         # Sanitize query text for websearch_to_tsquery

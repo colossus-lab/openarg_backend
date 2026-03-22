@@ -66,15 +66,15 @@ def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
 
     Processes in batches to avoid overwhelming the embedding API.
     """
-    import google.generativeai as genai  # type: ignore[import-untyped]
+    import json as _json
+
+    import boto3
 
     engine = get_sync_engine()
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
-    if not gemini_key:
-        logger.error("GEMINI_API_KEY not set, cannot index sesiones")
-        return {"error": "GEMINI_API_KEY not set"}
-
-    genai.configure(api_key=gemini_key)  # type: ignore[attr-defined]
+    bedrock = boto3.client(
+        "bedrock-runtime",
+        region_name=os.getenv("AWS_REGION", "us-east-1"),
+    )
 
     try:
         # Check if already indexed
@@ -117,13 +117,15 @@ def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
                 else:
                     texts.append(chunk_text[:2000])
 
-            # Generate embeddings in batch
-            resp = genai.embed_content(  # type: ignore[attr-defined]
-                model="models/gemini-embedding-001",
-                content=texts,
-                output_dimensionality=768,
+            # Generate embeddings in batch via Bedrock Cohere
+            _resp = bedrock.invoke_model(
+                modelId=os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3"),
+                body=_json.dumps(
+                    {"texts": texts, "input_type": "search_document", "truncate": "END"}
+                ),
             )
-            embeddings: list[list[float]] = resp["embedding"]
+            _result = _json.loads(_resp["body"].read())
+            embeddings: list[list[float]] = _result["embeddings"]
 
             # Insert into DB
             with engine.begin() as conn:

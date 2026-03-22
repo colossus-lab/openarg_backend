@@ -36,25 +36,36 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         self._loaded = False
 
     async def _generate_embedding(self, text_input: str) -> list[float] | None:
-        """Generate query embedding using Gemini text-embedding-004."""
-        if not self._gemini_api_key:
-            return None
+        """Generate query embedding using Bedrock Cohere."""
         try:
             import asyncio
+            import json as _json
+            import os
 
-            import google.generativeai as genai
+            import boto3
 
-            genai.configure(api_key=self._gemini_api_key)
-            result = await asyncio.to_thread(
-                genai.embed_content,
-                model="models/gemini-embedding-001",
-                content=text_input[:2000],
-                output_dimensionality=768,
-            )
-            return result["embedding"]  # type: ignore[no-any-return]
+            def _call_bedrock() -> list[float]:
+                bedrock = boto3.client(
+                    "bedrock-runtime",
+                    region_name=os.getenv("AWS_REGION", "us-east-1"),
+                )
+                resp = bedrock.invoke_model(
+                    modelId=os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3"),
+                    body=_json.dumps(
+                        {
+                            "texts": [text_input[:2000]],
+                            "input_type": "search_query",
+                            "truncate": "END",
+                        }
+                    ),
+                )
+                result = _json.loads(resp["body"].read())
+                return result["embeddings"][0]
+
+            return await asyncio.to_thread(_call_bedrock)
         except Exception:
             logger.error(
-                "Failed to generate Gemini embedding for sesiones — falling back to keyword search",
+                "Failed to generate Bedrock embedding for sesiones — falling back to keyword search",
                 exc_info=True,
             )
             return None
