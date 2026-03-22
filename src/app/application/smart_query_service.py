@@ -175,43 +175,7 @@ class SmartQueryService:
         self._chat_repo = chat_repo
         self._metrics = MetricsCollector()
 
-    # ── Backwards-compatible static methods (used by tests) ──
-
-    @staticmethod
-    def _get_casual_response(question: str) -> str | None:
-        from app.application.pipeline.classifiers import get_casual_response
-
-        return get_casual_response(question)
-
-    @staticmethod
-    def _get_meta_response(question: str) -> str | None:
-        from app.application.pipeline.classifiers import get_meta_response
-
-        return get_meta_response(question)
-
-    @staticmethod
-    def _get_educational_response(text: str) -> str | None:
-        from app.application.pipeline.classifiers import get_educational_response
-
-        return get_educational_response(text)
-
-    @staticmethod
-    def _is_off_topic(question: str) -> bool:
-        from app.application.pipeline.classifiers import is_off_topic
-
-        return is_off_topic(question)
-
-    @staticmethod
-    def _build_data_context(results: list) -> str:
-        return build_data_context(results)
-
-    @staticmethod
-    def _build_deterministic_charts(results: list) -> list[dict[str, Any]]:
-        return build_deterministic_charts(results)
-
-    @staticmethod
-    def _extract_llm_charts(text: str) -> list[dict[str, Any]]:
-        return extract_llm_charts(text)
+    # ── Shims for tests that call internal methods ──
 
     @staticmethod
     def _extract_meta(text: str) -> tuple[float, list[dict[str, Any]]]:

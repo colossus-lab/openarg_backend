@@ -1,7 +1,7 @@
 """Smart query v2 router — LangGraph pipeline endpoint.
 
 Parallel endpoint for A/B testing the LangGraph pipeline against
-the existing SmartQueryService. Activated by USE_LANGGRAPH=true.
+the existing SmartQueryService.
 """
 
 from __future__ import annotations

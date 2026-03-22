@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 
-from app.application.smart_query_service import SmartQueryService
+from app.application.pipeline.context_builder import build_data_context
 from app.domain.entities.connectors.data_result import DataResult
 
-_build_data_context = SmartQueryService._build_data_context
+_build_data_context = build_data_context
 
 
 def _make_result(
