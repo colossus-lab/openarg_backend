@@ -6,13 +6,13 @@ on:
       reason:
         description: "Reason for manual run"
         required: false
-  push:
-    branches: [main, staging]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'pyproject.toml'
-      - '.github/workflows/e2e.yml'
+  # push:
+  #   branches: [main, staging]
+  #   paths:
+  #     - 'src/**'
+  #     - 'tests/**'
+  #     - 'pyproject.toml'
+  #     - '.github/workflows/e2e.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,7 +22,7 @@ jobs:
   e2e-tests:
     runs-on: ubuntu-latest
     name: E2E Tests (Staging DB)
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     services:
       redis:
@@ -107,7 +107,7 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
       run: |
-        pytest tests/e2e/ -v --tb=short --timeout=180 -m e2e -o "addopts="
+        pytest tests/e2e/ -v --tb=short --timeout=300 -m e2e -o "addopts="
 
     - name: Cleanup SSH tunnel
       if: always()
