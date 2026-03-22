@@ -256,7 +256,7 @@ async def quick_query(
     has_real_data = bool(sample_data)
 
     system_prompt = (
-        "Sos OpenArg, un analista de datos públicos de Argentina entrenado por ColossusLab.tech. "
+        "Sos OpenArg, un analista de datos públicos de Argentina entrenado por ColossusLab.org. "
         "Respondé de forma breve y conversacional en español argentino. "
         "Máximo 4-5 oraciones. Destacá el dato más importante primero.\n"
     )
