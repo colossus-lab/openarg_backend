@@ -95,8 +95,8 @@ When a user submits a question, the smart query pipeline executes these steps:
 
 ```bash
 # Clone and configure
-git clone https://github.com/ColossusLab/openarg-backend.git
-cd openarg-backend
+git clone https://github.com/colossus-lab/openarg_backend.git
+cd openarg_backend
 cp .env.example .env
 # Edit .env with your API keys (GEMINI_API_KEY, DATABASE_URL, etc.)
 

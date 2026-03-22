@@ -26,7 +26,7 @@ Thank you for your interest in contributing to OpenArg. This guide will help you
 
 OpenArg has two repositories:
 - **Backend** (this repo): Python/FastAPI API, Celery workers, data pipeline
-- **Frontend**: [OpenArg Frontend](https://github.com/dantedeagostino-dot/OpenArg-Frontend) — Next.js 16, React 19, TypeScript
+- **Frontend**: [OpenArg Frontend](https://github.com/colossus-lab/openarg_frontend) — Next.js 16, React 19, TypeScript
 
 ## Development Workflow
 
