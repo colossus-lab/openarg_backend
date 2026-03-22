@@ -75,14 +75,29 @@ async def clarify_reply_node(state: OpenArgState) -> dict:
             "warnings": [],
         }
 
+    from langgraph.config import get_stream_writer
+
+    writer = get_stream_writer()
+
     clar_step = next((s for s in plan.steps if s.action == "clarification"), None)
     if clar_step:
         clar_q = clar_step.params.get("question", "¿Podés ser más específico?")
         clar_opts = clar_step.params.get("options", [])
-        opts_text = "\n".join(f"- {o}" for o in clar_opts) if clar_opts else ""
-        answer = f"**{clar_q}**\n\n{opts_text}" if opts_text else f"**{clar_q}**"
     else:
-        answer = "¿Podés ser más específico?"
+        clar_q = "¿Podés ser más específico?"
+        clar_opts = []
+
+    # Emit clarification event so the frontend renders clickable chips
+    writer(
+        {
+            "type": "clarification",
+            "question": clar_q,
+            "options": clar_opts,
+        }
+    )
+
+    opts_text = "\n".join(f"- {o}" for o in clar_opts) if clar_opts else ""
+    answer = f"**{clar_q}**\n\n{opts_text}" if opts_text else f"**{clar_q}**"
 
     return {
         "clean_answer": answer,

@@ -129,23 +129,55 @@ async def analyst_node(state: OpenArgState) -> dict:
             question, plan, results, memory_ctx_analyst, all_warnings
         )
 
-        # LLM call (1 call, same params as execute())
-        response = await deps.llm.chat(
-            messages=[
-                LLMMessage(role="system", content=load_prompt("analyst")),
-                LLMMessage(role="user", content=analysis_prompt),
-            ],
-            temperature=0.4,
-            max_tokens=8192,
-        )
+        # LLM streaming call — emit chunks as they arrive
+        messages = [
+            LLMMessage(role="system", content=load_prompt("analyst")),
+            LLMMessage(role="user", content=analysis_prompt),
+        ]
+
+        full_text = ""
+        stream_buf = ""
+        try:
+            async for chunk_text in deps.llm.chat_stream(
+                messages=messages,
+                temperature=0.4,
+                max_tokens=8192,
+            ):
+                full_text += chunk_text
+                stream_buf += chunk_text
+
+                # Buffer to avoid sending incomplete <!--CHART:--> or <!--META:--> tags
+                if "<!--" in stream_buf and "-->" not in stream_buf:
+                    continue  # Wait for tag to close
+
+                # Strip any complete tags from the buffer before sending
+                import re
+
+                cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
+                if cleaned:
+                    writer({"type": "chunk", "content": cleaned})
+                stream_buf = ""
+
+            # Flush remaining buffer
+            if stream_buf:
+                cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
+                cleaned = re.sub(r"<!--.*", "", cleaned, flags=re.DOTALL)
+                if cleaned:
+                    writer({"type": "chunk", "content": cleaned})
+        except Exception:
+            # Fallback to non-streaming if chat_stream fails
+            logger.warning("chat_stream failed, falling back to chat()", exc_info=True)
+            response = await deps.llm.chat(messages=messages, temperature=0.4, max_tokens=8192)
+            full_text = response.content
+            writer({"type": "chunk", "content": _strip_tags(full_text)})
 
         # Charts: prefer deterministic, fall back to LLM-generated
         det_charts = build_deterministic_charts(results)
-        llm_charts = extract_llm_charts(response.content)
+        llm_charts = extract_llm_charts(full_text)
         charts = det_charts if det_charts else llm_charts
 
         # Strip CHART tags from the answer text
-        clean_answer = _strip_tags(response.content)
+        clean_answer = _strip_tags(full_text)
 
         # Parse META confidence/citations
         confidence, citations = extract_meta(clean_answer)
@@ -159,7 +191,7 @@ async def analyst_node(state: OpenArgState) -> dict:
                 "verificación adicional.\n\n" + clean_answer
             )
 
-        tokens_used = response.tokens_used or 0
+        tokens_used = 0  # Token count not available in streaming mode
 
         return {
             "analysis_prompt": analysis_prompt,
