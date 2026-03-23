@@ -27,7 +27,7 @@ class BedrockLLMAdapter(ILLMProvider):
     def __init__(
         self,
         region: str = "us-east-1",
-        model: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     ) -> None:
         self._client = boto3.client("bedrock-runtime", region_name=region)
         self._model = model
