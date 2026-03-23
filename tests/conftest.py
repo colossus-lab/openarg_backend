@@ -53,7 +53,11 @@ def mock_embedding():
 def mock_series():
     connector = AsyncMock()
     connector.search.return_value = [
-        {"id": "148.3_INIVELNAL_DICI_M_26", "title": "IPC Nacional", "description": "Inflación Nacional"},
+        {
+            "id": "148.3_INIVELNAL_DICI_M_26",
+            "title": "IPC Nacional",
+            "description": "Inflación Nacional",
+        },
     ]
     connector.fetch.return_value = None
     return connector
