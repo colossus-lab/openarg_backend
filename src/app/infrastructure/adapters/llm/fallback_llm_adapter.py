@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from collections.abc import AsyncIterator
 
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage, LLMResponse
@@ -20,6 +21,8 @@ class FallbackLLMAdapter(ILLMProvider):
                 self.chain.extend(svc.chain)
             else:
                 self.chain.append(svc)
+        names = [type(s).__name__ for s in self.chain]
+        logger.info("FallbackLLMAdapter initialized with chain: %s", " → ".join(names))
 
     async def chat(
         self,
@@ -29,23 +32,33 @@ class FallbackLLMAdapter(ILLMProvider):
     ) -> LLMResponse:
         last_exc: Exception | None = None
         for i, svc in enumerate(self.chain):
+            name = type(svc).__name__
             try:
-                return await svc.chat(messages, temperature, max_tokens)
+                result = await svc.chat(messages, temperature, max_tokens)
+                logger.info(
+                    "LLM chat served by %s (model=%s, tokens=%d)",
+                    name,
+                    result.model,
+                    result.tokens_used,
+                )
+                return result
             except Exception as exc:
                 last_exc = exc
-                name = type(svc).__name__
                 remaining = len(self.chain) - i - 1
                 if remaining > 0:
                     logger.warning(
-                        "%s failed (%s), trying next fallback (%d remaining)...",
+                        "%s chat FAILED: [%s] %s — falling back (%d remaining)...",
                         name,
+                        type(exc).__name__,
                         exc,
                         remaining,
                     )
+                    logger.debug("Traceback for %s failure:\n%s", name, traceback.format_exc())
                 else:
                     logger.error(
-                        "All %d LLM services failed. Last error: %s",
+                        "All %d LLM services failed chat. Last: [%s] %s",
                         len(self.chain),
+                        type(exc).__name__,
                         exc,
                     )
         raise RuntimeError(f"All {len(self.chain)} LLM services failed") from last_exc
@@ -59,23 +72,33 @@ class FallbackLLMAdapter(ILLMProvider):
     ) -> LLMResponse:
         last_exc: Exception | None = None
         for i, svc in enumerate(self.chain):
+            name = type(svc).__name__
             try:
-                return await svc.chat_json(messages, json_schema, temperature, max_tokens)
+                result = await svc.chat_json(messages, json_schema, temperature, max_tokens)
+                logger.info(
+                    "LLM chat_json served by %s (model=%s, tokens=%d)",
+                    name,
+                    result.model,
+                    result.tokens_used,
+                )
+                return result
             except Exception as exc:
                 last_exc = exc
-                name = type(svc).__name__
                 remaining = len(self.chain) - i - 1
                 if remaining > 0:
                     logger.warning(
-                        "%s chat_json failed (%s), trying next fallback (%d remaining)...",
+                        "%s chat_json FAILED: [%s] %s — falling back (%d remaining)...",
                         name,
+                        type(exc).__name__,
                         exc,
                         remaining,
                     )
+                    logger.debug("Traceback for %s failure:\n%s", name, traceback.format_exc())
                 else:
                     logger.error(
-                        "All %d LLM services failed chat_json. Last error: %s",
+                        "All %d LLM services failed chat_json. Last: [%s] %s",
                         len(self.chain),
+                        type(exc).__name__,
                         exc,
                     )
         raise RuntimeError(f"All {len(self.chain)} LLM services failed chat_json") from last_exc
@@ -88,28 +111,32 @@ class FallbackLLMAdapter(ILLMProvider):
     ) -> AsyncIterator[str]:
         last_exc: Exception | None = None
         for i, svc in enumerate(self.chain):
+            name = type(svc).__name__
             try:
                 stream = svc.chat_stream(messages, temperature, max_tokens)
                 first_chunk = await anext(stream)
+                logger.info("LLM stream served by %s", name)
                 yield first_chunk
                 async for chunk in stream:
                     yield chunk
                 return
             except Exception as exc:
                 last_exc = exc
-                name = type(svc).__name__
                 remaining = len(self.chain) - i - 1
                 if remaining > 0:
                     logger.warning(
-                        "%s stream failed (%s), trying next fallback (%d remaining)...",
+                        "%s stream FAILED: [%s] %s — falling back (%d remaining)...",
                         name,
+                        type(exc).__name__,
                         exc,
                         remaining,
                     )
+                    logger.debug("Traceback for %s failure:\n%s", name, traceback.format_exc())
                 else:
                     logger.error(
-                        "All %d LLM services failed to stream. Last error: %s",
+                        "All %d LLM services failed to stream. Last: [%s] %s",
                         len(self.chain),
+                        type(exc).__name__,
                         exc,
                     )
         raise RuntimeError(f"All {len(self.chain)} LLM services failed to stream") from last_exc
