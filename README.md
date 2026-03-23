@@ -12,7 +12,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=for-the-badge&logo=fastapi" />
   <img src="https://img.shields.io/badge/PostgreSQL-16+pgvector-4169E1?style=for-the-badge&logo=postgresql" />
-  <img src="https://img.shields.io/badge/AWS_Bedrock-Claude_Haiku_3.5-blue?style=for-the-badge&logo=amazonaws" />
+  <img src="https://img.shields.io/badge/AWS_Bedrock-Claude-blue?style=for-the-badge&logo=amazonaws" />
   <img src="https://img.shields.io/badge/LangGraph-Pipeline-orange?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python" />
 </p>
@@ -21,11 +21,15 @@
 
 ## Overview
 
-OpenArg Backend is the analysis engine behind [openarg.org](https://openarg.org) -- a platform that answers natural-language questions about Argentine public data. It orchestrates a multi-step query pipeline that classifies user intent, searches across 9 data connectors, generates SQL against cached datasets, and produces structured analyses with citations and chart data. Built with FastAPI, PostgreSQL + pgvector, Redis, Celery, LangGraph, and AWS Bedrock Claude Haiku 3.5 (with Anthropic API fallback).
+OpenArg Backend is the analysis engine behind [openarg.org](https://openarg.org) -- a platform that answers natural-language questions about Argentine public data. It orchestrates a multi-step query pipeline that classifies user intent, searches across 9 data connectors, generates SQL against cached datasets, and produces structured analyses with citations and chart data. Built with FastAPI, PostgreSQL + pgvector, Redis, Celery, LangGraph, and AWS Bedrock Claude (with Anthropic API fallback).
 
 ---
 
 ## Architecture
+
+<p align="center">
+  <img src="docs/infraestructure.png" alt="OpenArg Infrastructure" width="800" />
+</p>
 
 Hexagonal (Ports & Adapters) architecture with four layers:
 
@@ -42,21 +46,35 @@ Domain ports define abstract interfaces (`IDataSource`, `ILLMProvider`, `IVector
 
 ## Query Pipeline
 
-When a user submits a question, the smart query pipeline executes these steps:
+<p align="center">
+  <img src="docs/query-pipeline.png" alt="OpenArg Query Pipeline" width="800" />
+</p>
 
-The query pipeline is implemented as a **LangGraph** state machine with the following nodes:
+The query pipeline is implemented as a **LangGraph** state machine. Four specialized AI agents collaborate on every query:
 
-1. **Classification** -- Categorize as casual, meta, injection, or off-topic (0 LLM calls, regex + keyword scoring)
-2. **Semantic cache lookup** -- Check Redis + pgvector for a similar recent answer
-3. **Query preprocessing** -- Expand acronyms, resolve temporal references, normalize province names
-4. **Planning** -- AWS Bedrock Claude Haiku 3.5 generates a structured execution plan (1 LLM call)
-5. **Parallel data collection** -- Dispatch to 9 connectors concurrently
-6. **Table catalog matching** -- Match collected data against cached tables via vector search
-7. **NL2SQL generation** -- Generate read-only SQL queries against matched tables
-8. **SQL validation** -- 3-layer validation (regex, table allowlist, AST parsing via sqlglot)
-9. **Analysis generation** -- AWS Bedrock Claude Haiku 3.5 synthesizes findings (1 LLM call)
-10. **Replanning** -- If data is insufficient, the pipeline can replan with a different strategy
-11. **Response assembly** -- Return analysis with citations, chart data, and source links
+| Agent | Role | What it does |
+|-------|------|-------------|
+| **Strategist** (Planner) | Decomposes the question | Analyzes the query, selects data sources, generates a structured execution plan |
+| **Researchers** (Collectors) | Gather data in parallel | Dispatch to 9 connectors concurrently — Series de Tiempo, CKAN, NL2SQL, vector search, DDJJ, Staff, BCRA, Georef, Argentina Datos |
+| **Analyst** | Synthesizes findings | Analyzes collected data, generates insights with citations, chart data, and confidence scoring |
+| **Policy Analyst** | Evaluates public policy | Optional agent (user-activated). Evaluates government policies using DNFCG criteria: pertinence, efficacy, efficiency, impact, and sustainability. Evidence-based, cites data |
+| **Writer** (Finalizer) | Assembles the response | Formats markdown, extracts charts, builds source attribution, streams to the frontend |
+
+<p align="center">
+  <img src="docs/multi-agent-pipeline.png" alt="Multi-Agent Pipeline" width="800" />
+</p>
+
+Pipeline nodes in execution order:
+
+1. **Classification** -- Categorize as casual, meta, injection, or off-topic (0 LLM calls)
+2. **Semantic cache** -- Check Redis + pgvector for a similar recent answer
+3. **Preprocessing** -- Expand acronyms, resolve temporal references, normalize province names
+4. **Planning** -- Strategist generates a structured execution plan (1 LLM call)
+5. **Data collection** -- Researchers dispatch to 9 connectors in parallel
+6. **NL2SQL** -- Generate and execute read-only SQL against cached tables (with 3-layer validation)
+7. **Analysis** -- Analyst synthesizes findings (1 LLM call)
+8. **Replanning** -- If data is insufficient, re-plan with a different strategy
+9. **Response assembly** -- Writer formats the final response with citations, charts, and sources
 
 ---
 
@@ -76,6 +94,31 @@ The query pipeline is implemented as a **LangGraph** state machine with the foll
 
 ---
 
+## Data Ingestion
+
+<p align="center">
+  <img src="docs/data-ingestion-pipeline.png" alt="OpenArg Data Ingestion Pipeline" width="800" />
+</p>
+
+Celery workers handle the full ingestion lifecycle: catalog scraping, dataset downloading and parsing, vector embedding generation, and periodic refresh via Beat scheduler. Each stage runs on a dedicated queue with tuned concurrency.
+
+---
+
+## Workers
+
+| Worker | Queue | Concurrency | Purpose |
+|--------|-------|-------------|---------|
+| **Scraper** | `scraper` | 2 | Scrape CKAN portal catalogs |
+| **Collector** | `collector` | 4 | Download datasets, parse with pandas, cache in PostgreSQL |
+| **Embedding** | `embedding` | 8 | Generate vector embeddings (3 chunks per dataset, 1024-dim via Bedrock Cohere) |
+| **Analyst** | `analyst` | 2 | Execute query analysis pipeline |
+| **Transparency** | `transparency` | 2 | Process transparency/budget data (presupuesto, DDJJ) |
+| **Ingest** | `ingest` | 2 | Ingest structured data sources (senado, staff, series tiempo) |
+| **S3** | `s3` | 2 | Handle S3 storage operations for large datasets |
+| **Beat** | -- | 1 | Celery Beat scheduler for periodic tasks |
+
+---
+
 ## Tech Stack
 
 | Component | Technology |
@@ -84,8 +127,8 @@ The query pipeline is implemented as a **LangGraph** state machine with the foll
 | Database | PostgreSQL 16 + pgvector (HNSW indexing, 1024-dim) |
 | ORM | SQLAlchemy 2.0 (async) + Alembic migrations |
 | Cache / Broker | Redis 7 |
-| Task Queue | Celery 5.4 (10 workers + beat scheduler) |
-| AI Models | AWS Bedrock Claude Haiku 3.5 (primary) + Anthropic API Claude Sonnet (fallback) |
+| Task Queue | Celery 5.4 (7 workers + beat scheduler) |
+| AI Models | AWS Bedrock Claude (primary) + Anthropic API Claude Sonnet (fallback) |
 | Embeddings | AWS Bedrock Cohere Embed Multilingual v3 (1024-dim) |
 | Pipeline | LangGraph (stateful graph with checkpointing) |
 | DI Container | Dishka 1.6 |
@@ -98,17 +141,20 @@ The query pipeline is implemented as a **LangGraph** state machine with the foll
 
 ## Quick Start
 
+### Docker (recommended)
+
 ```bash
-# Clone and configure
 git clone https://github.com/colossus-lab/openarg_backend.git
 cd openarg_backend
 cp .env.example .env
-# Edit .env with your API keys (GEMINI_API_KEY, DATABASE_URL, etc.)
+# Edit .env with your API keys (AWS credentials, DATABASE_URL, etc.)
 
-# Start with Docker (recommended)
 docker compose up -d
+```
 
-# Or local development
+### Local development
+
+```bash
 make install        # Install dependencies (requires uv)
 make db.up          # Start PostgreSQL + Redis containers
 make db.migrate     # Run Alembic migrations
@@ -130,7 +176,7 @@ make dev            # Start API with hot reload on port 8080
 | Query | GET | `/api/v1/query/{query_id}` | Check query status |
 | Datasets | GET | `/api/v1/datasets/` | List indexed datasets |
 | Datasets | GET | `/api/v1/datasets/stats` | Dataset counts per portal |
-| Datasets | POST | `/api/v1/datasets/scrape/{portal}` | Trigger catalog scrape |
+| Datasets | GET | `/api/v1/datasets/{id}/download` | Download original dataset file (presigned S3 URL) |
 | Sandbox | POST | `/api/v1/sandbox/query` | Execute read-only SQL |
 | Sandbox | POST | `/api/v1/sandbox/ask` | Natural language to SQL |
 | Sandbox | GET | `/api/v1/sandbox/tables` | List cached tables |
@@ -141,44 +187,29 @@ make dev            # Start API with hot reload on port 8080
 
 ---
 
-## Workers
-
-| Worker | Queue | Concurrency | Purpose |
-|--------|-------|-------------|---------|
-| **Scraper** | `scraper` | 2 | Scrape CKAN portal catalogs |
-| **Collector** | `collector` | 4 | Download datasets, parse with pandas, cache in PostgreSQL |
-| **Embedding** | `embedding` | 8 | Generate vector embeddings (3 chunks per dataset, 1024-dim via Bedrock Cohere) |
-| **Analyst** | `analyst` | 2 | Execute query analysis pipeline |
-| **Transparency** | `transparency` | 2 | Process transparency/budget data (presupuesto, DDJJ) |
-| **Ingest** | `ingest` | 2 | Ingest structured data sources (senado, staff, series tiempo) |
-| **S3** | `s3` | 2 | Handle S3 storage operations for large datasets |
-| **Beat** | -- | 1 | Celery Beat scheduler for periodic tasks |
-
----
-
 ## Development
 
 ```bash
-make install            # Install dependencies (uv pip)
-make dev                # Start API with hot reload
-make db.up              # Start PostgreSQL + Redis containers
-make db.migrate         # Run Alembic migrations
-make db.revision msg="add xyz"  # Create new migration
+make install                   # Install dependencies (uv pip)
+make dev                       # Start API with hot reload
+make db.up                     # Start PostgreSQL + Redis containers
+make db.migrate                # Run Alembic migrations
+make db.revision msg="add xyz" # Create new migration
 
-make workers.scraper    # Start scraper worker
-make workers.collector  # Start collector worker
-make workers.embedding  # Start embedding worker
-make workers.analyst    # Start analyst worker
-make workers.transparency  # Start transparency worker
-make workers.ingest     # Start ingest worker
-make workers.s3         # Start S3 worker
-make beat               # Start Celery Beat scheduler
-make flower             # Start Flower monitoring UI
+make workers.scraper           # Start scraper worker
+make workers.collector         # Start collector worker
+make workers.embedding         # Start embedding worker
+make workers.analyst           # Start analyst worker
+make workers.transparency      # Start transparency worker
+make workers.ingest            # Start ingest worker
+make workers.s3                # Start S3 worker
+make beat                      # Start Celery Beat scheduler
+make flower                    # Start Flower monitoring UI
 
-make code.format        # Format with Ruff
-make code.lint          # Ruff check + mypy
-make code.test          # Pytest with coverage
-make code.check         # Lint + tests
+make code.format               # Format with Ruff
+make code.lint                 # Ruff check + mypy
+make code.test                 # Pytest with coverage
+make code.check                # Lint + tests
 ```
 
 ---
@@ -197,17 +228,31 @@ CI runs unit tests, integration tests, and type checking against PostgreSQL 16 +
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [API Reference](docs/api-reference.md)
-- [Database Schema](docs/database-schema.md)
-- [Worker Pipeline](docs/worker-pipeline.md)
-- [Query Pipeline](docs/pipeline-map.md)
-- [Deployment](docs/deployment.md)
-- [Configuration](docs/configuration.md)
-- [Domain Layer](docs/domain-layer.md)
-- [Infrastructure Layer](docs/infrastructure-layer.md)
-- [Backup & Restore](docs/backup-restore.md)
-- [Runbook](docs/runbook.md)
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/architecture.md) | System design and hexagonal architecture overview |
+| [Diagrams (Mermaid)](docs/diagrams.md) | Architecture diagrams source (query pipeline, multi-agent, data ingestion, infrastructure) |
+| [API Reference](docs/api-reference.md) | Full endpoint documentation with request/response schemas |
+| [Database Schema](docs/database-schema.md) | Table definitions, indexes, and migration strategy |
+| [Worker Pipeline](docs/worker-pipeline.md) | Celery workers, queues, and task routing |
+| [Query Pipeline Map](docs/pipeline-map.md) | LangGraph nodes, edges, and state transitions |
+| [Deployment](docs/deployment.md) | Docker Compose, EC2, and Caddy configuration |
+| [Configuration](docs/configuration.md) | Environment variables, TOML config, and secrets |
+| [Domain Layer](docs/domain-layer.md) | Entities, ports, and domain exceptions |
+| [Infrastructure Layer](docs/infrastructure-layer.md) | Adapters, resilience patterns, and persistence |
+| [Backup & Restore](docs/backup-restore.md) | Database backup procedures and disaster recovery |
+| [Runbook](docs/runbook.md) | Operational playbooks for common incidents |
+
+Frontend repository: [colossus-lab/openarg_frontend](https://github.com/colossus-lab/openarg_frontend)
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Run `make code.check` before committing
+4. Open a pull request against `main`
 
 ---
 
@@ -219,6 +264,6 @@ CI runs unit tests, integration tests, and type checking against PostgreSQL 16 +
 
 <p align="center">
   <img src="docs/logo.svg" alt="OpenArg" width="48" /><br/>
-  Created by <b>Luciano Carreño</b> & <b>Dante De Agostino</b><br/>
+  Created by <b>Luciano Carreno</b> & <b>Dante De Agostino</b><br/>
   Powered by <a href="https://colossuslab.org"><b>ColossusLab</b></a>
 </p>
