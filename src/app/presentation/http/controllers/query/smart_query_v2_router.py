@@ -314,7 +314,17 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         # Custom events emitted by nodes via get_stream_writer()
                         # Filter to allowed fields only to prevent leaking internal
                         # data like prompts or tracebacks (SEC-07 audit fix)
-                        _allowed = {"type", "step", "detail", "progress", "message", "status", "content", "question", "options"}
+                        _allowed = {
+                            "type",
+                            "step",
+                            "detail",
+                            "progress",
+                            "message",
+                            "status",
+                            "content",
+                            "question",
+                            "options",
+                        }
                         safe_payload = (
                             {k: v for k, v in payload.items() if k in _allowed}
                             if isinstance(payload, dict)
