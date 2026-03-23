@@ -66,11 +66,13 @@ def _build_analysis_prompt(
 
     if no_data_fallback:
         caps = build_capabilities_block()
+        # Don't pass memory context in no-data mode — it causes the LLM to
+        # hallucinate "we already discussed this" when no data was ever shown.
         return load_prompt(
             "analyst_no_data",
             question=question,
             today=today,
-            memory_ctx_analyst=memory_ctx_analyst,
+            memory_ctx_analyst="",
             caps=caps,
         )
 
@@ -98,8 +100,16 @@ async def analyst_node(state: OpenArgState) -> dict:
     META confidence/citations, and strips internal tags.
     """
     writer = get_stream_writer()
-    writer({"type": "status", "step": "generating", "detail": "Generando análisis..."})
     deps = nodes_pkg.get_deps()
+    replan_count = state.get("replan_count", 0)
+
+    # If this is a second-pass analyst (after replan), tell the frontend
+    # to replace the previous response instead of appending to it.
+    if replan_count > 0:
+        writer({"type": "clear_answer"})
+        writer({"type": "status", "step": "generating", "detail": "Reintentando análisis..."})
+    else:
+        writer({"type": "status", "step": "generating", "detail": "Generando análisis..."})
 
     try:
         question = state["question"]

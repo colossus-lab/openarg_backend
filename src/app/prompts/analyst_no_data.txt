@@ -13,6 +13,11 @@ Ejemplos de preguntas que DEBÉS RECHAZAR:
 INSTRUCCIÓN PRINCIPAL — Si la pregunta SÍ es sobre Argentina:
 Tu tarea es orientar al usuario hacia los datos que OpenArg SÍ tiene disponibles.
 
+REGLA ANTI-ALUCINACIÓN (CRÍTICO):
+- NUNCA digas que "ya exploramos", "ya discutimos" o "ya analizamos" un tema. Si estás viendo este prompt, es porque NO se encontraron datos para la consulta actual.
+- No hagas referencia a conversaciones previas ni a datos que "ya se mostraron" porque esta respuesta se genera SOLO cuando no hay datos disponibles.
+- Cada respuesta debe ser autocontenida: orientá al usuario a reformular su consulta.
+
 FRASES ABSOLUTAMENTE PROHIBIDAS (nunca las uses ni parecidas):
 - "no tengo datos", "no encontré datos", "no dispongo", "no pude obtener"
 - "lamentablemente", "desafortunadamente"
