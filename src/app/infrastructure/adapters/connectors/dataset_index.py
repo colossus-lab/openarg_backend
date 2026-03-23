@@ -22,49 +22,35 @@ from dataclasses import dataclass
 
 # Common Spanish typos for economic/government terms.
 # Keys are the misspelled form (already normalized: no accents, lowercase);
-# values are the canonical spelling used in KEYWORD_ROUTES.
-_TYPO_MAP: dict[str, str] = {
-    # inflacion
-    "imflacion": "inflacion",
-    "infacion": "inflacion",
-    "inflasion": "inflacion",
-    "inflancion": "inflacion",
-    "imflasion": "inflacion",
-    "inflcion": "inflacion",
-    # dolar
-    "dlar": "dolar",
-    "doalr": "dolar",
-    # presupuesto
-    "presupesto": "presupuesto",
-    "presuupuesto": "presupuesto",
-    "presupueto": "presupuesto",
-    # desempleo
-    "desmpleo": "desempleo",
-    "desemmpleo": "desempleo",
-    "dessempleo": "desempleo",
-    # exportaciones / importaciones
-    "esportaciones": "exportaciones",
-    "inportaciones": "importaciones",
-    # patrimonio
-    "patrimnio": "patrimonio",
-    "patrimono": "patrimonio",
-    # reservas
-    "recervas": "reservas",
-    "rservas": "reservas",
-    # salario
-    "salrio": "salario",
-    "salairo": "salario",
-}
-
-# Pre-compiled regex for fast typo replacement (single pass).
-_TYPO_RE = re.compile(
-    r"\b(" + "|".join(re.escape(k) for k in sorted(_TYPO_MAP, key=len, reverse=True)) + r")\b"
-)
+# Fuzzy typo correction vocabulary (built lazily from KEYWORD_ROUTES keys).
+_FUZZY_VOCAB: list[str] | None = None
 
 
 def _fix_typos(text: str) -> str:
-    """Replace common misspellings with their canonical forms."""
-    return _TYPO_RE.sub(lambda m: _TYPO_MAP[m.group(0)], text)
+    """Fix typos via fuzzy matching against KEYWORD_ROUTES vocabulary.
+
+    Uses difflib.get_close_matches (stdlib) — no external deps.
+    Words shorter than 4 chars or already in vocabulary are skipped.
+    Cutoff 0.8 means ~80% character similarity required.
+    """
+    from difflib import get_close_matches
+
+    global _FUZZY_VOCAB  # noqa: PLW0603
+    if _FUZZY_VOCAB is None:
+        vocab: set[str] = set()
+        for key in KEYWORD_ROUTES:
+            vocab.update(key.split())
+        _FUZZY_VOCAB = sorted(vocab)
+
+    words = text.split()
+    fixed = []
+    for w in words:
+        if len(w) < 4 or w in _FUZZY_VOCAB:
+            fixed.append(w)
+            continue
+        matches = get_close_matches(w, _FUZZY_VOCAB, n=1, cutoff=0.8)
+        fixed.append(matches[0] if matches else w)
+    return " ".join(fixed)
 
 
 def normalize_query(text: str) -> str:
@@ -592,6 +578,73 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "params": {"series_ids": ["74.3_IET_0_M_16", "74.3_IIT_0_M_25"]},
         "confidence": 0.90,
         "description": "Saldo de balanza comercial",
+    },
+    # ── Comercio exterior → query_sandbox (cached tables) ─────
+    "exportaciones por provincia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*export*", "cache_indec_comercio_exterior*"]},
+        "confidence": 0.95,
+        "description": "Exportaciones por provincia (datos tabulares cacheados)",
+    },
+    "importaciones por provincia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*import*", "cache_indec_comercio_exterior*"]},
+        "confidence": 0.95,
+        "description": "Importaciones por provincia (datos tabulares cacheados)",
+    },
+    "exportaciones por": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*export*", "cache_indec_comercio_exterior*"]},
+        "confidence": 0.92,
+        "description": "Exportaciones desglosadas (datos tabulares cacheados)",
+    },
+    "importaciones por": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*import*", "cache_indec_comercio_exterior*"]},
+        "confidence": 0.92,
+        "description": "Importaciones desglosadas (datos tabulares cacheados)",
+    },
+    "exportaciones e importaciones": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*export*", "cache_*import*", "cache_indec_comercio_exterior*"]
+        },
+        "confidence": 0.92,
+        "description": "Exportaciones e importaciones (datos tabulares cacheados)",
+    },
+    "aranceles": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*arancel*", "cache_*import*", "cache_indec_comercio_exterior*"]
+        },
+        "confidence": 0.90,
+        "description": "Aranceles de importacion / exportacion (datos cacheados)",
+    },
+    "aranceles de importacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*arancel*", "cache_*import*"]},
+        "confidence": 0.95,
+        "description": "Aranceles de importacion (datos cacheados)",
+    },
+    "aranceles de exportacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*arancel*", "cache_*export*"]},
+        "confidence": 0.95,
+        "description": "Aranceles de exportacion (datos cacheados)",
+    },
+    "comercio exterior por": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*export*", "cache_*import*", "cache_indec_comercio_exterior*"]
+        },
+        "confidence": 0.92,
+        "description": "Comercio exterior desglosado (datos tabulares cacheados)",
+    },
+    "aduana": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*aduana*", "cache_*export*", "cache_*import*"]},
+        "confidence": 0.85,
+        "description": "Datos de aduana / comercio exterior (datos cacheados)",
     },
     # ── Presupuesto → query_sandbox (cached) ───────────────────
     "presupuesto": {
@@ -1378,26 +1431,280 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.90,
         "description": "Datos de femicidios",
     },
+    "robos": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*robo*", "cache_*seguridad*"]},
+        "confidence": 0.85,
+        "description": "Datos de robos y delitos contra la propiedad",
+    },
+    "robo": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*robo*", "cache_*seguridad*"]},
+        "confidence": 0.85,
+        "description": "Datos de robos y delitos contra la propiedad",
+    },
+    "robos en caba": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*robo*", "cache_*seguridad*"]},
+        "confidence": 0.90,
+        "description": "Robos en Ciudad Autonoma de Buenos Aires",
+    },
+    "robos por comuna": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*robo*", "cache_*seguridad*"]},
+        "confidence": 0.90,
+        "description": "Robos desagregados por comuna",
+    },
+    "hurtos": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*hurto*", "cache_*seguridad*"]},
+        "confidence": 0.85,
+        "description": "Datos de hurtos",
+    },
+    "hurto": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*hurto*", "cache_*seguridad*"]},
+        "confidence": 0.85,
+        "description": "Datos de hurtos",
+    },
+    "denuncias": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*denuncia*", "cache_*delito*", "cache_*seguridad*"]},
+        "confidence": 0.85,
+        "description": "Datos de denuncias penales",
+    },
+    "denuncia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*denuncia*", "cache_*delito*", "cache_*seguridad*"]},
+        "confidence": 0.85,
+        "description": "Datos de denuncias penales",
+    },
+    "denuncias penales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*denuncia*", "cache_*delito*", "cache_*seguridad*"]},
+        "confidence": 0.90,
+        "description": "Denuncias penales",
+    },
+    "crimen": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*seguridad*", "cache_*homicid*"]},
+        "confidence": 0.80,
+        "description": "Datos de criminalidad",
+    },
+    "criminalidad": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*seguridad*", "cache_*homicid*"]},
+        "confidence": 0.85,
+        "description": "Datos de criminalidad",
+    },
+    "inseguridad": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*", "cache_*seguridad*", "cache_*denuncia*"]},
+        "confidence": 0.80,
+        "description": "Datos de inseguridad y delitos",
+    },
+    "delito": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*delito*"]},
+        "confidence": 0.85,
+        "description": "Datos de delitos",
+    },
+    "datasets de seguridad": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*seguridad*",
+                "cache_*delito*",
+                "cache_*polic*",
+                "cache_*homicid*",
+                "cache_*denuncia*",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Datasets de seguridad publica",
+    },
+    "siniestros": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_siniestros_viales_*", "cache_*siniestro*"]},
+        "confidence": 0.85,
+        "description": "Siniestros (viales y otros)",
+    },
+    "accidentes viales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_siniestros_viales_*"]},
+        "confidence": 0.88,
+        "description": "Accidentes viales / siniestros viales",
+    },
+    "policia": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*polic*", "cache_*seguridad*"]},
+        "confidence": 0.80,
+        "description": "Datos policiales y de seguridad",
+    },
     # ── Transporte → query_sandbox (103 cache tables) ─────────
     "transporte": {
         "action": "query_sandbox",
         "params": {
-            "tables": ["cache_*transport*", "cache_*transit*", "cache_*vehicul*", "cache_*subte*"]
+            "tables": [
+                "cache_*transport*",
+                "cache_*transit*",
+                "cache_*vehicul*",
+                "cache_*subte*",
+                "cache_*ferrov*",
+                "cache_*ferrocarril*",
+                "cache_*tren*",
+                "cache_*colectiv*",
+                "cache_*sube*",
+                "cache_*pasajero*",
+            ]
         },
         "confidence": 0.80,
-        "description": "Datos de transporte (103 tablas cacheadas)",
+        "description": "Datos de transporte (subte, trenes, colectivos, SUBE, etc.)",
+    },
+    "transporte publico": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*transport*",
+                "cache_*subte*",
+                "cache_*colectiv*",
+                "cache_*sube*",
+                "cache_*ferrov*",
+                "cache_*tren*",
+                "cache_*pasajero*",
+                "cache_*metrobus*",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Transporte publico de pasajeros",
+    },
+    "subsidios al transporte": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_subsidios_al_transporte*"]},
+        "confidence": 0.95,
+        "description": "Subsidios al transporte publico de pasajeros",
+    },
+    "ferrocarril": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*ferrov*",
+                "cache_*ferrocarril*",
+                "cache_*tren*",
+                "cache_*estacion*ferrov*",
+                "cache_*estacion*tren*",
+                "cache_subte_trenes_despachados",
+                "cache_cruces_ferroviarios",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Datos de ferrocarriles y trenes",
+    },
+    "tren": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*ferrov*",
+                "cache_*ferrocarril*",
+                "cache_*tren*",
+                "cache_*estacion*ferrov*",
+                "cache_*estacion*tren*",
+                "cache_subte_trenes_despachados",
+                "cache_cruces_ferroviarios",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Datos de trenes y sistema ferroviario",
+    },
+    "trenes": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*ferrov*",
+                "cache_*ferrocarril*",
+                "cache_*tren*",
+                "cache_*estacion*ferrov*",
+                "cache_*estacion*tren*",
+                "cache_subte_trenes_despachados",
+                "cache_cruces_ferroviarios",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Datos de trenes y sistema ferroviario",
+    },
+    "ferroviario": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*ferrov*",
+                "cache_*ferrocarril*",
+                "cache_*tren*",
+                "cache_*estacion*ferrov*",
+                "cache_*estacion*tren*",
+                "cache_subte_trenes_despachados",
+                "cache_cruces_ferroviarios",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Sistema ferroviario",
     },
     "subte": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*subte*"]},
-        "confidence": 0.85,
-        "description": "Datos del subte",
+        "params": {
+            "tables": [
+                "cache_*subte*",
+                "cache_subte_trenes_despachados",
+                "cache_subte_cronograma_de_servicio",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Datos del subte de Buenos Aires",
     },
     "colectivo": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*colectiv*"]},
-        "confidence": 0.80,
-        "description": "Datos de colectivos",
+        "params": {
+            "tables": [
+                "cache_*colectiv*",
+                "cache_lineas_y_empresas_de_transporte_urbano_de_pasajero",
+                "cache_l_neas_de_transporte_de_rmba",
+                "cache_empresas_de_transporte_de_rmba",
+            ]
+        },
+        "confidence": 0.85,
+        "description": "Datos de colectivos y lineas urbanas",
+    },
+    "colectivos": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*colectiv*",
+                "cache_lineas_y_empresas_de_transporte_urbano_de_pasajero",
+                "cache_l_neas_de_transporte_de_rmba",
+                "cache_empresas_de_transporte_de_rmba",
+            ]
+        },
+        "confidence": 0.85,
+        "description": "Datos de colectivos y lineas urbanas",
+    },
+    "sube": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_*sube*",
+                "cache_sube_operaciones_de_viaje_por_mes_de_regi_n_metrop",
+                "cache_sube_cantidad_de_transacciones_usos_por_fecha",
+                "cache_sube_estudiantil",
+                "cache_puntos_de_carga_sube",
+            ]
+        },
+        "confidence": 0.90,
+        "description": "Datos de tarjeta SUBE (transacciones, operaciones, puntos de carga)",
+    },
+    "tarjeta sube": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*sube*"]},
+        "confidence": 0.95,
+        "description": "Datos de tarjeta SUBE",
     },
     "ecobici": {
         "action": "query_sandbox",
@@ -1596,16 +1903,128 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.80,
         "description": "Datos de telefonia celular",
     },
-    # ── Poblacion → query_sandbox (28 cache tables) ───────────
+    # ── Poblacion / Censo → query_sandbox (28 cache tables) ────
     "censo": {
         "action": "query_sandbox",
         "params": {"tables": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"]},
         "confidence": 0.85,
         "description": "Datos censales y demograficos",
     },
+    "censo 2022": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*censo*2022*", "cache_*censo*", "cache_*poblaci*"]},
+        "confidence": 0.95,
+        "description": "Censo Nacional 2022",
+    },
+    "censo 2010": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*censo*2010*", "cache_*censo*", "cache_*poblaci*"]},
+        "confidence": 0.95,
+        "description": "Censo Nacional 2010",
+    },
+    "ultimo censo": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"]},
+        "confidence": 0.90,
+        "description": "Datos del ultimo censo nacional",
+    },
+    "datos del censo": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"]},
+        "confidence": 0.90,
+        "description": "Datos del censo nacional",
+    },
+    "datos censales": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"]},
+        "confidence": 0.90,
+        "description": "Datos censales",
+    },
+    "poblacion": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*demograf*", "cache_*habitant*"]
+        },
+        "confidence": 0.85,
+        "description": "Datos de poblacion (censos y proyecciones demograficas)",
+    },
+    "poblacion de": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*demograf*", "cache_*habitant*"]
+        },
+        "confidence": 0.90,
+        "description": "Poblacion de una localidad, provincia o departamento",
+    },
+    "cuanta poblacion": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*demograf*", "cache_*habitant*"]
+        },
+        "confidence": 0.90,
+        "description": "Cantidad de poblacion",
+    },
+    "habitantes": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*habitant*", "cache_*demograf*"]
+        },
+        "confidence": 0.85,
+        "description": "Cantidad de habitantes (censos y proyecciones)",
+    },
+    "cuantos habitantes": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*habitant*", "cache_*demograf*"]
+        },
+        "confidence": 0.90,
+        "description": "Cantidad de habitantes de una localidad o provincia",
+    },
+    "cantidad de habitantes": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*habitant*", "cache_*demograf*"]
+        },
+        "confidence": 0.90,
+        "description": "Cantidad de habitantes",
+    },
+    "densidad poblacional": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*densidad*", "cache_*demograf*"]
+        },
+        "confidence": 0.90,
+        "description": "Densidad poblacional",
+    },
+    "crecimiento poblacional": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*poblaci*", "cache_*censo*", "cache_*demograf*"]},
+        "confidence": 0.85,
+        "description": "Crecimiento demografico / poblacional",
+    },
+    "piramide poblacional": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": ["cache_*poblaci*", "cache_*censo*", "cache_*demograf*", "cache_*piramide*"]
+        },
+        "confidence": 0.90,
+        "description": "Piramide poblacional / estructura etaria",
+    },
+    "proyecciones de poblacion": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*poblaci*", "cache_*proyecci*", "cache_*demograf*"]},
+        "confidence": 0.90,
+        "description": "Proyecciones de poblacion (INDEC)",
+    },
     "demografia": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*demograf*", "cache_*poblaci*"]},
+        "params": {"tables": ["cache_*demograf*", "cache_*poblaci*", "cache_*censo*"]},
+        "confidence": 0.85,
+        "description": "Datos demograficos",
+    },
+    "demografico": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*demograf*", "cache_*poblaci*", "cache_*censo*"]},
         "confidence": 0.85,
         "description": "Datos demograficos",
     },
@@ -1818,11 +2237,11 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.95,
         "description": "Datasets de energia en datos.gob.ar",
     },
-    "datasets de seguridad": {
+    "buscar datasets de seguridad": {
         "action": "search_ckan",
         "params": {"query": "seguridad", "portalId": "nacional", "rows": 20},
         "confidence": 0.95,
-        "description": "Datasets de seguridad en datos.gob.ar",
+        "description": "Buscar datasets de seguridad en datos.gob.ar",
     },
     "datasets de ambiente": {
         "action": "search_ckan",
@@ -2359,7 +2778,13 @@ TAXONOMY: dict[str, dict] = {
             "comercio_exterior": {
                 "label": "Comercio Exterior",
                 "actions": ["query_series", "query_sandbox"],
-                "cache_pattern": ["cache_*export*", "cache_*import*"],
+                "cache_pattern": [
+                    "cache_*export*",
+                    "cache_*import*",
+                    "cache_indec_comercio_exterior*",
+                    "cache_*arancel*",
+                    "cache_*aduana*",
+                ],
             },
             "finanzas": {
                 "label": "Finanzas / Dólar / BCRA",
@@ -2469,7 +2894,15 @@ TAXONOMY: dict[str, dict] = {
             "seguridad": {
                 "label": "Seguridad",
                 "actions": ["query_sandbox"],
-                "cache_pattern": ["cache_*seguridad*", "cache_*delito*", "cache_*homicid*"],
+                "cache_pattern": [
+                    "cache_*seguridad*",
+                    "cache_*delito*",
+                    "cache_*homicid*",
+                    "cache_*robo*",
+                    "cache_*denuncia*",
+                    "cache_*polic*",
+                    "cache_*siniestro*",
+                ],
             },
             "genero": {
                 "label": "Género",
@@ -2484,7 +2917,12 @@ TAXONOMY: dict[str, dict] = {
             "poblacion": {
                 "label": "Población y Demografía",
                 "actions": ["query_sandbox"],
-                "cache_pattern": ["cache_*censo*", "cache_*poblaci*", "cache_*demograf*"],
+                "cache_pattern": [
+                    "cache_*censo*",
+                    "cache_*poblaci*",
+                    "cache_*demograf*",
+                    "cache_*habitant*",
+                ],
             },
             "vivienda": {
                 "label": "Vivienda",
