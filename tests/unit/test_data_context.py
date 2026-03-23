@@ -101,12 +101,12 @@ class TestBuildDataContextTruncation:
             results.append(_make_result(records, title=f"BigDataset_{i}"))
         ctx = _build_data_context(results)
         assert len(ctx) <= 80_000 + 200  # allow for the truncation suffix
-        assert "datos truncados" in ctx
+        assert "contexto recortado" in ctx
 
     def test_short_context_not_truncated(self):
         records = [{"a": 1}, {"a": 2}]
         ctx = _build_data_context([_make_result(records)])
-        assert "datos truncados" not in ctx
+        assert "contexto recortado" not in ctx
 
 
 class TestBuildDataContextRecordSlicing:
