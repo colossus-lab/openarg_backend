@@ -16,6 +16,7 @@ import boto3
 from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
+from app.prompts import load_prompt
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
@@ -64,25 +65,13 @@ def _generate_metadata_for_table(
         )[:2000]
         sample_text = f"Filas de ejemplo:\n{raw}"
 
-    prompt = (
-        "Sos un experto en datos abiertos de Argentina. "
-        "Analizá esta tabla de un portal de datos "
-        f"públicos:\n\n"
-        f"Nombre: {table_name}\n"
-        f"Columnas: {', '.join(columns[:30])}\n"
-        f"Cantidad de filas: {row_count}\n"
-        f"{sample_text}\n\n"
-        "Respondé SOLO con JSON válido (sin markdown):\n"
-        '{"display_name": "nombre descriptivo corto",'
-        '"description": "1-2 oraciones de qué contiene",'
-        '"domain": "economía|gobierno|congreso|social'
-        '|infraestructura|geografía|otro",'
-        '"subdomain": "subdominio específico",'
-        '"key_columns": ["columnas importantes"],'
-        '"column_types": {"col": "descripción breve"},'
-        '"sample_queries": ["3 preguntas en lenguaje '
-        'natural respondibles con esta tabla"],'
-        '"tags": ["etiquetas para búsqueda"]}'
+    columns_str = ", ".join(columns[:30])
+    prompt = load_prompt(
+        "catalog_enrichment",
+        table_name=table_name,
+        columns=columns_str,
+        row_count=str(row_count),
+        sample_text=sample_text,
     )
 
     try:

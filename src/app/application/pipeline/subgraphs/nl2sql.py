@@ -22,6 +22,7 @@ from typing_extensions import TypedDict
 
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.llm_provider import LLMMessage
+from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -61,22 +62,11 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
     tables_context = state["tables_context"]
     few_shot_block = state.get("few_shot_block", "")
 
-    nl2sql_prompt = (
-        "You are a SQL assistant for Argentine public datasets stored in PostgreSQL.\n"
-        "You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, "
-        "DROP, or any DDL/DML statement.\n\n"
-        f"Available tables and their columns:\n\n{tables_context}\n\n"
-        "Rules:\n"
-        "- Only reference the tables and columns listed above.\n"
-        "- Always use double-quoted identifiers for column names that contain spaces or special characters.\n"
-        "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
-        "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
-        "- The query must be valid PostgreSQL syntax.\n"
-        "- NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.\n"
-        "- Use ILIKE for case-insensitive text matching.\n"
+    nl2sql_prompt = load_prompt(
+        "nl2sql",
+        tables_context=tables_context,
+        few_shot_block=few_shot_block or "",
     )
-    if few_shot_block:
-        nl2sql_prompt += f"\n{few_shot_block}\n"
 
     messages = [
         LLMMessage(role="system", content=nl2sql_prompt),
@@ -138,7 +128,7 @@ async def fix_sql_node(state: NL2SQLState) -> dict:
     retry_messages = [
         LLMMessage(
             role="system",
-            content="Fix this PostgreSQL query. Return ONLY the corrected SQL, no markdown.",
+            content=load_prompt("sql_fixer"),
         ),
         LLMMessage(
             role="user",

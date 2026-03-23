@@ -18,6 +18,7 @@ from app.domain.ports.search.vector_search import IVectorSearch
 from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
 from app.infrastructure.celery.tasks.analyst_tasks import analyze_query
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
+from app.prompts import load_prompt
 from app.setup.app_factory import limiter
 
 logger = logging.getLogger(__name__)
@@ -255,22 +256,18 @@ async def quick_query(
     context = "\n---\n".join(context_parts)
     has_real_data = bool(sample_data)
 
-    system_prompt = (
-        "Sos OpenArg, un analista de datos públicos de Argentina entrenado por ColossusLab.org. "
-        "Respondé de forma breve y conversacional en español argentino. "
-        "Máximo 4-5 oraciones. Destacá el dato más importante primero.\n"
-    )
     if has_real_data:
-        system_prompt += (
+        data_mode_instructions = (
             "Tenés acceso a datos REALES de los datasets (filas de muestra). "
             "Usá esos datos para dar respuestas concretas con números y hechos. "
             "Terminá sugiriendo 2-3 preguntas de seguimiento concretas."
         )
     else:
-        system_prompt += (
+        data_mode_instructions = (
             "Solo tenés metadata de los datasets (no los datos reales). "
             "Describí qué información contienen y sugerí consultas más específicas."
         )
+    system_prompt = load_prompt("quick_analyst", data_mode_instructions=data_mode_instructions)
 
     response = await llm.chat(
         messages=[
@@ -432,10 +429,7 @@ async def stream_query(
             messages = [
                 LLMMessage(
                     role="system",
-                    content=(
-                        "Sos un analista de datos públicos de Argentina. "
-                        "Respondé en español basándote en los datos."
-                    ),
+                    content=load_prompt("ws_analyst"),
                 ),
                 LLMMessage(
                     role="user",

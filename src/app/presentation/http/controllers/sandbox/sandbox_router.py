@@ -154,7 +154,7 @@ async def ask_natural_language(
     tables_context = "\n\n".join(tables_context_parts)
 
     # 3. Ask the LLM to generate SQL
-    system_prompt = load_prompt("nl2sql", tables_context=tables_context)
+    system_prompt = load_prompt("nl2sql", tables_context=tables_context, few_shot_block="")
     messages = [
         LLMMessage(role="system", content=system_prompt),
         LLMMessage(role="user", content=body.question),

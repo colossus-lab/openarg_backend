@@ -1,0 +1,4 @@
+Fix this PostgreSQL query. Return ONLY the corrected SQL, no markdown, no explanation.
+The tables and columns available are listed in the context below. Only use those tables.
+CRITICAL: Most columns are TEXT. Compare with text literals (WHERE anio = '1980', NOT WHERE anio = 1980).
+Use ILIKE for text matching. Use CAST(col AS NUMERIC) only for aggregations.

@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 from app.domain.ports.llm.llm_provider import LLMMessage
+from app.prompts import load_prompt
 
 if TYPE_CHECKING:
     from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
@@ -490,42 +491,11 @@ async def execute_sandbox_step(
         # Retrieve dynamic few-shot examples from successful past queries
         few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
 
-        nl2sql_prompt = (
-            "You are a SQL assistant for Argentine public datasets stored in PostgreSQL.\n"
-            "You MUST generate ONLY a single SELECT query. Never use INSERT, UPDATE, DELETE, "
-            "DROP, or any DDL/DML statement.\n\n"
-            f"Available tables and their columns:\n\n{tables_context}\n\n"
-            "Rules:\n"
-            "- Only reference the tables and columns listed above.\n"
-            "- Always use double-quoted identifiers for column names that contain spaces or special characters.\n"
-            "- Limit results to 1000 rows max (add LIMIT 1000 if appropriate).\n"
-            "- Return ONLY the SQL query, nothing else. No markdown, no explanation.\n"
-            "- The query must be valid PostgreSQL syntax.\n"
-            "- NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.\n"
-            "- Use ILIKE for case-insensitive text matching.\n"
-            "\nTable selection guidelines:\n"
-            "- When the user asks for a RATE (tasa), prefer tables with 'tasa' in the name "
-            "or small row counts with pre-aggregated data. Do NOT query raw record tables "
-            "(hundreds of thousands of rows) and try to compute rates from them.\n"
-            "- When multiple tables match, prefer the one whose name and description best "
-            "match the user's question. A table named 'tasa_de_mortalidad_infantil' is better "
-            "for a mortality rate question than a generic 'defunciones' raw-records table.\n"
-            "- Tables with 'tasa', 'indice', 'porcentaje' in the name contain pre-calculated "
-            "statistics. Prefer them over raw-data tables when the user asks for rates or indices.\n"
-            "- IMPORTANT: Do NOT select internal ID columns, row numbers, or code columns "
-            "(like jurisdiction codes or diagnostic codes) as if they were data values.\n"
-            "\nSELECCION DE TABLAS:\n"
-            '- Si hay tablas con "tasa" o "indice" en el nombre, preferilas para consultas '
-            "sobre tasas/indices\n"
-            '- Si hay tablas con "credito" o "presupuesto", preferilas para consultas de '
-            "presupuesto\n"
-            "- Tablas más pequeñas con datos agregados suelen ser más útiles que tablas con "
-            "millones de registros crudos\n"
-            "- NUNCA selecciones columnas que parezcan códigos internos (IDs, códigos CIE, "
-            "códigos numéricos de jurisdicción) como valores de datos\n"
+        nl2sql_prompt = load_prompt(
+            "nl2sql",
+            tables_context=tables_context,
+            few_shot_block=few_shot_block or "",
         )
-        if few_shot_block:
-            nl2sql_prompt += f"\n{few_shot_block}\n"
 
         messages = [
             LLMMessage(role="system", content=nl2sql_prompt),
@@ -555,7 +525,7 @@ async def execute_sandbox_step(
             retry_messages = [
                 LLMMessage(
                     role="system",
-                    content="Fix this PostgreSQL query. Return ONLY the corrected SQL, no markdown.",
+                    content=load_prompt("sql_fixer"),
                 ),
                 LLMMessage(
                     role="user",

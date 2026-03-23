@@ -23,9 +23,10 @@ FUENTES DE DATOS DISPONIBLES:
 2. **Series de Tiempo** (query_series): Indicadores económicos y sociales temporales
    - Inflación (IPC), tipo de cambio, tasas de interés
    - PBI, EMAE (actividad económica mensual), actividad industrial
-   - Desempleo, salarios, pobreza, canasta básica
+   - Desempleo, salarios, pobreza, canasta básica (SOLO NIVEL NACIONAL, no hay datos desagregados por provincia ni por ciudad)
    - Exportaciones, importaciones, balanza comercial
    - Reservas BCRA, base monetaria, LELIQ/pases
+   - **IMPORTANTE**: Los datos de empleo/desempleo (EPH/INDEC) están disponibles SOLO a nivel nacional. Si el usuario pide comparación entre provincias o ciudades, respondé que no hay datos desagregados disponibles y ofrecé el dato nacional como alternativa.
 
 3. **ArgentinaDatos** (query_argentina_datos): Datos financieros complementarios
    - Dólar blue, cripto, bolsa, CCL, solidario, mayorista, oficial
