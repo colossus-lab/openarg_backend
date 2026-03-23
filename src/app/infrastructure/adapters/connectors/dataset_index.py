@@ -42,13 +42,45 @@ def _fix_typos(text: str) -> str:
             vocab.update(key.split())
         _FUZZY_VOCAB = sorted(vocab)
 
+    # Common Spanish words that should never be "corrected" by fuzzy matching
+    _SKIP = {
+        "nacional",
+        "provincial",
+        "municipal",
+        "federal",
+        "actual",
+        "general",
+        "personal",
+        "especial",
+        "oficial",
+        "total",
+        "anual",
+        "mensual",
+        "trimestral",
+        "historico",
+        "publico",
+        "ultimo",
+        "primero",
+        "segundo",
+        "tercero",
+        "cuarto",
+        "millones",
+        "argentina",
+        "gobierno",
+        "ministerio",
+        "comparar",
+        "comparado",
+        "evolucion",
+        "informacion",
+    }
+
     words = text.split()
     fixed = []
     for w in words:
-        if len(w) < 4 or w in _FUZZY_VOCAB:
+        if len(w) < 7 or w in _FUZZY_VOCAB or w in _SKIP:
             fixed.append(w)
             continue
-        matches = get_close_matches(w, _FUZZY_VOCAB, n=1, cutoff=0.8)
+        matches = get_close_matches(w, _FUZZY_VOCAB, n=1, cutoff=0.87)
         fixed.append(matches[0] if matches else w)
     return " ".join(fixed)
 
