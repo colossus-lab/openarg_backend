@@ -162,6 +162,18 @@ class PgSandboxAdapter(ISQLSandbox):
 
     def _execute_sync(self, sql: str, timeout_seconds: int) -> SandboxResult:
         """Execute the query synchronously in a read-only transaction."""
+        # Auto-fix: wrap bare integers in WHERE/AND/OR clauses with quotes
+        # Prevents "operator does not exist: text = integer" errors
+        # NOTE: This runs BEFORE validation so _validate_sql operates on the
+        # final SQL that will actually be executed (SEC-01 audit fix).
+        import re
+
+        sql = re.sub(
+            r"(=|<>|!=|>=|<=|>|<)\s*(\d{4,})\b(?!')",
+            r"\1 '\2'",
+            sql,
+        )
+
         validation_error = _validate_sql(sql)
         if validation_error:
             return SandboxResult(
@@ -171,16 +183,6 @@ class PgSandboxAdapter(ISQLSandbox):
                 truncated=False,
                 error=validation_error,
             )
-
-        # Auto-fix: wrap bare integers in WHERE/AND/OR clauses with quotes
-        # Prevents "operator does not exist: text = integer" errors
-        import re
-
-        sql = re.sub(
-            r"(=|<>|!=|>=|<=|>|<)\s*(\d{4,})\b(?!')",
-            r"\1 '\2'",
-            sql,
-        )
 
         engine = self._get_engine()
         timeout_ms = timeout_seconds * 1000
