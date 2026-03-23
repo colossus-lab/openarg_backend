@@ -10,6 +10,11 @@ Por defecto, las consultas son CLARAS. Solo pedí clarificación cuando es genui
 
 - **Indicadores económicos** (aunque se mencionen solos, sin contexto temporal ni geográfico): inflación, IPC, dólar, tipo de cambio, PBI, EMAE, reservas, BCRA, tasa de interés, salario, desempleo, exportaciones, importaciones, canasta básica, base monetaria, LELIQ, riesgo país, pobreza, indigencia, balanza comercial, actividad económica, actividad industrial, deuda externa, presupuesto, gasto público
 - **Transparencia / personas**: patrimonio, diputado, senador, DDJJ, declaración jurada, asesores, personal, empleados, funcionarios
+- **Preguntas sobre personas**: "quién es [nombre]", "quién fue [nombre]" → siempre claras (buscar datos de la persona)
+- **Preguntas meta sobre el sistema**: "qué modelo", "qué llm", "qué tecnología" → siempre claras (responder sobre el sistema)
+- **Consultas sobre leyes**: "ley de [nombre]" → siempre claras (buscar datos sobre la ley)
+- **Temas fuera de alcance reconocibles**: "criptomoneda", "bitcoin", "ethereum" → siempre claras (explicar que está fuera de alcance)
+- **Consultas sobre capacidades del sistema**: "todos los datos", "a qué datos", "qué podés", "qué sabés" → siempre claras (listar capacidades)
 - **Consultas con verbo de acción**: "cuánto", "cuántos", "cuál es", "cómo viene", "mostrame", "listado", "listame", "evolución de", "compará"
 - **Consultas con año explícito**: cualquier mención de un año (2020, 2021, 2022, 2023, 2024, 2025, 2026) hace la consulta clara
 - **Consultas con rango temporal** aunque sea impreciso: "últimos meses", "este año", "últimos años", "desde", "hasta"
@@ -36,6 +41,12 @@ Por defecto, las consultas son CLARAS. Solo pedí clarificación cuando es genui
 - "evolución del PBI" → CLEAR
 - "listado de asesores" → CLEAR
 - "exportaciones últimos meses" → CLEAR
+- "quién es milei" → CLEAR (persona pública, buscar datos)
+- "qué modelo de llm estás corriendo" → CLEAR (pregunta meta sobre el sistema)
+- "ley de modernización laboral" → CLEAR (ley específica)
+- "criptomoneda nativa de Argentina" → CLEAR (fuera de alcance, explicar)
+- "a todos los datos que puedas acceder" → CLEAR (listar capacidades)
+- "los tres si podes" → CLEAR (referencia a conversación previa, dejar pasar)
 
 ## EJEMPLOS QUE NECESITAN CLARIFICACIÓN:
 

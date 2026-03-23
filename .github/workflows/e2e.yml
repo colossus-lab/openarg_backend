@@ -6,13 +6,13 @@ on:
       reason:
         description: "Reason for manual run"
         required: false
-  # push:
-  #   branches: [main, staging]
-  #   paths:
-  #     - 'src/**'
-  #     - 'tests/**'
-  #     - 'pyproject.toml'
-  #     - '.github/workflows/e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/e2e.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

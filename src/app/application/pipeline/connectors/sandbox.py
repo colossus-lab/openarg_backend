@@ -357,6 +357,19 @@ async def execute_sandbox_step(
     try:
         tables = await sandbox.list_cached_tables()
         table_hints = params.get("tables", [])
+        # Resolve table_notes and table_hints from routing when planner didn't provide them
+        table_notes = params.get("table_notes", "")
+        if not table_notes or not table_hints:
+            from app.infrastructure.adapters.connectors.dataset_index import resolve_hints as _rh
+
+            for _hint in _rh(nl_query):
+                if _hint.action == "query_sandbox":
+                    if not table_hints and _hint.params.get("tables"):
+                        table_hints = _hint.params["tables"]
+                    if not table_notes and _hint.params.get("table_notes"):
+                        table_notes = _hint.params["table_notes"]
+                    if table_hints and table_notes:
+                        break
         logger.info(
             "Sandbox step %s: %d cached tables, hints=%s, query=%s",
             step.id,
@@ -416,6 +429,34 @@ async def execute_sandbox_step(
                             filtered.append(t)
                             break
             if filtered:
+                # If query mentions a specific year, filter out tables that don't cover it
+                import re as _re
+
+                year_match = _re.search(r"\b(19\d{2}|20[0-2]\d)\b", nl_query)
+                if year_match and len(filtered) > 1 and table_notes:
+                    asked_year = int(year_match.group(1))
+                    # Parse "Cubre YYYY-YYYY" from table_notes
+                    narrowed = []
+                    for t in filtered:
+                        note_match = _re.search(
+                            rf"{_re.escape(t.table_name)}.*?[Cc]ubre\s+(\d{{4}})-(\d{{4}})",
+                            table_notes,
+                        )
+                        if note_match:
+                            start_y, end_y = int(note_match.group(1)), int(note_match.group(2))
+                            if start_y <= asked_year <= end_y:
+                                narrowed.append(t)
+                        else:
+                            narrowed.append(t)  # No note = keep
+                    if narrowed:
+                        filtered = narrowed
+                        logger.info(
+                            "Year filter %d narrowed tables from %d to %d: %s",
+                            asked_year,
+                            len(tables),
+                            len(filtered),
+                            [t.table_name for t in filtered],
+                        )
                 tables = filtered
             elif any("indec" in h for h in table_hints):
                 indec_tables = [t.table_name for t in tables if "indec" in t.table_name]
@@ -459,6 +500,20 @@ async def execute_sandbox_step(
                     )
                     return []
 
+        # Smart table ordering: when the query asks for rates/indices,
+        # put pre-aggregated tables (with "tasa", "indice", "porcentaje" in name)
+        # first so the NL2SQL LLM sees them at the top of the context.
+        _query_lower = nl_query.lower()
+        if any(kw in _query_lower for kw in ("tasa", "indice", "índice", "porcentaje")):
+            _rate_keywords = ("tasa_", "indice_", "porcentaje_")
+            tables = sorted(
+                tables,
+                key=lambda t: (
+                    0 if any(kw in t.table_name for kw in _rate_keywords) else 1,
+                    t.row_count or 999_999_999,
+                ),
+            )
+
         # Enrich tables with semantic catalog metadata if available
         catalog_entries = await get_catalog_entries([t.table_name for t in tables[:50]], sandbox)
 
@@ -487,6 +542,10 @@ async def execute_sandbox_step(
                 part = f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
             tables_context_parts.append(part)
         tables_context = "\n\n".join(tables_context_parts)
+
+        # Inject table_notes (resolved early at top of function) into NL2SQL context
+        if table_notes:
+            tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{table_notes}"
 
         # Retrieve dynamic few-shot examples from successful past queries
         few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)

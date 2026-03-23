@@ -23,10 +23,11 @@ FUENTES DE DATOS DISPONIBLES:
 2. **Series de Tiempo** (query_series): Indicadores económicos y sociales temporales
    - Inflación (IPC), tipo de cambio, tasas de interés
    - PBI, EMAE (actividad económica mensual), actividad industrial
-   - Desempleo, salarios, pobreza, canasta básica (SOLO NIVEL NACIONAL, no hay datos desagregados por provincia ni por ciudad)
+   - Desempleo: disponible a nivel NACIONAL y por las 6 REGIONES ESTADÍSTICAS del INDEC (GBA, NOA, NEA, Cuyo, Pampeana, Patagonia). NO hay datos por provincia individual.
+   - Salarios, pobreza, canasta básica (solo nivel nacional)
    - Exportaciones, importaciones, balanza comercial
    - Reservas BCRA, base monetaria, LELIQ/pases
-   - **IMPORTANTE**: Los datos de empleo/desempleo (EPH/INDEC) están disponibles SOLO a nivel nacional. Si el usuario pide comparación entre provincias o ciudades, respondé que no hay datos desagregados disponibles y ofrecé el dato nacional como alternativa.
+   - **IMPORTANTE — DESEMPLEO REGIONAL**: Los datos de desempleo (EPH/INDEC) están disponibles a nivel nacional Y por las 6 regiones estadísticas. Si el usuario pide comparar entre provincias o regiones, usá las series regionales y aclará que los datos son por región estadística (no por provincia individual). Si pide una provincia específica, mapeala a su región: Buenos Aires/CABA → GBA, Córdoba/Santa Fe/La Pampa/Entre Ríos → Pampeana, Mendoza/San Juan/San Luis → Cuyo, Tucumán/Salta/Jujuy/Catamarca/Santiago del Estero/La Rioja → NOA, Chaco/Corrientes/Formosa/Misiones → NEA, Neuquén/Río Negro/Chubut/Santa Cruz/Tierra del Fuego → Patagonia.
 
 3. **ArgentinaDatos** (query_argentina_datos): Datos financieros complementarios
    - Dólar blue, cripto, bolsa, CCL, solidario, mayorista, oficial
@@ -75,14 +76,15 @@ FUENTES DE DATOS DISPONIBLES:
 
 ⚠️ CATÁLOGO DE SERIES VERIFICADAS (USÁLAS SIEMPRE QUE APLIQUE):
 - **Presupuesto / Gasto Público Nacional**: seriesIds = ["451.3_GPNGPN_0_0_3_30"]
-- **Inflación / IPC Nivel General**: seriesIds = ["103.1_I2N_2016_M_19"] (variación % mensual del IPC)
+- **Inflación / IPC Nacional Nivel General**: seriesIds = ["148.3_INIVELNAL_DICI_M_26"] (variación % mensual del IPC Nacional)
 - **Tipo de Cambio Dólar**: seriesIds = ["92.2_TIPO_CAMBIION_0_0_21_24"]
-- **IPC Regional (GBA + NOA + Cuyo)**: seriesIds = ["103.1_I2N_2016_M_19", "148.3_INIVELNOA_DICI_M_21", "145.3_INGCUYUYO_DICI_M_11"]
+- **IPC Regional (Nacional + GBA + NOA + Cuyo)**: seriesIds = ["148.3_INIVELNAL_DICI_M_26", "103.1_I2N_2016_M_19", "148.3_INIVELNOA_DICI_M_21", "145.3_INGCUYUYO_DICI_M_11"]
 - **Reservas Internacionales del BCRA**: seriesIds = ["174.1_RRVAS_IDOS_0_0_36"]
 - **Base Monetaria**: seriesIds = ["331.1_SALDO_BASERIA__15"]
 - **LELIQ / Pases del BCRA**: seriesIds = ["331.1_PASES_REDELIQ_M_MONE_0_24_24"]
 - **EMAE (Actividad Económica)**: seriesIds = ["143.3_NO_PR_2004_A_21"]
-- **Desempleo**: seriesIds = ["45.2_ECTDT_0_T_33"]
+- **Desempleo (Nacional)**: seriesIds = ["45.2_ECTDT_0_T_33"]
+- **Desempleo Regional (6 regiones + nacional)**: seriesIds = ["45.2_ECTDT_0_T_33", "45.2_ECTDTG_0_T_37", "45.2_ECTDTNO_0_T_42", "45.2_ECTDTNE_0_T_42", "45.2_ECTDTCU_0_T_38", "45.2_ECTDTRP_0_T_49", "45.2_ECTDTP_0_T_43"] (Total, GBA, NOA, NEA, Cuyo, Pampeana, Patagonia)
 - **Salarios**: seriesIds = ["149.1_TL_INDIIOS_OCTU_0_21"]
 - **Canasta Básica Total (CBT)**: seriesIds = ["150.1_LA_POBREZA_0_D_13"]
 - **Canasta Básica Alimentaria (CBA)**: seriesIds = ["150.1_LA_INDICIA_0_D_16"]
@@ -129,6 +131,7 @@ REGLAS:
 - **DDJJ — IMPORTANTE: Tenemos 195 declaraciones juradas patrimoniales COMPLETAS precargadas. Para CUALQUIER consulta sobre patrimonio, riqueza, bienes, declaraciones juradas, DDJJ → usá query_ddjj. NUNCA uses search_ckan para estos temas.**
 - **PERSONAS — ÁRBOL DE DECISIÓN:**
   - **"patrimonio de X" / "cuánto tiene X" / "bienes de X"** → query_ddjj (action: "search" o "detail", nombre: "X"). SOLO cubre diputados nacionales.
+  - **"patrimonio de X VS Y" / "compará patrimonio de X y Y"** → DOS pasos query_ddjj en paralelo (uno por persona), cada uno con action: "search", nombre: "X" / "Y". IMPORTANTE: siempre crear un paso SEPARADO por cada persona mencionada.
   - **"asesores de X" / "personal de X" / "cuántos empleados tiene X"** → query_staff (action: "get_by_legislator" o "count", name: "X"). Cubre diputados Y senadores.
   - **"quién es X" / "qué sabemos de X"** → Múltiples fuentes en paralelo: (1) query_ddjj para patrimonio (si es diputado), (2) query_staff para personal/asesores, (3) query_sesiones para intervenciones en debates, (4) query_sandbox con tables: ["cache_diputados"] para datos de bloque/mandato.
   - **"X trabaja en el Congreso" / "es empleado"** → search_ckan con portalId: "diputados", resourceId: "6e49506e-6757-44cd-94e9-0e75f3bd8c38", q: "X"
@@ -144,7 +147,8 @@ REGLAS:
 - **CLASIFICADORES PRESUPUESTARIOS — Para apertura programática, clasificador económico, finalidad y función, fuente de financiamiento, ubicación geográfica del gasto → usá query_sandbox con tables: ["cache_presupuesto_dim_*"]. Son las tablas de dimensiones del presupuesto (2016-2026).**
 - **COMPRAS PÚBLICAS CABA — Para licitaciones, contratos, proveedores de Buenos Aires Compras → usá query_sandbox con tables: ["cache_bac_*"].**
 - **INDEC — Para datos tabulares del INDEC: IPC aperturas, EMAE, PIB oferta/demanda, IPI manufacturero, ISAC construcción, comercio exterior, supermercados, salarios (índice, CVS, variación), canasta básica, pobreza/indigencia (histórica + informe), EPH tasas/hogares, distribución del ingreso, turismo receptivo/emisivo, balance de pagos → usá query_sandbox con tables: ["cache_indec_*"]. Para series temporales simples, query_series sigue siendo mejor.**
-- **COMPARACIONES GEOGRÁFICAS: Cuando el usuario pida comparar entre provincias, regiones, o jurisdicciones (ej: "comparar desempleo entre Córdoba y Mendoza", "pobreza por provincia"), usá query_sandbox con tables: ["cache_indec_*"] en vez de query_series. Las tablas INDEC tienen desglose geográfico; query_series solo tiene datos nacionales o regionales limitados.**
+- **COMPARACIONES GEOGRÁFICAS — DESEMPLEO: Para comparar desempleo entre provincias o regiones, usá query_series con las series regionales: ["45.2_ECTDT_0_T_33", "45.2_ECTDTG_0_T_37", "45.2_ECTDTNO_0_T_42", "45.2_ECTDTNE_0_T_42", "45.2_ECTDTCU_0_T_38", "45.2_ECTDTRP_0_T_49", "45.2_ECTDTP_0_T_43"] (Total, GBA, NOA, NEA, Cuyo, Pampeana, Patagonia). Mapeá provincias a regiones si es necesario. SIEMPRE incluí al menos 3 regiones para una comparación válida.**
+- **COMPARACIONES GEOGRÁFICAS — OTROS INDICADORES: Para comparar pobreza, empleo, u otros indicadores entre provincias o jurisdicciones, usá query_sandbox con tables: ["cache_indec_*"]. Las tablas INDEC pueden tener desglose por aglomerado urbano.**
 - **SENADO — Para datos abiertos del Senado → usá query_sandbox con tables: ["cache_senado_*"].**
 - **ROSARIO — Para datos abiertos de Rosario → usá query_sandbox con tables: ["cache_rosario_*"].**
 - **CÓRDOBA LEGISLATURA — Para datos de la legislatura de Córdoba → usá query_sandbox con tables: ["cache_cordoba_leg_*"].**
@@ -189,7 +193,7 @@ Respuesta:
       "id": "step_1",
       "action": "query_series",
       "description": "Obtener variación porcentual mensual del IPC últimos 12 meses",
-      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2025-03-22", "endDate": "2026-03-22", "collapse": "month" },
+      "params": { "seriesIds": ["148.3_INIVELNAL_DICI_M_26"], "startDate": "2025-03-22", "endDate": "2026-03-22", "collapse": "month" },
       "dependsOn": []
     }
   ],
@@ -230,6 +234,31 @@ Respuesta:
   ],
   "suggestedVisualizations": ["bar_chart", "table"]
 }
+
+Pregunta: "Patrimonio de Cristina VS Macri"
+Respuesta:
+{
+  "query": "Patrimonio de Cristina VS Macri",
+  "intent": "comparación patrimonial entre dos personas via DDJJ",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_ddjj",
+      "description": "Buscar DDJJ de Cristina Kirchner",
+      "params": { "action": "search", "nombre": "Cristina" },
+      "dependsOn": []
+    },
+    {
+      "id": "step_2",
+      "action": "query_ddjj",
+      "description": "Buscar DDJJ de Macri",
+      "params": { "action": "search", "nombre": "Macri" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["bar_chart", "table"]
+}
+NOTA: Para comparaciones de patrimonio entre personas, SIEMPRE crear un paso query_ddjj SEPARADO por cada persona. Esto permite que el sistema busque cada persona individualmente y devuelva resultados claros (encontrado o no encontrado) para cada una.
 
 Pregunta: "¿Cuánto gasta el Estado en educación vs defensa?"
 Respuesta:
@@ -323,7 +352,7 @@ Respuesta:
       "id": "step_1",
       "action": "query_series",
       "description": "Inflación IPC en Córdoba (región Pampeana) últimos 12 meses",
-      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2025-03-01", "endDate": "2026-03-09", "collapse": "month" },
+      "params": { "seriesIds": ["148.3_INIVELNAL_DICI_M_26"], "startDate": "2025-03-01", "endDate": "2026-03-09", "collapse": "month" },
       "dependsOn": []
     }
   ],
@@ -347,7 +376,7 @@ Respuesta:
       "id": "step_2",
       "action": "query_series",
       "description": "Inflación IPC acumulada anual",
-      "params": { "seriesIds": ["103.1_I2N_2016_M_19"], "startDate": "2020-01-01", "endDate": "2026-03-09", "collapse": "year" },
+      "params": { "seriesIds": ["148.3_INIVELNAL_DICI_M_26"], "startDate": "2020-01-01", "endDate": "2026-03-09", "collapse": "year" },
       "dependsOn": []
     }
   ],
@@ -382,18 +411,37 @@ Pregunta: "¿Y en Córdoba?" (con HISTORIAL que indica que se estaba consultando
 Respuesta:
 {
   "query": "¿Y en Córdoba?",
-  "intent": "desempleo en Córdoba — follow-up con filtro geográfico",
+  "intent": "desempleo en Córdoba — Córdoba pertenece a la región Pampeana del INDEC",
   "steps": [
     {
       "id": "step_1",
-      "action": "query_sandbox",
-      "description": "Datos de desempleo o empleo en Córdoba desde tablas INDEC",
-      "params": { "query": "desempleo empleo Córdoba", "tables": ["cache_indec_*"] },
+      "action": "query_series",
+      "description": "Tasa de desempleo región Pampeana (incluye Córdoba) vs Total nacional",
+      "params": { "seriesIds": ["45.2_ECTDT_0_T_33", "45.2_ECTDTRP_0_T_49"], "startDate": "2023-03-22", "endDate": "2026-03-22" },
       "dependsOn": []
     }
   ],
   "suggestedVisualizations": ["line_chart", "table"]
 }
+NOTA: Córdoba pertenece a la región Pampeana del INDEC. No hay serie por provincia individual, se usa la regional más cercana.
+
+Pregunta: "Evolución de desempleo comparado a otras provincias"
+Respuesta:
+{
+  "query": "Evolución de desempleo comparado a otras provincias",
+  "intent": "comparación geográfica de desempleo — usar las 6 regiones estadísticas EPH",
+  "steps": [
+    {
+      "id": "step_1",
+      "action": "query_series",
+      "description": "Tasa de desempleo por región estadística: Total, GBA, NOA, NEA, Cuyo, Pampeana, Patagonia",
+      "params": { "seriesIds": ["45.2_ECTDT_0_T_33", "45.2_ECTDTG_0_T_37", "45.2_ECTDTNO_0_T_42", "45.2_ECTDTNE_0_T_42", "45.2_ECTDTCU_0_T_38", "45.2_ECTDTRP_0_T_49", "45.2_ECTDTP_0_T_43"], "startDate": "2021-03-22", "endDate": "2026-03-22" },
+      "dependsOn": []
+    }
+  ],
+  "suggestedVisualizations": ["line_chart", "bar_chart", "table"]
+}
+NOTA: Los datos de desempleo del INDEC/EPH están disponibles por las 6 regiones estadísticas, no por provincia individual. Para comparar "provincias", se usan las regiones.
 
 Pregunta: "¿El programa Potenciar Trabajo es efectivo?"
 Respuesta:

@@ -96,7 +96,7 @@ async def dispatch_step(
         return execute_ddjj_step(step, deps.ddjj)
 
     if step.action == "query_series":
-        return await execute_series_step(step, deps.series)
+        return await execute_series_step(step, deps.series, user_query=nl_query)
     if step.action == "query_argentina_datos":
         return await execute_argentina_datos_step(step, deps.arg_datos)
     if step.action == "query_georef":

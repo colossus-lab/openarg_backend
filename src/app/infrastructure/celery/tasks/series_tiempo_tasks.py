@@ -24,8 +24,8 @@ API_URL = "https://apis.datos.gob.ar/series/api/series"
 
 SERIES_CATALOG = {
     "inflacion_ipc": {
-        "ids": "103.1_I2N_2016_M_19",
-        "title": "IPC - Indice de Precios al Consumidor",
+        "ids": "148.3_INIVELNAL_DICI_M_26",
+        "title": "IPC Nacional - Indice de Precios al Consumidor",
     },
     "tipo_cambio": {"ids": "92.2_TIPO_CAMBIION_0_0_21_24", "title": "Tipo de Cambio Peso/Dolar"},
     "emae": {

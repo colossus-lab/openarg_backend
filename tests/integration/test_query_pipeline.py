@@ -155,7 +155,7 @@ class TestFullPipelinePlanToAnalysis:
                     id="step_2",
                     action="query_series",
                     description="Fetch IPC series",
-                    params={"seriesIds": ["103.1_I2N_2016_M_19"]},
+                    params={"seriesIds": ["148.3_INIVELNAL_DICI_M_26"]},
                 ),
             ],
         )
@@ -232,7 +232,7 @@ class TestPipelineConnectorFailurePartial:
                     id="step_1",
                     action="query_series",
                     description="Fetch IPC",
-                    params={"seriesIds": ["103.1_I2N_2016_M_19"]},
+                    params={"seriesIds": ["148.3_INIVELNAL_DICI_M_26"]},
                 ),
                 PlanStep(
                     id="step_2",

@@ -20,11 +20,58 @@ from dataclasses import dataclass
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Common Spanish typos for economic/government terms.
+# Keys are the misspelled form (already normalized: no accents, lowercase);
+# values are the canonical spelling used in KEYWORD_ROUTES.
+_TYPO_MAP: dict[str, str] = {
+    # inflacion
+    "imflacion": "inflacion",
+    "infacion": "inflacion",
+    "inflasion": "inflacion",
+    "inflancion": "inflacion",
+    "imflasion": "inflacion",
+    "inflcion": "inflacion",
+    # dolar
+    "dlar": "dolar",
+    "doalr": "dolar",
+    # presupuesto
+    "presupesto": "presupuesto",
+    "presuupuesto": "presupuesto",
+    "presupueto": "presupuesto",
+    # desempleo
+    "desmpleo": "desempleo",
+    "desemmpleo": "desempleo",
+    "dessempleo": "desempleo",
+    # exportaciones / importaciones
+    "esportaciones": "exportaciones",
+    "inportaciones": "importaciones",
+    # patrimonio
+    "patrimnio": "patrimonio",
+    "patrimono": "patrimonio",
+    # reservas
+    "recervas": "reservas",
+    "rservas": "reservas",
+    # salario
+    "salrio": "salario",
+    "salairo": "salario",
+}
+
+# Pre-compiled regex for fast typo replacement (single pass).
+_TYPO_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in sorted(_TYPO_MAP, key=len, reverse=True)) + r")\b"
+)
+
+
+def _fix_typos(text: str) -> str:
+    """Replace common misspellings with their canonical forms."""
+    return _TYPO_RE.sub(lambda m: _TYPO_MAP[m.group(0)], text)
+
 
 def normalize_query(text: str) -> str:
     """Normalize a query string for keyword matching.
 
-    Strips accents, lowercases, removes punctuation and collapses whitespace.
+    Strips accents, lowercases, removes punctuation, collapses whitespace,
+    and corrects common Spanish typos for economic/government terms.
     """
     # Strip combining marks (accents)
     nfkd = unicodedata.normalize("NFKD", text)
@@ -32,7 +79,9 @@ def normalize_query(text: str) -> str:
     # Lowercase and remove punctuation (keep alphanumeric + spaces)
     cleaned = re.sub(r"[^\w\s]", " ", stripped.lower())
     # Collapse whitespace
-    return re.sub(r"\s+", " ", cleaned).strip()
+    result = re.sub(r"\s+", " ", cleaned).strip()
+    # Fix common typos
+    return _fix_typos(result)
 
 
 # ---------------------------------------------------------------------------
@@ -61,39 +110,40 @@ KEYWORD_ROUTES: dict[str, dict] = {
     # ── Economia: Inflacion / IPC / Precios ────────────────────
     "inflacion": {
         "action": "query_series",
-        "params": {"series_ids": ["103.1_I2N_2016_M_19"], "representation": "percent_change"},
+        "params": {"series_ids": ["148.3_INIVELNAL_DICI_M_26"], "representation": "percent_change"},
         "confidence": 0.95,
-        "description": "IPC variacion mensual (inflacion)",
+        "description": "IPC Nacional variacion mensual (inflacion)",
     },
     "ipc": {
         "action": "query_series",
-        "params": {"series_ids": ["103.1_I2N_2016_M_19"], "representation": "percent_change"},
+        "params": {"series_ids": ["148.3_INIVELNAL_DICI_M_26"], "representation": "percent_change"},
         "confidence": 0.95,
-        "description": "Indice de Precios al Consumidor",
+        "description": "Indice de Precios al Consumidor Nacional",
     },
     "precios": {
         "action": "query_series",
-        "params": {"series_ids": ["103.1_I2N_2016_M_19"]},
+        "params": {"series_ids": ["148.3_INIVELNAL_DICI_M_26"]},
         "confidence": 0.80,
-        "description": "Indice de precios",
+        "description": "Indice de precios nacional",
     },
     "costo de vida": {
         "action": "query_series",
-        "params": {"series_ids": ["103.1_I2N_2016_M_19"]},
+        "params": {"series_ids": ["148.3_INIVELNAL_DICI_M_26"]},
         "confidence": 0.85,
-        "description": "Costo de vida / IPC",
+        "description": "Costo de vida / IPC Nacional",
     },
     "ipc regional": {
         "action": "query_series",
         "params": {
             "series_ids": [
+                "148.3_INIVELNAL_DICI_M_26",
                 "103.1_I2N_2016_M_19",
                 "148.3_INIVELNOA_DICI_M_21",
                 "145.3_INGCUYUYO_DICI_M_11",
             ]
         },
         "confidence": 0.90,
-        "description": "IPC regional: GBA, NOA, Cuyo",
+        "description": "IPC regional: Nacional, GBA, NOA, Cuyo",
     },
     # ── Economia: Actividad ────────────────────────────────────
     "emae": {
@@ -161,13 +211,80 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "action": "query_series",
         "params": {"series_ids": ["45.2_ECTDT_0_T_33"]},
         "confidence": 0.95,
-        "description": "Tasa de desempleo",
+        "description": "Tasa de desempleo (nacional)",
     },
     "desocupacion": {
         "action": "query_series",
         "params": {"series_ids": ["45.2_ECTDT_0_T_33"]},
         "confidence": 0.95,
-        "description": "Tasa de desocupacion",
+        "description": "Tasa de desocupacion (nacional)",
+    },
+    # ── Desempleo regional (6 regiones EPH) ───────────────────
+    # These composite keywords override the national-only "desempleo"
+    # route when geographic comparison context is detected.
+    "desempleo regional": {
+        "action": "query_series",
+        "params": {
+            "series_ids": [
+                "45.2_ECTDT_0_T_33",
+                "45.2_ECTDTG_0_T_37",
+                "45.2_ECTDTNO_0_T_42",
+                "45.2_ECTDTNE_0_T_42",
+                "45.2_ECTDTCU_0_T_38",
+                "45.2_ECTDTRP_0_T_49",
+                "45.2_ECTDTP_0_T_43",
+            ]
+        },
+        "confidence": 0.95,
+        "description": "Desempleo por region: Total, GBA, NOA, NEA, Cuyo, Pampeana, Patagonia",
+    },
+    "desempleo por region": {
+        "action": "query_series",
+        "params": {
+            "series_ids": [
+                "45.2_ECTDT_0_T_33",
+                "45.2_ECTDTG_0_T_37",
+                "45.2_ECTDTNO_0_T_42",
+                "45.2_ECTDTNE_0_T_42",
+                "45.2_ECTDTCU_0_T_38",
+                "45.2_ECTDTRP_0_T_49",
+                "45.2_ECTDTP_0_T_43",
+            ]
+        },
+        "confidence": 0.95,
+        "description": "Desempleo por region estadistica del INDEC",
+    },
+    "desempleo por provincia": {
+        "action": "query_series",
+        "params": {
+            "series_ids": [
+                "45.2_ECTDT_0_T_33",
+                "45.2_ECTDTG_0_T_37",
+                "45.2_ECTDTNO_0_T_42",
+                "45.2_ECTDTNE_0_T_42",
+                "45.2_ECTDTCU_0_T_38",
+                "45.2_ECTDTRP_0_T_49",
+                "45.2_ECTDTP_0_T_43",
+            ]
+        },
+        "confidence": 0.95,
+        "description": "Desempleo por region (no hay datos por provincia, se usan regiones EPH)",
+    },
+    "desocupacion regional": {
+        "action": "query_series",
+        "params": {
+            "series_ids": [
+                "45.2_ECTDT_0_T_33",
+                "45.2_ECTDTG_0_T_37",
+                "45.2_ECTDTNO_0_T_42",
+                "45.2_ECTDTNE_0_T_42",
+                "45.2_ECTDTCU_0_T_38",
+                "45.2_ECTDTRP_0_T_49",
+                "45.2_ECTDTP_0_T_43",
+            ]
+        },
+        "confidence": 0.95,
+        "description": "Desocupacion por region estadistica del INDEC",
     },
     "empleo": {
         "action": "query_series",
@@ -1164,6 +1281,58 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "confidence": 0.85,
         "description": "Datos de hospitales",
     },
+    "tasa de mortalidad fetal": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_tasa_de_mortalidad_fetal_por_sexo",
+                "cache_tasa_de_mortalidad_fetal_total",
+            ],
+            "table_notes": (
+                "cache_tasa_de_mortalidad_fetal_por_sexo: tasa nacional por sexo (cols: anio TEXT, total, varon, mujer). "
+                "Cubre 1980-2012. Usar para consultas históricas o nacionales. "
+                "IMPORTANTE: la columna anio es TEXT, filtrar con WHERE anio = '1980' (con comillas). "
+                "cache_tasa_de_mortalidad_fetal_total: tasa por provincia (cols: indice_tiempo, mortalidad_fetal_total_argentina, ..._caba, ..._buenosaires, etc). "
+                "Cubre 2006-2023. Usar para consultas por provincia."
+            ),
+        },
+        "confidence": 0.95,
+        "description": "Tasa de mortalidad fetal: _por_sexo (nacional 1980-2012) o _total (por provincia 2006-2023)",
+    },
+    "mortalidad fetal": {
+        "action": "query_sandbox",
+        "params": {
+            "tables": [
+                "cache_tasa_de_mortalidad_fetal_por_sexo",
+                "cache_tasa_de_mortalidad_fetal_total",
+            ],
+            "table_notes": (
+                "cache_tasa_de_mortalidad_fetal_por_sexo: tasa nacional 1980-2012 (anio TEXT, total, varon, mujer). "
+                "cache_tasa_de_mortalidad_fetal_total: tasa por provincia 2006-2023. "
+                "Elegir según período y si pide desglose provincial."
+            ),
+        },
+        "confidence": 0.92,
+        "description": "Mortalidad fetal: elegir tabla según período y desglose",
+    },
+    "tasa de mortalidad infantil": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_tasa_de_mortalidad_infantil*"]},
+        "confidence": 0.95,
+        "description": "Tasa de mortalidad infantil (tabla pre-agregada)",
+    },
+    "mortalidad infantil": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_*mortalidad_infantil*", "cache_tasa_de_mortalidad_infantil*"]},
+        "confidence": 0.92,
+        "description": "Mortalidad infantil (prefiere tablas con tasas pre-calculadas)",
+    },
+    "tasa de mortalidad": {
+        "action": "query_sandbox",
+        "params": {"tables": ["cache_tasa_de_mortalidad*"]},
+        "confidence": 0.92,
+        "description": "Tasas de mortalidad pre-calculadas",
+    },
     "mortalidad": {
         "action": "query_sandbox",
         "params": {"tables": ["cache_*mortalid*", "cache_*defunci*"]},
@@ -1994,6 +2163,70 @@ _SORTED_KEYWORDS: list[str] = sorted(KEYWORD_ROUTES.keys(), key=len, reverse=Tru
 # 3. Functions
 # ---------------------------------------------------------------------------
 
+# National-only series IDs for employment/unemployment
+_NATIONAL_EMPLOYMENT_SERIES = {"45.2_ECTDT_0_T_33"}
+
+# Regional series IDs (7 series: Total + 6 regions)
+_REGIONAL_EMPLOYMENT_SERIES = [
+    "45.2_ECTDT_0_T_33",  # Total nacional
+    "45.2_ECTDTG_0_T_37",  # GBA
+    "45.2_ECTDTNO_0_T_42",  # NOA
+    "45.2_ECTDTNE_0_T_42",  # NEA
+    "45.2_ECTDTCU_0_T_38",  # Cuyo
+    "45.2_ECTDTRP_0_T_49",  # Pampeana
+    "45.2_ECTDTP_0_T_43",  # Patagonia
+]
+
+# Regex that detects geographic/comparison context in normalized queries
+_GEO_COMPARISON_RE = re.compile(
+    r"\b(?:provincia|provincias|region|regiones|regional|comparar|comparado"
+    r"|comparacion|geografic|gba|noa|nea|cuyo|pampeana|patagonia"
+    r"|otras provincias|otros paises"
+    r"|entre.*(?:cordoba|mendoza|tucuman|rosario|santa fe|buenos aires|salta|jujuy))\b"
+)
+
+
+def _upgrade_employment_to_regional(
+    normalized: str,
+    seen_actions: dict[str, RoutingHint],
+) -> dict[str, RoutingHint]:
+    """Replace the national-only employment hint with regional series.
+
+    When the normalized query contains both an employment keyword (desempleo,
+    desocupacion, empleo, mercado laboral) AND a geographic/comparison keyword
+    (provincia, comparar, region, etc.), the national-only series hint is
+    replaced with the 7-region series hint.
+    """
+    if not _GEO_COMPARISON_RE.search(normalized):
+        return seen_actions
+
+    # Check if any matched hint is the national-only employment series
+    national_key = None
+    for dedup_key, hint in seen_actions.items():
+        if (
+            hint.action == "query_series"
+            and set(hint.params.get("series_ids", [])) == _NATIONAL_EMPLOYMENT_SERIES
+        ):
+            national_key = dedup_key
+            break
+
+    if national_key is None:
+        return seen_actions
+
+    # Replace with regional hint
+    regional_hint = RoutingHint(
+        action="query_series",
+        params={"series_ids": list(_REGIONAL_EMPLOYMENT_SERIES)},
+        confidence=0.95,
+        description=("Desempleo por region: Total, GBA, NOA, NEA, Cuyo, Pampeana, Patagonia"),
+    )
+    del seen_actions[national_key]
+    regional_param_key = str(sorted(regional_hint.params.items()))
+    regional_dedup_key = f"{regional_hint.action}:{regional_param_key}"
+    seen_actions[regional_dedup_key] = regional_hint
+
+    return seen_actions
+
 
 def resolve_hints(query: str) -> list[RoutingHint]:
     """Resolve routing hints from a user query using deterministic keyword matching.
@@ -2055,6 +2288,11 @@ def resolve_hints(query: str) -> list[RoutingHint]:
                 or hint.confidence > seen_actions[dedup_key].confidence
             ):
                 seen_actions[dedup_key] = hint
+
+    # ── Geographic upgrade: when employment keywords co-occur with
+    # geographic/comparison terms, replace the national-only series
+    # hint with the regional one (all 7 series).
+    seen_actions = _upgrade_employment_to_regional(normalized, seen_actions)
 
     # Sort by confidence descending
     return sorted(seen_actions.values(), key=lambda h: h.confidence, reverse=True)

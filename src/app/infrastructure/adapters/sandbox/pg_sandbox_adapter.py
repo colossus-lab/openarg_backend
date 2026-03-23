@@ -138,16 +138,17 @@ class PgSandboxAdapter(ISQLSandbox):
     """Read-only SQL sandbox that executes queries against cached dataset tables."""
 
     def __init__(self) -> None:
-        # Prefer dedicated sandbox URL (read-only role in prod) over main DB
-        self._db_url = os.getenv(
-            "SANDBOX_DATABASE_URL",
-            os.getenv(
-                "DATABASE_URL",
-                "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db",
-            ),
-        )
         self._engine: Engine | None = None
         self._executor = ThreadPoolExecutor(max_workers=2)
+
+    @property
+    def _db_url(self) -> str:
+        """Resolve DB URL lazily so env var overrides (e.g. in tests) take effect."""
+        return (
+            os.getenv("SANDBOX_DATABASE_URL")
+            or os.getenv("DATABASE_URL")
+            or "postgresql+psycopg://postgres:postgres@localhost:5432/openarg_db"
+        )
 
     def _get_engine(self) -> Engine:
         if self._engine is None:
@@ -174,6 +175,7 @@ class PgSandboxAdapter(ISQLSandbox):
         # Auto-fix: wrap bare integers in WHERE/AND/OR clauses with quotes
         # Prevents "operator does not exist: text = integer" errors
         import re
+
         sql = re.sub(
             r"(=|<>|!=|>=|<=|>|<)\s*(\d{4,})\b(?!')",
             r"\1 '\2'",

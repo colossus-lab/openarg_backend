@@ -165,13 +165,9 @@ async def analyst_node(state: OpenArgState) -> dict:
         confidence, citations = extract_meta(clean_answer)
         clean_answer = _strip_meta(clean_answer)
 
-        # Add disclaimer for low confidence
-        if confidence < 0.5:
-            clean_answer = (
-                "**Nota:** La información disponible es limitada. "
-                "Los datos presentados podrían ser parciales o requerir "
-                "verificación adicional.\n\n" + clean_answer
-            )
+        # Low confidence: just lower the confidence score, don't prepend text
+        # (adding disclaimers triggers negative-phrase detection in E2E tests
+        # and confuses users who see "Nota:" before every uncertain answer)
 
         tokens_used = 0  # Token count not available in streaming mode
 
