@@ -249,10 +249,18 @@ Frontend repository: [colossus-lab/openarg_frontend](https://github.com/colossus
 
 ## Contributing
 
+We welcome contributions! Please read our guidelines before getting started:
+
+- [**Contributing Guide**](CONTRIBUTING.md) — Setup, workflow, PR process, and coding standards
+- [**Code of Conduct**](CODE_OF_CONDUCT.md) — Expected behavior and community standards
+- [**Security Policy**](SECURITY.md) — How to report vulnerabilities responsibly
+
+Quick steps:
+
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Run `make code.check` before committing
-4. Open a pull request against `main`
+4. Open a pull request against `staging` — the repo includes PR and issue templates to guide you
 
 ---
 
