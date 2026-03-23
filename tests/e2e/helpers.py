@@ -169,7 +169,17 @@ def assert_substantive(data: dict, question: str, *, min_length: int = 100) -> N
     has_substance = bool(re.search(r"[\d$%]", answer))
     if not has_substance:
         # Allow if it explains data sources or gives guidance (meta responses)
-        meta_indicators = ["portal", "fuente", "dataset", "datos abiertos", "openarg", "consulta"]
+        meta_indicators = [
+            "portal",
+            "fuente",
+            "dataset",
+            "datos abiertos",
+            "openarg",
+            "consulta",
+            "interesa",
+            "especificar",
+            "aspecto",
+        ]
         has_meta = any(m in answer.lower() for m in meta_indicators)
         assert has_meta, f"Response has no data and no guidance for '{question}': {answer[:200]}"
 

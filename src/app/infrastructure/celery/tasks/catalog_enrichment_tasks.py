@@ -16,8 +16,8 @@ import boto3
 from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
-from app.prompts import load_prompt
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
 

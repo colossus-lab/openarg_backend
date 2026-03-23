@@ -31,12 +31,23 @@ class TestComparisons:
     """Real comparison queries from production."""
 
     async def test_patrimonio_cristina_vs_macri(self, client):
+        """Neither Cristina (senator/ex-VP) nor Macri (ex-president) are in the
+        DDJJ dataset which only covers 195 Diputados Nacionales. The system
+        should acknowledge the query and explain the data-coverage limitation
+        rather than hallucinate numbers. It's OK to say 'no encontré' here
+        because the data genuinely doesn't exist."""
         data = await ask(client, "Patrimonio de Cristina VS Macri")
-        answer_contains(
-            data,
-            ["cristina", "macri", "patrimonio", "$"],
-            "Cristina vs Macri",
-            require_numbers=True,
+        answer_lower = data["answer"].lower()
+        # Should mention both names and explain the limitation
+        assert any(kw in answer_lower for kw in ["cristina", "kirchner"]), (
+            f"Should mention Cristina: {data['answer'][:200]}"
+        )
+        assert any(kw in answer_lower for kw in ["macri", "mauricio"]), (
+            f"Should mention Macri: {data['answer'][:200]}"
+        )
+        # Should mention diputados limitation or DDJJ scope
+        assert any(kw in answer_lower for kw in ["diputado", "ddjj", "declaraci", "dataset"]), (
+            f"Should explain DDJJ scope: {data['answer'][:200]}"
         )
 
     async def test_inflacion_nacional_vs_pba_vs_caba(self, client):

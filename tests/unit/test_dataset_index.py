@@ -144,7 +144,7 @@ class TestEconomicRoutes:
         hints = resolve_hints("inflacion ultimos 12 meses")
         top = hints[0]
         assert top.action == "query_series"
-        assert "103.1_I2N_2016_M_19" in top.params.get("series_ids", [])
+        assert "148.3_INIVELNAL_DICI_M_26" in top.params.get("series_ids", [])
 
     def test_dolar_blue(self):
         hints = resolve_hints("cotizacion dolar blue hoy")

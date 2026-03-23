@@ -22,13 +22,22 @@ from app.setup.ioc.provider_registry import create_async_ioc_container, get_prov
 pytestmark = pytest.mark.e2e
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def _e2e_env_check():
-    """Fail fast if required env vars are missing."""
+    """Fail fast if required env vars are missing.
+
+    Also ensures SANDBOX_DATABASE_URL falls back to DATABASE_URL so the
+    sandbox adapter reuses the same tunnel/connection in local E2E runs.
+    """
     required = ["DATABASE_URL", "REDIS_CACHE_URL"]
     missing = [v for v in required if not os.getenv(v)]
     if missing:
         pytest.skip(f"E2E tests require env vars: {', '.join(missing)}")
+
+    # When no dedicated sandbox URL is configured, reuse the main DB URL
+    # so the sandbox adapter connects through the same SSH tunnel.
+    if not os.getenv("SANDBOX_DATABASE_URL"):
+        os.environ["SANDBOX_DATABASE_URL"] = os.environ["DATABASE_URL"]
 
 
 @pytest.fixture(scope="session")

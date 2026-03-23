@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from app.domain.entities.connectors.data_result import ExecutionPlan, PlanStep
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
+from app.infrastructure.adapters.connectors.dataset_index import normalize_query
 from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -182,6 +183,7 @@ _ALWAYS_CLEAR_RE = re.compile(
     r"|bcra|deuda\s+externa|gasto\s+p[uú]blico|presupuesto"
     # Concrete entities / transparency
     r"|diputado.*patrimonio|patrimonio.*diputado"
+    r"|patrimonio\s+de\s+\w+"
     r"|ddjj|declaraci[oó]n\s+jurada|senador"
     r"|asesores?\s+de\s|personal\s+de\s|empleados?\s+de"
     r"|gasto\s+(en|social)"
@@ -192,6 +194,16 @@ _ALWAYS_CLEAR_RE = re.compile(
     r"|evoluci[oó]n\s+de"
     r"|c[oó]mo\s+viene"
     r"|compar[aá]\s"
+    # People queries
+    r"|qui[eé]n\s+(es|fue|era)"
+    # Meta / system questions
+    r"|qu[eé]\s+modelo|qu[eé]\s+llm|qu[eé]\s+tecnolog[ií]a"
+    # Law queries
+    r"|ley\s+de\s"
+    # Capability / scope queries
+    r"|todos\s+los\s+datos|a\s+qu[eé]\s+datos|qu[eé]\s+pod[eé]s|qu[eé]\s+sab[eé]s"
+    # Out-of-scope but recognisable topics
+    r"|criptomoneda|bitcoin|ethereum"
     # Any year mentioned makes the query concrete
     r"|\b20[12]\d\b"
     r")",
@@ -209,7 +221,9 @@ async def _classify_ambiguity(
     """
     # Fast-path: skip the LLM call entirely for queries that match
     # well-known indicators or complete question patterns.
-    if _ALWAYS_CLEAR_RE.search(question):
+    # Check both the raw question and the typo-corrected version so that
+    # common misspellings like "imflacion" still bypass the classifier.
+    if _ALWAYS_CLEAR_RE.search(question) or _ALWAYS_CLEAR_RE.search(normalize_query(question)):
         logger.debug("Ambiguity classifier: fast-path CLEAR for '%s'", question)
         return None
 
@@ -268,6 +282,12 @@ async def generate_plan(
     catalog_hints: str = "",
 ) -> ExecutionPlan:
     """Generate an execution plan from a user query using the LLM."""
+    # Correct common typos so that downstream regex checks, keyword routing,
+    # and the LLM all see the canonical spelling (e.g. "imflacion" → "inflacion").
+    corrected = normalize_query(question)
+    if corrected != question.lower().strip():
+        logger.info("Typo/normalization: '%s' → '%s'", question, corrected)
+
     # Classify ambiguity with a lightweight LLM call (skip if history)
     has_history = bool(memory_context and memory_context.strip())
     if not has_history:
@@ -302,9 +322,11 @@ async def generate_plan(
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
     # Resolve routing hints from the semantic dataset index
+    # (resolve_hints uses normalize_query internally, so typos are fixed)
     hints_text = _resolve_routing_hints(question)
 
-    user_content = f'FECHA ACTUAL: {today}\n\nPregunta del usuario: "{question}"'
+    # Send the corrected query to the LLM so it sees "inflacion" not "imflacion"
+    user_content = f'FECHA ACTUAL: {today}\n\nPregunta del usuario: "{corrected}"'
     if memory_context:
         user_content += f"\n\n{memory_context}"
     if hints_text:
@@ -379,7 +401,13 @@ async def generate_plan(
 
 def _fallback_plan(question: str) -> ExecutionPlan:
     """Regex-based classification fallback when LLM fails."""
+    # Use normalize_query to fix common typos before regex matching,
+    # so "imflacion" becomes "inflacion" and matches the economic pattern.
+    # We keep the original lowercased form as well because normalize_query
+    # strips punctuation (e.g. "datos.gob" loses the dot) which could
+    # break patterns that rely on it.
     lower = question.lower()
+    normalized = normalize_query(question)
 
     is_national = bool(
         re.search(
@@ -396,24 +424,35 @@ def _fallback_plan(question: str) -> ExecutionPlan:
         )
     )
 
-    # Detect economic queries for series de tiempo fallback
-    is_economic = bool(
+    # Detect economic queries for series de tiempo fallback.
+    # Check both the raw lowercased form and the typo-corrected normalized form
+    # so that "imflacion" (typo) matches the economic pattern.
+    _economic_re = re.compile(
+        r"(inflaci[oó]n|ipc|d[oó]lar|tipo\s+de\s+cambio|pbi|emae|reservas|tasa|salario|desempleo"
+        r"|exportaci|importaci|canasta|presupuesto|base\s+monetaria|leliq)",
+        re.IGNORECASE,
+    )
+    is_economic = bool(_economic_re.search(lower) or _economic_re.search(normalized))
+
+    # Detect DDJJ queries (patrimonio/bienes/DDJJ of any person, not just "diputado")
+    is_ddjj = bool(
         re.search(
-            r"(inflaci[oó]n|ipc|d[oó]lar|tipo\s+de\s+cambio|pbi|emae|reservas|tasa|salario|desempleo"
-            r"|exportaci|importaci|canasta|presupuesto|base\s+monetaria|leliq)",
+            r"(ddjj|declaraci[oó]n\s+jurada|patrimonio\s+de\b|bienes\s+de\b|cu[aá]nto\s+tiene\b)",
             lower,
             re.IGNORECASE,
         )
     )
 
-    # Detect DDJJ queries
-    is_ddjj = bool(
-        re.search(
-            r"(ddjj|declaraci[oó]n\s+jurada|patrimonio\s+de\s+diputado)", lower, re.IGNORECASE
-        )
+    # Detect comparison pattern: "X vs Y", "X versus Y", "X contra Y"
+    comparison_match = re.search(
+        r"patrimonio\s+de\s+(\w+)\s+(?:vs\.?|versus|contra|y)\s+(\w+)",
+        lower,
+        re.IGNORECASE,
     )
 
     if is_economic:
+        # Use normalized query so typos like "imflacion" become "inflacion"
+        economic_query = normalized if normalized != lower else question
         return ExecutionPlan(
             query=question,
             intent="Consulta económica (fallback)",
@@ -421,8 +460,8 @@ def _fallback_plan(question: str) -> ExecutionPlan:
                 PlanStep(
                     id="step_1",
                     action="query_series",
-                    description=f"Buscar series de tiempo: {question}",
-                    params={"query": question},
+                    description=f"Buscar series de tiempo: {economic_query}",
+                    params={"query": economic_query},
                 ),
                 PlanStep(
                     id="step_2",
@@ -433,6 +472,30 @@ def _fallback_plan(question: str) -> ExecutionPlan:
                 ),
             ],
             suggested_visualizations=["line_chart"],
+        )
+
+    if is_ddjj and comparison_match:
+        # Comparison: create two separate DDJJ steps
+        name_a = comparison_match.group(1).title()
+        name_b = comparison_match.group(2).title()
+        return ExecutionPlan(
+            query=question,
+            intent=f"Comparación patrimonial DDJJ: {name_a} vs {name_b} (fallback)",
+            steps=[
+                PlanStep(
+                    id="step_1",
+                    action="query_ddjj",
+                    description=f"Buscar DDJJ de {name_a}",
+                    params={"action": "search", "nombre": name_a},
+                ),
+                PlanStep(
+                    id="step_2",
+                    action="query_ddjj",
+                    description=f"Buscar DDJJ de {name_b}",
+                    params={"action": "search", "nombre": name_b},
+                ),
+            ],
+            suggested_visualizations=["bar_chart", "table"],
         )
 
     if is_ddjj:

@@ -31,8 +31,8 @@ SERIES_CATALOG: dict[str, dict] = {
         ],
     },
     "inflacion": {
-        "ids": ["103.1_I2N_2016_M_19"],
-        "description": "IPC Nivel General (índice base dic-2016=100). Usar con representation=percent_change para variación % mensual.",
+        "ids": ["148.3_INIVELNAL_DICI_M_26"],
+        "description": "IPC Nacional Nivel General (índice base dic-2016=100). Usar con representation=percent_change para variación % mensual.",
         "keywords": ["inflacion", "ipc", "precios", "indice de precios", "costo de vida"],
         "default_collapse": "month",
         "default_representation": "percent_change",
@@ -44,8 +44,8 @@ SERIES_CATALOG: dict[str, dict] = {
         "default_collapse": "month",
     },
     "ipc_regional": {
-        "ids": ["103.1_I2N_2016_M_19", "148.3_INIVELNOA_DICI_M_21", "145.3_INGCUYUYO_DICI_M_11"],
-        "description": "IPC Nivel General: GBA, NOA, y Cuyo (mensual)",
+        "ids": ["148.3_INIVELNAL_DICI_M_26", "103.1_I2N_2016_M_19", "148.3_INIVELNOA_DICI_M_21", "145.3_INGCUYUYO_DICI_M_11"],
+        "description": "IPC Regional: Nacional, GBA, NOA, y Cuyo (mensual)",
         "keywords": ["ipc regional", "precios regionales", "inflacion regional"],
         "default_collapse": "month",
     },
