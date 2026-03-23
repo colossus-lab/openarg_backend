@@ -684,9 +684,13 @@ async def execute_sandbox_step(
                 metadata={
                     "total_records": result.row_count,
                     # Omit generated SQL in production to prevent schema enumeration (SEC-03)
-                    **({
-                        "generated_sql": generated_sql,
-                    } if os.getenv("APP_ENV", "local") != "prod" else {}),
+                    **(
+                        {
+                            "generated_sql": generated_sql,
+                        }
+                        if os.getenv("APP_ENV", "local") != "prod"
+                        else {}
+                    ),
                     "truncated": result.truncated,
                     "columns": result.columns,
                     "fetched_at": datetime.now(UTC).isoformat(),

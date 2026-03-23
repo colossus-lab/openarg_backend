@@ -15,10 +15,18 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.argentinadatos.com/v1"
 
 # Allowlist of valid exchange rate types (SEC-06 audit fix)
-_ALLOWED_CASAS = frozenset({
-    "oficial", "blue", "bolsa", "contadoconliqui",
-    "cripto", "mayorista", "solidario", "tarjeta",
-})
+_ALLOWED_CASAS = frozenset(
+    {
+        "oficial",
+        "blue",
+        "bolsa",
+        "contadoconliqui",
+        "cripto",
+        "mayorista",
+        "solidario",
+        "tarjeta",
+    }
+)
 
 
 class ArgentinaDatosAdapter(IArgentinaDatosConnector):
@@ -30,7 +38,10 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
             if casa and casa.lower() not in _ALLOWED_CASAS:
                 raise ConnectorError(
                     error_code=ErrorCode.CN_ARGENTINA_DATOS_UNAVAILABLE,
-                    details={"action": "fetch_dolar", "reason": f"Invalid casa: {casa}. Allowed: {sorted(_ALLOWED_CASAS)}"},
+                    details={
+                        "action": "fetch_dolar",
+                        "reason": f"Invalid casa: {casa}. Allowed: {sorted(_ALLOWED_CASAS)}",
+                    },
                 )
             path = f"/cotizaciones/dolares/{casa}" if casa else "/cotizaciones/dolares"
             resp = await self._http.get(f"{BASE_URL}{path}")
