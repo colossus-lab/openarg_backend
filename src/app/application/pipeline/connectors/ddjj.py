@@ -20,7 +20,7 @@ def _not_found_result(searched_name: str) -> DataResult:
     return DataResult(
         source="ddjj:oficina_anticorrupcion",
         portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-        portal_url="https://www.argentina.gob.ar/anticorrupcion",
+        portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
         dataset_title=f'DDJJ de "{searched_name}" — NO ENCONTRADO',
         format="json",
         records=[
