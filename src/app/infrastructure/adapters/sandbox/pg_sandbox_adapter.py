@@ -171,6 +171,15 @@ class PgSandboxAdapter(ISQLSandbox):
                 error=validation_error,
             )
 
+        # Auto-fix: wrap bare integers in WHERE/AND/OR clauses with quotes
+        # Prevents "operator does not exist: text = integer" errors
+        import re
+        sql = re.sub(
+            r"(=|<>|!=|>=|<=|>|<)\s*(\d{4,})\b(?!')",
+            r"\1 '\2'",
+            sql,
+        )
+
         engine = self._get_engine()
         timeout_ms = timeout_seconds * 1000
 

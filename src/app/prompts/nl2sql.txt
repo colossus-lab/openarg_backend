@@ -8,14 +8,27 @@ Available tables, their columns (with types), and row counts:
 Rules:
 - Only reference the tables and columns listed above.
 - Always use double-quoted identifiers for column names that contain spaces, accents, or special characters.
-- Most columns are stored as TEXT (even numeric data). Use CAST(col AS NUMERIC) for numeric comparisons, aggregations, or arithmetic.
+- CRITICAL: Most columns are stored as TEXT (even years, numbers, dates). ALWAYS compare with text literals: WHERE anio = '1980', NOT WHERE anio = 1980. Use CAST(col AS NUMERIC) only for aggregations or arithmetic, never for simple equality/filtering.
 - When casting to NUMERIC, filter NULLs and non-numeric values first: WHERE col IS NOT NULL AND col ~ '^\-?\d+\.?\d*$'
 - Use ILIKE for case-insensitive text matching (Argentine data often has inconsistent casing and accents).
 - Limit results to 1000 rows max (add LIMIT 1000 if appropriate).
 - Return ONLY the SQL query, nothing else. No markdown, no explanation.
 - The query must be valid PostgreSQL syntax.
+- NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.
 - Use GROUP BY for summaries, ORDER BY for rankings.
 - For date columns stored as text, use standard comparison (WHERE fecha >= '2024-01-01').
+- When multiple candidate tables exist, choose the one that covers the requested time period or data.
+
+Table selection guidelines:
+- When the user asks for a RATE (tasa), prefer tables with 'tasa' in the name or small row counts with pre-aggregated data. Do NOT query raw record tables (hundreds of thousands of rows) and try to compute rates from them.
+- When multiple tables match, prefer the one whose name and description best match the user's question.
+- Tables with 'tasa', 'indice', 'porcentaje' in the name contain pre-calculated statistics. Prefer them over raw-data tables when the user asks for rates or indices.
+- IMPORTANT: Do NOT select internal ID columns, row numbers, or code columns (like jurisdiction codes or diagnostic codes) as if they were data values.
+- Si hay tablas con "tasa" o "indice" en el nombre, preferilas para consultas sobre tasas/indices.
+- Si hay tablas con "credito" o "presupuesto", preferilas para consultas de presupuesto.
+- Tablas más pequeñas con datos agregados suelen ser más útiles que tablas con millones de registros crudos.
+- NUNCA selecciones columnas que parezcan códigos internos (IDs, códigos CIE, códigos numéricos de jurisdicción) como valores de datos.
+- Cuando la pregunta pida un año específico, verificá que la tabla elegida cubra ese año.
 
 Examples:
 
@@ -33,3 +46,8 @@ SQL: SELECT provincia, gobernador, partido, inicio_mandato FROM cache_gobernador
 
 Question: ¿Cuál es el presupuesto total por jurisdicción en 2025?
 SQL: SELECT jurisdiccion_desc, SUM(CAST(credito_vigente AS NUMERIC)) AS total_credito FROM cache_presupuesto_credito WHERE ejercicio = '2025' AND credito_vigente ~ '^\-?\d+\.?\d*$' GROUP BY jurisdiccion_desc ORDER BY total_credito DESC LIMIT 50
+
+Question: ¿Cuál era la tasa de mortalidad fetal en 1980?
+SQL: SELECT * FROM cache_tasa_de_mortalidad_fetal_por_sexo WHERE anio = '1980' LIMIT 50
+
+{few_shot_block}

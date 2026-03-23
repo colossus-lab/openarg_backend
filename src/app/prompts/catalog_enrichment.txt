@@ -1,0 +1,9 @@
+Sos un experto en datos abiertos de Argentina. Analizá esta tabla de un portal de datos públicos:
+
+Nombre: {table_name}
+Columnas: {columns}
+Cantidad de filas: {row_count}
+{sample_text}
+
+Respondé SOLO con JSON válido (sin markdown):
+{{"display_name": "nombre descriptivo corto", "description": "1-2 oraciones de qué contiene", "domain": "economía|gobierno|congreso|social|infraestructura|geografía|otro", "subdomain": "subdominio específico", "key_columns": ["columnas importantes"], "column_types": {{"col": "descripción breve"}}, "sample_queries": ["3 preguntas en lenguaje natural respondibles con esta tabla"], "tags": ["etiquetas para búsqueda"]}}

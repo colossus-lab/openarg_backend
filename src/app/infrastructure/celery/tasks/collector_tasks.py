@@ -225,10 +225,21 @@ def _drop_table_if_exists(engine, table_name: str):
 
 
 def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean column names: strip whitespace, non-breaking spaces, normalize."""
+    """Clean column names: strip whitespace, non-breaking spaces, normalize.
+
+    If most columns are 'Unnamed: N', treat the first data row as the real header.
+    """
     df.columns = [
         col.replace("\xa0", "").strip() if isinstance(col, str) else col for col in df.columns
     ]
+
+    # Detect misplaced header: if >50% of columns are "Unnamed: N", promote first row
+    unnamed_count = sum(1 for c in df.columns if str(c).startswith("Unnamed:"))
+    if unnamed_count > len(df.columns) * 0.5 and len(df) > 1:
+        new_header = [str(v).strip() if pd.notna(v) else f"col_{i}" for i, v in enumerate(df.iloc[0])]
+        df = df.iloc[1:].reset_index(drop=True)
+        df.columns = new_header
+
     return df
 
 

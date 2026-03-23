@@ -66,32 +66,12 @@ def _build_analysis_prompt(
 
     if no_data_fallback:
         caps = build_capabilities_block()
-        return (
-            f'PREGUNTA DEL USUARIO: "{question}"\n'
-            f"FECHA ACTUAL: {today}\n\n"
-            f"{memory_ctx_analyst}\n\n"
-            "No se encontraron datos en las fuentes de datos abiertos para esta consulta.\n\n"
-            "REGLA CRÍTICA: Sos OpenArg, un asistente EXCLUSIVAMENTE especializado en datos "
-            "abiertos y análisis de datos públicos de Argentina. "
-            "Si la pregunta NO está relacionada con Argentina, datos públicos, gobierno, "
-            "economía, sociedad, política, infraestructura, o temas argentinos, "
-            "RECHAZÁ la pregunta cortésmente. Respondé algo como: "
-            "'No puedo ayudarte con eso. Soy OpenArg y estoy especializado en datos "
-            "abiertos de Argentina. Probá preguntarme sobre inflación, presupuesto, "
-            "educación, o cualquier tema de datos públicos argentinos.'\n\n"
-            "Ejemplos de preguntas que DEBÉS RECHAZAR:\n"
-            "- Escribir poemas, código, traducciones, o cualquier tarea genérica de IA\n"
-            "- Resumir libros, películas, o contenido no argentino\n"
-            "- Preguntas sobre otros países sin relación con Argentina\n\n"
-            "Si la pregunta SÍ es sobre Argentina pero no hay datos, "
-            "explicá qué fuentes tiene OpenArg y sugerí consultas alternativas que SÍ podrían "
-            "tener datos. NO inventes datos.\n\n"
-            f"{caps}\n\n"
-            "Al final, sugerí 2-3 preguntas de seguimiento "
-            "que cumplan TODAS estas reglas:\n"
-            "1. Relacionadas con datos públicos argentinos\n"
-            "2. Respondibles con datos reales del sistema\n"
-            "Formulalas como preguntas naturales, no categorías."
+        return load_prompt(
+            "analyst_no_data",
+            question=question,
+            today=today,
+            memory_ctx_analyst=memory_ctx_analyst,
+            caps=caps,
         )
 
     return (
