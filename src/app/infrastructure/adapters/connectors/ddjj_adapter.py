@@ -135,7 +135,7 @@ class DDJJAdapter:
             return DataResult(
                 source="ddjj:oficina_anticorrupcion",
                 portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-                portal_url="https://www.argentina.gob.ar/anticorrupcion",
+                portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
                 dataset_title="Estadísticas DDJJ",
                 format="json",
                 records=[],
@@ -161,7 +161,7 @@ class DDJJAdapter:
         return DataResult(
             source="ddjj:oficina_anticorrupcion",
             portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-            portal_url="https://www.argentina.gob.ar/anticorrupcion",
+            portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
             dataset_title="Estadísticas DDJJ Diputados Nacionales",
             format="json",
             records=[stats_record],
@@ -205,7 +205,7 @@ class DDJJAdapter:
         return DataResult(
             source="ddjj:oficina_anticorrupcion",
             portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
-            portal_url="https://www.argentina.gob.ar/anticorrupcion",
+            portal_url="https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos",
             dataset_title=title,
             format="json",
             records=formatted,
