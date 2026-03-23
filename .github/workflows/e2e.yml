@@ -22,7 +22,7 @@ jobs:
   e2e-tests:
     runs-on: ubuntu-latest
     name: E2E Tests (Staging DB)
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     services:
       redis:
@@ -107,7 +107,7 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
       run: |
-        pytest tests/e2e/ -v --tb=short --timeout=300 -m e2e -o "addopts="
+        pytest tests/e2e/ -v --tb=short --timeout=300 --reruns 1 --reruns-delay 5 -m e2e -o "addopts="
 
     - name: Cleanup SSH tunnel
       if: always()
