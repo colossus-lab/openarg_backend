@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -611,8 +612,13 @@ async def execute_sandbox_step(
             logger.warning("Sandbox query failed after retries: %s", result.error)
             # Last-resort fallback: try SELECT * LIMIT 10 on the first matched table
             if tables:
+                from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
+
                 fallback_table = tables[0].table_name
-                fallback_sql = f'SELECT * FROM "{fallback_table}" LIMIT 10'
+                fallback_sql = safe_table_query(fallback_table, 'SELECT * FROM "{}" LIMIT 10')
+                if fallback_sql is None:
+                    logger.warning("NL2SQL fallback: invalid table name %s", fallback_table)
+                    return []
                 logger.info("NL2SQL fallback: trying simple query on %s", fallback_table)
                 result = await sandbox.execute_readonly(fallback_sql, timeout_seconds=5)
                 if result.error:
@@ -677,7 +683,10 @@ async def execute_sandbox_step(
                 records=result.rows[:200],
                 metadata={
                     "total_records": result.row_count,
-                    "generated_sql": generated_sql,
+                    # Omit generated SQL in production to prevent schema enumeration (SEC-03)
+                    **({
+                        "generated_sql": generated_sql,
+                    } if os.getenv("APP_ENV", "local") != "prod" else {}),
                     "truncated": result.truncated,
                     "columns": result.columns,
                     "fetched_at": datetime.now(UTC).isoformat(),
