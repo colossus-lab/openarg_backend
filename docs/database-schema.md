@@ -4,21 +4,17 @@ PostgreSQL 16 with pgvector extension. All primary keys are UUID v4 with `gen_ra
 
 ## Entity-Relationship Diagram
 
-```
-┌──────────┐       ┌────────────────┐       ┌──────────┐
-│  users   │──1:N──│ conversations  │──1:N──│ messages  │
-└──────────┘       └────────────────┘       └──────────┘
-
-┌──────────┐       ┌────────────────┐       ┌──────────────────┐
-│ datasets │──1:N──│ dataset_chunks │       │ cached_datasets   │
-│          │──1:N──│                │       │  (download cache) │
-└──────────┘       └────────────────┘       └──────────────────┘
-                          ↑ pgvector(1024)
-
-┌──────────────┐       ┌──────────────────────┐       ┌──────────────┐
-│ user_queries │──1:N──│ query_dataset_links   │       │ agent_tasks  │
-│  (analytics) │──1:N──│                       │       │              │
-└──────────────┘       └──────────────────────┘       └──────────────┘
+```mermaid
+erDiagram
+    USERS ||--|{ CONVERSATIONS : "starts"
+    CONVERSATIONS ||--|{ MESSAGES : "contains"
+    
+    DATASETS ||--|{ DATASET_CHUNKS : "chunked_to"
+    DATASETS ||--o| CACHED_DATASETS : "tracked_in"
+    
+    USER_QUERIES ||--|{ AGENT_TASKS : "executes"
+    USER_QUERIES ||--|{ QUERY_DATASET_LINKS : "uses"
+    DATASETS ||--|{ QUERY_DATASET_LINKS : "linked_to"
 ```
 
 ## Tables
