@@ -286,7 +286,23 @@ def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, lis
         return _csv_load_inner(file_path, table_name, engine, csv_params, chunk_size)
 
 
-def _set_error_status(engine, dataset_id: str, error_msg: str):
+def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
+    """Ensure a cached_datasets row exists for this dataset (idempotent)."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at) "
+                    "VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW()) "
+                    "ON CONFLICT (table_name) DO NOTHING"
+                ),
+                {"did": dataset_id, "tn": table_name},
+            )
+    except Exception:
+        logger.debug("Could not ensure cached entry for %s", dataset_id, exc_info=True)
+
+
+def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: str | None = None):
     """Mark cached_datasets as permanently_failed for deterministic errors.
 
     Deterministic errors (unsupported format, file too large, zip bomb, etc.)
@@ -295,15 +311,32 @@ def _set_error_status(engine, dataset_id: str, error_msg: str):
     """
     try:
         with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE cached_datasets SET status = 'permanently_failed', "
-                    "error_message = :msg, retry_count = retry_count + 1, "
-                    "updated_at = NOW() "
-                    "WHERE dataset_id = CAST(:did AS uuid)"
-                ),
-                {"msg": error_msg[:500], "did": dataset_id},
-            )
+            if table_name:
+                # UPSERT: works even if no row exists yet
+                conn.execute(
+                    text(
+                        "INSERT INTO cached_datasets "
+                        "(dataset_id, table_name, status, error_message, retry_count, updated_at) "
+                        "VALUES (CAST(:did AS uuid), :tn, 'permanently_failed', :msg, 1, NOW()) "
+                        "ON CONFLICT (table_name) DO UPDATE SET "
+                        "status = 'permanently_failed', "
+                        "error_message = :msg, "
+                        "retry_count = cached_datasets.retry_count + 1, "
+                        "updated_at = NOW()"
+                    ),
+                    {"msg": error_msg[:500], "did": dataset_id, "tn": table_name},
+                )
+            else:
+                # Fallback: plain UPDATE when table_name is unknown
+                conn.execute(
+                    text(
+                        "UPDATE cached_datasets SET status = 'permanently_failed', "
+                        "error_message = :msg, retry_count = retry_count + 1, "
+                        "updated_at = NOW() "
+                        "WHERE dataset_id = CAST(:did AS uuid)"
+                    ),
+                    {"msg": error_msg[:500], "did": dataset_id},
+                )
     except Exception:
         logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
 
@@ -320,6 +353,7 @@ def collect_dataset(self, dataset_id: str):
 
     logger.info(f"Collecting dataset: {dataset_id}")
     engine = get_sync_engine()
+    table_name = None
 
     try:
         # Get dataset info
@@ -339,9 +373,14 @@ def collect_dataset(self, dataset_id: str):
         title, download_url, fmt = row.title, row.download_url, row.format
         fmt = _detect_format_from_url(download_url, fmt)
         portal, source_id = row.portal, row.source_id
+        table_name = _sanitize_table_name(title)
+
+        # Ensure a cached_datasets row exists EARLY so failures are always tracked
+        _ensure_cached_entry(engine, dataset_id, table_name)
 
         if not download_url:
             logger.warning(f"Dataset {dataset_id} has no download URL")
+            _set_error_status(engine, dataset_id, "no_download_url", table_name=table_name)
             return {"error": "no_download_url"}
 
         # Check retry_count — skip if permanently failed
@@ -360,7 +399,6 @@ def collect_dataset(self, dataset_id: str):
                 return {"error": "permanently_failed"}
 
         # Check if already cached
-        table_name = _sanitize_table_name(title)
         with engine.begin() as conn:
             cached = conn.execute(
                 text(
@@ -402,7 +440,10 @@ def collect_dataset(self, dataset_id: str):
                     if content_length > max_download_bytes:
                         logger.warning(f"Dataset {dataset_id} too large: {content_length} bytes")
                         _set_error_status(
-                            engine, dataset_id, f"file_too_large: {content_length} bytes"
+                            engine,
+                            dataset_id,
+                            f"file_too_large: {content_length} bytes",
+                            table_name=table_name,
                         )
                         return {"error": f"file_too_large: {content_length} bytes"}
             except Exception:
@@ -464,7 +505,7 @@ def collect_dataset(self, dataset_id: str):
                     zf = zipfile.ZipFile(tmp_path)
                 except zipfile.BadZipFile:
                     logger.warning(f"ZIP {dataset_id}: not a valid ZIP file")
-                    _set_error_status(engine, dataset_id, "bad_zip_file")
+                    _set_error_status(engine, dataset_id, "bad_zip_file", table_name=table_name)
                     return {"error": "bad_zip_file"}
                 total_size = sum(info.file_size for info in zf.infolist())
                 if total_size > max_decompressed:
@@ -472,7 +513,10 @@ def collect_dataset(self, dataset_id: str):
                         f"ZIP {dataset_id}: decompressed size {total_size} exceeds limit"
                     )
                     _set_error_status(
-                        engine, dataset_id, f"zip_too_large: {total_size} bytes decompressed"
+                        engine,
+                        dataset_id,
+                        f"zip_too_large: {total_size} bytes decompressed",
+                        table_name=table_name,
                     )
                     return {"error": f"zip_too_large: {total_size} bytes"}
 
@@ -555,7 +599,9 @@ def collect_dataset(self, dataset_id: str):
                         break
                 if not parsed:
                     logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
-                    _set_error_status(engine, dataset_id, "zip_no_parseable_file")
+                    _set_error_status(
+                        engine, dataset_id, "zip_no_parseable_file", table_name=table_name
+                    )
                     return {"error": "zip_no_parseable_file"}
 
             elif fmt == "json":
@@ -600,7 +646,9 @@ def collect_dataset(self, dataset_id: str):
                     df = pd.DataFrame(records)
                 else:
                     logger.warning(f"GeoJSON {dataset_id}: no features found")
-                    _set_error_status(engine, dataset_id, "geojson_no_features")
+                    _set_error_status(
+                        engine, dataset_id, "geojson_no_features", table_name=table_name
+                    )
                     return {"error": "geojson_no_features"}
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
@@ -622,14 +670,16 @@ def collect_dataset(self, dataset_id: str):
                     logger.warning(
                         "XML %s: pd.read_xml failed, skipping", dataset_id, exc_info=True
                     )
-                    _set_error_status(engine, dataset_id, "xml_parse_failed")
+                    _set_error_status(engine, dataset_id, "xml_parse_failed", table_name=table_name)
                     return {"error": "xml_parse_failed"}
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             else:
                 logger.warning(f"Unsupported format: {fmt}")
-                _set_error_status(engine, dataset_id, f"unsupported_format: {fmt}")
+                _set_error_status(
+                    engine, dataset_id, f"unsupported_format: {fmt}", table_name=table_name
+                )
                 return {"error": f"unsupported_format: {fmt}"}
 
             # Update cache status
@@ -731,7 +781,7 @@ def collect_dataset(self, dataset_id: str):
         )
         if non_retryable:
             logger.warning("Non-retryable error for %s: %s", dataset_id, exc_str[:200])
-            _set_error_status(engine, dataset_id, exc_str[:500])
+            _set_error_status(engine, dataset_id, exc_str[:500], table_name=table_name)
             return {"error": "non_retryable"}
 
         logger.exception(f"Collection failed for dataset {dataset_id}")
