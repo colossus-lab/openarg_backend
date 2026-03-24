@@ -4,18 +4,23 @@ OpenArg uses Celery with Redis as broker for background processing. The system r
 
 ## Architecture
 
-```
-                              ┌─────────────────────┐
-                              │     Redis Broker     │
-                              │  (redis://...:6379)  │
-                              └──────────┬──────────┘
-                                         │
-              ┌──────────┬───────────────┼───────────────┬──────────┬──────────┬──────────┬──────────┐
-              ▼          ▼               ▼               ▼          ▼          ▼          ▼          ▼
-    ┌─────────────┐ ┌──────────┐ ┌────────────┐ ┌───────────┐ ┌────────────┐ ┌────────┐ ┌──────┐ ┌────────┐
-    │   scraper   │ │embedding │ │ collector  │ │  analyst  │ │transparency│ │ ingest │ │  s3  │ │  beat  │
-    │  queue (2)  │ │queue (8) │ │ queue (4)  │ │ queue (2) │ │ queue (2)  │ │queue(2)│ │q.(2) │ │scheduler│
-    └─────────────┘ └──────────┘ └────────────┘ └───────────┘ └────────────┘ └────────┘ └──────┘ └────────┘
+```mermaid
+graph TD
+    Broker[(Redis Broker)]
+    
+    subgraph Workers ["Celery Workers"]
+        direction LR
+        Scraper[Scraper Queue\nconcurrency 2]
+        Embedding[Embedding Queue\nconcurrency 8]
+        Collector[Collector Queue\nconcurrency 4]
+        Analyst[Analyst Queue\nconcurrency 2]
+        Transparency[Transparency Queue\nconcurrency 2]
+        Ingest[Ingest Queue\nconcurrency 2]
+        S3[S3 Queue\nconcurrency 2]
+    end
+    
+    Beat[Beat Scheduler] --> Broker
+    Broker --> Workers
 ```
 
 ## Celery Configuration (`infrastructure/celery/app.py`)
@@ -49,6 +54,21 @@ Fetches dataset metadata from CKAN portals and indexes them.
 4. Select best resource (prefer CSV > JSON > XLSX).
 5. Upsert dataset into PostgreSQL.
 6. Dispatch `index_dataset_embedding.delay(dataset_id)` for each new/updated dataset.
+
+**Task Flow:**
+```mermaid
+sequenceDiagram
+    participant W as Scraper Worker
+    participant P as CKAN Portal API
+    participant DB as PostgreSQL
+    participant E as Embedding Queue
+
+    W->>P: Fetch metadata (batch 100)
+    P-->>W: Metadata results
+    W->>W: Select best resource (CSV/JSON/XLSX)
+    W->>DB: Upsert dataset
+    W->>E: Dispatch index_dataset_embedding(id)
+```
 
 **Supported portals:**
 - `datos_gob_ar` — datos.gob.ar (national)
@@ -94,6 +114,22 @@ Downloads a dataset file and caches it as a PostgreSQL table.
 9. Update cached_datasets with status "ready", row_count, columns_json.
 10. Update parent dataset: `is_cached=True`, `row_count`.
 
+**Task Flow:**
+```mermaid
+sequenceDiagram
+    participant W as Collector Worker
+    participant DB as PostgreSQL
+    participant DS as Data Source (URL)
+
+    W->>DB: Load metadata
+    W->>DB: Update status to "downloading"
+    W->>DS: Download file (HTTPX)
+    DS-->>W: File data
+    W->>W: Parse with pandas
+    W->>DB: to_sql(cache_{title})
+    W->>DB: Update status to "ready" + row_count
+```
+
 ### Analyst Tasks (`tasks/analyst_tasks.py`)
 
 #### `analyze_query(query_id, question)`
@@ -118,6 +154,26 @@ Full multi-agent analysis pipeline.
    - Dataset metadata
    - Real sample data (when available)
    - Execution plan context
+
+**Task Flow:**
+```mermaid
+sequenceDiagram
+    participant W as Analyst Worker
+    participant L as LLM (Bedrock)
+    participant DB as PostgreSQL
+    participant C as Collector Queue
+
+    W->>L: Generate execution plan
+    L-->>W: Plan (JSON)
+    W->>DB: Vector search datasets
+    DB-->>W: Top matched datasets
+    alt Dataset not cached
+        W->>C: Dispatch collect_dataset(id)
+    end
+    W->>DB: Fetch sample rows
+    W->>L: Generate final analysis
+    L-->>W: Markdown analysis
+```
 
 **Status progression:** `pending` → `planning` → `collecting` → `analyzing` → `completed` (or `error`)
 
