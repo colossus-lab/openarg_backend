@@ -118,7 +118,7 @@ class SmartQueryV2Response(BaseModel):
 
 
 @router.post("/smart", response_model=SmartQueryV2Response, dependencies=[Depends(_verify_api_key)])
-@limiter.limit("15/minute")  # type: ignore[untyped-decorator]
+@limiter.limit("10/minute;50/day")  # type: ignore[untyped-decorator]
 @inject  # type: ignore[untyped-decorator]
 async def smart_query_v2(
     request: Request,
