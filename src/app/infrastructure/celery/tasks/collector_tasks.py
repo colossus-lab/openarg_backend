@@ -203,11 +203,15 @@ def _csv_load_inner(
     csv_params: dict,
     chunk_size: int,
     max_rows: int = 0,
+    source_dataset_id: str | None = None,
+    force_append: bool = False,
 ) -> tuple[int, list[str], bool]:
     """Inner CSV loading loop.
 
     Returns ``(total_rows_written, columns, was_truncated)``.
     When *max_rows* > 0 the loader stops after writing that many rows.
+    When *source_dataset_id* is provided, adds ``_source_dataset_id`` column.
+    When *force_append* is True, all chunks use ``if_exists='append'``.
     """
     total_rows = 0
     columns: list[str] = []
@@ -227,7 +231,12 @@ def _csv_load_inner(
             if len(chunk_df) > remaining:
                 chunk_df = chunk_df.iloc[:remaining]
                 truncated = True
-        mode = "replace" if is_first else "append"
+        if source_dataset_id:
+            chunk_df["_source_dataset_id"] = source_dataset_id
+        if force_append:
+            mode = "append"
+        else:
+            mode = "replace" if is_first else "append"
         _to_sql_safe(chunk_df, table_name, engine, if_exists=mode, index=False)
         total_rows += len(chunk_df)
         if is_first:
@@ -308,7 +317,13 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
             raise
 
 
-def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str], bool]:
+def _load_csv_chunked(
+    file_path: str,
+    table_name: str,
+    engine,
+    source_dataset_id: str | None = None,
+    force_append: bool = False,
+) -> tuple[int, list[str], bool]:
     """Load a CSV file into PostgreSQL in chunks.
 
     Returns ``(total_rows, columns, was_truncated)``.
@@ -318,13 +333,27 @@ def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, lis
     chunk_size = 50_000
     try:
         return _csv_load_inner(
-            file_path, table_name, engine, csv_params, chunk_size, max_rows=MAX_TABLE_ROWS
+            file_path,
+            table_name,
+            engine,
+            csv_params,
+            chunk_size,
+            max_rows=MAX_TABLE_ROWS,
+            source_dataset_id=source_dataset_id,
+            force_append=force_append,
         )
     except pd.errors.ParserError:
         logger.info("CSV C-parser failed, retrying with Python engine")
         csv_params["engine"] = "python"
         return _csv_load_inner(
-            file_path, table_name, engine, csv_params, chunk_size, max_rows=MAX_TABLE_ROWS
+            file_path,
+            table_name,
+            engine,
+            csv_params,
+            chunk_size,
+            max_rows=MAX_TABLE_ROWS,
+            source_dataset_id=source_dataset_id,
+            force_append=force_append,
         )
 
 
@@ -381,6 +410,47 @@ def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: st
                 )
     except Exception:
         logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
+
+
+def _check_schema_compat(engine, table_name: str, df: pd.DataFrame) -> bool:
+    """Check if df columns are compatible with existing table for append.
+
+    Returns True if schemas are compatible (subset in either direction), False otherwise.
+    """
+    try:
+        with engine.connect() as conn:
+            existing_cols = set(
+                r.column_name
+                for r in conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = :tn AND table_schema = 'public'"
+                    ),
+                    {"tn": table_name},
+                ).fetchall()
+            )
+            conn.rollback()
+        new_cols = set(df.columns) - {"_source_dataset_id"}
+        existing_cols_clean = existing_cols - {"_source_dataset_id"}
+        return new_cols.issubset(existing_cols_clean) or existing_cols_clean.issubset(new_cols)
+    except Exception:
+        return True  # If check fails, allow append
+
+
+def _update_row_count_after_append(engine, table_name: str):
+    """Update row_count in cached_datasets after appending rows."""
+    try:
+        with engine.begin() as conn:
+            new_count = conn.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar()  # noqa: S608
+            conn.execute(
+                text(
+                    "UPDATE cached_datasets SET row_count = :cnt, updated_at = NOW() "
+                    "WHERE table_name = :tn"
+                ),
+                {"cnt": new_count, "tn": table_name},
+            )
+    except Exception:
+        logger.debug("Could not update row_count after append for %s", table_name, exc_info=True)
 
 
 @celery_app.task(
@@ -440,29 +510,63 @@ def collect_dataset(self, dataset_id: str):
                 )
                 return {"error": "permanently_failed"}
 
-        # Check if already cached
+        # Check if already cached — distinguish same-resource vs sibling-resource
+        append_mode = False
         with engine.begin() as conn:
             cached = conn.execute(
                 text(
-                    "SELECT id FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid) AND status = 'ready'"
+                    "SELECT id, dataset_id FROM cached_datasets "
+                    "WHERE table_name = :tn AND status = 'ready'"
                 ),
-                {"did": dataset_id},
+                {"tn": table_name},
             ).fetchone()
 
         if cached:
-            logger.info(f"Dataset {dataset_id} already cached as {table_name}")
-            return {"dataset_id": dataset_id, "table_name": table_name, "status": "already_cached"}
+            cached_did = str(cached.dataset_id)
+            if cached_did == dataset_id:
+                # Same resource — truly already cached, skip
+                logger.info(f"Dataset {dataset_id} already cached as {table_name}")
+                return {
+                    "dataset_id": dataset_id,
+                    "table_name": table_name,
+                    "status": "already_cached",
+                }
+            else:
+                # Sibling resource (same title+portal, different dataset_id) — append
+                logger.info(
+                    f"Dataset {dataset_id} is sibling of {cached_did} for table {table_name}, "
+                    "will attempt append"
+                )
+                # Check if this specific resource already contributed rows
+                try:
+                    with engine.connect() as conn:
+                        already_appended = conn.execute(
+                            text(
+                                f'SELECT EXISTS(SELECT 1 FROM "{table_name}" WHERE _source_dataset_id = :did LIMIT 1)'
+                            ),  # noqa: S608
+                            {"did": dataset_id},
+                        ).scalar()
+                        conn.rollback()
+                    if already_appended:
+                        logger.info(
+                            f"Dataset {dataset_id} already appended to {table_name}, skipping"
+                        )
+                        return {"dataset_id": dataset_id, "status": "already_appended"}
+                except Exception:
+                    pass  # Column might not exist yet (old tables), proceed with append
+                append_mode = True
 
-        # Update status
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
-                    ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
-                """),
-                {"did": dataset_id, "tn": table_name},
-            )
+        # Update status (skip for append_mode — table is already 'ready')
+        if not append_mode:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
+                        VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
+                        ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
+                    """),
+                    {"did": dataset_id, "tn": table_name},
+                )
 
         # Stream download to temp file (memory-safe for large files)
         max_download_bytes = 500 * 1024 * 1024  # 500 MB
@@ -538,7 +642,46 @@ def collect_dataset(self, dataset_id: str):
 
             if fmt in ("csv", "txt"):
                 # Chunked CSV loading — never loads full file into memory
-                row_count, columns, csv_truncated = _load_csv_chunked(tmp_path, table_name, engine)
+                # For append mode, do a quick schema check using first chunk
+                if append_mode:
+                    try:
+                        _csv_params = _detect_csv_params(tmp_path)
+                        preview_df = pd.read_csv(tmp_path, nrows=5, **_csv_params)
+                        with engine.connect() as conn:
+                            existing_cols = set(
+                                r.column_name
+                                for r in conn.execute(
+                                    text(
+                                        "SELECT column_name FROM information_schema.columns "
+                                        "WHERE table_name = :tn AND table_schema = 'public'"
+                                    ),
+                                    {"tn": table_name},
+                                ).fetchall()
+                            )
+                            conn.rollback()
+                        new_cols = set(preview_df.columns) - {"_source_dataset_id"}
+                        existing_cols_clean = existing_cols - {"_source_dataset_id"}
+                        if not new_cols.issubset(
+                            existing_cols_clean
+                        ) and not existing_cols_clean.issubset(new_cols):
+                            logger.info(
+                                f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                            )
+                            return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    except Exception:
+                        logger.debug(
+                            "Schema preview failed for %s, proceeding anyway",
+                            dataset_id,
+                            exc_info=True,
+                        )
+
+                row_count, columns, csv_truncated = _load_csv_chunked(
+                    tmp_path,
+                    table_name,
+                    engine,
+                    source_dataset_id=dataset_id,
+                    force_append=append_mode,
+                )
                 if csv_truncated:
                     sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
                     logger.warning(
@@ -588,7 +731,11 @@ def collect_dataset(self, dataset_id: str):
                                         break
                                     out.write(block)
                             row_count, columns, csv_trunc = _load_csv_chunked(
-                                csv_tmp_path, table_name, engine
+                                csv_tmp_path,
+                                table_name,
+                                engine,
+                                source_dataset_id=dataset_id,
+                                force_append=append_mode,
                             )
                             if csv_trunc:
                                 sampled_note = (
@@ -621,7 +768,16 @@ def collect_dataset(self, dataset_id: str):
                                 dataset_id,
                                 MAX_TABLE_ROWS,
                             )
-                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                        df["_source_dataset_id"] = dataset_id
+                        if append_mode:
+                            if not _check_schema_compat(engine, table_name, df):
+                                logger.info(
+                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                )
+                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                        else:
+                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -654,7 +810,16 @@ def collect_dataset(self, dataset_id: str):
                                 MAX_TABLE_ROWS,
                             )
                             df = df.iloc[:MAX_TABLE_ROWS]
-                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                        df["_source_dataset_id"] = dataset_id
+                        if append_mode:
+                            if not _check_schema_compat(engine, table_name, df):
+                                logger.info(
+                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                )
+                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                        else:
+                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -687,7 +852,16 @@ def collect_dataset(self, dataset_id: str):
                                 MAX_TABLE_ROWS,
                             )
                             df = df.iloc[:MAX_TABLE_ROWS]
-                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                        df["_source_dataset_id"] = dataset_id
+                        if append_mode:
+                            if not _check_schema_compat(engine, table_name, df):
+                                logger.info(
+                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                )
+                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                        else:
+                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -725,7 +899,16 @@ def collect_dataset(self, dataset_id: str):
                         MAX_TABLE_ROWS,
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "geojson":
@@ -762,7 +945,16 @@ def collect_dataset(self, dataset_id: str):
                         MAX_TABLE_ROWS,
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
@@ -776,7 +968,16 @@ def collect_dataset(self, dataset_id: str):
                         dataset_id,
                         MAX_TABLE_ROWS,
                     )
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "ods":
@@ -790,7 +991,16 @@ def collect_dataset(self, dataset_id: str):
                         dataset_id,
                         MAX_TABLE_ROWS,
                     )
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "xml":
@@ -811,7 +1021,16 @@ def collect_dataset(self, dataset_id: str):
                         MAX_TABLE_ROWS,
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             else:
@@ -820,6 +1039,27 @@ def collect_dataset(self, dataset_id: str):
                     engine, dataset_id, f"unsupported_format: {fmt}", table_name=table_name
                 )
                 return {"error": f"unsupported_format: {fmt}"}
+
+            if append_mode:
+                # Append mode: update row_count from actual table, keep status 'ready'
+                _update_row_count_after_append(engine, table_name)
+                # Also mark this dataset as cached in datasets table
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "UPDATE datasets SET is_cached = true, row_count = :rows "
+                            "WHERE id = CAST(:id AS uuid)"
+                        ),
+                        {"rows": row_count, "id": dataset_id},
+                    )
+                logger.info(f"Dataset {dataset_id} appended {row_count} rows to table {table_name}")
+                return {
+                    "dataset_id": dataset_id,
+                    "table_name": table_name,
+                    "rows": row_count,
+                    "status": "appended",
+                    "s3_key": s3_key,
+                }
 
             # Update cache status (include sampling note when truncated)
             columns_json = json.dumps([str(c) for c in columns])
