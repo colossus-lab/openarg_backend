@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 from urllib.parse import urlparse
@@ -58,10 +59,18 @@ def _should_verify_ssl(url: str) -> bool:
 # re-dispatches) the task is marked permanently_failed and never retried.
 MAX_TOTAL_ATTEMPTS = 5
 
+# Maximum rows to store per dataset table.  Datasets exceeding this limit
+# are truncated to the first MAX_TABLE_ROWS rows.
+MAX_TABLE_ROWS = 500_000
 
-def _sanitize_table_name(name: str) -> str:
+
+def _sanitize_table_name(name: str, portal: str = "") -> str:
     clean = re.sub(r"[^a-z0-9_]", "_", name.lower())
     clean = re.sub(r"_+", "_", clean).strip("_")
+    if portal:
+        portal_clean = re.sub(r"[^a-z0-9_]", "_", portal.lower()).strip("_")
+        # Enforce PostgreSQL 63-char identifier limit
+        return f"cache_{portal_clean[:15]}_{clean[:45]}"
     return f"cache_{clean[:50]}"
 
 
@@ -188,11 +197,42 @@ def _detect_csv_params(file_path: str) -> dict:
 
 
 def _csv_load_inner(
-    file_path: str, table_name: str, engine, csv_params: dict, chunk_size: int
-) -> tuple[int, list[str]]:
-    """Inner CSV loading loop."""
+    file_path: str,
+    table_name: str,
+    engine,
+    csv_params: dict,
+    chunk_size: int,
+    max_rows: int = 0,
+) -> tuple[int, list[str], bool]:
+    """Inner CSV loading loop.
+
+    Returns ``(total_rows_written, columns, was_truncated)``.
+    When *max_rows* > 0 the loader stops after writing that many rows.
+    """
     total_rows = 0
     columns: list[str] = []
+    truncated = False
+
+    def _write_chunk(chunk_df: pd.DataFrame, is_first: bool) -> bool:
+        """Write a single chunk, truncating if the cap would be exceeded.
+
+        Returns True when the row cap has been reached.
+        """
+        nonlocal total_rows, columns, truncated
+        if max_rows:
+            remaining = max_rows - total_rows
+            if remaining <= 0:
+                truncated = True
+                return True
+            if len(chunk_df) > remaining:
+                chunk_df = chunk_df.iloc[:remaining]
+                truncated = True
+        mode = "replace" if is_first else "append"
+        _to_sql_safe(chunk_df, table_name, engine, if_exists=mode, index=False)
+        total_rows += len(chunk_df)
+        if is_first:
+            columns = list(chunk_df.columns)
+        return truncated
 
     reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
     for i, chunk_df in enumerate(reader):
@@ -201,20 +241,14 @@ def _csv_load_inner(
             csv_params["sep"] = ";"
             reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
             for j, retry_df in enumerate(reader):
-                mode = "replace" if j == 0 else "append"
-                _to_sql_safe(retry_df, table_name, engine, if_exists=mode, index=False)
-                total_rows += len(retry_df)
-                if j == 0:
-                    columns = list(retry_df.columns)
-            return total_rows, columns
+                if _write_chunk(retry_df, is_first=(j == 0)):
+                    break
+            return total_rows, columns, truncated
 
-        mode = "replace" if i == 0 else "append"
-        _to_sql_safe(chunk_df, table_name, engine, if_exists=mode, index=False)
-        total_rows += len(chunk_df)
-        if i == 0:
-            columns = list(chunk_df.columns)
+        if _write_chunk(chunk_df, is_first=(i == 0)):
+            break
 
-    return total_rows, columns
+    return total_rows, columns, truncated
 
 
 def _drop_table_if_exists(engine, table_name: str):
@@ -274,16 +308,24 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
             raise
 
 
-def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str]]:
-    """Load a CSV file into PostgreSQL in chunks. Returns (total_rows, columns)."""
+def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str], bool]:
+    """Load a CSV file into PostgreSQL in chunks.
+
+    Returns ``(total_rows, columns, was_truncated)``.
+    Stops after ``MAX_TABLE_ROWS`` rows.
+    """
     csv_params = _detect_csv_params(file_path)
     chunk_size = 50_000
     try:
-        return _csv_load_inner(file_path, table_name, engine, csv_params, chunk_size)
+        return _csv_load_inner(
+            file_path, table_name, engine, csv_params, chunk_size, max_rows=MAX_TABLE_ROWS
+        )
     except pd.errors.ParserError:
         logger.info("CSV C-parser failed, retrying with Python engine")
         csv_params["engine"] = "python"
-        return _csv_load_inner(file_path, table_name, engine, csv_params, chunk_size)
+        return _csv_load_inner(
+            file_path, table_name, engine, csv_params, chunk_size, max_rows=MAX_TABLE_ROWS
+        )
 
 
 def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
@@ -373,7 +415,7 @@ def collect_dataset(self, dataset_id: str):
         title, download_url, fmt = row.title, row.download_url, row.format
         fmt = _detect_format_from_url(download_url, fmt)
         portal, source_id = row.portal, row.source_id
-        table_name = _sanitize_table_name(title)
+        table_name = _sanitize_table_name(title, portal)
 
         # Ensure a cached_datasets row exists EARLY so failures are always tracked
         _ensure_cached_entry(engine, dataset_id, table_name)
@@ -492,10 +534,18 @@ def collect_dataset(self, dataset_id: str):
             # Parse and load into PostgreSQL
             row_count = 0
             columns: list[str] = []
+            sampled_note: str | None = None  # set when dataset is truncated
 
             if fmt in ("csv", "txt"):
                 # Chunked CSV loading — never loads full file into memory
-                row_count, columns = _load_csv_chunked(tmp_path, table_name, engine)
+                row_count, columns, csv_truncated = _load_csv_chunked(tmp_path, table_name, engine)
+                if csv_truncated:
+                    sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
+                    logger.warning(
+                        "Dataset %s truncated at %d rows (CSV row cap)",
+                        dataset_id,
+                        row_count,
+                    )
 
             elif fmt == "zip":
                 import zipfile
@@ -537,7 +587,18 @@ def collect_dataset(self, dataset_id: str):
                                     if not block:
                                         break
                                     out.write(block)
-                            row_count, columns = _load_csv_chunked(csv_tmp_path, table_name, engine)
+                            row_count, columns, csv_trunc = _load_csv_chunked(
+                                csv_tmp_path, table_name, engine
+                            )
+                            if csv_trunc:
+                                sampled_note = (
+                                    f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
+                                )
+                                logger.warning(
+                                    "Dataset %s (zip/csv) truncated at %d rows",
+                                    dataset_id,
+                                    row_count,
+                                )
                         finally:
                             try:
                                 os.unlink(csv_tmp_path)
@@ -548,7 +609,18 @@ def collect_dataset(self, dataset_id: str):
                     elif lower.endswith((".xlsx", ".xls")):
                         with zf.open(name) as f:
                             content = f.read()
-                        df = pd.read_excel(io.BytesIO(content))
+                        df = pd.read_excel(io.BytesIO(content), nrows=MAX_TABLE_ROWS)
+                        original_len = len(df)
+                        if original_len >= MAX_TABLE_ROWS:
+                            sampled_note = (
+                                f"sampled: first {MAX_TABLE_ROWS} rows kept"
+                                f" (excel in zip, file may have more)"
+                            )
+                            logger.warning(
+                                "Dataset %s (zip/excel) truncated at %d rows",
+                                dataset_id,
+                                MAX_TABLE_ROWS,
+                            )
                         _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
@@ -571,6 +643,17 @@ def collect_dataset(self, dataset_id: str):
                             df = pd.json_normalize(
                                 raw_geo if isinstance(raw_geo, list) else [raw_geo]
                             )
+                        if len(df) > MAX_TABLE_ROWS:
+                            sampled_note = (
+                                f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                            )
+                            logger.warning(
+                                "Dataset %s (zip/geojson) truncated from %d to %d rows",
+                                dataset_id,
+                                len(df),
+                                MAX_TABLE_ROWS,
+                            )
+                            df = df.iloc[:MAX_TABLE_ROWS]
                         _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
@@ -593,6 +676,17 @@ def collect_dataset(self, dataset_id: str):
                                     df = pd.json_normalize([raw_j])
                             else:
                                 continue
+                        if len(df) > MAX_TABLE_ROWS:
+                            sampled_note = (
+                                f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                            )
+                            logger.warning(
+                                "Dataset %s (zip/json) truncated from %d to %d rows",
+                                dataset_id,
+                                len(df),
+                                MAX_TABLE_ROWS,
+                            )
+                            df = df.iloc[:MAX_TABLE_ROWS]
                         _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
@@ -622,6 +716,15 @@ def collect_dataset(self, dataset_id: str):
                             df = pd.json_normalize([raw])
                     else:
                         raise
+                if len(df) > MAX_TABLE_ROWS:
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                    logger.warning(
+                        "Dataset %s (json) truncated from %d to %d rows",
+                        dataset_id,
+                        len(df),
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.iloc[:MAX_TABLE_ROWS]
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
@@ -650,16 +753,43 @@ def collect_dataset(self, dataset_id: str):
                         engine, dataset_id, "geojson_no_features", table_name=table_name
                     )
                     return {"error": "geojson_no_features"}
+                if len(df) > MAX_TABLE_ROWS:
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                    logger.warning(
+                        "Dataset %s (geojson) truncated from %d to %d rows",
+                        dataset_id,
+                        len(df),
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.iloc[:MAX_TABLE_ROWS]
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
-                df = pd.read_excel(tmp_path)
+                df = pd.read_excel(tmp_path, nrows=MAX_TABLE_ROWS)
+                if len(df) >= MAX_TABLE_ROWS:
+                    sampled_note = (
+                        f"sampled: first {MAX_TABLE_ROWS} rows kept (excel file may have more)"
+                    )
+                    logger.warning(
+                        "Dataset %s (excel) truncated at %d rows",
+                        dataset_id,
+                        MAX_TABLE_ROWS,
+                    )
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "ods":
-                df = pd.read_excel(tmp_path, engine="odf")
+                df = pd.read_excel(tmp_path, engine="odf", nrows=MAX_TABLE_ROWS)
+                if len(df) >= MAX_TABLE_ROWS:
+                    sampled_note = (
+                        f"sampled: first {MAX_TABLE_ROWS} rows kept (ods file may have more)"
+                    )
+                    logger.warning(
+                        "Dataset %s (ods) truncated at %d rows",
+                        dataset_id,
+                        MAX_TABLE_ROWS,
+                    )
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
@@ -672,6 +802,15 @@ def collect_dataset(self, dataset_id: str):
                     )
                     _set_error_status(engine, dataset_id, "xml_parse_failed", table_name=table_name)
                     return {"error": "xml_parse_failed"}
+                if len(df) > MAX_TABLE_ROWS:
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                    logger.warning(
+                        "Dataset %s (xml) truncated from %d to %d rows",
+                        dataset_id,
+                        len(df),
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.iloc[:MAX_TABLE_ROWS]
                 _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
@@ -682,7 +821,7 @@ def collect_dataset(self, dataset_id: str):
                 )
                 return {"error": f"unsupported_format: {fmt}"}
 
-            # Update cache status
+            # Update cache status (include sampling note when truncated)
             columns_json = json.dumps([str(c) for c in columns])
             with engine.begin() as conn:
                 conn.execute(
@@ -690,7 +829,9 @@ def collect_dataset(self, dataset_id: str):
                         UPDATE cached_datasets SET
                             status = 'ready', row_count = :rows,
                             columns_json = :cols, size_bytes = :size,
-                            s3_key = :s3key, updated_at = NOW()
+                            s3_key = :s3key,
+                            error_message = :sampled,
+                            updated_at = NOW()
                         WHERE dataset_id = CAST(:did AS uuid)
                     """),
                     {
@@ -698,6 +839,7 @@ def collect_dataset(self, dataset_id: str):
                         "cols": columns_json,
                         "size": file_size,
                         "s3key": s3_key,
+                        "sampled": sampled_note,
                         "did": dataset_id,
                     },
                 )
@@ -762,7 +904,9 @@ def collect_dataset(self, dataset_id: str):
                 ),
                 {"msg": "Task timed out", "did": dataset_id, "max": MAX_TOTAL_ATTEMPTS},
             )
-        raise
+        backoff = min(60 * (2**self.request.retries), 600)  # 60s, 120s, 240s, capped at 600s
+        jitter = random.uniform(0, backoff * 0.3)
+        raise self.retry(countdown=int(backoff + jitter))
     except Exception as exc:
         exc_str = str(exc)
         # Non-retryable errors — mark permanently failed immediately
@@ -772,6 +916,8 @@ def collect_dataset(self, dataset_id: str):
                 for s in (
                     "403 Forbidden",
                     "401 Unauthorized",
+                    "404 Not Found",
+                    "410 Gone",
                     "illegal status line",
                     "Request Denied",
                     "Name or service not known",
@@ -819,7 +965,9 @@ def collect_dataset(self, dataset_id: str):
             )
             return {"error": "permanently_failed", "attempts": attempts}
 
-        raise self.retry(exc=exc, countdown=60) from exc
+        backoff = min(60 * (2**self.request.retries), 600)  # 60s, 120s, 240s, capped at 600s
+        jitter = random.uniform(0, backoff * 0.3)
+        raise self.retry(exc=exc, countdown=int(backoff + jitter)) from exc
     finally:
         engine.dispose()
 
@@ -830,12 +978,20 @@ def bulk_collect_all(self, portal: str | None = None):
     engine = get_sync_engine()
 
     try:
-        # Select datasets that have no successful cache and are not permanently failed
+        # Select datasets that have no successful cache and are not permanently failed.
+        # Exclude multi-resource groups (titles with >10 siblings in the same portal)
+        # to avoid wasting dispatches on bulk-published datasets like Entre Ríos elections.
         query = (
             "SELECT CAST(d.id AS text) FROM datasets d "
             "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
             "WHERE d.is_cached = false "
-            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed'))"
+            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed')) "
+            "AND d.title NOT IN ("
+            "  SELECT title FROM datasets "
+            "  WHERE portal = d.portal "
+            "  GROUP BY title, portal "
+            "  HAVING COUNT(*) > 10"
+            ")"
         )
         params: dict = {}
         if portal:
