@@ -170,3 +170,18 @@ graph TB
     style Bedrock fill:#F39C12,stroke:#D68910,color:#fff
     style Anthropic fill:#F39C12,stroke:#D68910,color:#fff
 ```
+
+## Database Entity-Relationship Diagram
+
+```mermaid
+erDiagram
+    USERS ||--|{ CONVERSATIONS : "starts"
+    CONVERSATIONS ||--|{ MESSAGES : "contains"
+    
+    DATASETS ||--|{ DATASET_CHUNKS : "chunked_to"
+    DATASETS ||--o| CACHED_DATASETS : "tracked_in"
+    
+    USER_QUERIES ||--|{ AGENT_TASKS : "executes"
+    USER_QUERIES ||--|{ QUERY_DATASET_LINKS : "uses"
+    DATASETS ||--|{ QUERY_DATASET_LINKS : "linked_to"
+```
