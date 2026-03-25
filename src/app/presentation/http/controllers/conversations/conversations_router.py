@@ -35,6 +35,7 @@ class MessageCreate(BaseModel):
     content: str
     sources: list[dict[str, Any]] | None = None
     chart_data: list[dict[str, Any]] | None = None
+    map_data: dict[str, Any] | None = None
     documents: list[dict[str, Any]] | None = None
 
 
@@ -45,6 +46,7 @@ class MessageResponse(BaseModel):
     content: str
     sources: list[dict[str, Any]]
     chart_data: list[dict[str, Any]] | None = None
+    map_data: dict[str, Any] | None = None
     documents: list[dict[str, Any]] | None = None
     created_at: str
     feedback: str | None = None
@@ -180,6 +182,7 @@ async def get_conversation(
                 content=m.content,
                 sources=m.sources or [],
                 chart_data=m.chart_data,
+                map_data=m.map_data,
                 documents=m.documents,
                 created_at=m.created_at.isoformat(),
                 feedback=m.feedback,
@@ -246,6 +249,7 @@ async def add_message(
         content=body.content,
         sources=body.sources or [],
         chart_data=body.chart_data,
+        map_data=body.map_data,
         documents=body.documents,
     )
     saved = await chat_repo.add_message(message)
@@ -257,6 +261,7 @@ async def add_message(
         content=saved.content,
         sources=saved.sources or [],
         chart_data=saved.chart_data,
+        map_data=saved.map_data,
         documents=saved.documents,
         created_at=saved.created_at.isoformat(),
         feedback=saved.feedback,
@@ -286,6 +291,7 @@ async def get_messages(
             content=m.content,
             sources=m.sources or [],
             chart_data=m.chart_data,
+            map_data=m.map_data,
             documents=m.documents,
             created_at=m.created_at.isoformat(),
             feedback=m.feedback,
@@ -332,6 +338,7 @@ async def submit_feedback(
         content=updated.content,
         sources=updated.sources or [],
         chart_data=updated.chart_data,
+        map_data=updated.map_data,
         documents=updated.documents,
         created_at=updated.created_at.isoformat(),
         feedback=updated.feedback,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import UTC, datetime
@@ -24,6 +25,35 @@ from app.domain.ports.llm.llm_provider import LLMMessage
 from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
+
+_MAX_MAP_FEATURES = 500
+
+
+def _build_map_data(results: list) -> dict[str, Any] | None:
+    """Build a GeoJSON FeatureCollection from data results that contain geometry.
+
+    Returns None if no results carry ``_geometry_geojson`` columns.
+    Deterministic — no LLM involved.
+    """
+    features: list[dict[str, Any]] = []
+    for r in results:
+        for rec in r.records:
+            geojson_str = rec.get("_geometry_geojson")
+            if not geojson_str:
+                continue
+            try:
+                geom = json.loads(geojson_str) if isinstance(geojson_str, str) else geojson_str
+            except (json.JSONDecodeError, TypeError):
+                continue
+            props = {k: v for k, v in rec.items() if k not in ("_geometry_geojson", "_source_dataset_id")}
+            features.append({"type": "Feature", "geometry": geom, "properties": props})
+            if len(features) >= _MAX_MAP_FEATURES:
+                break
+        if len(features) >= _MAX_MAP_FEATURES:
+            break
+    if not features:
+        return None
+    return {"type": "FeatureCollection", "features": features}
 
 
 # ── Tag stripping helpers (same as smart_query_service.py) ────────
@@ -168,6 +198,12 @@ async def analyst_node(state: OpenArgState) -> dict:
         llm_charts = extract_llm_charts(full_text)
         charts = det_charts if det_charts else llm_charts
 
+        # Maps: build GeoJSON FeatureCollection from geo results (deterministic)
+        map_data = _build_map_data(results)
+        # When map data is present, suppress charts (geo data doesn't chart well)
+        if map_data:
+            charts = None
+
         # Strip CHART tags from the answer text
         clean_answer = _strip_tags(full_text)
 
@@ -186,6 +222,7 @@ async def analyst_node(state: OpenArgState) -> dict:
             "analysis_response": full_text,
             "clean_answer": clean_answer,
             "chart_data": charts if charts else None,
+            "map_data": map_data,
             "confidence": confidence,
             "citations": citations,
             "tokens_used": tokens_used,
@@ -199,6 +236,7 @@ async def analyst_node(state: OpenArgState) -> dict:
                 "Ocurrió un error al analizar los datos. Probá reformulando tu consulta."
             ),
             "chart_data": None,
+            "map_data": None,
             "confidence": 0.0,
             "citations": [],
             "tokens_used": 0,

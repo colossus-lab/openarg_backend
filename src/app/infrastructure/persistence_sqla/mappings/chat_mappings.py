@@ -68,6 +68,7 @@ def map_chat_tables() -> None:
         Column("content", Text, nullable=False),
         Column("sources", JSONB, nullable=True, server_default=text("'[]'::jsonb")),
         Column("chart_data", JSONB, nullable=True),
+        Column("map_data", JSONB, nullable=True),
         Column("documents", JSONB, nullable=True),
         Column("feedback", String(10), nullable=True),
         Column("feedback_comment", Text, nullable=True),
