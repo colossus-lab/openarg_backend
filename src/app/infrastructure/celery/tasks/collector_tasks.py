@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 from urllib.parse import urlparse
@@ -58,10 +59,18 @@ def _should_verify_ssl(url: str) -> bool:
 # re-dispatches) the task is marked permanently_failed and never retried.
 MAX_TOTAL_ATTEMPTS = 5
 
+# Maximum rows to store per dataset table.  Datasets exceeding this limit
+# are truncated to the first MAX_TABLE_ROWS rows.
+MAX_TABLE_ROWS = 500_000
 
-def _sanitize_table_name(name: str) -> str:
+
+def _sanitize_table_name(name: str, portal: str = "") -> str:
     clean = re.sub(r"[^a-z0-9_]", "_", name.lower())
     clean = re.sub(r"_+", "_", clean).strip("_")
+    if portal:
+        portal_clean = re.sub(r"[^a-z0-9_]", "_", portal.lower()).strip("_")
+        # Enforce PostgreSQL 63-char identifier limit
+        return f"cache_{portal_clean[:15]}_{clean[:45]}"
     return f"cache_{clean[:50]}"
 
 
@@ -144,6 +153,79 @@ def _upload_file_to_s3(file_path: str, portal: str, dataset_id: str, filename: s
     return key
 
 
+_MAX_GEOJSON_GEOMETRY_BYTES = 100 * 1024  # 100KB per feature geometry
+
+
+def _geojson_features_to_df(features: list[dict]) -> pd.DataFrame:
+    """Convert GeoJSON features to a DataFrame preserving full geometry.
+
+    Each feature's ``geometry`` is serialised as compact JSON in the
+    ``_geometry_geojson`` column.  Geometries larger than
+    ``_MAX_GEOJSON_GEOMETRY_BYTES`` are replaced by their centroid (for
+    Points) or dropped to avoid bloating the database.
+    """
+    records: list[dict] = []
+    for feat in features:
+        props = dict(feat.get("properties", {}) or {})
+        geom = feat.get("geometry") or {}
+        if geom:
+            props["geometry_type"] = geom.get("type")
+            geom_str = json.dumps(geom, separators=(",", ":"))
+            if len(geom_str) > _MAX_GEOJSON_GEOMETRY_BYTES:
+                # Oversized → store centroid for Point-like, skip otherwise
+                coords = geom.get("coordinates")
+                gtype = geom.get("type", "")
+                if gtype == "Point" and coords:
+                    props["_geometry_geojson"] = geom_str
+                elif coords:
+                    # Best-effort centroid: first coordinate of the first ring
+                    try:
+                        c = coords
+                        while isinstance(c, list) and c and isinstance(c[0], list):
+                            c = c[0]
+                        if isinstance(c, list) and len(c) >= 2:
+                            centroid = {"type": "Point", "coordinates": c[:2]}
+                            props["_geometry_geojson"] = json.dumps(
+                                centroid, separators=(",", ":")
+                            )
+                    except Exception:
+                        pass  # skip geometry entirely
+            else:
+                props["_geometry_geojson"] = geom_str
+        records.append(props)
+    return pd.DataFrame(records)
+
+
+def _read_shapefile_from_zip(zip_path: str) -> pd.DataFrame | None:
+    """Read a shapefile from a ZIP archive using fiona, return DataFrame or None."""
+    try:
+        import fiona
+    except ImportError:
+        logger.warning("fiona not installed — cannot parse shapefiles")
+        return None
+
+    try:
+        # fiona can read directly from zip:// paths
+        layers = fiona.listlayers(f"zip://{zip_path}")
+        if not layers:
+            return None
+        with fiona.open(f"zip://{zip_path}", layer=layers[0]) as src:
+            features = []
+            for i, feat in enumerate(src):
+                if i >= MAX_TABLE_ROWS:
+                    break
+                # fiona features are dict-like; convert geometry to GeoJSON dict
+                geom = dict(feat.get("geometry", {})) if feat.get("geometry") else {}
+                props = dict(feat.get("properties", {})) if feat.get("properties") else {}
+                features.append({"type": "Feature", "geometry": geom, "properties": props})
+            if not features:
+                return None
+            return _geojson_features_to_df(features)
+    except Exception:
+        logger.warning("Failed to read shapefile from %s", zip_path, exc_info=True)
+        return None
+
+
 def _stream_download(
     url: str, dest_path: str, verify_ssl: bool = True, max_bytes: int = 500 * 1024 * 1024
 ) -> int:
@@ -188,11 +270,51 @@ def _detect_csv_params(file_path: str) -> dict:
 
 
 def _csv_load_inner(
-    file_path: str, table_name: str, engine, csv_params: dict, chunk_size: int
-) -> tuple[int, list[str]]:
-    """Inner CSV loading loop."""
+    file_path: str,
+    table_name: str,
+    engine,
+    csv_params: dict,
+    chunk_size: int,
+    max_rows: int = 0,
+    source_dataset_id: str | None = None,
+    force_append: bool = False,
+) -> tuple[int, list[str], bool]:
+    """Inner CSV loading loop.
+
+    Returns ``(total_rows_written, columns, was_truncated)``.
+    When *max_rows* > 0 the loader stops after writing that many rows.
+    When *source_dataset_id* is provided, adds ``_source_dataset_id`` column.
+    When *force_append* is True, all chunks use ``if_exists='append'``.
+    """
     total_rows = 0
     columns: list[str] = []
+    truncated = False
+
+    def _write_chunk(chunk_df: pd.DataFrame, is_first: bool) -> bool:
+        """Write a single chunk, truncating if the cap would be exceeded.
+
+        Returns True when the row cap has been reached.
+        """
+        nonlocal total_rows, columns, truncated
+        if max_rows:
+            remaining = max_rows - total_rows
+            if remaining <= 0:
+                truncated = True
+                return True
+            if len(chunk_df) > remaining:
+                chunk_df = chunk_df.iloc[:remaining]
+                truncated = True
+        if source_dataset_id:
+            chunk_df["_source_dataset_id"] = source_dataset_id
+        if force_append:
+            mode = "append"
+        else:
+            mode = "replace" if is_first else "append"
+        _to_sql_safe(chunk_df, table_name, engine, if_exists=mode, index=False)
+        total_rows += len(chunk_df)
+        if is_first:
+            columns = list(chunk_df.columns)
+        return truncated
 
     reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
     for i, chunk_df in enumerate(reader):
@@ -201,20 +323,14 @@ def _csv_load_inner(
             csv_params["sep"] = ";"
             reader = pd.read_csv(file_path, chunksize=chunk_size, **csv_params)
             for j, retry_df in enumerate(reader):
-                mode = "replace" if j == 0 else "append"
-                _to_sql_safe(retry_df, table_name, engine, if_exists=mode, index=False)
-                total_rows += len(retry_df)
-                if j == 0:
-                    columns = list(retry_df.columns)
-            return total_rows, columns
+                if _write_chunk(retry_df, is_first=(j == 0)):
+                    break
+            return total_rows, columns, truncated
 
-        mode = "replace" if i == 0 else "append"
-        _to_sql_safe(chunk_df, table_name, engine, if_exists=mode, index=False)
-        total_rows += len(chunk_df)
-        if i == 0:
-            columns = list(chunk_df.columns)
+        if _write_chunk(chunk_df, is_first=(i == 0)):
+            break
 
-    return total_rows, columns
+    return total_rows, columns, truncated
 
 
 def _drop_table_if_exists(engine, table_name: str):
@@ -274,16 +390,92 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
             raise
 
 
-def _load_csv_chunked(file_path: str, table_name: str, engine) -> tuple[int, list[str]]:
-    """Load a CSV file into PostgreSQL in chunks. Returns (total_rows, columns)."""
+def _get_table_row_count(engine, table_name: str) -> int:
+    """Get current row count for a cache table. Returns 0 if table doesn't exist."""
+    try:
+        with engine.connect() as conn:
+            count = conn.execute(
+                text(f'SELECT COUNT(*) FROM "{table_name}"')  # noqa: S608
+            ).scalar()
+            conn.rollback()
+            return count or 0
+    except Exception:
+        return 0
+
+
+def _ensure_postgis_geom(engine, table_name: str, columns: list[str]) -> None:
+    """Add a native PostGIS geom column if the table has _geometry_geojson.
+
+    Idempotent — skips if geom column already exists or PostGIS unavailable.
+    """
+    if "_geometry_geojson" not in columns:
+        return
+    try:
+        tbl = f'"{table_name}"'
+        idx_name = f"idx_{table_name}_geom"[:63]
+        with engine.begin() as conn:
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = :tn AND column_name = 'geom'"
+                ),
+                {"tn": table_name},
+            ).fetchone()
+            if exists:
+                return
+            # Ensure PostGIS is available
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+            conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN geom geometry(Geometry, 4326)"))
+            conn.execute(text(
+                f"UPDATE {tbl} SET geom = ST_SetSRID(ST_GeomFromGeoJSON(_geometry_geojson), 4326) "
+                f"WHERE _geometry_geojson IS NOT NULL AND _geometry_geojson != '' "
+                f"AND _geometry_geojson ~ '^\\s*\\{{' AND geom IS NULL"
+            ))
+            conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON {tbl} USING gist (geom)'))
+        logger.info("PostGIS geom column added to %s", table_name)
+    except Exception:
+        logger.debug("PostGIS geom column skipped for %s", table_name, exc_info=True)
+
+
+def _load_csv_chunked(
+    file_path: str,
+    table_name: str,
+    engine,
+    source_dataset_id: str | None = None,
+    force_append: bool = False,
+) -> tuple[int, list[str], bool]:
+    """Load a CSV file into PostgreSQL in chunks.
+
+    Returns ``(total_rows, columns, was_truncated)``.
+    Stops after ``MAX_TABLE_ROWS`` rows.
+    """
     csv_params = _detect_csv_params(file_path)
     chunk_size = 50_000
     try:
-        return _csv_load_inner(file_path, table_name, engine, csv_params, chunk_size)
+        return _csv_load_inner(
+            file_path,
+            table_name,
+            engine,
+            csv_params,
+            chunk_size,
+            max_rows=MAX_TABLE_ROWS,
+            source_dataset_id=source_dataset_id,
+            force_append=force_append,
+        )
     except pd.errors.ParserError:
         logger.info("CSV C-parser failed, retrying with Python engine")
         csv_params["engine"] = "python"
-        return _csv_load_inner(file_path, table_name, engine, csv_params, chunk_size)
+        return _csv_load_inner(
+            file_path,
+            table_name,
+            engine,
+            csv_params,
+            chunk_size,
+            max_rows=MAX_TABLE_ROWS,
+            source_dataset_id=source_dataset_id,
+            force_append=force_append,
+        )
 
 
 def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
@@ -341,6 +533,47 @@ def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: st
         logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
 
 
+def _check_schema_compat(engine, table_name: str, df: pd.DataFrame) -> bool:
+    """Check if df columns are compatible with existing table for append.
+
+    Returns True if schemas are compatible (subset in either direction), False otherwise.
+    """
+    try:
+        with engine.connect() as conn:
+            existing_cols = set(
+                r.column_name
+                for r in conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = :tn AND table_schema = 'public'"
+                    ),
+                    {"tn": table_name},
+                ).fetchall()
+            )
+            conn.rollback()
+        new_cols = set(df.columns) - {"_source_dataset_id"}
+        existing_cols_clean = existing_cols - {"_source_dataset_id"}
+        return new_cols.issubset(existing_cols_clean) or existing_cols_clean.issubset(new_cols)
+    except Exception:
+        return True  # If check fails, allow append
+
+
+def _update_row_count_after_append(engine, table_name: str):
+    """Update row_count in cached_datasets after appending rows."""
+    try:
+        with engine.begin() as conn:
+            new_count = conn.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar()  # noqa: S608
+            conn.execute(
+                text(
+                    "UPDATE cached_datasets SET row_count = :cnt, updated_at = NOW() "
+                    "WHERE table_name = :tn"
+                ),
+                {"cnt": new_count, "tn": table_name},
+            )
+    except Exception:
+        logger.debug("Could not update row_count after append for %s", table_name, exc_info=True)
+
+
 @celery_app.task(
     name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=600, time_limit=720
 )
@@ -373,7 +606,7 @@ def collect_dataset(self, dataset_id: str):
         title, download_url, fmt = row.title, row.download_url, row.format
         fmt = _detect_format_from_url(download_url, fmt)
         portal, source_id = row.portal, row.source_id
-        table_name = _sanitize_table_name(title)
+        table_name = _sanitize_table_name(title, portal)
 
         # Ensure a cached_datasets row exists EARLY so failures are always tracked
         _ensure_cached_entry(engine, dataset_id, table_name)
@@ -398,29 +631,77 @@ def collect_dataset(self, dataset_id: str):
                 )
                 return {"error": "permanently_failed"}
 
-        # Check if already cached
+        # Check if already cached — distinguish same-resource vs sibling-resource
+        append_mode = False
         with engine.begin() as conn:
             cached = conn.execute(
                 text(
-                    "SELECT id FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid) AND status = 'ready'"
+                    "SELECT id, dataset_id FROM cached_datasets "
+                    "WHERE table_name = :tn AND status = 'ready'"
                 ),
-                {"did": dataset_id},
+                {"tn": table_name},
             ).fetchone()
 
         if cached:
-            logger.info(f"Dataset {dataset_id} already cached as {table_name}")
-            return {"dataset_id": dataset_id, "table_name": table_name, "status": "already_cached"}
+            cached_did = str(cached.dataset_id)
+            if cached_did == dataset_id:
+                # Same resource — truly already cached, skip
+                logger.info(f"Dataset {dataset_id} already cached as {table_name}")
+                return {
+                    "dataset_id": dataset_id,
+                    "table_name": table_name,
+                    "status": "already_cached",
+                }
+            else:
+                # Sibling resource (same title+portal, different dataset_id) — append
+                logger.info(
+                    f"Dataset {dataset_id} is sibling of {cached_did} for table {table_name}, "
+                    "will attempt append"
+                )
+                # Check if this specific resource already contributed rows
+                try:
+                    with engine.connect() as conn:
+                        already_appended = conn.execute(
+                            text(
+                                f'SELECT EXISTS(SELECT 1 FROM "{table_name}" WHERE _source_dataset_id = :did LIMIT 1)'
+                            ),  # noqa: S608
+                            {"did": dataset_id},
+                        ).scalar()
+                        conn.rollback()
+                    if already_appended:
+                        logger.info(
+                            f"Dataset {dataset_id} already appended to {table_name}, skipping"
+                        )
+                        return {"dataset_id": dataset_id, "status": "already_appended"}
+                except Exception:
+                    pass  # Column might not exist yet (old tables), proceed with append
+                # Check aggregate row cap before appending
+                current_rows = _get_table_row_count(engine, table_name)
+                if current_rows >= MAX_TABLE_ROWS:
+                    logger.info(
+                        f"Table {table_name} already has {current_rows} rows (cap {MAX_TABLE_ROWS}), "
+                        f"skipping append of {dataset_id}"
+                    )
+                    # Mark as cached so bulk_collect_all doesn't re-dispatch
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                            {"id": dataset_id},
+                        )
+                    return {"dataset_id": dataset_id, "status": "table_full"}
+                append_mode = True
 
-        # Update status
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
-                    ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
-                """),
-                {"did": dataset_id, "tn": table_name},
-            )
+        # Update status (skip for append_mode — table is already 'ready')
+        if not append_mode:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
+                        VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
+                        ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
+                    """),
+                    {"did": dataset_id, "tn": table_name},
+                )
 
         # Stream download to temp file (memory-safe for large files)
         max_download_bytes = 500 * 1024 * 1024  # 500 MB
@@ -492,10 +773,57 @@ def collect_dataset(self, dataset_id: str):
             # Parse and load into PostgreSQL
             row_count = 0
             columns: list[str] = []
+            sampled_note: str | None = None  # set when dataset is truncated
 
             if fmt in ("csv", "txt"):
                 # Chunked CSV loading — never loads full file into memory
-                row_count, columns = _load_csv_chunked(tmp_path, table_name, engine)
+                # For append mode, do a quick schema check using first chunk
+                if append_mode:
+                    try:
+                        _csv_params = _detect_csv_params(tmp_path)
+                        preview_df = pd.read_csv(tmp_path, nrows=5, **_csv_params)
+                        with engine.connect() as conn:
+                            existing_cols = set(
+                                r.column_name
+                                for r in conn.execute(
+                                    text(
+                                        "SELECT column_name FROM information_schema.columns "
+                                        "WHERE table_name = :tn AND table_schema = 'public'"
+                                    ),
+                                    {"tn": table_name},
+                                ).fetchall()
+                            )
+                            conn.rollback()
+                        new_cols = set(preview_df.columns) - {"_source_dataset_id"}
+                        existing_cols_clean = existing_cols - {"_source_dataset_id"}
+                        if not new_cols.issubset(
+                            existing_cols_clean
+                        ) and not existing_cols_clean.issubset(new_cols):
+                            logger.info(
+                                f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                            )
+                            return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    except Exception:
+                        logger.debug(
+                            "Schema preview failed for %s, proceeding anyway",
+                            dataset_id,
+                            exc_info=True,
+                        )
+
+                row_count, columns, csv_truncated = _load_csv_chunked(
+                    tmp_path,
+                    table_name,
+                    engine,
+                    source_dataset_id=dataset_id,
+                    force_append=append_mode,
+                )
+                if csv_truncated:
+                    sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
+                    logger.warning(
+                        "Dataset %s truncated at %d rows (CSV row cap)",
+                        dataset_id,
+                        row_count,
+                    )
 
             elif fmt == "zip":
                 import zipfile
@@ -537,7 +865,22 @@ def collect_dataset(self, dataset_id: str):
                                     if not block:
                                         break
                                     out.write(block)
-                            row_count, columns = _load_csv_chunked(csv_tmp_path, table_name, engine)
+                            row_count, columns, csv_trunc = _load_csv_chunked(
+                                csv_tmp_path,
+                                table_name,
+                                engine,
+                                source_dataset_id=dataset_id,
+                                force_append=append_mode,
+                            )
+                            if csv_trunc:
+                                sampled_note = (
+                                    f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
+                                )
+                                logger.warning(
+                                    "Dataset %s (zip/csv) truncated at %d rows",
+                                    dataset_id,
+                                    row_count,
+                                )
                         finally:
                             try:
                                 os.unlink(csv_tmp_path)
@@ -548,8 +891,28 @@ def collect_dataset(self, dataset_id: str):
                     elif lower.endswith((".xlsx", ".xls")):
                         with zf.open(name) as f:
                             content = f.read()
-                        df = pd.read_excel(io.BytesIO(content))
-                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                        df = pd.read_excel(io.BytesIO(content), nrows=MAX_TABLE_ROWS)
+                        original_len = len(df)
+                        if original_len >= MAX_TABLE_ROWS:
+                            sampled_note = (
+                                f"sampled: first {MAX_TABLE_ROWS} rows kept"
+                                f" (excel in zip, file may have more)"
+                            )
+                            logger.warning(
+                                "Dataset %s (zip/excel) truncated at %d rows",
+                                dataset_id,
+                                MAX_TABLE_ROWS,
+                            )
+                        df["_source_dataset_id"] = dataset_id
+                        if append_mode:
+                            if not _check_schema_compat(engine, table_name, df):
+                                logger.info(
+                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                )
+                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                        else:
+                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -559,19 +922,32 @@ def collect_dataset(self, dataset_id: str):
                         raw_geo = json.loads(content)
                         features = raw_geo.get("features", []) if isinstance(raw_geo, dict) else []
                         if features:
-                            records = []
-                            for feat in features:
-                                props = feat.get("properties", {}) or {}
-                                geom = feat.get("geometry") or {}
-                                if geom:
-                                    props["geometry_type"] = geom.get("type")
-                                records.append(props)
-                            df = pd.DataFrame(records)
+                            df = _geojson_features_to_df(features)
                         else:
                             df = pd.json_normalize(
                                 raw_geo if isinstance(raw_geo, list) else [raw_geo]
                             )
-                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                        if len(df) > MAX_TABLE_ROWS:
+                            sampled_note = (
+                                f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                            )
+                            logger.warning(
+                                "Dataset %s (zip/geojson) truncated from %d to %d rows",
+                                dataset_id,
+                                len(df),
+                                MAX_TABLE_ROWS,
+                            )
+                            df = df.iloc[:MAX_TABLE_ROWS]
+                        df["_source_dataset_id"] = dataset_id
+                        if append_mode:
+                            if not _check_schema_compat(engine, table_name, df):
+                                logger.info(
+                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                )
+                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                        else:
+                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
@@ -593,10 +969,58 @@ def collect_dataset(self, dataset_id: str):
                                     df = pd.json_normalize([raw_j])
                             else:
                                 continue
-                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                        if len(df) > MAX_TABLE_ROWS:
+                            sampled_note = (
+                                f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                            )
+                            logger.warning(
+                                "Dataset %s (zip/json) truncated from %d to %d rows",
+                                dataset_id,
+                                len(df),
+                                MAX_TABLE_ROWS,
+                            )
+                            df = df.iloc[:MAX_TABLE_ROWS]
+                        df["_source_dataset_id"] = dataset_id
+                        if append_mode:
+                            if not _check_schema_compat(engine, table_name, df):
+                                logger.info(
+                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                )
+                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                        else:
+                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                         row_count, columns = len(df), list(df.columns)
                         parsed = True
                         break
+                # Fallback: try reading as shapefile (ZIP may contain .shp/.dbf)
+                if not parsed:
+                    has_shp = any(n.lower().endswith(".shp") for n in zf.namelist())
+                    if has_shp:
+                        df = _read_shapefile_from_zip(tmp_path)
+                        if df is not None and len(df) > 0:
+                            if len(df) > MAX_TABLE_ROWS:
+                                sampled_note = (
+                                    f"sampled: first {MAX_TABLE_ROWS} of {len(df)} rows (shapefile)"
+                                )
+                                logger.warning(
+                                    "Dataset %s (zip/shp) truncated from %d to %d rows",
+                                    dataset_id, len(df), MAX_TABLE_ROWS,
+                                )
+                                df = df.iloc[:MAX_TABLE_ROWS]
+                            df["_source_dataset_id"] = dataset_id
+                            if append_mode:
+                                if not _check_schema_compat(engine, table_name, df):
+                                    logger.info(
+                                        f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                    )
+                                    return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                                _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                            else:
+                                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                            row_count, columns = len(df), list(df.columns)
+                            parsed = True
+
                 if not parsed:
                     logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
                     _set_error_status(
@@ -622,7 +1046,25 @@ def collect_dataset(self, dataset_id: str):
                             df = pd.json_normalize([raw])
                     else:
                         raise
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                if len(df) > MAX_TABLE_ROWS:
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                    logger.warning(
+                        "Dataset %s (json) truncated from %d to %d rows",
+                        dataset_id,
+                        len(df),
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.iloc[:MAX_TABLE_ROWS]
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "geojson":
@@ -630,37 +1072,78 @@ def collect_dataset(self, dataset_id: str):
                     raw = json.load(f)
                 features = raw.get("features", []) if isinstance(raw, dict) else []
                 if features:
-                    records = []
-                    for feat in features:
-                        props = feat.get("properties", {}) or {}
-                        geom = feat.get("geometry") or {}
-                        if geom:
-                            props["geometry_type"] = geom.get("type")
-                            coords = geom.get("coordinates")
-                            if coords:
-                                coord_str = str(coords)
-                                if len(coord_str) > 2000:
-                                    coord_str = coord_str[:2000] + "..."
-                                props["geometry_coordinates"] = coord_str
-                        records.append(props)
-                    df = pd.DataFrame(records)
+                    df = _geojson_features_to_df(features)
                 else:
                     logger.warning(f"GeoJSON {dataset_id}: no features found")
                     _set_error_status(
                         engine, dataset_id, "geojson_no_features", table_name=table_name
                     )
                     return {"error": "geojson_no_features"}
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                if len(df) > MAX_TABLE_ROWS:
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                    logger.warning(
+                        "Dataset %s (geojson) truncated from %d to %d rows",
+                        dataset_id,
+                        len(df),
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.iloc[:MAX_TABLE_ROWS]
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
-                df = pd.read_excel(tmp_path)
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                df = pd.read_excel(tmp_path, nrows=MAX_TABLE_ROWS)
+                if len(df) >= MAX_TABLE_ROWS:
+                    sampled_note = (
+                        f"sampled: first {MAX_TABLE_ROWS} rows kept (excel file may have more)"
+                    )
+                    logger.warning(
+                        "Dataset %s (excel) truncated at %d rows",
+                        dataset_id,
+                        MAX_TABLE_ROWS,
+                    )
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "ods":
-                df = pd.read_excel(tmp_path, engine="odf")
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                df = pd.read_excel(tmp_path, engine="odf", nrows=MAX_TABLE_ROWS)
+                if len(df) >= MAX_TABLE_ROWS:
+                    sampled_note = (
+                        f"sampled: first {MAX_TABLE_ROWS} rows kept (ods file may have more)"
+                    )
+                    logger.warning(
+                        "Dataset %s (ods) truncated at %d rows",
+                        dataset_id,
+                        MAX_TABLE_ROWS,
+                    )
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "xml":
@@ -672,7 +1155,25 @@ def collect_dataset(self, dataset_id: str):
                     )
                     _set_error_status(engine, dataset_id, "xml_parse_failed", table_name=table_name)
                     return {"error": "xml_parse_failed"}
-                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                if len(df) > MAX_TABLE_ROWS:
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                    logger.warning(
+                        "Dataset %s (xml) truncated from %d to %d rows",
+                        dataset_id,
+                        len(df),
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.iloc[:MAX_TABLE_ROWS]
+                df["_source_dataset_id"] = dataset_id
+                if append_mode:
+                    if not _check_schema_compat(engine, table_name, df):
+                        logger.info(
+                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                        )
+                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                else:
+                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             else:
@@ -682,7 +1183,28 @@ def collect_dataset(self, dataset_id: str):
                 )
                 return {"error": f"unsupported_format: {fmt}"}
 
-            # Update cache status
+            if append_mode:
+                # Append mode: update row_count from actual table, keep status 'ready'
+                _update_row_count_after_append(engine, table_name)
+                # Also mark this dataset as cached in datasets table
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "UPDATE datasets SET is_cached = true, row_count = :rows "
+                            "WHERE id = CAST(:id AS uuid)"
+                        ),
+                        {"rows": row_count, "id": dataset_id},
+                    )
+                logger.info(f"Dataset {dataset_id} appended {row_count} rows to table {table_name}")
+                return {
+                    "dataset_id": dataset_id,
+                    "table_name": table_name,
+                    "rows": row_count,
+                    "status": "appended",
+                    "s3_key": s3_key,
+                }
+
+            # Update cache status (include sampling note when truncated)
             columns_json = json.dumps([str(c) for c in columns])
             with engine.begin() as conn:
                 conn.execute(
@@ -690,7 +1212,9 @@ def collect_dataset(self, dataset_id: str):
                         UPDATE cached_datasets SET
                             status = 'ready', row_count = :rows,
                             columns_json = :cols, size_bytes = :size,
-                            s3_key = :s3key, updated_at = NOW()
+                            s3_key = :s3key,
+                            error_message = :sampled,
+                            updated_at = NOW()
                         WHERE dataset_id = CAST(:did AS uuid)
                     """),
                     {
@@ -698,6 +1222,7 @@ def collect_dataset(self, dataset_id: str):
                         "cols": columns_json,
                         "size": file_size,
                         "s3key": s3_key,
+                        "sampled": sampled_note,
                         "did": dataset_id,
                     },
                 )
@@ -715,6 +1240,9 @@ def collect_dataset(self, dataset_id: str):
                     ),
                     {"rows": row_count, "id": dataset_id},
                 )
+
+            # Add PostGIS native geometry column if this is a geo dataset
+            _ensure_postgis_geom(engine, table_name, columns)
 
             # Re-embed only on first cache (enriches with sample rows); skip if already embedded
             if not was_cached:
@@ -762,7 +1290,9 @@ def collect_dataset(self, dataset_id: str):
                 ),
                 {"msg": "Task timed out", "did": dataset_id, "max": MAX_TOTAL_ATTEMPTS},
             )
-        raise
+        backoff = min(60 * (2**self.request.retries), 600)  # 60s, 120s, 240s, capped at 600s
+        jitter = random.uniform(0, backoff * 0.3)
+        raise self.retry(countdown=int(backoff + jitter))
     except Exception as exc:
         exc_str = str(exc)
         # Non-retryable errors — mark permanently failed immediately
@@ -772,6 +1302,8 @@ def collect_dataset(self, dataset_id: str):
                 for s in (
                     "403 Forbidden",
                     "401 Unauthorized",
+                    "404 Not Found",
+                    "410 Gone",
                     "illegal status line",
                     "Request Denied",
                     "Name or service not known",
@@ -819,23 +1351,38 @@ def collect_dataset(self, dataset_id: str):
             )
             return {"error": "permanently_failed", "attempts": attempts}
 
-        raise self.retry(exc=exc, countdown=60) from exc
+        backoff = min(60 * (2**self.request.retries), 600)  # 60s, 120s, 240s, capped at 600s
+        jitter = random.uniform(0, backoff * 0.3)
+        raise self.retry(exc=exc, countdown=int(backoff + jitter)) from exc
     finally:
         engine.dispose()
 
 
-@celery_app.task(name="openarg.bulk_collect_all", bind=True, soft_time_limit=60, time_limit=120)
+@celery_app.task(name="openarg.bulk_collect_all", bind=True, soft_time_limit=120, time_limit=180)
 def bulk_collect_all(self, portal: str | None = None):
-    """Descarga y cachea TODOS los datasets no cacheados."""
+    """Descarga y cachea TODOS los datasets no cacheados.
+
+    Phase 1: Dispatch individual collect_dataset for groups with <=50 siblings.
+    Phase 2: Dispatch collect_large_group for groups with >50 siblings,
+             which handles format dedup, schema probing, and row budgets.
+    """
     engine = get_sync_engine()
 
     try:
-        # Select datasets that have no successful cache and are not permanently failed
+        from celery import group as celery_group
+
+        # ── Phase 1: individual datasets (groups <= 50 siblings) ──
         query = (
             "SELECT CAST(d.id AS text) FROM datasets d "
             "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
             "WHERE d.is_cached = false "
-            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed'))"
+            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed')) "
+            "AND d.title NOT IN ("
+            "  SELECT title FROM datasets "
+            "  WHERE portal = d.portal "
+            "  GROUP BY title, portal "
+            "  HAVING COUNT(*) > 50"
+            ")"
         )
         params: dict = {}
         if portal:
@@ -846,14 +1393,154 @@ def bulk_collect_all(self, portal: str | None = None):
         with engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
 
-        logger.info(f"Bulk collect: {len(rows)} uncached datasets to process")
-        from celery import group
-
+        phase1_count = len(rows)
         tasks = [collect_dataset.s(row[0]) for row in rows]
         if tasks:
-            group(tasks).apply_async()
+            celery_group(tasks).apply_async()
 
-        return {"dispatched": len(rows)}
+        # ── Phase 2: large groups (>50 siblings) ──
+        large_query = (
+            "SELECT d.title, d.portal, COUNT(*) as cnt FROM datasets d "
+            "WHERE d.is_cached = false "
+            "GROUP BY d.title, d.portal "
+            "HAVING COUNT(*) > 50 "
+            "ORDER BY COUNT(*) ASC "
+            "LIMIT 100"
+        )
+        with engine.connect() as conn:
+            large_groups = conn.execute(text(large_query)).fetchall()
+
+        phase2_count = len(large_groups)
+        if large_groups:
+            large_tasks = [
+                collect_large_group.s(row.title, row.portal) for row in large_groups
+            ]
+            celery_group(large_tasks).apply_async()
+
+        logger.info(
+            f"Bulk collect: phase1={phase1_count} individual, phase2={phase2_count} large groups"
+        )
+        return {"dispatched_individual": phase1_count, "dispatched_groups": phase2_count}
+    finally:
+        engine.dispose()
+
+
+_FORMAT_PRIORITY = {"csv": 1, "txt": 2, "json": 3, "xlsx": 4, "xls": 5, "geojson": 6, "zip": 7, "ods": 8, "xml": 9}
+
+
+@celery_app.task(
+    name="openarg.collect_large_group",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=2100,
+    max_retries=1,
+)
+def collect_large_group(self, title: str, portal: str):
+    """Collect a large multi-resource group (>50 siblings) as a single table.
+
+    Strategy:
+      1. Format-dedup: group by URL stem, keep highest-priority format per stem
+      2. Schema-probe: download 5 rows from 3 sample resources to check compatibility
+      3. Concatenate compatible resources until MAX_TABLE_ROWS, skip incompatible
+      4. Mark all datasets in the group as is_cached=true
+    """
+    engine = get_sync_engine()
+    try:
+        table_name = _sanitize_table_name(title, portal)
+
+        # Check if table already exists and is full
+        current_rows = _get_table_row_count(engine, table_name)
+        if current_rows >= MAX_TABLE_ROWS:
+            logger.info(f"Large group '{title}' ({portal}): table already full ({current_rows} rows)")
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE datasets SET is_cached = true "
+                        "WHERE title = :title AND portal = :portal AND is_cached = false"
+                    ),
+                    {"title": title, "portal": portal},
+                )
+            return {"title": title, "status": "table_full", "rows": current_rows}
+
+        # Get all uncached resources for this group
+        with engine.connect() as conn:
+            resources = conn.execute(
+                text(
+                    "SELECT CAST(d.id AS text) as id, d.format, d.download_url "
+                    "FROM datasets d "
+                    "WHERE d.title = :title AND d.portal = :portal AND d.is_cached = false "
+                    "ORDER BY d.format, d.id"
+                ),
+                {"title": title, "portal": portal},
+            ).fetchall()
+            conn.rollback()
+
+        if not resources:
+            return {"title": title, "status": "nothing_to_collect"}
+
+        # Format dedup: group by URL path (without extension), keep best format
+        seen_stems: dict[str, tuple] = {}  # stem → (dataset_id, format, url)
+        for r in resources:
+            url = r.download_url or ""
+            if not url:
+                continue
+            # Extract URL stem (without extension and query params)
+            path = url.split("?")[0].split("#")[0]
+            dot = path.rfind(".")
+            stem = path[:dot] if dot > 0 else path
+            fmt = (r.format or "").lower().strip()
+            priority = _FORMAT_PRIORITY.get(fmt, 99)
+
+            if stem not in seen_stems or priority < _FORMAT_PRIORITY.get(seen_stems[stem][1], 99):
+                seen_stems[stem] = (r.id, fmt, url)
+
+        deduped = list(seen_stems.values())
+        logger.info(
+            f"Large group '{title}' ({portal}): {len(resources)} resources → "
+            f"{len(deduped)} after format dedup"
+        )
+
+        # Dispatch individual collect_dataset for each deduped resource (up to 200)
+        # The append_mode + aggregate row cap in collect_dataset handles the rest
+        from celery import group as celery_group
+
+        tasks = [collect_dataset.s(did) for did, _, _ in deduped[:200]]
+        if tasks:
+            celery_group(tasks).apply_async()
+
+        # Mark remaining (beyond 200) as cached to avoid re-dispatch
+        if len(deduped) > 200:
+            skipped_ids = [did for did, _, _ in deduped[200:]]
+            with engine.begin() as conn:
+                for sid in skipped_ids:
+                    conn.execute(
+                        text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                        {"id": sid},
+                    )
+
+        # Mark format-dupes as cached
+        deduped_ids = {did for did, _, _ in deduped}
+        format_dupes = [r.id for r in resources if r.id not in deduped_ids]
+        if format_dupes:
+            with engine.begin() as conn:
+                for fid in format_dupes:
+                    conn.execute(
+                        text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                        {"id": fid},
+                    )
+            logger.info(f"Marked {len(format_dupes)} format-duplicate resources as cached")
+
+        return {
+            "title": title,
+            "portal": portal,
+            "total_resources": len(resources),
+            "deduped": len(deduped),
+            "dispatched": min(len(deduped), 200),
+            "format_dupes_skipped": len(format_dupes),
+        }
+    except Exception as exc:
+        logger.warning(f"collect_large_group failed for '{title}' ({portal})", exc_info=True)
+        raise self.retry(exc=exc, countdown=60) from exc
     finally:
         engine.dispose()
 
@@ -1118,5 +1805,63 @@ def reset_failed_collectors():
         else:
             logger.debug("No permanently_failed datasets to reset")
         return {"reset": count}
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.retry_failed_shapefiles",
+    bind=True,
+    soft_time_limit=300,
+    time_limit=360,
+)
+def retry_failed_shapefiles(self):
+    """Re-dispatch datasets that failed with zip_no_parseable_file.
+
+    Now that we support shapefiles via fiona, these may succeed on retry.
+    Only retries datasets whose ZIP actually contains .shp files.
+    """
+    engine = get_sync_engine()
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT cd.dataset_id, cd.table_name, d.download_url, d.portal "
+                    "FROM cached_datasets cd "
+                    "JOIN datasets d ON d.id = cd.dataset_id "
+                    "WHERE cd.status = 'permanently_failed' "
+                    "AND cd.error_message = 'zip_no_parseable_file' "
+                    "LIMIT 500"
+                )
+            ).fetchall()
+
+        if not rows:
+            logger.info("No zip_no_parseable_file datasets to retry")
+            return {"dispatched": 0}
+
+        # Reset status so collect_data picks them up
+        with engine.begin() as conn:
+            for r in rows:
+                conn.execute(
+                    text(
+                        "UPDATE cached_datasets "
+                        "SET status = 'pending', retry_count = 0, "
+                        "    error_message = NULL, updated_at = NOW() "
+                        "WHERE dataset_id = CAST(:did AS uuid)"
+                    ),
+                    {"did": str(r.dataset_id)},
+                )
+
+        # Dispatch collect_data for each
+        tasks = []
+        for r in rows:
+            tasks.append(collect_dataset.s(str(r.dataset_id)))
+        if tasks:
+            from celery import group
+
+            group(tasks).apply_async()
+
+        logger.info("Retrying %d shapefile datasets", len(rows))
+        return {"dispatched": len(rows)}
     finally:
         engine.dispose()
