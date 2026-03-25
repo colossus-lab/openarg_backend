@@ -8,33 +8,24 @@ Cuando un usuario envía una pregunta, pasa por un pipeline implementado como un
 
 ## Diagrama General
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  FRONTEND (Next.js)                                                  │
-│  POST /api/chat → proxy al backend via WebSocket                     │
-└──────────────┬───────────────────────────────────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  BACKEND — Router (smart_query_v2_router.py)                         │
-│                                                                      │
-│  POST /api/v1/query/smart     → LangGraph ainvoke() → respuesta JSON │
-│  WS   /api/v1/query/ws/smart  → LangGraph astream() → eventos WS    │
-│                                                                      │
-│  • Validación de API key                                             │
-│  • Rate limiting (15/min HTTP, 20/min WS)                            │
-│  • Inyección de dependencias (Dishka)                                │
-│  • Checkpointing via PostgreSQL (per conversation_id)                │
-└──────────────┬───────────────────────────────────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  LangGraph Pipeline (app/application/pipeline/graph.py)              │
-│                                                                      │
-│  Nodes: classify → cache → preprocess → planner → executor           │
-│         → analyst → replan (conditional) → finalize                  │
-│  Fast paths: fast_reply, cache_reply, clarify_reply                  │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    FE[Frontend Next.js] -- "POST /api/chat" --> BE[Backend FastAPI]
+    BE -- "astream() events" --> WS[WebSocket /ws/smart]
+    
+    subgraph Pipeline ["LangGraph State Machine"]
+        direction LR
+        Classify[Classify] --> Cache[Cache]
+        Cache --> Preproc[Preprocess]
+        Preproc --> Planner[Planner]
+        Planner --> Exec[Executor]
+        Exec --> Analyst[Analyst]
+        Analyst --> Replan{Replan?}
+        Replan -- "Yes" --> Exec
+        Replan -- "No" --> Finalize[Finalize]
+    end
+    
+    BE --> Pipeline
 ```
 
 ---
@@ -273,84 +264,52 @@ Respuesta final
 
 ## Pipeline Completo — Diagrama de Flujo
 
-```
-Usuario envía pregunta
-        │
-        ▼
-  ┌─────────────┐    sí    ┌─────────────────┐
-  │ ¿Casual/    │─────────▶│ Respuesta        │──▶ FIN
-  │  Meta/Edu?  │          │ instantánea      │    (0 LLM, ~1ms)
-  └──────┬──────┘          └─────────────────┘
-         │ no
-         ▼
-  ┌─────────────┐    sí    ┌─────────────────┐
-  │ ¿Injection? │─────────▶│ Bloqueo + audit  │──▶ FIN
-  └──────┬──────┘          └─────────────────┘
-         │ no
-         ▼
-  ┌─────────────┐    sí    ┌─────────────────┐
-  │ ¿En cache?  │─────────▶│ Respuesta        │──▶ FIN
-  │ Redis/Sem.  │          │ cacheada         │    (0 LLM, ~1-200ms)
-  └──────┬──────┘          └─────────────────┘
-         │ no
-         ▼
-  ┌─────────────┐
-  │ Cargar      │
-  │ memoria     │
-  └──────┬──────┘
-         ▼
-  ┌─────────────┐
-  │ Preprocesar │ expand_acronyms → normalize_temporal
-  │ query       │ → normalize_provinces → expand_synonyms
-  └──────┬──────┘
-         ▼
-  ┌─────────────┐
-  │ PLANNER     │ ◀── 1ra llamada LLM (AWS Bedrock Claude Haiku 3.5)
-  │ (planner.txt)│    genera ExecutionPlan con steps
-  └──────┬──────┘
-         ▼
-  ┌─────────────────────────────────────────────┐
-  │ EJECUTAR STEPS (paralelo por nivel)          │
-  │                                              │
-  │  ┌──────┐  ┌──────┐  ┌──────┐              │
-  │  │series│  │ bcra │  │sandbox│  ...         │
-  │  └──┬───┘  └──┬───┘  └──┬───┘              │
-  │     └─────────┴─────────┘                    │
-  │         DataResult[]                         │
-  └──────────────┬──────────────────────────────┘
-                 ▼
-  ┌─────────────┐
-  │ Construir   │ _build_data_context()
-  │ contexto    │
-  └──────┬──────┘
-         ▼
-  ┌─────────────┐
-  │ ANALYST     │ ◀── 2da llamada LLM (AWS Bedrock Claude Haiku 3.5)
-  │(analyst.txt)│    genera respuesta + gráficos + confianza
-  └──────┬──────┘
-         ▼
-  ┌─────────────┐
-  │ Extraer     │ charts, confidence, citations
-  │ metadata    │
-  └──────┬──────┘
-         ▼
-  ┌─────────────┐   sí   ┌──────────────────┐
-  │ ¿Policy     │────────▶│ POLICY AGENT     │ ◀── 3ra llamada LLM (opcional)
-  │  mode?      │         └────────┬─────────┘
-  └──────┬──────┘                  │
-         │ no                      │
-         ◀────────────────────────┘
-         ▼
-  ┌─────────────────────────────────────────────┐
-  │ POST-PROCESAMIENTO                           │
-  │  • Audit log                                 │
-  │  • Actualizar memoria (1 LLM)                │
-  │  • Guardar historial en DB                   │
-  │  • Escribir en cache (Redis + semántico)     │
-  └──────────────┬──────────────────────────────┘
-                 ▼
-           Respuesta al usuario
-           {answer, sources, chart_data, confidence, citations}
+```mermaid
+graph TD
+    User([Usuario envía pregunta]) --> Classify{¿Casual/Meta/Edu?}
+    
+    Classify -- "Sí" --> FastReply[Respuesta instantánea] --> End([FIN])
+    
+    Classify -- "No" --> Injection{¿Injection?}
+    Injection -- "Sí" --> Block[Bloqueo + Audit] --> End
+    
+    Injection -- "No" --> Cache{¿En cache?}
+    Cache -- "Sí" --> CacheReply[Respuesta cacheada] --> End
+    
+    Cache -- "No" --> Memory[Cargar memoria]
+    Memory --> Preproc[Preprocesar query]
+    Preproc --> Planner[[PLANNER LLM]]
+    
+    Planner --> Exec[EJECUTAR STEPS]
+    
+    subgraph Parallel ["Ejecución Paralela"]
+        direction LR
+        S1[Series Tiempo]
+        S2[BCRA]
+        S3[Sandbox SQL]
+        S4[CKAN/Vector Search]
+    end
+    
+    Exec --> Parallel
+    Parallel --> Context[Construir contexto]
+    
+    Context --> Analyst[[ANALYST LLM]]
+    Analyst --> Metadata[Extraer charts/citations]
+    
+    Metadata --> Policy{¿Policy mode?}
+    Policy -- "Sí" --> PolicyAgent[[POLICY AGENT LLM]] --> Post
+    Policy -- "No" --> Post[POST-PROCESAMIENTO]
+    
+    Post --> Final([Respuesta final al usuario])
+    
+    subgraph Background ["Segundo Plano"]
+        Audit[Audit log]
+        UpMem[Actualizar memoria]
+        DB[Guardar en DB]
+        CacheW[Escribir en cache]
+    end
+    
+    Final -.-> Background
 ```
 
 ---
