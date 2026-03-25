@@ -1,20 +1,43 @@
 # OpenArg Backend Documentation
 
-OpenArg is an AI-powered multi-agent platform for analyzing Argentine government open data. It scrapes public data portals, generates vector embeddings, caches datasets in PostgreSQL, and answers natural-language queries using LLMs.
+> [!NOTE]
+> OpenArg is an AI-powered multi-agent platform for analyzing Argentine government open data. It scrapes public data portals, generates vector embeddings, caches datasets in PostgreSQL, and answers natural-language queries using LLMs.
+
+---
 
 ## Documentation Index
 
+```mermaid
+graph TD
+    Start[Documentation Root] --> Arch[Architecture & Design]
+    Start --> API[API Reference]
+    Start --> Ops[Operations & Deployment]
+    
+    Arch --> Layer1[Domain Layer]
+    Arch --> Layer2[Infrastructure Layer]
+    Arch --> DB[Database Schema]
+    
+    Ops --> Config[Configuration]
+    Ops --> Deploy[Deployment]
+    Ops --> Runbook[Runbook]
+    
+    Flow[Pipelines] --> QPipe[Query Pipeline]
+    Flow --> WPipe[Worker Pipeline]
+```
+
 | Document | Description |
-|----------|-------------|
-| [Architecture](./architecture.md) | Hexagonal architecture, layer responsibilities, DI wiring |
-| [API Reference](./api-reference.md) | All HTTP endpoints with request/response schemas |
-| [Database Schema](./database-schema.md) | Tables, columns, indexes, relationships, migrations |
-| [Domain Layer](./domain-layer.md) | Entities, ports (interfaces), exceptions |
-| [Infrastructure Layer](./infrastructure-layer.md) | Adapters, persistence, Celery workers |
-| [Configuration](./configuration.md) | Settings, TOML config, environment variables |
-| [Deployment](./deployment.md) | Docker Compose, services, Make commands |
-| [Query Pipeline](./pipeline-map.md) | LangGraph pipeline nodes, flow diagram |
-| [Worker Pipeline](./worker-pipeline.md) | Celery tasks, queues, scheduled jobs |
+|:---|:---|
+| **[Architecture](./architecture.md)** | Hexagonal architecture, layer responsibilities, DI wiring |
+| **[API Reference](./api-reference.md)** | All HTTP endpoints with request/response schemas |
+| **[Database Schema](./database-schema.md)** | Tables, columns, indexes, relationships, migrations |
+| **[Domain Layer](./domain-layer.md)** | Entities, ports (interfaces), exceptions |
+| **[Infrastructure Layer](./infrastructure-layer.md)** | Adapters, persistence, Celery workers |
+| **[Configuration](./configuration.md)** | Settings, TOML config, environment variables |
+| **[Deployment](./deployment.md)** | Docker Compose, services, Make commands |
+| **[Query Pipeline](./pipeline-map.md)** | LangGraph pipeline nodes, flow diagram |
+| **[Worker Pipeline](./worker-pipeline.md)** | Celery tasks, queues, scheduled jobs |
+
+---
 
 ## Quick Start
 
@@ -37,6 +60,8 @@ make workers.transparency
 make workers.ingest
 make workers.s3
 ```
+
+---
 
 ## Tech Stack
 
