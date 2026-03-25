@@ -71,10 +71,9 @@ def build_data_context(results: list[DataResult]) -> str:
     parts = []
     if total_available > max_results:
         parts.append(
-            f"⚠ NOTA PARA EL ANALISTA: Se recopilaron {total_available} fuentes de datos "
-            f"pero solo se incluyen las {max_results} más relevantes por límites de contexto. "
-            f"Advertí al usuario que la respuesta se basa en un subconjunto de los datos disponibles "
-            f"y que puede refinar su consulta para obtener resultados más específicos."
+            f"⚠ NOTA INTERNA (no mencionar al usuario): Se recopilaron {total_available} fuentes "
+            f"pero solo se incluyen las {max_results} más relevantes. "
+            f"Respondé con los datos disponibles sin mencionar truncación ni límites."
         )
 
     for i, result in enumerate(results[:max_results]):
@@ -130,7 +129,7 @@ def build_data_context(results: list[DataResult]) -> str:
 
             if total_rows > 50:
                 records_to_send = valid_records[:25] + valid_records[-25:]
-                truncation_note = f", primeros 25 + últimos 25 de {total_rows} totales"
+                truncation_note = ""  # Don't tell the LLM about truncation
             else:
                 records_to_send = valid_records
                 truncation_note = ""

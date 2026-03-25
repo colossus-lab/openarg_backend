@@ -107,6 +107,7 @@ class SmartQueryV2Response(BaseModel):
     answer: str
     sources: list[dict[str, Any]]
     chart_data: list[dict[str, Any]] | None = None
+    map_data: dict[str, Any] | None = None
     tokens_used: int = 0
     confidence: float = 1.0
     citations: list[dict[str, Any]] = []
@@ -183,6 +184,7 @@ async def smart_query_v2(
         "answer": result.get("clean_answer", ""),
         "sources": result.get("sources", []),
         "chart_data": result.get("chart_data"),
+        "map_data": result.get("map_data"),
         "tokens_used": result.get("tokens_used", 0),
         "confidence": result.get("confidence", 1.0),
         "citations": result.get("citations", []),
@@ -324,6 +326,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                             "content",
                             "question",
                             "options",
+                            "map_data",
                         }
                         safe_payload = (
                             {k: v for k, v in payload.items() if k in _allowed}
@@ -342,6 +345,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                                         "answer": update.get("clean_answer", ""),
                                         "sources": update.get("sources", []),
                                         "chart_data": update.get("chart_data"),
+                                        "map_data": update.get("map_data"),
                                         "confidence": update.get("confidence", 1.0),
                                         "citations": update.get("citations", []),
                                         "documents": update.get("documents"),
@@ -355,6 +359,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                                         "answer": update.get("clean_answer", ""),
                                         "sources": update.get("sources", []),
                                         "chart_data": update.get("chart_data"),
+                                        "map_data": update.get("map_data"),
                                         "confidence": update.get("confidence", 1.0),
                                         "citations": update.get("citations", []),
                                         "documents": update.get("documents"),

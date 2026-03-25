@@ -58,6 +58,7 @@ async def finalize_node(state: OpenArgState) -> dict:
     plan = state.get("plan")
     clean_answer = state.get("clean_answer", "")
     chart_data = state.get("chart_data")
+    map_data = state.get("map_data")
     tokens_used = state.get("tokens_used", 0)
     last_embedding = state.get("last_embedding")
     all_warnings = list(state.get("step_warnings", []))
@@ -84,6 +85,7 @@ async def finalize_node(state: OpenArgState) -> dict:
         "answer": clean_answer,
         "sources": sources,
         "chart_data": chart_data,
+        "map_data": map_data,
         "tokens_used": tokens_used,
         "documents": documents,
     }
@@ -114,6 +116,7 @@ async def finalize_node(state: OpenArgState) -> dict:
         "clean_answer": clean_answer,
         "sources": sources,
         "documents": documents,
+        "map_data": map_data,
         "warnings": all_warnings,
         "duration_ms": duration_ms,
     }

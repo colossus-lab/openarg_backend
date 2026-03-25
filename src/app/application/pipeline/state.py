@@ -60,6 +60,9 @@ class OpenArgState(TypedDict, total=False):
     # ── Charts ──────────────────────────────────────────────
     chart_data: list[dict[str, Any]] | None
 
+    # ── Maps ──────────────────────────────────────────────
+    map_data: dict[str, Any] | None  # GeoJSON FeatureCollection for frontend
+
     # ── Policy ──────────────────────────────────────────────
     policy_text: str | None
 
