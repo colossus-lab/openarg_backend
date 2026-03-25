@@ -57,4 +57,32 @@ SQL: SELECT jurisdiccion_desc, SUM(CAST(credito_vigente AS NUMERIC)) AS total_cr
 Question: ¿Cuál era la tasa de mortalidad fetal en 1980?
 SQL: SELECT * FROM cache_tasa_de_mortalidad_fetal_por_sexo WHERE anio = '1980' LIMIT 50
 
+Geographic data rules:
+- Some tables have a `_geometry_geojson` column (GeoJSON text) and a `geom` column (PostGIS native geometry, SRID 4326).
+- When the user asks for a map, geographic distribution, locations, or "mostrá en mapa", INCLUDE the `_geometry_geojson` column in the SELECT.
+- When the user does NOT ask for geographic visualization, EXCLUDE geometry columns from the SELECT.
+- NEVER apply text comparison operators (ILIKE, =, ~) to `_geometry_geojson` or `geom`. Filter using attribute columns.
+- The `geometry_type` column (Point, Polygon, etc.) can be used for filtering.
+
+Spatial query rules (PostGIS):
+- For proximity searches ("qué hay cerca de", "a cuántos km de", "dentro de X km"), use ST_DWithin():
+  ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(<lon>, <lat>), 4326)::geography, <distance_meters>)
+- For distance calculation, use ST_Distance() with ::geography for meters:
+  ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(<lon>, <lat>), 4326)::geography) AS distancia_metros
+- For tables with centroide_lat/centroide_lon columns (like georef), build points:
+  ST_SetSRID(ST_MakePoint(CAST(centroide_lon AS FLOAT), CAST(centroide_lat AS FLOAT)), 4326)
+- Use ST_Contains(a.geom, b.geom) for containment queries.
+- ALWAYS use ::geography (not ::geometry) when computing real-world distances.
+- ALWAYS use SRID 4326 (WGS84) for lat/lon coordinates.
+- IMPORTANT: Use ST_DWithin() for proximity filters, NOT ST_Distance() < N.
+
+Question: ¿Dónde están los efectores de salud en Córdoba? Mostrá en mapa.
+SQL: SELECT nombre, tipo, localidad, provincia, _geometry_geojson FROM cache_caba_efectores_de_salud WHERE provincia ILIKE '%cordoba%' OR provincia ILIKE '%córdoba%' LIMIT 500
+
+Question: ¿Qué localidades hay dentro de 50km de Buenos Aires?
+SQL: SELECT nombre, centroide_lat, centroide_lon, ST_Distance(ST_SetSRID(ST_MakePoint(CAST(centroide_lon AS FLOAT), CAST(centroide_lat AS FLOAT)), 4326)::geography, ST_SetSRID(ST_MakePoint(-58.3816, -34.6037), 4326)::geography) / 1000 AS distancia_km FROM cache_georef_localidades WHERE ST_DWithin(ST_SetSRID(ST_MakePoint(CAST(centroide_lon AS FLOAT), CAST(centroide_lat AS FLOAT)), 4326)::geography, ST_SetSRID(ST_MakePoint(-58.3816, -34.6037), 4326)::geography, 50000) ORDER BY distancia_km LIMIT 100
+
+Question: ¿Qué barrios están cerca de la Plaza de Mayo? Mostrá en mapa.
+SQL: SELECT nombre, _geometry_geojson, ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(-58.3816, -34.6083), 4326)::geography) AS distancia_metros FROM cache_caba_barrios WHERE geom IS NOT NULL AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(-58.3816, -34.6083), 4326)::geography, 5000) ORDER BY distancia_metros LIMIT 100
+
 {few_shot_block}

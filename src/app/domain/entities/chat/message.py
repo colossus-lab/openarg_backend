@@ -15,6 +15,7 @@ class Message(BaseEntity):
     content: str = ""
     sources: list[dict] = field(default_factory=list)
     chart_data: list[dict] | None = None
+    map_data: dict | None = None
     documents: list[dict] | None = None
     feedback: str | None = None  # "up" | "down" | None
     feedback_comment: str | None = None

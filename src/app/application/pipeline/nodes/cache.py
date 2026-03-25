@@ -62,6 +62,7 @@ async def cache_reply_node(state: OpenArgState) -> dict:
         "clean_answer": cached.get("answer", ""),
         "sources": cached.get("sources", []),
         "chart_data": cached.get("chart_data"),
+        "map_data": cached.get("map_data"),
         "tokens_used": cached.get("tokens_used", 0),
         "documents": cached.get("documents"),
         "plan_intent": "cached",
