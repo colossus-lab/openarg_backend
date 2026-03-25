@@ -1,8 +1,19 @@
 # Configuration
 
-OpenArg uses a layered configuration system: TOML files per environment + environment variable overrides.
+OpenArg uses a layered configuration system that merges environment-specific TOML files with secret files and environment variable overrides.
+
+## Config Resolution Order
+
+```mermaid
+graph TD
+    Default[Base Config: config/{env}/config.toml] --> Secrets[Secret Config: config/{env}/.secrets.toml]
+    Secrets --> EnvVars[Environment Variable Overrides]
+    EnvVars --> Final[Final AppSettings Model]
+```
 
 ## Config Hierarchy
+
+
 
 ```
 config/
