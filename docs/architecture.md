@@ -4,20 +4,35 @@ OpenArg follows **Hexagonal Architecture** (Ports & Adapters), with clear separa
 
 ## Layer Overview
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  Presentation Layer (HTTP Controllers)                   │
-│  FastAPI routers with Pydantic request/response schemas  │
-├──────────────────────────────────────────────────────────┤
-│  Application Layer (LangGraph pipeline)                  │
-│  SmartQueryService + LangGraph state machine             │
-├──────────────────────────────────────────────────────────┤
-│  Domain Layer (Entities + Ports)                         │
-│  Dataclass entities, ABC interfaces, exceptions          │
-├──────────────────────────────────────────────────────────┤
-│  Infrastructure Layer (Adapters)                         │
-│  SQLAlchemy, LLM clients, Redis, Celery, CKAN scrapers  │
-└──────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Presentation ["Presentation Layer"]
+        A[FastAPI Controllers]
+        B[Pydantic Schemas]
+    end
+
+    subgraph Application ["Application Layer"]
+        C[SmartQueryService]
+        D[LangGraph State Machine]
+    end
+
+    subgraph Domain ["Domain Layer"]
+        E[Entities]
+        F[Ports / Interfaces]
+        G[Exceptions]
+    end
+
+    subgraph Infrastructure ["Infrastructure Layer"]
+        H[SQLAlchemy / pgvector]
+        I[LLM Clients]
+        J[Redis / Celery]
+        K[Data Source Adapters]
+    end
+
+    Presentation --> Application
+    Application --> Domain
+    Infrastructure -- Implements --> F
+    Application -.-> F
 ```
 
 ## Directory Structure
