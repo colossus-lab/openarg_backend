@@ -9,6 +9,25 @@
 | **Retención** | 7 días (configurable) |
 | **Componentes** | PostgreSQL + Redis |
 
+## Process Overview
+
+```mermaid
+graph TD
+    subgraph Backup
+        B1[Run backup.sh] --> B2[pg_dump -> .sql.gz]
+        B1 --> B3[redis-cli SAVE -> .rdb]
+        B2 & B3 --> B4[Local/Remote storage]
+    end
+
+    subgraph Restore
+        R1[Select backup files] --> R2[Drop/Create database]
+        R2 --> R3[pg_restore .sql.gz]
+        R1 --> R4[docker cp .rdb]
+        R3 & R4 --> R5[Restart services]
+        R5 --> R6[Alembic upgrade]
+    end
+```
+
 ## Backup
 
 ### Ejecución manual
