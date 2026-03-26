@@ -69,9 +69,10 @@ def _sanitize_table_name(name: str, portal: str = "") -> str:
     clean = re.sub(r"_+", "_", clean).strip("_")
     if portal:
         portal_clean = re.sub(r"[^a-z0-9_]", "_", portal.lower()).strip("_")
-        # Enforce PostgreSQL 63-char identifier limit
-        return f"cache_{portal_clean[:15]}_{clean[:45]}"
-    return f"cache_{clean[:50]}"
+        # Enforce PostgreSQL 63-char identifier limit:
+        # "cache_" (6) + portal (max 12) + "_" (1) + name (max 44) = 63
+        return f"cache_{portal_clean[:12]}_{clean[:44]}"
+    return f"cache_{clean[:57]}"
 
 
 _CONTENT_TYPES = {
@@ -185,9 +186,7 @@ def _geojson_features_to_df(features: list[dict]) -> pd.DataFrame:
                             c = c[0]
                         if isinstance(c, list) and len(c) >= 2:
                             centroid = {"type": "Point", "coordinates": c[:2]}
-                            props["_geometry_geojson"] = json.dumps(
-                                centroid, separators=(",", ":")
-                            )
+                            props["_geometry_geojson"] = json.dumps(centroid, separators=(",", ":"))
                     except Exception:
                         pass  # skip geometry entirely
             else:
@@ -236,7 +235,9 @@ def _stream_download(
     import httpx
 
     total = 0
-    with httpx.Client(timeout=180.0, verify=verify_ssl) as client:
+    # connect=30s, read=60s per chunk (not total). Celery soft_time_limit handles total.
+    dl_timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0)
+    with httpx.Client(timeout=dl_timeout, verify=verify_ssl) as client:
         with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
             with open(dest_path, "wb") as f:
@@ -427,12 +428,16 @@ def _ensure_postgis_geom(engine, table_name: str, columns: list[str]) -> None:
             # Ensure PostGIS is available
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
             conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN geom geometry(Geometry, 4326)"))
-            conn.execute(text(
-                f"UPDATE {tbl} SET geom = ST_SetSRID(ST_GeomFromGeoJSON(_geometry_geojson), 4326) "
-                f"WHERE _geometry_geojson IS NOT NULL AND _geometry_geojson != '' "
-                f"AND _geometry_geojson ~ '^\\s*\\{{' AND geom IS NULL"
-            ))
-            conn.execute(text(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON {tbl} USING gist (geom)'))
+            conn.execute(
+                text(
+                    f"UPDATE {tbl} SET geom = ST_SetSRID(ST_GeomFromGeoJSON(_geometry_geojson), 4326) "
+                    f"WHERE _geometry_geojson IS NOT NULL AND _geometry_geojson != '' "
+                    f"AND _geometry_geojson ~ '^\\s*\\{{' AND geom IS NULL"
+                )
+            )
+            conn.execute(
+                text(f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON {tbl} USING gist (geom)')
+            )
         logger.info("PostGIS geom column added to %s", table_name)
     except Exception:
         logger.debug("PostGIS geom column skipped for %s", table_name, exc_info=True)
@@ -685,7 +690,9 @@ def collect_dataset(self, dataset_id: str):
                     # Mark as cached so bulk_collect_all doesn't re-dispatch
                     with engine.begin() as conn:
                         conn.execute(
-                            text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                            text(
+                                "UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"
+                            ),
                             {"id": dataset_id},
                         )
                     return {"dataset_id": dataset_id, "status": "table_full"}
@@ -1005,7 +1012,9 @@ def collect_dataset(self, dataset_id: str):
                                 )
                                 logger.warning(
                                     "Dataset %s (zip/shp) truncated from %d to %d rows",
-                                    dataset_id, len(df), MAX_TABLE_ROWS,
+                                    dataset_id,
+                                    len(df),
+                                    MAX_TABLE_ROWS,
                                 )
                                 df = df.iloc[:MAX_TABLE_ROWS]
                             df["_source_dataset_id"] = dataset_id
@@ -1015,9 +1024,13 @@ def collect_dataset(self, dataset_id: str):
                                         f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
                                     )
                                     return {"dataset_id": dataset_id, "status": "schema_mismatch"}
-                                _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                                _to_sql_safe(
+                                    df, table_name, engine, if_exists="append", index=False
+                                )
                             else:
-                                _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                                _to_sql_safe(
+                                    df, table_name, engine, if_exists="replace", index=False
+                                )
                             row_count, columns = len(df), list(df.columns)
                             parsed = True
 
@@ -1412,9 +1425,7 @@ def bulk_collect_all(self, portal: str | None = None):
 
         phase2_count = len(large_groups)
         if large_groups:
-            large_tasks = [
-                collect_large_group.s(row.title, row.portal) for row in large_groups
-            ]
+            large_tasks = [collect_large_group.s(row.title, row.portal) for row in large_groups]
             celery_group(large_tasks).apply_async()
 
         logger.info(
@@ -1425,7 +1436,17 @@ def bulk_collect_all(self, portal: str | None = None):
         engine.dispose()
 
 
-_FORMAT_PRIORITY = {"csv": 1, "txt": 2, "json": 3, "xlsx": 4, "xls": 5, "geojson": 6, "zip": 7, "ods": 8, "xml": 9}
+_FORMAT_PRIORITY = {
+    "csv": 1,
+    "txt": 2,
+    "json": 3,
+    "xlsx": 4,
+    "xls": 5,
+    "geojson": 6,
+    "zip": 7,
+    "ods": 8,
+    "xml": 9,
+}
 
 
 @celery_app.task(
@@ -1451,7 +1472,9 @@ def collect_large_group(self, title: str, portal: str):
         # Check if table already exists and is full
         current_rows = _get_table_row_count(engine, table_name)
         if current_rows >= MAX_TABLE_ROWS:
-            logger.info(f"Large group '{title}' ({portal}): table already full ({current_rows} rows)")
+            logger.info(
+                f"Large group '{title}' ({portal}): table already full ({current_rows} rows)"
+            )
             with engine.begin() as conn:
                 conn.execute(
                     text(

@@ -1,6 +1,29 @@
 # OpenArg — Runbook Operativo
 
-Procedimientos de respuesta a incidentes y operación del sistema.
+Procedimientos de respuesta a incidentes y operación del sistema en producción.
+
+---
+
+## Flujo de Resolución de Incidentes
+
+```mermaid
+graph TD
+    Alert[Alerta Detectada] --> Diag[Diagnóstico / Logs]
+    Diag --> Category{Categoría}
+    
+    Category -->|Redis| R1[Reinicio / Check Memoria]
+    Category -->|Postgres| P1[Reinicio / Check Health]
+    Category -->|API/LLM| A1[Check API Keys / Quotas]
+    Category -->|MCP| M1[Reinicio Server Específico]
+    
+    R1 --> Verify[Verificar Recuperación]
+    P1 --> Verify
+    A1 --> Verify
+    M1 --> Verify
+    
+    Verify -->|OK| End[Fin del Incidente]
+    Verify -->|Error| Escalation[Escalar / Restore Backup]
+```
 
 ---
 
@@ -199,3 +222,4 @@ mcp-series-tiempo:
 ### Redis
 - Para cache-heavy: Redis Cluster o Redis Sentinel para HA
 - Evaluar `maxmemory-policy allkeys-lru` si la memoria es limitada
+

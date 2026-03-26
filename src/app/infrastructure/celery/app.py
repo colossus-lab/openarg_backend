@@ -97,8 +97,8 @@ def create_celery() -> Celery:
         "openarg.analyze_session_topics": {"queue": "transparency"},
         "openarg.retry_s3_uploads": {"queue": "s3"},
         "openarg.upload_to_s3": {"queue": "s3"},
-        "openarg.recover_stuck_tasks": {"queue": "collector"},
-        "openarg.reset_failed_collectors": {"queue": "collector"},
+        "openarg.recover_stuck_tasks": {"queue": "default"},
+        "openarg.reset_failed_collectors": {"queue": "default"},
         "openarg.snapshot_staff": {"queue": "scraper"},
         "openarg.reindex_all_embeddings": {"queue": "embedding"},
         # New data source tasks (dedicated ingest queue)
@@ -216,7 +216,7 @@ def create_celery() -> Celery:
             "recover-stuck-tasks": {
                 "task": "openarg.recover_stuck_tasks",
                 "schedule": crontab(minute="*/15"),
-                "options": {"queue": "collector"},
+                "options": {"queue": "default"},
             },
             "snapshot-staff-weekly": {
                 "task": "openarg.snapshot_staff",

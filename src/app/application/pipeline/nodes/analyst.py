@@ -45,7 +45,9 @@ def _build_map_data(results: list) -> dict[str, Any] | None:
                 geom = json.loads(geojson_str) if isinstance(geojson_str, str) else geojson_str
             except (json.JSONDecodeError, TypeError):
                 continue
-            props = {k: v for k, v in rec.items() if k not in ("_geometry_geojson", "_source_dataset_id")}
+            props = {
+                k: v for k, v in rec.items() if k not in ("_geometry_geojson", "_source_dataset_id")
+            }
             features.append({"type": "Feature", "geometry": geom, "properties": props})
             if len(features) >= _MAX_MAP_FEATURES:
                 break
