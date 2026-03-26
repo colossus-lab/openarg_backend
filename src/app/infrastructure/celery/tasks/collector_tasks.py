@@ -69,9 +69,10 @@ def _sanitize_table_name(name: str, portal: str = "") -> str:
     clean = re.sub(r"_+", "_", clean).strip("_")
     if portal:
         portal_clean = re.sub(r"[^a-z0-9_]", "_", portal.lower()).strip("_")
-        # Enforce PostgreSQL 63-char identifier limit
-        return f"cache_{portal_clean[:15]}_{clean[:45]}"
-    return f"cache_{clean[:50]}"
+        # Enforce PostgreSQL 63-char identifier limit:
+        # "cache_" (6) + portal (max 12) + "_" (1) + name (max 44) = 63
+        return f"cache_{portal_clean[:12]}_{clean[:44]}"
+    return f"cache_{clean[:57]}"
 
 
 _CONTENT_TYPES = {
@@ -236,7 +237,9 @@ def _stream_download(
     import httpx
 
     total = 0
-    with httpx.Client(timeout=180.0, verify=verify_ssl) as client:
+    # connect=30s, read=60s per chunk (not total). Celery soft_time_limit handles total.
+    dl_timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0)
+    with httpx.Client(timeout=dl_timeout, verify=verify_ssl) as client:
         with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
             with open(dest_path, "wb") as f:
