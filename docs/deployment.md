@@ -1,10 +1,40 @@
 # Deployment
 
+OpenArg is designed to be fully containerized. The system consists of a web API, multiple specialized Celery workers, and necessary infrastructure (PostgreSQL + Redis).
+
+## Deployment Architecture
+
+```mermaid
+graph TD
+    User((User)) -->|HTTP| API[FastAPI Server]
+    API -->|Read/Write| DB[(PostgreSQL + pgvector)]
+    API -->|Queue Task| Redis[(Redis Broker/Cache)]
+    
+    subgraph Workers [Celery Worker Fleet]
+        WS[Scraper Worker]
+        WC[Collector Worker]
+        WE[Embedding Worker]
+        WA[Analyst Worker]
+        WT[Transparency Worker]
+    end
+    
+    Redis --> WS
+    Redis --> WC
+    Redis --> WE
+    Redis --> WA
+    Redis --> WT
+    
+    WS -->|Cache Data| DB
+    WE -->|Vectorize| DB
+```
+
 ## Docker Compose (Full Stack)
 
 The `docker-compose.yaml` defines the complete stack:
 
 ### Services
+
+
 
 | Service | Image | Port | Description |
 |---------|-------|------|-------------|

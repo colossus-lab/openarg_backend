@@ -96,6 +96,16 @@ OpenArg has two repositories:
 
 ## Development Workflow
 
+```mermaid
+graph LR
+    Feature[feature/*] -->|PR| Staging[staging]
+    Bugfix[bugfix/*] -->|PR| Staging
+    Staging -->|Merge| Main[main]
+    
+    style Staging fill:#ccf,stroke:#333,stroke-width:2px
+    style Main fill:#f9f,stroke:#333,stroke-width:4px
+```
+
 1. Create a feature branch from `staging`:
    ```bash
    git checkout staging
@@ -108,9 +118,11 @@ OpenArg has two repositories:
    make code.check    # Runs lint + tests
    ```
 4. Commit with a clear, meaningful message
-5. Push to your fork and open a Pull Request **against the `staging` branch** (not `main`)
+5. Push to your fork and open a Pull Request **against the `staging` branch** (not `main`).
 
-> **Important**: All PRs must target `staging`. The `main` branch is reserved for production releases and is only updated via merges from `staging`.
+> [!IMPORTANT]
+> All PRs must target **`staging`**. The `main` branch is reserved for production releases and is only updated via merges from `staging`.
+
 
 ## Code Style
 
