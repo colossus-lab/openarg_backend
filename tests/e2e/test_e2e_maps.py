@@ -37,8 +37,13 @@ def assert_has_map_data(data: dict, label: str, *, min_features: int = 1) -> Non
     assert "properties" in feat, f"Feature missing properties for: {label}"
     geom = feat["geometry"]
     assert geom.get("type") in (
-        "Point", "MultiPoint", "LineString", "MultiLineString",
-        "Polygon", "MultiPolygon", "GeometryCollection",
+        "Point",
+        "MultiPoint",
+        "LineString",
+        "MultiLineString",
+        "Polygon",
+        "MultiPolygon",
+        "GeometryCollection",
     ), f"Invalid geometry type {geom.get('type')} for: {label}"
     assert "coordinates" in geom, f"Geometry missing coordinates for: {label}"
 
@@ -174,8 +179,12 @@ class TestGeoJSONStructure:
             pytest.skip("Could not get map_data from any geo query (LLM non-determinism)")
         for feat in data["map_data"]["features"][:10]:
             props = feat.get("properties", {})
-            assert "_geometry_geojson" not in props, "Internal _geometry_geojson leaked to properties"
-            assert "_source_dataset_id" not in props, "Internal _source_dataset_id leaked to properties"
+            assert "_geometry_geojson" not in props, (
+                "Internal _geometry_geojson leaked to properties"
+            )
+            assert "_source_dataset_id" not in props, (
+                "Internal _source_dataset_id leaked to properties"
+            )
 
     async def test_max_features_cap(self, client):
         """Map data should have at most 500 features."""
@@ -189,6 +198,4 @@ class TestGeoJSONStructure:
         data = await self._get_map_response(client)
         if not data:
             pytest.skip("Could not get map_data from any geo query (LLM non-determinism)")
-        assert data.get("chart_data") is None, (
-            "chart_data should be None when map_data is present"
-        )
+        assert data.get("chart_data") is None, "chart_data should be None when map_data is present"
