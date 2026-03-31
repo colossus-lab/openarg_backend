@@ -652,6 +652,11 @@ def collect_dataset(self, dataset_id: str):
             if cached_did == dataset_id:
                 # Same resource — truly already cached, skip
                 logger.info(f"Dataset {dataset_id} already cached as {table_name}")
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                        {"id": dataset_id},
+                    )
                 return {
                     "dataset_id": dataset_id,
                     "table_name": table_name,
@@ -677,6 +682,11 @@ def collect_dataset(self, dataset_id: str):
                         logger.info(
                             f"Dataset {dataset_id} already appended to {table_name}, skipping"
                         )
+                        with engine.begin() as conn:
+                            conn.execute(
+                                text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                                {"id": dataset_id},
+                            )
                         return {"dataset_id": dataset_id, "status": "already_appended"}
                 except Exception:
                     pass  # Column might not exist yet (old tables), proceed with append
@@ -1403,7 +1413,7 @@ def bulk_collect_all(self, portal: str | None = None):
             "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed', 'schema_mismatch')) "
             "AND d.title NOT IN ("
             "  SELECT title FROM datasets "
-            "  WHERE portal = d.portal "
+            "  WHERE portal = d.portal AND is_cached = false "
             "  GROUP BY title, portal "
             "  HAVING COUNT(*) > 50"
             ")"
