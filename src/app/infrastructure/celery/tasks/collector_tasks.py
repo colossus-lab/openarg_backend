@@ -809,6 +809,16 @@ def collect_dataset(self, dataset_id: str):
                             logger.info(
                                 f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
                             )
+                            with engine.begin() as conn:
+                                conn.execute(
+                                    text(
+                                        "UPDATE cached_datasets SET status = 'schema_mismatch', "
+                                        "error_message = 'Incompatible columns for append', "
+                                        "updated_at = NOW() "
+                                        "WHERE dataset_id = CAST(:did AS uuid)"
+                                    ),
+                                    {"did": dataset_id},
+                                )
                             return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                     except Exception:
                         logger.debug(
@@ -1320,6 +1330,7 @@ def collect_dataset(self, dataset_id: str):
                     "illegal status line",
                     "Request Denied",
                     "Name or service not known",
+                    "TooManyColumns",
                 )
             )
             or "TooManyRedirects" in type(exc).__name__
@@ -1389,7 +1400,7 @@ def bulk_collect_all(self, portal: str | None = None):
             "SELECT CAST(d.id AS text) FROM datasets d "
             "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
             "WHERE d.is_cached = false "
-            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed')) "
+            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed', 'schema_mismatch')) "
             "AND d.title NOT IN ("
             "  SELECT title FROM datasets "
             "  WHERE portal = d.portal "
