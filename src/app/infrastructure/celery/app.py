@@ -188,10 +188,10 @@ def create_celery() -> Celery:
         for portal, (hour, minute) in _beat_schedule.items()
     }
 
-    # Bulk collect — download all uncached datasets after scraping (05:45 ART)
+    # Bulk collect — download all uncached datasets every 6 hours
     app.conf.beat_schedule["bulk-collect-datasets"] = {
         "task": "openarg.bulk_collect_all",
-        "schedule": crontab(hour=5, minute=45),
+        "schedule": crontab(hour="1,7,13,19", minute=45),
         "options": {"queue": "collector"},
     }
 
