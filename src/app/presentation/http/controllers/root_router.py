@@ -11,11 +11,17 @@ from app.presentation.http.controllers.conversations.conversations_router import
 from app.presentation.http.controllers.datasets.datasets_router import (
     router as datasets_router,
 )
+from app.presentation.http.controllers.developers.developers_router import (
+    router as developers_router,
+)
 from app.presentation.http.controllers.health.health_router import (
     router as health_router,
 )
 from app.presentation.http.controllers.monitoring.metrics_router import (
     router as metrics_router,
+)
+from app.presentation.http.controllers.public_api.ask_router import (
+    router as ask_router,
 )
 from app.presentation.http.controllers.query.query_router import (
     router as query_router,
@@ -58,6 +64,8 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(taxonomy_router)
     api_v1.include_router(transparency_router)
     api_v1.include_router(skills_router)
+    api_v1.include_router(developers_router)
+    api_v1.include_router(ask_router)
     api_v1.include_router(admin_tasks_router)
 
     root.include_router(api_v1)

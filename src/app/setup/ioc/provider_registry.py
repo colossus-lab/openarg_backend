@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.pipeline.nodes import PipelineDeps
 from app.application.smart_query_service import SmartQueryService
+from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
@@ -357,6 +358,19 @@ class LangGraphProvider(Provider):  # type: ignore[misc]
         )
 
 
+class ApiKeyProvider(Provider):  # type: ignore[misc]
+    scope = Scope.REQUEST
+
+    @provide  # type: ignore[untyped-decorator]
+    def api_key_repo(
+        self,
+        session: MainAsyncSession,
+    ) -> IApiKeyRepository:
+        from app.infrastructure.adapters.api_key.api_key_repository_sqla import ApiKeyRepositorySQLA
+
+        return ApiKeyRepositorySQLA(session)
+
+
 def get_providers() -> Iterable[Provider]:
     return (
         DatabaseProvider(),
@@ -373,6 +387,7 @@ def get_providers() -> Iterable[Provider]:
         MonitoringProvider(),
         ApplicationProvider(),
         LangGraphProvider(),
+        ApiKeyProvider(),
     )
 
 
