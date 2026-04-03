@@ -7,6 +7,7 @@ per plan, and does NOT save conversations.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -54,12 +55,13 @@ async def public_ask(
     # 1. Authenticate Bearer token
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization: Bearer <api_key>")
+        raise HTTPException(status_code=401, detail="Unauthorized")
     token = auth_header[7:].strip()
     api_key = await verify_api_key(token, api_key_repo)
 
-    # 2. Rate limit check (dynamic per plan)
-    rate_info = await check_rate_limit(api_key, cache)
+    # 2. Rate limit check (per-key + per-IP + global free cap)
+    client_ip = request.client.host if request.client else ""
+    rate_info = await check_rate_limit(api_key, cache, client_ip=client_ip)
 
     # 3. Reuse the same compiled graph as the frontend endpoint
     checkpointer = await _get_checkpointer()
@@ -77,7 +79,12 @@ async def public_ask(
     }
 
     try:
-        result = await compiled_graph.ainvoke(initial_state)
+        async with asyncio.timeout(30):
+            result = await compiled_graph.ainvoke(initial_state)
+    except TimeoutError:
+        logger.error("Pipeline timeout for API key %s", api_key.key_prefix)
+        await _log_usage(api_key_repo, api_key.id, body.question, 408, 0, 0)
+        raise HTTPException(status_code=408, detail="Request timed out")
     except Exception:
         logger.exception("Pipeline failed for API key %s", api_key.key_prefix)
         await _log_usage(api_key_repo, api_key.id, body.question, 500, 0, 0)
@@ -101,6 +108,8 @@ async def public_ask(
         "chart_data": result.get("chart_data"),
         "map_data": result.get("map_data"),
         "confidence": result.get("confidence", 1.0),
+        "citations": result.get("citations", []),
+        "warnings": result.get("warnings", []),
         "usage": {
             "tokens": tokens_used,
             "duration_ms": duration_ms,

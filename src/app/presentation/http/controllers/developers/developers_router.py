@@ -54,11 +54,11 @@ async def create_api_key_endpoint(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Limit: 1 active key per user
+    # Revoke any existing active key (1 key per user)
     existing = await api_key_repo.list_by_user(user.id)
-    active_count = sum(1 for k in existing if k.is_active)
-    if active_count >= 1:
-        raise HTTPException(status_code=400, detail="You already have an active API key. Revoke it first to create a new one.")
+    for k in existing:
+        if k.is_active:
+            await api_key_repo.deactivate(k.id, user.id)
 
     raw_key, key_hash = generate_api_key()
 

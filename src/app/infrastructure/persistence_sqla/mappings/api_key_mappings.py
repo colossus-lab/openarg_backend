@@ -39,7 +39,7 @@ def map_api_key_tables() -> None:
             ForeignKey("users.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        Column("key_hash", String(255), nullable=False),
+        Column("key_hash", String(255), nullable=False, unique=True),
         Column("key_prefix", String(32), nullable=False),
         Column("name", String(200), nullable=False),
         Column("plan", String(20), nullable=False, server_default="free"),

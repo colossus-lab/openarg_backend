@@ -314,3 +314,48 @@ The exception handler converts this to:
   "details": { "dataset_id": "abc123" }
 }
 ```
+
+---
+
+## API Key Entities
+
+### ApiKey
+
+```python
+@dataclass
+class ApiKey(BaseEntity):
+    user_id: UUID          # FK → users.id
+    key_hash: str          # SHA-256 hash (UNIQUE)
+    key_prefix: str        # First 16 chars for display
+    name: str              # User-given name
+    plan: str              # free | basic | pro
+    is_active: bool        # True until revoked
+    last_used_at: datetime | None
+    expires_at: datetime | None
+```
+
+### ApiUsage
+
+```python
+@dataclass
+class ApiUsage(BaseEntity):
+    api_key_id: UUID       # FK → api_keys.id
+    endpoint: str          # e.g. "/api/v1/ask"
+    question: str          # Truncated to 200 chars
+    status_code: int       # 200, 401, 429, etc.
+    tokens_used: int
+    duration_ms: int
+```
+
+### IApiKeyRepository (Port)
+
+```python
+class IApiKeyRepository(ABC):
+    async def create(api_key: ApiKey) -> ApiKey
+    async def get_by_key_hash(key_hash: str) -> ApiKey | None
+    async def list_by_user(user_id: UUID) -> list[ApiKey]
+    async def deactivate(key_id: UUID, user_id: UUID) -> bool
+    async def update_last_used(key_id: UUID) -> None
+    async def record_usage(usage: ApiUsage) -> None
+    async def get_usage_summary(user_id: UUID) -> dict
+```

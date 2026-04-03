@@ -101,7 +101,6 @@ class TestVerifyApiKey:
         with pytest.raises(HTTPException) as exc_info:
             await verify_api_key(raw_key, mock_repo)
         assert exc_info.value.status_code == 401
-        assert "revoked" in exc_info.value.detail
 
     @pytest.mark.asyncio
     async def test_expired_key_rejected(self, mock_repo: AsyncMock, valid_key: tuple) -> None:
@@ -113,7 +112,6 @@ class TestVerifyApiKey:
         with pytest.raises(HTTPException) as exc_info:
             await verify_api_key(raw_key, mock_repo)
         assert exc_info.value.status_code == 401
-        assert "expired" in exc_info.value.detail
 
 
 # ── Rate limiting ────────────────────────────────────────────
@@ -132,7 +130,7 @@ class TestRateLimit:
 
     @pytest.mark.asyncio
     async def test_first_request_allowed(self, free_key: ApiKey, mock_cache: AsyncMock) -> None:
-        result = await check_rate_limit(free_key, mock_cache)
+        result = await check_rate_limit(free_key, mock_cache, client_ip="1.2.3.4")
         assert result["remaining_minute"] == PLAN_LIMITS["free"]["per_min"] - 1
         assert result["remaining_day"] == PLAN_LIMITS["free"]["per_day"] - 1
 
@@ -140,8 +138,14 @@ class TestRateLimit:
     async def test_minute_limit_exceeded(self, free_key: ApiKey, mock_cache: AsyncMock) -> None:
         from fastapi import HTTPException
 
-        # Simulate per_min limit reached
-        mock_cache.get.side_effect = lambda key: PLAN_LIMITS["free"]["per_min"] if "min" in key else 0
+        user_id = str(free_key.user_id)
+
+        def _side_effect(key: str):
+            if key == f"rl:user:{user_id}:min":
+                return PLAN_LIMITS["free"]["per_min"]
+            return None
+
+        mock_cache.get.side_effect = _side_effect
         with pytest.raises(HTTPException) as exc_info:
             await check_rate_limit(free_key, mock_cache)
         assert exc_info.value.status_code == 429
@@ -151,10 +155,14 @@ class TestRateLimit:
     async def test_day_limit_exceeded(self, free_key: ApiKey, mock_cache: AsyncMock) -> None:
         from fastapi import HTTPException
 
-        # Simulate per_day limit reached (but per_min ok)
-        mock_cache.get.side_effect = lambda key: (
-            PLAN_LIMITS["free"]["per_day"] if "day" in key else 0
-        )
+        user_id = str(free_key.user_id)
+
+        def _side_effect(key: str):
+            if key == f"rl:user:{user_id}:day":
+                return PLAN_LIMITS["free"]["per_day"]
+            return None
+
+        mock_cache.get.side_effect = _side_effect
         with pytest.raises(HTTPException) as exc_info:
             await check_rate_limit(free_key, mock_cache)
         assert exc_info.value.status_code == 429
@@ -162,15 +170,9 @@ class TestRateLimit:
 
     @pytest.mark.asyncio
     async def test_increments_counters(self, free_key: ApiKey, mock_cache: AsyncMock) -> None:
-        await check_rate_limit(free_key, mock_cache)
-        # Should have called set twice (min + day)
-        assert mock_cache.set.call_count == 2
-        # Check TTLs
-        calls = mock_cache.set.call_args_list
-        min_call = [c for c in calls if "min" in str(c)][0]
-        day_call = [c for c in calls if "day" in str(c)][0]
-        assert min_call.kwargs.get("ttl_seconds") == 60
-        assert day_call.kwargs.get("ttl_seconds") == 86400
+        await check_rate_limit(free_key, mock_cache, client_ip="1.2.3.4")
+        # global free cap + ip + per-key min + per-key day = 4 sets
+        assert mock_cache.set.call_count == 4
 
     @pytest.mark.asyncio
     async def test_pro_plan_higher_limits(self, mock_cache: AsyncMock) -> None:

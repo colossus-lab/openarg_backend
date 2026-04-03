@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import secrets
 from datetime import UTC, datetime
 
@@ -16,9 +17,13 @@ from app.domain.ports.cache.cache_port import ICacheService
 logger = logging.getLogger(__name__)
 
 _KEY_PREFIX = "oarg_sk_"
+_MAX_TOKEN_LENGTH = 100  # Reject absurdly long tokens before hashing
+
+# Global cap: max free requests across ALL free users per day.
+GLOBAL_FREE_DAILY_CAP = 5000
 
 PLAN_LIMITS: dict[str, dict[str, int]] = {
-    "free": {"per_min": 5, "per_day": 10},
+    "free": {"per_min": 2, "per_day": 5},
     "basic": {"per_min": 15, "per_day": 200},
     "pro": {"per_min": 30, "per_day": 1000},
 }
@@ -47,41 +52,86 @@ async def verify_api_key(
 ) -> ApiKey:
     """Verify a Bearer token and return the ApiKey entity.
 
-    Raises HTTPException(401) if invalid, inactive, or expired.
+    Raises HTTPException(401) with a generic message for ALL failure reasons
+    to prevent key enumeration attacks.
     """
-    if not token.startswith(_KEY_PREFIX):
-        raise HTTPException(status_code=401, detail="Invalid API key format")
+    _AUTH_ERROR = "Invalid or unauthorized API key"
+
+    if not token or len(token) > _MAX_TOKEN_LENGTH or not token.startswith(_KEY_PREFIX):
+        raise HTTPException(status_code=401, detail=_AUTH_ERROR)
 
     key_hash = hash_api_key(token)
     api_key = await repo.get_by_key_hash(key_hash)
 
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    if not api_key.is_active:
-        raise HTTPException(status_code=401, detail="API key has been revoked")
+    if not api_key or not api_key.is_active:
+        raise HTTPException(status_code=401, detail=_AUTH_ERROR)
 
     if api_key.expires_at and api_key.expires_at < datetime.now(UTC):
-        raise HTTPException(status_code=401, detail="API key has expired")
+        raise HTTPException(status_code=401, detail=_AUTH_ERROR)
 
     return api_key
+
+
+async def _safe_cache_get(cache: ICacheService, key: str) -> int:
+    """Read a counter from cache, returning 0 on any failure (fail-open)."""
+    try:
+        val = await cache.get(key)
+        return int(val) if val is not None else 0
+    except Exception:
+        logger.warning("Cache read failed for %s, allowing request (fail-open)", key)
+        return 0
+
+
+async def _safe_cache_set(cache: ICacheService, key: str, value: int, ttl: int) -> None:
+    """Write a counter to cache, logging on failure instead of crashing."""
+    try:
+        await cache.set(key, value, ttl_seconds=ttl)
+    except Exception:
+        logger.warning("Cache write failed for %s, rate limit may be inaccurate", key)
 
 
 async def check_rate_limit(
     api_key: ApiKey,
     cache: ICacheService,
+    client_ip: str = "",
 ) -> dict[str, int]:
-    """Check and enforce rate limits for the given API key.
+    """Check and enforce rate limits: per-user, per-IP, and global free cap.
+
+    All cache operations are wrapped in try-except (fail-open): if Redis is
+    down, requests are allowed but logged. Counters are only incremented
+    AFTER all checks pass (no counter leak on rejected requests).
 
     Returns a dict with remaining quotas. Raises HTTPException(429) if exceeded.
     """
     limits = PLAN_LIMITS.get(api_key.plan, PLAN_LIMITS["free"])
-    key_id = str(api_key.id)
+    user_id = str(api_key.user_id)
 
-    # Per-minute check
-    min_key = f"rl:{key_id}:min"
-    min_count = await cache.get(min_key)
-    min_count = int(min_count) if min_count is not None else 0
+    # ── Phase 1: READ all counters ───────────────────────
+    global_count = 0
+    if api_key.plan == "free":
+        global_count = await _safe_cache_get(cache, "rl:global:free:day")
+
+    ip_count = 0
+    if client_ip:
+        ip_count = await _safe_cache_get(cache, f"rl:ip:{client_ip}:day")
+
+    min_count = await _safe_cache_get(cache, f"rl:user:{user_id}:min")
+    day_count = await _safe_cache_get(cache, f"rl:user:{user_id}:day")
+
+    # ── Phase 2: CHECK all limits (no increments yet) ────
+    if api_key.plan == "free" and global_count >= GLOBAL_FREE_DAILY_CAP:
+        logger.warning("Global free daily cap reached (%d)", global_count)
+        raise HTTPException(
+            status_code=429,
+            detail="Free tier daily limit reached. Try again tomorrow or upgrade.",
+        )
+
+    if client_ip and ip_count >= 20:
+        logger.warning("IP %s exceeded daily limit (%d)", client_ip, ip_count)
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests from this IP. Try again tomorrow.",
+        )
 
     if min_count >= limits["per_min"]:
         raise HTTPException(
@@ -94,11 +144,6 @@ async def check_rate_limit(
             },
         )
 
-    # Per-day check
-    day_key = f"rl:{key_id}:day"
-    day_count = await cache.get(day_key)
-    day_count = int(day_count) if day_count is not None else 0
-
     if day_count >= limits["per_day"]:
         raise HTTPException(
             status_code=429,
@@ -110,9 +155,26 @@ async def check_rate_limit(
             },
         )
 
-    # Increment counters
-    await cache.set(min_key, min_count + 1, ttl_seconds=60)
-    await cache.set(day_key, day_count + 1, ttl_seconds=86400)
+    # ── Phase 3: INCREMENT all counters (only after all checks pass) ──
+    if api_key.plan == "free":
+        await _safe_cache_set(cache, "rl:global:free:day", global_count + 1, 86400)
+
+    if client_ip:
+        await _safe_cache_set(cache, f"rl:ip:{client_ip}:day", ip_count + 1, 86400)
+
+    await _safe_cache_set(cache, f"rl:user:{user_id}:min", min_count + 1, 60)
+    await _safe_cache_set(cache, f"rl:user:{user_id}:day", day_count + 1, 86400)
+
+    # ── Abuse monitoring ─────────────────────────────────
+    day_threshold = math.ceil(limits["per_day"] * 0.8)
+    if day_count + 1 == day_threshold:
+        logger.warning(
+            "API key %s (%s plan) reached 80%% of daily limit (%d/%d)",
+            api_key.key_prefix,
+            api_key.plan,
+            day_count + 1,
+            limits["per_day"],
+        )
 
     return {
         "remaining_minute": limits["per_min"] - min_count - 1,
