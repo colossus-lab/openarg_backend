@@ -358,6 +358,16 @@ async def generate_plan(
 
         # Handle clarification response from planner
         if plan_data.get("type") == "clarification":
+            # Safety net: if _ALWAYS_CLEAR_RE already said this query is
+            # unambiguous but the LLM still returned a clarification,
+            # use the regex-based fallback plan instead of clarifying.
+            if _ALWAYS_CLEAR_RE.search(question) or _ALWAYS_CLEAR_RE.search(corrected):
+                logger.warning(
+                    "LLM returned clarification for ALWAYS_CLEAR query, using fallback: %s",
+                    question[:80],
+                )
+                return _fallback_plan(question)
+
             return ExecutionPlan(
                 query=question,
                 intent="clarification",
@@ -388,12 +398,25 @@ async def generate_plan(
                 )
             )
 
-        return ExecutionPlan(
+        plan = ExecutionPlan(
             query=plan_data.get("query", question),
             intent=plan_data.get("intent", ""),
             steps=steps,
             suggested_visualizations=plan_data.get("suggestedVisualizations", []),
         )
+
+        # Safety net: if intent ended up as "clarification" but the query
+        # is clearly answerable (matched _ALWAYS_CLEAR_RE), use fallback.
+        if plan.intent == "clarification" and (
+            _ALWAYS_CLEAR_RE.search(question) or _ALWAYS_CLEAR_RE.search(corrected)
+        ):
+            logger.warning(
+                "Plan intent=clarification for ALWAYS_CLEAR query, using fallback: %s",
+                question[:80],
+            )
+            return _fallback_plan(question)
+
+        return plan
     except Exception:
         logger.warning("LLM planner failed, using regex fallback", exc_info=True)
         return _fallback_plan(question)
