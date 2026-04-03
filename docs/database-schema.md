@@ -218,6 +218,43 @@ Managed via Alembic. Migration files are in `src/app/infrastructure/persistence_
 | `0002` | Change user_queries.user_id from UUID to TEXT |
 | `0003` | Add users, conversations, messages tables with FK constraints |
 
+### API Keys & Usage (Migration 0027)
+
+**`api_keys`** — API keys for public programmatic access
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID | PK, gen_random_uuid() |
+| `user_id` | UUID | FK → users.id (CASCADE) |
+| `key_hash` | VARCHAR(255) | SHA-256 hash, **UNIQUE** index |
+| `key_prefix` | VARCHAR(32) | First 16 chars for display |
+| `name` | VARCHAR(200) | User-given name |
+| `plan` | VARCHAR(20) | free / basic / pro (default: free) |
+| `is_active` | BOOLEAN | Default true |
+| `last_used_at` | TIMESTAMPTZ | Updated on each API call |
+| `expires_at` | TIMESTAMPTZ | Nullable |
+| `created_at` | TIMESTAMPTZ | server_default now() |
+| `updated_at` | TIMESTAMPTZ | server_default now() |
+
+Indexes: `ix_api_keys_key_hash` (unique), `ix_api_keys_user_id`
+
+**`api_usage`** — Append-only log of API requests
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID | PK |
+| `api_key_id` | UUID | FK → api_keys.id (CASCADE) |
+| `endpoint` | VARCHAR(255) | e.g. "/api/v1/ask" |
+| `question` | VARCHAR(500) | Truncated to 200 chars |
+| `status_code` | INTEGER | 200, 401, 429, 500, etc. |
+| `tokens_used` | INTEGER | LLM tokens consumed |
+| `duration_ms` | INTEGER | Total request time |
+| `created_at` | TIMESTAMPTZ | server_default now() |
+
+Indexes: `ix_api_usage_key_id`, `ix_api_usage_created`
+
+---
+
 ### Running Migrations
 
 ```bash

@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from app.domain.entities.base import BaseEntity
+
+_ZERO_UUID = UUID("00000000-0000-0000-0000-000000000000")
 
 
 @dataclass
 class ApiKey(BaseEntity):
     """An API key issued to a user for programmatic access."""
 
-    user_id: UUID = field(default_factory=uuid4)
+    user_id: UUID = field(default=_ZERO_UUID)  # Must be set explicitly
     key_hash: str = ""
     key_prefix: str = ""  # "oarg_sk_a1b2c3d4" (first 16 chars for display)
     name: str = ""
@@ -27,7 +29,7 @@ class ApiKey(BaseEntity):
 class ApiUsage(BaseEntity):
     """A single API request log entry (append-only)."""
 
-    api_key_id: UUID = field(default_factory=uuid4)
+    api_key_id: UUID = field(default=_ZERO_UUID)  # Must be set explicitly
     endpoint: str = ""
     question: str = ""  # truncated to 200 chars
     status_code: int = 200

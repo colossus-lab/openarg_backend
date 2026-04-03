@@ -13,7 +13,8 @@ graph TB
     Classify -->|casual/spam| FastReply[Fast Reply]
     Classify -->|ok| Cache{Semantic Cache}
     Cache -->|hit| CacheReply[Cached Response]
-    Cache -->|miss| Planner[Planner LLM]
+    Cache -->|miss| Skills[Skill Resolver]
+    Skills -->|inject context| Planner[Planner LLM]
     Planner -->|ambiguous| Clarify[Clarification]
     Planner -->|clear| Execute[Execute Steps]
 
@@ -28,8 +29,9 @@ graph TB
     Execute --> C9[BCRA/Georef]
 
     C1 & C2 & C3 & C4 & C5 & C6 & C7 & C8 & C9 --> Analyst[Analyst LLM]
-    Analyst -->|no data| Replan[Replan] --> Execute
-    Analyst -->|ok| Stream[Stream Response] --> FE
+    Analyst --> Coord{Coordinator}
+    Coord -->|replan: broaden/narrow/switch| Replan[Replan] --> Execute
+    Coord -->|continue| Stream[Stream Response] --> FE
 
     style User fill:#4A90D9,stroke:#2C5F8A,color:#fff
     style Caddy fill:#2ECC71,stroke:#1A9B54,color:#fff
@@ -49,6 +51,8 @@ graph TB
     style C8 fill:#1ABC9C,stroke:#148F77,color:#fff
     style C9 fill:#1ABC9C,stroke:#148F77,color:#fff
     style Analyst fill:#E74C3C,stroke:#C0392B,color:#fff
+    style Skills fill:#8E44AD,stroke:#6C3483,color:#fff
+    style Coord fill:#F39C12,stroke:#D68910,color:#fff
     style Replan fill:#F39C12,stroke:#D68910,color:#fff
     style Stream fill:#2ECC71,stroke:#1A9B54,color:#fff
     style FastReply fill:#95A5A6,stroke:#717D7E,color:#fff
@@ -60,7 +64,8 @@ graph TB
 
 ```mermaid
 graph LR
-    User([User Query]) --> Strategist
+    User([User Query]) --> Skills[Skill Resolver\nauto-detect]
+    Skills -->|skill context| Strategist
 
     Strategist[Strategist\nPlanner] -->|execution plan| R1[Researcher 1\nSeries Tiempo]
     Strategist --> R2[Researcher 2\nCKAN Search]
@@ -70,16 +75,19 @@ graph LR
 
     R1 & R2 & R3 & R4 & R5 -->|collected data| Analyst[Analyst]
 
-    Analyst -->|if policy mode ON| Policy[Policy Analyst\nDNFCG Evaluation]
-    Analyst -->|findings| Writer[Writer\nFinalizer]
+    Analyst --> Coord[Coordinator\nheuristic]
+    Coord -->|if policy mode ON| Policy[Policy Analyst\nDNFCG Evaluation]
+    Coord -->|findings| Writer[Writer\nFinalizer]
     Policy -->|policy evaluation| Writer
 
     Writer -->|stream| Response([Response\nwith citations + charts])
 
-    Analyst -.->|no data found| Strategist
+    Coord -.->|replan: broaden/narrow/switch| Strategist
 
     style User fill:#4A90D9,stroke:#2C5F8A,color:#fff
+    style Skills fill:#8E44AD,stroke:#6C3483,color:#fff
     style Strategist fill:#9B59B6,stroke:#7A3D92,color:#fff
+    style Coord fill:#F39C12,stroke:#D68910,color:#fff
     style R1 fill:#1ABC9C,stroke:#148F77,color:#fff
     style R2 fill:#1ABC9C,stroke:#148F77,color:#fff
     style R3 fill:#1ABC9C,stroke:#148F77,color:#fff
@@ -148,8 +156,8 @@ graph TB
 
     PGB --> RDS[(AWS RDS PostgreSQL + pgvector)]
     W6 --> S3[(AWS S3 openarg-datasets)]
-    BE -.->|primary LLM| Bedrock[AWS Bedrock Claude Haiku + Cohere]
-    BE -.->|fallback LLM| Anthropic[Anthropic API Claude Sonnet]
+    BE -.->|primary LLM| Bedrock[AWS Bedrock Claude Haiku 4.5 + Cohere]
+    BE -.->|fallback LLM| Gemini[Google Gemini 2.5 Flash]
 
     style Browser fill:#4A90D9,stroke:#2C5F8A,color:#fff
     style Caddy fill:#2ECC71,stroke:#1A9B54,color:#fff
@@ -168,7 +176,7 @@ graph TB
     style RDS fill:#2C3E50,stroke:#1A252F,color:#fff
     style S3 fill:#2C3E50,stroke:#1A252F,color:#fff
     style Bedrock fill:#F39C12,stroke:#D68910,color:#fff
-    style Anthropic fill:#F39C12,stroke:#D68910,color:#fff
+    style Gemini fill:#F39C12,stroke:#D68910,color:#fff
 ```
 
 ## Database Entity-Relationship Diagram
@@ -177,6 +185,8 @@ graph TB
 erDiagram
     USERS ||--|{ CONVERSATIONS : "starts"
     CONVERSATIONS ||--|{ MESSAGES : "contains"
+    USERS ||--|{ API_KEYS : "owns"
+    API_KEYS ||--|{ API_USAGE : "logs"
     
     DATASETS ||--|{ DATASET_CHUNKS : "chunked_to"
     DATASETS ||--o| CACHED_DATASETS : "tracked_in"

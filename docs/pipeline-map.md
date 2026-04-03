@@ -2,7 +2,7 @@
 
 ## Resumen
 
-Cuando un usuario envía una pregunta, pasa por un pipeline implementado como un **LangGraph state machine** con nodos especializados. El pipeline usa entre **0 y 3 llamadas a LLM** (AWS Bedrock Claude Haiku 3.5) dependiendo del tipo de consulta. Incluye soporte para replanning automático cuando los datos son insuficientes.
+Cuando un usuario envía una pregunta, pasa por un pipeline implementado como un **LangGraph state machine** con 16 nodos especializados. El pipeline usa entre **0 y 3 llamadas a LLM** (AWS Bedrock Claude Haiku 4.5) dependiendo del tipo de consulta. Incluye detección automática de skills, coordinación inteligente de replanning con estrategias (broaden/narrow/switch_source), y soporte para acceso por API key pública.
 
 ---
 
@@ -13,16 +13,18 @@ graph TD
     FE[Frontend Next.js] -- "POST /api/chat" --> BE[Backend FastAPI]
     BE -- "astream() events" --> WS[WebSocket /ws/smart]
     
-    subgraph Pipeline ["LangGraph State Machine"]
+    subgraph Pipeline ["LangGraph State Machine (16 nodos)"]
         direction LR
         Classify[Classify] --> Cache[Cache]
         Cache --> Preproc[Preprocess]
-        Preproc --> Planner[Planner]
+        Preproc --> Skills[Skill Resolver]
+        Skills --> Planner[Planner]
         Planner --> Exec[Executor]
         Exec --> Analyst[Analyst]
-        Analyst --> Replan{Replan?}
-        Replan -- "Yes" --> Exec
-        Replan -- "No" --> Finalize[Finalize]
+        Analyst --> Coord[Coordinator]
+        Coord -- "replan" --> Replan[Replan]
+        Replan --> Exec
+        Coord -- "continue" --> Finalize[Finalize]
     end
     
     BE --> Pipeline
@@ -101,13 +103,35 @@ Pregunta original
 
 ---
 
+### Paso 3b — Detección Automática de Skills (0 LLM)
+
+```
+Pregunta preprocesada
+    │
+    └─ SkillRegistry.match_auto() → regex matching contra 5 skills
+       │
+       ├─ /verificar  → "es verdad que...", "dijo que...", "aumentó X%"
+       ├─ /comparar   → "vs", "comparar", "diferencia entre"
+       ├─ /presupuesto → "presupuesto de...", "gasto público", "ejecución"
+       ├─ /perfil     → "quién es el diputado...", "patrimonio de..."
+       └─ /precio     → "a cuánto está el dólar", "riesgo país"
+```
+
+**Si matchea:** Inyecta `planner_injection` (instrucciones obligatorias de qué conectores usar) y `analyst_injection` (formato de respuesta estricto) en los prompts del planner y analyst respectivamente.
+
+**Si no matchea:** Pipeline continúa normal, el planner decide libremente.
+
+**Costo: 0 llamadas LLM** — es regex puro, ~1ms.
+
+---
+
 ### Paso 4 — Planificación (1 llamada LLM)
 
 ```
 Pregunta preprocesada + contexto de memoria
     │
     ▼
-generate_plan() → AWS Bedrock Claude Haiku 3.5
+generate_plan() → AWS Bedrock Claude Haiku 4.5
     │
     └─ Prompt: planner.txt (con 5 few-shot examples)
        Salida: ExecutionPlan {
@@ -226,7 +250,38 @@ Respuesta del LLM
 
 ---
 
-### Paso 9b — Análisis de Política (opcional, 1 llamada LLM)
+### Paso 9b — Coordinación y Replan Inteligente (0 LLM)
+
+```
+Resultados del analyst
+    │
+    ▼
+coordinator_node() → heurístico, sin LLM
+    │
+    ├─ ¿Tiene datos útiles? → "continue" → finalize
+    │
+    ├─ ¿Time budget > 20s? → "escalate" → finalize con lo que hay
+    │
+    ├─ ¿3+ fallos de conectores? → "escalate"
+    │
+    ├─ ¿replan_count >= 2? → "escalate"
+    │
+    └─ Replan con estrategia:
+       ├─ 1er intento: "broaden"      → ampliar búsqueda
+       ├─ 2do intento: "switch_source" → probar conectores diferentes
+       └─ 2do intento: "narrow"       → enfocar si hay datos parciales
+```
+
+El `replan_node` recibe la estrategia y genera contexto específico para el planner:
+- **broaden**: "Probá search_datasets, query_sandbox con tablas generales"
+- **switch_source**: "Los conectores anteriores fallaron, usá fuentes DIFERENTES"
+- **narrow**: "Hay datos parciales, sé más específico con filtros"
+
+**Máximo 2 replans** (3 intentos totales). Costo: 0 LLM para la decisión, 1 LLM por replan (planner call).
+
+---
+
+### Paso 9c — Análisis de Política (opcional, 1 llamada LLM)
 
 Solo se ejecuta si `policy_mode=True`.
 
@@ -278,7 +333,8 @@ graph TD
     
     Cache -- "No" --> Memory[Cargar memoria]
     Memory --> Preproc[Preprocesar query]
-    Preproc --> Planner[[PLANNER LLM]]
+    Preproc --> Skills{Skill auto-detect}
+    Skills --> Planner[[PLANNER LLM]]
     
     Planner --> Exec[EJECUTAR STEPS]
     
@@ -294,7 +350,10 @@ graph TD
     Parallel --> Context[Construir contexto]
     
     Context --> Analyst[[ANALYST LLM]]
-    Analyst --> Metadata[Extraer charts/citations]
+    Analyst --> Coord{Coordinator}
+    
+    Coord -- "replan (broaden/narrow/switch)" --> Exec
+    Coord -- "continue/escalate" --> Metadata[Extraer charts/citations]
     
     Metadata --> Policy{¿Policy mode?}
     Policy -- "Sí" --> PolicyAgent[[POLICY AGENT LLM]] --> Post
@@ -338,11 +397,13 @@ El endpoint WS `/api/v1/query/ws/smart` emite eventos en tiempo real via LangGra
 
 ```
 → {"type": "status", "step": "classifying"}
+→ {"type": "status", "step": "skill", "detail": "Verificación de afirmaciones..."}  (si skill detectada)
 → {"type": "status", "step": "planning"}
 → {"type": "status", "step": "planned", "intent": "...", "steps_count": N}
-→ {"type": "status", "step": "searching"}
+→ {"type": "status", "step": "searching", "detail": "Consultando Series de Tiempo..."}
 → {"type": "status", "step": "generating"}
 → {"type": "chunk", "content": "texto parcial..."}   (múltiples)
+→ {"type": "status", "step": "coordination", "detail": "Replanificando: ampliando búsqueda..."}  (si replan)
 → {"type": "complete", "answer": "...", "sources": [...], "chart_data": [...]}
 ```
 

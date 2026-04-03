@@ -14,6 +14,8 @@ graph TD
     subgraph Application ["Application Layer"]
         C[SmartQueryService]
         D[LangGraph State Machine]
+        SK[Skill Registry]
+        AK[API Key Service]
     end
 
     subgraph Domain ["Domain Layer"]
