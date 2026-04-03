@@ -26,6 +26,9 @@ from app.presentation.http.controllers.query.smart_query_v2_router import (
 from app.presentation.http.controllers.sandbox.sandbox_router import (
     router as sandbox_router,
 )
+from app.presentation.http.controllers.skills.skills_router import (
+    router as skills_router,
+)
 from app.presentation.http.controllers.taxonomy.taxonomy_router import (
     router as taxonomy_router,
 )
@@ -54,6 +57,7 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(metrics_router)
     api_v1.include_router(taxonomy_router)
     api_v1.include_router(transparency_router)
+    api_v1.include_router(skills_router)
     api_v1.include_router(admin_tasks_router)
 
     root.include_router(api_v1)

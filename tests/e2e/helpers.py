@@ -63,12 +63,23 @@ def smart_payload(question: str) -> dict:
 
 
 def extract_numbers(text: str) -> list[float]:
-    """Extract all numbers (including decimals) from text."""
+    """Extract all numbers (including decimals) from text.
+
+    Handles both decimal formats:
+    - "64.72" or "64,72" → 64.72  (1-2 digits after separator = decimal)
+    - "1.234" or "1,234" → 1234   (3 digits after separator = thousands)
+    - "1.234.567" → 1234567       (multiple separators = thousands)
+    """
     raw = re.findall(r"[\d]+(?:[.,]\d+)*", text)
     numbers = []
     for r in raw:
         try:
-            cleaned = r.replace(".", "").replace(",", ".")
+            # If ends with separator + 1 or 2 digits → decimal number
+            if re.search(r"[.,]\d{1,2}$", r) and r.count(".") + r.count(",") == 1:
+                cleaned = r.replace(",", ".")
+            else:
+                # Thousands separators: strip dots, replace comma with dot
+                cleaned = r.replace(".", "").replace(",", ".")
             numbers.append(float(cleaned))
         except ValueError:
             continue

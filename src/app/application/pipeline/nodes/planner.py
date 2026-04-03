@@ -27,6 +27,11 @@ async def planner_node(state: OpenArgState) -> dict:
         preprocessed_q = state.get("preprocessed_query", state["question"])
         planner_ctx = state.get("planner_ctx", "")
 
+        # Inject skill context if a skill was detected
+        skill_ctx = state.get("skill_context")
+        if skill_ctx and skill_ctx.get("planner"):
+            planner_ctx = (planner_ctx or "") + "\n\n--- SKILL ACTIVA ---\n" + skill_ctx["planner"]
+
         # Discover relevant cached tables for the planner
         catalog_hints = await discover_catalog_hints_for_planner(
             preprocessed_q, deps.sandbox, deps.embedding

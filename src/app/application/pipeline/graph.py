@@ -24,9 +24,9 @@ from langgraph.graph import END, START, StateGraph
 
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.edges import (
-    route_after_analysis,
     route_after_cache,
     route_after_classify,
+    route_after_coordinator,
     route_after_plan,
     route_cache_reply,
     route_clarify_reply,
@@ -36,6 +36,7 @@ from app.application.pipeline.nodes import PipelineDeps
 from app.application.pipeline.nodes.analyst import analyst_node
 from app.application.pipeline.nodes.cache import cache_check_node, cache_reply_node
 from app.application.pipeline.nodes.classify import classify_node
+from app.application.pipeline.nodes.coordinator import coordinator_node
 from app.application.pipeline.nodes.executor import (
     execute_steps_node,
     inject_fallbacks_node,
@@ -47,6 +48,7 @@ from app.application.pipeline.nodes.planner import clarify_reply_node, planner_n
 from app.application.pipeline.nodes.policy import policy_node
 from app.application.pipeline.nodes.preprocess import preprocess_node
 from app.application.pipeline.nodes.replan import replan_node
+from app.application.pipeline.nodes.skill_resolver import skill_resolver_node
 from app.application.pipeline.state import OpenArgState
 
 
@@ -83,11 +85,13 @@ def build_pipeline_graph(
     builder.add_node("cache_reply", cache_reply_node)
     builder.add_node("load_memory", load_memory_node)
     builder.add_node("preprocess", preprocess_node)
+    builder.add_node("skill_resolver", skill_resolver_node)
     builder.add_node("planner", planner_node)
     builder.add_node("clarify_reply", clarify_reply_node)
     builder.add_node("inject_fallbacks", inject_fallbacks_node)
     builder.add_node("execute_steps", execute_steps_node)
     builder.add_node("analyst", analyst_node)
+    builder.add_node("coordinator", coordinator_node)
     builder.add_node("policy", policy_node)
     builder.add_node("replan", replan_node)
     builder.add_node("finalize", finalize_node)
@@ -125,9 +129,10 @@ def build_pipeline_graph(
         {END: END},
     )
 
-    # load_memory -> preprocess -> planner (sequential)
+    # load_memory -> preprocess -> skill_resolver -> planner (sequential)
     builder.add_edge("load_memory", "preprocess")
-    builder.add_edge("preprocess", "planner")
+    builder.add_edge("preprocess", "skill_resolver")
+    builder.add_edge("skill_resolver", "planner")
 
     # After planner: clarify_reply (terminal) or inject_fallbacks
     builder.add_conditional_edges(
@@ -143,14 +148,15 @@ def build_pipeline_graph(
         {END: END},
     )
 
-    # inject_fallbacks -> execute_steps -> analyst (sequential)
+    # inject_fallbacks -> execute_steps -> analyst -> coordinator (sequential)
     builder.add_edge("inject_fallbacks", "execute_steps")
     builder.add_edge("execute_steps", "analyst")
+    builder.add_edge("analyst", "coordinator")
 
-    # After analyst: replan (if no data + retries remain), policy, or finalize
+    # After coordinator: replan (strategy-based), policy, or finalize
     builder.add_conditional_edges(
-        "analyst",
-        route_after_analysis,
+        "coordinator",
+        route_after_coordinator,
         {"replan": "replan", "policy": "policy", "finalize": "finalize"},
     )
 
