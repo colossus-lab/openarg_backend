@@ -38,6 +38,16 @@ _checkpointer_attempted = False  # Prevent repeated init attempts
 logger = logging.getLogger(__name__)
 
 
+def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type: ignore[no-untyped-def]
+    """Return the compiled graph, compiling it once (thread-safe)."""
+    global _compiled_graph  # noqa: PLW0603
+    if _compiled_graph is None:
+        with _graph_lock:
+            if _compiled_graph is None:
+                _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
+    return _compiled_graph
+
+
 async def _get_checkpointer():
     """Lazily create an ``AsyncPostgresSaver`` if DATABASE_URL is set.
 
@@ -127,14 +137,9 @@ async def smart_query_v2(
     deps: FromDishka[PipelineDeps],
 ) -> dict[str, Any] | ORJSONResponse:
     """Execute a query through the LangGraph pipeline."""
-    global _compiled_graph  # noqa: PLW0603
-
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
     checkpointer = await _get_checkpointer()
-    if _compiled_graph is None:
-        with _graph_lock:
-            if _compiled_graph is None:
-                _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
+    compiled_graph = _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
     user_id = body.user_email or "anonymous"
@@ -155,7 +160,7 @@ async def smart_query_v2(
         invoke_config["configurable"] = {"thread_id": conversation_id}
 
     try:
-        result = await _compiled_graph.ainvoke(initial_state, config=invoke_config)
+        result = await compiled_graph.ainvoke(initial_state, config=invoke_config)
     except Exception:
         logger.exception("LangGraph pipeline failed")
         return ORJSONResponse(
