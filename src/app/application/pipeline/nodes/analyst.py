@@ -82,6 +82,7 @@ def _build_analysis_prompt(
     results: list,
     memory_ctx_analyst: str,
     all_warnings: list[str],
+    skill_context: dict[str, str] | None = None,
 ) -> str:
     """Build the analyst LLM prompt from data context and warnings."""
     data_context = build_data_context(results)
@@ -108,6 +109,10 @@ def _build_analysis_prompt(
             caps=caps,
         )
 
+    skill_block = ""
+    if skill_context and skill_context.get("analyst"):
+        skill_block = "\n\n--- FORMATO REQUERIDO POR SKILL ---\n" + skill_context["analyst"]
+
     return (
         f'PREGUNTA DEL USUARIO: "{question}"\n'
         f"FECHA ACTUAL: {today}\n"
@@ -121,6 +126,7 @@ def _build_analysis_prompt(
         "Respondé de forma breve y conversacional. Destacá el dato más importante, "
         "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
         "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+        f"{skill_block}"
     )
 
 
@@ -151,8 +157,10 @@ async def analyst_node(state: OpenArgState) -> dict:
         all_warnings = list(state.get("step_warnings", []))
 
         # Build prompt
+        skill_context = state.get("skill_context")
         analysis_prompt = _build_analysis_prompt(
-            question, plan, results, memory_ctx_analyst, all_warnings
+            question, plan, results, memory_ctx_analyst, all_warnings,
+            skill_context=skill_context,
         )
 
         # LLM streaming call — emit chunks as they arrive

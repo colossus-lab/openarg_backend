@@ -29,17 +29,10 @@ def route_after_plan(state: OpenArgState) -> str:
     return "inject_fallbacks"
 
 
-def route_after_analysis(state: OpenArgState) -> str:
-    """After analysis: replan if no data and retries remain, policy, or finalize."""
-    # Check if we have no useful data and haven't replanned yet
-    data_results = state.get("data_results", [])
-    has_data = data_results and any(
-        r.records or r.source.startswith("pgvector:") or r.source.startswith("ckan:")
-        for r in data_results
-    )
-    replan_count = state.get("replan_count", 0)
-
-    if not has_data and replan_count < 1:
+def route_after_coordinator(state: OpenArgState) -> str:
+    """Route based on coordinator's decision (replaces route_after_analysis)."""
+    decision = state.get("coordinator_decision", "continue")
+    if decision == "replan":
         return "replan"
     if state.get("policy_mode"):
         return "policy"

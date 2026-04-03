@@ -684,7 +684,9 @@ def collect_dataset(self, dataset_id: str):
                         )
                         with engine.begin() as conn:
                             conn.execute(
-                                text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                                text(
+                                    "UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"
+                                ),
                                 {"id": dataset_id},
                             )
                         return {"dataset_id": dataset_id, "status": "already_appended"}
