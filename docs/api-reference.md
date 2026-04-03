@@ -522,3 +522,111 @@ All errors follow a consistent format:
 | `SC_001` | 502 | Data portal unreachable |
 | `SC_002` | 429 | Rate limited by data portal |
 | `SR_001` | 500 | Failed to generate embedding |
+
+---
+
+## Public API (API Key Access)
+
+### `POST /api/v1/ask`
+
+Execute a query using a public API key. Same pipeline as the frontend chat but stateless (no conversation memory).
+
+**Auth:** `Authorization: Bearer oarg_sk_xxx`
+
+**Rate Limits (Free Beta):**
+- 2 requests/minute per user
+- 5 requests/day per user
+- 20 requests/day per IP (anti-abuse)
+- 5,000 requests/day global free cap
+
+**Request:**
+```json
+{
+  "question": "a cuanto esta el dolar?"
+}
+```
+
+**Response:**
+```json
+{
+  "answer": "El dólar oficial cotiza a $1.415...",
+  "sources": [{"name": "Cotización Dólar", "url": "...", "portal": "ArgentinaDatos"}],
+  "chart_data": [{"type": "line_chart", ...}],
+  "map_data": null,
+  "confidence": 0.95,
+  "citations": [{"claim": "...", "source": "..."}],
+  "warnings": [],
+  "usage": {
+    "tokens": 1200,
+    "duration_ms": 3400,
+    "plan": "free",
+    "requests_remaining_today": 4,
+    "requests_remaining_minute": 1
+  }
+}
+```
+
+**Error Responses:**
+- `401` — Invalid, revoked, or expired API key
+- `408` — Pipeline timeout (>30s)
+- `429` — Rate limit exceeded (includes `Retry-After` header)
+- `500` — Pipeline execution failed
+
+---
+
+## API Key Management
+
+### `POST /api/v1/developers/keys`
+
+Create a new API key. Returns the full key **once** — save it immediately. If a key already exists, it is automatically revoked and replaced.
+
+**Auth:** `X-API-Key` (shared backend key) + `X-User-Email` header
+
+**Request:**
+```json
+{"name": "My API Key"}
+```
+
+**Response:**
+```json
+{
+  "key": "oarg_sk_a1b2c3d4...",
+  "id": "uuid",
+  "name": "My API Key",
+  "key_prefix": "oarg_sk_a1b2c3d4",
+  "plan": "free",
+  "limits": {"per_min": 2, "per_day": 5},
+  "warning": "Save this key now. You will not be able to see it again."
+}
+```
+
+### `GET /api/v1/developers/keys`
+
+List all API keys for the authenticated user (keys are masked).
+
+### `DELETE /api/v1/developers/keys/{key_id}`
+
+Revoke an API key.
+
+### `GET /api/v1/developers/usage`
+
+Get usage summary (requests today, total requests).
+
+---
+
+## Skills
+
+### `GET /api/v1/skills`
+
+List all available auto-detected skills.
+
+**Response:**
+```json
+[
+  {"name": "verificar", "description": "Verificación de afirmaciones con datos oficiales"},
+  {"name": "comparar", "description": "Comparativa estructurada entre dos o más elementos"},
+  {"name": "presupuesto", "description": "Análisis presupuestario detallado con ejecución y desglose"},
+  {"name": "perfil", "description": "Perfil completo de legislador con patrimonio y personal"},
+  {"name": "precio", "description": "Cotización rápida de indicadores financieros"}
+]
+```

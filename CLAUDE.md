@@ -9,7 +9,7 @@ Backend service for OpenArg — AI-powered analysis of Argentine government open
 - **ORM:** SQLAlchemy 2.0 (async) + Alembic migrations
 - **DI:** Dishka 1.6 (IoC container)
 - **Workers:** Celery 5.4 + Redis 7 (broker + cache + results)
-- **AI:** AWS Bedrock Claude Haiku 3.5 (primary LLM) + Anthropic API Claude Sonnet (fallback)
+- **AI:** AWS Bedrock Claude Haiku 4.5 (primary LLM) + Google Gemini 2.5 Flash (fallback)
 - **Embeddings:** AWS Bedrock Cohere Embed Multilingual v3 (1024-dim)
 - **Pipeline:** LangGraph (stateful graph with checkpointing)
 - **HTTP:** HTTPX (async client)
@@ -43,9 +43,10 @@ src/app/
 │   │   │   ├── datos_gob_ar_adapter.py          # IDataSource → datos.gob.ar CKAN
 │   │   │   └── caba_adapter.py                  # IDataSource → CABA CKAN
 │   │   ├── llm/
-│   │   │   ├── bedrock_llm_adapter.py           # ILLMProvider → Claude Haiku 3.5 (AWS Bedrock, primary)
+│   │   │   ├── bedrock_llm_adapter.py           # ILLMProvider → Claude Haiku 4.5 (AWS Bedrock, primary)
 │   │   │   ├── bedrock_embedding_adapter.py     # IEmbeddingProvider → Cohere Embed Multilingual v3 (1024-dim)
-│   │   │   ├── anthropic_adapter.py             # ILLMProvider → Claude Sonnet (Anthropic API fallback)
+│   │   │   ├── gemini_adapter.py                # ILLMProvider → Gemini 2.5 Flash (Google, fallback)
+│   │   │   ├── anthropic_adapter.py             # ILLMProvider → Claude Sonnet 4 (Anthropic API)
 │   │   ├── search/
 │   │   │   └── pgvector_search_adapter.py       # IVectorSearch → pgvector
 │   │   ├── sandbox/
@@ -75,10 +76,13 @@ src/app/
 │
 ├── presentation/http/controllers/               # API layer
 │   ├── root_router.py                           # Composes all routers under /api/v1
-│   ├── health/health_router.py                  # GET /health, /health/ready (DI-based component checks)
+│   ├── health/health_router.py                  # GET /health, /health/ready
 │   ├── datasets/datasets_router.py              # CRUD + scrape trigger
 │   ├── query/query_router.py                    # Query submission + WebSocket stream
 │   ├── query/smart_query_v2_router.py           # LangGraph pipeline (POST /smart + WS /ws/smart)
+│   ├── public_api/ask_router.py                 # POST /ask (public API with Bearer token auth)
+│   ├── developers/developers_router.py          # API key CRUD (create/list/revoke keys)
+│   ├── skills/skills_router.py                  # GET /skills (list auto-detected skills)
 │   ├── sandbox/sandbox_router.py                # SQL sandbox + NL2SQL
 │   ├── taxonomy/taxonomy_router.py              # Taxonomy management
 │   ├── transparency/transparency_router.py      # Transparency data
@@ -136,12 +140,18 @@ s3_tasks → s3 queue (concurrency 2)
 | GET | `/api/v1/query/{query_id}` | Check query status |
 | POST | `/api/v1/query/quick` | Synchronous query (rate limited) |
 | WS | `/api/v1/query/ws/stream` | Stream query responses |
-| POST | `/api/v1/query/smart` | LangGraph pipeline (plan → collect → analyze) |
+| POST | `/api/v1/query/smart` | LangGraph pipeline (frontend, X-API-Key auth) |
 | WS | `/api/v1/query/ws/smart` | LangGraph pipeline with WebSocket streaming |
+| POST | `/api/v1/ask` | **Public API** (Bearer token auth, rate limited per plan) |
+| GET | `/api/v1/skills` | List auto-detected skills |
+| POST | `/api/v1/developers/keys` | Create API key (1 per user, returns key once) |
+| GET | `/api/v1/developers/keys` | List user's API keys (masked) |
+| DELETE | `/api/v1/developers/keys/{id}` | Revoke API key |
+| GET | `/api/v1/developers/usage` | API usage stats |
 | POST | `/api/v1/sandbox/query` | Execute raw SQL (read-only) |
 | GET | `/api/v1/sandbox/tables` | List cached tables |
 | POST | `/api/v1/sandbox/ask` | NL2SQL query |
-| GET | `/api/v1/metrics` | In-memory metrics (requests, connectors, cache, tokens) |
+| GET | `/api/v1/metrics` | In-memory metrics |
 
 ### Database Tables
 
@@ -156,6 +166,8 @@ s3_tasks → s3 queue (concurrency 2)
 | `query_cache` | Semantic cache (pgvector 1024-dim, HNSW index, TTL-based expiry) |
 | `table_catalog` | Cached table metadata with vector(1024) + HNSW for NL2SQL matching |
 | `successful_queries` | Log of successfully answered queries for analytics |
+| `api_keys` | API keys for public access (SHA-256 hash, unique, per-user) |
+| `api_usage` | Append-only API request log (endpoint, tokens, duration) |
 
 ## Conventions
 

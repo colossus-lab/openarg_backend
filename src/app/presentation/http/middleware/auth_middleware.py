@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
-_ALWAYS_PUBLIC = frozenset({"/health", "/health/ready"})
+_ALWAYS_PUBLIC = frozenset({"/health", "/health/ready", "/api/v1/ask"})
 _DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})
 
 _env = os.getenv("APP_ENV", "local").lower()
