@@ -28,9 +28,7 @@ class PromptInjectionError(ApplicationError):
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(PromptInjectionError)
-    async def prompt_injection_handler(
-        request: Request, exc: PromptInjectionError
-    ) -> JSONResponse:
+    async def prompt_injection_handler(request: Request, exc: PromptInjectionError) -> JSONResponse:
         audit_injection_blocked(
             user=exc.user,
             question=str(exc.details.get("question", "")),

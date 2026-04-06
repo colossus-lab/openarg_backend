@@ -31,11 +31,7 @@ class ApiKeyRepositorySQLA(IApiKeyRepository):
         return result.scalar_one_or_none()
 
     async def list_by_user(self, user_id: UUID) -> list[ApiKey]:
-        stmt = (
-            select(ApiKey)
-            .where(ApiKey.user_id == user_id)
-            .order_by(ApiKey.created_at.desc())
-        )
+        stmt = select(ApiKey).where(ApiKey.user_id == user_id).order_by(ApiKey.created_at.desc())
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -51,11 +47,7 @@ class ApiKeyRepositorySQLA(IApiKeyRepository):
         return result.rowcount > 0  # type: ignore[union-attr]
 
     async def update_last_used(self, key_id: UUID) -> None:
-        stmt = (
-            update(ApiKey)
-            .where(ApiKey.id == key_id)
-            .values(last_used_at=datetime.now(UTC))
-        )
+        stmt = update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=datetime.now(UTC))
         await self._session.execute(stmt)
         await self._session.flush()
         await self._session.commit()

@@ -44,10 +44,10 @@ class MockProvider(Provider):
         mock = MagicMock(spec=ILLMProvider)
         mock.chat = AsyncMock(
             return_value=MagicMock(
-            content="Mock response",
-            tokens_used=10,
-            model="test",
-        )
+                content="Mock response",
+                tokens_used=10,
+                model="test",
+            )
         )
 
         async def _chat_stream(*args, **kwargs):
@@ -143,9 +143,9 @@ class MockProvider(Provider):
     @provide
     def sandbox(self) -> ISQLSandbox:
         mock = MagicMock(spec=ISQLSandbox)
-        mock.execute_readonly = AsyncMock(return_value=MagicMock(
-            rows=[], columns=[], row_count=0, truncated=False, error=None
-        ))
+        mock.execute_readonly = AsyncMock(
+            return_value=MagicMock(rows=[], columns=[], row_count=0, truncated=False, error=None)
+        )
         mock.list_cached_tables = AsyncMock(return_value=[])
         return mock
 
@@ -233,10 +233,12 @@ class MockProvider(Provider):
     @provide
     def health_service(self) -> HealthCheckService:
         mock = MagicMock(spec=HealthCheckService)
-        mock.check_all = AsyncMock(return_value={
-            "status": "healthy",
-            "components": {},
-        })
+        mock.check_all = AsyncMock(
+            return_value={
+                "status": "healthy",
+                "components": {},
+            }
+        )
         return mock
 
 

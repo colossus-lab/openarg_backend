@@ -334,7 +334,8 @@ class TestSearchDeduplication:
             vector_search=vector_search,
         )
         status, body = await _post_search(
-            fast_app, {"query": "q", "limit": 2},
+            fast_app,
+            {"query": "q", "limit": 2},
         )
 
         assert status == 200
@@ -435,13 +436,11 @@ class TestSearchLimit:
     async def test_limit_default_is_10(self, monkeypatch):
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.list_cached_tables.return_value = [
-            _make_cached(f"ds-{i:03d}", f"cache_dataset_{i:03d}")
-            for i in range(1, 16)
+            _make_cached(f"ds-{i:03d}", f"cache_dataset_{i:03d}") for i in range(1, 16)
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
         vector_search.search_datasets.return_value = [
-            _make_search_result(f"ds-{i:03d}", round(0.99 - i * 0.01, 3))
-            for i in range(1, 16)
+            _make_search_result(f"ds-{i:03d}", round(0.99 - i * 0.01, 3)) for i in range(1, 16)
         ]
 
         fast_app = _build_app(

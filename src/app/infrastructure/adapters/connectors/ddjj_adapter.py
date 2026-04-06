@@ -97,7 +97,9 @@ class DDJJAdapter:
         # Early-termination search instead of scanning all records then slicing
         matches: list[dict] = []
         for r in self._dataset:
-            if _name_matches(r.get("nombre", ""), query) or q_clean in r.get("cuit", "").replace("-", ""):
+            if _name_matches(r.get("nombre", ""), query) or q_clean in r.get("cuit", "").replace(
+                "-", ""
+            ):
                 matches.append(r)
                 if len(matches) >= limit:
                     break

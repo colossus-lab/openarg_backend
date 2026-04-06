@@ -166,7 +166,11 @@ async def analyst_node(state: OpenArgState) -> dict:
         # Build prompt
         skill_context = state.get("skill_context")
         analysis_prompt = _build_analysis_prompt(
-            question, plan, results, memory_ctx_analyst, all_warnings,
+            question,
+            plan,
+            results,
+            memory_ctx_analyst,
+            all_warnings,
             skill_context=skill_context,
         )
 

@@ -764,12 +764,14 @@ def _extract_sources(results: list) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
-        sources.append({
-            "name": r.dataset_title,
-            "url": r.portal_url,
-            "portal": r.portal_name,
-            "accessed_at": r.metadata.get("fetched_at", ""),
-        })
+        sources.append(
+            {
+                "name": r.dataset_title,
+                "url": r.portal_url,
+                "portal": r.portal_name,
+                "accessed_at": r.metadata.get("fetched_at", ""),
+            }
+        )
     return sources
 
 

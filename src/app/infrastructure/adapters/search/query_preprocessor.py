@@ -294,7 +294,7 @@ def normalize_temporal(query: str) -> tuple[str, dict[str, str]]:
     else:
         return query, {}
 
-    result = query[:match.start()] + replacement + query[match.end():]
+    result = query[: match.start()] + replacement + query[match.end() :]
     return result, metadata
 
 

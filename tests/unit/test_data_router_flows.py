@@ -183,13 +183,21 @@ class TestTerritoriaPolicyFlow:
         )
         vector_search = AsyncMock(spec=IVectorSearch)
         vector_search.search_datasets.return_value = [
-            SearchResult("ds-budget-001", "Budget Sample", "National budget", "p", "", '["fecha"]', 0.92),
-            SearchResult("ds-edu-001", "Education Metrics", "Edu indicators", "p", "", '["year"]', 0.85),
-            SearchResult("ds-health-001", "Health Indicators", "Health data", "p", "", '["fecha"]', 0.78),
+            SearchResult(
+                "ds-budget-001", "Budget Sample", "National budget", "p", "", '["fecha"]', 0.92
+            ),
+            SearchResult(
+                "ds-edu-001", "Education Metrics", "Edu indicators", "p", "", '["year"]', 0.85
+            ),
+            SearchResult(
+                "ds-health-001", "Health Indicators", "Health data", "p", "", '["fecha"]', 0.78
+            ),
         ]
 
         async with _build_client(
-            monkeypatch, sandbox=sandbox, vector_search=vector_search,
+            monkeypatch,
+            sandbox=sandbox,
+            vector_search=vector_search,
         ) as c:
             # Step 1: search
             search_resp = await c.post(
@@ -232,16 +240,20 @@ class TestTerritoriaPolicyFlow:
         async def fake_search(**kwargs):
             calls["count"] += 1
             if calls["count"] == 1:
-                return [SearchResult("ds-budget-001", "Budget", "Budget data", "p", "", '[]', 0.9)]
+                return [SearchResult("ds-budget-001", "Budget", "Budget data", "p", "", "[]", 0.9)]
             if calls["count"] == 2:
-                return [SearchResult("ds-edu-001", "Edu", "Education data", "p", "", '[]', 0.88)]
-            return [SearchResult("ds-transport-001", "Transport", "Transport data", "p", "", '[]', 0.82)]
+                return [SearchResult("ds-edu-001", "Edu", "Education data", "p", "", "[]", 0.88)]
+            return [
+                SearchResult("ds-transport-001", "Transport", "Transport data", "p", "", "[]", 0.82)
+            ]
 
         vector_search = AsyncMock(spec=IVectorSearch)
         vector_search.search_datasets.side_effect = fake_search
 
         async with _build_client(
-            monkeypatch, sandbox=sandbox, vector_search=vector_search,
+            monkeypatch,
+            sandbox=sandbox,
+            vector_search=vector_search,
         ) as c:
             tables_seen = []
             for q in ["budget", "education", "municipal"]:
@@ -331,8 +343,7 @@ class TestTerritoriaHardcodedQueries:
                 "/data/query",
                 json={
                     "sql": (
-                        "SELECT * FROM cache_budget_sample "
-                        "WHERE provincia = 'Buenos Aires' LIMIT 5"
+                        "SELECT * FROM cache_budget_sample WHERE provincia = 'Buenos Aires' LIMIT 5"
                     ),
                 },
                 headers=_auth_header(),
@@ -460,8 +471,7 @@ class TestTerritoriaErrorRecovery:
                 "/data/query",
                 json={
                     "sql": (
-                        "SELECT categoria, SUM(monto) FROM cache_budget_sample "
-                        "GROUP BY categoria"
+                        "SELECT categoria, SUM(monto) FROM cache_budget_sample GROUP BY categoria"
                     ),
                 },
                 headers=_auth_header(),
@@ -482,7 +492,11 @@ class TestTerritoriaDataShapes:
     async def test_response_matches_contract(self, monkeypatch):
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.execute_readonly.return_value = SandboxResult(
-            columns=["a"], rows=[{"a": 1}], row_count=1, truncated=False, error=None,
+            columns=["a"],
+            rows=[{"a": 1}],
+            row_count=1,
+            truncated=False,
+            error=None,
         )
         sandbox.list_cached_tables.return_value = [
             CachedTableInfo("cache_budget_sample", "ds-budget-001", 42, ["a", "b"]),
@@ -490,7 +504,13 @@ class TestTerritoriaDataShapes:
         vector_search = AsyncMock(spec=IVectorSearch)
         vector_search.search_datasets.return_value = [
             SearchResult(
-                "ds-budget-001", "Budget", "Budget description", "p", "", '[]', 0.77,
+                "ds-budget-001",
+                "Budget",
+                "Budget description",
+                "p",
+                "",
+                "[]",
+                0.77,
             ),
         ]
 
@@ -499,7 +519,9 @@ class TestTerritoriaDataShapes:
         expected_table_fields = {"table_name", "name", "dataset_id", "row_count", "columns"}
 
         async with _build_client(
-            monkeypatch, sandbox=sandbox, vector_search=vector_search,
+            monkeypatch,
+            sandbox=sandbox,
+            vector_search=vector_search,
         ) as c:
             # Query contract
             q = await c.post(
@@ -632,12 +654,14 @@ class TestTerritoriaBatchScenarios:
         )
         vector_search = AsyncMock(spec=IVectorSearch)
         vector_search.search_datasets.return_value = [
-            SearchResult("ds-budget-001", "Budget", "B", "p", "", '[]', 0.9),
-            SearchResult("ds-health-001", "Health", "H", "p", "", '[]', 0.85),
+            SearchResult("ds-budget-001", "Budget", "B", "p", "", "[]", 0.9),
+            SearchResult("ds-health-001", "Health", "H", "p", "", "[]", 0.85),
         ]
 
         async with _build_client(
-            monkeypatch, sandbox=sandbox, vector_search=vector_search,
+            monkeypatch,
+            sandbox=sandbox,
+            vector_search=vector_search,
         ) as c:
             # 3 searches
             for q in ["budget for education", "waste management", "health indicators"]:

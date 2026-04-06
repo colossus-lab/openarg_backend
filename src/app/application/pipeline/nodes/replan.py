@@ -58,7 +58,13 @@ async def replan_node(state: OpenArgState) -> dict:
     replan_count = state.get("replan_count", 0) + 1
     strategy = state.get("replan_strategy", "broaden")
 
-    writer({"type": "status", "step": "replanning", "detail": f"Replanificando búsqueda ({strategy})..."})
+    writer(
+        {
+            "type": "status",
+            "step": "replanning",
+            "detail": f"Replanificando búsqueda ({strategy})...",
+        }
+    )
 
     try:
         preprocessed_q = state.get("preprocessed_query", state["question"])
