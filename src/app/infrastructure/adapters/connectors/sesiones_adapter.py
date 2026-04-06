@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import re
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,11 @@ from app.domain.ports.connectors.sesiones import (
 logger = logging.getLogger(__name__)
 
 _CHUNKS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "chunks"
+_TERM_RE = re.compile(r"\w+")
+
+
+def _extract_terms(text: str) -> list[str]:
+    return [term for term in _TERM_RE.findall(text.lower()) if len(term) > 2]
 
 
 class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
@@ -33,6 +40,10 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         self._session_factory = session_factory
         self._gemini_api_key = gemini_api_key
         self._chunks: list[dict[str, Any]] = []
+        self._chunk_term_counts: list[Counter[str]] = []
+        self._speaker_lowers: list[str] = []
+        self._term_index: dict[str, set[int]] = defaultdict(set)
+        self._period_index: dict[int, list[int]] = defaultdict(list)
         self._loaded = False
 
     async def _generate_embedding(self, text_input: str) -> list[float] | None:
@@ -162,7 +173,24 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
                 try:
                     data = json.loads(f.read_text(encoding="utf-8"))
                     if isinstance(data, list):
-                        self._chunks.extend(data)
+                        for chunk in data:
+                            if not isinstance(chunk, dict):
+                                continue
+                            idx = len(self._chunks)
+                            self._chunks.append(chunk)
+
+                            text_lower = str(chunk.get("text", "")).lower()
+                            speaker_lower = str(chunk.get("speaker") or "").lower()
+                            self._speaker_lowers.append(speaker_lower)
+
+                            term_counts = Counter(_extract_terms(text_lower))
+                            self._chunk_term_counts.append(term_counts)
+                            for term in term_counts:
+                                self._term_index[term].add(idx)
+
+                            periodo = chunk.get("periodo")
+                            if isinstance(periodo, int):
+                                self._period_index[periodo].append(idx)
                 except Exception:
                     bad_files += 1
                     logger.warning("Bad sesiones chunk file: %s", f)
@@ -187,38 +215,45 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         if not self._chunks:
             return None
 
-        query_terms = [t for t in query.lower().split() if len(t) > 2]
+        query_terms = _extract_terms(query)
         if not query_terms:
             return None
 
-        filtered = self._chunks
-        if periodo is not None:
-            filtered = [c for c in filtered if c.get("periodo") == periodo]
+        candidate_ids: set[int] = set()
+        for term in query_terms:
+            candidate_ids.update(self._term_index.get(term, ()))
 
-        scored: list[tuple[dict[str, Any], float]] = []
-        for chunk in filtered:
-            text_lower = chunk.get("text", "").lower()
-            speaker_lower = (chunk.get("speaker") or "").lower()
+        if not candidate_ids:
+            return None
+
+        if periodo is not None:
+            candidate_ids.intersection_update(self._period_index.get(periodo, ()))
+            if not candidate_ids:
+                return None
+
+        orador_lower = orador.lower() if orador else None
+
+        scored: list[tuple[float, int]] = []
+        for idx in candidate_ids:
+            speaker_lower = self._speaker_lowers[idx]
+            term_counts = self._chunk_term_counts[idx]
 
             score = 0.0
             for term in query_terms:
-                count = len(re.findall(re.escape(term), text_lower))
-                score += count * 2
+                score += term_counts.get(term, 0) * 2
                 if term in speaker_lower:
                     score += 10
 
-            if orador:
-                orador_lower = orador.lower()
+            if orador_lower:
                 if orador_lower in speaker_lower:
                     score += 20
                 else:
                     score *= 0.1
 
             if score > 0:
-                scored.append((chunk, score))
+                scored.append((score, idx))
 
-        scored.sort(key=lambda x: x[1], reverse=True)
-        top_chunks = [c for c, _ in scored[:limit]]
+        top_chunks = [self._chunks[idx] for _, idx in heapq.nlargest(limit, scored)]
         return top_chunks if top_chunks else None
 
     def _chunks_to_data_result(self, query: str, chunks: list[dict[str, Any]]) -> DataResult:

@@ -182,11 +182,9 @@ async def data_search(
         raise HTTPException(status_code=502, detail="Servicio de búsqueda no disponible")
 
     logger.info("Executing semantic search for query: %s", body.query[:100])
-    # Fetch 4x to compensate for: non-cached datasets, duplicates from multiple
-    # chunks per dataset (main, columns, contextual), and min_similarity filter.
     results = await vector_search.search_datasets(
         query_embedding=query_embedding,
-        limit=body.limit * 4,
+        limit=body.limit,
         min_similarity=_MIN_SIMILARITY,
     )
 

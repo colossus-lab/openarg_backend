@@ -20,29 +20,41 @@ class PgVectorSearchAdapter(IVectorSearch):
         embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
         params: dict = {"embedding": embedding_str, "limit": limit, "min_sim": min_similarity}
+        base_query = (
+            "WITH ranked_chunks AS ("
+            " SELECT"
+            "   CAST(d.id AS text) AS dataset_id,"
+            "   d.title, d.description, d.portal, d.download_url, d.columns,"
+            "   1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score,"
+            "   ROW_NUMBER() OVER ("
+            "     PARTITION BY d.id"
+            "     ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
+            "   ) AS dataset_rank"
+            " FROM dataset_chunks dc"
+            " JOIN datasets d ON d.id = dc.dataset_id"
+            " {where_clause}"
+            ")"
+            " SELECT dataset_id, title, description, portal, download_url, columns, score"
+            " FROM ranked_chunks"
+            " WHERE dataset_rank = 1"
+            " ORDER BY score DESC"
+            " LIMIT :limit"
+        )
         if portal_filter:
             params["portal"] = portal_filter
             query = text(
-                "SELECT CAST(d.id AS text) AS dataset_id,"
-                " d.title, d.description, d.portal, d.download_url, d.columns,"
-                " 1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score"
-                " FROM dataset_chunks dc"
-                " JOIN datasets d ON d.id = dc.dataset_id"
-                " WHERE d.portal = :portal"
-                " AND 1 - (dc.embedding <=> CAST(:embedding AS vector)) >= :min_sim"
-                " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
-                " LIMIT :limit"
+                base_query.format(
+                    where_clause=(
+                        "WHERE d.portal = :portal"
+                        " AND 1 - (dc.embedding <=> CAST(:embedding AS vector)) >= :min_sim"
+                    )
+                )
             )
         else:
             query = text(
-                "SELECT CAST(d.id AS text) AS dataset_id,"
-                " d.title, d.description, d.portal, d.download_url, d.columns,"
-                " 1 - (dc.embedding <=> CAST(:embedding AS vector)) AS score"
-                " FROM dataset_chunks dc"
-                " JOIN datasets d ON d.id = dc.dataset_id"
-                " WHERE 1 - (dc.embedding <=> CAST(:embedding AS vector)) >= :min_sim"
-                " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
-                " LIMIT :limit"
+                base_query.format(
+                    where_clause="WHERE 1 - (dc.embedding <=> CAST(:embedding AS vector)) >= :min_sim"
+                )
             )
 
         result = await self._session.execute(query, params)

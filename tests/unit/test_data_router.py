@@ -287,6 +287,45 @@ class TestDataSearch:
         assert body[0]["name"] == "cache_ipc"
         assert body[0]["relevance"] == 0.92
 
+    async def test_search_passes_requested_limit_without_overfetch(self, monkeypatch):
+        sandbox = AsyncMock(spec=ISQLSandbox)
+        sandbox.list_cached_tables.return_value = [
+            CachedTableInfo("cache_ipc", "ds-001", 100, ["fecha", "valor"]),
+        ]
+        vector_search = AsyncMock(spec=IVectorSearch)
+        vector_search.search_datasets.return_value = [
+            SearchResult(
+                dataset_id="ds-001",
+                title="IPC Nacional",
+                description="Indice de precios al consumidor",
+                portal="datos_gob_ar",
+                download_url="https://example.com/ipc.csv",
+                columns='["fecha", "valor"]',
+                score=0.92,
+            ),
+        ]
+        monkeypatch.setenv("DATA_SERVICE_TOKEN", SERVICE_TOKEN)
+
+        fast_app = FastAPI()
+        fast_app.include_router(data_router)
+        container = make_async_container(
+            _make_mock_provider(sandbox=sandbox, vector_search=vector_search),
+        )
+        setup_dishka(container=container, app=fast_app)
+
+        transport = ASGITransport(app=fast_app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/data/search",
+                json={"query": "inflacion", "limit": 3},
+                headers=_auth_header(),
+            )
+
+        assert resp.status_code == 200
+        vector_search.search_datasets.assert_awaited_once()
+        _, kwargs = vector_search.search_datasets.await_args
+        assert kwargs["limit"] == 3
+
     async def test_no_cached_tables_match_returns_empty(self, monkeypatch):
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.list_cached_tables.return_value = [
