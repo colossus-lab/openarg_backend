@@ -272,11 +272,8 @@ class SmartQueryService:
         )
 
         # Handle clarification from planner
-        _is_clar = plan.intent == "clarification" and any(
-            s.action == "clarification" for s in plan.steps
-        )
-        if _is_clar:
-            clar_step = next(s for s in plan.steps if s.action == "clarification")
+        clar_step = _get_clarification_step(plan)
+        if clar_step is not None:
             clar_q = clar_step.params.get("question", "¿Podés ser más específico?")
             clar_opts = clar_step.params.get("options", [])
             opts_text = "\n".join(f"- {o}" for o in clar_opts) if clar_opts else ""
@@ -381,10 +378,6 @@ class SmartQueryService:
 
         # 11. Save conversation history
         if session:
-            plan_data = {
-                "intent": plan.intent,
-                "steps": [{"action": s.action, "params": s.params} for s in plan.steps],
-            }
             await save_history(
                 session,
                 question,
@@ -393,7 +386,7 @@ class SmartQueryService:
                 sources,
                 tokens_used,
                 duration_ms,
-                plan_json=json.dumps(plan_data, ensure_ascii=False),
+                plan_json=_serialize_plan(plan),
             )
 
         # 12. Cache write
@@ -492,11 +485,8 @@ class SmartQueryService:
         )
 
         # Handle clarification
-        _is_clar = plan.intent == "clarification" and any(
-            s.action == "clarification" for s in plan.steps
-        )
-        if _is_clar:
-            clar_step = next(s for s in plan.steps if s.action == "clarification")
+        clar_step = _get_clarification_step(plan)
+        if clar_step is not None:
             yield {
                 "type": "clarification",
                 "question": clar_step.params.get("question", "¿Podés ser más específico?"),
@@ -685,9 +675,7 @@ def _inject_vector_fallback(
     preprocessed_q: str,
 ) -> None:
     """Add a search_datasets step if the plan has no vector/data step."""
-    _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
-    _has_data_step = any(s.action in DATA_ACTIONS for s in plan.steps)
-    if not _has_vector_step and not _has_data_step:
+    if not _has_data_or_vector_step(plan):
         plan.steps.insert(
             0,
             PlanStep(
@@ -702,6 +690,46 @@ def _inject_vector_fallback(
         )
 
 
+def _has_data_or_vector_step(plan: ExecutionPlan) -> bool:
+    """Return whether the plan already contains a data-producing search step."""
+    return any(step.action == "search_datasets" or step.action in DATA_ACTIONS for step in plan.steps)
+
+
+def _serialize_plan(plan: ExecutionPlan) -> str:
+    """Serialize a plan once for history persistence."""
+    return json.dumps(
+        {
+            "intent": plan.intent,
+            "steps": [{"action": step.action, "params": step.params} for step in plan.steps],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_errors_block(all_warnings: list[str]) -> str:
+    """Format connector warnings for the analyst prompt."""
+    if not all_warnings:
+        return ""
+    return "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {warning}" for warning in all_warnings)
+
+
+def _today_iso_utc() -> str:
+    """Return today's UTC date formatted for analyst prompts."""
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def _has_result_records(results: list[Any]) -> bool:
+    """Return whether any connector result contains records."""
+    return any(result.records for result in results)
+
+
+def _get_clarification_step(plan: ExecutionPlan) -> PlanStep | None:
+    """Return the clarification step when the planner produced one."""
+    if plan.intent != "clarification":
+        return None
+    return next((step for step in plan.steps if step.action == "clarification"), None)
+
+
 def _build_analysis_prompt(
     question: str,
     plan: ExecutionPlan,
@@ -711,14 +739,11 @@ def _build_analysis_prompt(
     has_records: bool | None = None,
 ) -> str:
     """Build the analyst LLM prompt from data context and warnings."""
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-
-    errors_block = ""
-    if all_warnings:
-        errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {w}" for w in all_warnings)
+    today = _today_iso_utc()
+    errors_block = _build_errors_block(all_warnings)
 
     if has_records is None:
-        has_records = any(r.records for r in results)
+        has_records = _has_result_records(results)
 
     no_data_fallback = not results or not has_records
 
