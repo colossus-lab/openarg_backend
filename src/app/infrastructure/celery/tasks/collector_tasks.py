@@ -66,9 +66,9 @@ MAX_TOTAL_ATTEMPTS = 5
 # are truncated to the first MAX_TABLE_ROWS rows.
 MAX_TABLE_ROWS = 500_000
 _MAX_SQL_COLUMNS = 1400
-_TEMP_SPACE_RESERVE_BYTES = 512 * 1024 * 1024  # keep 512MB free for worker stability
-_COLLECT_DISPATCH_BATCH_SIZE = int(os.getenv("OPENARG_COLLECT_DISPATCH_BATCH_SIZE", "25"))
-_COLLECT_DISPATCH_STEP_SECONDS = int(os.getenv("OPENARG_COLLECT_DISPATCH_STEP_SECONDS", "15"))
+_TEMP_SPACE_RESERVE_BYTES = 256 * 1024 * 1024  # keep 256MB free for worker stability
+_COLLECT_DISPATCH_BATCH_SIZE = int(os.getenv("OPENARG_COLLECT_DISPATCH_BATCH_SIZE", "10"))
+_COLLECT_DISPATCH_STEP_SECONDS = int(os.getenv("OPENARG_COLLECT_DISPATCH_STEP_SECONDS", "30"))
 _COLLECT_MAX_INFLIGHT = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT", "100"))
 _COLLECT_MAX_INFLIGHT_PER_PORTAL = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT_PER_PORTAL", "10"))
 
@@ -1139,7 +1139,7 @@ def _update_row_count_after_append(engine, table_name: str):
 
 
 @celery_app.task(
-    name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=600, time_limit=720
+    name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=1200, time_limit=1380
 )
 def collect_dataset(self, dataset_id: str):
     """
@@ -1242,13 +1242,12 @@ def collect_dataset(self, dataset_id: str):
         max_download_bytes = 500 * 1024 * 1024  # 500 MB
         if not _has_temp_space(max_download_bytes):
             logger.warning("Insufficient temp space before downloading dataset %s", dataset_id)
-            _set_error_status(
-                engine,
-                dataset_id,
-                "insufficient_temp_space",
-                table_name=table_name,
+            # Temp space is transient — retry later instead of marking permanently failed
+            backoff = min(120 * (2 ** self.request.retries), 600)
+            raise self.retry(
+                exc=RuntimeError("insufficient_temp_space"),
+                countdown=int(backoff + random.uniform(0, backoff * 0.3)),
             )
-            return {"error": "insufficient_temp_space"}
 
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}", dir=_temp_dir())
         tmp_path = tmp_file.name
@@ -1376,13 +1375,11 @@ def collect_dataset(self, dataset_id: str):
                         dataset_id,
                         total_size,
                     )
-                    _set_error_status(
-                        engine,
-                        dataset_id,
-                        "insufficient_temp_space",
-                        table_name=table_name,
+                    backoff = min(120 * (2 ** self.request.retries), 600)
+                    raise self.retry(
+                        exc=RuntimeError("insufficient_temp_space (zip decompression)"),
+                        countdown=int(backoff + random.uniform(0, backoff * 0.3)),
                     )
-                    return {"error": "insufficient_temp_space"}
 
                 parsed = False
                 for name in zf.namelist():

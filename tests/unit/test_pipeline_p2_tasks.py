@@ -142,14 +142,12 @@ class TestCollectorP2:
         assert mock_ensure_cached_entry.call_count == 1
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
-    @patch("app.infrastructure.celery.tasks.collector_tasks._set_error_status")
     @patch("app.infrastructure.celery.tasks.collector_tasks._has_temp_space")
     @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
-    def test_collect_dataset_aborts_when_temp_space_is_insufficient(
+    def test_collect_dataset_retries_when_temp_space_is_insufficient(
         self,
         mock_get_engine,
         mock_has_temp_space,
-        mock_set_error_status,
         _mock_ensure_cached_entry,
     ):
         mock_has_temp_space.return_value = False
@@ -183,10 +181,9 @@ class TestCollectorP2:
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
-        result = collect_dataset.run("11111111-1111-1111-1111-111111111111")
-
-        assert result == {"error": "insufficient_temp_space"}
-        mock_set_error_status.assert_called_once()
+        # Now raises Retry/RuntimeError instead of returning error — task will be retried
+        with pytest.raises((RuntimeError, collect_dataset.MaxRetriesExceededError)):
+            collect_dataset.run("11111111-1111-1111-1111-111111111111")
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_postgis_geom")
