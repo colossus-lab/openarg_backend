@@ -25,7 +25,7 @@ from app.domain.ports.sandbox.sql_sandbox import (
     ISQLSandbox,
     SandboxResult,
 )
-from app.domain.ports.search.vector_search import IVectorSearch, SearchResult
+from app.domain.ports.search.vector_search import IVectorSearch
 from app.presentation.http.controllers.data.data_router import router as data_router
 
 SERVICE_TOKEN = "svc_test_token_12345"
