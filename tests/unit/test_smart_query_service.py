@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.application.pipeline.cache_manager import check_cache, get_cached_dict
 from app.application.pipeline.chart_builder import extract_meta
-from app.application.smart_query_service import SmartQueryService
+from app.application.smart_query_service import (
+    SmartQueryService,
+    _build_analysis_prompt,
+    _collect_result_payloads,
+)
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
@@ -304,6 +308,22 @@ class TestCacheEmbeddingPassed:
         mock_deps["embedding"].embed.assert_called_once()
         mock_deps["semantic_cache"].get.assert_called_once()
 
+    async def test_get_cached_dict_returns_redis_hit_without_embedding_result(
+        self, service, mock_deps
+    ):
+        """Redis hits should keep the streaming cache contract unchanged."""
+        mock_deps["cache"].get.return_value = {"answer": "cached", "sources": []}
+
+        cached_dict, embedding = await get_cached_dict(
+            "test question",
+            mock_deps["cache"],
+            mock_deps["embedding"],
+            mock_deps["semantic_cache"],
+        )
+
+        assert cached_dict == {"answer": "cached", "sources": []}
+        assert embedding is None
+
 
 class TestMetaParsing:
     def test_extract_meta_with_valid_block(self):
@@ -357,3 +377,80 @@ class TestStreamingYieldsEvents:
         assert "complete" in types
         complete = next(e for e in events if e["type"] == "complete")
         assert "reformulándola" in complete["answer"] or "datos públicos" in complete["answer"]
+
+
+class TestResultPayloadCollection:
+    def test_collect_result_payloads_combines_sources_documents_and_has_records(self):
+        results = [
+            DataResult(
+                source="vector_search",
+                portal_name="Portal A",
+                portal_url="https://portal-a.test",
+                dataset_title="Dataset A",
+                format="json",
+                records=[{"id": 1}],
+                metadata={"fetched_at": "2026-04-06"},
+            ),
+            DataResult(
+                source="ddjj:diputados",
+                portal_name="DDJJ",
+                portal_url="https://ddjj.test",
+                dataset_title="Declaraciones",
+                format="json",
+                records=[
+                    {"nombre": "Ana", "patrimonio_cierre": 10},
+                    {"nombre": "Sin patrimonio"},
+                ],
+                metadata={},
+            ),
+            DataResult(
+                source="vector_search",
+                portal_name="Portal A",
+                portal_url="https://portal-a.test",
+                dataset_title="Dataset A",
+                format="json",
+                records=[{"id": 2}],
+                metadata={"fetched_at": "2026-04-06"},
+            ),
+        ]
+
+        payloads = _collect_result_payloads(results)
+
+        assert payloads.has_records is True
+        assert payloads.sources == [
+            {
+                "name": "Dataset A",
+                "url": "https://portal-a.test",
+                "portal": "Portal A",
+                "accessed_at": "2026-04-06",
+            },
+            {
+                "name": "Declaraciones",
+                "url": "https://ddjj.test",
+                "portal": "DDJJ",
+                "accessed_at": "",
+            },
+        ]
+        assert payloads.documents == [
+            {"nombre": "Ana", "patrimonio_cierre": 10, "doc_type": "ddjj"}
+        ]
+
+
+class TestAnalysisPromptBuilder:
+    def test_no_data_prompt_skips_build_data_context(self):
+        plan = ExecutionPlan(query="sin datos", intent="search", steps=[])
+
+        with patch(
+            "app.application.smart_query_service.build_data_context"
+        ) as build_data_context_mock:
+            prompt = _build_analysis_prompt(
+                question="sin datos",
+                plan=plan,
+                results=[],
+                memory_ctx_analyst="",
+                all_warnings=[],
+                has_records=False,
+            )
+
+        build_data_context_mock.assert_not_called()
+        assert prompt

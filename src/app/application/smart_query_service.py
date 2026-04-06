@@ -305,8 +305,14 @@ class SmartQueryService:
         all_warnings.extend(step_warnings)
 
         # 7. LLM analysis (1 LLM call)
+        result_payloads = _collect_result_payloads(results)
         analysis_prompt = _build_analysis_prompt(
-            question, plan, results, memory_ctx_analyst, all_warnings
+            question,
+            plan,
+            results,
+            memory_ctx_analyst,
+            all_warnings,
+            has_records=result_payloads.has_records,
         )
 
         response = await self._llm.chat(
@@ -347,8 +353,8 @@ class SmartQueryService:
             except Exception:
                 logger.warning("Policy agent failed", exc_info=True)
 
-        sources = _extract_sources(results)
-        documents = _extract_documents(results)
+        sources = result_payloads.sources
+        documents = result_payloads.documents
 
         tokens_used = response.tokens_used or 0
         self._metrics.record_tokens_used(tokens_used)
@@ -518,8 +524,14 @@ class SmartQueryService:
         # Analysis (1 LLM call, streamed)
         yield {"type": "status", "step": "generating"}
 
+        result_payloads = _collect_result_payloads(results)
         analysis_prompt = _build_analysis_prompt(
-            question, plan, results, memory_ctx_analyst, all_warnings
+            question,
+            plan,
+            results,
+            memory_ctx_analyst,
+            all_warnings,
+            has_records=result_payloads.has_records,
         )
 
         full_parts: list[str] = []
@@ -582,8 +594,8 @@ class SmartQueryService:
             except Exception:
                 logger.warning("Policy agent failed in streaming", exc_info=True)
 
-        sources = _extract_sources(results)
-        documents = _extract_documents(results)
+        sources = result_payloads.sources
+        documents = result_payloads.documents
 
         yield {
             "type": "complete",
@@ -696,16 +708,19 @@ def _build_analysis_prompt(
     results: list,
     memory_ctx_analyst: str,
     all_warnings: list[str],
+    has_records: bool | None = None,
 ) -> str:
     """Build the analyst LLM prompt from data context and warnings."""
-    data_context = build_data_context(results)
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
     errors_block = ""
     if all_warnings:
         errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {w}" for w in all_warnings)
 
-    no_data_fallback = not results or not any(r.records for r in results)
+    if has_records is None:
+        has_records = any(r.records for r in results)
+
+    no_data_fallback = not results or not has_records
 
     if no_data_fallback:
         caps = build_capabilities_block()
@@ -716,6 +731,8 @@ def _build_analysis_prompt(
             memory_ctx_analyst=memory_ctx_analyst,
             caps=caps,
         )
+
+    data_context = build_data_context(results)
 
     return (
         f'PREGUNTA DEL USUARIO: "{question}"\n'
@@ -784,3 +801,47 @@ def _extract_documents(results: list) -> list[dict[str, Any]] | None:
                 if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
                     documents.append({**rec, "doc_type": "ddjj"})
     return documents if documents else None
+
+
+@dataclass(slots=True)
+class ResultPayloads:
+    has_records: bool
+    sources: list[dict[str, Any]]
+    documents: list[dict[str, Any]] | None
+
+
+def _collect_result_payloads(results: list) -> ResultPayloads:
+    """Collect structured payloads from connector results in a single pass."""
+    seen_sources: set[tuple[str, str]] = set()
+    sources: list[dict[str, Any]] = []
+    documents: list[dict[str, Any]] = []
+    has_records = False
+
+    for result in results:
+        if not result.records:
+            continue
+
+        has_records = True
+
+        source_key = (result.dataset_title, result.portal_url)
+        if source_key not in seen_sources:
+            seen_sources.add(source_key)
+            sources.append(
+                {
+                    "name": result.dataset_title,
+                    "url": result.portal_url,
+                    "portal": result.portal_name,
+                    "accessed_at": result.metadata.get("fetched_at", ""),
+                }
+            )
+
+        if result.source.startswith("ddjj:"):
+            for rec in result.records:
+                if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
+                    documents.append({**rec, "doc_type": "ddjj"})
+
+    return ResultPayloads(
+        has_records=has_records,
+        sources=sources,
+        documents=documents if documents else None,
+    )

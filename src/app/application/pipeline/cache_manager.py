@@ -98,21 +98,30 @@ async def get_cached_dict(
 
     Returns (result_dict_or_None, embedding_or_None).
     """
-    q_embedding: list[float] | None = None
-    try:
-        cached = await cache.get(cache_key(question))
-        if cached and isinstance(cached, dict):
-            return cached, None
-    except Exception:
-        logger.debug("WS Redis cache read failed", exc_info=True)
-    try:
-        q_embedding = await get_embedding(embedding_provider, question)
-        if q_embedding:
+    async def _redis_lookup() -> dict[str, Any] | None:
+        try:
+            cached = await cache.get(cache_key(question))
+            if cached and isinstance(cached, dict):
+                return cached
+        except Exception:
+            logger.debug("WS Redis cache read failed", exc_info=True)
+        return None
+
+    redis_result, q_embedding = await asyncio.gather(
+        _redis_lookup(),
+        get_embedding(embedding_provider, question),
+    )
+
+    if redis_result is not None:
+        return redis_result, None
+
+    if q_embedding:
+        try:
             sem = await semantic_cache.get(question, embedding=q_embedding)
             if sem and isinstance(sem, dict):
                 return sem, q_embedding
-    except Exception:
-        logger.debug("WS semantic cache read failed", exc_info=True)
+        except Exception:
+            logger.debug("WS semantic cache read failed", exc_info=True)
     return None, q_embedding
 
 
