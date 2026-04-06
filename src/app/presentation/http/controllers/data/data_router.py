@@ -24,6 +24,8 @@ from app.domain.ports.search.vector_search import IVectorSearch
 
 logger = logging.getLogger(__name__)
 
+_MIN_SIMILARITY = 0.40
+
 router = APIRouter(prefix="/data", tags=["data-api"])
 
 
@@ -48,6 +50,7 @@ def verify_service_token(request: Request) -> str:
 
     token = auth_header[7:].strip()
     if not token or not secrets.compare_digest(token, expected):
+        logger.warning("Data API auth failed: invalid service token")
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     return token
@@ -158,11 +161,17 @@ async def data_search(
     for datasets whose descriptions are semantically similar.
     Cross-references results with cached_datasets to return real table names.
     """
-    query_embedding = await embedding_provider.embed(body.query)
+    try:
+        query_embedding = await embedding_provider.embed(body.query)
+    except Exception:
+        logger.error("Failed to generate embedding for query: %s", body.query[:100])
+        raise HTTPException(status_code=502, detail="Servicio de búsqueda no disponible")
+
+    logger.info("Executing semantic search for query: %s", body.query[:100])
     results = await vector_search.search_datasets(
         query_embedding=query_embedding,
         limit=body.limit * 2,  # fetch extra to compensate for non-cached datasets
-        min_similarity=0.40,
+        min_similarity=_MIN_SIMILARITY,
     )
 
     # Build dataset_id → table_name mapping from cached tables
@@ -184,4 +193,6 @@ async def data_search(
         )
         if len(out) >= body.limit:
             break
+
+    logger.info("Search completed: %d results for query: %s", len(out), body.query[:100])
     return out
