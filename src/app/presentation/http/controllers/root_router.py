@@ -5,6 +5,9 @@ from fastapi import APIRouter
 from app.presentation.http.controllers.admin.tasks_router import (
     router as admin_tasks_router,
 )
+from app.presentation.http.controllers.data.data_router import (
+    router as data_router,
+)
 from app.presentation.http.controllers.conversations.conversations_router import (
     router as conversations_router,
 )
@@ -66,6 +69,7 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(skills_router)
     api_v1.include_router(developers_router)
     api_v1.include_router(ask_router)
+    api_v1.include_router(data_router)
     api_v1.include_router(admin_tasks_router)
 
     root.include_router(api_v1)
