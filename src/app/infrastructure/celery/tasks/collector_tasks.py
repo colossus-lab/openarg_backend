@@ -718,25 +718,58 @@ def _drop_table_if_exists(engine, table_name: str):
     logger.info("Dropped table %s for schema refresh", table_name)
 
 
+def _make_unique_columns(columns) -> list[str]:
+    """Normalize column names and guarantee uniqueness after cleanup."""
+    used: set[str] = set()
+    counters: dict[str, int] = {}
+    normalized: list[str] = []
+
+    for idx, raw in enumerate(columns):
+        if pd.isna(raw):
+            base = f"col_{idx}"
+        else:
+            base = str(raw).replace("\xa0", "").strip()
+            if not base or base.lower() == "nan":
+                base = f"col_{idx}"
+
+        counters[base] = counters.get(base, 0) + 1
+        candidate = base if counters[base] == 1 else f"{base}_{counters[base]}"
+        while candidate in used:
+            counters[base] += 1
+            candidate = f"{base}_{counters[base]}"
+
+        used.add(candidate)
+        normalized.append(candidate)
+
+    return normalized
+
+
 def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Clean column names: strip whitespace, non-breaking spaces, normalize.
 
     If most columns are 'Unnamed: N', treat the first data row as the real header.
     """
-    df.columns = [
-        col.replace("\xa0", "").strip() if isinstance(col, str) else col for col in df.columns
-    ]
+    df.columns = _make_unique_columns(df.columns)
 
     # Detect misplaced header: if >50% of columns are "Unnamed: N", promote first row
     unnamed_count = sum(1 for c in df.columns if str(c).startswith("Unnamed:"))
     if unnamed_count > len(df.columns) * 0.5 and len(df) > 1:
-        new_header = [
-            str(v).strip() if pd.notna(v) else f"col_{i}" for i, v in enumerate(df.iloc[0])
-        ]
+        new_header = _make_unique_columns(df.iloc[0])
         df = df.iloc[1:].reset_index(drop=True)
         df.columns = new_header
 
     return _compact_wide_dataframe(df)
+
+
+def _read_excel_frame(source, *, nrows: int, **kwargs) -> pd.DataFrame:
+    """Read an Excel workbook and normalize empty/invalid-sheet errors."""
+    try:
+        return pd.read_excel(source, nrows=nrows, **kwargs)
+    except ValueError as exc:
+        message = str(exc)
+        if "0 worksheets found" in message or "Worksheet index 0 is invalid" in message:
+            raise ValueError("excel_no_worksheets") from exc
+        raise
 
 
 def _compact_wide_dataframe(df: pd.DataFrame, max_columns: int = _MAX_SQL_COLUMNS) -> pd.DataFrame:
@@ -1394,7 +1427,17 @@ def collect_dataset(self, dataset_id: str):
                     elif lower.endswith((".xlsx", ".xls")):
                         with zf.open(name) as f:
                             content = f.read()
-                        df = pd.read_excel(io.BytesIO(content), nrows=MAX_TABLE_ROWS)
+                        try:
+                            df = _read_excel_frame(io.BytesIO(content), nrows=MAX_TABLE_ROWS)
+                        except ValueError as exc:
+                            if str(exc) == "excel_no_worksheets":
+                                logger.warning(
+                                    "ZIP %s: skipping excel member %s with no worksheets",
+                                    dataset_id,
+                                    name,
+                                )
+                                continue
+                            raise
                         original_len = len(df)
                         if original_len >= MAX_TABLE_ROWS:
                             sampled_note = (
@@ -1634,7 +1677,19 @@ def collect_dataset(self, dataset_id: str):
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
-                df = pd.read_excel(tmp_path, nrows=MAX_TABLE_ROWS)
+                try:
+                    df = _read_excel_frame(tmp_path, nrows=MAX_TABLE_ROWS)
+                except ValueError as exc:
+                    if str(exc) == "excel_no_worksheets":
+                        logger.warning("Dataset %s: Excel workbook has no worksheets", dataset_id)
+                        _set_error_status(
+                            engine,
+                            dataset_id,
+                            "excel_no_worksheets",
+                            table_name=table_name,
+                        )
+                        return {"error": "excel_no_worksheets"}
+                    raise
                 if len(df) >= MAX_TABLE_ROWS:
                     sampled_note = (
                         f"sampled: first {MAX_TABLE_ROWS} rows kept (excel file may have more)"

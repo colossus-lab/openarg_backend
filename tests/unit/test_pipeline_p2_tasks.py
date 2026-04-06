@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.infrastructure.celery.tasks.collector_tasks import (
+    _make_unique_columns,
     _resource_table_name,
     _route_table_for_schema,
     _sanitize_columns,
@@ -57,6 +58,13 @@ class TestCollectorP2:
         overflow = json.loads(compacted.loc[0, "_overflow_json"])
         assert overflow["col_1399"] == 1399
         assert overflow["col_1504"] == 1504
+
+    def test_make_unique_columns_deduplicates_colliding_headers(self):
+        assert _make_unique_columns(["DEPARTAMENTOS", "DEPARTAMENTOS", " DEPARTAMENTOS "]) == [
+            "DEPARTAMENTOS",
+            "DEPARTAMENTOS_2",
+            "DEPARTAMENTOS_3",
+        ]
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")
@@ -254,6 +262,70 @@ class TestCollectorP2:
             "11111111-1111-1111-1111-111111111111",
         )
         mock_httpx_client.assert_not_called()
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._read_excel_frame")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._set_error_status")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._has_temp_space")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._upload_file_to_s3")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._stream_download")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
+    def test_collect_dataset_marks_excel_without_sheets_as_terminal_error(
+        self,
+        _mock_ensure_cached_entry,
+        mock_get_engine,
+        mock_stream_download,
+        mock_upload_file_to_s3,
+        mock_has_temp_space,
+        mock_set_error_status,
+        mock_read_excel_frame,
+    ):
+        mock_has_temp_space.return_value = True
+        mock_stream_download.return_value = 123
+        mock_upload_file_to_s3.return_value = "datasets/datos_gob_ar/id/ipc.xlsx"
+        mock_read_excel_frame.side_effect = ValueError("excel_no_worksheets")
+
+        dataset_row = SimpleNamespace(
+            title="IPC Nacional",
+            download_url="https://example.com/ipc.xlsx",
+            format="xlsx",
+            portal="datos_gob_ar",
+            source_id="ipc-1",
+        )
+        retry_row = SimpleNamespace(retry_count=0)
+
+        mock_conn = MagicMock()
+
+        def execute_side_effect(stmt, params=None):
+            query = str(stmt)
+            if "SELECT title, download_url, format, portal, source_id" in query:
+                return _FetchOneResult(dataset_row)
+            if "SELECT retry_count FROM cached_datasets" in query:
+                return _FetchOneResult(retry_row)
+            if "WHERE table_name = :tn AND status = 'ready'" in query:
+                return _FetchOneResult(None)
+            return MagicMock()
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+
+        result = collect_dataset.run("11111111-1111-1111-1111-111111111111")
+
+        assert result == {"error": "excel_no_worksheets"}
+        mock_set_error_status.assert_called_once_with(
+            mock_engine,
+            "11111111-1111-1111-1111-111111111111",
+            "excel_no_worksheets",
+            table_name=_resource_table_name(
+                "cache_datos_gob_ar_ipc_nacional",
+                "11111111-1111-1111-1111-111111111111",
+            ),
+        )
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_postgis_geom")
