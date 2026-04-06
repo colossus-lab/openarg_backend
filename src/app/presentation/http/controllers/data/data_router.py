@@ -137,7 +137,7 @@ async def data_tables(
             table_name=t.table_name,
             dataset_id=str(t.dataset_id) if t.dataset_id else "",
             row_count=t.row_count,
-            columns=t.columns,
+            columns=[str(c) for c in t.columns],
         )
         for t in tables
     ]
@@ -168,9 +168,11 @@ async def data_search(
         raise HTTPException(status_code=502, detail="Servicio de búsqueda no disponible")
 
     logger.info("Executing semantic search for query: %s", body.query[:100])
+    # Fetch 4x to compensate for: non-cached datasets, duplicates from multiple
+    # chunks per dataset (main, columns, contextual), and min_similarity filter.
     results = await vector_search.search_datasets(
         query_embedding=query_embedding,
-        limit=body.limit * 2,  # fetch extra to compensate for non-cached datasets
+        limit=body.limit * 4,
         min_similarity=_MIN_SIMILARITY,
     )
 
@@ -179,10 +181,14 @@ async def data_search(
     dataset_to_table = {t.dataset_id: t.table_name for t in cached_tables}
 
     out: list[DataSearchResult] = []
+    seen_tables: set[str] = set()
     for r in results:
         table_name = dataset_to_table.get(r.dataset_id, "")
         if not table_name:
             continue  # skip datasets without a cached table
+        if table_name in seen_tables:
+            continue  # dedupe: same table matched multiple chunks (main/columns/contextual)
+        seen_tables.add(table_name)
         out.append(
             DataSearchResult(
                 table_name=table_name,
