@@ -4,7 +4,7 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 
 from app.domain.exceptions.base import ApplicationError
 from app.domain.exceptions.connector_errors import ConnectorError
@@ -30,7 +30,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(PromptInjectionError)
     async def prompt_injection_handler(
         request: Request, exc: PromptInjectionError
-    ) -> ORJSONResponse:
+    ) -> JSONResponse:
         audit_injection_blocked(
             user=exc.user,
             question=str(exc.details.get("question", "")),
@@ -41,13 +41,13 @@ def register_exception_handlers(app: FastAPI) -> None:
             exc.injection_score,
             exc.user,
         )
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=exc.http_status,
             content={"error": exc.to_dict()},
         )
 
     @app.exception_handler(ConnectorError)
-    async def connector_error_handler(request: Request, exc: ConnectorError) -> ORJSONResponse:
+    async def connector_error_handler(request: Request, exc: ConnectorError) -> JSONResponse:
         logger.warning(
             "Connector error on %s %s: %s - %s",
             request.method,
@@ -55,13 +55,13 @@ def register_exception_handlers(app: FastAPI) -> None:
             exc.error_code.name,
             exc,
         )
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=exc.http_status,
             content={"error": exc.to_dict()},
         )
 
     @app.exception_handler(ApplicationError)
-    async def application_error_handler(request: Request, exc: ApplicationError) -> ORJSONResponse:
+    async def application_error_handler(request: Request, exc: ApplicationError) -> JSONResponse:
         logger.warning(
             "Application error on %s %s: %s - %s",
             request.method,
@@ -69,7 +69,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             exc.error_code.name,
             exc,
         )
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=exc.http_status,
             content={"error": exc.to_dict()},
         )
@@ -77,7 +77,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
-    ) -> ORJSONResponse:
+    ) -> JSONResponse:
         errors = []
         for err in exc.errors():
             loc = " → ".join(str(part) for part in err.get("loc", []))
@@ -89,7 +89,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 }
             )
         logger.warning("Validation error: %s", errors)
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=422,
             content={
                 "error": {
@@ -101,9 +101,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def unhandled_error_handler(request: Request, exc: Exception) -> ORJSONResponse:
+    async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception(f"Unhandled error: {exc}")
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=500,
             content={"error": {"code": "INTERNAL", "message": "Internal server error"}},
         )

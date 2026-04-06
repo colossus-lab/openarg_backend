@@ -241,9 +241,10 @@ class TestDataTables:
     async def test_returns_table_list(self, client):
         resp = await client.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["tables"]
         assert len(body) == 1
         assert body[0]["table_name"] == "cache_ipc"
+        assert body[0]["name"] == "cache_ipc"
         assert body[0]["dataset_id"] == "ds-001"
         assert body[0]["row_count"] == 100
 
@@ -261,7 +262,7 @@ class TestDataTables:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json() == {"tables": []}
 
 
 # ===================================================================
@@ -277,9 +278,10 @@ class TestDataSearch:
             headers=_auth_header(),
         )
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["results"]
         assert len(body) == 1
         assert body[0]["table_name"] == "cache_ipc"
+        assert body[0]["name"] == "cache_ipc"
         assert body[0]["relevance"] == 0.92
 
     async def test_no_cached_tables_match_returns_empty(self, monkeypatch):
@@ -312,7 +314,7 @@ class TestDataSearch:
                 headers=_auth_header(),
             )
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json() == {"results": []}
 
     async def test_empty_query_returns_422(self, client):
         resp = await client.post(

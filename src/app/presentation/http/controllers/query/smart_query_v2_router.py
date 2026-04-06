@@ -17,7 +17,7 @@ from typing import Any
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
@@ -135,7 +135,7 @@ async def smart_query_v2(
     request: Request,
     body: SmartQueryV2Request,
     deps: FromDishka[PipelineDeps],
-) -> dict[str, Any] | ORJSONResponse:
+) -> dict[str, Any] | JSONResponse:
     """Execute a query through the LangGraph pipeline."""
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
     checkpointer = await _get_checkpointer()
@@ -163,7 +163,7 @@ async def smart_query_v2(
         result = await compiled_graph.ainvoke(initial_state, config=invoke_config)
     except Exception:
         logger.exception("LangGraph pipeline failed")
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=500,
             content={"error": {"code": "PIPELINE_ERROR", "message": "Pipeline execution failed"}},
         )
@@ -174,7 +174,7 @@ async def smart_query_v2(
         from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
 
         _, score = is_suspicious(body.question)
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=400,
             content={
                 "error": {
