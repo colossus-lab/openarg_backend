@@ -2608,6 +2608,10 @@ DOMAIN_PATTERNS: list[DomainPattern] = [
 # ---------------------------------------------------------------------------
 
 _SORTED_KEYWORDS: list[str] = sorted(KEYWORD_ROUTES.keys(), key=len, reverse=True)
+_KEYWORD_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (keyword, re.compile(r"\b" + re.escape(keyword) + r"\b"))
+    for keyword in _SORTED_KEYWORDS
+]
 
 
 # ---------------------------------------------------------------------------
@@ -2700,10 +2704,10 @@ def resolve_hints(query: str) -> list[RoutingHint]:
     # Track which actions we've already matched (keep highest confidence)
     seen_actions: dict[str, RoutingHint] = {}
 
-    for keyword in _SORTED_KEYWORDS:
+    for keyword, pattern in _KEYWORD_PATTERNS:
         # Only match if keyword appears as a whole token sequence
         # Use word boundaries to prevent "gas" matching inside "gastos"
-        if re.search(r"\b" + re.escape(keyword) + r"\b", normalized):
+        if pattern.search(normalized):
             route = KEYWORD_ROUTES[keyword]
             hint = RoutingHint(
                 action=route["action"],

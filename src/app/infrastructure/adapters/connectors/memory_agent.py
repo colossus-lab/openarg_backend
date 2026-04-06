@@ -17,6 +17,17 @@ def _memory_cache_key(session_id: str) -> str:
     return f"openarg:memory:{session_id}"
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
 async def load_memory(cache: ICacheService, session_id: str) -> MemoryContext:
     """Load memory context from Redis for a session."""
     if not session_id:
@@ -90,7 +101,7 @@ async def update_memory(
         parsed = json.loads(response.content.strip())
 
         new_datasets = parsed.get("datasetsUsed", [])
-        all_datasets = list(set(current_memory.datasets_used + new_datasets))
+        all_datasets = _dedupe_preserve_order(current_memory.datasets_used + new_datasets)
 
         return MemoryContext(
             turn_number=current_memory.turn_number + 1,
@@ -103,7 +114,7 @@ async def update_memory(
         logger.debug("LLM memory update failed, using simple fallback", exc_info=True)
         # Simple fallback without LLM
         new_datasets = [r.dataset_title for r in results]
-        all_datasets = list(set(current_memory.datasets_used + new_datasets))
+        all_datasets = _dedupe_preserve_order(current_memory.datasets_used + new_datasets)
 
         return MemoryContext(
             turn_number=current_memory.turn_number + 1,
