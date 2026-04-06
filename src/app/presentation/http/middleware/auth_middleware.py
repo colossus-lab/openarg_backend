@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 _ALWAYS_PUBLIC = frozenset({"/health", "/health/ready", "/api/v1/ask"})
+_SERVICE_PREFIXES = ("/api/v1/data/",)  # Own auth via Bearer service token
 _DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})
 
 _env = os.getenv("APP_ENV", "local").lower()
@@ -30,7 +31,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
-        if path in _PUBLIC_PATHS:
+        if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _SERVICE_PREFIXES):
             return await call_next(request)
 
         provided_key = request.headers.get("X-API-Key", "")
