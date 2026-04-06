@@ -51,6 +51,19 @@ class TestPgVectorSearchAdapter:
         params = call_args[0][1]
         assert params["portal"] == "caba"
 
+    async def test_search_deduplicates_by_dataset_in_sql(self, adapter, mock_session):
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_session.execute.return_value = mock_result
+
+        await adapter.search_datasets([0.1] * 1536, limit=5)
+
+        call_args = mock_session.execute.call_args
+        query = str(call_args[0][0])
+        assert "ROW_NUMBER() OVER (" in query
+        assert "PARTITION BY d.id" in query
+        assert "WHERE dataset_rank = 1" in query
+
     async def test_search_maps_rows_to_search_results(self, adapter, mock_session):
         mock_row = MagicMock()
         mock_row.dataset_id = "abc-123"
