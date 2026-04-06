@@ -7,13 +7,13 @@ lo parsea con pandas y lo cachea en PostgreSQL para consultas SQL.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
 import os
 import random
 import re
-import hashlib
 import shutil
 import tempfile
 import time
@@ -1113,7 +1113,6 @@ def collect_dataset(self, dataset_id: str):
     Descarga un dataset real, lo parsea y lo guarda como tabla SQL.
     Esto permite al Analyst hacer queries SQL reales sobre los datos.
     """
-    import httpx
 
     logger.info(f"Collecting dataset: {dataset_id}")
     engine = get_sync_engine()

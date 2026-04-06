@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 _RESOURCE_SUFFIX_RE = re.compile(r"_r[a-f0-9]{10}$")
 _GROUP_SUFFIX_RE = re.compile(r"_g[a-f0-9]{8}$")
 _SCHEMA_SUFFIX_RE = re.compile(r"_s[a-f0-9]{8}$")
