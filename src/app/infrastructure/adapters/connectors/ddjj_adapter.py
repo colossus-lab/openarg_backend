@@ -27,10 +27,13 @@ def _name_matches(nombre: str, query: str) -> bool:
     return all(w in nombre_norm for w in words)
 
 
+_RE_ASSET_TYPE = re.compile(r"EN EL (?:PAIS|EXTERIOR)")
+
+
 def _summarize_assets(bienes: list[dict]) -> dict[str, float]:
     summary: dict[str, float] = {}
     for b in bienes:
-        cat = re.sub(r"EN EL (PAIS|EXTERIOR)", "", b.get("tipo", "")).strip()
+        cat = _RE_ASSET_TYPE.sub("", b.get("tipo", "")).strip()
         summary[cat] = summary.get(cat, 0) + b.get("importe", 0)
     return summary
 
@@ -90,13 +93,14 @@ class DDJJAdapter:
 
     def search(self, query: str, limit: int = 20) -> DataResult:
         self._ensure_loaded()
-        q = _strip_accents(query.lower())
-        matches = [
-            r
-            for r in self._dataset
-            if _name_matches(r.get("nombre", ""), query)
-            or r.get("cuit", "").replace("-", "").find(q.replace("-", "")) >= 0
-        ][:limit]
+        q_clean = _strip_accents(query.lower()).replace("-", "")
+        # Early-termination search instead of scanning all records then slicing
+        matches: list[dict] = []
+        for r in self._dataset:
+            if _name_matches(r.get("nombre", ""), query) or q_clean in r.get("cuit", "").replace("-", ""):
+                matches.append(r)
+                if len(matches) >= limit:
+                    break
         return self._to_data_result(f'Búsqueda DDJJ: "{query}"', matches)
 
     def ranking(
@@ -142,11 +146,21 @@ class DDJJAdapter:
                 metadata={"total_records": 0, "fetched_at": datetime.now(UTC).isoformat()},
             )
 
-        patrimonios = sorted(r.get("patrimonioCierre", 0) for r in self._dataset)
-        total = len(patrimonios)
-        suma = sum(patrimonios)
-        max_r = max(self._dataset, key=lambda r: r.get("patrimonioCierre", 0))
-        min_r = min(self._dataset, key=lambda r: r.get("patrimonioCierre", 0))
+        # Single pass: collect min, max, sum, and sorted list simultaneously
+        total = len(self._dataset)
+        suma = 0.0
+        max_val, min_val = float("-inf"), float("inf")
+        max_r = min_r = self._dataset[0]
+        patrimonios: list[float] = []
+        for r in self._dataset:
+            p = r.get("patrimonioCierre", 0)
+            patrimonios.append(p)
+            suma += p
+            if p > max_val:
+                max_val, max_r = p, r
+            if p < min_val:
+                min_val, min_r = p, r
+        patrimonios.sort()
 
         stats_record = {
             "total": total,

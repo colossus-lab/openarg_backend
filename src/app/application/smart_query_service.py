@@ -522,7 +522,7 @@ class SmartQueryService:
             question, plan, results, memory_ctx_analyst, all_warnings
         )
 
-        full_text = ""
+        full_parts: list[str] = []
         stream_buf = ""
         async for chunk in self._llm.chat_stream(
             messages=[
@@ -532,7 +532,7 @@ class SmartQueryService:
             temperature=0.4,
             max_tokens=8192,
         ):
-            full_text += chunk
+            full_parts.append(chunk)
             stream_buf += chunk
 
             # If we're inside a tag, keep buffering
@@ -553,10 +553,12 @@ class SmartQueryService:
 
         # Flush remaining buffer
         if stream_buf:
-            cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
-            cleaned = re.sub(r"<!--.*", "", cleaned, flags=re.DOTALL)
+            cleaned = _RE_ANY_TAG.sub("", stream_buf)
+            cleaned = _RE_ANY_TAG_TRUNC.sub("", cleaned)
             if cleaned.strip():
                 yield {"type": "chunk", "content": cleaned}
+
+        full_text = "".join(full_parts)
 
         # Complete
         det_charts = build_deterministic_charts(results)
@@ -731,30 +733,44 @@ def _build_analysis_prompt(
     )
 
 
+_RE_CHART_TAG = re.compile(r"<!--CHART:.*?-->", re.DOTALL)
+_RE_CHART_TRUNC = re.compile(r"<!--CHART:.*", re.DOTALL)
+_RE_META_TAG = re.compile(r"<!--META:.*?-->", re.DOTALL)
+_RE_META_TRUNC = re.compile(r"<!--META:.*", re.DOTALL)
+_RE_ANY_TAG = re.compile(r"<!--.*?-->", re.DOTALL)
+_RE_ANY_TAG_TRUNC = re.compile(r"<!--.*", re.DOTALL)
+
+
 def _strip_tags(text: str) -> str:
     """Strip <!--CHART:...--> tags (complete and truncated) from text."""
-    text = re.sub(r"<!--CHART:.*?-->", "", text, flags=re.DOTALL)
-    return re.sub(r"<!--CHART:.*", "", text, flags=re.DOTALL).strip()
+    text = _RE_CHART_TAG.sub("", text)
+    return _RE_CHART_TRUNC.sub("", text).strip()
 
 
 def _strip_meta(text: str) -> str:
     """Strip <!--META:...--> tags (complete and truncated) from text."""
-    text = re.sub(r"<!--META:.*?-->", "", text, flags=re.DOTALL)
-    return re.sub(r"<!--META:.*", "", text, flags=re.DOTALL).strip()
+    text = _RE_META_TAG.sub("", text)
+    return _RE_META_TRUNC.sub("", text).strip()
 
 
 def _extract_sources(results: list) -> list[dict[str, Any]]:
-    """Build the sources list from data results."""
-    return [
-        {
+    """Build the sources list from data results, deduplicating by (name, url)."""
+    seen: set[tuple[str, str]] = set()
+    sources: list[dict[str, Any]] = []
+    for r in results:
+        if not r.records:
+            continue
+        key = (r.dataset_title, r.portal_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append({
             "name": r.dataset_title,
             "url": r.portal_url,
             "portal": r.portal_name,
             "accessed_at": r.metadata.get("fetched_at", ""),
-        }
-        for r in results
-        if r.records
-    ]
+        })
+    return sources
 
 
 def _extract_documents(results: list) -> list[dict[str, Any]] | None:

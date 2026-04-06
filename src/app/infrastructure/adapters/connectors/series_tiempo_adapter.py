@@ -193,13 +193,23 @@ def _strip_accents(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
 
 
+# Pre-strip keywords at module load (avoids re-stripping same keywords on every search)
+_CATALOG_NORMALIZED: list[tuple[str, dict]] = []
+for _entry in SERIES_CATALOG.values():
+    for _kw in _entry["keywords"]:
+        _CATALOG_NORMALIZED.append((_strip_accents(_kw), _entry))
+
+
 def find_catalog_match(query: str) -> dict | None:
-    """Find a catalog entry matching the query by keyword matching."""
+    """Find a catalog entry matching the query by keyword matching.
+
+    Uses pre-normalized keywords for O(keywords) substring checks
+    instead of re-stripping accents on every call.
+    """
     normalized = _strip_accents(query.lower())
-    for entry in SERIES_CATALOG.values():
-        for keyword in entry["keywords"]:
-            if _strip_accents(keyword) in normalized:
-                return entry
+    for kw_normalized, entry in _CATALOG_NORMALIZED:
+        if kw_normalized in normalized:
+            return entry
     return None
 
 
