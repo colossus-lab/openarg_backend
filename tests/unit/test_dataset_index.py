@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from app.infrastructure.adapters.connectors.dataset_index import (
-    KEYWORD_ROUTES,
     _KEYWORD_PATTERNS,
+    KEYWORD_ROUTES,
     TAXONOMY,
     format_hints_for_prompt,
     normalize_query,

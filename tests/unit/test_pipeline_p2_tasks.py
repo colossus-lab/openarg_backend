@@ -10,8 +10,8 @@ import pytest
 from app.infrastructure.celery.tasks.collector_tasks import (
     _resource_table_name,
     _route_table_for_schema,
-    _schema_table_name,
     _sanitize_columns,
+    _schema_table_name,
     collect_dataset,
 )
 from app.infrastructure.celery.tasks.embedding_tasks import index_sesiones_chunks

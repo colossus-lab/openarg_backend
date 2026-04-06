@@ -24,6 +24,7 @@ import boto3
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
+
 from .retrieval_strategy_evaluator import (
     RetrievalCandidate,
     build_case_result,
