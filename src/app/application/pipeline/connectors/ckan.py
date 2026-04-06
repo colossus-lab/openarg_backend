@@ -7,6 +7,10 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from app.application.pipeline.connectors.cache_table_selection import (
+    prefer_consolidated_table,
+    table_priority,
+)
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 
 if TYPE_CHECKING:
@@ -97,6 +101,12 @@ async def search_cached_tables(
     if not matched:
         return []
 
+    available_names = [t.table_name for t in all_tables]
+    preferred_names = {
+        prefer_consolidated_table(t.table_name, available_names) for t in matched
+    }
+    matched = [t for t in all_tables if t.table_name in preferred_names]
+    matched.sort(key=lambda t: (table_priority(t.table_name), t.table_name))
     matched = matched[:limit]
     results: list[DataResult] = []
     now = datetime.now(UTC).isoformat()

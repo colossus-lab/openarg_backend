@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
+from unittest.mock import MagicMock
+
+from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter, _validate_sql
 
 
 class TestSQLValidation:
@@ -66,3 +68,56 @@ class TestSQLValidation:
     def test_vacuum_rejected(self):
         result = _validate_sql("VACUUM table1")
         assert result is not None
+
+
+class _FetchAllResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class TestSandboxTableDiscovery:
+    def test_list_tables_includes_physical_cache_tables_without_cached_dataset_rows(self):
+        adapter = PgSandboxAdapter()
+        conn = MagicMock()
+        conn.execute.side_effect = [
+            _FetchAllResult(
+                [
+                    MagicMock(
+                        dataset_id="ds-1",
+                        table_name="cache_budget_sample",
+                        row_count=42,
+                        columns_json='["a","b"]',
+                    )
+                ]
+            ),
+            _FetchAllResult(
+                [
+                    MagicMock(table_name="cache_budget_sample", row_count=42),
+                    MagicMock(table_name="cache_budget_sample_gaaaaaaaa", row_count=100),
+                ]
+            ),
+            _FetchAllResult(
+                [
+                    MagicMock(column_name="a"),
+                    MagicMock(column_name="b"),
+                    MagicMock(column_name="_source_dataset_id"),
+                ]
+            ),
+        ]
+        engine = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        adapter._engine = engine
+
+        tables = adapter._list_tables_sync()
+
+        assert [t.table_name for t in tables] == [
+            "cache_budget_sample",
+            "cache_budget_sample_gaaaaaaaa",
+        ]
+        assert tables[1].dataset_id == ""
+        assert tables[1].row_count == 100
+        assert tables[1].columns == ["a", "b", "_source_dataset_id"]

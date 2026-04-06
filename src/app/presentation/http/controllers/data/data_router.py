@@ -19,6 +19,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.application.pipeline.connectors.cache_table_selection import prefer_consolidated_table
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
@@ -190,7 +191,12 @@ async def data_search(
 
     # Build dataset_id → table_name mapping from cached tables
     cached_tables = await sandbox.list_cached_tables()
-    dataset_to_table = {t.dataset_id: t.table_name for t in cached_tables}
+    available_names = [t.table_name for t in cached_tables]
+    dataset_to_table = {
+        t.dataset_id: prefer_consolidated_table(t.table_name, available_names)
+        for t in cached_tables
+        if t.dataset_id
+    }
 
     out: list[DataSearchResult] = []
     seen_tables: set[str] = set()

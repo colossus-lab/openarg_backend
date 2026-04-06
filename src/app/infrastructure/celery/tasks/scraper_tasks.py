@@ -7,6 +7,7 @@ y la guarda en PostgreSQL. Luego dispara el embedding de cada uno.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -75,6 +76,45 @@ def _check_html_response(resp, portal: str) -> None:
         raise PortalHTMLResponseError(
             f"Portal {portal} returned raw HTML (no proper HTTP headers): {snippet}"
         )
+
+
+def _embedding_signature(
+    *,
+    title: str | None,
+    description: str | None,
+    organization: str | None,
+    portal: str | None,
+    download_url: str | None,
+    fmt: str | None,
+    columns: str | list[str] | None,
+    tags: str | None,
+    last_updated,
+) -> str:
+    """Build a stable signature for fields that affect retrieval chunks."""
+    if isinstance(columns, list):
+        columns_value = json.dumps([str(col) for col in columns], ensure_ascii=False)
+    else:
+        columns_value = columns or "[]"
+
+    if hasattr(last_updated, "isoformat"):
+        last_updated_value = last_updated.isoformat()
+    else:
+        last_updated_value = str(last_updated or "")
+
+    payload = {
+        "title": title or "",
+        "description": description or "",
+        "organization": organization or "",
+        "portal": portal or "",
+        "download_url": download_url or "",
+        "format": fmt or "",
+        "columns": columns_value,
+        "tags": tags or "",
+        "last_updated_at": last_updated_value,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 @celery_app.task(
@@ -234,8 +274,34 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
 
             # Batch upsert using ON CONFLICT (eliminates N+1 SELECT per resource)
             if batch_rows:
-                source_ids = [r["sid"] for r in batch_rows]
+                deduped_rows = list({row["sid"]: row for row in batch_rows if row["sid"]}.values())
+                source_ids = [r["sid"] for r in deduped_rows]
                 with engine.begin() as conn:
+                    existing_rows = conn.execute(
+                        text(
+                            "SELECT CAST(id AS text) AS id, source_id, title, description, "
+                            "organization, portal, download_url, format, columns, tags, "
+                            "last_updated_at "
+                            "FROM datasets "
+                            "WHERE source_id = ANY(:sids) AND portal = :portal"
+                        ),
+                        {"sids": source_ids, "portal": portal},
+                    ).fetchall()
+                    existing_signatures = {
+                        row.source_id: _embedding_signature(
+                            title=row.title,
+                            description=row.description,
+                            organization=row.organization,
+                            portal=row.portal,
+                            download_url=row.download_url,
+                            fmt=row.format,
+                            columns=row.columns,
+                            tags=row.tags,
+                            last_updated=row.last_updated_at,
+                        )
+                        for row in existing_rows
+                    }
+
                     conn.execute(
                         text("""
                             INSERT INTO datasets
@@ -253,19 +319,35 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                                 last_updated_at = COALESCE(EXCLUDED.last_updated_at, datasets.last_updated_at),
                                 updated_at = :now
                         """),
-                        batch_rows,
+                        deduped_rows,
                     )
                     # Fetch IDs separately (RETURNING doesn't work with executemany)
                     result = conn.execute(
-                        text(
-                            "SELECT CAST(id AS text) FROM datasets "
-                            "WHERE source_id = ANY(:sids) AND portal = :portal"
-                        ),
+                        text("SELECT CAST(id AS text) AS id, source_id FROM datasets "
+                             "WHERE source_id = ANY(:sids) AND portal = :portal"),
                         {"sids": source_ids, "portal": portal},
                     )
-                    dataset_ids = [row[0] for row in result.fetchall()]
+                    dataset_ids_by_source = {row.source_id: row.id for row in result.fetchall()}
 
-                for dataset_id in dataset_ids:
+                changed_dataset_ids: list[str] = []
+                for row in deduped_rows:
+                    new_signature = _embedding_signature(
+                        title=row["title"],
+                        description=row["desc"],
+                        organization=row["org"],
+                        portal=row["portal"],
+                        download_url=row["dl"],
+                        fmt=row["fmt"],
+                        columns=row["cols"],
+                        tags=row["tags"],
+                        last_updated=row["last_upd"],
+                    )
+                    if existing_signatures.get(row["sid"]) != new_signature:
+                        dataset_id = dataset_ids_by_source.get(row["sid"])
+                        if dataset_id is not None:
+                            changed_dataset_ids.append(dataset_id)
+
+                for dataset_id in changed_dataset_ids:
                     index_dataset_embedding.delay(dataset_id)
                     indexed += 1
 
@@ -640,14 +722,21 @@ def index_dataset_embedding(self, dataset_id: str):
                 {"did": dataset_id},
             )
             # Insert all chunks
-            for i, emb in enumerate(embeddings):
-                embedding_str = "[" + ",".join(str(v) for v in emb) + "]"
+            chunk_rows = [
+                {
+                    "did": dataset_id,
+                    "content": chunk,
+                    "embedding": "[" + ",".join(str(v) for v in emb) + "]",
+                }
+                for chunk, emb in zip(chunks, embeddings, strict=False)
+            ]
+            if chunk_rows:
                 conn.execute(
                     text("""
                         INSERT INTO dataset_chunks (dataset_id, content, embedding)
                         VALUES (:did, :content, CAST(:embedding AS vector))
                     """),
-                    {"did": dataset_id, "content": chunks[i], "embedding": embedding_str},
+                    chunk_rows,
                 )
 
         logger.info(f"Indexed {len(chunks)} chunks for dataset: {dataset_id}")

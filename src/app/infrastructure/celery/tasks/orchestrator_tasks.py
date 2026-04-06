@@ -90,10 +90,9 @@ TASK_GROUPS: dict[str, dict] = {
     "embeddings": {
         "phase": 4,
         "delay_seconds": 3600,  # 1 hour — wait for collectors
-        "description": "Index session chunks + dataset embeddings (pgvector)",
+        "description": "Index session chunks (dataset reindex is manual/on-demand)",
         "tasks": [
             {"name": "openarg.index_sesiones"},
-            {"name": "openarg.reindex_all_embeddings"},
         ],
     },
     "transparency": {
