@@ -72,7 +72,7 @@ _SKILL_VERIFICAR = SkillDef(
         "query_series con la serie de inflación (148.3_INIVELNAL_DICI_M_26) para "
         "poder calcular la variación en términos REALES (ajustados por inflación).\n"
         "3. Si la afirmación es sobre presupuesto/gasto, DEBES incluir query_sandbox "
-        "con tables: [\"cache_presupuesto_*\"] para obtener crédito vigente y devengado.\n"
+        'con tables: ["cache_presupuesto_*"] para obtener crédito vigente y devengado.\n'
         "4. Buscá datos que puedan CONTRADECIR la afirmación, no solo confirmarla.\n"
         "IMPORTANTE: Generá al menos 2 pasos de recolección de datos."
     ),
@@ -111,7 +111,7 @@ _SKILL_COMPARAR = SkillDef(
         "con action 'search' y el nombre como parámetro.\n"
         "3. Si son indicadores económicos → generar query_series paralelos.\n"
         "4. Si son áreas presupuestarias → generar query_sandbox paralelos con "
-        "tables: [\"cache_presupuesto_*\"].\n"
+        'tables: ["cache_presupuesto_*"].\n'
         "5. Los pasos deben ser independientes para ejecutarse en paralelo.\n"
         "IMPORTANTE: NUNCA pongas ambos lados en un solo paso."
     ),
@@ -120,7 +120,7 @@ _SKILL_COMPARAR = SkillDef(
         "Respondé con este formato:\n\n"
         "1. **Tabla comparativa** con las métricas clave lado a lado.\n"
         "2. **Diferencias principales**: 2-3 puntos destacados.\n"
-        "3. **Gráfico comparativo**: incluí SIEMPRE un <!--CHART:{\"type\":\"bar_chart\",...}--> "
+        '3. **Gráfico comparativo**: incluí SIEMPRE un <!--CHART:{"type":"bar_chart",...}--> '
         "comparando los valores principales.\n\n"
         "Usá formato de tabla markdown:\n"
         "| Métrica | [A] | [B] |\n"
@@ -145,9 +145,9 @@ _SKILL_PRESUPUESTO = SkillDef(
         "SKILL ACTIVA: ANÁLISIS PRESUPUESTARIO\n"
         "El usuario quiere un análisis detallado de presupuesto.\n"
         "Tu plan DEBE incluir:\n"
-        "1. query_sandbox con tables: [\"cache_presupuesto_*\"] para obtener "
+        '1. query_sandbox con tables: ["cache_presupuesto_*"] para obtener '
         "crédito original, vigente Y devengado.\n"
-        "2. query_sandbox con tables: [\"cache_presupuesto_dim_apertura_programatica_*\"] "
+        '2. query_sandbox con tables: ["cache_presupuesto_dim_apertura_programatica_*"] '
         "para desglose por programa/subprograma.\n"
         "3. Si hay comparación interanual, incluir query_series con la serie de "
         "inflación (148.3_INIVELNAL_DICI_M_26) para deflactar y mostrar variación real.\n"
@@ -252,7 +252,7 @@ _SKILL_PRECIO = SkillDef(
         "1. El valor actual del indicador en negrita.\n"
         "2. La variación reciente (diaria, semanal o mensual según corresponda).\n"
         "3. Un mini gráfico de línea si hay datos históricos: "
-        "<!--CHART:{\"type\":\"line_chart\",...}-->.\n\n"
+        '<!--CHART:{"type":"line_chart",...}-->.\n\n'
         "NO des contexto extenso. El usuario quiere el número, no una explicación."
     ),
 )

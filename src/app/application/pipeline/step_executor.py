@@ -116,9 +116,17 @@ _DISPATCH_TABLE: dict[str, Callable[..., Any]] = {
     "query_sesiones": lambda s, d, q: execute_sesiones_step(s, d.sesiones),
     "query_staff": lambda s, d, q: execute_staff_step(s, d.staff),
     "query_bcra": lambda s, d, q: execute_bcra_step(s, d.bcra),
-    "search_datasets": lambda s, d, q: execute_search_datasets_step(s, d.embedding, d.vector_search),
+    "search_datasets": lambda s, d, q: execute_search_datasets_step(
+        s, d.embedding, d.vector_search
+    ),
     "query_sandbox": lambda s, d, q: execute_sandbox_step(
-        s, d.sandbox, d.llm, d.embedding, d.vector_search, d.semantic_cache, user_query=q,
+        s,
+        d.sandbox,
+        d.llm,
+        d.embedding,
+        d.vector_search,
+        d.semantic_cache,
+        user_query=q,
     ),
 }
 

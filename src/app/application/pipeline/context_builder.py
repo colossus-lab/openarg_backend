@@ -122,16 +122,12 @@ def build_data_context(results: list[DataResult]) -> str:
             lines.append(f"Fuente: {result.portal_name} ({result.source})")
             lines.append(f"URL: {result.portal_url}")
             lines.append(
-                "NOTA: Este dataset no tiene Datastore "
-                "habilitado. Solo metadatos de los recursos."
+                "NOTA: Este dataset no tiene Datastore habilitado. Solo metadatos de los recursos."
             )
             if result.metadata.get("description"):
                 lines.append(f"Descripción: {result.metadata['description']}")
             lines.append(f"Recursos disponibles:\n{records_text}")
-            lines.append(
-                "\nExplicale al usuario qué datos contiene "
-                "y proporcioná el link."
-            )
+            lines.append("\nExplicale al usuario qué datos contiene y proporcioná el link.")
         else:
             columns = list(valid_records[0].keys()) if valid_records else []
             display_columns = [c.replace("_", " ") for c in columns]

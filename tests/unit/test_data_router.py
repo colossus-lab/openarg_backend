@@ -211,7 +211,10 @@ class TestDataQuery:
     async def test_sandbox_error_propagated(self, monkeypatch):
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.execute_readonly.return_value = SandboxResult(
-            columns=[], rows=[], row_count=0, truncated=False,
+            columns=[],
+            rows=[],
+            row_count=0,
+            truncated=False,
             error="Only SELECT statements are allowed",
         )
         monkeypatch.setenv("DATA_SERVICE_TOKEN", SERVICE_TOKEN)
@@ -292,9 +295,13 @@ class TestDataSearch:
         vector_search = AsyncMock(spec=IVectorSearch)
         vector_search.search_datasets.return_value = [
             SearchResult(
-                dataset_id="ds-not-cached", title="Uncached",
-                description="Not cached", portal="test",
-                download_url="", columns='["a"]', score=0.95,
+                dataset_id="ds-not-cached",
+                title="Uncached",
+                description="Not cached",
+                portal="test",
+                download_url="",
+                columns='["a"]',
+                score=0.95,
             ),
         ]
         monkeypatch.setenv("DATA_SERVICE_TOKEN", SERVICE_TOKEN)

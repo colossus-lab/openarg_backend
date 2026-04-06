@@ -12,7 +12,9 @@ from app.domain.entities.connectors.data_result import DataResult
 logger = logging.getLogger(__name__)
 
 
-def build_deterministic_charts(results: list[DataResult], max_charts: int = 4) -> list[dict[str, Any]]:
+def build_deterministic_charts(
+    results: list[DataResult], max_charts: int = 4
+) -> list[dict[str, Any]]:
     """Build charts deterministically from structured data results."""
     charts: list[dict[str, Any]] = []
     for result in results:

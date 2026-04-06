@@ -173,17 +173,12 @@ class TestSQLInjectionAttacks:
             resp = await c.post(
                 "/data/query",
                 json={
-                    "sql": (
-                        "SELECT * FROM cache_sample "
-                        "WHERE x IN (SELECT email FROM users)"
-                    ),
+                    "sql": ("SELECT * FROM cache_sample WHERE x IN (SELECT email FROM users)"),
                 },
                 headers=_auth_header(),
             )
         assert resp.status_code == 200
-        assert resp.json()["error"] == (
-            "Access denied: subquery references forbidden table"
-        )
+        assert resp.json()["error"] == ("Access denied: subquery references forbidden table")
 
     async def test_cte_on_protected_table(self, monkeypatch):
         sandbox = _blocked_sandbox("Access denied: CTE references forbidden table")
@@ -191,10 +186,7 @@ class TestSQLInjectionAttacks:
             resp = await c.post(
                 "/data/query",
                 json={
-                    "sql": (
-                        "WITH x AS (SELECT * FROM users) "
-                        "SELECT * FROM cache_sample LIMIT 1"
-                    ),
+                    "sql": ("WITH x AS (SELECT * FROM users) SELECT * FROM cache_sample LIMIT 1"),
                 },
                 headers=_auth_header(),
             )
