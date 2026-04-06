@@ -12,7 +12,13 @@ from app.application.pipeline.chart_builder import extract_meta
 from app.application.smart_query_service import (
     SmartQueryService,
     _build_analysis_prompt,
+    _build_errors_block,
     _collect_result_payloads,
+    _get_clarification_step,
+    _has_data_or_vector_step,
+    _has_result_records,
+    _serialize_plan,
+    _today_iso_utc,
 )
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
@@ -454,3 +460,154 @@ class TestAnalysisPromptBuilder:
 
         build_data_context_mock.assert_not_called()
         assert prompt
+
+
+class TestClarificationStep:
+    def test_returns_clarification_step_when_present(self):
+        plan = ExecutionPlan(
+            query="aclarar",
+            intent="clarification",
+            steps=[
+                PlanStep(id="s1", action="search_datasets", description="", params={}, depends_on=[]),
+                PlanStep(
+                    id="s2",
+                    action="clarification",
+                    description="",
+                    params={"question": "¿Cuál?"},
+                    depends_on=[],
+                ),
+            ],
+        )
+
+        clar_step = _get_clarification_step(plan)
+
+        assert clar_step is not None
+        assert clar_step.id == "s2"
+
+    def test_returns_none_when_plan_is_not_clarification(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(id="s1", action="clarification", description="", params={}, depends_on=[])
+            ],
+        )
+
+        assert _get_clarification_step(plan) is None
+
+
+class TestPlanStepScanning:
+    def test_detects_existing_data_or_vector_step(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(id="s1", action="clarification", description="", params={}, depends_on=[]),
+                PlanStep(id="s2", action="search_datasets", description="", params={}, depends_on=[]),
+            ],
+        )
+
+        assert _has_data_or_vector_step(plan) is True
+
+    def test_returns_false_when_plan_has_no_data_or_vector_step(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(id="s1", action="clarification", description="", params={}, depends_on=[]),
+            ],
+        )
+
+        assert _has_data_or_vector_step(plan) is False
+
+
+class TestPlanSerialization:
+    def test_serialize_plan_preserves_intent_and_steps(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(
+                    id="s1",
+                    action="search_datasets",
+                    description="",
+                    params={"query": "ipc", "limit": 5},
+                    depends_on=[],
+                ),
+                PlanStep(
+                    id="s2",
+                    action="query_series",
+                    description="",
+                    params={"seriesIds": ["123"]},
+                    depends_on=["s1"],
+                ),
+            ],
+        )
+
+        serialized = _serialize_plan(plan)
+
+        assert serialized == (
+            '{"intent": "search", "steps": '
+            '[{"action": "search_datasets", "params": {"query": "ipc", "limit": 5}}, '
+            '{"action": "query_series", "params": {"seriesIds": ["123"]}}]}'
+        )
+
+
+class TestErrorsBlock:
+    def test_build_errors_block_formats_warning_list(self):
+        assert _build_errors_block(["fallo uno", "fallo dos"]) == (
+            "\nERRORES EN LA RECOLECCIÓN:\n- fallo uno\n- fallo dos"
+        )
+
+    def test_build_errors_block_returns_empty_string_without_warnings(self):
+        assert _build_errors_block([]) == ""
+
+
+class TestTodayIsoUtc:
+    def test_today_iso_utc_has_expected_format(self):
+        today = _today_iso_utc()
+
+        assert len(today) == 10
+        assert today[4] == "-"
+        assert today[7] == "-"
+
+
+class TestHasResultRecords:
+    def test_returns_true_when_any_result_has_records(self):
+        results = [
+            DataResult(
+                source="test",
+                portal_name="Portal",
+                portal_url="https://example.com",
+                dataset_title="Vacío",
+                format="json",
+                records=[],
+                metadata={},
+            ),
+            DataResult(
+                source="test",
+                portal_name="Portal",
+                portal_url="https://example.com",
+                dataset_title="Con datos",
+                format="json",
+                records=[{"x": 1}],
+                metadata={},
+            ),
+        ]
+
+        assert _has_result_records(results) is True
+
+    def test_returns_false_when_all_results_are_empty(self):
+        results = [
+            DataResult(
+                source="test",
+                portal_name="Portal",
+                portal_url="https://example.com",
+                dataset_title="Vacío",
+                format="json",
+                records=[],
+                metadata={},
+            )
+        ]
+
+        assert _has_result_records(results) is False
