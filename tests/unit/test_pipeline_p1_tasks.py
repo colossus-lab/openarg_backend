@@ -202,15 +202,15 @@ class TestCollectLargeGroupP1:
         result = collect_large_group.run("Pauta Publicitaria", "caba")
 
         assert result["dispatched"] == 200
-        assert result["dispatch_batches"] == 8
+        assert result["dispatch_batches"] == 20
         assert result["deferred"] == 5
         assert result["consolidation_scheduled"] is True
-        assert mock_group_result.apply_async.call_count == 8
+        assert mock_group_result.apply_async.call_count == 20
         countdowns = [call.kwargs["countdown"] for call in mock_group_result.apply_async.call_args_list]
-        assert countdowns == [0, 15, 30, 45, 60, 75, 90, 105]
+        assert countdowns == [i * 30 for i in range(20)]
         mock_consolidate_group.assert_called_once_with(
             args=["Pauta Publicitaria", "caba"],
-            countdown=180,
+            countdown=660,
         )
         mock_engine.begin.assert_not_called()
 
@@ -260,7 +260,7 @@ class TestCollectLargeGroupP1:
         mock_group_result.apply_async.assert_called_once_with(countdown=0)
         mock_consolidate_group.assert_called_once_with(
             args=["Pauta Publicitaria", "caba"],
-            countdown=75,
+            countdown=90,
         )
 
 
