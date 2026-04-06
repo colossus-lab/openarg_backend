@@ -5,11 +5,11 @@ from fastapi import APIRouter
 from app.presentation.http.controllers.admin.tasks_router import (
     router as admin_tasks_router,
 )
-from app.presentation.http.controllers.data.data_router import (
-    router as data_router,
-)
 from app.presentation.http.controllers.conversations.conversations_router import (
     router as conversations_router,
+)
+from app.presentation.http.controllers.data.data_router import (
+    router as data_router,
 )
 from app.presentation.http.controllers.datasets.datasets_router import (
     router as datasets_router,
