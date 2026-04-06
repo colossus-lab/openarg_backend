@@ -8,7 +8,7 @@ from typing import Any
 from dishka import AsyncContainer
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.application.smart_query_service import SmartQueryService
@@ -71,7 +71,7 @@ async def smart_query(
     body: SmartQueryRequest,
     service: FromDishka[SmartQueryService],
     session: FromDishka[MainAsyncSession],
-) -> dict[str, Any] | ORJSONResponse:
+) -> dict[str, Any] | JSONResponse:
     user_id = body.user_email or "anonymous"
 
     result = await service.execute(
@@ -87,7 +87,7 @@ async def smart_query(
         from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
 
         _, score = is_suspicious(body.question)
-        return ORJSONResponse(
+        return JSONResponse(
             status_code=400,
             content={
                 "error": {

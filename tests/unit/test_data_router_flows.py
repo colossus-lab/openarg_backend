@@ -198,7 +198,7 @@ class TestTerritoriaPolicyFlow:
                 headers=_auth_header(),
             )
             assert search_resp.status_code == 200
-            results = search_resp.json()
+            results = search_resp.json()["results"]
             assert len(results) == 3
             first_table = results[0]["table_name"]
             assert first_table == "cache_budget_sample"
@@ -251,7 +251,7 @@ class TestTerritoriaPolicyFlow:
                     headers=_auth_header(),
                 )
                 assert resp.status_code == 200
-                results = resp.json()
+                results = resp.json()["results"]
                 assert len(results) >= 1
                 tables_seen.append(results[0]["table_name"])
 
@@ -495,8 +495,8 @@ class TestTerritoriaDataShapes:
         ]
 
         expected_query_fields = {"columns", "rows", "row_count", "truncated", "error"}
-        expected_search_fields = {"table_name", "title", "description", "relevance"}
-        expected_table_fields = {"table_name", "dataset_id", "row_count", "columns"}
+        expected_search_fields = {"table_name", "name", "title", "description", "relevance"}
+        expected_table_fields = {"table_name", "name", "dataset_id", "row_count", "columns"}
 
         async with _build_client(
             monkeypatch, sandbox=sandbox, vector_search=vector_search,
@@ -517,14 +517,14 @@ class TestTerritoriaDataShapes:
                 headers=_auth_header(),
             )
             assert s.status_code == 200
-            search_items = s.json()
+            search_items = s.json()["results"]
             assert len(search_items) >= 1
             assert set(search_items[0].keys()) == expected_search_fields
 
             # Tables contract
             t = await c.get("/data/tables", headers=_auth_header())
             assert t.status_code == 200
-            table_items = t.json()
+            table_items = t.json()["tables"]
             assert len(table_items) >= 1
             assert set(table_items[0].keys()) == expected_table_fields
 
@@ -647,7 +647,7 @@ class TestTerritoriaBatchScenarios:
                     headers=_auth_header(),
                 )
                 assert resp.status_code == 200
-                assert len(resp.json()) >= 1
+                assert len(resp.json()["results"]) >= 1
 
             # 2 queries
             for table in ["cache_budget_sample", "cache_health_indicators"]:

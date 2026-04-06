@@ -191,7 +191,8 @@ async def _post_search(
         )
     body: object
     try:
-        body = resp.json()
+        raw = resp.json()
+        body = raw["results"] if isinstance(raw, dict) and "results" in raw else raw
     except Exception:
         body = None
     return resp.status_code, body

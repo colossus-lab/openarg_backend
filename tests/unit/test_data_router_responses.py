@@ -484,7 +484,7 @@ class TestQueryDataTypes:
 
 
 class TestSearchResponseContract:
-    async def test_search_response_is_list(self, client):
+    async def test_search_response_is_object_with_results(self, client):
         resp = await client.post(
             "/data/search",
             json={"query": "something"},
@@ -492,7 +492,8 @@ class TestSearchResponseContract:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert isinstance(body, list)
+        assert set(body.keys()) == {"results"}
+        assert isinstance(body["results"], list)
 
     async def test_search_item_has_exact_fields(self, client):
         resp = await client.post(
@@ -501,10 +502,11 @@ class TestSearchResponseContract:
             headers=_auth_header(),
         )
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["results"]
         assert len(body) >= 1
         assert set(body[0].keys()) == {
             "table_name",
+            "name",
             "title",
             "description",
             "relevance",
@@ -517,8 +519,9 @@ class TestSearchResponseContract:
             headers=_auth_header(),
         )
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["results"]
         assert isinstance(body[0]["table_name"], str)
+        assert isinstance(body[0]["name"], str)
 
     async def test_search_relevance_is_float(self, client):
         resp = await client.post(
@@ -527,7 +530,7 @@ class TestSearchResponseContract:
             headers=_auth_header(),
         )
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["results"]
         assert isinstance(body[0]["relevance"], float)
         assert not isinstance(body[0]["relevance"], bool)
 
@@ -554,7 +557,7 @@ class TestSearchResponseContract:
                 headers=_auth_header(),
             )
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["results"]
         assert body[0]["relevance"] == 0.123
 
     async def test_empty_search_returns_empty_array(self, monkeypatch):
@@ -571,9 +574,9 @@ class TestSearchResponseContract:
             )
         assert resp.status_code == 200
         body = resp.json()
-        assert body == []
-        assert isinstance(body, list)
-        assert resp.text.strip() == "[]"
+        assert body == {"results": []}
+        assert isinstance(body["results"], list)
+        assert '"results":[]' in resp.text or '"results": []' in resp.text
 
 
 # ===================================================================
@@ -582,19 +585,21 @@ class TestSearchResponseContract:
 
 
 class TestTablesResponseContract:
-    async def test_tables_response_is_list(self, client):
+    async def test_tables_response_is_object_with_tables(self, client):
         resp = await client.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
         body = resp.json()
-        assert isinstance(body, list)
+        assert set(body.keys()) == {"tables"}
+        assert isinstance(body["tables"], list)
 
     async def test_tables_item_has_exact_fields(self, client):
         resp = await client.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["tables"]
         assert len(body) >= 1
         assert set(body[0].keys()) == {
             "table_name",
+            "name",
             "dataset_id",
             "row_count",
             "columns",
@@ -616,7 +621,7 @@ class TestTablesResponseContract:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["tables"]
         assert body[0]["row_count"] is None
         raw = resp.text
         assert '"row_count":null' in raw or '"row_count": null' in raw
@@ -637,7 +642,7 @@ class TestTablesResponseContract:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["tables"]
         assert body[0]["dataset_id"] == ""
         assert isinstance(body[0]["dataset_id"], str)
 
@@ -657,7 +662,7 @@ class TestTablesResponseContract:
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
-        body = resp.json()
+        body = resp.json()["tables"]
         assert body[0]["columns"] == ["name", "59", "value"]
         assert all(isinstance(c, str) for c in body[0]["columns"])
 
@@ -671,9 +676,9 @@ class TestTablesResponseContract:
             resp = await c.get("/data/tables", headers=_auth_header())
         assert resp.status_code == 200
         body = resp.json()
-        assert body == []
-        assert isinstance(body, list)
-        assert resp.text.strip() == "[]"
+        assert body == {"tables": []}
+        assert isinstance(body["tables"], list)
+        assert '"tables":[]' in resp.text or '"tables": []' in resp.text
 
 
 # ===================================================================

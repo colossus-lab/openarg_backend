@@ -1,10 +1,11 @@
 """
-Data API Router — Service-to-service endpoints for DataRouter.
+Data API Router — internal service-to-service endpoints.
 
 Protected by DATA_SERVICE_TOKEN (env var).
 Header: Authorization: Bearer svc_xxx
 
-No rate limiting (service-to-service).
+No public rate limiting by design: intended for trusted internal products
+running under the same platform boundary.
 """
 
 from __future__ import annotations
@@ -75,6 +76,7 @@ class DataQueryResponse(BaseModel):
 
 class TableInfoResponse(BaseModel):
     table_name: str
+    name: str
     dataset_id: str
     row_count: int | None
     columns: list[str]
@@ -87,9 +89,18 @@ class DataSearchRequest(BaseModel):
 
 class DataSearchResult(BaseModel):
     table_name: str
+    name: str
     title: str
     description: str
     relevance: float
+
+
+class TableListResponse(BaseModel):
+    tables: list[TableInfoResponse]
+
+
+class DataSearchResponse(BaseModel):
+    results: list[DataSearchResult]
 
 
 # ---------------------------------------------------------------------------
@@ -123,29 +134,32 @@ async def data_query(
 
 @router.get(
     "/tables",
-    response_model=list[TableInfoResponse],
+    response_model=TableListResponse,
     dependencies=[Depends(verify_service_token)],
 )
 @inject
 async def data_tables(
     sandbox: FromDishka[ISQLSandbox],
-) -> list[TableInfoResponse]:
+) -> TableListResponse:
     """List all cached dataset tables with schema metadata."""
     tables = await sandbox.list_cached_tables()
-    return [
-        TableInfoResponse(
-            table_name=t.table_name,
-            dataset_id=str(t.dataset_id) if t.dataset_id else "",
-            row_count=t.row_count,
-            columns=[str(c) for c in t.columns],
-        )
-        for t in tables
-    ]
+    return TableListResponse(
+        tables=[
+            TableInfoResponse(
+                table_name=t.table_name,
+                name=t.table_name,
+                dataset_id=str(t.dataset_id) if t.dataset_id else "",
+                row_count=t.row_count,
+                columns=[str(c) for c in t.columns],
+            )
+            for t in tables
+        ]
+    )
 
 
 @router.post(
     "/search",
-    response_model=list[DataSearchResult],
+    response_model=DataSearchResponse,
     dependencies=[Depends(verify_service_token)],
 )
 @inject
@@ -154,7 +168,7 @@ async def data_search(
     sandbox: FromDishka[ISQLSandbox],
     vector_search: FromDishka[IVectorSearch],
     embedding_provider: FromDishka[IEmbeddingProvider],
-) -> list[DataSearchResult]:
+) -> DataSearchResponse:
     """Semantic search for relevant cached dataset tables.
 
     Generates an embedding for the query text and searches pgvector
@@ -192,6 +206,7 @@ async def data_search(
         out.append(
             DataSearchResult(
                 table_name=table_name,
+                name=table_name,
                 title=r.title,
                 description=r.description,
                 relevance=round(r.score, 3),
@@ -201,4 +216,4 @@ async def data_search(
             break
 
     logger.info("Search completed: %d results for query: %s", len(out), body.query[:100])
-    return out
+    return DataSearchResponse(results=out)

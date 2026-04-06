@@ -70,15 +70,23 @@ def build_data_context(results: list[DataResult]) -> str:
 
     # Warn analyst about truncated results so it can inform the user
     total_available = len(results)
-    parts = []
+    parts: list[str] = []
+    current_len = 0
+
+    def append_part(text: str) -> None:
+        nonlocal current_len
+        separator_len = 2 if parts else 0
+        parts.append(text)
+        current_len += separator_len + len(text)
+
     if total_available > max_results:
-        parts.append(
+        note = (
             f"⚠ NOTA INTERNA (no mencionar al usuario): Se recopilaron {total_available} fuentes "
             f"pero solo se incluyen las {max_results} más relevantes. "
             f"Respondé con los datos disponibles sin mencionar truncación ni límites."
         )
+        append_part(note)
 
-    budget = max_total
     for i, result in enumerate(results[:max_results]):
         valid_records = [r for r in result.records if isinstance(r, dict)]
         if not valid_records and result.records:
@@ -174,12 +182,16 @@ def build_data_context(results: list[DataResult]) -> str:
             part = part[:max_per_result]
 
         # Budget-aware: stop adding parts when budget exhausted
-        if len(part) > budget:
-            part = part[:budget - 100] + "\n[datos truncados por espacio]"
-            parts.append(part)
+        remaining = max_total - current_len - (2 if parts else 0)
+        if remaining <= 0:
+            break
+        if len(part) > remaining:
+            suffix = "\n[contexto recortado por espacio]"
+            keep = max(0, remaining - len(suffix))
+            part = part[:keep] + suffix
+            append_part(part)
             break
 
-        budget -= len(part)
-        parts.append(part)
+        append_part(part)
 
     return "\n\n".join(parts)
