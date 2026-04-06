@@ -13,7 +13,10 @@ import logging
 import os
 import random
 import re
+import hashlib
+import shutil
 import tempfile
+import time
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -62,6 +65,345 @@ MAX_TOTAL_ATTEMPTS = 5
 # Maximum rows to store per dataset table.  Datasets exceeding this limit
 # are truncated to the first MAX_TABLE_ROWS rows.
 MAX_TABLE_ROWS = 500_000
+_MAX_SQL_COLUMNS = 1400
+_TEMP_SPACE_RESERVE_BYTES = 512 * 1024 * 1024  # keep 512MB free for worker stability
+_COLLECT_DISPATCH_BATCH_SIZE = int(os.getenv("OPENARG_COLLECT_DISPATCH_BATCH_SIZE", "25"))
+_COLLECT_DISPATCH_STEP_SECONDS = int(os.getenv("OPENARG_COLLECT_DISPATCH_STEP_SECONDS", "15"))
+_COLLECT_MAX_INFLIGHT = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT", "100"))
+_COLLECT_MAX_INFLIGHT_PER_PORTAL = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT_PER_PORTAL", "10"))
+
+
+def _temp_dir() -> str:
+    """Return the temp directory used by collector tasks."""
+    return os.getenv("OPENARG_TEMP_DIR", "/tmp")
+
+
+def _has_temp_space(required_bytes: int, reserve_bytes: int = _TEMP_SPACE_RESERVE_BYTES) -> bool:
+    """Check whether the temp filesystem has enough free space for a new task."""
+    try:
+        usage = shutil.disk_usage(_temp_dir())
+    except OSError:
+        logger.debug("Could not inspect temp dir space", exc_info=True)
+        return True
+    return usage.free >= (required_bytes + reserve_bytes)
+
+
+def _dispatch_in_batches(signatures: list, *, batch_size: int, step_seconds: int) -> int:
+    """Dispatch Celery signatures in staggered batches to reduce worker pressure."""
+    from celery import group as celery_group
+
+    dispatched_batches = 0
+    for start in range(0, len(signatures), batch_size):
+        batch = signatures[start : start + batch_size]
+        if not batch:
+            continue
+        celery_group(batch).apply_async(countdown=dispatched_batches * step_seconds)
+        dispatched_batches += 1
+    return dispatched_batches
+
+
+def _get_inflight_counts(engine) -> tuple[int, dict[str, int]]:
+    """Return current collector inflight totals overall and by portal."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT d.portal, COUNT(*) "
+                "FROM cached_datasets cd "
+                "JOIN datasets d ON d.id = cd.dataset_id "
+                "WHERE cd.status = 'downloading' "
+                "GROUP BY d.portal"
+            )
+        ).fetchall()
+        conn.rollback()
+    by_portal = {str(row[0]): int(row[1]) for row in rows}
+    return sum(by_portal.values()), by_portal
+
+
+def _throttle_collect_rows(
+    rows,
+    *,
+    inflight_total: int,
+    inflight_by_portal: dict[str, int],
+    max_total: int,
+    max_per_portal: int,
+):
+    """Keep only rows that fit within inflight collector budgets."""
+    selected = []
+    deferred = []
+    total = inflight_total
+    per_portal = dict(inflight_by_portal)
+
+    for row in rows:
+        dataset_id = str(row[0])
+        portal = str(row[1])
+        if total >= max_total or per_portal.get(portal, 0) >= max_per_portal:
+            deferred.append((dataset_id, portal))
+            continue
+        selected.append((dataset_id, portal))
+        total += 1
+        per_portal[portal] = per_portal.get(portal, 0) + 1
+
+    return selected, deferred
+
+
+def _recycle_stuck_downloads(
+    engine,
+    *,
+    max_age_minutes: int = 30,
+    redispatch: bool = False,
+) -> dict[str, int]:
+    """Recycle stale `downloading` rows so they stop consuming inflight slots.
+
+    Old rows with materialized data are promoted to `ready`.
+    Old rows without data are moved back to `error` (or `permanently_failed`
+    if they already exhausted retries). Optionally re-dispatches datasets that
+    are recycled back to `error`.
+    """
+    recovered_ready = 0
+    recycled_error = 0
+    recycled_failed = 0
+
+    with engine.begin() as conn:
+        exhausted = conn.execute(
+            text(
+                """
+                UPDATE cached_datasets
+                SET status = 'permanently_failed',
+                    error_message = 'Exhausted retries while stuck in downloading',
+                    updated_at = NOW()
+                WHERE status = 'downloading'
+                  AND updated_at < NOW() - (:age_minutes * INTERVAL '1 minute')
+                  AND retry_count >= :max
+                """
+            ),
+            {"age_minutes": max_age_minutes, "max": MAX_TOTAL_ATTEMPTS},
+        )
+        recycled_failed += exhausted.rowcount or 0
+
+        stale_rows = conn.execute(
+            text(
+                """
+                SELECT CAST(dataset_id AS text) AS dataset_id,
+                       table_name,
+                       retry_count
+                FROM cached_datasets
+                WHERE status = 'downloading'
+                  AND updated_at < NOW() - (:age_minutes * INTERVAL '1 minute')
+                  AND retry_count < :max
+                """
+            ),
+            {"age_minutes": max_age_minutes, "max": MAX_TOTAL_ATTEMPTS},
+        ).fetchall()
+
+        to_redispatch: list[str] = []
+        for row in stale_rows:
+            table_exists = False
+            if row.table_name:
+                table_exists = bool(
+                    conn.execute(
+                        text(
+                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+                            "WHERE table_name = :tn AND table_schema = 'public')"
+                        ),
+                        {"tn": row.table_name},
+                    ).scalar()
+                )
+
+            if table_exists:
+                row_count = (
+                    conn.execute(text(f'SELECT COUNT(*) FROM "{row.table_name}"')).scalar() or 0
+                )  # noqa: S608
+                if row_count > 0:
+                    col_result = conn.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_name = :tn ORDER BY ordinal_position"
+                        ),
+                        {"tn": row.table_name},
+                    ).fetchall()
+                    columns = [r.column_name for r in col_result]
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE cached_datasets
+                            SET status = 'ready',
+                                row_count = :rows,
+                                columns_json = :cols,
+                                error_message = NULL,
+                                updated_at = NOW()
+                            WHERE dataset_id = CAST(:did AS uuid)
+                              AND status = 'downloading'
+                            """
+                        ),
+                        {
+                            "did": row.dataset_id,
+                            "rows": row_count,
+                            "cols": json.dumps(columns),
+                        },
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE datasets SET is_cached = true, row_count = :rows "
+                            "WHERE id = CAST(:did AS uuid)"
+                        ),
+                        {"did": row.dataset_id, "rows": row_count},
+                    )
+                    recovered_ready += 1
+                    continue
+
+            new_count = (row.retry_count or 0) + 1
+            next_status = "permanently_failed" if new_count >= MAX_TOTAL_ATTEMPTS else "error"
+            next_error = (
+                "Permanently failed: stuck in downloading too many times"
+                if next_status == "permanently_failed"
+                else "Recovered: stuck in downloading state"
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE cached_datasets
+                    SET status = :status,
+                        retry_count = :cnt,
+                        error_message = :msg,
+                        updated_at = NOW()
+                    WHERE dataset_id = CAST(:did AS uuid)
+                      AND status = 'downloading'
+                    """
+                ),
+                {
+                    "did": row.dataset_id,
+                    "status": next_status,
+                    "cnt": new_count,
+                    "msg": next_error,
+                },
+            )
+            if next_status == "permanently_failed":
+                recycled_failed += 1
+            else:
+                recycled_error += 1
+                if redispatch:
+                    to_redispatch.append(str(row.dataset_id))
+
+    if redispatch:
+        for dataset_id in to_redispatch:
+            collect_dataset.delay(dataset_id)
+
+    return {
+        "recovered_ready": recovered_ready,
+        "recycled_error": recycled_error,
+        "recycled_failed": recycled_failed,
+    }
+
+
+def _reconcile_cache_coverage(
+    engine,
+    *,
+    redispatch: bool = False,
+    reindex_embeddings: bool = False,
+) -> dict[str, int]:
+    """Fix inconsistent cache flags and optionally requeue missing work."""
+    orphaned_ready = 0
+    fixed_cached_flags = 0
+    reindexed_missing_chunks = 0
+
+    with engine.begin() as conn:
+        orphaned_rows = conn.execute(
+            text(
+                """
+                SELECT CAST(cd.dataset_id AS text) AS dataset_id, cd.table_name
+                FROM cached_datasets cd
+                WHERE cd.status = 'ready'
+                  AND cd.table_name IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM information_schema.tables t
+                      WHERE t.table_schema = 'public'
+                        AND t.table_name = cd.table_name
+                  )
+                """
+            )
+        ).fetchall()
+        for row in orphaned_rows:
+            conn.execute(
+                text(
+                    """
+                    UPDATE cached_datasets
+                    SET status = 'error',
+                        retry_count = 0,
+                        error_message = 'Table missing: marked for re-download',
+                        updated_at = NOW()
+                    WHERE dataset_id = CAST(:did AS uuid)
+                      AND status = 'ready'
+                    """
+                ),
+                {"did": row.dataset_id},
+            )
+            conn.execute(
+                text("UPDATE datasets SET is_cached = false WHERE id = CAST(:did AS uuid)"),
+                {"did": row.dataset_id},
+            )
+            orphaned_ready += 1
+
+        inconsistent_rows = conn.execute(
+            text(
+                """
+                SELECT CAST(d.id AS text) AS dataset_id
+                FROM datasets d
+                WHERE d.is_cached = true
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM cached_datasets cd
+                      WHERE cd.dataset_id = d.id
+                        AND cd.status = 'ready'
+                  )
+                """
+            )
+        ).fetchall()
+        for row in inconsistent_rows:
+            conn.execute(
+                text("UPDATE datasets SET is_cached = false WHERE id = CAST(:did AS uuid)"),
+                {"did": row.dataset_id},
+            )
+            fixed_cached_flags += 1
+
+        missing_chunk_rows = conn.execute(
+            text(
+                """
+                SELECT CAST(d.id AS text) AS dataset_id
+                FROM datasets d
+                WHERE d.is_cached = true
+                  AND EXISTS (
+                      SELECT 1
+                      FROM cached_datasets cd
+                      WHERE cd.dataset_id = d.id
+                        AND cd.status = 'ready'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM dataset_chunks dc
+                      WHERE dc.dataset_id = d.id
+                  )
+                LIMIT 5000
+                """
+            )
+        ).fetchall()
+
+    if redispatch:
+        for row in orphaned_rows:
+            collect_dataset.delay(str(row.dataset_id))
+
+    if reindex_embeddings and missing_chunk_rows:
+        from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+
+        for row in missing_chunk_rows:
+            index_dataset_embedding.delay(str(row.dataset_id))
+            reindexed_missing_chunks += 1
+
+    return {
+        "orphaned_ready": orphaned_ready,
+        "fixed_cached_flags": fixed_cached_flags,
+        "reindexed_missing_chunks": reindexed_missing_chunks,
+    }
 
 
 def _sanitize_table_name(name: str, portal: str = "") -> str:
@@ -73,6 +415,38 @@ def _sanitize_table_name(name: str, portal: str = "") -> str:
         # "cache_" (6) + portal (max 12) + "_" (1) + name (max 44) = 63
         return f"cache_{portal_clean[:12]}_{clean[:44]}"
     return f"cache_{clean[:57]}"
+
+
+def _schema_columns(columns) -> tuple[str, ...]:
+    """Return a canonical, ordered schema signature excluding source metadata."""
+    return tuple(sorted(str(col) for col in columns if str(col) != "_source_dataset_id"))
+
+
+def _schema_suffix(columns) -> str:
+    signature = "|".join(_schema_columns(columns))
+    return hashlib.sha1(signature.encode("utf-8")).hexdigest()[:8]
+
+
+def _schema_table_name(base_table_name: str, columns) -> str:
+    """Build a stable variant table name for a specific schema signature."""
+    suffix = f"_s{_schema_suffix(columns)}"
+    trimmed = base_table_name[: max(1, 63 - len(suffix))]
+    return f"{trimmed}{suffix}"
+
+
+def _resource_table_name(base_table_name: str, dataset_id: str) -> str:
+    """Build a stable resource-specific fallback table name."""
+    compact_id = str(dataset_id).replace("-", "")[:10]
+    suffix = f"_r{compact_id}"
+    trimmed = base_table_name[: max(1, 63 - len(suffix))]
+    return f"{trimmed}{suffix}"
+
+
+def _consolidated_table_name(base_table_name: str, columns) -> str:
+    """Build a stable group-consolidated table name for a schema signature."""
+    suffix = f"_g{_schema_suffix(columns)}"
+    trimmed = base_table_name[: max(1, 63 - len(suffix))]
+    return f"{trimmed}{suffix}"
 
 
 _CONTENT_TYPES = {
@@ -240,6 +614,9 @@ def _stream_download(
     with httpx.Client(timeout=dl_timeout, verify=verify_ssl) as client:
         with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
+            content_length = int(resp.headers.get("content-length", 0) or 0)
+            if content_length > max_bytes:
+                raise ValueError(f"file_too_large: {content_length} bytes (limit {max_bytes})")
             with open(dest_path, "wb") as f:
                 for chunk in resp.iter_bytes(chunk_size=256 * 1024):
                     total += len(chunk)
@@ -359,7 +736,40 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
         df.columns = new_header
 
-    return df
+    return _compact_wide_dataframe(df)
+
+
+def _compact_wide_dataframe(df: pd.DataFrame, max_columns: int = _MAX_SQL_COLUMNS) -> pd.DataFrame:
+    """Collapse overflow columns into `_overflow_json` before hitting Postgres column limits."""
+    if len(df.columns) <= max_columns:
+        return df
+
+    keep_budget = max_columns - 1  # reserve one slot for _overflow_json
+    if "_source_dataset_id" in df.columns:
+        base_cols = [col for col in df.columns if col != "_source_dataset_id"]
+        kept_base = base_cols[: max(0, keep_budget - 1)]
+        keep_cols = kept_base + ["_source_dataset_id"]
+    else:
+        keep_cols = list(df.columns[:keep_budget])
+
+    overflow_cols = [col for col in df.columns if col not in keep_cols]
+    overflow_frame = df[overflow_cols].where(pd.notna(df[overflow_cols]), None)
+    overflow_records = overflow_frame.to_dict(orient="records")
+
+    compacted = df[keep_cols].copy()
+    compacted["_overflow_json"] = [
+        json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        if any(value is not None for value in record.values())
+        else None
+        for record in overflow_records
+    ]
+    logger.warning(
+        "Compacted wide dataset from %d to %d SQL columns (%d overflow columns stored in _overflow_json)",
+        len(df.columns),
+        len(compacted.columns),
+        len(overflow_cols),
+    )
+    return compacted
 
 
 def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
@@ -402,6 +812,22 @@ def _get_table_row_count(engine, table_name: str) -> int:
             return count or 0
     except Exception:
         return 0
+
+
+def _table_exists(engine, table_name: str) -> bool:
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text(
+                    "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = :tn AND table_schema = 'public')"
+                ),
+                {"tn": table_name},
+            ).scalar()
+            conn.rollback()
+        return bool(exists)
+    except Exception:
+        return False
 
 
 def _ensure_postgis_geom(engine, table_name: str, columns: list[str]) -> None:
@@ -538,8 +964,8 @@ def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: st
         logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
 
 
-def _check_schema_compat(engine, table_name: str, df: pd.DataFrame) -> bool:
-    """Check if df columns are compatible with existing table for append.
+def _check_schema_compat_columns(engine, table_name: str, columns) -> bool:
+    """Check if columns are compatible with an existing table for append.
 
     Returns True if schemas are compatible (subset in either direction), False otherwise.
     """
@@ -556,11 +982,111 @@ def _check_schema_compat(engine, table_name: str, df: pd.DataFrame) -> bool:
                 ).fetchall()
             )
             conn.rollback()
-        new_cols = set(df.columns) - {"_source_dataset_id"}
+        new_cols = set(_schema_columns(columns))
         existing_cols_clean = existing_cols - {"_source_dataset_id"}
         return new_cols.issubset(existing_cols_clean) or existing_cols_clean.issubset(new_cols)
     except Exception:
         return True  # If check fails, allow append
+
+
+def _check_schema_compat(engine, table_name: str, df: pd.DataFrame) -> bool:
+    """Check if df columns are compatible with existing table for append."""
+    return _check_schema_compat_columns(engine, table_name, df.columns)
+
+
+def _route_table_for_schema(
+    engine,
+    dataset_id: str,
+    table_name: str,
+    columns,
+    *,
+    append_mode: bool,
+) -> tuple[str, bool, str | None]:
+    """Route mismatched siblings into a stable schema-specific table instead of dropping them."""
+    if not append_mode:
+        return table_name, False, None
+
+    target_table = table_name
+    if _table_exists(engine, table_name):
+        if not _check_schema_compat_columns(engine, table_name, columns):
+            target_table = _schema_table_name(table_name, columns)
+            logger.info(
+                "Dataset %s schema differs from %s, routing to %s",
+                dataset_id,
+                table_name,
+                target_table,
+            )
+
+    if target_table != table_name:
+        _ensure_cached_entry(engine, dataset_id, target_table)
+
+    if not _table_exists(engine, target_table):
+        return target_table, False, None
+
+    try:
+        with engine.connect() as conn:
+            already_appended = conn.execute(
+                text(
+                    f'SELECT EXISTS(SELECT 1 FROM "{target_table}" WHERE _source_dataset_id = :did LIMIT 1)'
+                ),  # noqa: S608
+                {"did": dataset_id},
+            ).scalar()
+            conn.rollback()
+        if already_appended:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                    {"id": dataset_id},
+                )
+            return target_table, True, "already_appended"
+    except Exception:
+        logger.debug("Could not inspect source_dataset_id on %s", target_table, exc_info=True)
+
+    current_rows = _get_table_row_count(engine, target_table)
+    if current_rows >= MAX_TABLE_ROWS:
+        resource_table = _resource_table_name(target_table, dataset_id)
+        logger.info(
+            "Dataset %s target table %s is full (%d rows), routing to resource table %s",
+            dataset_id,
+            target_table,
+            current_rows,
+            resource_table,
+        )
+        _ensure_cached_entry(engine, dataset_id, resource_table)
+        if not _table_exists(engine, resource_table):
+            return resource_table, False, None
+
+        resource_rows = _get_table_row_count(engine, resource_table)
+        if resource_rows >= MAX_TABLE_ROWS:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                    {"id": dataset_id},
+                )
+            return resource_table, True, "table_full"
+
+        try:
+            with engine.connect() as conn:
+                already_appended = conn.execute(
+                    text(
+                        f'SELECT EXISTS(SELECT 1 FROM "{resource_table}" WHERE _source_dataset_id = :did LIMIT 1)'
+                    ),  # noqa: S608
+                    {"did": dataset_id},
+                ).scalar()
+                conn.rollback()
+            if already_appended:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                        {"id": dataset_id},
+                    )
+                return resource_table, True, "already_appended"
+        except Exception:
+            logger.debug("Could not inspect resource fallback table %s", resource_table, exc_info=True)
+
+        return resource_table, True, None
+
+    return target_table, True, None
 
 
 def _update_row_count_after_append(engine, table_name: str):
@@ -592,6 +1118,10 @@ def collect_dataset(self, dataset_id: str):
     logger.info(f"Collecting dataset: {dataset_id}")
     engine = get_sync_engine()
     table_name = None
+    started_at = time.monotonic()
+    download_ms = 0
+    parse_ms = 0
+    upload_ms = 0
 
     try:
         # Get dataset info
@@ -611,7 +1141,8 @@ def collect_dataset(self, dataset_id: str):
         title, download_url, fmt = row.title, row.download_url, row.format
         fmt = _detect_format_from_url(download_url, fmt)
         portal, source_id = row.portal, row.source_id
-        table_name = _sanitize_table_name(title, portal)
+        group_table_name = _sanitize_table_name(title, portal)
+        table_name = _resource_table_name(group_table_name, dataset_id)
 
         # Ensure a cached_datasets row exists EARLY so failures are always tracked
         _ensure_cached_entry(engine, dataset_id, table_name)
@@ -636,7 +1167,7 @@ def collect_dataset(self, dataset_id: str):
                 )
                 return {"error": "permanently_failed"}
 
-        # Check if already cached — distinguish same-resource vs sibling-resource
+        # Resource staging is the primary materialization path: each dataset gets its own table.
         append_mode = False
         with engine.begin() as conn:
             cached = conn.execute(
@@ -662,53 +1193,6 @@ def collect_dataset(self, dataset_id: str):
                     "table_name": table_name,
                     "status": "already_cached",
                 }
-            else:
-                # Sibling resource (same title+portal, different dataset_id) — append
-                logger.info(
-                    f"Dataset {dataset_id} is sibling of {cached_did} for table {table_name}, "
-                    "will attempt append"
-                )
-                # Check if this specific resource already contributed rows
-                try:
-                    with engine.connect() as conn:
-                        already_appended = conn.execute(
-                            text(
-                                f'SELECT EXISTS(SELECT 1 FROM "{table_name}" WHERE _source_dataset_id = :did LIMIT 1)'
-                            ),  # noqa: S608
-                            {"did": dataset_id},
-                        ).scalar()
-                        conn.rollback()
-                    if already_appended:
-                        logger.info(
-                            f"Dataset {dataset_id} already appended to {table_name}, skipping"
-                        )
-                        with engine.begin() as conn:
-                            conn.execute(
-                                text(
-                                    "UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"
-                                ),
-                                {"id": dataset_id},
-                            )
-                        return {"dataset_id": dataset_id, "status": "already_appended"}
-                except Exception:
-                    pass  # Column might not exist yet (old tables), proceed with append
-                # Check aggregate row cap before appending
-                current_rows = _get_table_row_count(engine, table_name)
-                if current_rows >= MAX_TABLE_ROWS:
-                    logger.info(
-                        f"Table {table_name} already has {current_rows} rows (cap {MAX_TABLE_ROWS}), "
-                        f"skipping append of {dataset_id}"
-                    )
-                    # Mark as cached so bulk_collect_all doesn't re-dispatch
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text(
-                                "UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"
-                            ),
-                            {"id": dataset_id},
-                        )
-                    return {"dataset_id": dataset_id, "status": "table_full"}
-                append_mode = True
 
         # Update status (skip for append_mode — table is already 'ready')
         if not append_mode:
@@ -724,7 +1208,17 @@ def collect_dataset(self, dataset_id: str):
 
         # Stream download to temp file (memory-safe for large files)
         max_download_bytes = 500 * 1024 * 1024  # 500 MB
-        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}", dir="/tmp")
+        if not _has_temp_space(max_download_bytes):
+            logger.warning("Insufficient temp space before downloading dataset %s", dataset_id)
+            _set_error_status(
+                engine,
+                dataset_id,
+                "insufficient_temp_space",
+                table_name=table_name,
+            )
+            return {"error": "insufficient_temp_space"}
+
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{fmt}", dir=_temp_dir())
         tmp_path = tmp_file.name
         tmp_file.close()
         file_size = 0
@@ -732,28 +1226,8 @@ def collect_dataset(self, dataset_id: str):
         verify_ssl = _should_verify_ssl(download_url)
 
         try:
-            # HEAD to check Content-Length before downloading
             try:
-                with httpx.Client(timeout=30.0, verify=verify_ssl) as client:
-                    head = client.head(download_url, follow_redirects=True)
-                    content_length = int(head.headers.get("content-length", 0))
-                    if content_length > max_download_bytes:
-                        logger.warning(f"Dataset {dataset_id} too large: {content_length} bytes")
-                        _set_error_status(
-                            engine,
-                            dataset_id,
-                            f"file_too_large: {content_length} bytes",
-                            table_name=table_name,
-                        )
-                        return {"error": f"file_too_large: {content_length} bytes"}
-            except Exception:
-                logger.debug(
-                    "HEAD request failed for %s, proceeding with stream download",
-                    dataset_id,
-                    exc_info=True,
-                )
-
-            try:
+                download_started_at = time.monotonic()
                 file_size = _stream_download(
                     download_url,
                     tmp_path,
@@ -777,12 +1251,15 @@ def collect_dataset(self, dataset_id: str):
                     )
                 else:
                     raise
+            download_ms = int((time.monotonic() - download_started_at) * 1000)
 
             # Upload raw file to S3 (from disk, not memory)
             s3_key = None
             try:
+                upload_started_at = time.monotonic()
                 filename = f"{source_id}.{fmt}"
                 s3_key = _upload_file_to_s3(tmp_path, portal, dataset_id, filename)
+                upload_ms = int((time.monotonic() - upload_started_at) * 1000)
                 logger.info(f"Uploaded to S3: {s3_key}")
             except Exception:
                 logger.warning(
@@ -793,6 +1270,7 @@ def collect_dataset(self, dataset_id: str):
             row_count = 0
             columns: list[str] = []
             sampled_note: str | None = None  # set when dataset is truncated
+            parse_started_at = time.monotonic()
 
             if fmt in ("csv", "txt"):
                 # Chunked CSV loading — never loads full file into memory
@@ -801,37 +1279,21 @@ def collect_dataset(self, dataset_id: str):
                     try:
                         _csv_params = _detect_csv_params(tmp_path)
                         preview_df = pd.read_csv(tmp_path, nrows=5, **_csv_params)
-                        with engine.connect() as conn:
-                            existing_cols = set(
-                                r.column_name
-                                for r in conn.execute(
-                                    text(
-                                        "SELECT column_name FROM information_schema.columns "
-                                        "WHERE table_name = :tn AND table_schema = 'public'"
-                                    ),
-                                    {"tn": table_name},
-                                ).fetchall()
-                            )
-                            conn.rollback()
-                        new_cols = set(preview_df.columns) - {"_source_dataset_id"}
-                        existing_cols_clean = existing_cols - {"_source_dataset_id"}
-                        if not new_cols.issubset(
-                            existing_cols_clean
-                        ) and not existing_cols_clean.issubset(new_cols):
+                        table_name, append_mode, routed_status = _route_table_for_schema(
+                            engine,
+                            dataset_id,
+                            table_name,
+                            preview_df.columns,
+                            append_mode=append_mode,
+                        )
+                        if routed_status:
                             logger.info(
-                                f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
+                                "Dataset %s resolved early status %s on %s",
+                                dataset_id,
+                                routed_status,
+                                table_name,
                             )
-                            with engine.begin() as conn:
-                                conn.execute(
-                                    text(
-                                        "UPDATE cached_datasets SET status = 'schema_mismatch', "
-                                        "error_message = 'Incompatible columns for append', "
-                                        "updated_at = NOW() "
-                                        "WHERE dataset_id = CAST(:did AS uuid)"
-                                    ),
-                                    {"did": dataset_id},
-                                )
-                            return {"dataset_id": dataset_id, "status": "schema_mismatch"}
+                            return {"dataset_id": dataset_id, "status": routed_status}
                     except Exception:
                         logger.debug(
                             "Schema preview failed for %s, proceeding anyway",
@@ -876,6 +1338,19 @@ def collect_dataset(self, dataset_id: str):
                         table_name=table_name,
                     )
                     return {"error": f"zip_too_large: {total_size} bytes"}
+                if not _has_temp_space(total_size):
+                    logger.warning(
+                        "ZIP %s: insufficient temp space for %d decompressed bytes",
+                        dataset_id,
+                        total_size,
+                    )
+                    _set_error_status(
+                        engine,
+                        dataset_id,
+                        "insufficient_temp_space",
+                        table_name=table_name,
+                    )
+                    return {"error": "insufficient_temp_space"}
 
                 parsed = False
                 for name in zf.namelist():
@@ -883,7 +1358,7 @@ def collect_dataset(self, dataset_id: str):
                     if lower.endswith((".csv", ".txt")):
                         # Extract CSV to temp file, then chunked load
                         csv_tmp = tempfile.NamedTemporaryFile(
-                            delete=False, suffix=".csv", dir="/tmp"
+                            delete=False, suffix=".csv", dir=_temp_dir()
                         )
                         csv_tmp_path = csv_tmp.name
                         csv_tmp.close()
@@ -933,12 +1408,16 @@ def collect_dataset(self, dataset_id: str):
                                 MAX_TABLE_ROWS,
                             )
                         df["_source_dataset_id"] = dataset_id
+                        table_name, append_mode, routed_status = _route_table_for_schema(
+                            engine,
+                            dataset_id,
+                            table_name,
+                            df.columns,
+                            append_mode=append_mode,
+                        )
+                        if routed_status:
+                            return {"dataset_id": dataset_id, "status": routed_status}
                         if append_mode:
-                            if not _check_schema_compat(engine, table_name, df):
-                                logger.info(
-                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                                )
-                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                             _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                         else:
                             _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -968,12 +1447,16 @@ def collect_dataset(self, dataset_id: str):
                             )
                             df = df.iloc[:MAX_TABLE_ROWS]
                         df["_source_dataset_id"] = dataset_id
+                        table_name, append_mode, routed_status = _route_table_for_schema(
+                            engine,
+                            dataset_id,
+                            table_name,
+                            df.columns,
+                            append_mode=append_mode,
+                        )
+                        if routed_status:
+                            return {"dataset_id": dataset_id, "status": routed_status}
                         if append_mode:
-                            if not _check_schema_compat(engine, table_name, df):
-                                logger.info(
-                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                                )
-                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                             _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                         else:
                             _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -1010,12 +1493,16 @@ def collect_dataset(self, dataset_id: str):
                             )
                             df = df.iloc[:MAX_TABLE_ROWS]
                         df["_source_dataset_id"] = dataset_id
+                        table_name, append_mode, routed_status = _route_table_for_schema(
+                            engine,
+                            dataset_id,
+                            table_name,
+                            df.columns,
+                            append_mode=append_mode,
+                        )
+                        if routed_status:
+                            return {"dataset_id": dataset_id, "status": routed_status}
                         if append_mode:
-                            if not _check_schema_compat(engine, table_name, df):
-                                logger.info(
-                                    f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                                )
-                                return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                             _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                         else:
                             _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -1040,12 +1527,16 @@ def collect_dataset(self, dataset_id: str):
                                 )
                                 df = df.iloc[:MAX_TABLE_ROWS]
                             df["_source_dataset_id"] = dataset_id
+                            table_name, append_mode, routed_status = _route_table_for_schema(
+                                engine,
+                                dataset_id,
+                                table_name,
+                                df.columns,
+                                append_mode=append_mode,
+                            )
+                            if routed_status:
+                                return {"dataset_id": dataset_id, "status": routed_status}
                             if append_mode:
-                                if not _check_schema_compat(engine, table_name, df):
-                                    logger.info(
-                                        f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                                    )
-                                    return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                                 _to_sql_safe(
                                     df, table_name, engine, if_exists="append", index=False
                                 )
@@ -1091,12 +1582,16 @@ def collect_dataset(self, dataset_id: str):
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
                 df["_source_dataset_id"] = dataset_id
+                table_name, append_mode, routed_status = _route_table_for_schema(
+                    engine,
+                    dataset_id,
+                    table_name,
+                    df.columns,
+                    append_mode=append_mode,
+                )
+                if routed_status:
+                    return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    if not _check_schema_compat(engine, table_name, df):
-                        logger.info(
-                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                        )
-                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                 else:
                     _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -1124,12 +1619,16 @@ def collect_dataset(self, dataset_id: str):
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
                 df["_source_dataset_id"] = dataset_id
+                table_name, append_mode, routed_status = _route_table_for_schema(
+                    engine,
+                    dataset_id,
+                    table_name,
+                    df.columns,
+                    append_mode=append_mode,
+                )
+                if routed_status:
+                    return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    if not _check_schema_compat(engine, table_name, df):
-                        logger.info(
-                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                        )
-                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                 else:
                     _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -1147,12 +1646,16 @@ def collect_dataset(self, dataset_id: str):
                         MAX_TABLE_ROWS,
                     )
                 df["_source_dataset_id"] = dataset_id
+                table_name, append_mode, routed_status = _route_table_for_schema(
+                    engine,
+                    dataset_id,
+                    table_name,
+                    df.columns,
+                    append_mode=append_mode,
+                )
+                if routed_status:
+                    return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    if not _check_schema_compat(engine, table_name, df):
-                        logger.info(
-                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                        )
-                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                 else:
                     _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -1170,12 +1673,16 @@ def collect_dataset(self, dataset_id: str):
                         MAX_TABLE_ROWS,
                     )
                 df["_source_dataset_id"] = dataset_id
+                table_name, append_mode, routed_status = _route_table_for_schema(
+                    engine,
+                    dataset_id,
+                    table_name,
+                    df.columns,
+                    append_mode=append_mode,
+                )
+                if routed_status:
+                    return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    if not _check_schema_compat(engine, table_name, df):
-                        logger.info(
-                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                        )
-                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                 else:
                     _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -1200,12 +1707,16 @@ def collect_dataset(self, dataset_id: str):
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
                 df["_source_dataset_id"] = dataset_id
+                table_name, append_mode, routed_status = _route_table_for_schema(
+                    engine,
+                    dataset_id,
+                    table_name,
+                    df.columns,
+                    append_mode=append_mode,
+                )
+                if routed_status:
+                    return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    if not _check_schema_compat(engine, table_name, df):
-                        logger.info(
-                            f"Schema mismatch for {dataset_id} vs {table_name}, skipping append"
-                        )
-                        return {"dataset_id": dataset_id, "status": "schema_mismatch"}
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
                 else:
                     _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
@@ -1230,6 +1741,21 @@ def collect_dataset(self, dataset_id: str):
                         ),
                         {"rows": row_count, "id": dataset_id},
                     )
+                parse_ms = int((time.monotonic() - parse_started_at) * 1000)
+                total_ms = int((time.monotonic() - started_at) * 1000)
+                logger.info(
+                    "Collector timings dataset=%s portal=%s fmt=%s rows=%s size_bytes=%s "
+                    "download_ms=%s upload_ms=%s parse_ms=%s total_ms=%s mode=append",
+                    dataset_id,
+                    portal,
+                    fmt,
+                    row_count,
+                    file_size,
+                    download_ms,
+                    upload_ms,
+                    parse_ms,
+                    total_ms,
+                )
                 logger.info(f"Dataset {dataset_id} appended {row_count} rows to table {table_name}")
                 return {
                     "dataset_id": dataset_id,
@@ -1292,6 +1818,21 @@ def collect_dataset(self, dataset_id: str):
 
                 enrich_single_table.delay(table_name)
 
+            parse_ms = int((time.monotonic() - parse_started_at) * 1000)
+            total_ms = int((time.monotonic() - started_at) * 1000)
+            logger.info(
+                "Collector timings dataset=%s portal=%s fmt=%s rows=%s size_bytes=%s "
+                "download_ms=%s upload_ms=%s parse_ms=%s total_ms=%s",
+                dataset_id,
+                portal,
+                fmt,
+                row_count,
+                file_size,
+                download_ms,
+                upload_ms,
+                parse_ms,
+                total_ms,
+            )
             logger.info(f"Dataset {dataset_id} cached: {row_count} rows in table {table_name}")
             return {
                 "dataset_id": dataset_id,
@@ -1309,7 +1850,8 @@ def collect_dataset(self, dataset_id: str):
                 pass
 
     except SoftTimeLimitExceeded:
-        logger.error(f"Task timed out for dataset {dataset_id}")
+        total_ms = int((time.monotonic() - started_at) * 1000)
+        logger.error("Task timed out for dataset %s after %dms", dataset_id, total_ms)
         with engine.begin() as conn:
             conn.execute(
                 text(
@@ -1348,11 +1890,18 @@ def collect_dataset(self, dataset_id: str):
             or "TooManyRedirects" in type(exc).__name__
         )
         if non_retryable:
-            logger.warning("Non-retryable error for %s: %s", dataset_id, exc_str[:200])
+            total_ms = int((time.monotonic() - started_at) * 1000)
+            logger.warning(
+                "Non-retryable error for %s after %dms: %s",
+                dataset_id,
+                total_ms,
+                exc_str[:200],
+            )
             _set_error_status(engine, dataset_id, exc_str[:500], table_name=table_name)
             return {"error": "non_retryable"}
 
-        logger.exception(f"Collection failed for dataset {dataset_id}")
+        total_ms = int((time.monotonic() - started_at) * 1000)
+        logger.exception("Collection failed for dataset %s after %dms", dataset_id, total_ms)
         with engine.begin() as conn:
             # Increment retry_count and check if we should give up
             conn.execute(
@@ -1405,11 +1954,31 @@ def bulk_collect_all(self, portal: str | None = None):
     engine = get_sync_engine()
 
     try:
-        from celery import group as celery_group
+        reconciled = _reconcile_cache_coverage(
+            engine,
+            redispatch=False,
+            reindex_embeddings=True,
+        )
+        if any(reconciled.values()):
+            logger.warning(
+                "Bulk collect reconciled cache coverage before dispatch: orphaned_ready=%s fixed_cached_flags=%s reindexed_missing_chunks=%s",
+                reconciled["orphaned_ready"],
+                reconciled["fixed_cached_flags"],
+                reconciled["reindexed_missing_chunks"],
+            )
+
+        recycled = _recycle_stuck_downloads(engine, redispatch=False)
+        if any(recycled.values()):
+            logger.warning(
+                "Bulk collect recycled stale downloads before dispatch: ready=%s error=%s failed=%s",
+                recycled["recovered_ready"],
+                recycled["recycled_error"],
+                recycled["recycled_failed"],
+            )
 
         # ── Phase 1: individual datasets (groups <= 50 siblings) ──
         query = (
-            "SELECT CAST(d.id AS text) FROM datasets d "
+            "SELECT CAST(d.id AS text), d.portal FROM datasets d "
             "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
             "WHERE d.is_cached = false "
             "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed', 'schema_mismatch')) "
@@ -1429,10 +1998,25 @@ def bulk_collect_all(self, portal: str | None = None):
         with engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
 
-        phase1_count = len(rows)
-        tasks = [collect_dataset.s(row[0]) for row in rows]
+        inflight_total, inflight_by_portal = _get_inflight_counts(engine)
+        selected_rows, deferred_rows = _throttle_collect_rows(
+            rows,
+            inflight_total=inflight_total,
+            inflight_by_portal=inflight_by_portal,
+            max_total=_COLLECT_MAX_INFLIGHT,
+            max_per_portal=_COLLECT_MAX_INFLIGHT_PER_PORTAL,
+        )
+
+        phase1_count = len(selected_rows)
+        deferred_individual = len(deferred_rows)
+        tasks = [collect_dataset.s(dataset_id) for dataset_id, _portal in selected_rows]
+        phase1_batches = 0
         if tasks:
-            celery_group(tasks).apply_async()
+            phase1_batches = _dispatch_in_batches(
+                tasks,
+                batch_size=_COLLECT_DISPATCH_BATCH_SIZE,
+                step_seconds=_COLLECT_DISPATCH_STEP_SECONDS,
+            )
 
         # ── Phase 2: large groups (>50 siblings) ──
         large_query = (
@@ -1446,15 +2030,62 @@ def bulk_collect_all(self, portal: str | None = None):
         with engine.connect() as conn:
             large_groups = conn.execute(text(large_query)).fetchall()
 
-        phase2_count = len(large_groups)
-        if large_groups:
-            large_tasks = [collect_large_group.s(row.title, row.portal) for row in large_groups]
-            celery_group(large_tasks).apply_async()
+        remaining_total_slots = max(_COLLECT_MAX_INFLIGHT - inflight_total - phase1_count, 0)
+        remaining_portal_slots = {
+            portal_key: max(
+                _COLLECT_MAX_INFLIGHT_PER_PORTAL
+                - inflight_by_portal.get(portal_key, 0)
+                - sum(1 for _did, p in selected_rows if p == portal_key),
+                0,
+            )
+            for portal_key in {row.portal for row in large_groups}
+        }
+        selected_groups = []
+        deferred_groups = 0
+        for row in large_groups:
+            if remaining_total_slots <= 0 or remaining_portal_slots.get(row.portal, 0) <= 0:
+                deferred_groups += 1
+                continue
+            selected_groups.append(row)
+            remaining_total_slots -= 1
+            remaining_portal_slots[row.portal] = remaining_portal_slots.get(row.portal, 0) - 1
+
+        phase2_count = len(selected_groups)
+        phase2_batches = 0
+        if selected_groups:
+            large_tasks = [collect_large_group.s(row.title, row.portal) for row in selected_groups]
+            phase2_batches = _dispatch_in_batches(
+                large_tasks,
+                batch_size=_COLLECT_DISPATCH_BATCH_SIZE,
+                step_seconds=_COLLECT_DISPATCH_STEP_SECONDS,
+            )
 
         logger.info(
-            f"Bulk collect: phase1={phase1_count} individual, phase2={phase2_count} large groups"
+            "Bulk collect: inflight_total=%s phase1=%s individual (%s batches, %s deferred) "
+            "phase2=%s large groups (%s batches, %s deferred)",
+            inflight_total,
+            phase1_count,
+            phase1_batches,
+            deferred_individual,
+            phase2_count,
+            phase2_batches,
+            deferred_groups,
         )
-        return {"dispatched_individual": phase1_count, "dispatched_groups": phase2_count}
+        return {
+            "dispatched_individual": phase1_count,
+            "dispatched_groups": phase2_count,
+            "phase1_batches": phase1_batches,
+            "phase2_batches": phase2_batches,
+            "deferred_individual": deferred_individual,
+            "deferred_groups": deferred_groups,
+            "inflight_total": inflight_total,
+            "reconciled_orphaned_ready": reconciled["orphaned_ready"],
+            "reconciled_cached_flags": reconciled["fixed_cached_flags"],
+            "reindexed_missing_chunks": reconciled["reindexed_missing_chunks"],
+            "recycled_stale_ready": recycled["recovered_ready"],
+            "recycled_stale_error": recycled["recycled_error"],
+            "recycled_stale_failed": recycled["recycled_failed"],
+        }
     finally:
         engine.dispose()
 
@@ -1480,34 +2111,15 @@ _FORMAT_PRIORITY = {
     max_retries=1,
 )
 def collect_large_group(self, title: str, portal: str):
-    """Collect a large multi-resource group (>50 siblings) as a single table.
+    """Collect a large multi-resource group (>50 siblings) by staging each resource safely.
 
     Strategy:
       1. Format-dedup: group by URL stem, keep highest-priority format per stem
-      2. Schema-probe: download 5 rows from 3 sample resources to check compatibility
-      3. Concatenate compatible resources until MAX_TABLE_ROWS, skip incompatible
-      4. Mark all datasets in the group as is_cached=true
+      2. Dispatch each surviving resource to its own primary cache table
+      3. Leave overflow resources pending for a future pass instead of marking them cached
     """
     engine = get_sync_engine()
     try:
-        table_name = _sanitize_table_name(title, portal)
-
-        # Check if table already exists and is full
-        current_rows = _get_table_row_count(engine, table_name)
-        if current_rows >= MAX_TABLE_ROWS:
-            logger.info(
-                f"Large group '{title}' ({portal}): table already full ({current_rows} rows)"
-            )
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "UPDATE datasets SET is_cached = true "
-                        "WHERE title = :title AND portal = :portal AND is_cached = false"
-                    ),
-                    {"title": title, "portal": portal},
-                )
-            return {"title": title, "status": "table_full", "rows": current_rows}
-
         # Get all uncached resources for this group
         with engine.connect() as conn:
             resources = conn.execute(
@@ -1548,21 +2160,33 @@ def collect_large_group(self, title: str, portal: str):
 
         # Dispatch individual collect_dataset for each deduped resource (up to 200)
         # The append_mode + aggregate row cap in collect_dataset handles the rest
-        from celery import group as celery_group
-
         tasks = [collect_dataset.s(did) for did, _, _ in deduped[:200]]
+        dispatched_batches = 0
         if tasks:
-            celery_group(tasks).apply_async()
+            dispatched_batches = _dispatch_in_batches(
+                tasks,
+                batch_size=_COLLECT_DISPATCH_BATCH_SIZE,
+                step_seconds=_COLLECT_DISPATCH_STEP_SECONDS,
+            )
 
-        # Mark remaining (beyond 200) as cached to avoid re-dispatch
+        consolidation_scheduled = False
+        if deduped:
+            consolidate_group_tables.apply_async(
+                args=[title, portal],
+                countdown=(dispatched_batches * _COLLECT_DISPATCH_STEP_SECONDS) + 60,
+            )
+            consolidation_scheduled = True
+
+        # Leave remaining (beyond 200) pending for a later pass
+        deferred_count = 0
         if len(deduped) > 200:
-            skipped_ids = [did for did, _, _ in deduped[200:]]
-            with engine.begin() as conn:
-                for sid in skipped_ids:
-                    conn.execute(
-                        text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
-                        {"id": sid},
-                    )
+            deferred_count = len(deduped) - 200
+            logger.warning(
+                "Large group '%s' (%s): deferring %d resources beyond dispatch cap",
+                title,
+                portal,
+                deferred_count,
+            )
 
         # Mark format-dupes as cached
         deduped_ids = {did for did, _, _ in deduped}
@@ -1582,7 +2206,10 @@ def collect_large_group(self, title: str, portal: str):
             "total_resources": len(resources),
             "deduped": len(deduped),
             "dispatched": min(len(deduped), 200),
+            "dispatch_batches": dispatched_batches,
+            "deferred": deferred_count,
             "format_dupes_skipped": len(format_dupes),
+            "consolidation_scheduled": consolidation_scheduled,
         }
     except Exception as exc:
         logger.warning(f"collect_large_group failed for '{title}' ({portal})", exc_info=True)
@@ -1603,132 +2230,8 @@ def recover_stuck_tasks(self):
     try:
         recovered_downloads = 0
         recovered_queries = 0
-
-        # 1a. Transition stuck downloads that exhausted retries → permanently_failed
-        with engine.begin() as conn:
-            exhausted = conn.execute(
-                text("""
-                    UPDATE cached_datasets
-                    SET status = 'permanently_failed',
-                        error_message = 'Exhausted retries while stuck in downloading',
-                        updated_at = NOW()
-                    WHERE status = 'downloading'
-                      AND updated_at < NOW() - INTERVAL '30 minutes'
-                      AND retry_count >= :max
-                """),
-                {"max": MAX_TOTAL_ATTEMPTS},
-            )
-            if exhausted.rowcount:
-                logger.warning(
-                    "Marked %d stuck downloads as permanently_failed (retry >= %d)",
-                    exhausted.rowcount,
-                    MAX_TOTAL_ATTEMPTS,
-                )
-
-        # 1b. Recover stuck cached_datasets that still have retries left
-        with engine.begin() as conn:
-            stuck_downloads = conn.execute(
-                text("""
-                    SELECT CAST(dataset_id AS text) AS dataset_id,
-                           table_name, retry_count
-                    FROM cached_datasets
-                    WHERE status = 'downloading'
-                      AND updated_at < NOW() - INTERVAL '30 minutes'
-                      AND retry_count < :max
-                """),
-                {"max": MAX_TOTAL_ATTEMPTS},
-            ).fetchall()
-
-            for row in stuck_downloads:
-                # Check if the table exists via information_schema (safe, no transaction abort)
-                table_exists = False
-                if row.table_name:
-                    exists_result = conn.execute(
-                        text(
-                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                            "WHERE table_name = :tn AND table_schema = 'public')"
-                        ),
-                        {"tn": row.table_name},
-                    ).scalar()
-                    table_exists = bool(exists_result)
-
-                if table_exists:
-                    # Table exists — check row count
-                    row_count = (
-                        conn.execute(
-                            text(f'SELECT COUNT(*) FROM "{row.table_name}"')  # noqa: S608
-                        ).scalar()
-                        or 0
-                    )
-                    if row_count > 0:
-                        col_result = conn.execute(
-                            text(
-                                "SELECT column_name FROM information_schema.columns "
-                                "WHERE table_name = :tn ORDER BY ordinal_position"
-                            ),
-                            {"tn": row.table_name},
-                        ).fetchall()
-                        columns = [r.column_name for r in col_result]
-                        columns_json = json.dumps(columns)
-                        conn.execute(
-                            text("""
-                                UPDATE cached_datasets
-                                SET status = 'ready',
-                                    row_count = :rows,
-                                    columns_json = :cols,
-                                    error_message = NULL,
-                                    updated_at = NOW()
-                                WHERE dataset_id = CAST(:did AS uuid)
-                                  AND status = 'downloading'
-                            """),
-                            {"did": row.dataset_id, "rows": row_count, "cols": columns_json},
-                        )
-                        conn.execute(
-                            text(
-                                "UPDATE datasets SET is_cached = true, row_count = :rows "
-                                "WHERE id = CAST(:did AS uuid)"
-                            ),
-                            {"did": row.dataset_id, "rows": row_count},
-                        )
-                        logger.info(
-                            "Recovered stuck download %s: table %s has %d rows, set to ready",
-                            row.dataset_id,
-                            row.table_name,
-                            row_count,
-                        )
-                        recovered_downloads += 1
-                        continue
-
-                # Table doesn't exist or has no data — re-dispatch or mark failed
-                new_count = (row.retry_count or 0) + 1
-                if new_count >= MAX_TOTAL_ATTEMPTS:
-                    conn.execute(
-                        text("""
-                            UPDATE cached_datasets
-                            SET status = 'permanently_failed',
-                                retry_count = :cnt,
-                                error_message = 'Permanently failed: stuck in downloading too many times',
-                                updated_at = NOW()
-                            WHERE dataset_id = CAST(:did AS uuid)
-                              AND status = 'downloading'
-                        """),
-                        {"did": row.dataset_id, "cnt": new_count},
-                    )
-                else:
-                    conn.execute(
-                        text("""
-                            UPDATE cached_datasets
-                            SET status = 'error',
-                                retry_count = :cnt,
-                                error_message = 'Recovered: stuck in downloading state',
-                                updated_at = NOW()
-                            WHERE dataset_id = CAST(:did AS uuid)
-                              AND status = 'downloading'
-                        """),
-                        {"did": row.dataset_id, "cnt": new_count},
-                    )
-                    collect_dataset.delay(row.dataset_id)
-                recovered_downloads += 1
+        recycled = _recycle_stuck_downloads(engine, redispatch=True)
+        recovered_downloads = sum(recycled.values())
 
         # 2. Recover stuck user_queries
         with engine.begin() as conn:
@@ -1814,6 +2317,240 @@ def recover_stuck_tasks(self):
             "recovered_queries": recovered_queries,
             "orphaned_ready": orphaned_ready,
         }
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.consolidate_group_tables",
+    bind=True,
+    soft_time_limit=600,
+    time_limit=900,
+)
+def consolidate_group_tables(self, title: str, portal: str):
+    """Best-effort consolidation of ready resource tables for a title+portal group."""
+    engine = get_sync_engine()
+    try:
+        base_table_name = _sanitize_table_name(title, portal)
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT CAST(d.id AS text) AS dataset_id,
+                           cd.table_name,
+                           cd.columns_json
+                    FROM datasets d
+                    JOIN cached_datasets cd ON cd.dataset_id = d.id
+                    WHERE d.title = :title
+                      AND d.portal = :portal
+                      AND cd.status = 'ready'
+                      AND cd.table_name LIKE :resource_pattern
+                    ORDER BY cd.table_name
+                    """
+                ),
+                {
+                    "title": title,
+                    "portal": portal,
+                    "resource_pattern": f"{base_table_name}_r%",
+                },
+            ).fetchall()
+            conn.rollback()
+
+        groups: dict[tuple[str, ...], list[tuple[str, str]]] = {}
+        for row in rows:
+            try:
+                columns = json.loads(row.columns_json or "[]")
+            except (json.JSONDecodeError, TypeError):
+                columns = []
+            signature = _schema_columns(columns)
+            if not signature:
+                continue
+            groups.setdefault(signature, []).append((str(row.dataset_id), row.table_name))
+
+        consolidated_tables = 0
+        consolidated_sources = 0
+        for signature, members in groups.items():
+            if len(members) < 2:
+                continue
+
+            target_table = _consolidated_table_name(base_table_name, signature)
+            source_tables = [table_name for _dataset_id, table_name in members]
+
+            with engine.begin() as conn:
+                if not _table_exists(engine, target_table):
+                    conn.execute(
+                        text(
+                            f'CREATE TABLE "{target_table}" AS SELECT * FROM "{source_tables[0]}" WITH NO DATA'
+                        )  # noqa: S608
+                    )
+
+                loaded_ids = set(
+                    row[0]
+                    for row in conn.execute(
+                        text(
+                            f'SELECT DISTINCT _source_dataset_id FROM "{target_table}" '
+                            "WHERE _source_dataset_id IS NOT NULL"
+                        )  # noqa: S608
+                    ).fetchall()
+                )
+
+                for dataset_id, source_table in members:
+                    if dataset_id in loaded_ids:
+                        continue
+                    conn.execute(
+                        text(
+                            f'INSERT INTO "{target_table}" SELECT * FROM "{source_table}"'
+                        )  # noqa: S608
+                    )
+                    loaded_ids.add(dataset_id)
+                    consolidated_sources += 1
+
+            consolidated_tables += 1
+
+        return {
+            "title": title,
+            "portal": portal,
+            "schemas_seen": len(groups),
+            "consolidated_tables": consolidated_tables,
+            "consolidated_sources": consolidated_sources,
+        }
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(name="openarg.audit_cache_coverage", soft_time_limit=60, time_limit=120)
+def audit_cache_coverage():
+    """Audit cache completeness and return actionable counts."""
+    engine = get_sync_engine()
+    try:
+        with engine.connect() as conn:
+            total_datasets = conn.execute(text("SELECT COUNT(*) FROM datasets")).scalar() or 0
+            non_cached = (
+                conn.execute(text("SELECT COUNT(*) FROM datasets WHERE is_cached = false")).scalar() or 0
+            )
+            stale_downloading = (
+                conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM cached_datasets "
+                        "WHERE status = 'downloading' "
+                        "AND updated_at < NOW() - INTERVAL '30 minutes'"
+                    )
+                ).scalar()
+                or 0
+            )
+            recoverable_errors = (
+                conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM cached_datasets "
+                        "WHERE status IN ('error', 'schema_mismatch')"
+                    )
+                ).scalar()
+                or 0
+            )
+            permanently_failed = (
+                conn.execute(
+                    text("SELECT COUNT(*) FROM cached_datasets WHERE status = 'permanently_failed'")
+                ).scalar()
+                or 0
+            )
+            ready_missing_table = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM cached_datasets cd
+                        WHERE cd.status = 'ready'
+                          AND cd.table_name IS NOT NULL
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM information_schema.tables t
+                              WHERE t.table_schema = 'public'
+                                AND t.table_name = cd.table_name
+                          )
+                        """
+                    )
+                ).scalar()
+                or 0
+            )
+            cached_flag_inconsistent = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM datasets d
+                        WHERE d.is_cached = true
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM cached_datasets cd
+                              WHERE cd.dataset_id = d.id
+                                AND cd.status = 'ready'
+                          )
+                        """
+                    )
+                ).scalar()
+                or 0
+            )
+            ready_missing_chunks = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM datasets d
+                        WHERE d.is_cached = true
+                          AND EXISTS (
+                              SELECT 1
+                              FROM cached_datasets cd
+                              WHERE cd.dataset_id = d.id
+                                AND cd.status = 'ready'
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM dataset_chunks dc
+                              WHERE dc.dataset_id = d.id
+                          )
+                        """
+                    )
+                ).scalar()
+                or 0
+            )
+            conn.rollback()
+
+        return {
+            "total_datasets": int(total_datasets),
+            "non_cached": int(non_cached),
+            "stale_downloading": int(stale_downloading),
+            "recoverable_errors": int(recoverable_errors),
+            "permanently_failed": int(permanently_failed),
+            "ready_missing_table": int(ready_missing_table),
+            "cached_flag_inconsistent": int(cached_flag_inconsistent),
+            "ready_missing_chunks": int(ready_missing_chunks),
+        }
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.reconcile_cache_coverage",
+    bind=True,
+    soft_time_limit=120,
+    time_limit=180,
+)
+def reconcile_cache_coverage(self):
+    """Fix inconsistent cache state and requeue missing collector/embedding work."""
+    engine = get_sync_engine()
+    try:
+        reconciled = _reconcile_cache_coverage(
+            engine,
+            redispatch=True,
+            reindex_embeddings=True,
+        )
+        logger.warning(
+            "Reconciled cache coverage: orphaned_ready=%s fixed_cached_flags=%s reindexed_missing_chunks=%s",
+            reconciled["orphaned_ready"],
+            reconciled["fixed_cached_flags"],
+            reconciled["reindexed_missing_chunks"],
+        )
+        return reconciled
     finally:
         engine.dispose()
 

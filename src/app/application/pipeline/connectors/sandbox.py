@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
+from app.application.pipeline.connectors.cache_table_selection import prefer_consolidated_table
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 from app.domain.ports.llm.llm_provider import LLMMessage
 from app.prompts import load_prompt
@@ -226,9 +227,14 @@ async def discover_tables_by_vector_search(
         hit_dataset_ids = {vr.dataset_id for vr in vector_results}
 
         # Match against cached tables by dataset_id
-        matched_names = [
+        direct_matches = [
             t.table_name for t in cached_tables if t.dataset_id and t.dataset_id in hit_dataset_ids
         ]
+        available_names = [t.table_name for t in cached_tables]
+        matched_names = [
+            prefer_consolidated_table(name, available_names) for name in direct_matches
+        ]
+        matched_names = list(dict.fromkeys(matched_names))
 
         if matched_names:
             logger.info(
