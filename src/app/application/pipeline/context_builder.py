@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 
@@ -10,6 +11,7 @@ from app.domain.entities.connectors.data_result import DataResult
 logger = logging.getLogger(__name__)
 
 
+@functools.cache
 def build_capabilities_block() -> str:
     """Build a concise list of system capabilities from the taxonomy."""
     try:
@@ -76,6 +78,7 @@ def build_data_context(results: list[DataResult]) -> str:
             f"Respondé con los datos disponibles sin mencionar truncación ni límites."
         )
 
+    budget = max_total
     for i, result in enumerate(results[:max_results]):
         valid_records = [r for r in result.records if isinstance(r, dict)]
         if not valid_records and result.records:
@@ -83,22 +86,22 @@ def build_data_context(results: list[DataResult]) -> str:
 
         # Vector search results: no records but have metadata
         is_vector_result = not valid_records and result.source.startswith("pgvector:")
-
         is_metadata_only = valid_records and valid_records[0].get("_type") == "resource_metadata"
 
+        # Build each part using list+join instead of += (avoids O(n²) string concat)
+        lines: list[str] = []
+
         if is_vector_result:
-            part = (
-                f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
-                f"Portal: {result.portal_name}\n"
-                f"URL: {result.portal_url}\n"
-            )
+            lines.append(f"--- Dataset {i + 1}: {result.dataset_title} ---")
+            lines.append(f"Portal: {result.portal_name}")
+            lines.append(f"URL: {result.portal_url}")
             if result.metadata.get("description"):
-                part += f"Descripción: {result.metadata['description']}\n"
+                lines.append(f"Descripción: {result.metadata['description']}")
             if result.metadata.get("columns"):
-                part += f"Columnas: {result.metadata['columns']}\n"
+                lines.append(f"Columnas: {result.metadata['columns']}")
             if result.metadata.get("score"):
-                part += f"Relevancia: {result.metadata['score']}\n"
-            part += (
+                lines.append(f"Relevancia: {result.metadata['score']}")
+            lines.append(
                 "\nEste dataset está indexado en la base de datos. "
                 "Listalo al usuario con su título, descripción y URL."
             )
@@ -107,57 +110,56 @@ def build_data_context(results: list[DataResult]) -> str:
             records_text = json.dumps(
                 preview, ensure_ascii=False, separators=(",", ":"), default=str
             )
-            part = (
-                f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
-                f"Fuente: {result.portal_name} ({result.source})\n"
-                f"URL: {result.portal_url}\n"
+            lines.append(f"--- Dataset {i + 1}: {result.dataset_title} ---")
+            lines.append(f"Fuente: {result.portal_name} ({result.source})")
+            lines.append(f"URL: {result.portal_url}")
+            lines.append(
                 "NOTA: Este dataset no tiene Datastore "
-                "habilitado. Solo metadatos de los recursos.\n"
+                "habilitado. Solo metadatos de los recursos."
             )
             if result.metadata.get("description"):
-                part += f"Descripción: {result.metadata['description']}\n"
-            part += (
-                f"Recursos disponibles:\n{records_text}\n\n"
-                "Explicale al usuario qué datos contiene "
+                lines.append(f"Descripción: {result.metadata['description']}")
+            lines.append(f"Recursos disponibles:\n{records_text}")
+            lines.append(
+                "\nExplicale al usuario qué datos contiene "
                 "y proporcioná el link."
             )
         else:
             columns = list(valid_records[0].keys()) if valid_records else []
-            # Humanize column names for LLM display (replace _ with spaces)
             display_columns = [c.replace("_", " ") for c in columns]
             total_rows = len(valid_records)
 
             if total_rows > 50:
                 records_to_send = valid_records[:25] + valid_records[-25:]
-                truncation_note = ""  # Don't tell the LLM about truncation
             else:
                 records_to_send = valid_records
-                truncation_note = ""
 
-            # Humanize keys in records for LLM context
-            display_records = [
-                {k.replace("_", " "): v for k, v in rec.items()} for rec in records_to_send
-            ]
+            # Pre-compute key mapping once, reuse for all records
+            if records_to_send:
+                key_map = {k: k.replace("_", " ") for k in records_to_send[0].keys()}
+                display_records = [
+                    {key_map.get(k, k): v for k, v in rec.items()} for rec in records_to_send
+                ]
+            else:
+                display_records = []
             records_text = json.dumps(
                 display_records, ensure_ascii=False, separators=(",", ":"), default=str
             )
 
-            part = (
-                f"--- Dataset {i + 1}: {result.dataset_title} ---\n"
-                f"Fuente: {result.portal_name} ({result.source})\n"
-                f"URL: {result.portal_url}\n"
-                f"Formato: {result.format}\n"
-                f"Total de registros: {result.metadata.get('total_records', total_rows)}\n"
-                f"Columnas: {', '.join(display_columns)}\n"
-            )
+            lines.append(f"--- Dataset {i + 1}: {result.dataset_title} ---")
+            lines.append(f"Fuente: {result.portal_name} ({result.source})")
+            lines.append(f"URL: {result.portal_url}")
+            lines.append(f"Formato: {result.format}")
+            lines.append(f"Total de registros: {result.metadata.get('total_records', total_rows)}")
+            lines.append(f"Columnas: {', '.join(display_columns)}")
             if result.metadata.get("description"):
-                part += f"Descripción: {result.metadata['description']}\n"
+                lines.append(f"Descripción: {result.metadata['description']}")
             if result.metadata.get("table_descriptions"):
-                part += "Tablas consultadas:\n"
+                lines.append("Tablas consultadas:")
                 for td in result.metadata["table_descriptions"]:
-                    part += f"  - {td}\n"
-            part += (
-                f"Datos ({len(records_to_send)} registros{truncation_note}):\n"
+                    lines.append(f"  - {td}")
+            lines.append(
+                f"Datos ({len(records_to_send)} registros):\n"
                 f"{records_text}\n\n"
                 "IMPORTANTE: Si hay una columna temporal "
                 "(año, fecha, mes), generá un gráfico de línea "
@@ -165,16 +167,19 @@ def build_data_context(results: list[DataResult]) -> str:
                 "datos proporcionados."
             )
 
+        part = "\n".join(lines)
+
         # Per-result truncation
         if len(part) > max_per_result:
             part = part[:max_per_result]
 
+        # Budget-aware: stop adding parts when budget exhausted
+        if len(part) > budget:
+            part = part[:budget - 100] + "\n[datos truncados por espacio]"
+            parts.append(part)
+            break
+
+        budget -= len(part)
         parts.append(part)
 
-    joined = "\n\n".join(parts)
-    if len(joined) > max_total:
-        joined = joined[:max_total] + (
-            "\n\n[NOTA INTERNA: contexto recortado. Presentá lo que tenés "
-            "sin mencionar el recorte al usuario.]"
-        )
-    return joined
+    return "\n\n".join(parts)

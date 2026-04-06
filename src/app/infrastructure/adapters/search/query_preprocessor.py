@@ -45,20 +45,25 @@ _ACRONYM_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b" + re.escape(acronym) + r"\b", re.IGNORECASE), expansion)
     for acronym, expansion in ACRONYM_MAP.items()
 ]
+# Fast pre-filter: set of lowercase acronym words for O(1) check before regex
+_ACRONYM_WORDS = frozenset(k.lower() for k in ACRONYM_MAP)
 
-# ── Temporal patterns ──────────────────────────────────────
+# ── Temporal patterns (single combined regex — 1 pass instead of 9) ──
 
-_TEMPORAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b[úu]ltimo\s+mes\b", re.IGNORECASE), "último_mes"),
-    (re.compile(r"\b[úu]ltimos?\s+(\d+)\s+meses?\b", re.IGNORECASE), "últimos_n_meses"),
-    (re.compile(r"\b[úu]ltimo\s+a[ñn]o\b", re.IGNORECASE), "último_año"),
-    (re.compile(r"\b[úu]ltimos?\s+(\d+)\s+a[ñn]os?\b", re.IGNORECASE), "últimos_n_años"),
-    (re.compile(r"\beste\s+a[ñn]o\b", re.IGNORECASE), "este_año"),
-    (re.compile(r"\bhoy\b", re.IGNORECASE), "hoy"),
-    (re.compile(r"\bayer\b", re.IGNORECASE), "ayer"),
-    (re.compile(r"\besta\s+semana\b", re.IGNORECASE), "esta_semana"),
-    (re.compile(r"\beste\s+mes\b", re.IGNORECASE), "este_mes"),
-]
+_TEMPORAL_COMBINED = re.compile(
+    r"\b(?:"
+    r"(?P<ultimo_mes>[úu]ltimo\s+mes)"
+    r"|(?P<ultimos_n_meses>[úu]ltimos?\s+(?P<n_meses>\d+)\s+meses?)"
+    r"|(?P<ultimo_ano>[úu]ltimo\s+a[ñn]o)"
+    r"|(?P<ultimos_n_anos>[úu]ltimos?\s+(?P<n_anos>\d+)\s+a[ñn]os?)"
+    r"|(?P<este_ano>este\s+a[ñn]o)"
+    r"|(?P<hoy>hoy)"
+    r"|(?P<ayer>ayer)"
+    r"|(?P<esta_semana>esta\s+semana)"
+    r"|(?P<este_mes>este\s+mes)"
+    r")\b",
+    re.IGNORECASE,
+)
 
 # ── Province aliases (sorted longest-first to avoid partial matches) ──
 
@@ -185,23 +190,50 @@ SYNONYM_MAP: dict[str, list[str]] = {
     "funcionario": ["funcionarios públicos", "servidor público", "cargo público"],
 }
 
+# Pre-built inverted index: single-word terms → synonyms (O(1) lookup)
+# Multi-word terms still use substring matching but are a much smaller set.
+_SYNONYM_SINGLE_WORDS: dict[str, list[str]] = {}
+_SYNONYM_PHRASES: dict[str, list[str]] = {}
+for _term, _syns in SYNONYM_MAP.items():
+    if " " in _term:
+        _SYNONYM_PHRASES[_term] = _syns
+    else:
+        _SYNONYM_SINGLE_WORDS[_term] = _syns
+
 
 def expand_synonyms(query: str) -> str:
-    """Append relevant synonyms to the query for broader search coverage."""
+    """Append relevant synonyms to the query for broader search coverage.
+
+    Uses an inverted word→terms index for single-word terms (O(words) vs O(map_size)),
+    and only falls back to substring scan for multi-word terms.
+    """
     lower = query.lower()
+    words = set(lower.split())
     additions: list[str] = []
-    for term, synonyms in SYNONYM_MAP.items():
-        if term in lower:
-            additions.extend(synonyms)
+    # O(1) per word for single-word terms via inverted index
+    for w in words:
+        if w in _SYNONYM_SINGLE_WORDS:
+            additions.extend(_SYNONYM_SINGLE_WORDS[w])
+    # O(phrases) for multi-word terms (much smaller set)
+    for phrase, syns in _SYNONYM_PHRASES.items():
+        if phrase in lower:
+            additions.extend(syns)
     if additions:
-        # Deduplicate and append as context
         unique = list(dict.fromkeys(additions))[:4]
         return query + " (" + ", ".join(unique) + ")"
     return query
 
 
 def expand_acronyms(query: str) -> str:
-    """Expand known Argentine acronyms in the query. Deterministic, fast."""
+    """Expand known Argentine acronyms in the query. Deterministic, fast.
+
+    Uses a set pre-filter to skip all 21 regex patterns when no acronym
+    words are present in the query (the common case).
+    """
+    # Fast path: if no known acronym word appears, skip all regex
+    query_words = set(query.lower().split())
+    if not query_words & _ACRONYM_WORDS:
+        return query
     result = query
     for pattern, expansion in _ACRONYM_PATTERNS:
         if pattern.search(result):
@@ -210,70 +242,59 @@ def expand_acronyms(query: str) -> str:
 
 
 def normalize_temporal(query: str) -> tuple[str, dict[str, str]]:
-    """Replace temporal expressions with concrete dates. Returns (query, metadata)."""
+    """Replace temporal expressions with concrete dates. Returns (query, metadata).
+
+    Uses a single combined regex (1 pass) instead of 9 separate patterns.
+    """
+    match = _TEMPORAL_COMBINED.search(query)
+    if not match:
+        return query, {}
+
     now = datetime.now(UTC)
     metadata: dict[str, str] = {}
-    result = query
+    end = now.strftime("%Y-%m-%d")
 
-    for pattern, label in _TEMPORAL_PATTERNS:
-        match = pattern.search(result)
-        if not match:
-            continue
+    if match.group("ultimo_mes"):
+        start = (now - relativedelta(months=1)).strftime("%Y-%m-%d")
+        metadata.update(start_date=start, end_date=end)
+        replacement = f"(desde {start} hasta {end})"
+    elif match.group("ultimos_n_meses"):
+        n = int(match.group("n_meses"))
+        start = (now - relativedelta(months=n)).strftime("%Y-%m-%d")
+        metadata.update(start_date=start, end_date=end)
+        replacement = f"(desde {start} hasta {end})"
+    elif match.group("ultimo_ano"):
+        start = (now - relativedelta(years=1)).strftime("%Y-%m-%d")
+        metadata.update(start_date=start, end_date=end)
+        replacement = f"(desde {start} hasta {end})"
+    elif match.group("ultimos_n_anos"):
+        n = int(match.group("n_anos"))
+        start = (now - relativedelta(years=n)).strftime("%Y-%m-%d")
+        metadata.update(start_date=start, end_date=end)
+        replacement = f"(desde {start} hasta {end})"
+    elif match.group("este_ano"):
+        start = f"{now.year}-01-01"
+        metadata.update(start_date=start, end_date=end)
+        replacement = f"(desde {start} hasta {end})"
+    elif match.group("hoy"):
+        metadata["date"] = end
+        replacement = f"(fecha: {end})"
+    elif match.group("ayer"):
+        yesterday = (now - relativedelta(days=1)).strftime("%Y-%m-%d")
+        metadata["date"] = yesterday
+        replacement = f"(fecha: {yesterday})"
+    elif match.group("esta_semana"):
+        start = (now - relativedelta(days=now.weekday())).strftime("%Y-%m-%d")
+        metadata.update(start_date=start, end_date=end)
+        replacement = f"(desde {start} hasta {end})"
+    elif match.group("este_mes"):
+        start = f"{now.year}-{now.month:02d}-01"
+        metadata.update(start_date=start, end_date=end)
+        replacement = f"(desde {start} hasta {end})"
+    else:
+        return query, {}
 
-        if label == "último_mes":
-            start = (now - relativedelta(months=1)).strftime("%Y-%m-%d")
-            end = now.strftime("%Y-%m-%d")
-            metadata["start_date"] = start
-            metadata["end_date"] = end
-            result = pattern.sub(f"(desde {start} hasta {end})", result)
-        elif label == "últimos_n_meses":
-            n = int(match.group(1))
-            start = (now - relativedelta(months=n)).strftime("%Y-%m-%d")
-            end = now.strftime("%Y-%m-%d")
-            metadata["start_date"] = start
-            metadata["end_date"] = end
-            result = pattern.sub(f"(desde {start} hasta {end})", result)
-        elif label == "último_año":
-            start = (now - relativedelta(years=1)).strftime("%Y-%m-%d")
-            end = now.strftime("%Y-%m-%d")
-            metadata["start_date"] = start
-            metadata["end_date"] = end
-            result = pattern.sub(f"(desde {start} hasta {end})", result)
-        elif label == "últimos_n_años":
-            n = int(match.group(1))
-            start = (now - relativedelta(years=n)).strftime("%Y-%m-%d")
-            end = now.strftime("%Y-%m-%d")
-            metadata["start_date"] = start
-            metadata["end_date"] = end
-            result = pattern.sub(f"(desde {start} hasta {end})", result)
-        elif label == "este_año":
-            start = f"{now.year}-01-01"
-            end = now.strftime("%Y-%m-%d")
-            metadata["start_date"] = start
-            metadata["end_date"] = end
-            result = pattern.sub(f"(desde {start} hasta {end})", result)
-        elif label == "hoy":
-            today = now.strftime("%Y-%m-%d")
-            metadata["date"] = today
-            result = pattern.sub(f"(fecha: {today})", result)
-        elif label == "ayer":
-            yesterday = (now - relativedelta(days=1)).strftime("%Y-%m-%d")
-            metadata["date"] = yesterday
-            result = pattern.sub(f"(fecha: {yesterday})", result)
-        elif label == "esta_semana":
-            start = (now - relativedelta(days=now.weekday())).strftime("%Y-%m-%d")
-            end = now.strftime("%Y-%m-%d")
-            metadata["start_date"] = start
-            metadata["end_date"] = end
-            result = pattern.sub(f"(desde {start} hasta {end})", result)
-        elif label == "este_mes":
-            start = f"{now.year}-{now.month:02d}-01"
-            end = now.strftime("%Y-%m-%d")
-            metadata["start_date"] = start
-            metadata["end_date"] = end
-            result = pattern.sub(f"(desde {start} hasta {end})", result)
-        break  # only process first temporal match
-
+    result = query[:match.start()] + replacement + query[match.end():]
     return result, metadata
 
 

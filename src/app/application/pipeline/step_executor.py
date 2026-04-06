@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.application.pipeline.connectors.argentina_datos import execute_argentina_datos_step
 from app.application.pipeline.connectors.bcra import execute_bcra_step
@@ -90,41 +90,37 @@ async def dispatch_step(
     deps: ConnectorDeps,
     nl_query: str = "",
 ) -> list[DataResult]:
-    """Route a single plan step to the appropriate connector function."""
-    # Sync handler (ddjj is not async)
-    if step.action == "query_ddjj":
-        return execute_ddjj_step(step, deps.ddjj)
+    """Route a single plan step to the appropriate connector function.
 
-    if step.action == "query_series":
-        return await execute_series_step(step, deps.series, user_query=nl_query)
-    if step.action == "query_argentina_datos":
-        return await execute_argentina_datos_step(step, deps.arg_datos)
-    if step.action == "query_georef":
-        return await execute_georef_step(step, deps.georef)
-    if step.action == "search_ckan":
-        return await execute_ckan_step(step, deps.ckan, deps.sandbox)
-    if step.action == "query_sesiones":
-        return await execute_sesiones_step(step, deps.sesiones)
-    if step.action == "query_staff":
-        return await execute_staff_step(step, deps.staff)
-    if step.action == "query_bcra":
-        return await execute_bcra_step(step, deps.bcra)
-    if step.action == "search_datasets":
-        return await execute_search_datasets_step(step, deps.embedding, deps.vector_search)
-    if step.action == "query_sandbox":
-        return await execute_sandbox_step(
-            step,
-            deps.sandbox,
-            deps.llm,
-            deps.embedding,
-            deps.vector_search,
-            deps.semantic_cache,
-            user_query=nl_query,
-        )
+    Uses a dispatch table for O(1) action lookup instead of if/elif chain.
+    """
+    handler = _DISPATCH_TABLE.get(step.action)
+    if handler is not None:
+        result = handler(step, deps, nl_query)
+        return result if not asyncio.iscoroutine(result) else await result
+
     if step.action in _NOOP_ACTIONS:
         return []
     logger.info("Unknown step action '%s', skipping", step.action)
     return []
+
+
+# ── Dispatch table — O(1) action→handler mapping ────────────────
+
+_DISPATCH_TABLE: dict[str, Callable[..., Any]] = {
+    "query_ddjj": lambda s, d, q: execute_ddjj_step(s, d.ddjj),
+    "query_series": lambda s, d, q: execute_series_step(s, d.series, user_query=q),
+    "query_argentina_datos": lambda s, d, q: execute_argentina_datos_step(s, d.arg_datos),
+    "query_georef": lambda s, d, q: execute_georef_step(s, d.georef),
+    "search_ckan": lambda s, d, q: execute_ckan_step(s, d.ckan, d.sandbox),
+    "query_sesiones": lambda s, d, q: execute_sesiones_step(s, d.sesiones),
+    "query_staff": lambda s, d, q: execute_staff_step(s, d.staff),
+    "query_bcra": lambda s, d, q: execute_bcra_step(s, d.bcra),
+    "search_datasets": lambda s, d, q: execute_search_datasets_step(s, d.embedding, d.vector_search),
+    "query_sandbox": lambda s, d, q: execute_sandbox_step(
+        s, d.sandbox, d.llm, d.embedding, d.vector_search, d.semantic_cache, user_query=q,
+    ),
+}
 
 
 # ── Retry wrapper ─────────────────────────────────────────────
