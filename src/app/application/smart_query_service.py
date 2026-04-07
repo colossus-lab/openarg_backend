@@ -272,11 +272,8 @@ class SmartQueryService:
         )
 
         # Handle clarification from planner
-        _is_clar = plan.intent == "clarification" and any(
-            s.action == "clarification" for s in plan.steps
-        )
-        if _is_clar:
-            clar_step = next(s for s in plan.steps if s.action == "clarification")
+        clar_step = _get_clarification_step(plan)
+        if clar_step is not None:
             clar_q = clar_step.params.get("question", "¿Podés ser más específico?")
             clar_opts = clar_step.params.get("options", [])
             opts_text = "\n".join(f"- {o}" for o in clar_opts) if clar_opts else ""
@@ -305,8 +302,14 @@ class SmartQueryService:
         all_warnings.extend(step_warnings)
 
         # 7. LLM analysis (1 LLM call)
+        result_payloads = _collect_result_payloads(results)
         analysis_prompt = _build_analysis_prompt(
-            question, plan, results, memory_ctx_analyst, all_warnings
+            question,
+            plan,
+            results,
+            memory_ctx_analyst,
+            all_warnings,
+            has_records=result_payloads.has_records,
         )
 
         response = await self._llm.chat(
@@ -347,8 +350,8 @@ class SmartQueryService:
             except Exception:
                 logger.warning("Policy agent failed", exc_info=True)
 
-        sources = _extract_sources(results)
-        documents = _extract_documents(results)
+        sources = result_payloads.sources
+        documents = result_payloads.documents
 
         tokens_used = response.tokens_used or 0
         self._metrics.record_tokens_used(tokens_used)
@@ -375,10 +378,6 @@ class SmartQueryService:
 
         # 11. Save conversation history
         if session:
-            plan_data = {
-                "intent": plan.intent,
-                "steps": [{"action": s.action, "params": s.params} for s in plan.steps],
-            }
             await save_history(
                 session,
                 question,
@@ -387,7 +386,7 @@ class SmartQueryService:
                 sources,
                 tokens_used,
                 duration_ms,
-                plan_json=json.dumps(plan_data, ensure_ascii=False),
+                plan_json=_serialize_plan(plan),
             )
 
         # 12. Cache write
@@ -486,11 +485,8 @@ class SmartQueryService:
         )
 
         # Handle clarification
-        _is_clar = plan.intent == "clarification" and any(
-            s.action == "clarification" for s in plan.steps
-        )
-        if _is_clar:
-            clar_step = next(s for s in plan.steps if s.action == "clarification")
+        clar_step = _get_clarification_step(plan)
+        if clar_step is not None:
             yield {
                 "type": "clarification",
                 "question": clar_step.params.get("question", "¿Podés ser más específico?"),
@@ -518,11 +514,17 @@ class SmartQueryService:
         # Analysis (1 LLM call, streamed)
         yield {"type": "status", "step": "generating"}
 
+        result_payloads = _collect_result_payloads(results)
         analysis_prompt = _build_analysis_prompt(
-            question, plan, results, memory_ctx_analyst, all_warnings
+            question,
+            plan,
+            results,
+            memory_ctx_analyst,
+            all_warnings,
+            has_records=result_payloads.has_records,
         )
 
-        full_text = ""
+        full_parts: list[str] = []
         stream_buf = ""
         async for chunk in self._llm.chat_stream(
             messages=[
@@ -532,7 +534,7 @@ class SmartQueryService:
             temperature=0.4,
             max_tokens=8192,
         ):
-            full_text += chunk
+            full_parts.append(chunk)
             stream_buf += chunk
 
             # If we're inside a tag, keep buffering
@@ -553,10 +555,12 @@ class SmartQueryService:
 
         # Flush remaining buffer
         if stream_buf:
-            cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
-            cleaned = re.sub(r"<!--.*", "", cleaned, flags=re.DOTALL)
+            cleaned = _RE_ANY_TAG.sub("", stream_buf)
+            cleaned = _RE_ANY_TAG_TRUNC.sub("", cleaned)
             if cleaned.strip():
                 yield {"type": "chunk", "content": cleaned}
+
+        full_text = "".join(full_parts)
 
         # Complete
         det_charts = build_deterministic_charts(results)
@@ -580,8 +584,8 @@ class SmartQueryService:
             except Exception:
                 logger.warning("Policy agent failed in streaming", exc_info=True)
 
-        sources = _extract_sources(results)
-        documents = _extract_documents(results)
+        sources = result_payloads.sources
+        documents = result_payloads.documents
 
         yield {
             "type": "complete",
@@ -671,9 +675,7 @@ def _inject_vector_fallback(
     preprocessed_q: str,
 ) -> None:
     """Add a search_datasets step if the plan has no vector/data step."""
-    _has_vector_step = any(s.action == "search_datasets" for s in plan.steps)
-    _has_data_step = any(s.action in DATA_ACTIONS for s in plan.steps)
-    if not _has_vector_step and not _has_data_step:
+    if not _has_data_or_vector_step(plan):
         plan.steps.insert(
             0,
             PlanStep(
@@ -688,22 +690,62 @@ def _inject_vector_fallback(
         )
 
 
+def _has_data_or_vector_step(plan: ExecutionPlan) -> bool:
+    """Return whether the plan already contains a data-producing search step."""
+    return any(step.action == "search_datasets" or step.action in DATA_ACTIONS for step in plan.steps)
+
+
+def _serialize_plan(plan: ExecutionPlan) -> str:
+    """Serialize a plan once for history persistence."""
+    return json.dumps(
+        {
+            "intent": plan.intent,
+            "steps": [{"action": step.action, "params": step.params} for step in plan.steps],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_errors_block(all_warnings: list[str]) -> str:
+    """Format connector warnings for the analyst prompt."""
+    if not all_warnings:
+        return ""
+    return "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {warning}" for warning in all_warnings)
+
+
+def _today_iso_utc() -> str:
+    """Return today's UTC date formatted for analyst prompts."""
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+def _has_result_records(results: list[Any]) -> bool:
+    """Return whether any connector result contains records."""
+    return any(result.records for result in results)
+
+
+def _get_clarification_step(plan: ExecutionPlan) -> PlanStep | None:
+    """Return the clarification step when the planner produced one."""
+    if plan.intent != "clarification":
+        return None
+    return next((step for step in plan.steps if step.action == "clarification"), None)
+
+
 def _build_analysis_prompt(
     question: str,
     plan: ExecutionPlan,
     results: list,
     memory_ctx_analyst: str,
     all_warnings: list[str],
+    has_records: bool | None = None,
 ) -> str:
     """Build the analyst LLM prompt from data context and warnings."""
-    data_context = build_data_context(results)
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = _today_iso_utc()
+    errors_block = _build_errors_block(all_warnings)
 
-    errors_block = ""
-    if all_warnings:
-        errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {w}" for w in all_warnings)
+    if has_records is None:
+        has_records = _has_result_records(results)
 
-    no_data_fallback = not results or not any(r.records for r in results)
+    no_data_fallback = not results or not has_records
 
     if no_data_fallback:
         caps = build_capabilities_block()
@@ -714,6 +756,8 @@ def _build_analysis_prompt(
             memory_ctx_analyst=memory_ctx_analyst,
             caps=caps,
         )
+
+    data_context = build_data_context(results)
 
     return (
         f'PREGUNTA DEL USUARIO: "{question}"\n'
@@ -731,30 +775,46 @@ def _build_analysis_prompt(
     )
 
 
+_RE_CHART_TAG = re.compile(r"<!--CHART:.*?-->", re.DOTALL)
+_RE_CHART_TRUNC = re.compile(r"<!--CHART:.*", re.DOTALL)
+_RE_META_TAG = re.compile(r"<!--META:.*?-->", re.DOTALL)
+_RE_META_TRUNC = re.compile(r"<!--META:.*", re.DOTALL)
+_RE_ANY_TAG = re.compile(r"<!--.*?-->", re.DOTALL)
+_RE_ANY_TAG_TRUNC = re.compile(r"<!--.*", re.DOTALL)
+
+
 def _strip_tags(text: str) -> str:
     """Strip <!--CHART:...--> tags (complete and truncated) from text."""
-    text = re.sub(r"<!--CHART:.*?-->", "", text, flags=re.DOTALL)
-    return re.sub(r"<!--CHART:.*", "", text, flags=re.DOTALL).strip()
+    text = _RE_CHART_TAG.sub("", text)
+    return _RE_CHART_TRUNC.sub("", text).strip()
 
 
 def _strip_meta(text: str) -> str:
     """Strip <!--META:...--> tags (complete and truncated) from text."""
-    text = re.sub(r"<!--META:.*?-->", "", text, flags=re.DOTALL)
-    return re.sub(r"<!--META:.*", "", text, flags=re.DOTALL).strip()
+    text = _RE_META_TAG.sub("", text)
+    return _RE_META_TRUNC.sub("", text).strip()
 
 
 def _extract_sources(results: list) -> list[dict[str, Any]]:
-    """Build the sources list from data results."""
-    return [
-        {
-            "name": r.dataset_title,
-            "url": r.portal_url,
-            "portal": r.portal_name,
-            "accessed_at": r.metadata.get("fetched_at", ""),
-        }
-        for r in results
-        if r.records
-    ]
+    """Build the sources list from data results, deduplicating by (name, url)."""
+    seen: set[tuple[str, str]] = set()
+    sources: list[dict[str, Any]] = []
+    for r in results:
+        if not r.records:
+            continue
+        key = (r.dataset_title, r.portal_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(
+            {
+                "name": r.dataset_title,
+                "url": r.portal_url,
+                "portal": r.portal_name,
+                "accessed_at": r.metadata.get("fetched_at", ""),
+            }
+        )
+    return sources
 
 
 def _extract_documents(results: list) -> list[dict[str, Any]] | None:
@@ -766,3 +826,47 @@ def _extract_documents(results: list) -> list[dict[str, Any]] | None:
                 if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
                     documents.append({**rec, "doc_type": "ddjj"})
     return documents if documents else None
+
+
+@dataclass(slots=True)
+class ResultPayloads:
+    has_records: bool
+    sources: list[dict[str, Any]]
+    documents: list[dict[str, Any]] | None
+
+
+def _collect_result_payloads(results: list) -> ResultPayloads:
+    """Collect structured payloads from connector results in a single pass."""
+    seen_sources: set[tuple[str, str]] = set()
+    sources: list[dict[str, Any]] = []
+    documents: list[dict[str, Any]] = []
+    has_records = False
+
+    for result in results:
+        if not result.records:
+            continue
+
+        has_records = True
+
+        source_key = (result.dataset_title, result.portal_url)
+        if source_key not in seen_sources:
+            seen_sources.add(source_key)
+            sources.append(
+                {
+                    "name": result.dataset_title,
+                    "url": result.portal_url,
+                    "portal": result.portal_name,
+                    "accessed_at": result.metadata.get("fetched_at", ""),
+                }
+            )
+
+        if result.source.startswith("ddjj:"):
+            for rec in result.records:
+                if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
+                    documents.append({**rec, "doc_type": "ddjj"})
+
+    return ResultPayloads(
+        has_records=has_records,
+        sources=sources,
+        documents=documents if documents else None,
+    )

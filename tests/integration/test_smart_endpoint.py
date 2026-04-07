@@ -17,6 +17,7 @@ class TestSmartQueryEndpoint:
         )
         assert response.status_code == 422
 
-    async def test_returns_405_on_get(self, client):
-        response = await client.get("/api/v1/query/smart")
-        assert response.status_code in (405, 500)
+    async def test_smart_query_route_is_post_only(self, app):
+        route = next(r for r in app.routes if getattr(r, "path", None) == "/api/v1/query/smart")
+        assert "POST" in route.methods
+        assert "GET" not in route.methods

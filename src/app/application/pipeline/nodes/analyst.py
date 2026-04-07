@@ -58,19 +58,26 @@ def _build_map_data(results: list) -> dict[str, Any] | None:
     return {"type": "FeatureCollection", "features": features}
 
 
-# ── Tag stripping helpers (same as smart_query_service.py) ────────
+# ── Pre-compiled regex patterns (avoid recompilation per call) ────
+
+_RE_CHART_TAG = re.compile(r"<!--CHART:.*?-->", re.DOTALL)
+_RE_CHART_TRUNC = re.compile(r"<!--CHART:.*", re.DOTALL)
+_RE_META_TAG = re.compile(r"<!--META:.*?-->", re.DOTALL)
+_RE_META_TRUNC = re.compile(r"<!--META:.*", re.DOTALL)
+_RE_ANY_TAG = re.compile(r"<!--.*?-->", re.DOTALL)
+_RE_ANY_TAG_TRUNC = re.compile(r"<!--.*", re.DOTALL)
 
 
 def _strip_tags(text: str) -> str:
     """Strip <!--CHART:...--> tags (complete and truncated) from text."""
-    text = re.sub(r"<!--CHART:.*?-->", "", text, flags=re.DOTALL)
-    return re.sub(r"<!--CHART:.*", "", text, flags=re.DOTALL).strip()
+    text = _RE_CHART_TAG.sub("", text)
+    return _RE_CHART_TRUNC.sub("", text).strip()
 
 
 def _strip_meta(text: str) -> str:
     """Strip <!--META:...--> tags (complete and truncated) from text."""
-    text = re.sub(r"<!--META:.*?-->", "", text, flags=re.DOTALL)
-    return re.sub(r"<!--META:.*", "", text, flags=re.DOTALL).strip()
+    text = _RE_META_TAG.sub("", text)
+    return _RE_META_TRUNC.sub("", text).strip()
 
 
 # ── Analysis prompt builder (same logic as _build_analysis_prompt) ─
@@ -159,7 +166,11 @@ async def analyst_node(state: OpenArgState) -> dict:
         # Build prompt
         skill_context = state.get("skill_context")
         analysis_prompt = _build_analysis_prompt(
-            question, plan, results, memory_ctx_analyst, all_warnings,
+            question,
+            plan,
+            results,
+            memory_ctx_analyst,
+            all_warnings,
             skill_context=skill_context,
         )
 
@@ -185,15 +196,15 @@ async def analyst_node(state: OpenArgState) -> dict:
                     continue  # Wait for tag to close
 
                 # Strip any complete tags from the buffer before sending
-                cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
+                cleaned = _RE_ANY_TAG.sub("", stream_buf)
                 if cleaned:
                     writer({"type": "chunk", "content": cleaned})
                 stream_buf = ""
 
             # Flush remaining buffer
             if stream_buf:
-                cleaned = re.sub(r"<!--.*?-->", "", stream_buf, flags=re.DOTALL)
-                cleaned = re.sub(r"<!--.*", "", cleaned, flags=re.DOTALL)
+                cleaned = _RE_ANY_TAG.sub("", stream_buf)
+                cleaned = _RE_ANY_TAG_TRUNC.sub("", cleaned)
                 if cleaned:
                     writer({"type": "chunk", "content": cleaned})
         except Exception:

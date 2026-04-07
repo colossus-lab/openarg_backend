@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.application.pipeline.cache_manager import check_cache, get_cached_dict
 from app.application.pipeline.chart_builder import extract_meta
-from app.application.smart_query_service import SmartQueryService
+from app.application.smart_query_service import (
+    SmartQueryService,
+    _build_analysis_prompt,
+    _build_errors_block,
+    _collect_result_payloads,
+    _get_clarification_step,
+    _has_data_or_vector_step,
+    _has_result_records,
+    _serialize_plan,
+    _today_iso_utc,
+)
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
@@ -304,6 +314,22 @@ class TestCacheEmbeddingPassed:
         mock_deps["embedding"].embed.assert_called_once()
         mock_deps["semantic_cache"].get.assert_called_once()
 
+    async def test_get_cached_dict_returns_redis_hit_without_embedding_result(
+        self, service, mock_deps
+    ):
+        """Redis hits should keep the streaming cache contract unchanged."""
+        mock_deps["cache"].get.return_value = {"answer": "cached", "sources": []}
+
+        cached_dict, embedding = await get_cached_dict(
+            "test question",
+            mock_deps["cache"],
+            mock_deps["embedding"],
+            mock_deps["semantic_cache"],
+        )
+
+        assert cached_dict == {"answer": "cached", "sources": []}
+        assert embedding is None
+
 
 class TestMetaParsing:
     def test_extract_meta_with_valid_block(self):
@@ -357,3 +383,231 @@ class TestStreamingYieldsEvents:
         assert "complete" in types
         complete = next(e for e in events if e["type"] == "complete")
         assert "reformulándola" in complete["answer"] or "datos públicos" in complete["answer"]
+
+
+class TestResultPayloadCollection:
+    def test_collect_result_payloads_combines_sources_documents_and_has_records(self):
+        results = [
+            DataResult(
+                source="vector_search",
+                portal_name="Portal A",
+                portal_url="https://portal-a.test",
+                dataset_title="Dataset A",
+                format="json",
+                records=[{"id": 1}],
+                metadata={"fetched_at": "2026-04-06"},
+            ),
+            DataResult(
+                source="ddjj:diputados",
+                portal_name="DDJJ",
+                portal_url="https://ddjj.test",
+                dataset_title="Declaraciones",
+                format="json",
+                records=[
+                    {"nombre": "Ana", "patrimonio_cierre": 10},
+                    {"nombre": "Sin patrimonio"},
+                ],
+                metadata={},
+            ),
+            DataResult(
+                source="vector_search",
+                portal_name="Portal A",
+                portal_url="https://portal-a.test",
+                dataset_title="Dataset A",
+                format="json",
+                records=[{"id": 2}],
+                metadata={"fetched_at": "2026-04-06"},
+            ),
+        ]
+
+        payloads = _collect_result_payloads(results)
+
+        assert payloads.has_records is True
+        assert payloads.sources == [
+            {
+                "name": "Dataset A",
+                "url": "https://portal-a.test",
+                "portal": "Portal A",
+                "accessed_at": "2026-04-06",
+            },
+            {
+                "name": "Declaraciones",
+                "url": "https://ddjj.test",
+                "portal": "DDJJ",
+                "accessed_at": "",
+            },
+        ]
+        assert payloads.documents == [
+            {"nombre": "Ana", "patrimonio_cierre": 10, "doc_type": "ddjj"}
+        ]
+
+
+class TestAnalysisPromptBuilder:
+    def test_no_data_prompt_skips_build_data_context(self):
+        plan = ExecutionPlan(query="sin datos", intent="search", steps=[])
+
+        with patch(
+            "app.application.smart_query_service.build_data_context"
+        ) as build_data_context_mock:
+            prompt = _build_analysis_prompt(
+                question="sin datos",
+                plan=plan,
+                results=[],
+                memory_ctx_analyst="",
+                all_warnings=[],
+                has_records=False,
+            )
+
+        build_data_context_mock.assert_not_called()
+        assert prompt
+
+
+class TestClarificationStep:
+    def test_returns_clarification_step_when_present(self):
+        plan = ExecutionPlan(
+            query="aclarar",
+            intent="clarification",
+            steps=[
+                PlanStep(id="s1", action="search_datasets", description="", params={}, depends_on=[]),
+                PlanStep(
+                    id="s2",
+                    action="clarification",
+                    description="",
+                    params={"question": "¿Cuál?"},
+                    depends_on=[],
+                ),
+            ],
+        )
+
+        clar_step = _get_clarification_step(plan)
+
+        assert clar_step is not None
+        assert clar_step.id == "s2"
+
+    def test_returns_none_when_plan_is_not_clarification(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(id="s1", action="clarification", description="", params={}, depends_on=[])
+            ],
+        )
+
+        assert _get_clarification_step(plan) is None
+
+
+class TestPlanStepScanning:
+    def test_detects_existing_data_or_vector_step(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(id="s1", action="clarification", description="", params={}, depends_on=[]),
+                PlanStep(id="s2", action="search_datasets", description="", params={}, depends_on=[]),
+            ],
+        )
+
+        assert _has_data_or_vector_step(plan) is True
+
+    def test_returns_false_when_plan_has_no_data_or_vector_step(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(id="s1", action="clarification", description="", params={}, depends_on=[]),
+            ],
+        )
+
+        assert _has_data_or_vector_step(plan) is False
+
+
+class TestPlanSerialization:
+    def test_serialize_plan_preserves_intent_and_steps(self):
+        plan = ExecutionPlan(
+            query="buscar",
+            intent="search",
+            steps=[
+                PlanStep(
+                    id="s1",
+                    action="search_datasets",
+                    description="",
+                    params={"query": "ipc", "limit": 5},
+                    depends_on=[],
+                ),
+                PlanStep(
+                    id="s2",
+                    action="query_series",
+                    description="",
+                    params={"seriesIds": ["123"]},
+                    depends_on=["s1"],
+                ),
+            ],
+        )
+
+        serialized = _serialize_plan(plan)
+
+        assert serialized == (
+            '{"intent": "search", "steps": '
+            '[{"action": "search_datasets", "params": {"query": "ipc", "limit": 5}}, '
+            '{"action": "query_series", "params": {"seriesIds": ["123"]}}]}'
+        )
+
+
+class TestErrorsBlock:
+    def test_build_errors_block_formats_warning_list(self):
+        assert _build_errors_block(["fallo uno", "fallo dos"]) == (
+            "\nERRORES EN LA RECOLECCIÓN:\n- fallo uno\n- fallo dos"
+        )
+
+    def test_build_errors_block_returns_empty_string_without_warnings(self):
+        assert _build_errors_block([]) == ""
+
+
+class TestTodayIsoUtc:
+    def test_today_iso_utc_has_expected_format(self):
+        today = _today_iso_utc()
+
+        assert len(today) == 10
+        assert today[4] == "-"
+        assert today[7] == "-"
+
+
+class TestHasResultRecords:
+    def test_returns_true_when_any_result_has_records(self):
+        results = [
+            DataResult(
+                source="test",
+                portal_name="Portal",
+                portal_url="https://example.com",
+                dataset_title="Vacío",
+                format="json",
+                records=[],
+                metadata={},
+            ),
+            DataResult(
+                source="test",
+                portal_name="Portal",
+                portal_url="https://example.com",
+                dataset_title="Con datos",
+                format="json",
+                records=[{"x": 1}],
+                metadata={},
+            ),
+        ]
+
+        assert _has_result_records(results) is True
+
+    def test_returns_false_when_all_results_are_empty(self):
+        results = [
+            DataResult(
+                source="test",
+                portal_name="Portal",
+                portal_url="https://example.com",
+                dataset_title="Vacío",
+                format="json",
+                records=[],
+                metadata={},
+            )
+        ]
+
+        assert _has_result_records(results) is False

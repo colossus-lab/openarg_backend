@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -76,7 +75,6 @@ def create_app() -> FastAPI:
         description="Inteligencia sobre Datos Abiertos de Argentina",
         version="0.1.0",
         lifespan=lifespan,
-        default_response_class=ORJSONResponse,
         docs_url=docs_url,
         redoc_url=redoc_url,
         openapi_url=openapi_url,

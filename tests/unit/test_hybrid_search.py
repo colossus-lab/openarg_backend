@@ -50,7 +50,7 @@ async def test_search_datasets_hybrid_returns_results(
     assert results[0].dataset_id == "123"
     assert results[0].title == "Test Dataset"
     assert results[0].score == 0.06
-    mock_session.execute.assert_called_once()
+    assert mock_session.execute.await_count == 2
 
 
 @pytest.mark.asyncio

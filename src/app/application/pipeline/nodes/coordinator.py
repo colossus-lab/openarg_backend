@@ -73,7 +73,9 @@ async def coordinator_node(state: OpenArgState) -> dict:
     # ── Rule 1: Time budget exceeded → escalate ──────────
     start_time = state.get("_start_time")
     if start_time and (time.monotonic() - start_time) > _TIME_BUDGET_SECONDS:
-        logger.info("Coordinator: time budget exceeded (%.1fs), escalating", time.monotonic() - start_time)
+        logger.info(
+            "Coordinator: time budget exceeded (%.1fs), escalating", time.monotonic() - start_time
+        )
         return {"coordinator_decision": "escalate", "replan_strategy": None}
 
     # ── Rule 2: Has useful data → continue ───────────────
@@ -99,11 +101,13 @@ async def coordinator_node(state: OpenArgState) -> dict:
         replan_count + 1,
         strategy,
     )
-    writer({
-        "type": "status",
-        "step": "coordination",
-        "detail": f"Replanificando: {label}...",
-    })
+    writer(
+        {
+            "type": "status",
+            "step": "coordination",
+            "detail": f"Replanificando: {label}...",
+        }
+    )
 
     return {
         "coordinator_decision": "replan",

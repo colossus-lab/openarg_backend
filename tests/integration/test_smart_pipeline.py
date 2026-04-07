@@ -88,6 +88,9 @@ class TestFullPipelineMocked:
             metadata={"total_records": 1, "fetched_at": "2024-01-01"},
         )
 
+        async def _noop_update_memory_bg(*args, **kwargs):
+            return None
+
         with (
             patch(
                 "app.application.smart_query_service.generate_plan",
@@ -101,12 +104,8 @@ class TestFullPipelineMocked:
                 return_value=MagicMock(turn_number=0, summaries=[], datasets_used=[]),
             ),
             patch(
-                "app.application.smart_query_service.update_memory",
-                new_callable=AsyncMock,
-            ),
-            patch(
-                "app.application.smart_query_service.save_memory",
-                new_callable=AsyncMock,
+                "app.application.smart_query_service.SmartQueryService._update_memory_bg",
+                new=_noop_update_memory_bg,
             ),
         ):
             mock_prep.return_value.reformulate = AsyncMock(return_value="cotización dólar")

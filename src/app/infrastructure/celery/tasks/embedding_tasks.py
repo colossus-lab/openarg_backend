@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 _CHUNKS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "chunks"
 
 
+def _sesion_chunk_key(chunk: dict[str, Any]) -> tuple[str, int]:
+    """Build a stable identity for a session chunk."""
+    return (
+        str(chunk.get("pdfUrl") or ""),
+        int(chunk.get("chunkIndex") or 0),
+    )
+
+
 @celery_app.task(name="openarg.reindex_all_embeddings", bind=True)  # type: ignore[misc]
 def reindex_all_embeddings(self: Any, portal: str | None = None) -> dict[str, Any]:
     """Re-genera embeddings para todos los datasets (o filtrado por portal)."""
@@ -68,21 +76,15 @@ def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
     """
     import json as _json
 
-    import boto3
-
     engine = get_sync_engine()
-    bedrock = boto3.client(
-        "bedrock-runtime",
-        region_name=os.getenv("AWS_REGION", "us-east-1"),
-    )
 
     try:
-        # Check if already indexed
+        # Load existing chunk identities for incremental indexing
         with engine.begin() as conn:
-            count = conn.execute(text("SELECT COUNT(*) FROM sesion_chunks")).scalar()
-            if count and count > 0:
-                logger.info("sesion_chunks already has %d rows, skipping indexing", count)
-                return {"status": "already_indexed", "count": count}
+            existing_rows = conn.execute(
+                text("SELECT COALESCE(pdf_url, ''), COALESCE(chunk_index, 0) FROM sesion_chunks")
+            ).fetchall()
+            existing_keys = {(str(row[0]), int(row[1])) for row in existing_rows}
 
         # Load all chunks from JSON files
         all_chunks: list[dict[str, Any]] = []
@@ -102,9 +104,26 @@ def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
         if not all_chunks:
             return {"status": "no_chunks"}
 
+        pending_chunks = [chunk for chunk in all_chunks if _sesion_chunk_key(chunk) not in existing_keys]
+        skipped = len(all_chunks) - len(pending_chunks)
+        if not pending_chunks:
+            logger.info(
+                "sesion_chunks already up to date (%d existing rows, %d source chunks)",
+                len(existing_keys),
+                len(all_chunks),
+            )
+            return {"status": "already_indexed", "count": len(existing_keys), "skipped": skipped}
+
+        import boto3
+
+        bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name=os.getenv("AWS_REGION", "us-east-1"),
+        )
+
         indexed = 0
-        for i in range(0, len(all_chunks), batch_size):
-            batch = all_chunks[i : i + batch_size]
+        for i in range(0, len(pending_chunks), batch_size):
+            batch = pending_chunks[i : i + batch_size]
 
             # Build text for embedding (speaker context + text)
             texts = []
@@ -129,19 +148,9 @@ def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
 
             # Insert into DB
             with engine.begin() as conn:
-                for j, emb in enumerate(embeddings):
-                    chunk = batch[j]
-                    embedding_str = "[" + ",".join(str(v) for v in emb) + "]"
-                    conn.execute(
-                        text("""
-                            INSERT INTO sesion_chunks
-                                (periodo, reunion, fecha, tipo_sesion, pdf_url,
-                                 total_pages, speaker, chunk_index, content, embedding)
-                            VALUES
-                                (:periodo, :reunion, :fecha, :tipo_sesion, :pdf_url,
-                                 :total_pages, :speaker, :chunk_index, :content,
-                                 CAST(:embedding AS vector))
-                        """),
+                rows = []
+                for chunk, emb in zip(batch, embeddings, strict=False):
+                    rows.append(
                         {
                             "periodo": chunk.get("periodo"),
                             "reunion": chunk.get("reunion"),
@@ -152,14 +161,32 @@ def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
                             "speaker": chunk.get("speaker"),
                             "chunk_index": chunk.get("chunkIndex"),
                             "content": chunk.get("text", ""),
-                            "embedding": embedding_str,
-                        },
+                            "embedding": "[" + ",".join(str(v) for v in emb) + "]",
+                        }
+                    )
+                if rows:
+                    conn.execute(
+                        text("""
+                            INSERT INTO sesion_chunks
+                                (periodo, reunion, fecha, tipo_sesion, pdf_url,
+                                 total_pages, speaker, chunk_index, content, embedding)
+                            VALUES
+                                (:periodo, :reunion, :fecha, :tipo_sesion, :pdf_url,
+                                 :total_pages, :speaker, :chunk_index, :content,
+                                 CAST(:embedding AS vector))
+                        """),
+                        rows,
                     )
 
             indexed += len(batch)
-            logger.info("Indexed %d/%d sesiones chunks", indexed, len(all_chunks))
+            logger.info("Indexed %d/%d new sesiones chunks", indexed, len(pending_chunks))
 
-        return {"status": "indexed", "total_chunks": indexed}
+        return {
+            "status": "indexed",
+            "total_chunks": indexed,
+            "skipped": skipped,
+            "existing_before": len(existing_keys),
+        }
 
     except SoftTimeLimitExceeded:
         logger.error("Sesiones indexing timed out")

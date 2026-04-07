@@ -14,7 +14,4 @@ _registry = SkillRegistry()
 @router.get("/skills")
 async def list_skills() -> list[dict[str, str]]:
     """Return all available skills with their names and descriptions."""
-    return [
-        {"name": s.name, "description": s.description}
-        for s in _registry.list_all()
-    ]
+    return [{"name": s.name, "description": s.description} for s in _registry.list_all()]

@@ -19,13 +19,14 @@ async def execute_search_datasets_step(
     embedding: IEmbeddingProvider,
     vector_search: IVectorSearch,
 ) -> list[DataResult]:
-    """Vector search over cached dataset chunks in pgvector."""
+    """Hybrid retrieval over cached dataset chunks in pgvector."""
     params = step.params
     query = params.get("query", step.description)
     try:
         q_embedding = await embedding.embed(query)
-        vector_results = await vector_search.search_datasets(
+        vector_results = await vector_search.search_datasets_hybrid(
             q_embedding,
+            query,
             limit=params.get("limit", 10),
         )
         if not vector_results:

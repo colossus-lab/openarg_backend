@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.infrastructure.adapters.connectors.dataset_index import (
+    _KEYWORD_PATTERNS,
     KEYWORD_ROUTES,
     TAXONOMY,
     format_hints_for_prompt,
@@ -135,6 +136,11 @@ class TestResolveHints:
         top = hints[0]
         assert top.action == "query_sandbox"
         assert any("siniestro" in t or "transit" in t for t in top.params.get("tables", []))
+
+    def test_precompiled_keyword_patterns_cover_sorted_keywords(self):
+        assert [keyword for keyword, _ in _KEYWORD_PATTERNS] == sorted(
+            KEYWORD_ROUTES.keys(), key=len, reverse=True
+        )
 
 
 class TestEconomicRoutes:

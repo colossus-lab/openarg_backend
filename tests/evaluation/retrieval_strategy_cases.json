@@ -1,0 +1,86 @@
+{
+  "version": "1.0",
+  "description": "Retrieval-only real-world comparison cases for vector_only vs hybrid strategy",
+  "entries": [
+    {
+      "id": "retrieval_001",
+      "category": "siglas",
+      "query": "ipc",
+      "expected_title_keywords": ["IPC", "Indice de Precios", "Índice de Precios"],
+      "difficulty": "hard",
+      "notes": "Vectorial puro suele fallar con esta sigla corta."
+    },
+    {
+      "id": "retrieval_002",
+      "category": "siglas",
+      "query": "ipc gba",
+      "expected_title_keywords": ["IPC-GBA", "Índice de Precios al Consumidor GBA"],
+      "difficulty": "hard",
+      "notes": "Caso léxico donde BM25 ayuda a recuperar el dataset exacto."
+    },
+    {
+      "id": "retrieval_003",
+      "category": "siglas",
+      "query": "ipc indec",
+      "expected_title_keywords": ["IPC", "Indice de Precios", "Índice de Precios"],
+      "difficulty": "medium",
+      "notes": "El vectorial ya suele ir bien; no debería empeorar."
+    },
+    {
+      "id": "retrieval_004",
+      "category": "siglas",
+      "query": "sistau",
+      "expected_title_keywords": ["SISTAU", "Sistema Integrado de Transporte Automotor"],
+      "difficulty": "hard",
+      "notes": "Sigla de transporte donde el vectorial base tiende a quedar vacío."
+    },
+    {
+      "id": "retrieval_005",
+      "category": "siglas",
+      "query": "sube",
+      "expected_title_keywords": ["SUBE"],
+      "difficulty": "medium",
+      "notes": "Consulta corta con muchos datasets relevantes en producción."
+    },
+    {
+      "id": "retrieval_006",
+      "category": "siglas",
+      "query": "enargas",
+      "expected_title_keywords": ["ENARGAS"],
+      "difficulty": "medium",
+      "notes": "Marca institucional con resultados razonables en vectorial."
+    },
+    {
+      "id": "retrieval_007",
+      "category": "siglas",
+      "query": "pbg",
+      "expected_title_keywords": ["PBG", "Producto Bruto Geográfico"],
+      "difficulty": "hard",
+      "notes": "Sigla económica corta donde el híbrido debería recuperar mejor."
+    },
+    {
+      "id": "retrieval_008",
+      "category": "topic",
+      "query": "subsidios transporte",
+      "expected_title_keywords": ["SISTAU", "SUBE", "transporte"],
+      "difficulty": "medium",
+      "notes": "Consulta temática donde el vectorial suele ser fuerte."
+    },
+    {
+      "id": "retrieval_009",
+      "category": "topic",
+      "query": "inflacion mensual",
+      "expected_title_keywords": ["IPC", "Inflación", "Indice de Precios", "Índice de Precios"],
+      "difficulty": "medium",
+      "notes": "Consulta rica donde conviene fast-path vectorial si ya está bien."
+    },
+    {
+      "id": "retrieval_010",
+      "category": "topic",
+      "query": "transferencias enargas",
+      "expected_title_keywords": ["ENARGAS", "Transferencias de fondos del ENARGAS"],
+      "difficulty": "medium",
+      "notes": "Consulta mixta institución + tópico."
+    }
+  ]
+}

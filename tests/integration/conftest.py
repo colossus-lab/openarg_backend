@@ -41,52 +41,73 @@ class MockProvider(Provider):
 
     @provide
     def llm(self) -> ILLMProvider:
-        mock = AsyncMock()
-        mock.chat.return_value = MagicMock(
-            content="Mock response",
-            tokens_used=10,
-            model="test",
+        mock = MagicMock(spec=ILLMProvider)
+        mock.chat = AsyncMock(
+            return_value=MagicMock(
+                content="Mock response",
+                tokens_used=10,
+                model="test",
+            )
         )
+
+        async def _chat_stream(*args, **kwargs):
+            yield "Mock response"
+
+        mock.chat_stream = _chat_stream
         return mock
 
     @provide
     def embedding(self) -> IEmbeddingProvider:
-        mock = AsyncMock()
-        mock.embed.return_value = [0.1] * 1536
+        mock = MagicMock(spec=IEmbeddingProvider)
+        mock.embed = AsyncMock(return_value=[0.1] * 1536)
         return mock
 
     @provide
     def vector_search(self) -> IVectorSearch:
-        mock = AsyncMock()
-        mock.search_datasets_hybrid.return_value = []
+        mock = MagicMock(spec=IVectorSearch)
+        mock.search_datasets_hybrid = AsyncMock(return_value=[])
         return mock
 
     @provide
     def cache(self) -> ICacheService:
-        mock = AsyncMock()
-        mock.get.return_value = None
-        mock.set.return_value = None
+        mock = MagicMock(spec=ICacheService)
+        mock.get = AsyncMock(return_value=None)
+        mock.set = AsyncMock(return_value=None)
         return mock
 
     @provide
     def series(self) -> ISeriesTiempoConnector:
-        return AsyncMock()
+        mock = MagicMock(spec=ISeriesTiempoConnector)
+        mock.search = AsyncMock(return_value=[])
+        mock.fetch = AsyncMock(return_value=None)
+        return mock
 
     @provide
     def arg_datos(self) -> IArgentinaDatosConnector:
-        return AsyncMock()
+        mock = MagicMock(spec=IArgentinaDatosConnector)
+        mock.fetch_dolar = AsyncMock(return_value=None)
+        mock.fetch_riesgo_pais = AsyncMock(return_value=None)
+        mock.fetch_inflacion = AsyncMock(return_value=None)
+        return mock
 
     @provide
     def georef(self) -> IGeorefConnector:
-        return AsyncMock()
+        mock = MagicMock(spec=IGeorefConnector)
+        mock.normalize_location = AsyncMock(return_value=None)
+        return mock
 
     @provide
     def ckan(self) -> ICKANSearchConnector:
-        return AsyncMock()
+        mock = MagicMock(spec=ICKANSearchConnector)
+        mock.search_datasets = AsyncMock(return_value=[])
+        mock.query_datastore = AsyncMock(return_value=[])
+        return mock
 
     @provide
     def sesiones(self) -> ISesionesConnector:
-        return AsyncMock()
+        mock = MagicMock(spec=ISesionesConnector)
+        mock.search = AsyncMock(return_value=None)
+        return mock
 
     @provide
     def ddjj(self) -> DDJJAdapter:
@@ -96,36 +117,42 @@ class MockProvider(Provider):
 
     @provide
     def semantic_cache(self) -> SemanticCache:
-        mock = AsyncMock(spec=SemanticCache)
-        mock.get.return_value = None
-        mock.set.return_value = None
+        mock = MagicMock(spec=SemanticCache)
+        mock.get = AsyncMock(return_value=None)
+        mock.set = AsyncMock(return_value=None)
         return mock
 
     @provide
     def session(self) -> MainAsyncSession:
-        return AsyncMock(spec=AsyncSession)
+        mock = MagicMock(spec=AsyncSession)
+        mock.close = AsyncMock(return_value=None)
+        return mock
 
     @provide
     def staff(self) -> IStaffConnector:
-        return AsyncMock()
+        mock = MagicMock(spec=IStaffConnector)
+        mock.search = AsyncMock(return_value=None)
+        return mock
 
     @provide
     def bcra(self) -> BCRAAdapter:
-        return AsyncMock(spec=BCRAAdapter)
+        mock = MagicMock(spec=BCRAAdapter)
+        mock.search = AsyncMock(return_value=None)
+        return mock
 
     @provide
     def sandbox(self) -> ISQLSandbox:
-        mock = AsyncMock()
-        mock.execute_readonly.return_value = MagicMock(
-            rows=[], columns=[], row_count=0, truncated=False, error=None
+        mock = MagicMock(spec=ISQLSandbox)
+        mock.execute_readonly = AsyncMock(
+            return_value=MagicMock(rows=[], columns=[], row_count=0, truncated=False, error=None)
         )
-        mock.list_cached_tables.return_value = []
+        mock.list_cached_tables = AsyncMock(return_value=[])
         return mock
 
     @provide
     def chat_repo(self) -> IChatRepository:
-        mock = AsyncMock()
-        mock.get_conversation_messages.return_value = []
+        mock = MagicMock(spec=IChatRepository)
+        mock.get_conversation_messages = AsyncMock(return_value=[])
         return mock
 
     @provide
@@ -205,11 +232,13 @@ class MockProvider(Provider):
 
     @provide
     def health_service(self) -> HealthCheckService:
-        mock = AsyncMock(spec=HealthCheckService)
-        mock.check_all.return_value = {
-            "status": "healthy",
-            "components": {},
-        }
+        mock = MagicMock(spec=HealthCheckService)
+        mock.check_all = AsyncMock(
+            return_value={
+                "status": "healthy",
+                "components": {},
+            }
+        )
         return mock
 
 
