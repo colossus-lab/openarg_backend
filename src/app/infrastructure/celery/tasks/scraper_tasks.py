@@ -323,8 +323,10 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                     )
                     # Fetch IDs separately (RETURNING doesn't work with executemany)
                     result = conn.execute(
-                        text("SELECT CAST(id AS text) AS id, source_id FROM datasets "
-                             "WHERE source_id = ANY(:sids) AND portal = :portal"),
+                        text(
+                            "SELECT CAST(id AS text) AS id, source_id FROM datasets "
+                            "WHERE source_id = ANY(:sids) AND portal = :portal"
+                        ),
                         {"sids": source_ids, "portal": portal},
                     )
                     dataset_ids_by_source = {row.source_id: row.id for row in result.fetchall()}

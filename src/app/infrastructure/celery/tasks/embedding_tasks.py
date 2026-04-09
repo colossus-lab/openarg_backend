@@ -104,7 +104,9 @@ def index_sesiones_chunks(self: Any, batch_size: int = 50) -> dict[str, Any]:
         if not all_chunks:
             return {"status": "no_chunks"}
 
-        pending_chunks = [chunk for chunk in all_chunks if _sesion_chunk_key(chunk) not in existing_keys]
+        pending_chunks = [
+            chunk for chunk in all_chunks if _sesion_chunk_key(chunk) not in existing_keys
+        ]
         skipped = len(all_chunks) - len(pending_chunks)
         if not pending_chunks:
             logger.info(

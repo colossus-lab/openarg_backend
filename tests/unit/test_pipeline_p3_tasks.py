@@ -118,8 +118,14 @@ class TestSesionesIncrementalP3:
 
         mock_engine = MagicMock()
         mock_engine.begin.side_effect = [
-            MagicMock(__enter__=MagicMock(return_value=existing_conn), __exit__=MagicMock(return_value=False)),
-            MagicMock(__enter__=MagicMock(return_value=insert_conn), __exit__=MagicMock(return_value=False)),
+            MagicMock(
+                __enter__=MagicMock(return_value=existing_conn),
+                __exit__=MagicMock(return_value=False),
+            ),
+            MagicMock(
+                __enter__=MagicMock(return_value=insert_conn),
+                __exit__=MagicMock(return_value=False),
+            ),
         ]
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine

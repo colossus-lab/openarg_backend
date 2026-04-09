@@ -150,7 +150,9 @@ class PgVectorSearchAdapter(IVectorSearch):
         return 0.01
 
     @classmethod
-    def _effective_min_score(cls, retrieval_mode: str, requested_min_score: float, rrf_k: int) -> float:
+    def _effective_min_score(
+        cls, retrieval_mode: str, requested_min_score: float, rrf_k: int
+    ) -> float:
         """Keep the final threshold realistic for the selected scoring mode."""
         if retrieval_mode == cls._RETRIEVAL_VECTOR_ONLY:
             return requested_min_score

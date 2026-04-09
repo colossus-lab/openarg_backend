@@ -180,9 +180,7 @@ class TestPgVectorSearchAdapter:
         assert params["bm25_candidate_min"] == 0.01
         assert params["fetch_limit"] == 30
 
-    async def test_hybrid_search_caps_min_score_to_reachable_rrf_range(
-        self, adapter, mock_session
-    ):
+    async def test_hybrid_search_caps_min_score_to_reachable_rrf_range(self, adapter, mock_session):
         mock_result = MagicMock()
         mock_result.fetchall.return_value = []
         mock_session.execute.return_value = mock_result

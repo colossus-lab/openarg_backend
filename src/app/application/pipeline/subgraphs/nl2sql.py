@@ -55,6 +55,25 @@ def _strip_markdown_fences(sql: str) -> str:
     return sql
 
 
+def _extract_sql(raw: str) -> str:
+    """Extract a SELECT/WITH statement from an LLM response.
+
+    Handles: pure SQL, markdown code blocks, text + SQL, multiple statements.
+    """
+    import re
+
+    text_val = raw.strip()
+    code_block = re.search(r"```(?:sql)?\s*\n?(.*?)```", text_val, re.DOTALL | re.IGNORECASE)
+    if code_block:
+        text_val = code_block.group(1).strip()
+    if re.match(r"^\s*(SELECT|WITH)\b", text_val, re.IGNORECASE):
+        return text_val
+    match = re.search(r"\b((?:WITH|SELECT)\b.*)", text_val, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return text_val
+
+
 async def generate_sql_node(state: NL2SQLState) -> dict:
     """Generate SQL from natural language using the LLM."""
     llm = state["llm"]
@@ -79,7 +98,7 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
         max_tokens=1024,
     )
 
-    generated_sql = _strip_markdown_fences(llm_response.content.strip())
+    generated_sql = _extract_sql(llm_response.content)
 
     return {
         "nl2sql_prompt": nl2sql_prompt,
@@ -143,7 +162,7 @@ async def fix_sql_node(state: NL2SQLState) -> dict:
         max_tokens=1024,
     )
 
-    fixed_sql = _strip_markdown_fences(llm_response.content.strip())
+    fixed_sql = _extract_sql(llm_response.content)
 
     return {
         "generated_sql": fixed_sql,

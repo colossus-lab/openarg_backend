@@ -692,7 +692,9 @@ def _inject_vector_fallback(
 
 def _has_data_or_vector_step(plan: ExecutionPlan) -> bool:
     """Return whether the plan already contains a data-producing search step."""
-    return any(step.action == "search_datasets" or step.action in DATA_ACTIONS for step in plan.steps)
+    return any(
+        step.action == "search_datasets" or step.action in DATA_ACTIONS for step in plan.steps
+    )
 
 
 def _serialize_plan(plan: ExecutionPlan) -> str:

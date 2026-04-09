@@ -98,6 +98,7 @@ async def get_cached_dict(
 
     Returns (result_dict_or_None, embedding_or_None).
     """
+
     async def _redis_lookup() -> dict[str, Any] | None:
         try:
             cached = await cache.get(cache_key(question))

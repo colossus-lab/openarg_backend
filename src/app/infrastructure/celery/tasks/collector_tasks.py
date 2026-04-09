@@ -1115,7 +1115,9 @@ def _route_table_for_schema(
                     )
                 return resource_table, True, "already_appended"
         except Exception:
-            logger.debug("Could not inspect resource fallback table %s", resource_table, exc_info=True)
+            logger.debug(
+                "Could not inspect resource fallback table %s", resource_table, exc_info=True
+            )
 
         return resource_table, True, None
 
@@ -1243,7 +1245,7 @@ def collect_dataset(self, dataset_id: str):
         if not _has_temp_space(max_download_bytes):
             logger.warning("Insufficient temp space before downloading dataset %s", dataset_id)
             # Temp space is transient — retry later instead of marking permanently failed
-            backoff = min(120 * (2 ** self.request.retries), 600)
+            backoff = min(120 * (2**self.request.retries), 600)
             raise self.retry(
                 exc=RuntimeError("insufficient_temp_space"),
                 countdown=int(backoff + random.uniform(0, backoff * 0.3)),
@@ -1375,7 +1377,7 @@ def collect_dataset(self, dataset_id: str):
                         dataset_id,
                         total_size,
                     )
-                    backoff = min(120 * (2 ** self.request.retries), 600)
+                    backoff = min(120 * (2**self.request.retries), 600)
                     raise self.retry(
                         exc=RuntimeError("insufficient_temp_space (zip decompression)"),
                         countdown=int(backoff + random.uniform(0, backoff * 0.3)),
@@ -2449,9 +2451,7 @@ def consolidate_group_tables(self, title: str, portal: str):
                     if dataset_id in loaded_ids:
                         continue
                     conn.execute(
-                        text(
-                            f'INSERT INTO "{target_table}" SELECT * FROM "{source_table}"'
-                        )  # noqa: S608
+                        text(f'INSERT INTO "{target_table}" SELECT * FROM "{source_table}"')  # noqa: S608
                     )
                     loaded_ids.add(dataset_id)
                     consolidated_sources += 1
@@ -2477,7 +2477,8 @@ def audit_cache_coverage():
         with engine.connect() as conn:
             total_datasets = conn.execute(text("SELECT COUNT(*) FROM datasets")).scalar() or 0
             non_cached = (
-                conn.execute(text("SELECT COUNT(*) FROM datasets WHERE is_cached = false")).scalar() or 0
+                conn.execute(text("SELECT COUNT(*) FROM datasets WHERE is_cached = false")).scalar()
+                or 0
             )
             stale_downloading = (
                 conn.execute(

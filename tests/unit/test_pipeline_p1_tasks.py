@@ -206,7 +206,9 @@ class TestCollectLargeGroupP1:
         assert result["deferred"] == 5
         assert result["consolidation_scheduled"] is True
         assert mock_group_result.apply_async.call_count == 20
-        countdowns = [call.kwargs["countdown"] for call in mock_group_result.apply_async.call_args_list]
+        countdowns = [
+            call.kwargs["countdown"] for call in mock_group_result.apply_async.call_args_list
+        ]
         assert countdowns == [i * 30 for i in range(20)]
         mock_consolidate_group.assert_called_once_with(
             args=["Pauta Publicitaria", "caba"],

@@ -124,8 +124,7 @@ def compute_hit_at_k(
 ) -> bool:
     """Check whether at least one relevant item appears in the first k candidates."""
     return any(
-        candidate_matches_expected(candidate, expected_keywords)
-        for candidate in candidates[:k]
+        candidate_matches_expected(candidate, expected_keywords) for candidate in candidates[:k]
     )
 
 

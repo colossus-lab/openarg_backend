@@ -2609,8 +2609,7 @@ DOMAIN_PATTERNS: list[DomainPattern] = [
 
 _SORTED_KEYWORDS: list[str] = sorted(KEYWORD_ROUTES.keys(), key=len, reverse=True)
 _KEYWORD_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    (keyword, re.compile(r"\b" + re.escape(keyword) + r"\b"))
-    for keyword in _SORTED_KEYWORDS
+    (keyword, re.compile(r"\b" + re.escape(keyword) + r"\b")) for keyword in _SORTED_KEYWORDS
 ]
 
 

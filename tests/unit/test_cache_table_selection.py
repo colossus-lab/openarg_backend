@@ -82,9 +82,7 @@ class TestCachedTablePreferenceInConnectors:
         ]
         embedding = SimpleNamespace(embed=AsyncMock(return_value=[0.1, 0.2]))
         vector_search = SimpleNamespace(
-            search_datasets=AsyncMock(
-                return_value=[SimpleNamespace(dataset_id="ds-1")]
-            )
+            search_datasets=AsyncMock(return_value=[SimpleNamespace(dataset_id="ds-1")])
         )
 
         tables = await discover_tables_by_vector_search(

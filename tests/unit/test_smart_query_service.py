@@ -468,7 +468,9 @@ class TestClarificationStep:
             query="aclarar",
             intent="clarification",
             steps=[
-                PlanStep(id="s1", action="search_datasets", description="", params={}, depends_on=[]),
+                PlanStep(
+                    id="s1", action="search_datasets", description="", params={}, depends_on=[]
+                ),
                 PlanStep(
                     id="s2",
                     action="clarification",
@@ -503,7 +505,9 @@ class TestPlanStepScanning:
             intent="search",
             steps=[
                 PlanStep(id="s1", action="clarification", description="", params={}, depends_on=[]),
-                PlanStep(id="s2", action="search_datasets", description="", params={}, depends_on=[]),
+                PlanStep(
+                    id="s2", action="search_datasets", description="", params={}, depends_on=[]
+                ),
             ],
         )
 

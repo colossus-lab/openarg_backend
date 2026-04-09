@@ -86,7 +86,9 @@ class TestSummaryAndComparison:
             case=case,
             strategy="vector_only",
             candidates=[
-                RetrievalCandidate(title="Series de Tiempo — IPC", portal="series_tiempo", score=0.88)
+                RetrievalCandidate(
+                    title="Series de Tiempo — IPC", portal="series_tiempo", score=0.88
+                )
             ],
             latency_ms=120.0,
         )

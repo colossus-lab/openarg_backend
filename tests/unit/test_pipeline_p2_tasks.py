@@ -354,7 +354,9 @@ class TestCollectorP2:
             source_id="canon-2",
         )
         retry_row = SimpleNamespace(retry_count=0)
-        cached_row = SimpleNamespace(id="cached-id", dataset_id="22222222-2222-2222-2222-222222222222")
+        cached_row = SimpleNamespace(
+            id="cached-id", dataset_id="22222222-2222-2222-2222-222222222222"
+        )
         prev_cached_row = SimpleNamespace(is_cached=False)
 
         mock_conn = MagicMock()
@@ -439,7 +441,9 @@ class TestEmbeddingP2:
         mock_get_engine.return_value = mock_engine
 
         mock_body = MagicMock()
-        mock_body.read.return_value = json.dumps({"embeddings": [[0.1] * 3, [0.2] * 3, [0.3] * 3]}).encode()
+        mock_body.read.return_value = json.dumps(
+            {"embeddings": [[0.1] * 3, [0.2] * 3, [0.3] * 3]}
+        ).encode()
         mock_bedrock = MagicMock()
         mock_bedrock.invoke_model.return_value = {"body": mock_body}
         mock_boto_client.return_value = mock_bedrock
@@ -500,8 +504,13 @@ class TestEmbeddingP2:
 
         mock_engine = MagicMock()
         mock_engine.begin.side_effect = [
-            MagicMock(__enter__=MagicMock(return_value=count_conn), __exit__=MagicMock(return_value=False)),
-            MagicMock(__enter__=MagicMock(return_value=insert_conn), __exit__=MagicMock(return_value=False)),
+            MagicMock(
+                __enter__=MagicMock(return_value=count_conn), __exit__=MagicMock(return_value=False)
+            ),
+            MagicMock(
+                __enter__=MagicMock(return_value=insert_conn),
+                __exit__=MagicMock(return_value=False),
+            ),
         ]
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine

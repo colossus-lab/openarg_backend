@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,36 @@ from app.application.pipeline.connectors.cache_table_selection import prefer_con
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 from app.domain.ports.llm.llm_provider import LLMMessage
 from app.prompts import load_prompt
+
+
+def _extract_sql(raw: str) -> str:
+    """Extract a SELECT/WITH statement from an LLM response.
+
+    Handles common LLM response patterns:
+    - Pure SQL (just the query)
+    - Markdown code blocks (```sql ... ```)
+    - Text + SQL (explanation followed by query)
+    - Multiple statements (takes the first SELECT/WITH)
+    """
+    text_val = raw.strip()
+
+    # 1. Extract from markdown code blocks
+    code_block = re.search(r"```(?:sql)?\s*\n?(.*?)```", text_val, re.DOTALL | re.IGNORECASE)
+    if code_block:
+        text_val = code_block.group(1).strip()
+
+    # 2. If it already starts with SELECT/WITH, return as-is
+    if re.match(r"^\s*(SELECT|WITH)\b", text_val, re.IGNORECASE):
+        return text_val
+
+    # 3. Try to find SELECT/WITH statement in the text
+    match = re.search(r"\b((?:WITH|SELECT)\b.*)", text_val, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    # 4. Fallback: return original (will fail validation with a clear error)
+    return text_val
+
 
 if TYPE_CHECKING:
     from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
@@ -574,11 +605,8 @@ async def execute_sandbox_step(
             max_tokens=1024,
         )
 
-        generated_sql = llm_response.content.strip()
-        if generated_sql.startswith("```"):
-            lines = generated_sql.split("\n")
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            generated_sql = "\n".join(lines).strip()
+        generated_sql = _extract_sql(llm_response.content)
+        logger.debug("NL2SQL generated: %s", generated_sql[:200])
 
         result = await sandbox.execute_readonly(generated_sql)
 
@@ -587,7 +615,12 @@ async def execute_sandbox_step(
         for _attempt in range(2):
             if not result.error:
                 break
-            logger.warning("Sandbox query failed (attempt %d): %s", _attempt + 1, result.error)
+            logger.warning(
+                "Sandbox query failed (attempt %d): %s | SQL: %s",
+                _attempt + 1,
+                result.error,
+                generated_sql[:200],
+            )
             retry_messages = [
                 LLMMessage(
                     role="system",
@@ -607,11 +640,8 @@ async def execute_sandbox_step(
                 temperature=0.0,
                 max_tokens=1024,
             )
-            generated_sql = llm_response.content.strip()
-            if generated_sql.startswith("```"):
-                lines = generated_sql.split("\n")
-                lines = [ln for ln in lines if not ln.strip().startswith("```")]
-                generated_sql = "\n".join(lines).strip()
+            generated_sql = _extract_sql(llm_response.content)
+            logger.debug("NL2SQL retry generated: %s", generated_sql[:200])
             result = await sandbox.execute_readonly(generated_sql)
 
         if result.error:

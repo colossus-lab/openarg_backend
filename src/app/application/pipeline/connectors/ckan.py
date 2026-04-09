@@ -102,9 +102,7 @@ async def search_cached_tables(
         return []
 
     available_names = [t.table_name for t in all_tables]
-    preferred_names = {
-        prefer_consolidated_table(t.table_name, available_names) for t in matched
-    }
+    preferred_names = {prefer_consolidated_table(t.table_name, available_names) for t in matched}
     matched = [t for t in all_tables if t.table_name in preferred_names]
     matched.sort(key=lambda t: (table_priority(t.table_name), t.table_name))
     matched = matched[:limit]
