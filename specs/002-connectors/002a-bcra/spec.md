@@ -135,7 +135,7 @@ It is the **only financial-monetary data connector** in the system and the only 
 
 - **[DEBT-006]** — **Direct coupling to `datasets` / `cached_datasets` schema**. `_register_dataset()` in `bcra_tasks.py:25-84` uses raw SQL with detailed knowledge of the schema. It should use the `IDatasetRepository` port from the domain. **Priority: medium**.
 
-- **[DEBT-007]** — **Silent degradation without observability**. `execute_bcra_step` in `application/pipeline/connectors/bcra.py:48-50` catches *any* exception, logs it and returns `[]`. It does not emit failure metrics nor integrate with the circuit breaker. The end user does not know that the data did not come from BCRA. **Priority: high**.
+- **[DEBT-007]** — ~~**Silent degradation without observability**~~ **FIXED 2026-04-10**: `application/pipeline/connectors/bcra.py` no longer catches generic exceptions. `ConnectorError` propagates to the step executor which adds it to `step_warnings` and records the failure via `MetricsCollector.record_connector_call(..., error=True)`. The analyst sees the warning in its context and mentions it in the user-facing response. See `FIX_BACKLOG.md#fix-001`.
 
 - **[DEBT-008]** — **No integration with the `infrastructure/resilience/` circuit breaker**. Other connectors do use it. BCRA only has `@with_retry` at the method level. **Priority: low-medium**.
 

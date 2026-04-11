@@ -82,7 +82,7 @@ The Series de Tiempo connector allows querying Argentina's macroeconomic indicat
 - **[DEBT-002]** — **Fragile regex-based regional upgrade** in `pipeline/connectors/series.py:79-86`. Detection via substring matching on the query; does not use intent classification. Impact: false positives/negatives on ambiguous queries.
 - **[DEBT-003]** — **Naive accent-stripping keyword matching** (`series_tiempo_adapter.py:196-200`). Does not handle synonyms or typos (e.g., "desempleyo" does not match).
 - **[DEBT-004]** — **No cache for search results** — each query to the `/search` endpoint makes an HTTP call even if the response is identical to a previous one.
-- **[DEBT-005]** — **`percent_change` representation is silently multiplied by 100** without marking the unit in `DataResult.metadata`. The downstream consumer may misinterpret the value.
+- **[DEBT-005]** — ~~**`percent_change` representation is silently multiplied by 100**~~ **FIXED 2026-04-10**: `series_tiempo_adapter.py` now sets `DataResult.metadata["unit"] = "percent"` and `metadata["value_scale"] = "percentage_points"` whenever `representation == "percent_change"`, making the unit explicit for the analyst, chart builder and UI. Also records `metadata["representation"]` for non-default modes.
 - **[DEBT-006]** — Pipeline step depends on the concrete adapter (recurring pattern — see `../spec.md[DEBT-002]`).
 - **[DEBT-007]** — Snapshot task bypasses DI, uses `asyncio.run()` (recurring pattern — see `../spec.md[DEBT-003,DEBT-007]`).
 

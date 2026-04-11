@@ -86,7 +86,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 - **[DEBT-001]** — **Hardcoded similarity threshold** (0.92) — no per-intent tuning.
 - **[DEBT-002]** — **Manual pgvector string construction** (`[v1,v2,...]`) instead of robust casting.
 - **[DEBT-003]** — **No metrics** for hit rate.
-- **[DEBT-004]** — **No scheduled cleanup task** — expired entries are not deleted automatically.
+- **[DEBT-004]** — ~~**No scheduled cleanup task**~~ **FIXED 2026-04-10**: `celery/tasks/cache_cleanup_tasks.py` adds `cleanup_semantic_cache` — a Celery beat task that runs every 6h on the `ingest` queue and deletes entries with `expires_at < now() - INTERVAL '1 hour'`. See `FIX_BACKLOG.md#fix-007`.
 - **[DEBT-005]** — **Hardcoded TTL mapping** in code, not in config.
 - **[DEBT-006]** — **No abstract port** — used directly by the pipeline (similar to BCRA/DDJJ).
 
