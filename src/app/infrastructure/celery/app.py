@@ -122,6 +122,7 @@ def create_celery() -> Celery:
         "openarg.enrich_single_table": {"queue": "embedding"},
         "openarg.enrich_all_tables": {"queue": "embedding"},
         "openarg.cleanup_semantic_cache": {"queue": "ingest"},
+        "openarg.cleanup_orphan_catalog_entries": {"queue": "ingest"},
     }
 
     app.conf.task_default_queue = "scraper"
@@ -305,6 +306,12 @@ def create_celery() -> Celery:
             "cleanup-semantic-cache": {
                 "task": "openarg.cleanup_semantic_cache",
                 "schedule": crontab(hour="*/6", minute=0),  # Every 6 hours
+                "options": {"queue": "ingest"},
+            },
+            # --- Table catalog orphan cleanup (011-table-catalog FR-007) ---
+            "cleanup-orphan-catalog-entries": {
+                "task": "openarg.cleanup_orphan_catalog_entries",
+                "schedule": crontab(hour=3, minute=30),  # Daily 3:30 AM ART
                 "options": {"queue": "ingest"},
             },
             # --- Reporting / Dead Letter visibility ---

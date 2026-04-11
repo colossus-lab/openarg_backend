@@ -42,6 +42,7 @@ It was part of **Optimization Category 3 (Mar 2026)** — migration 0019 created
 - **FR-004**: Auto-enrichment MUST be triggered on create/update of a `cache_*` table.
 - **FR-005**: `discover_catalog_hints_for_planner(query_embedding)` MUST return the top-K most similar tables to inject into the planner's context.
 - **FR-006**: NL2SQL MUST use the catalog to build its `tables_context`.
+- **FR-007**: **Orphan cleanup** — the system MUST periodically remove `table_catalog` rows whose `table_name` no longer exists in `information_schema.tables (table_schema = 'public')`. A Celery beat task named `openarg.cleanup_orphan_catalog_entries` runs once a day on the `ingest` queue and executes a single `DELETE FROM table_catalog WHERE table_name NOT IN (SELECT table_name FROM information_schema.tables WHERE table_schema = 'public')`. The deletion is atomic per-task-run, logs the row count dropped, and is idempotent (re-running it when nothing is orphaned is a no-op). This closes the hole where a rename or drop of a `cache_*` table would leave the vector index returning stale table names that the NL2SQL step then compiles into SQL against non-existent tables (absorbed today by the last-resort fallback, but still a data-quality problem).
 
 ## 5. Success Criteria
 
@@ -64,13 +65,13 @@ It was part of **Optimization Category 3 (Mar 2026)** — migration 0019 created
 
 ## 7. Open Questions
 
-- **[RESOLVED CL-001]** — **Orphan.** `table_catalog` uses `table_name` as the primary key (migration 0019) with no foreign key to `cached_datasets`, and `catalog_enrichment_tasks._enrich_table` only ever `INSERT ... ON CONFLICT (table_name) DO UPDATE`. There is no DELETE path, no trigger, no cleanup task, and `enrich_all_tables` only processes tables where `tc.id IS NULL` (line 252-265). If a `cache_*` table is renamed or dropped the corresponding catalog row remains forever — this is exactly `DEBT-001`. (resolved 2026-04-11 via code inspection)
+- **[RESOLVED CL-001]** — ~~Orphan catalog rows accumulate when cache tables are renamed/dropped~~ **FIXED 2026-04-11** via FR-007: a daily `cleanup_orphan_catalog_entries` beat task now DELETEs `table_catalog` rows whose `table_name` is not in `information_schema.tables (public)`. Idempotent, logs the row count, runs on the `ingest` queue alongside the other cleanup tasks. See DEBT-001 below for the historical rationale.
 - **[RESOLVED CL-002]** — **No.** `enrich_all_tables` (catalog_enrichment_tasks.py:244-281) only targets tables that have NO catalog entry yet (`WHERE tc.id IS NULL`). There is no periodic re-enrichment, no column-diff check, no `updated_at` staleness filter. The only way to refresh metadata is to call `enrich_single_table` manually per table (which does UPSERT). Note: the collector does emit a `schema_drift_detected` log at `collector_tasks.py:882` when a cached table's columns change, but this log is NOT wired to invalidate the catalog. Tracked as `DEBT-002`. (resolved 2026-04-11 via code inspection)
 - **[RESOLVED CL-003]** — **NOT validated**. The LLM generates 3 sample_queries in natural language (prompt `catalog_enrichment.txt:9`), they are parsed to dict in `catalog_enrichment_tasks.py:89` and upserted to `table_catalog` directly (lines 166-204). Without executing against the sandbox. If the LLM generates nonsensical or non-executable queries, they persist as-is. **Concrete debt already captured in `DEBT-003`**.
 
 ## 8. Tech Debt Discovered
 
-- **[DEBT-001]** — **No orphan detection** when cache tables are deleted.
+- **[DEBT-001]** — ~~**No orphan detection** when cache tables are deleted~~ **FIXED 2026-04-11** via FR-007: the daily `cleanup_orphan_catalog_entries` beat task removes rows whose target table no longer exists in `information_schema.tables`. Before this fix, a rename or drop of any `cache_*` table left a stale entry in `table_catalog.embedding` that the vector search would still rank high, causing NL2SQL to compile SQL against non-existent tables. The last-resort fallback of the NL2SQL subgraph (see `010-sandbox-sql/010b-nl2sql/` FR-006) was absorbing the final failure, but the data-quality drift is now closed at the source.
 - **[DEBT-002]** — **No staleness detection** — metadata can silently go out of date.
 - **[DEBT-003]** — **`sample_queries` without validation** — can be invalid SQL.
 - **[DEBT-004]** — **`public` schema only** — hardcoded in the task.
