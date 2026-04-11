@@ -37,7 +37,7 @@ This is the task that connects the snapshot of any connector to the vector catal
 
 - **[RESOLVED CL-001]** — **On-demand only**. There is no auto-trigger from `collector_tasks.py` nor an event hook. It is only invoked manually: `enrich_single_table(table_name)` (one table) or `enrich_all_tables(batch_size=50)` (all non-enriched tables). Queue: `embedding` (`celery/app.py:121-122`). **Note**: this contradicts the claim in `MEMORY.md` about "auto-enrichment in collector" (Cat 3 optimizations Mar 2026) — it seems that optimization was not completed or was implemented elsewhere.
 - **[NEEDS CLARIFICATION CL-002]** — The programmatic fallback on LLM failure — when are those entries reviewed?
-- **[NEEDS CLARIFICATION CL-003]** — Does the task support re-enrichment of existing tables (to refresh stale metadata)?
+- **[RESOLVED CL-003]** — **Partial:** `_enrich_table` uses `INSERT ... ON CONFLICT (table_name) DO UPDATE` (`catalog_enrichment_tasks.py:166-204`), so calling `enrich_single_table(table_name)` manually DOES overwrite an existing row with fresh metadata. However, the batch task `enrich_all_tables` only processes entries where `tc.id IS NULL` (line 258-262), i.e., NEW tables only — it will never refresh stale metadata automatically. There is no scheduled re-enrichment, no staleness detection. To refresh an existing table today you must call `enrich_single_table` by hand. See `011-table-catalog/CL-002`. (resolved 2026-04-11 via code inspection)
 
 ## 6. Tech Debt Discovered
 

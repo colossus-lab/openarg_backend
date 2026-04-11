@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered (abstraction extracted from multiple specific connectors)
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Domain + Application + Infrastructure
 **Related plan**: [./plan.md](./plan.md)
 
@@ -91,7 +91,7 @@ Each specific connector (see `002a-bcra/`, `002b-series-tiempo/`, etc.) is a **c
 ## 7. Open Questions (generic pattern)
 
 - **[NEEDS CLARIFICATION CL-001]** — When should a connector have a scheduled snapshot and when only query-on-demand? Today the decision appears ad-hoc. There should be explicit criteria (e.g. frequency of upstream data change, HTTP cost, expected sandbox usage).
-- **[NEEDS CLARIFICATION CL-002]** — What is the naming convention for planner actions? Some are `query_X` (query_bcra, query_series), others are `search_X` (search_ckan). Is there a semantic difference or is it historical inconsistency?
+- **[RESOLVED CL-002]** — **There is a semantic difference**: `query_X` actions hit structured/ID-addressable sources (`query_bcra`, `query_series`, `query_ddjj`, `query_argentina_datos`, `query_georef`, `query_staff`, `query_sesiones`, `query_sandbox`) where the planner already knows which records to fetch. `search_X` actions run free-text search over a catalog that returns ranked results (`search_ckan`, `search_datasets`). The dispatch table at `src/app/application/pipeline/step_executor.py:110-131` cleanly separates the two groups, and `search_datasets` (vector search) / `search_ckan` (fulltext) are precisely the ones that behave like search rather than keyed lookup. (resolved 2026-04-11 via code inspection)
 - **[NEEDS CLARIFICATION CL-003]** — All connectors should honor the global circuit breaker, but today only some integrate it. Remediation plan?
 - **[RESOLVED CL-004]** — 10 downed CKAN portals: **keep them in the active catalog with a circuit breaker**. Architectural decision: the cost of keeping entries blocked by CB is lower than the risk of removing portals that may come back online in the future. The circuit breaker protects them without affecting performance.
 - **[NEEDS CLARIFICATION CL-005]** — Is there an SLO per connector? Today the only health check is binary (UP/DOWN) for 2 connectors; the rest are missing.

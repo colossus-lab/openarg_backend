@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Infrastructure (task only)
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -36,7 +36,7 @@ Monthly ETL that downloads data from **Presupuesto Abierto Nacional** (`presupue
 ## 5. Open Questions
 
 - **[RESOLVED CL-001]** — `PRESUPUESTO_API_TOKEN`: **does not expire and is not rotated** in the current flow. Stable token issued by the Presupuesto Abierto portal. Accepted debt. If the token is invalidated upstream, it is replaced manually via env var + restart.
-- **[NEEDS CLARIFICATION CL-002]** — Are the dimensions (geographic, functional, and programmatic classifiers) refreshed together with the transactional ones or separately?
+- **[RESOLVED CL-002]** — **Separately, but on the same day.** Two distinct Celery tasks scheduled separately in `src/app/infrastructure/celery/app.py:229-238`: `openarg.ingest_presupuesto` (transactional credito/recurso/PEF/transversal) runs `crontab(day_of_month=5, hour=0, minute=0)`, and `openarg.ingest_presupuesto_dimensiones` (clasificadores presupuestarios from DGSIAF) runs 30 minutes later `crontab(day_of_month=5, hour=0, minute=30)`. Both target the `ingest` queue but are independent tasks with independent retry semantics — a failure in one does not block the other. (resolved 2026-04-11 via code inspection)
 - **[NEEDS CLARIFICATION CL-003]** — Does the official endpoint impose rate limits? Not visible in the code.
 
 ## 6. Tech Debt Discovered

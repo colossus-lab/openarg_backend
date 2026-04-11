@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Infrastructure (meta-task, cross-cutting)
 **Related plan**: [./plan.md](./plan.md)
 
@@ -64,8 +64,8 @@ It was part of **Optimization Category 3 (Mar 2026)** — migration 0019 created
 
 ## 7. Open Questions
 
-- **[NEEDS CLARIFICATION CL-001]** — What happens if a `cache_*` table is renamed? Orphan in `table_catalog`?
-- **[NEEDS CLARIFICATION CL-002]** — Is there a mechanism to detect that metadata is stale (e.g., columns changed)?
+- **[RESOLVED CL-001]** — **Orphan.** `table_catalog` uses `table_name` as the primary key (migration 0019) with no foreign key to `cached_datasets`, and `catalog_enrichment_tasks._enrich_table` only ever `INSERT ... ON CONFLICT (table_name) DO UPDATE`. There is no DELETE path, no trigger, no cleanup task, and `enrich_all_tables` only processes tables where `tc.id IS NULL` (line 252-265). If a `cache_*` table is renamed or dropped the corresponding catalog row remains forever — this is exactly `DEBT-001`. (resolved 2026-04-11 via code inspection)
+- **[RESOLVED CL-002]** — **No.** `enrich_all_tables` (catalog_enrichment_tasks.py:244-281) only targets tables that have NO catalog entry yet (`WHERE tc.id IS NULL`). There is no periodic re-enrichment, no column-diff check, no `updated_at` staleness filter. The only way to refresh metadata is to call `enrich_single_table` manually per table (which does UPSERT). Note: the collector does emit a `schema_drift_detected` log at `collector_tasks.py:882` when a cached table's columns change, but this log is NOT wired to invalidate the catalog. Tracked as `DEBT-002`. (resolved 2026-04-11 via code inspection)
 - **[RESOLVED CL-003]** — **NOT validated**. The LLM generates 3 sample_queries in natural language (prompt `catalog_enrichment.txt:9`), they are parsed to dict in `catalog_enrichment_tasks.py:89` and upserted to `table_catalog` directly (lines 166-204). Without executing against the sandbox. If the LLM generates nonsensical or non-executable queries, they persist as-is. **Concrete debt already captured in `DEBT-003`**.
 
 ## 8. Tech Debt Discovered

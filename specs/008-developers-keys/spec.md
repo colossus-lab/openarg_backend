@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Presentation + Application + Infrastructure
 **Related plan**: [./plan.md](./plan.md)
 
@@ -60,7 +60,7 @@ Endpoints for **authenticated users** to manage their own **API keys**: create, 
 
 ## 6. Open Questions
 
-- **[NEEDS CLARIFICATION CL-001]** — Is `expires_at` never set from any endpoint? It looks like dead code.
+- **[RESOLVED CL-001]** — Confirmed dead code: `expires_at` is **never** written by any endpoint. `POST /developers/keys` (developers_router.py:65-72) builds `ApiKey(user_id=..., key_hash=..., key_prefix=..., name=..., plan="free")` with no `expires_at` argument; grepping the code only finds **reads** (`verify_api_key` at `api_key_service.py:69`) and the nullable schema column (`api_key_mappings.py:48`, alembic migration 0027). Same issue as `007-public-api/CL-001`. (resolved 2026-04-11 via code inspection)
 - **[NEEDS CLARIFICATION CL-002]** — Why 1 key per user? Plan to allow more?
 - **[RESOLVED CL-003]** — `BACKEND_API_KEY`: **currently NOT rotated**. Manual rotation on demand (requires coordinated backend + frontend restart). Accepted debt, not a priority. If compromised, it is rotated manually by editing env vars and restarting services.
 

@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Infrastructure (transparent to pipeline)
 **Related plan**: [./plan.md](./plan.md)
 
@@ -77,7 +77,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 
 - **[RESOLVED CL-001]** — **No cleanup task exists**. Confirmed: greps for `query_cache` in `celery/tasks/` and for `DELETE.*query_cache` across the entire codebase return zero matches. Expired entries **accumulate indefinitely**; they are only filtered on reads via `expires_at > now()`. The HNSW index degrades with dead entries. Concrete debt — see `FIX_BACKLOG.md#FIX-007`.
 - **[NEEDS CLARIFICATION CL-002]** — Was the 0.92 threshold validated empirically? Against which dataset?
-- **[NEEDS CLARIFICATION CL-003]** — `ttl_for_intent` mapping — where is the mapping decided? Hardcoded.
+- **[RESOLVED CL-003]** — The mapping is a hardcoded `INTENT_TTL_MAP: dict[str, int]` in `src/app/infrastructure/adapters/cache/semantic_cache.py:23-44`, with only two TTL buckets: `TTL_DAILY = 1800s` (30 min) for volatile intents like `inflacion`, `series`, `emae`, `tipo_cambio`, `reservas`, `desempleo`, and `TTL_STATIC = 7200s` (2h) for stable ones like `ddjj`, `sesiones`, `ckan`, `catalogo`, `georef`. `ttl_for_intent()` tokenises the intent string and falls back to `TTL_DAILY` when nothing matches. No config file, no env var, no per-user override. (resolved 2026-04-11 via code inspection)
 - **[RESOLVED CL-004]** — **Direct verification in the production DB (2026-04-10)**: `query_cache` has **just 1 entry total** (created on 2026-04-06, expired), table size 1248 kB (mostly HNSW index overhead). **No hit-rate metrics are exported** — `MetricsCollector` has `record_cache_event()` but it has not been verified whether it is wired into all paths. With current traffic volume (~28 historical queries) the hit rate is trivially 0%. **Prerequisites for a useful metric**: (1) volume ≥100 queries/day; (2) consistent wiring of `record_cache_event` in the `cache.py` node; (3) exposure in `/api/v1/metrics`. Without those, measuring hit rate is not actionable.
 - **[NEEDS CLARIFICATION CL-005]** — What happens to the cached response if the underlying model changes (e.g. an upgrade of Claude Haiku)?
 

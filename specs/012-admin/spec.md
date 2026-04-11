@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Presentation + Infrastructure
 **Related plan**: [./plan.md](./plan.md)
 
@@ -62,7 +62,7 @@
 
 ## 7. Open Questions
 
-- **[NEEDS CLARIFICATION CL-001]** — Is there an admin UI (part of the frontend)? What tasks does it actually expose?
+- **[RESOLVED CL-001]** — **No admin UI exists in the frontend today.** There is no `/admin` route, page, or component in `openarg_frontend/src/app` (grep for `/admin` and `admin_router` both return zero matches). All admin task triggering is backend-only via the REST endpoints at `src/app/presentation/http/controllers/admin/tasks_router.py`, which are called directly with `ADMIN_API_KEY` (e.g. from curl/Postman/scripts). The developer portal embedded in `UserMenu.tsx` only handles API keys, not admin tasks. (resolved 2026-04-11 via code inspection)
 - **[RESOLVED CL-002]** — `ADMIN_API_KEY`: **currently NOT rotated**. Manual rotation on demand by editing env vars + restart. Accepted debt, not a priority.
 - **[RESOLVED CL-003]** — **Single request, client retries**. `GET /admin/tasks/status/{celery_task_id}` calls `AsyncResult(id).state` only once and returns the current state (PENDING, STARTED, SUCCESS, FAILURE, RETRY, REVOKED) without blocking. There is no long-polling. See `tasks_router.py:288-327`.
 

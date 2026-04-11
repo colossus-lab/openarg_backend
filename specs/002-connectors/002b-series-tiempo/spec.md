@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Domain + Application + Infrastructure
 **Extends**: [`../spec.md`](../spec.md) (generic connector pattern)
 **Related plan**: [./plan.md](./plan.md)
@@ -74,7 +74,7 @@ The Series de Tiempo connector allows querying Argentina's macroeconomic indicat
 - **[RESOLVED CL-002]** — **Last substantial update: 2026-03-23** (commit `ddd5692` — "Pipeline quality: hardened E2E validations, fix typo handling, IPC nacional, desempleo regional..."). In that commit at least the inflation ID (`148.3_INIVELNAL_DICI_M_26`) and the regional unemployment logic were updated. Original catalog commit: 2026-02-28 (`225052f2`). Keywords reformat commit: 2026-03-20 (`d81657b`, CI autoformatting only). **Since 2026-03-23: 18 days without substantive changes** (today 2026-04-10). The 15 series IDs **have not been massively validated against upstream since then** — they could have obsolete IDs undetected.
 - **[NEEDS CLARIFICATION CL-003]** — The regional-upgrade is hardcoded for unemployment. Should it be extended to other indicators (regional GDP, regional CPI)?
 - **[NEEDS CLARIFICATION CL-004]** — What happens if the user asks for a series that does exist in datos.gob.ar but is not in the curated catalog? Today it falls back to dynamic `/search` — does it work well?
-- **[NEEDS CLARIFICATION CL-005]** — The `percent_change × 100` conversion is not marked in metadata. Does the downstream consumer know this?
+- **[RESOLVED CL-005]** — **It IS marked now.** `series_tiempo_adapter.py:314-319,338-339` sets `metadata["unit"] = "percent"` and `metadata["value_scale"] = "percentage_points"` whenever `representation == "percent_change"`, exactly so the analyst prompt, charts and UI know not to display "15.2%" as "1520%". Superseded by fixed `DEBT-005`. (resolved 2026-04-11 via code inspection)
 
 ## 8. Tech Debt Discovered
 

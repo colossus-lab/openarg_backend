@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Infrastructure (task only)
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -33,7 +33,7 @@ Scraper for **DKAN** portals (a CKAN fork used by some Argentine cities). It cur
 ## 5. Open Questions
 
 - **[NEEDS CLARIFICATION CL-001]** — Is there a plan to support more DKAN portals? Or keep only Rosario/Jujuy?
-- **[NEEDS CLARIFICATION CL-002]** — Does the DKAN API have stable endpoints, or does it require HTML scraping?
+- **[RESOLVED CL-002]** — **Stable JSON API, no HTML scraping.** Both portals expose the DKAN REST API at `/api/1/metastore/schemas/dataset/items` (Rosario: `https://datosabiertos.rosario.gob.ar/api/...`, Jujuy: `https://datos.gajujuy.gob.ar/api/...`), see `src/app/infrastructure/celery/tasks/dkan_tasks.py:40-59`. The task fetches JSON with `httpx`, reads `data.distribution[].downloadURL` and downloads CSVs directly; no `BeautifulSoup` / HTML parsing is used. (resolved 2026-04-11 via code inspection)
 
 ## 6. Tech Debt Discovered
 

@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Domain + Application + Infrastructure
 **Related plan**: [./plan.md](./plan.md)
 
@@ -116,7 +116,7 @@ It is the **only financial-monetary data connector** in the system and the only 
 - **[RESOLVED CL-001]** — Duplicate methods `get_principales_variables` and `get_variable_historica` both call the same `/Cotizaciones` endpoint. **Decision**: remove both, leave only `get_cotizaciones`. The v2 PrincipalesVariables endpoint was deprecated by BCRA and there is no migration to another source. See [`FIX_BACKLOG.md#fix-002-bcra-deduplicate-broken-methods`](../../FIX_BACKLOG.md).
 - **[RESOLVED CL-002]** — **Dead code**. Grep confirms that **there are no callers** to `BCRAAdapter.search()` in the codebase. The pipeline step `execute_bcra_step` calls `get_cotizaciones()` / `get_principales_variables()` / `get_variable_historica()` directly (`bcra.py:28-46`). **Action**: remove `search()` from the adapter along with FIX-002 (dedup). It has no consumers.
 - **[RESOLVED CL-003]** — Schedule `crontab(hour=4, minute=0)`: **will be interpreted as ART (America/Argentina/Buenos_Aires)**. Requires explicitly setting `celery_app.conf.timezone` (today it is not configured, interprets UTC by default). See [`FIX_BACKLOG.md#fix-003-bcra-schedule-timezone--art`](../../FIX_BACKLOG.md).
-- **[NEEDS CLARIFICATION CL-004]** — What happens with currencies other than USD? The endpoint returns them all and filtering is client-side. Do we need to register separate snapshots per currency?
+- **[RESOLVED CL-004]** — **All currencies are supported on-demand, filtered client-side. Only a single combined snapshot exists.** The pipeline step at `src/app/application/pipeline/connectors/bcra.py:46-50` passes `moneda=params.get("moneda", "USD")` through to `BCRAAdapter.get_cotizaciones`, which filters `records = [r for r in records if r.get("codigoMoneda") == moneda]` at `bcra_adapter.py:68-69`. The scheduled `snapshot_bcra` task (`celery/app.py:239-243`) is a single daily job — there are no per-currency snapshots. So "what happens with non-USD" today: works at query-time if the planner requests it, but there is no persisted history per currency. (resolved 2026-04-11 via code inspection)
 - **[RESOLVED CL-005]** — Silent degradation **is not acceptable**. When BCRA fails, the system MUST surface the error to the user: add an entry to `step_warnings`, increment connector metrics, integrate the circuit breaker, and let the analyst explicitly mention that data was missing. No more silent `return []`. See [`FIX_BACKLOG.md#fix-001-bcra-silent-degradation--surface-errors`](../../FIX_BACKLOG.md).
 - **[PARTIAL CL-006]** — **No explanatory comment in code**. It is a hardcoded literal in `bcra_adapter.py:32`, treated as a static User-Agent. It has not been verified against official BCRA docs whether the public API **requires** this exact token, accepts any value, or does not need it at all. **Suggested action**: test manually with curl without the header against `https://api.bcra.gob.ar/estadisticascambiarias/v1.0/Cotizaciones` to verify. Low priority — the current value works in production.
 - **[NEEDS CLARIFICATION CL-007]** — BCRA API rate limits are not documented in the code. Do we know them? Are we getting close to them with the current schedule?

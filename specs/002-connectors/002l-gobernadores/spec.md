@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Infrastructure (task only)
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -28,7 +28,7 @@ ETL that queries **Wikidata SPARQL** to obtain the current list of governors of 
 
 - **[RESOLVED CL-001]** — Task registered as `scrape_gobernadores` (not `snapshot_gobernadores`). Schedule: **`crontab(day_of_month=1, hour=2, minute=15)`** — first day of the month at 02:15 ART. Queue: `scraper`. See `celery/app.py:297-300`.
 - **[NEEDS CLARIFICATION CL-002]** — Wikidata may contain incorrect or stale information. Is there any validation?
-- **[NEEDS CLARIFICATION CL-003]** — Is there an equivalent connector for mayors?
+- **[RESOLVED CL-003]** — **No.** Glob for files matching `intendente*`, `alcalde*`, `mayor*` under `src/app/infrastructure/adapters/connectors` and `src/app/infrastructure/celery/tasks` returns zero files. Only `gobernadores_tasks.py` exists — mayors/intendentes are not ingested anywhere in the codebase. (resolved 2026-04-11 via code inspection)
 
 ## 5. Tech Debt Discovered
 

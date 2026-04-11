@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Application + Infrastructure
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -77,7 +77,7 @@ It is the only connector in the system with an **explicitly incomplete dataset**
 
 - **[RESOLVED CL-001]** — Expansion of the DDJJ dataset to other branches (senadores, executive, judges) is **accepted as out of scope for now**. The current dataset (195 diputados) is sufficient for current use cases.
 - **[NEEDS CLARIFICATION CL-002]** — How is the JSON refreshed when new declarations are available? Manual process or script?
-- **[NEEDS CLARIFICATION CL-003]** — Is there an abstract port for DDJJ? The adapter appears to be standalone (similar to the BCRA case).
+- **[RESOLVED CL-003]** — **No abstract port exists.** `src/app/infrastructure/adapters/connectors/ddjj_adapter.py` defines `class DDJJAdapter:` with no inheritance, and there is no file under `src/app/domain/ports/` with `IDDJJ`, `DDJJPort`, `DdjjPort`, `IDdjj` or any similar interface. Same hexagonal violation as BCRA — already tracked as `DEBT-001`. (resolved 2026-04-11 via code inspection)
 - **[NEEDS CLARIFICATION CL-004]** — The regex for stripping "EN EL PAÍS/EXTERIOR" from asset types is fragile. Is the upstream format consistent?
 
 ## 8. Tech Debt Discovered

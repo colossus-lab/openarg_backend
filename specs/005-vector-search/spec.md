@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Domain + Infrastructure
 **Related plan**: [./plan.md](./plan.md)
 
@@ -73,8 +73,8 @@
 
 - **[NEEDS CLARIFICATION CL-001]** — Is the `min_similarity=0.55` threshold empirical? Against which test dataset?
 - **[NEEDS CLARIFICATION CL-002]** — Is `rrf_k=60` tuned or is it the standard default?
-- **[NEEDS CLARIFICATION CL-003]** — What happens when a dataset has >3 chunks? The current strategy is hardcoded to 3.
-- **[NEEDS CLARIFICATION CL-004]** — `_has_lexical_signal` uses a length-3 heuristic. Are there edge cases?
+- **[RESOLVED CL-003]** — A dataset **cannot** have more than 3 chunks. `index_dataset_embedding` in `src/app/infrastructure/celery/tasks/scraper_tasks.py:595-674` builds a fixed pipeline: chunk 1 (main metadata), chunk 2 (columns, only if `cols` non-empty), chunk 3 (context/use-case). There is no loop over a variable number of chunks — datasets without columns end up with 2 chunks, all others with 3. The "3" is a generation cap, not a retrieval cap. (resolved 2026-04-11 via code inspection)
+- **[RESOLVED CL-004]** — The heuristic at `src/app/infrastructure/adapters/search/pgvector_search_adapter.py:97-101` is: tokenise the query on `\w+`, keep tokens with length ≥ 3, return `True` if at least **2 meaningful tokens** remain. Edge cases: single-word queries like "inflación" return `False` (1 meaningful token) → BM25 is skipped, so lexical-only queries with a single keyword rely on pure vector. Queries with lots of stopwords (`de`, `la`, `el`) also collapse to few meaningful tokens. Tracked separately as `DEBT-002`. (resolved 2026-04-11 via code inspection)
 - **[NEEDS CLARIFICATION CL-005]** — **`MEMORY.md`** mentions "Vector search lacks threshold, reranking, dedup" as known debt. Plan to close it?
 
 ## 8. Tech Debt Discovered
