@@ -70,6 +70,7 @@ class AnthropicLLMAdapter(ILLMProvider):
         messages: list[LLMMessage],
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        usage_out: dict[str, int] | None = None,
     ) -> AsyncIterator[str]:
         system_prompt, api_messages = self._build_messages(messages)
 
@@ -85,3 +86,17 @@ class AnthropicLLMAdapter(ILLMProvider):
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 yield text
+
+            # FIX-006: capture usage from the final message metadata
+            if usage_out is not None:
+                try:
+                    final_msg = await stream.get_final_message()
+                    usage = getattr(final_msg, "usage", None)
+                    if usage is not None:
+                        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+                        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+                        usage_out["input_tokens"] = input_tokens
+                        usage_out["output_tokens"] = output_tokens
+                        usage_out["total_tokens"] = input_tokens + output_tokens
+                except (AttributeError, TypeError):
+                    pass  # usage not available

@@ -108,12 +108,16 @@ class FallbackLLMAdapter(ILLMProvider):
         messages: list[LLMMessage],
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        usage_out: dict[str, int] | None = None,
     ) -> AsyncIterator[str]:
         last_exc: Exception | None = None
         for i, svc in enumerate(self.chain):
             name = type(svc).__name__
             try:
-                stream = svc.chat_stream(messages, temperature, max_tokens)
+                # FIX-006: forward usage_out to whichever adapter serves the stream
+                stream = svc.chat_stream(
+                    messages, temperature, max_tokens, usage_out=usage_out
+                )
                 first_chunk = await anext(stream)
                 logger.info("LLM stream served by %s", name)
                 yield first_chunk

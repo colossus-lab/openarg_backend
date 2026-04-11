@@ -182,11 +182,13 @@ async def analyst_node(state: OpenArgState) -> dict:
 
         full_text = ""
         stream_buf = ""
+        usage_dict: dict[str, int] = {}
         try:
             async for chunk_text in deps.llm.chat_stream(
                 messages=messages,
                 temperature=0.2,
                 max_tokens=8192,
+                usage_out=usage_dict,
             ):
                 full_text += chunk_text
                 stream_buf += chunk_text
@@ -236,7 +238,10 @@ async def analyst_node(state: OpenArgState) -> dict:
         # (adding disclaimers triggers negative-phrase detection in E2E tests
         # and confuses users who see "Nota:" before every uncertain answer)
 
-        tokens_used = 0  # Token count not available in streaming mode
+        # FIX-006: read token usage from usage_dict populated by the adapter.
+        # If the adapter doesn't support it (or the non-streaming fallback was
+        # used), tokens_used stays 0 — matches previous behavior for that path.
+        tokens_used = usage_dict.get("total_tokens", 0)
 
         return {
             "analysis_prompt": analysis_prompt,

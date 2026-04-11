@@ -139,6 +139,7 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
         messages: list[LLMMessage],
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        usage_out: dict[str, int] | None = None,
     ) -> AsyncIterator[str]:
         model, chat_messages = self._prepare_call(messages)
 
@@ -152,7 +153,9 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
         )
 
         yielded_any = False
+        last_chunk = None
         async for chunk in response:
+            last_chunk = chunk
             try:
                 if chunk.text:
                     yield chunk.text
@@ -161,3 +164,16 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
                 continue
         if not yielded_any:
             raise RuntimeError("Gemini stream returned no content")
+
+        # FIX-006: capture usage from the final chunk if available
+        if usage_out is not None and last_chunk is not None:
+            try:
+                meta = getattr(last_chunk, "usage_metadata", None)
+                if meta is not None:
+                    input_tokens = int(getattr(meta, "prompt_token_count", 0) or 0)
+                    output_tokens = int(getattr(meta, "candidates_token_count", 0) or 0)
+                    usage_out["input_tokens"] = input_tokens
+                    usage_out["output_tokens"] = output_tokens
+                    usage_out["total_tokens"] = input_tokens + output_tokens
+            except (AttributeError, TypeError):
+                pass  # usage metadata not available for this chunk
