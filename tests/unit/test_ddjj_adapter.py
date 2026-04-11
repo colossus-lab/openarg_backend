@@ -110,3 +110,36 @@ class TestDDJJAdapter:
         result = adapter.search("perez")
         bienes = result.records[0]["resumen_bienes"]
         assert "INMUEBLES" in str(bienes)
+
+    def test_ranking_rows_are_compact(self, adapter):
+        """FIX-007 / FR-004a: ranking rows MUST NOT include ``bienes_detalle``
+        or ``resumen_bienes``.
+
+        The verbose shape blew each row past 5KB and caused the analyst
+        LLM to run out of ``max_tokens`` after ~4 rows, then hallucinate
+        a "records 5–10 incompletos" disclaimer. The compact shape keeps
+        top-level numeric and identity fields only so the model can fit
+        all N requested rows in its output budget.
+        """
+        result = adapter.ranking(sort_by="patrimonio", top=2, order="desc")
+        assert len(result.records) == 2
+        for row in result.records:
+            assert "nombre" in row
+            assert "patrimonio_cierre" in row
+            assert "cantidad_bienes" in row
+            assert "bienes_detalle" not in row, (
+                "ranking rows must not include bienes_detalle — see FIX-007"
+            )
+            assert "resumen_bienes" not in row, (
+                "ranking rows must not include resumen_bienes — see FIX-007"
+            )
+
+    def test_search_rows_keep_full_detail(self, adapter):
+        """Non-ranking paths (search, get_by_name) still return the full
+        shape with ``bienes_detalle`` + ``resumen_bienes`` so the user
+        looking up ONE person gets their asset list."""
+        result = adapter.search("perez")
+        assert len(result.records) == 1
+        row = result.records[0]
+        assert "bienes_detalle" in row
+        assert "resumen_bienes" in row

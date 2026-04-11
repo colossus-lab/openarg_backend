@@ -62,6 +62,7 @@ The phase also owns the `_background_tasks: set[asyncio.Task]` registry and the 
 - **FR-034**: Finalize MUST audit the query (intent, duration, user_id).
 - **FR-035**: Finalize MUST compute `duration_ms` from `_start_time`.
 - **FR-036**: Finalize MUST trigger cache write + memory update as fire-and-forget.
+- **FR-036a**: Finalize MUST return ``chart_data``, ``map_data``, ``confidence``, ``citations``, ``sources`` and ``documents`` in its return dict so the LangGraph `updates` stream can forward them to the browser's `complete` event. LangGraph passes only the node's return dict to the update handler — anything the finalize node reads from state but does not re-emit is silently lost. Regression-tested by a unit test on `finalize_node` output keys (FIX-008 fix, 2026-04-11).
 
 ### Streaming (terminal event)
 - **FR-037**: The pipeline MUST support both `updates` (completed nodes) and `custom` (events emitted by nodes) modes in `astream()`.

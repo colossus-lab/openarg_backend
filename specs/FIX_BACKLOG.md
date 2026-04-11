@@ -460,7 +460,7 @@ for legajo, curr in curr_by_legajo.items():
 ## FIX-007: DDJJ top-N requests return partial results
 
 **Priority**: Medium (correctness)
-**Status**: Open — reported 2026-04-11
+**Status**: **DONE 2026-04-11** — ranking rows now use a compact shape
 **Module**: `002-connectors/` (DDJJ connector) + `001-query-pipeline/`
 **Type**: Correctness / data completeness
 
@@ -498,9 +498,9 @@ analyst prompt's final rendered table.
 ## FIX-008: Chart rendering regression in chat bridge
 
 **Priority**: Medium (visible UX regression)
-**Status**: Open — reported 2026-04-11
+**Status**: **DONE 2026-04-11** — finalize_node now returns chart_data in its update dict
 **Module**: `001-chat-bridge/` + `001-query-pipeline/`
-**Type**: Regression
+**Type**: Regression (latent since LangGraph Phase 1)
 
 ### Problem
 Charts no longer render in the chat UI for queries that historically produced

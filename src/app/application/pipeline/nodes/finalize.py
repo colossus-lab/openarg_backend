@@ -114,11 +114,18 @@ async def finalize_node(state: OpenArgState) -> dict:
         )
 
     duration_ms = int((time.monotonic() - state.get("_start_time", time.monotonic())) * 1000)
+    # FR-036a: LangGraph's ``updates`` stream forwards ONLY what this node
+    # returns; fields left out are silently dropped from the ``complete``
+    # event even if they were populated earlier in the pipeline. Keep
+    # chart_data, map_data, confidence and citations in lockstep here.
     return {
         "clean_answer": clean_answer,
         "sources": sources,
         "documents": documents,
+        "chart_data": chart_data,
         "map_data": map_data,
+        "confidence": state.get("confidence", 1.0),
+        "citations": state.get("citations", []),
         "warnings": all_warnings,
         "duration_ms": duration_ms,
     }

@@ -7,6 +7,7 @@ import time
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from app.domain.entities.connectors.data_result import DataResult
 
@@ -125,9 +126,14 @@ class DDJJAdapter:
         )
         top_records = sorted_ds[:top]
         label = "mayor" if order == "desc" else "menor"
+        # FR-004a: ranking rows MUST be compact. Passing ``compact=True``
+        # strips ``bienes_detalle``, ``bienes`` and ``resumen_bienes`` so
+        # the analyst fits all N records in its output budget. See
+        # FIX-007 in ``specs/FIX_BACKLOG.md``.
         return self._to_data_result(
             f"Ranking: {top} diputados con {label} {sort_by}",
             top_records,
+            compact=True,
         )
 
     def get_by_name(self, name: str) -> DataResult:
@@ -188,35 +194,49 @@ class DDJJAdapter:
             },
         )
 
-    def _to_data_result(self, title: str, records: list[dict]) -> DataResult:
+    def _to_data_result(
+        self,
+        title: str,
+        records: list[dict],
+        *,
+        compact: bool = False,
+    ) -> DataResult:
+        """Format records as a DataResult.
+
+        When ``compact=True`` the per-asset ``bienes_detalle`` and the
+        grouped ``resumen_bienes`` are omitted so each row stays under
+        ~500 chars. Used by ``ranking()`` (FR-004a / FIX-007) where the
+        analyst has to fit N rows in its output budget and elaborating
+        every asset would blow past ``max_tokens`` after ~4 rows.
+        """
         now = datetime.now(UTC).isoformat()
         formatted = []
         for r in records:
             bienes = r.get("bienes", [])
-            formatted.append(
-                {
-                    "cuit": r.get("cuit", ""),
-                    "nombre": r.get("nombre", ""),
-                    "sexo": r.get("sexo", ""),
-                    "fecha_nacimiento": r.get("fechaNacimiento", ""),
-                    "estado_civil": r.get("estadoCivil", ""),
-                    "cargo": r.get("cargo", ""),
-                    "organismo": r.get("organismo", ""),
-                    "anio_declaracion": r.get("anioDeclaracion", ""),
-                    "tipo_declaracion": r.get("tipoDeclaracion", ""),
-                    "bienes_inicio": r.get("bienesInicio", 0),
-                    "deudas_inicio": r.get("deudasInicio", 0),
-                    "bienes_cierre": r.get("bienesCierre", 0),
-                    "deudas_cierre": r.get("deudasCierre", 0),
-                    "patrimonio_cierre": r.get("patrimonioCierre", 0),
-                    "variacion_patrimonial": r.get("bienesCierre", 0) - r.get("bienesInicio", 0),
-                    "ingresos_trabajo_neto": r.get("ingresosTrabajoNeto", 0),
-                    "gastos_personales": r.get("gastosPersonales", 0),
-                    "cantidad_bienes": len(bienes),
-                    "bienes_detalle": bienes,
-                    "resumen_bienes": _summarize_assets(bienes),
-                }
-            )
+            row: dict[str, Any] = {
+                "cuit": r.get("cuit", ""),
+                "nombre": r.get("nombre", ""),
+                "sexo": r.get("sexo", ""),
+                "fecha_nacimiento": r.get("fechaNacimiento", ""),
+                "estado_civil": r.get("estadoCivil", ""),
+                "cargo": r.get("cargo", ""),
+                "organismo": r.get("organismo", ""),
+                "anio_declaracion": r.get("anioDeclaracion", ""),
+                "tipo_declaracion": r.get("tipoDeclaracion", ""),
+                "bienes_inicio": r.get("bienesInicio", 0),
+                "deudas_inicio": r.get("deudasInicio", 0),
+                "bienes_cierre": r.get("bienesCierre", 0),
+                "deudas_cierre": r.get("deudasCierre", 0),
+                "patrimonio_cierre": r.get("patrimonioCierre", 0),
+                "variacion_patrimonial": r.get("bienesCierre", 0) - r.get("bienesInicio", 0),
+                "ingresos_trabajo_neto": r.get("ingresosTrabajoNeto", 0),
+                "gastos_personales": r.get("gastosPersonales", 0),
+                "cantidad_bienes": len(bienes),
+            }
+            if not compact:
+                row["bienes_detalle"] = bienes
+                row["resumen_bienes"] = _summarize_assets(bienes)
+            formatted.append(row)
 
         return DataResult(
             source="ddjj:oficina_anticorrupcion",
