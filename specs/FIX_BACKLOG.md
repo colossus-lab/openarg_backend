@@ -7,7 +7,7 @@
 - Priority: **High** (security or user-visible correctness) / **Medium** (structural debt) / **Low** (nice-to-fix).
 - Status: `Pending` | `In progress` | `Completed`.
 
-**Overall status**: Updated 2026-04-11 after a second fix pass with full spec-first discipline for FIX-004. 6 out of 8 fixes applied (FIX-001, FIX-002, FIX-003, FIX-004, FIX-006, FIX-007). The remaining 2 are FIX-005 (requires front+back JWT coordination) and FIX-008 (requires a staff_changes migration).
+**Overall status**: Updated 2026-04-11 after a third fix pass under strict §0.5 spec-first discipline. **7 out of 8** fixes applied (FIX-001, FIX-002, FIX-003, FIX-004, FIX-006, FIX-007, FIX-008). The only remaining item is FIX-005 (X-User-Email → JWT server-side validation), which is deliberately deferred because it requires coordinated front+back rollout that cannot be done autonomously.
 
 **Relation to specs**: Each fix is referenced from its corresponding `spec.md` in the "Open Questions" section (now with marker `[RESOLVED CL-XXX]` → `specs/FIX_BACKLOG.md#FIX-NNN`).
 
@@ -24,7 +24,7 @@
 | FIX-005 | **High (security)** | `003-auth` | X-User-Email → JWT server-side validation | Pending (front+back coord.) |
 | FIX-006 | Medium | `001-query-pipeline` | Token counting via Bedrock stream metadata | ✅ Completed 2026-04-10 |
 | FIX-007 | Medium | `004-semantic-cache` | Semantic cache cleanup task (expired entries never deleted) | ✅ Completed 2026-04-10 |
-| FIX-008 | Low-Medium | `002f-staff` | Staff diff misses field changes (transfers between offices invisible) | Pending (requires migration) |
+| FIX-008 | Low-Medium | `002f-staff` | Staff diff misses field changes (transfers between offices invisible) | ✅ Completed 2026-04-11 |
 
 ---
 

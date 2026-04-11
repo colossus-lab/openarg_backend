@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, date, datetime
 
@@ -74,6 +75,105 @@ def _normalize_record(raw: dict) -> dict:
     }
 
 
+# FIX-008 / FR-006 / FR-009: tracked fields for update detection. Only
+# these three fields cause a "tipo='update'" event; other differences
+# (apellido casing, nombre whitespace) are ignored so the changes feed
+# stays signal-heavy.
+_TRACKED_STAFF_FIELDS: tuple[str, ...] = ("area_desempeno", "escalafon", "convenio")
+
+
+def _compute_staff_changes(
+    prev_by_legajo: dict[str, dict],
+    current: list[dict],
+    now: datetime,
+    *,
+    is_first_run: bool,
+) -> tuple[list[dict], int, int, int]:
+    """Compute altas / bajas / updates between two consecutive staff snapshots.
+
+    Pure function — no DB access, no clock, no Celery — so unit tests
+    can exercise it directly with dict fixtures. The Celery task
+    ``snapshot_staff`` is the only production caller and is responsible
+    for fetching the two snapshots and persisting the returned events.
+
+    Parameters:
+        prev_by_legajo: map of ``legajo → {apellido, nombre,
+            area_desempeno, escalafon, convenio}`` from the previous
+            snapshot row.
+        current: list of normalized records from the current snapshot
+            (shape produced by ``_normalize_record``).
+        now: UTC timestamp to stamp onto every event's ``detected_at``.
+        is_first_run: if True, return an empty event list regardless
+            (FR-013 — no events on a cold start so the first run does
+            not emit 3600+ false altas).
+
+    Returns:
+        (changes, alta_count, baja_count, update_count) where
+        ``changes`` is the full list of event dicts ready for the
+        INSERT, and the three counts are the per-category totals for
+        logging and metrics.
+    """
+    if is_first_run:
+        return [], 0, 0, 0
+
+    prev_legajos = set(prev_by_legajo.keys())
+    current_legajos = {r["legajo"] for r in current if r["legajo"]}
+
+    altas = [r for r in current if r["legajo"] and r["legajo"] not in prev_legajos]
+    bajas_legajos = prev_legajos - current_legajos
+
+    changes: list[dict] = []
+    for r in altas:
+        changes.append({**r, "tipo": "alta", "detected_at": now, "changes_json": None})
+
+    for leg in bajas_legajos:
+        info = prev_by_legajo.get(leg, {})
+        changes.append(
+            {
+                "legajo": leg,
+                "apellido": info.get("apellido", ""),
+                "nombre": info.get("nombre", ""),
+                "area_desempeno": info.get("area_desempeno", ""),
+                "tipo": "baja",
+                "detected_at": now,
+                "changes_json": None,
+            }
+        )
+
+    # FR-009/FR-010: for each legajo present in both snapshots, compare
+    # the tracked fields. Record one "update" event per legajo with a
+    # changes_json naming only the fields that actually differed. An
+    # empty diff never becomes an event.
+    update_count = 0
+    for curr_rec in current:
+        legajo = curr_rec["legajo"]
+        if not legajo or legajo not in prev_by_legajo:
+            continue
+        prev_info = prev_by_legajo[legajo]
+        diff: dict[str, dict] = {}
+        for field in _TRACKED_STAFF_FIELDS:
+            old_val = prev_info.get(field)
+            new_val = curr_rec.get(field)
+            if old_val != new_val:
+                diff[field] = {"from": old_val, "to": new_val}
+        if not diff:
+            continue
+        changes.append(
+            {
+                "legajo": legajo,
+                "apellido": curr_rec.get("apellido", ""),
+                "nombre": curr_rec.get("nombre", ""),
+                "area_desempeno": curr_rec.get("area_desempeno", ""),
+                "tipo": "update",
+                "detected_at": now,
+                "changes_json": diff,
+            }
+        )
+        update_count += 1
+
+    return changes, len(altas), len(bajas_legajos), update_count
+
+
 @celery_app.task(
     name="openarg.snapshot_staff",
     bind=True,
@@ -99,7 +199,6 @@ def snapshot_staff(self):
         return {"status": "empty", "records": 0}
 
     current = [_normalize_record(r) for r in raw_records]
-    current_legajos = {r["legajo"] for r in current if r["legajo"]}
     logger.info("Downloaded %d staff records from HCDN", len(current))
 
     # 2. Get legajos from previous snapshot
@@ -110,22 +209,26 @@ def snapshot_staff(self):
                 {"today": today},
             ).scalar()
 
-            prev_legajos: set[str] = set()
             prev_by_legajo: dict[str, dict] = {}
             if prev_date_row:
+                # FIX-008: include escalafon and convenio in the SELECT
+                # so _compute_staff_changes can detect update events on
+                # the three tracked fields (FR-006, FR-009).
                 rows = conn.execute(
                     text(
-                        "SELECT legajo, apellido, nombre, area_desempeno "
+                        "SELECT legajo, apellido, nombre, area_desempeno, "
+                        "escalafon, convenio "
                         "FROM staff_snapshots WHERE snapshot_date = :d"
                     ),
                     {"d": prev_date_row},
                 ).fetchall()
                 for r in rows:
-                    prev_legajos.add(r.legajo)
                     prev_by_legajo[r.legajo] = {
                         "apellido": r.apellido,
                         "nombre": r.nombre,
                         "area_desempeno": r.area_desempeno,
+                        "escalafon": r.escalafon,
+                        "convenio": r.convenio,
                     }
     except SoftTimeLimitExceeded:
         raise
@@ -133,30 +236,15 @@ def snapshot_staff(self):
         logger.error("Failed to read previous snapshot: %s", exc)
         raise self.retry(exc=exc)
 
-    # 3. Diff: altas (new) and bajas (gone)
+    # 3. Diff: altas (new), bajas (gone), and updates (FR-006/FR-009 — FIX-008).
+    #    Pure function — no DB access, no clock — so unit tests can hit it
+    #    directly with dict fixtures.
     is_first_run = not prev_date_row
     now = datetime.now(UTC)
-    altas = [r for r in current if r["legajo"] and r["legajo"] not in prev_legajos]
-    bajas_legajos = prev_legajos - current_legajos
-
-    # On first run, skip recording changes (all 3600+ would be "altas")
-    changes: list[dict] = []
-    if not is_first_run:
-        for r in altas:
-            changes.append({**r, "tipo": "alta", "detected_at": now})
-        for leg in bajas_legajos:
-            info = prev_by_legajo.get(leg, {})
-            changes.append(
-                {
-                    "legajo": leg,
-                    "apellido": info.get("apellido", ""),
-                    "nombre": info.get("nombre", ""),
-                    "area_desempeno": info.get("area_desempeno", ""),
-                    "tipo": "baja",
-                    "detected_at": now,
-                }
-            )
-    else:
+    changes, alta_count, baja_count, update_count = _compute_staff_changes(
+        prev_by_legajo, current, now, is_first_run=is_first_run
+    )
+    if is_first_run:
         logger.info("First staff snapshot — skipping change detection")
 
     # 4. Persist snapshot + changes in a single transaction
@@ -174,11 +262,16 @@ def snapshot_staff(self):
                 )
 
             if changes:
+                # FR-010: serialize changes_json to a JSON string for
+                # psycopg's JSONB binding. None values stay None so
+                # altas/bajas leave the column NULL.
                 conn.execute(
                     text(
                         "INSERT INTO staff_changes "
-                        "(legajo, apellido, nombre, area_desempeno, tipo, detected_at) "
-                        "VALUES (:legajo, :apellido, :nombre, :area_desempeno, :tipo, :detected_at)"
+                        "(legajo, apellido, nombre, area_desempeno, tipo, "
+                        "detected_at, changes_json) "
+                        "VALUES (:legajo, :apellido, :nombre, :area_desempeno, "
+                        ":tipo, :detected_at, CAST(:changes_json AS JSONB))"
                     ),
                     [
                         {
@@ -188,6 +281,11 @@ def snapshot_staff(self):
                             "area_desempeno": c["area_desempeno"],
                             "tipo": c["tipo"],
                             "detected_at": c["detected_at"],
+                            "changes_json": (
+                                json.dumps(c["changes_json"], ensure_ascii=False)
+                                if c.get("changes_json") is not None
+                                else None
+                            ),
                         }
                         for c in changes
                     ],
@@ -199,17 +297,19 @@ def snapshot_staff(self):
         raise self.retry(exc=exc)
 
     logger.info(
-        "Staff snapshot persisted: %d employees, %d altas, %d bajas (first_run=%s)",
+        "Staff snapshot persisted: %d employees, %d altas, %d bajas, %d updates (first_run=%s)",
         len(current),
-        len(altas),
-        len(bajas_legajos),
+        alta_count,
+        baja_count,
+        update_count,
         is_first_run,
     )
     return {
         "status": "ok",
         "snapshot_date": str(today),
         "total": len(current),
-        "altas": len(altas),
-        "bajas": len(bajas_legajos),
+        "altas": alta_count,
+        "bajas": baja_count,
+        "updates": update_count,
         "first_run": is_first_run,
     }
