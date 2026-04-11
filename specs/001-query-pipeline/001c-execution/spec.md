@@ -73,7 +73,7 @@ The phase exits with either populated `data_results` and `step_warnings`, or emp
 - **Individual connector specs** — see `002-connectors/`.
 - **Circuit breaker + retry decorator** — see `009-resilience/` (if present).
 - **SQL sandbox internals** — see `010-sandbox-sql/`.
-- **NL2SQL subgraph** — exists at `application/pipeline/subgraphs/nl2sql.py` but is NOT integrated into the main graph (see DEBT-016).
+- **NL2SQL subgraph internals** — owned by [`../../010-sandbox-sql/010b-nl2sql/`](../../010-sandbox-sql/010b-nl2sql/). This phase treats NL2SQL as an opaque sub-step: the sandbox connector runs as one of the `execute_steps` dispatch targets, and inside its own execution it hands off to the NL2SQL subgraph. The main pipeline does not see the subgraph's internal nodes.
 - **LLM synthesis over the results** — see `../001d-analysis/`.
 
 ## 7. Open Questions
@@ -84,7 +84,7 @@ The phase exits with either populated `data_results` and `step_warnings`, or emp
 
 - **[DEBT-006]** — **Optional `on_step_start` callback** for streaming. Coupling between streaming and step dispatch, inconsistency: not all steps emit status.
 - **[DEBT-013]** — **Connector dispatch table is a dict of lambdas** (`step_executor.py:70-105`). Adding a new connector requires a manual update, with no auto-registration.
-- **[DEBT-016]** — **NL2SQL subgraph exists but is not integrated into the main graph** (it's inlined in `connectors/sandbox.py`). Dead or abandoned code.
+- **[DEBT-016]** — ~~**NL2SQL subgraph exists but is not integrated into the main graph**~~ **CLOSED 2026-04-11 via FIX-004**: the inline loop in `connectors/sandbox.py` has been removed; the sandbox connector now delegates the NL2SQL state machine to the compiled subgraph at `application/pipeline/subgraphs/nl2sql.py`. Contract and node topology are documented in [`../../010-sandbox-sql/010b-nl2sql/spec.md`](../../010-sandbox-sql/010b-nl2sql/spec.md). This sub-module still sees NL2SQL as opaque — the subgraph lives one layer down inside the sandbox connector's execution slot, not as a peer of the main-graph nodes.
 
 ---
 

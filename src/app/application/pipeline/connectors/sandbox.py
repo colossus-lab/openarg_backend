@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -17,38 +15,6 @@ from sqlalchemy import text
 
 from app.application.pipeline.connectors.cache_table_selection import prefer_consolidated_table
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
-from app.domain.ports.llm.llm_provider import LLMMessage
-from app.prompts import load_prompt
-
-
-def _extract_sql(raw: str) -> str:
-    """Extract a SELECT/WITH statement from an LLM response.
-
-    Handles common LLM response patterns:
-    - Pure SQL (just the query)
-    - Markdown code blocks (```sql ... ```)
-    - Text + SQL (explanation followed by query)
-    - Multiple statements (takes the first SELECT/WITH)
-    """
-    text_val = raw.strip()
-
-    # 1. Extract from markdown code blocks
-    code_block = re.search(r"```(?:sql)?\s*\n?(.*?)```", text_val, re.DOTALL | re.IGNORECASE)
-    if code_block:
-        text_val = code_block.group(1).strip()
-
-    # 2. If it already starts with SELECT/WITH, return as-is
-    if re.match(r"^\s*(SELECT|WITH)\b", text_val, re.IGNORECASE):
-        return text_val
-
-    # 3. Try to find SELECT/WITH statement in the text
-    match = re.search(r"\b((?:WITH|SELECT)\b.*)", text_val, re.DOTALL | re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    # 4. Fallback: return original (will fail validation with a clear error)
-    return text_val
-
 
 if TYPE_CHECKING:
     from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
@@ -387,10 +353,10 @@ async def execute_sandbox_step(
     # (e.g. "gobernador de jujuy") are not lost to the planner's generic query.
     nl_query = user_query or params.get("query", step.description)
 
-    # Import few-shot helpers from history module
-    # Import INDEC_PATTERN from classifiers module
-    from app.application.pipeline.classifiers import INDEC_PATTERN
-    from app.application.pipeline.history import get_few_shot_examples, save_successful_query
+    # Few-shot helper used to build the subgraph's initial state.
+    # INDEC_PATTERN and save_successful_query are now owned by the
+    # NL2SQL subgraph itself (FIX-004).
+    from app.application.pipeline.history import get_few_shot_examples
 
     try:
         tables = await sandbox.list_cached_tables()
@@ -588,116 +554,10 @@ async def execute_sandbox_step(
         # Retrieve dynamic few-shot examples from successful past queries
         few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
 
-        nl2sql_prompt = load_prompt(
-            "nl2sql",
-            tables_context=tables_context,
-            few_shot_block=few_shot_block or "",
-        )
-
-        messages = [
-            LLMMessage(role="system", content=nl2sql_prompt),
-            LLMMessage(role="user", content=nl_query),
-        ]
-
-        llm_response = await llm.chat(
-            messages=messages,
-            temperature=0.0,
-            max_tokens=1024,
-        )
-
-        generated_sql = _extract_sql(llm_response.content)
-        logger.debug("NL2SQL generated: %s", generated_sql[:200])
-
-        result = await sandbox.execute_readonly(generated_sql)
-
-        # Self-correction loop: retry up to 2 times with a minimal prompt
-        # to avoid re-sending the full system prompt + history on each retry
-        for _attempt in range(2):
-            if not result.error:
-                break
-            logger.warning(
-                "Sandbox query failed (attempt %d): %s | SQL: %s",
-                _attempt + 1,
-                result.error,
-                generated_sql[:200],
-            )
-            retry_messages = [
-                LLMMessage(
-                    role="system",
-                    content=load_prompt("sql_fixer"),
-                ),
-                LLMMessage(
-                    role="user",
-                    content=(
-                        f"SQL:\n{generated_sql}\n\n"
-                        f"Error: {result.error}\n\n"
-                        f"Tables:\n{tables_context[:2000]}"
-                    ),
-                ),
-            ]
-            llm_response = await llm.chat(
-                messages=retry_messages,
-                temperature=0.0,
-                max_tokens=1024,
-            )
-            generated_sql = _extract_sql(llm_response.content)
-            logger.debug("NL2SQL retry generated: %s", generated_sql[:200])
-            result = await sandbox.execute_readonly(generated_sql)
-
-        if result.error:
-            logger.warning("Sandbox query failed after retries: %s", result.error)
-            # Last-resort fallback: try SELECT * LIMIT 10 on the first matched table
-            if tables:
-                from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
-
-                fallback_table = tables[0].table_name
-                fallback_sql = safe_table_query(fallback_table, 'SELECT * FROM "{}" LIMIT 10')
-                if fallback_sql is None:
-                    logger.warning("NL2SQL fallback: invalid table name %s", fallback_table)
-                    return []
-                logger.info("NL2SQL fallback: trying simple query on %s", fallback_table)
-                result = await sandbox.execute_readonly(fallback_sql, timeout_seconds=5)
-                if result.error:
-                    logger.warning("NL2SQL fallback also failed: %s", result.error)
-                    return [
-                        DataResult(
-                            source="sandbox:nl2sql",
-                            portal_name="Cache Local (NL2SQL)",
-                            portal_url="",
-                            dataset_title=f"Consulta SQL fallida: {nl_query[:100]}",
-                            format="json",
-                            records=[],
-                            metadata={
-                                "error": result.error,
-                                "fetched_at": datetime.now(UTC).isoformat(),
-                            },
-                        )
-                    ]
-                generated_sql = fallback_sql
-            else:
-                return []
-
-        if not result.rows and INDEC_PATTERN.search(nl_query):
-            logger.info("Sandbox returned empty for INDEC query, trying live fallback")
-            fallback = await indec_live_fallback(nl_query)
-            if fallback:
-                return fallback
-
-        # Save successful query for future few-shot examples
-        if result.rows and not result.error:
-            asyncio.create_task(
-                save_successful_query(
-                    nl_query,
-                    generated_sql,
-                    tables[0].table_name if tables else "",
-                    result.row_count,
-                    embedding,
-                    semantic_cache,
-                )
-            )
-
-        # Build description from catalog entries for the queried table(s)
-        _table_descriptions = []
+        # Build display descriptions from catalog entries for the queried
+        # table(s). These land in DataResult.metadata.table_descriptions
+        # via the subgraph's format_result_node.
+        table_descriptions: list[str] = []
         for t in tables[:5]:
             entry = catalog_entries.get(t.table_name)
             if entry:
@@ -707,33 +567,33 @@ async def execute_sandbox_step(
                 if entry.get("description"):
                     desc_parts.append(entry["description"])
                 if desc_parts:
-                    _table_descriptions.append(f"{t.table_name}: {' — '.join(desc_parts)}")
+                    table_descriptions.append(f"{t.table_name}: {' — '.join(desc_parts)}")
 
-        return [
-            DataResult(
-                source="sandbox:nl2sql",
-                portal_name="Cache Local (NL2SQL)",
-                portal_url="",
-                dataset_title=f"Consulta SQL: {nl_query[:100]}",
-                format="json",
-                records=result.rows[:200],
-                metadata={
-                    "total_records": result.row_count,
-                    # Omit generated SQL in production to prevent schema enumeration (SEC-03)
-                    **(
-                        {
-                            "generated_sql": generated_sql,
-                        }
-                        if os.getenv("APP_ENV", "local") != "prod"
-                        else {}
-                    ),
-                    "truncated": result.truncated,
-                    "columns": result.columns,
-                    "fetched_at": datetime.now(UTC).isoformat(),
-                    "table_descriptions": _table_descriptions,
-                },
-            )
-        ]
+        # Hand off to the NL2SQL subgraph. It owns the generate → execute
+        # → fix → last_resort → indec_fallback → save_success → format
+        # state machine. See specs/010-sandbox-sql/010b-nl2sql/ for the
+        # contract. FIX-004 (2026-04-11).
+        from app.application.pipeline.subgraphs.nl2sql import (
+            get_compiled_nl2sql_subgraph,
+        )
+
+        compiled_subgraph = await get_compiled_nl2sql_subgraph()
+        initial_state: dict[str, Any] = {
+            "nl_query": nl_query,
+            "tables": tables,
+            "tables_context": tables_context,
+            "table_notes": table_notes,
+            "catalog_entries": catalog_entries,
+            "table_descriptions": table_descriptions,
+            "few_shot_block": few_shot_block or "",
+            "llm": llm,
+            "sandbox": sandbox,
+            "embedding": embedding,
+            "semantic_cache": semantic_cache,
+            "max_attempts": 2,
+        }
+        final_state = await compiled_subgraph.ainvoke(initial_state)
+        return final_state.get("data_results", []) or []
     except Exception:
         logger.warning("Sandbox step %s failed", step.id, exc_info=True)
         return []

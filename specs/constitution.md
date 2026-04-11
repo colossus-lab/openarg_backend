@@ -1,9 +1,9 @@
 # OpenArg Constitution
 
-**Version**: 1.0.0
+**Version**: 1.1.0
 **Status**: Draft (reverse-engineered from codebase + `CLAUDE.md` + `MEMORY.md`)
-**Last synced with code**: 2026-04-10
-**Scope**: Backend (`openarg_backend`). Frontend constitution TBD when the frontend repo is reverse-engineered.
+**Last synced with code**: 2026-04-11
+**Scope**: Backend (`openarg_backend`). Frontend has its own `constitution.md`.
 
 ---
 
@@ -12,6 +12,24 @@
 This document codifies the **non-negotiable principles** that govern OpenArg development. Every `plan.md` of any feature must pass the "Constitution Check" declared here before moving forward. Known deviations are listed in section 9 of each `plan.md` with explicit justification and a debt ticket.
 
 The constitution is **immutable by convention**: modifying it requires a semver version bump, written justification, and a review of the impact on existing specs (Sync Impact Report).
+
+---
+
+## 0. Keep It Simple (axiom)
+
+**Simplicity beats cleverness, always.** This is the principal axiom — every other article in this constitution must be read in its light.
+
+Concretely, when designing or reviewing a change:
+
+1. **Prefer the obvious solution.** If a junior engineer can read the spec and plan and understand why the code does what it does, the design is good. If it takes a seasoned engineer 20 minutes to follow the dance, the design is wrong even if it is technically correct.
+2. **Add abstractions only when they pay rent.** Never introduce an interface, a pattern, or a layer for a hypothetical second caller. Three similar lines beat a premature factory. A second caller earns the abstraction; a first caller does not.
+3. **Small files beat small functions in big files.** Prefer splitting by responsibility over creating 30-line helpers inside 600-line modules.
+4. **Data flow over control flow.** A pipeline of pure transforms is easier to reason about than a mesh of callbacks, events, and mutable shared state. Prefer the former even if it takes more keystrokes.
+5. **One way to do something.** If two code paths converge on the same outcome, delete one. Duplicate code is cheaper than duplicate semantics.
+6. **Delete before you add.** When a `spec.md` or `plan.md` grows, ask what can be removed. If a section can go without losing information, remove it.
+7. **When in doubt, write the dumbest version that works, ship it, and let usage teach you what to generalize.**
+
+A spec that violates this axiom for a good reason must cite the reason inline ("complexity justified because X") and open a debt item to revisit once the assumption is validated. Complexity without justification is a bug in the design.
 
 ---
 

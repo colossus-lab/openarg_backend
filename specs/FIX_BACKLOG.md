@@ -7,7 +7,7 @@
 - Priority: **High** (security or user-visible correctness) / **Medium** (structural debt) / **Low** (nice-to-fix).
 - Status: `Pending` | `In progress` | `Completed`.
 
-**Overall status**: Updated 2026-04-10 after an autonomous fix pass. 5 out of 8 fixes applied (FIX-001, FIX-002, FIX-003, FIX-006, FIX-007). The remaining 3 (FIX-004, FIX-005, FIX-008) require either front/back coordination or a more extensive refactor and are waiting for user decision.
+**Overall status**: Updated 2026-04-11 after a second fix pass with full spec-first discipline for FIX-004. 6 out of 8 fixes applied (FIX-001, FIX-002, FIX-003, FIX-004, FIX-006, FIX-007). The remaining 2 are FIX-005 (requires front+back JWT coordination) and FIX-008 (requires a staff_changes migration).
 
 **Relation to specs**: Each fix is referenced from its corresponding `spec.md` in the "Open Questions" section (now with marker `[RESOLVED CL-XXX]` → `specs/FIX_BACKLOG.md#FIX-NNN`).
 
@@ -20,7 +20,7 @@
 | FIX-001 | **High** | `002a-bcra` | BCRA silent degradation → surface errors | ✅ Completed 2026-04-10 |
 | FIX-002 | Medium | `002a-bcra` | BCRA deduplicate broken methods | ✅ Completed 2026-04-10 |
 | FIX-003 | Low | `002a-bcra` + Celery config | BCRA schedule timezone → ART | ✅ Completed (already applied) |
-| FIX-004 | Medium | `001-query-pipeline` + `010-sandbox-sql` | NL2SQL subgraph integration | Pending (extensive refactor) |
+| FIX-004 | Medium | `001-query-pipeline` + `010-sandbox-sql` | NL2SQL subgraph integration | ✅ Completed 2026-04-11 |
 | FIX-005 | **High (security)** | `003-auth` | X-User-Email → JWT server-side validation | Pending (front+back coord.) |
 | FIX-006 | Medium | `001-query-pipeline` | Token counting via Bedrock stream metadata | ✅ Completed 2026-04-10 |
 | FIX-007 | Medium | `004-semantic-cache` | Semantic cache cleanup task (expired entries never deleted) | ✅ Completed 2026-04-10 |

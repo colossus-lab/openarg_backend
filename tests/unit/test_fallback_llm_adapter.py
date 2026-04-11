@@ -40,9 +40,16 @@ class FakeLLM(ILLMProvider):
         messages: list[LLMMessage],
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        usage_out: dict[str, int] | None = None,
     ) -> AsyncIterator[str]:
         if self._error:
             raise self._error
+        # FIX-006 contract: if the caller provides a usage_out dict,
+        # populate it with token counts as the stream concludes.
+        if usage_out is not None:
+            usage_out["input_tokens"] = 5
+            usage_out["output_tokens"] = 5
+            usage_out["total_tokens"] = 10
         for chunk in [f"{self._name}", " stream"]:
             yield chunk
 
