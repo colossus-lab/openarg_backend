@@ -8,6 +8,7 @@ from pydantic import BaseModel, EmailStr
 
 from app.domain.entities.user.user import User
 from app.domain.ports.user.user_repository import IUserRepository
+from app.presentation.http.middleware.google_jwt_middleware import get_request_user_email
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -74,7 +75,7 @@ async def export_my_data(
     user_repo: FromDishka[IUserRepository],
 ) -> dict:
     """Export all user data (Ley 25.326 ARCO right of access / data portability)."""
-    email = request.headers.get("X-User-Email", "")
+    email = get_request_user_email(request)
     if not email:
         raise HTTPException(status_code=401, detail="User email required")
 
@@ -92,8 +93,8 @@ async def get_current_user(
     request: Request,
     user_repo: FromDishka[IUserRepository],
 ) -> UserResponse:
-    """Get user by email (from X-User-Email header, not query params)."""
-    email = request.headers.get("X-User-Email", "")
+    """Get user by email (from validated Google JWT or legacy header)."""
+    email = get_request_user_email(request)
     if not email:
         raise HTTPException(status_code=401, detail="User email required")
 
@@ -122,7 +123,7 @@ async def update_settings(
     user_repo: FromDishka[IUserRepository],
 ) -> UserResponse:
     """Update user settings (e.g., save_history toggle)."""
-    email = request.headers.get("X-User-Email", "")
+    email = get_request_user_email(request)
     if not email:
         raise HTTPException(status_code=401, detail="User email required")
 
@@ -157,7 +158,7 @@ async def delete_my_account(
     user_repo: FromDishka[IUserRepository],
 ) -> dict:
     """Delete current user and all associated data (Ley 25.326 ARCO right to erasure)."""
-    email = request.headers.get("X-User-Email", "")
+    email = get_request_user_email(request)
     if not email:
         raise HTTPException(status_code=401, detail="User email required")
 

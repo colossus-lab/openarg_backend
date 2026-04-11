@@ -10,9 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from app.infrastructure.auth import GoogleJwtValidator
 from app.infrastructure.monitoring.middleware import MetricsMiddleware
 from app.infrastructure.persistence_sqla.mappings.all import map_tables
 from app.presentation.http.errors.handlers import register_exception_handlers
+from app.presentation.http.middleware import google_jwt_middleware as _gjwt
 from app.presentation.http.middleware.auth_middleware import APIKeyMiddleware
 from app.presentation.http.middleware.rate_limit_key import get_rate_limit_identifier
 from app.presentation.http.middleware.request_id_middleware import RequestIdMiddleware
@@ -96,6 +98,28 @@ def configure_app(
     app.add_middleware(MetricsMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIdMiddleware)
+
+    # Google ID token validation (FIX-005). Starlette applies middleware in
+    # reverse registration order, so adding this BEFORE APIKeyMiddleware below
+    # makes the API-key check run first — Google JWT validation only sees
+    # requests that already passed the service-token gate.
+    if settings:
+        raw_mode = (settings.security.GOOGLE_JWT_VALIDATION_MODE or "disabled").lower()
+        mode: _gjwt.Mode = raw_mode if raw_mode in ("disabled", "dual", "enforced") else "disabled"  # type: ignore[assignment]
+        validator: GoogleJwtValidator | None = None
+        if mode != "disabled":
+            client_id = settings.security.GOOGLE_OAUTH_CLIENT_ID
+            if not client_id:
+                raise RuntimeError(
+                    "GOOGLE_JWT_VALIDATION_MODE is "
+                    f"{mode!r} but GOOGLE_OAUTH_CLIENT_ID is empty"
+                )
+            validator = GoogleJwtValidator(client_id=client_id)
+        app.add_middleware(
+            _gjwt.GoogleJwtAuthMiddleware,
+            validator=validator,
+            mode=mode,
+        )
 
     # API key middleware (if configured)
     if settings and settings.security.BACKEND_API_KEY:

@@ -37,6 +37,8 @@ class SecuritySettings(BaseModel):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     BACKEND_API_KEY: str = ""
     CORS_ALLOWED_ORIGINS: list[str] = []
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_JWT_VALIDATION_MODE: str = "disabled"
 
     def model_post_init(self, __context: object) -> None:
         import os
@@ -47,6 +49,12 @@ class SecuritySettings(BaseModel):
         env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
         if env_origins:
             self.CORS_ALLOWED_ORIGINS = [o.strip() for o in env_origins.split(",") if o.strip()]
+        env_client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+        if env_client_id:
+            self.GOOGLE_OAUTH_CLIENT_ID = env_client_id
+        env_mode = os.getenv("GOOGLE_JWT_VALIDATION_MODE", "").strip().lower()
+        if env_mode in {"disabled", "dual", "enforced"}:
+            self.GOOGLE_JWT_VALIDATION_MODE = env_mode
 
 
 class LoggingSettings(BaseModel):

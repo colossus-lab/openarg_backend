@@ -1,7 +1,8 @@
 """Developer API key management endpoints.
 
 These endpoints are called from the frontend (authenticated with the
-shared BACKEND_API_KEY + X-User-Email header), NOT with user API keys.
+shared BACKEND_API_KEY + a Google OAuth ID token — see FIX-005), NOT
+with user API keys.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from app.application.api_key_service import PLAN_LIMITS, generate_api_key
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.user.user_repository import IUserRepository
+from app.presentation.http.middleware.google_jwt_middleware import get_request_user_email
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +48,9 @@ async def create_api_key_endpoint(
     user_repo: FromDishka[IUserRepository],
 ) -> dict:
     """Create a new API key. Returns the full key ONCE — save it immediately."""
-    user_email = request.headers.get("X-User-Email", "")
+    user_email = get_request_user_email(request)
     if not user_email:
-        raise HTTPException(status_code=401, detail="X-User-Email header required")
+        raise HTTPException(status_code=401, detail="User identity required")
 
     user = await user_repo.get_by_email(user_email)
     if not user:
@@ -92,9 +94,9 @@ async def list_api_keys(
     user_repo: FromDishka[IUserRepository],
 ) -> list[dict]:
     """List all API keys for the authenticated user (keys are masked)."""
-    user_email = request.headers.get("X-User-Email", "")
+    user_email = get_request_user_email(request)
     if not user_email:
-        raise HTTPException(status_code=401, detail="X-User-Email header required")
+        raise HTTPException(status_code=401, detail="User identity required")
 
     user = await user_repo.get_by_email(user_email)
     if not user:
@@ -125,9 +127,9 @@ async def revoke_api_key(
     user_repo: FromDishka[IUserRepository],
 ) -> dict:
     """Revoke (deactivate) an API key."""
-    user_email = request.headers.get("X-User-Email", "")
+    user_email = get_request_user_email(request)
     if not user_email:
-        raise HTTPException(status_code=401, detail="X-User-Email header required")
+        raise HTTPException(status_code=401, detail="User identity required")
 
     user = await user_repo.get_by_email(user_email)
     if not user:
@@ -150,9 +152,9 @@ async def get_usage(
     user_repo: FromDishka[IUserRepository],
 ) -> dict:
     """Get usage summary for all API keys owned by the authenticated user."""
-    user_email = request.headers.get("X-User-Email", "")
+    user_email = get_request_user_email(request)
     if not user_email:
-        raise HTTPException(status_code=401, detail="X-User-Email header required")
+        raise HTTPException(status_code=401, detail="User identity required")
 
     user = await user_repo.get_by_email(user_email)
     if not user:

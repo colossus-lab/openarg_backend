@@ -205,9 +205,10 @@ Before starting: **verify that the subgraph is not out of date** compared to the
 ## FIX-005: X-User-Email → JWT server-side validation
 
 **Priority**: **High (security)**
+**Status**: **In progress — Option A (JWKS validation per request)**
 **Module**: `003-auth/`
-**Type**: Vulnerability
-**Spec**: `specs/003-auth/spec.md` CL-001
+**Type**: Hardening
+**Spec**: `specs/003-auth/spec.md` FR-007, CL-001
 **Related debt**: `003-auth/DEBT-002`
 
 ### Problem
