@@ -64,7 +64,7 @@ The **API keys** module for programmatic access is documented in `008-developers
 
 ### Assumptions
 - The frontend (NextAuth) correctly validates the Google OAuth token before sending the email.
-- The `X-User-Email` header comes only from a trusted proxy (Caddy) and cannot be spoofed by an external client.
+- The `X-User-Email` header is provisioned by the trusted reverse proxy, not by external clients. A future migration to server-side Google JWT validation (planned as FIX-005) will remove this assumption.
 - Emails are unique (DB constraint).
 
 ### Out of scope
@@ -78,19 +78,19 @@ The **API keys** module for programmatic access is documented in `008-developers
 ## 7. Open Questions
 
 - **[RESOLVED CL-001]** — The `X-User-Email` header without server-side validation is an acceptable vulnerability only temporarily. **Decision**: implement server-side JWT validation (Google OAuth ID token). The frontend sends `Authorization: Bearer <jwt>`, the backend validates the signature via Google's JWKS, verifies `aud` + `iss` + `exp`, and extracts the email from the verified claim. See [`FIX_BACKLOG.md#fix-005-x-user-email--jwt-server-side-validation`](../FIX_BACKLOG.md).
-- **[RESOLVED CL-002]** — **Verified on the staging server env (2026-04-10)**. The allowlist lives in the **frontend** (`openarg_frontend/src/lib/authOptions.ts`, NextAuth signIn callback), not in the backend. Policy per environment:
-  - **Staging** (`REDACTED_STAGING`): allowlist **ACTIVE** with ~28 emails in `ALLOWED_EMAILS`, `OPEN_BETA=false`. Only the listed emails can authenticate — private alpha.
-  - **Production** (`openarg.org`): allowlist **BYPASSED** (`OPEN_BETA=true` or empty allowlist + open domains). Public access.
-  - **Admins**: 2 emails in `ADMIN_EMAILS` (the `requireAdmin()` infrastructure exists but is not yet used).
+- **[RESOLVED CL-002]** — The allowlist lives in the **frontend** (`openarg_frontend/src/lib/authOptions.ts`, NextAuth signIn callback), not in the backend. Policy per environment:
+  - **Staging**: allowlist **ACTIVE** via `ALLOWED_EMAILS` with `OPEN_BETA=false`. Only the listed operators can authenticate — private alpha.
+  - **Production**: allowlist **BYPASSED** (`OPEN_BETA=true` or empty allowlist + open domains). Public access.
+  - **Admins**: operators listed in `ADMIN_EMAILS` (the `requireAdmin()` helper exists and is used by the transparency endpoint).
 
-  The backend trusts the `X-User-Email` it receives from the frontend (already validated by NextAuth), without its own enforcement. See `../../openarg_frontend/specs/004-auth/` for details.
+  The backend trusts the `X-User-Email` it receives from the frontend (already validated by NextAuth), without its own cryptographic enforcement. See `../../openarg_frontend/specs/004-auth/` for details and FIX-005 for the planned migration to server-side JWT validation.
 - **[RESOLVED CL-003]** — Backend-own JWT session tokens: **future work, not prioritized for now**. FIX-005 implements validation of the Google OAuth JWT (the token NextAuth already emits), which closes the immediate security gap. Emitting backend-own session tokens is evaluated later if the trust model changes.
 - **[RESOLVED CL-004]** — `delete_user_and_data` **does NOT need to cascade to S3 or the semantic cache**. Decision: no user-identifiable data is stored in S3 (it is storage for public datasets, not per-user content) or in the semantic cache (it caches queries + responses with no user_id associated in the hash). The current cascade over `conversations`, `messages`, `user_queries` is sufficient to fulfill the right to cancellation.
 
 ## 8. Tech Debt Discovered
 
 - **[DEBT-001]** — **No password hashing** — acceptable for the OAuth-only model, but it should be documented as an explicit decision.
-- **[DEBT-002]** — **`X-User-Email` header trust model** — if the frontend is compromised or the proxy is misconfigured, anyone can impersonate. Token verification (JWT signed) should be added.
+- **[DEBT-002]** — **`X-User-Email` header trust model** — the backend accepts the caller identity from a header set by the trusted proxy, without its own cryptographic validation. Planned improvement: migrate to server-side Google OAuth JWT validation using the JWKS endpoint, so the identity is verified at the API layer. Tracked as `FIX_BACKLOG.md#fix-005`.
 - **[DEBT-003]** — **No audit trail** of login/logout events.
 - **[DEBT-004]** — **No rate limiting** on `/users/sync` — an attacker could spam emails.
 

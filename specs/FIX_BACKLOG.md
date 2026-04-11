@@ -211,16 +211,9 @@ Before starting: **verify that the subgraph is not out of date** compared to the
 **Related debt**: `003-auth/DEBT-002`
 
 ### Problem
-The backend today trusts the `X-User-Email` header sent by the frontend, without cryptographic validation. The model assumes that:
-1. The frontend is trustworthy (handles the OAuth flow correctly)
-2. The Caddy proxy is trustworthy (does not allow external clients to spoof the header)
+The backend currently derives the caller identity from the `X-User-Email` header, which is provisioned by the trusted reverse proxy after the frontend completes the Google OAuth flow. The backend itself does not cryptographically verify the claim — it trusts the upstream chain (NextAuth + reverse proxy) to set the header correctly.
 
-Both assumptions are fragile:
-- If the frontend is compromised (XSS, supply chain attack), an attacker can send any email
-- If Caddy is misconfigured (e.g., header strip forgotten), an attacker can spoof it directly
-- There is no cryptographic proof that the authenticated user is who they claim to be
-
-Impact: an attacker who manages to spoof the header can impersonate any user and access their conversations, API keys, and data.
+The improvement is to move identity verification into the API layer itself, so the backend no longer depends on the infrastructure chain being configured correctly to know who the caller is. Server-side validation of Google's OAuth ID token (via JWKS) provides that independent check.
 
 ### Chosen resolution
 Replace the trust model with **server-side JWT validation**:

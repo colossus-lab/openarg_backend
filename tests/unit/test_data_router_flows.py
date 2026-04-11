@@ -1,12 +1,12 @@
-"""End-to-end flow tests for the /data/* endpoints from DataRouter's POV.
+"""End-to-end flow tests for the /data/* service endpoints.
 
-DataRouter is a GovTech platform for Argentine municipal governments that
-consumes OpenArg's /data/* API to discover relevant tables, query them with
-hardcoded SQL, and feed the results into its own LLM policy generator.
+The /data/* API is a service-to-service contract authenticated via the
+`DATA_SERVICE_TOKEN` Bearer token (separate from the user-facing API
+keys managed under /developers/keys). These tests simulate the real
+request sequences a consumer performs:
 
-These tests simulate the real request sequences DataRouter performs:
     1. POST /data/search   -> find relevant cached tables
-    2. POST /data/query    -> run hardcoded SELECT against a table
+    2. POST /data/query    -> run a hardcoded SELECT against a table
     3. GET  /data/tables   -> inspect schema when needed
 
 All upstream dependencies (sandbox, vector search, embeddings) are mocked.
@@ -158,13 +158,13 @@ def _build_client(
 
 
 # ===================================================================
-# 1. TestTerritoriaPolicyFlow — full flow simulation
+# 1. TestDataRouterPolicyFlow — full flow simulation
 # ===================================================================
 
 
-class TestTerritoriaPolicyFlow:
+class TestDataRouterPolicyFlow:
     async def test_discover_and_query_flow(self, monkeypatch):
-        """DataRouter discovers tables then queries the first one."""
+        """Consumer discovers tables then queries the first one."""
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.list_cached_tables.return_value = [
             CachedTableInfo("cache_budget_sample", "ds-budget-001", 500, ["fecha", "monto"]),
@@ -226,7 +226,7 @@ class TestTerritoriaPolicyFlow:
             assert len(body["rows"]) == 2
 
     async def test_multiple_searches_for_context(self, monkeypatch):
-        """DataRouter runs 3 separate searches to build policy context."""
+        """Consumer runs 3 separate searches to build policy context."""
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.list_cached_tables.return_value = [
             CachedTableInfo("cache_budget_sample", "ds-budget-001", 500, ["fecha"]),
@@ -295,11 +295,11 @@ class TestTerritoriaPolicyFlow:
 
 
 # ===================================================================
-# 2. TestTerritoriaHardcodedQueries — SQL patterns DataRouter uses
+# 2. TestDataRouterHardcodedQueries — SQL patterns the consumer uses
 # ===================================================================
 
 
-class TestTerritoriaHardcodedQueries:
+class TestDataRouterHardcodedQueries:
     async def test_select_top_n_by_date(self, monkeypatch):
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.execute_readonly.return_value = SandboxResult(
@@ -407,11 +407,11 @@ class TestTerritoriaHardcodedQueries:
 
 
 # ===================================================================
-# 3. TestTerritoriaErrorRecovery — how DataRouter handles errors
+# 3. TestDataRouterErrorRecovery — how the consumer handles errors
 # ===================================================================
 
 
-class TestTerritoriaErrorRecovery:
+class TestDataRouterErrorRecovery:
     async def test_invalid_table_name_error(self, monkeypatch):
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.execute_readonly.return_value = SandboxResult(
@@ -484,11 +484,11 @@ class TestTerritoriaErrorRecovery:
 
 
 # ===================================================================
-# 4. TestTerritoriaDataShapes — data format expectations
+# 4. TestDataRouterDataShapes — data format expectations
 # ===================================================================
 
 
-class TestTerritoriaDataShapes:
+class TestDataRouterDataShapes:
     async def test_response_matches_contract(self, monkeypatch):
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.execute_readonly.return_value = SandboxResult(
@@ -633,11 +633,11 @@ class TestTerritoriaDataShapes:
 
 
 # ===================================================================
-# 5. TestTerritoriaBatchScenarios — realistic batch patterns
+# 5. TestDataRouterBatchScenarios — realistic batch patterns
 # ===================================================================
 
 
-class TestTerritoriaBatchScenarios:
+class TestDataRouterBatchScenarios:
     async def test_sequential_searches_and_queries(self, monkeypatch):
         """Simulate 5 sequential requests: 3 searches + 2 queries all succeed."""
         sandbox = AsyncMock(spec=ISQLSandbox)
@@ -686,7 +686,7 @@ class TestTerritoriaBatchScenarios:
                 assert body["row_count"] == 1
 
     async def test_large_result_truncation(self, monkeypatch):
-        """Sandbox returns a truncated result; DataRouter must handle it."""
+        """Sandbox returns a truncated result; consumer must handle it."""
         big_rows = [{"id": i, "value": i * 10} for i in range(1000)]
         sandbox = AsyncMock(spec=ISQLSandbox)
         sandbox.execute_readonly.return_value = SandboxResult(

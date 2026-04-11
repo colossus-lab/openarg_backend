@@ -86,7 +86,7 @@
 
 **New DEBT flagged**:
 
-- **`DISABLE_AUTH` backdoor has no `NODE_ENV` guard** at `middleware.ts:6`. If env is mis-configured in prod, **all middleware is bypassed silently**. Elevated to high-priority DEBT-005 in `004-auth/spec.md`. Recommended fix: `if (process.env.DISABLE_AUTH === 'true' && process.env.NODE_ENV !== 'production')`.
+- **`DISABLE_AUTH` dev-only env var hardened with `NODE_ENV` guard** at `middleware.ts:6-13` (FIXED 2026-04-11). The guard refuses to bypass auth when `NODE_ENV === 'production'` and logs an error; only the dev branch is honored. Elevated originally to high-priority DEBT-005 in `004-auth/spec.md`, now closed.
 - **Sentry DSN uses `NEXT_PUBLIC_` prefix** for client, meaning the DSN is exposed in browser JS (this is by Sentry design, but should be documented explicitly).
 
 ### Auth (`004-auth/`) — 8.5/10

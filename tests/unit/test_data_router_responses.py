@@ -1,10 +1,10 @@
 """Response format contract tests for the /data/* endpoints.
 
-These tests verify the exact JSON response format that external
-consumers (e.g. DataRouter) receive. The /data/* API is a public
-contract and must remain stable across releases. Tests here focus
-on response structure, Python-to-JSON type handling, serialization
-edge cases (Unicode, emoji, special characters), and HTTP headers.
+These tests verify the exact JSON response format that service-to-
+service consumers receive. The /data/* API is a contract that must
+remain stable across releases. Tests here focus on response
+structure, Python-to-JSON type handling, serialization edge cases
+(Unicode, emoji, special characters), and HTTP headers.
 """
 
 from __future__ import annotations
