@@ -286,20 +286,32 @@ def _find_portal(portal_id: str) -> dict | None:
     return None
 
 
-def _parse_csv_text(text: str) -> list[dict]:
+def _parse_csv_text(text: str) -> tuple[list[dict], dict | None]:
+    """Parse CSV text into records, returning truncation info per FR-011.
+
+    Returns ``(records, truncation)`` where ``truncation`` is either
+    ``None`` (the whole file fit) or a dict with keys
+    ``{"truncated": True, "truncation_reason": "max_rows_exceeded",
+    "truncation_limit": MAX_CSV_ROWS}`` when we stopped reading rows at
+    the ``MAX_CSV_ROWS`` cap. Byte-level truncation is detected one
+    layer up in ``_fetch_csv`` — see FR-011b for why both reasons exist
+    as separate codes.
+    """
     if not text.strip():
-        return []
+        return [], None
     if text[0] == "\ufeff":
         text = text[1:]
     lines = text.split("\n")
     if len(lines) < 2:
-        return []
+        return [], None
     header = lines[0]
     delimiter = ";" if header.count(";") > header.count(",") else ","
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     records: list[dict] = []
+    truncated_rows = False
     for i, row in enumerate(reader):
         if i >= MAX_CSV_ROWS:
+            truncated_rows = True
             break
         record: dict = {}
         for k, v in row.items():
@@ -315,7 +327,13 @@ def _parse_csv_text(text: str) -> list[dict]:
             except ValueError:
                 record[k] = v
         records.append(record)
-    return records
+    if truncated_rows:
+        return records, {
+            "truncated": True,
+            "truncation_reason": "max_rows_exceeded",
+            "truncation_limit": MAX_CSV_ROWS,
+        }
+    return records, None
 
 
 class CKANSearchAdapter(ICKANSearchConnector):
@@ -345,13 +363,29 @@ class CKANSearchAdapter(ICKANSearchConnector):
             return []
         return data["result"]["records"]
 
-    async def _fetch_csv(self, url: str) -> list[dict]:
+    async def _fetch_csv(self, url: str) -> tuple[list[dict], dict | None]:
+        """Fetch and parse a CSV resource, returning truncation info per FR-011.
+
+        Returns ``(records, truncation)``. Byte-level truncation (the CSV
+        exceeds ``MAX_CSV_BYTES``) takes precedence over row-level
+        truncation in the reason code, because if we chopped the bytes
+        we may also have cut the last record mid-line and the row count
+        is no longer meaningful as an "I read the whole file" signal.
+        """
         resp = await self._http.get(url, follow_redirects=True)
         resp.raise_for_status()
         text = resp.text
-        if len(text) > MAX_CSV_BYTES:
+        byte_truncated = len(text) > MAX_CSV_BYTES
+        if byte_truncated:
             text = text[:MAX_CSV_BYTES]
-        return _parse_csv_text(text)
+        records, row_trunc = _parse_csv_text(text)
+        if byte_truncated:
+            return records, {
+                "truncated": True,
+                "truncation_reason": "max_bytes_exceeded",
+                "truncation_limit": MAX_CSV_BYTES,
+            }
+        return records, row_trunc
 
     async def search_datasets(
         self,
@@ -389,6 +423,7 @@ class CKANSearchAdapter(ICKANSearchConnector):
                             except Exception:
                                 continue
 
+                        csv_truncation: dict | None = None
                         if not records:
                             csv_resources = [
                                 r
@@ -397,11 +432,27 @@ class CKANSearchAdapter(ICKANSearchConnector):
                             ]
                             for resource in csv_resources[:1]:
                                 try:
-                                    records = await self._fetch_csv(resource["url"])
+                                    records, csv_truncation = await self._fetch_csv(
+                                        resource["url"]
+                                    )
                                     if records:
                                         break
                                 except Exception:
                                     continue
+
+                        # FR-011: if the CSV branch ran and the download hit
+                        # either the byte or row limit, surface it in the
+                        # metadata so the analyst and the UI know this is a
+                        # partial view of the dataset. Datastore results are
+                        # not yet truncation-aware (tracked as CL-003 —
+                        # separate follow-up).
+                        metadata: dict = {
+                            "total_records": len(records) if records else 0,
+                            "fetched_at": now,
+                            "description": ds.get("notes", ""),
+                        }
+                        if csv_truncation is not None:
+                            metadata.update(csv_truncation)
 
                         results.append(
                             DataResult(
@@ -411,11 +462,7 @@ class CKANSearchAdapter(ICKANSearchConnector):
                                 dataset_title=ds.get("title", ""),
                                 format="json",
                                 records=(records[:50] if records else []),
-                                metadata={
-                                    "total_records": len(records) if records else 0,
-                                    "fetched_at": now,
-                                    "description": ds.get("notes", ""),
-                                },
+                                metadata=metadata,
                             )
                         )
                     return results

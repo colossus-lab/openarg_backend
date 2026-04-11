@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Domain + Application + Infrastructure
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -54,6 +54,11 @@ It is the "thickest" connector in the system (321 lines in the adapter) and the 
 - **FR-008**: MUST isolate failures per portal: a downed portal does not invalidate results from others.
 - **FR-009**: MUST maintain a documented list of dead portals with the reason for the death.
 - **FR-010**: MUST scrape catalogs on staggered schedules so as not to hit portals simultaneously.
+- **FR-011**: **Truncation transparency** — when a CSV download is truncated (either because the byte stream exceeded `MAX_CSV_BYTES = 2 MiB` or because the row count exceeded `MAX_CSV_ROWS = 500`), the connector MUST populate the returned `DataResult.metadata` with:
+  - `truncated: True` — boolean flag (FR-011a)
+  - `truncation_reason: "max_bytes_exceeded" | "max_rows_exceeded"` — which of the two limits fired first (FR-011b)
+  - `truncation_limit: <int>` — the limit value that was hit, for self-describing metadata (FR-011c)
+  This exists so the downstream analyst prompt and the frontend can surface the fact that the user is seeing a partial view of the dataset, instead of assuming the returned rows are the complete dataset. The limits themselves are not changing in this FR — only the visibility of the fact that they fired.
 
 ## 5. Success Criteria
 
@@ -86,7 +91,7 @@ It is the "thickest" connector in the system (321 lines in the adapter) and the 
 
 - **[DEBT-001]** — **Hardcoded list of 30+ portals** in `ckan_search_adapter.py:21-229`. Adding a portal requires a code change + deploy. No dynamic registration in the DB.
 - **[DEBT-002]** — **Hardcoded dead portals list** in `ckan_search_adapter.py:233-279`. No automated health checks, no metrics.
-- **[DEBT-003]** — **Silent truncation of CSVs >2MB or >500 rows**. The user does not know that the data is incomplete.
+- **[DEBT-003]** — ~~**Silent truncation of CSVs >2MB or >500 rows**~~ **FIXED 2026-04-11**: the connector now populates `metadata.truncated`, `metadata.truncation_reason` (`max_bytes_exceeded` / `max_rows_exceeded`), and `metadata.truncation_limit` whenever either CSV limit fires (FR-011a/b/c). Downstream consumers — the analyst prompt, the chart builder, the frontend sources panel — now have a self-describing signal that the dataset view is partial. The limits themselves (`MAX_CSV_BYTES = 2 MiB`, `MAX_CSV_ROWS = 500`) are unchanged; only the visibility of them firing is.
 - **[DEBT-004]** — **Heuristic delimiter detection** — does not handle cases where both delimiters appear in the data (commas inside quoted strings with `;` as main delimiter).
 - **[DEBT-005]** — **Silent exception swallowing per portal** in `ckan_search_adapter.py:423`. Upstream errors are logged as warnings but do not emit metrics — invisible in observability.
 - **[DEBT-006]** — **No retry decorator explicitly applied** to the adapter.
