@@ -39,6 +39,59 @@ _checkpointer_attempted = False  # Prevent repeated init attempts
 
 logger = logging.getLogger(__name__)
 
+# FR-038 / FR-038a: module-level allowlist of payload fields the streaming
+# endpoint is willing to forward to the browser. Fail-closed — anything
+# NOT in this set is dropped before the payload reaches the WebSocket.
+# This is a security surface (SEC-07 audit fix): node-emitted dicts have
+# historically included prompts, tracebacks, and internal state when
+# developers forgot to filter. Keeping this as a single module-level
+# constant makes membership discoverable from one place.
+#
+# When you add a new field to a streamable event, add it here too.
+# FR-038b guarantees you will see a WARNING log on any dropped key, so
+# you'll know immediately if you forgot.
+_STREAM_ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "type",
+        "step",
+        "detail",
+        "progress",
+        "message",
+        "status",
+        "content",
+        "question",
+        "options",
+        "map_data",
+    }
+)
+
+
+def _filter_stream_payload(payload: Any) -> Any:
+    """FR-038 + FR-038b: drop non-allowlisted keys and log a WARNING per drop.
+
+    Non-dict payloads pass through unchanged (defensive: LangGraph may
+    emit sentinel values). Dict payloads are filtered to
+    ``_STREAM_ALLOWED_PAYLOAD_KEYS`` so no internal state leaks to the
+    browser. Keys that were dropped are logged once per call with the
+    payload's ``type`` (if present) so developers can trace why a new
+    node's field is not showing up in the frontend — the fix is to add
+    the field to the allowlist above, not to disable the filter.
+
+    DEBT-017 fix, 2026-04-11. See spec
+    ``specs/001-query-pipeline/001e-finalization/spec.md`` FR-038/a/b.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    dropped = [k for k in payload if k not in _STREAM_ALLOWED_PAYLOAD_KEYS]
+    if dropped:
+        logger.warning(
+            "stream_payload dropped keys %s (type=%r) — add them to "
+            "_STREAM_ALLOWED_PAYLOAD_KEYS if they should reach the browser",
+            sorted(dropped),
+            payload.get("type"),
+        )
+    return {k: v for k, v in payload.items() if k in _STREAM_ALLOWED_PAYLOAD_KEYS}
+
 
 def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type: ignore[no-untyped-def]
     """Return the compiled graph, compiling it once (thread-safe)."""
@@ -338,27 +391,11 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     stream_mode=["updates", "custom"],
                 ):
                     if mode == "custom":
-                        # Custom events emitted by nodes via get_stream_writer()
-                        # Filter to allowed fields only to prevent leaking internal
-                        # data like prompts or tracebacks (SEC-07 audit fix)
-                        _allowed = {
-                            "type",
-                            "step",
-                            "detail",
-                            "progress",
-                            "message",
-                            "status",
-                            "content",
-                            "question",
-                            "options",
-                            "map_data",
-                        }
-                        safe_payload = (
-                            {k: v for k, v in payload.items() if k in _allowed}
-                            if isinstance(payload, dict)
-                            else payload
-                        )
-                        await ws.send_json(safe_payload)
+                        # Custom events emitted by nodes via get_stream_writer().
+                        # _filter_stream_payload applies FR-038 (fail-closed
+                        # allowlist, SEC-07) AND FR-038b (WARNING log on any
+                        # dropped key — DEBT-017 fix 2026-04-11).
+                        await ws.send_json(_filter_stream_payload(payload))
                     elif mode == "updates":
                         # Node completed — check if it's a terminal node
                         for node_name, update in payload.items():

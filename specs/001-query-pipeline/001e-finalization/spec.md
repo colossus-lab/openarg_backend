@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Application (finalize node) + Infrastructure (Redis, pgvector semantic cache, PG audit, metrics)
 **Parent**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -65,7 +65,9 @@ The phase also owns the `_background_tasks: set[asyncio.Task]` registry and the 
 
 ### Streaming (terminal event)
 - **FR-037**: The pipeline MUST support both `updates` (completed nodes) and `custom` (events emitted by nodes) modes in `astream()`.
-- **FR-038**: The pipeline MUST apply a **whitelist of keys** in custom events (`type, step, detail, progress, message, status, content, question, options, map_data`) to prevent leaking internal prompts.
+- **FR-038**: The pipeline MUST apply a **fail-closed allowlist of payload keys** in custom events — `{type, step, detail, progress, message, status, content, question, options, map_data}` — to prevent leaking internal prompts, tracebacks, or other node-internal state to the browser (SEC-07 audit fix). Keys outside the allowlist MUST be dropped before the payload is sent over the WebSocket.
+- **FR-038a**: The allowlist MUST be defined as a single module-level constant (not inlined in the stream loop) so that its membership is discoverable from one place and the warning emitted by FR-038b can reference it by name.
+- **FR-038b**: When the filter drops any key from a `custom` event payload, the router MUST emit a structured `WARNING` log naming the dropped keys and the event's `type`. Silent drops are forbidden — a developer adding a new field to a streamed event must get a visible signal in the logs if they forgot to update the allowlist, instead of having the key evaporate without trace. This log is **dev-facing**, not user-facing, and is the only degradation path that is acceptable under the §0.5 "spec → code → verify" axiom for this security-critical filter.
 - **FR-039**: The labels shown to the user MUST be in Spanish (Estratega / Investigador / Analista / Redactor).
 
 ### Checkpointing
@@ -106,7 +108,7 @@ The phase also owns the `_background_tasks: set[asyncio.Task]` registry and the 
 - **[DEBT-012]** — ~~**`asyncio.create_task()` fire-and-forget**~~ **FIXED 2026-04-10**: `finalize.py` now uses a module-level `_background_tasks: set[asyncio.Task]` with a `_spawn_background()` helper that keeps a strong reference and attaches a `done_callback` logging any unhandled exception. Prevents CPython's weak-ref task GC and surfaces background failures in logs.
 - **[DEBT-014]** — **`_get_or_compile_graph()` uses `threading.Lock` in async context** (`graph.py:41-48`). Thread safety in async is subtle and can cause rare bugs.
 - **[DEBT-015]** — **`_get_checkpointer()` holds global state** with a double-check pattern. It does not reset if `DATABASE_URL` changes at runtime.
-- **[DEBT-017]** — **Streaming key whitelist is hardcoded** (`smart_query_v2_router.py:324-335`). If a new node needs to emit a non-whitelisted key, it fails silently.
+- **[DEBT-017]** — ~~**Streaming key whitelist is hardcoded and drops unknown keys silently**~~ **FIXED 2026-04-11**: the allowlist has been hoisted to a module-level `_STREAM_ALLOWED_PAYLOAD_KEYS` frozenset in `smart_query_v2_router.py`, and a new `_filter_stream_payload()` helper emits a `WARNING` log naming the dropped keys and the event `type` whenever the filter discards anything from a `custom` payload. The allowlist is still **fail-closed** — prompts and tracebacks still MUST NOT leak to the browser — but developers now get a visible signal when a new node emits a field they forgot to add, instead of silent drops. See FR-038/FR-038a/FR-038b above.
 
 ---
 
