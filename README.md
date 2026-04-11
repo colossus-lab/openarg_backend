@@ -268,12 +268,24 @@ We welcome contributions! Please read our guidelines before getting started:
 - [**Code of Conduct**](CODE_OF_CONDUCT.md) — Expected behavior and community standards
 - [**Security Policy**](SECURITY.md) — How to report vulnerabilities responsibly
 
-Quick steps:
+### Spec-Driven Design is the contract
+
+This project uses **Spec-Driven Design** (see the [Spec-Driven Design section](#spec-driven-design) above). Before opening a PR that adds, removes, or changes observable behavior:
+
+1. **Read the affected `spec.md` + `plan.md`** under [`specs/`](specs/) to understand the current design and the constraints documented there. If there is a `[NEEDS CLARIFICATION]` or `[DEBT]` entry related to your change, reference it in the PR.
+2. **Update the spec as part of your PR.** Specs are the source of truth for intent — if code and spec diverge, the PR is incomplete. Add or update `FR-NNN`, `DEBT-NNN`, or `CL-NNN` entries as appropriate, and bump the `Last synced with code` date at the top of the spec.
+3. **If you introduce new invariants** (rate limits, timeouts, auth rules, schema contracts), add them to the relevant [`constitution.md`](specs/constitution.md) or module spec so future contributors inherit the context.
+4. **Reviewers will check both the code and the spec.** PRs that change behavior without spec updates will be asked to fix the drift before merging.
+
+For net-new features, prefer creating a new `specs/NNN-feature/` folder with `spec.md` (WHAT/WHY) + `plan.md` (HOW) before writing code, following the structure of the existing modules.
+
+### Quick steps
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Run `make code.check` before committing
-4. Open a pull request against `staging` — the repo includes PR and issue templates to guide you
+3. Read and update the relevant specs under [`specs/`](specs/) alongside your code changes
+4. Run `make code.check` before committing
+5. Open a pull request against `staging` — the repo includes PR and issue templates to guide you
 
 ---
 
