@@ -82,6 +82,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.orchestrator_tasks",
             "app.infrastructure.celery.tasks.reporting_tasks",
             "app.infrastructure.celery.tasks.catalog_enrichment_tasks",
+            "app.infrastructure.celery.tasks.cache_cleanup_tasks",
         ],
     )
 
@@ -120,6 +121,7 @@ def create_celery() -> Celery:
         "openarg.report_failed_tasks": {"queue": "collector"},
         "openarg.enrich_single_table": {"queue": "embedding"},
         "openarg.enrich_all_tables": {"queue": "embedding"},
+        "openarg.cleanup_semantic_cache": {"queue": "ingest"},
     }
 
     app.conf.task_default_queue = "scraper"
@@ -298,6 +300,12 @@ def create_celery() -> Celery:
                 "task": "openarg.scrape_gobernadores",
                 "schedule": crontab(day_of_month=1, hour=2, minute=15),  # Monthly, day 1
                 "options": {"queue": "scraper"},
+            },
+            # --- Semantic cache cleanup (FIX-007) ---
+            "cleanup-semantic-cache": {
+                "task": "openarg.cleanup_semantic_cache",
+                "schedule": crontab(hour="*/6", minute=0),  # Every 6 hours
+                "options": {"queue": "ingest"},
             },
             # --- Reporting / Dead Letter visibility ---
             "report-failed-tasks": {
