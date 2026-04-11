@@ -143,7 +143,7 @@ async def discover_catalog_hints_for_planner(
         embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
         loop = asyncio.get_running_loop()
 
-        def _search() -> list[tuple[str, str, str, int]]:
+        def _search() -> list[tuple[str, str, str, int, float]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
                 result = conn.execute(
