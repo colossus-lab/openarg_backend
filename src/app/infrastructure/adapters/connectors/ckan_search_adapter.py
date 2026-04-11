@@ -351,7 +351,19 @@ class CKANSearchAdapter(ICKANSearchConnector):
 
     async def _fetch_datastore(
         self, portal: dict, resource_id: str, q: str | None, limit: int
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict | None]:
+        """Fetch a datastore page, returning pagination truncation info per FR-012.
+
+        Returns ``(records, truncation)``. ``truncation`` is None when the
+        full dataset fits in one page (``total <= limit``) and a dict
+        with ``truncated=True``, ``truncation_reason="datastore_pagination_limit"``,
+        ``truncation_limit``, and ``total_available`` when the page is
+        smaller than the upstream total. The connector still only
+        fetches one page — this FR is about making the partial view
+        visible, not about complete data retrieval. See
+        ``specs/002-connectors/002d-ckan-search/spec.md`` FR-012 for
+        the contract.
+        """
         url = f"{portal['base_url']}{portal['api_path']}/datastore_search"
         params: dict[str, str | int] = {"resource_id": resource_id, "limit": limit}
         if q:
@@ -360,8 +372,26 @@ class CKANSearchAdapter(ICKANSearchConnector):
         resp.raise_for_status()
         data = resp.json()
         if not data.get("success"):
-            return []
-        return data["result"]["records"]
+            return [], None
+        result = data.get("result") or {}
+        records = result.get("records") or []
+        # CKAN returns the true row count in `result.total`. When it is
+        # strictly greater than the page we requested, we are looking at
+        # the tip of a larger dataset — mark it so downstream consumers
+        # can tell a partial view from a complete one.
+        total = result.get("total")
+        try:
+            total_int = int(total) if total is not None else None
+        except (TypeError, ValueError):
+            total_int = None
+        if total_int is not None and total_int > limit and len(records) >= limit:
+            return records, {
+                "truncated": True,
+                "truncation_reason": "datastore_pagination_limit",
+                "truncation_limit": limit,
+                "total_available": total_int,
+            }
+        return records, None
 
     async def _fetch_csv(self, url: str) -> tuple[list[dict], dict | None]:
         """Fetch and parse a CSV resource, returning truncation info per FR-011.
@@ -412,10 +442,11 @@ class CKANSearchAdapter(ICKANSearchConnector):
                             for r in ds.get("resources", [])
                             if r.get("format", "").upper() in ("CSV", "JSON")
                         ]
-                        records = None
+                        records: list[dict] | None = None
+                        datastore_truncation: dict | None = None
                         for resource in suitable[:2]:
                             try:
-                                records = await self._fetch_datastore(
+                                records, datastore_truncation = await self._fetch_datastore(
                                     portal, resource["id"], None, 50
                                 )
                                 if records:
@@ -440,18 +471,19 @@ class CKANSearchAdapter(ICKANSearchConnector):
                                 except Exception:
                                     continue
 
-                        # FR-011: if the CSV branch ran and the download hit
-                        # either the byte or row limit, surface it in the
-                        # metadata so the analyst and the UI know this is a
-                        # partial view of the dataset. Datastore results are
-                        # not yet truncation-aware (tracked as CL-003 —
-                        # separate follow-up).
+                        # FR-011 / FR-012: surface truncation metadata whether
+                        # the partial view came from the CSV path (byte / row
+                        # limit) or the datastore path (pagination limit).
+                        # Only one of the two can be non-None for any given
+                        # result — we try datastore first, fall back to CSV.
                         metadata: dict = {
                             "total_records": len(records) if records else 0,
                             "fetched_at": now,
                             "description": ds.get("notes", ""),
                         }
-                        if csv_truncation is not None:
+                        if datastore_truncation is not None:
+                            metadata.update(datastore_truncation)
+                        elif csv_truncation is not None:
                             metadata.update(csv_truncation)
 
                         results.append(
@@ -499,7 +531,12 @@ class CKANSearchAdapter(ICKANSearchConnector):
             portal = _find_portal(portal_id)
             if not portal:
                 return []
-            return await self._fetch_datastore(portal, resource_id, q, limit)
+            # The port contract for query_datastore returns raw records
+            # without truncation metadata — the DataResult-wrapping path
+            # (search_datasets) is the one FR-012 targets. Discard the
+            # truncation tuple element here.
+            records, _ = await self._fetch_datastore(portal, resource_id, q, limit)
+            return records
         except ConnectorError:
             raise
         except Exception as exc:

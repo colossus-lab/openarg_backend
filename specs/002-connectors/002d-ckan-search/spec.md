@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-11
+**Last synced with code**: 2026-04-11 (datastore pagination fix)
 **Hexagonal scope**: Domain + Application + Infrastructure
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -54,11 +54,17 @@ It is the "thickest" connector in the system (321 lines in the adapter) and the 
 - **FR-008**: MUST isolate failures per portal: a downed portal does not invalidate results from others.
 - **FR-009**: MUST maintain a documented list of dead portals with the reason for the death.
 - **FR-010**: MUST scrape catalogs on staggered schedules so as not to hit portals simultaneously.
-- **FR-011**: **Truncation transparency** — when a CSV download is truncated (either because the byte stream exceeded `MAX_CSV_BYTES = 2 MiB` or because the row count exceeded `MAX_CSV_ROWS = 500`), the connector MUST populate the returned `DataResult.metadata` with:
+- **FR-011**: **CSV truncation transparency** — when a CSV download is truncated (either because the byte stream exceeded `MAX_CSV_BYTES = 2 MiB` or because the row count exceeded `MAX_CSV_ROWS = 500`), the connector MUST populate the returned `DataResult.metadata` with:
   - `truncated: True` — boolean flag (FR-011a)
   - `truncation_reason: "max_bytes_exceeded" | "max_rows_exceeded"` — which of the two limits fired first (FR-011b)
   - `truncation_limit: <int>` — the limit value that was hit, for self-describing metadata (FR-011c)
   This exists so the downstream analyst prompt and the frontend can surface the fact that the user is seeing a partial view of the dataset, instead of assuming the returned rows are the complete dataset. The limits themselves are not changing in this FR — only the visibility of the fact that they fired.
+- **FR-012**: **Datastore pagination transparency** — when a `datastore_search` call returns only the first page of a larger dataset (upstream `total > limit`), the connector MUST populate `DataResult.metadata` with the same three keys as the CSV truncation path, but with a datastore-specific reason code:
+  - `truncated: True` (FR-012a)
+  - `truncation_reason: "datastore_pagination_limit"` (FR-012b)
+  - `truncation_limit: <limit that was requested, e.g. 50>` (FR-012c)
+  - `total_available: <int>` — the real `total` reported by the CKAN response, so the analyst and UI can compare "fetched 50 of 5000" (FR-012d)
+  This closes the sibling silent data loss identified in CL-003: before FR-012, the datastore path returned the first 50 rows and reported `metadata.total_records = 50`, making the partial view look complete. The connector still only fetches one page — raising the page size or iterating would change upstream load characteristics and is deliberately out of scope for this FR. We only change visibility, same philosophy as FR-011. If a future iteration needs complete data, a separate FR can introduce a paging loop with a configurable row budget.
 
 ## 5. Success Criteria
 
@@ -84,7 +90,7 @@ It is the "thickest" connector in the system (321 lines in the adapter) and the 
 
 - **[RESOLVED CL-001]** — Last substantial update of `dead_portals`: **2026-03-08** (commit `4eff38c1` — "feat: streaming collector, new portals, chunked CSV loading"). Commit `d81657bd` from 2026-03-20 was only a formatting pass. **No audit in >1 month** (today 2026-04-10). **Recommendation**: manual quarterly audit or an automated task that periodically pings the dead portals.
 - **[RESOLVED CL-002]** — **Hardcoded, not configurable**. Module-level constants in `ckan_search_adapter.py:18-19`: `MAX_CSV_BYTES = 2 * 1024 * 1024` and `MAX_CSV_ROWS = 500`. No per-portal override, no env var. Changing them requires a code edit.
-- **[RESOLVED CL-003]** — **No pagination**. `_fetch_datastore()` (`ckan_search_adapter.py:334-346`) makes a single call with `limit=50` (line 385) and **does not check the `total` field** of the CKAN response. If the upstream dataset has 5000 records, **only 50 are fetched and the rest are silently lost**. `metadata["total_records"] = len(records)` (line 415) reports the returned count, not the real total. **Severe debt — silent data loss**. Consider adding to FIX_BACKLOG if it becomes actionable.
+- **[RESOLVED CL-003]** — ~~**No pagination silent data loss**~~ **FIXED 2026-04-11**: `_fetch_datastore()` still makes a single `limit=50` call (upstream load considerations unchanged), but it now reads the CKAN response's `total` field and, when `total > limit`, populates `metadata.truncated`, `metadata.truncation_reason = "datastore_pagination_limit"`, `metadata.truncation_limit`, and `metadata.total_available` — see FR-012a/b/c/d above. The data loss is no longer silent; the downstream analyst and the frontend can see "50 of 5000 fetched" and surface it to the user. A full paging loop (fetching all rows) remains out of scope.
 - **[RESOLVED CL-004]** — Simple heuristic: `delimiter = ";" if header.count(";") > header.count(",") else ","` (`ckan_search_adapter.py:298`). **Edge case NOT handled**: if the CSV uses `;` as delimiter but has commas inside quoted fields (e.g., `"name, address";age`), the heuristic counts the quoted commas as separators and incorrectly picks `,`. Downstream `csv.DictReader` respects quoting, but the prior detection already failed. **Debt**: naive detection, does not parse quoting before counting.
 
 ## 8. Tech Debt Discovered
