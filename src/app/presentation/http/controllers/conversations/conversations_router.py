@@ -37,12 +37,12 @@ class MessageCreate(BaseModel):
     chart_data: list[dict[str, Any]] | None = None
     map_data: dict[str, Any] | None = None
     documents: list[dict[str, Any]] | None = None
-    # Sent by the frontend chat bridge when the assistant message is being
+    # Set by the frontend chat bridge when the assistant message is being
     # persisted on an error path (stream broke, WS failure, backend 5xx).
-    # Currently ignored by the DB layer — the field exists to (a) document
-    # the contract between bridge and backend and (b) prepare for a future
-    # `messages.errored` column that the UI can use to render a
-    # "regenerate" affordance. Drops silently until that column lands.
+    # FR-014/FR-015 of 001-chat-bridge/001d-conversation-lifecycle — the
+    # 2026-04-11 migration 0029 adds the backing `messages.errored`
+    # column so the UI can render a regenerate affordance across page
+    # refreshes.
     errored: bool = False
 
 
@@ -55,6 +55,7 @@ class MessageResponse(BaseModel):
     chart_data: list[dict[str, Any]] | None = None
     map_data: dict[str, Any] | None = None
     documents: list[dict[str, Any]] | None = None
+    errored: bool = False
     created_at: str
     feedback: str | None = None
     feedback_comment: str | None = None
@@ -191,6 +192,7 @@ async def get_conversation(
                 chart_data=m.chart_data,
                 map_data=m.map_data,
                 documents=m.documents,
+                errored=getattr(m, "errored", False),
                 created_at=m.created_at.isoformat(),
                 feedback=m.feedback,
                 feedback_comment=m.feedback_comment,
@@ -258,6 +260,7 @@ async def add_message(
         chart_data=body.chart_data,
         map_data=body.map_data,
         documents=body.documents,
+        errored=body.errored,
     )
     saved = await chat_repo.add_message(message)
 
@@ -270,6 +273,7 @@ async def add_message(
         chart_data=saved.chart_data,
         map_data=saved.map_data,
         documents=saved.documents,
+        errored=getattr(saved, "errored", False),
         created_at=saved.created_at.isoformat(),
         feedback=saved.feedback,
         feedback_comment=saved.feedback_comment,
@@ -300,6 +304,7 @@ async def get_messages(
             chart_data=m.chart_data,
             map_data=m.map_data,
             documents=m.documents,
+            errored=getattr(m, "errored", False),
             created_at=m.created_at.isoformat(),
             feedback=m.feedback,
             feedback_comment=m.feedback_comment,
@@ -347,6 +352,7 @@ async def submit_feedback(
         chart_data=updated.chart_data,
         map_data=updated.map_data,
         documents=updated.documents,
+        errored=getattr(updated, "errored", False),
         created_at=updated.created_at.isoformat(),
         feedback=updated.feedback,
         feedback_comment=updated.feedback_comment,

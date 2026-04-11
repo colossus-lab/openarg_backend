@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -72,6 +73,10 @@ def map_chat_tables() -> None:
         Column("documents", JSONB, nullable=True),
         Column("feedback", String(10), nullable=True),
         Column("feedback_comment", Text, nullable=True),
+        # FR-015 (001d-conversation-lifecycle): persists the error flag from
+        # saveAssistantMessageWithRetry so the UI can render a regenerate
+        # affordance across page refreshes.
+        Column("errored", Boolean, nullable=False, server_default=text("false")),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
         Column(
             "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -19,3 +19,8 @@ class Message(BaseEntity):
     documents: list[dict] | None = None
     feedback: str | None = None  # "up" | "down" | None
     feedback_comment: str | None = None
+    # FR-015 (001d-conversation-lifecycle): true when the assistant
+    # message was persisted on an error path (stream broken, WS error,
+    # caught exception). Write-once — a regenerate appends a new
+    # message instead of mutating this flag.
+    errored: bool = False
