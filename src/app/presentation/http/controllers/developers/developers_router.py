@@ -1,8 +1,8 @@
 """Developer API key management endpoints.
 
-These endpoints are called from the frontend (authenticated with the
-shared BACKEND_API_KEY + a Google OAuth ID token — see FIX-005), NOT
-with user API keys.
+Called from the frontend with the shared ``BACKEND_API_KEY`` service
+token plus the per-user Google OAuth ID token (see FIX-005). Not called
+with user-owned API keys.
 """
 
 from __future__ import annotations

@@ -104,21 +104,12 @@ def configure_app(
     # makes the API-key check run first — Google JWT validation only sees
     # requests that already passed the service-token gate.
     if settings:
-        raw_mode = (settings.security.GOOGLE_JWT_VALIDATION_MODE or "disabled").lower()
-        mode: _gjwt.Mode = raw_mode if raw_mode in ("disabled", "dual", "enforced") else "disabled"  # type: ignore[assignment]
-        validator: GoogleJwtValidator | None = None
-        if mode != "disabled":
-            client_id = settings.security.GOOGLE_OAUTH_CLIENT_ID
-            if not client_id:
-                raise RuntimeError(
-                    "GOOGLE_JWT_VALIDATION_MODE is "
-                    f"{mode!r} but GOOGLE_OAUTH_CLIENT_ID is empty"
-                )
-            validator = GoogleJwtValidator(client_id=client_id)
+        client_id = settings.security.GOOGLE_OAUTH_CLIENT_ID
+        if not client_id:
+            raise RuntimeError("GOOGLE_OAUTH_CLIENT_ID must be set")
         app.add_middleware(
             _gjwt.GoogleJwtAuthMiddleware,
-            validator=validator,
-            mode=mode,
+            validator=GoogleJwtValidator(client_id=client_id),
         )
 
     # API key middleware (if configured)

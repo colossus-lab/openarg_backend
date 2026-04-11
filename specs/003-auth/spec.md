@@ -50,7 +50,7 @@ The **API keys** module for programmatic access is documented in `008-developers
 - **FR-004**: Deletion (DELETE /me) MUST cascade to `conversations`, `messages`, `user_queries`.
 - **FR-005**: Export (GET /me/data) MUST return a JSON with all the user's entities.
 - **FR-006**: The `save_history=false` toggle MUST delete existing conversations in the same operation.
-- **FR-007**: Authenticated endpoints MUST identify the user from a Google OAuth ID token sent as `Authorization: Bearer <jwt>`. The token's signature MUST be verified against Google's JWKS (`https://www.googleapis.com/oauth2/v3/certs`), and the claims `iss`, `aud` and `exp` MUST be enforced before extracting `email`. During the rollout, a dual mode accepts the deprecated `X-User-Email` header as a fallback with a warning log; an enforced mode rejects requests without a valid JWT.
+- **FR-007**: Authenticated endpoints MUST identify the user from a Google OAuth ID token sent as `Authorization: Bearer <jwt>`. The token's signature MUST be verified against Google's JWKS (`https://www.googleapis.com/oauth2/v3/certs`), and the claims `iss`, `aud`, `exp` and `email_verified` MUST be enforced before extracting `email`. Requests without a valid token MUST be rejected with HTTP 401. The deprecated `X-User-Email` header is no longer read.
 - **FR-008**: User creation (sync) MUST record `privacy_accepted_at` when the frontend reports it.
 
 ## 5. Success Criteria
@@ -63,10 +63,9 @@ The **API keys** module for programmatic access is documented in `008-developers
 ## 6. Assumptions & Out of Scope
 
 ### Assumptions
-- The frontend (NextAuth) forwards the Google OAuth ID token it obtained during login to the backend as `Authorization: Bearer <jwt>`. The backend then validates the token itself (signature + `iss` + `aud` + `exp`) on every authenticated request, so backend auth no longer depends on downstream components (NextAuth, reverse proxy) being configured correctly.
+- The frontend (NextAuth) forwards the Google OAuth ID token it obtained during login to the backend as `Authorization: Bearer <jwt>`. The backend validates the token itself (signature + `iss` + `aud` + `exp` + `email_verified`) on every authenticated request, so backend auth does not depend on downstream components (NextAuth, reverse proxy) being configured correctly.
 - The `GOOGLE_OAUTH_CLIENT_ID` configured on the backend matches the client id used by the frontend to mint the token; otherwise `aud` validation rejects the request.
 - Emails are unique (DB constraint).
-- During the rollout, `GOOGLE_JWT_VALIDATION_MODE` starts at `disabled` (legacy `X-User-Email` behavior), is flipped to `dual` once the frontend sends `Authorization: Bearer`, and finally to `enforced` once the header path is verified unused in logs.
 
 ### Out of scope
 - **Passwords** — OAuth only, never password hashing.
@@ -78,7 +77,7 @@ The **API keys** module for programmatic access is documented in `008-developers
 
 ## 7. Open Questions
 
-- **[RESOLVED CL-001]** — **Implementing Option A (FIX-005).** The backend now validates the Google OAuth ID token on every authenticated request: signature via JWKS (`https://www.googleapis.com/oauth2/v3/certs`), `iss ∈ {accounts.google.com, https://accounts.google.com}`, `aud == GOOGLE_OAUTH_CLIENT_ID`, and `exp` not expired. The email is extracted from the verified claim, not from a header. Rollout uses `GOOGLE_JWT_VALIDATION_MODE` (`disabled`/`dual`/`enforced`) so the backend can ship independently of the frontend. See [`FIX_BACKLOG.md#fix-005`](../FIX_BACKLOG.md).
+- **[RESOLVED CL-001]** — **Implemented and enforced 2026-04-11 (FIX-005 Option A).** The backend validates the Google OAuth ID token on every authenticated request: signature via JWKS (`https://www.googleapis.com/oauth2/v3/certs`), `iss ∈ {accounts.google.com, https://accounts.google.com}`, `aud == GOOGLE_OAUTH_CLIENT_ID`, `exp` not expired, `email_verified` is true. The email is extracted from the verified claim. The legacy `X-User-Email` header path was deleted from both backend and frontend. See [`FIX_BACKLOG.md#fix-005`](../FIX_BACKLOG.md).
 - **[RESOLVED CL-002]** — The allowlist lives in the **frontend** (`openarg_frontend/src/lib/authOptions.ts`, NextAuth signIn callback), not in the backend. Policy per environment:
   - **Staging**: allowlist **ACTIVE** via `ALLOWED_EMAILS` with `OPEN_BETA=false`. Only the listed operators can authenticate — private alpha.
   - **Production**: allowlist **BYPASSED** (`OPEN_BETA=true` or empty allowlist + open domains). Public access.
@@ -91,7 +90,7 @@ The **API keys** module for programmatic access is documented in `008-developers
 ## 8. Tech Debt Discovered
 
 - **[DEBT-001]** — **No password hashing** — acceptable for the OAuth-only model, but it should be documented as an explicit decision.
-- **[DEBT-002]** — **`X-User-Email` header trust model** — ~~the backend accepts the caller identity from a header set by the trusted proxy, without its own cryptographic validation~~ **RESOLVED via FIX-005 Option A**: the backend now validates the Google OAuth ID token itself at the API layer (`GoogleJwtAuthMiddleware` + `google_jwt_validator.py`), and `GOOGLE_JWT_VALIDATION_MODE=enforced` eliminates the header path entirely. The legacy header remains available under `dual` mode during rollout only.
+- **[DEBT-002]** — ~~**`X-User-Email` header trust model**~~ **CLOSED 2026-04-11 via FIX-005**: the backend validates the Google OAuth ID token itself at the API layer (`GoogleJwtAuthMiddleware` + `google_jwt_validator.py`). The legacy header and the `GOOGLE_JWT_VALIDATION_MODE` rollout flag have been deleted from the codebase.
 - **[DEBT-003]** — **No audit trail** of login/logout events.
 - **[DEBT-004]** — **No rate limiting** on `/users/sync` — an attacker could spam emails.
 

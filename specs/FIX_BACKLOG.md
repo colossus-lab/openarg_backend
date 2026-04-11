@@ -205,11 +205,16 @@ Before starting: **verify that the subgraph is not out of date** compared to the
 ## FIX-005: X-User-Email → JWT server-side validation
 
 **Priority**: **High (security)**
-**Status**: **In progress — Option A (JWKS validation per request)**
+**Status**: **DONE — enforced 2026-04-11**
 **Module**: `003-auth/`
 **Type**: Hardening
 **Spec**: `specs/003-auth/spec.md` FR-007, CL-001
-**Related debt**: `003-auth/DEBT-002`
+**Related debt**: `003-auth/DEBT-002` (closed)
+
+The backend now validates the Google OAuth ID token on every authenticated
+request via JWKS. The legacy ``X-User-Email`` header path has been deleted
+from both backend and frontend. The ``GOOGLE_JWT_VALIDATION_MODE`` rollout
+flag is gone — validation is always enforced.
 
 ### Problem
 The backend currently derives the caller identity from the `X-User-Email` header, which is provisioned by the trusted reverse proxy after the frontend completes the Google OAuth flow. The backend itself does not cryptographically verify the claim — it trusts the upstream chain (NextAuth + reverse proxy) to set the header correctly.
@@ -449,6 +454,83 @@ for legajo, curr in curr_by_legajo.items():
 
 ### Priority note
 **Low-Medium**: no users reporting missing transfer info (the feature doesn't exist yet, no one is asking for it). But it is a data completeness gap that can bite when someone does longitudinal analysis of legislative staff. Consider it when planning a "staff movement analysis" feature or similar.
+
+---
+
+## FIX-007: DDJJ top-N requests return partial results
+
+**Priority**: Medium (correctness)
+**Status**: Open — reported 2026-04-11
+**Module**: `002-connectors/` (DDJJ connector) + `001-query-pipeline/`
+**Type**: Correctness / data completeness
+
+### Problem
+When the user asks for a ranked top-N (e.g. "¿Quiénes son los 10 diputados con
+mayor patrimonio declarado?"), the pipeline returns fewer rows than requested.
+Observed on 2026-04-11 against staging: asked for top 10, got only 4 complete
+records (Brugge, Kirchner, Carrizo, Ritondo) followed by an admission that
+"datos del 5º al 10º registro incompletos en la recolección".
+
+Root cause suspected in one of:
+
+- DDJJ adapter limiting rows too aggressively in its internal paging or
+  by truncating the JSON slice loaded into memory (we only have 195 diputados
+  in the local dataset — 10 top by patrimonio should always be reachable).
+- Planner allocating fewer PlanSteps than needed when the ask is "top 10"
+  and then stopping early.
+- Analyst prompt dropping rows when synthesizing the final answer.
+
+### Acceptance criteria
+- [ ] "¿Quiénes son los 10 diputados con mayor patrimonio declarado?" returns
+      exactly 10 rows with numeric patrimonio values, sorted descending.
+- [ ] A regression test in `tests/integration/` or the analyst-prompt fixture
+      set pins the top-10 behavior so it cannot silently drop back to top-4.
+- [ ] Same check for senadores once the DDJJ coverage expands beyond the
+      current 195 diputados sample (see `000-architecture/` CL-005).
+
+### Investigation hint
+Start by logging the row count returned at each step in
+`app/application/pipeline/` for the DDJJ path, then compare with the
+analyst prompt's final rendered table.
+
+---
+
+## FIX-008: Chart rendering regression in chat bridge
+
+**Priority**: Medium (visible UX regression)
+**Status**: Open — reported 2026-04-11
+**Module**: `001-chat-bridge/` + `001-query-pipeline/`
+**Type**: Regression
+
+### Problem
+Charts no longer render in the chat UI for queries that historically produced
+them. Confirmed broken on 2026-04-11 with "¿Cómo viene la inflación en los
+últimos meses?" and "Mostrame la evolución de las reservas del BCRA". Both
+used to return `chart_data` that the frontend renders as interactive charts;
+current behavior is text-only.
+
+Unclear whether the breakage is backend (pipeline no longer emitting
+``chart_data`` in the SmartResult) or frontend (stream event whitelist or
+SSE mapping dropping the payload). Note: 2026-04-11 backend logs contain
+a warning `stream_payload dropped keys ['connector'] (type='status') —
+add them to _STREAM_ALLOWED_PAYLOAD_KEYS if they should reach the browser`
+which suggests the allowed-keys whitelist may also be stripping
+``chart_data`` in some paths.
+
+### Acceptance criteria
+- [ ] The two reference queries above produce charts in the browser on
+      staging, end to end.
+- [ ] A regression test (frontend vitest + backend unit) pins that
+      ``chart_data`` is present in the SmartResult and reaches the
+      browser intact through both WS primary and HTTP fallback.
+- [ ] `_STREAM_ALLOWED_PAYLOAD_KEYS` audited: any legitimate payload keys
+      that are currently being dropped get added.
+
+### Investigation hint
+Start at `app/presentation/http/controllers/query/smart_query_v2_router.py`
+where `_STREAM_ALLOWED_PAYLOAD_KEYS` lives, then trace the chart payload
+back through the NL2SQL subgraph and forward to the frontend's chat bridge
+(`src/lib/chat/wsBridge.ts` + `syncFallback.ts`).
 
 ---
 
