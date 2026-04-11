@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -102,16 +101,12 @@ class TestVerifyApiKey:
             await verify_api_key(raw_key, mock_repo)
         assert exc_info.value.status_code == 401
 
-    @pytest.mark.asyncio
-    async def test_expired_key_rejected(self, mock_repo: AsyncMock, valid_key: tuple) -> None:
-        from fastapi import HTTPException
-
-        raw_key, api_key = valid_key
-        api_key.expires_at = datetime.now(UTC) - timedelta(hours=1)
-        mock_repo.get_by_key_hash.return_value = api_key
-        with pytest.raises(HTTPException) as exc_info:
-            await verify_api_key(raw_key, mock_repo)
-        assert exc_info.value.status_code == 401
+    # test_expired_key_rejected was deleted 2026-04-11 along with the
+    # api_keys.expires_at column (Alembic 0030). It was testing a
+    # behavior that never fired in production — the column was read
+    # but never written, so every real key had expires_at=NULL and
+    # the validation short-circuited on the None guard. See
+    # specs/008-developers-keys/[DEBT-003].
 
 
 # ── Rate limiting ────────────────────────────────────────────

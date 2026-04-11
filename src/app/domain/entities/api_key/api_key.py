@@ -13,7 +13,14 @@ _ZERO_UUID = UUID("00000000-0000-0000-0000-000000000000")
 
 @dataclass
 class ApiKey(BaseEntity):
-    """An API key issued to a user for programmatic access."""
+    """An API key issued to a user for programmatic access.
+
+    Keys never expire: ``expires_at`` used to exist on this entity and
+    on the ``api_keys`` table but was only ever read, never written
+    (Alembic 0030 dropped the column 2026-04-11). If expiration is
+    ever needed, it becomes a new feature with a UI flow that actually
+    sets a value — see specs/008-developers-keys/[DEBT-003].
+    """
 
     user_id: UUID = field(default=_ZERO_UUID)  # Must be set explicitly
     key_hash: str = ""
@@ -22,7 +29,6 @@ class ApiKey(BaseEntity):
     plan: str = "free"  # free | basic | pro
     is_active: bool = True
     last_used_at: datetime | None = None
-    expires_at: datetime | None = None
 
 
 @dataclass

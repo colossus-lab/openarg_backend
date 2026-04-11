@@ -6,7 +6,6 @@ import hashlib
 import logging
 import math
 import secrets
-from datetime import UTC, datetime
 
 from fastapi import HTTPException
 
@@ -66,8 +65,9 @@ async def verify_api_key(
     if not api_key or not api_key.is_active:
         raise HTTPException(status_code=401, detail=_AUTH_ERROR)
 
-    if api_key.expires_at and api_key.expires_at < datetime.now(UTC):
-        raise HTTPException(status_code=401, detail=_AUTH_ERROR)
+    # api_keys.expires_at was dropped in Alembic 0030 (2026-04-11) —
+    # it was dead code (read but never written). Keys now live until
+    # explicitly revoked. See specs/008-developers-keys/[DEBT-003].
 
     return api_key
 

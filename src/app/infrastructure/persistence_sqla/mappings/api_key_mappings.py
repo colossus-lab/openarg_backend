@@ -45,7 +45,8 @@ def map_api_key_tables() -> None:
         Column("plan", String(20), nullable=False, server_default="free"),
         Column("is_active", Boolean, nullable=False, server_default=text("true")),
         Column("last_used_at", DateTime(timezone=True), nullable=True),
-        Column("expires_at", DateTime(timezone=True), nullable=True),
+        # expires_at was dropped 2026-04-11 (Alembic 0030) — see
+        # specs/008-developers-keys/[DEBT-003] for rationale.
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
         Column(
             "updated_at",

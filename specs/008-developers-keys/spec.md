@@ -53,14 +53,14 @@ Endpoints for **authenticated users** to manage their own **API keys**: create, 
 
 ### Out of scope
 - **Multiple keys per user** — only one for now.
-- **Key expiration management** — the field exists but is not set from the UI.
+- **Key expiration** — keys do not expire. If expiration is ever needed, it becomes a new feature with its own FR + migration + UI (see DEBT-003 below, which tracks the former dead-code state and the 2026-04-11 cleanup).
 - **Billing** / plan upgrade.
 - **Key scopes / permissions** — all keys have the same permissions.
 - **Webhook notifications** for anomalous usage.
 
 ## 6. Open Questions
 
-- **[RESOLVED CL-001]** — Confirmed dead code: `expires_at` is **never** written by any endpoint. `POST /developers/keys` (developers_router.py:65-72) builds `ApiKey(user_id=..., key_hash=..., key_prefix=..., name=..., plan="free")` with no `expires_at` argument; grepping the code only finds **reads** (`verify_api_key` at `api_key_service.py:69`) and the nullable schema column (`api_key_mappings.py:48`, alembic migration 0027). Same issue as `007-public-api/CL-001`. (resolved 2026-04-11 via code inspection)
+- **[RESOLVED CL-001]** — ~~`expires_at` is dead code never written by any endpoint~~ **FIXED 2026-04-11 via deletion**. The column + entity field + mapping + validation check have been removed (Alembic migration 0030). See DEBT-003 below for the rationale — §0 "delete before you add" + "abstractions pay rent only when a second caller exists". Same change closed the sibling `007-public-api/CL-001`.
 - **[NEEDS CLARIFICATION CL-002]** — Why 1 key per user? Plan to allow more?
 - **[RESOLVED CL-003]** — `BACKEND_API_KEY`: **currently NOT rotated**. Manual rotation on demand (requires coordinated backend + frontend restart). Accepted debt, not a priority. If compromised, it is rotated manually by editing env vars and restarting services.
 
@@ -68,7 +68,7 @@ Endpoints for **authenticated users** to manage their own **API keys**: create, 
 
 - **[DEBT-001]** — **Key prefix stored for display** — no rotation mechanism.
 - **[DEBT-002]** — **Global cap checked only against Redis** — fail-open allows over-limit.
-- **[DEBT-003]** — `expires_at` is dead code (field checked but never set).
+- **[DEBT-003]** — ~~`expires_at` is dead code~~ **FIXED 2026-04-11 via deletion**: the column is gone (Alembic 0030), the `ApiKey.expires_at` entity field is removed, the `api_key_service.verify_api_key` check that compared it to `now()` is removed, and the `api_key_mappings` Column is removed. Rationale: the field was being **read but never written**, so every key was persisted with `expires_at = NULL` and the check at `api_key_service.py:69` always short-circuited on the `api_key.expires_at and ...` guard — pure dead validation. If expiration ever becomes a real feature, it should be re-introduced with a UI flow that actually sets it (see the Out of Scope section above).
 - **[DEBT-004]** — **No soft delete audit** — revoking a key leaves no trace of "who revoked it when".
 
 ---
