@@ -37,6 +37,13 @@ class MessageCreate(BaseModel):
     chart_data: list[dict[str, Any]] | None = None
     map_data: dict[str, Any] | None = None
     documents: list[dict[str, Any]] | None = None
+    # Sent by the frontend chat bridge when the assistant message is being
+    # persisted on an error path (stream broke, WS failure, backend 5xx).
+    # Currently ignored by the DB layer — the field exists to (a) document
+    # the contract between bridge and backend and (b) prepare for a future
+    # `messages.errored` column that the UI can use to render a
+    # "regenerate" affordance. Drops silently until that column lands.
+    errored: bool = False
 
 
 class MessageResponse(BaseModel):

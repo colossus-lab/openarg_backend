@@ -21,10 +21,12 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
+from app.application.common.privacy_gate import ensure_privacy_accepted
 from app.application.pipeline.graph import build_pipeline_graph
 from app.application.pipeline.nodes import PipelineDeps, set_deps
 from app.application.pipeline.state import OpenArgState
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
 from app.setup.app_factory import limiter
 
@@ -135,8 +137,12 @@ async def smart_query_v2(
     request: Request,
     body: SmartQueryV2Request,
     deps: FromDishka[PipelineDeps],
+    user_repo: FromDishka[IUserRepository],
 ) -> dict[str, Any] | JSONResponse:
     """Execute a query through the LangGraph pipeline."""
+    # Server-side privacy gate (defense in depth — the frontend also checks).
+    await ensure_privacy_accepted(body.user_email, user_repo)
+
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
     checkpointer = await _get_checkpointer()
     compiled_graph = _get_or_compile_graph(deps, checkpointer)
@@ -289,6 +295,20 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
                     await ws.close(code=4429)
                     return
+
+                # Server-side privacy gate (defense in depth).
+                ws_user_email = raw.get("user_email") or ""
+                if ws_user_email:
+                    user_repo = await request_scope.get(IUserRepository)
+                    try:
+                        await ensure_privacy_accepted(ws_user_email, user_repo)
+                    except HTTPException as exc:
+                        detail = exc.detail if isinstance(exc.detail, dict) else {
+                            "message": str(exc.detail)
+                        }
+                        await ws.send_json({"type": "error", **detail})
+                        await ws.close(code=4403)
+                        return
 
                 question = raw.get("question", "")
                 conversation_id = raw.get("conversation_id", "")

@@ -18,6 +18,32 @@ from app.infrastructure.audit.audit_logger import audit_query
 
 logger = logging.getLogger(__name__)
 
+# Strong references to background tasks. Without this, `asyncio.create_task()`
+# returns a weakly-referenced task that can be garbage-collected mid-execution
+# (CPython issue; documented in asyncio docs). Tasks add themselves on spawn
+# and remove themselves on completion via a done callback.
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_background(coro: Any, *, name: str) -> None:
+    """Spawn a fire-and-forget task while keeping a strong reference.
+
+    Also attaches a done_callback that logs any unhandled exception so
+    silent failures in background work are at least visible in logs.
+    """
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task[Any]) -> None:
+        _background_tasks.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.warning("Background task %r raised: %s", name, exc, exc_info=exc)
+
+    task.add_done_callback(_done)
+
 
 def _extract_sources(results: list) -> list[dict[str, Any]]:
     """Build the sources list from data results."""
@@ -107,8 +133,9 @@ async def finalize_node(state: OpenArgState) -> dict:
     session_id = conversation_id or ""
     memory = state.get("memory")
     if memory and plan:
-        asyncio.create_task(
-            _update_memory_bg(deps, session_id, memory, plan, results, clean_answer)
+        _spawn_background(
+            _update_memory_bg(deps, session_id, memory, plan, results, clean_answer),
+            name="finalize.memory_update",
         )
 
     duration_ms = int((time.monotonic() - state.get("_start_time", time.monotonic())) * 1000)

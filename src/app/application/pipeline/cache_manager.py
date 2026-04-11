@@ -128,6 +128,40 @@ async def get_cached_dict(
 
 _ERROR_MARKERS = ("ocurrió un error", "error al analizar", "pipeline_error")
 
+_CACHE_WRITE_MAX_RETRIES = 2
+_CACHE_WRITE_BACKOFF_BASE = 0.5
+
+
+async def _retry_async(op_name: str, op: Any) -> bool:
+    """Retry an async cache write with exponential backoff. Returns True if it eventually succeeded."""
+    last_exc: Exception | None = None
+    for attempt in range(1 + _CACHE_WRITE_MAX_RETRIES):
+        try:
+            await op()
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _CACHE_WRITE_MAX_RETRIES:
+                delay = _CACHE_WRITE_BACKOFF_BASE * (2**attempt)
+                logger.debug(
+                    "%s attempt %d/%d failed, retrying in %.1fs",
+                    op_name,
+                    attempt + 1,
+                    1 + _CACHE_WRITE_MAX_RETRIES,
+                    delay,
+                    exc_info=True,
+                )
+                await asyncio.sleep(delay)
+    logger.warning(
+        "%s failed after %d attempts: %s",
+        op_name,
+        1 + _CACHE_WRITE_MAX_RETRIES,
+        last_exc,
+    )
+    return False
+
 
 async def write_cache(
     question: str,
@@ -138,21 +172,29 @@ async def write_cache(
     semantic_cache: SemanticCache,
     last_embedding: list[float] | None = None,
 ) -> None:
-    """Write to both Redis and semantic cache. Skip error responses."""
+    """Write to both Redis and semantic cache. Skip error responses.
+
+    Each write is retried independently with exponential backoff so a
+    transient failure in Redis does not block the semantic cache write
+    (and vice versa). Matches the retry behavior of the memory update
+    path — see finalize.py `_update_memory_bg`.
+    """
     answer = (result.get("answer") or "").lower()
     if any(marker in answer for marker in _ERROR_MARKERS):
         logger.debug("Skipping cache write for error response")
         return
     ttl = ttl_for_intent(intent)
-    try:
-        await cache.set(cache_key(question), result, ttl_seconds=ttl)
-    except Exception:
-        logger.warning("Failed to cache smart query result", exc_info=True)
-    try:
-        q_embedding = last_embedding
-        if not q_embedding:
-            q_embedding = await get_embedding(embedding_provider, question)
-        if q_embedding:
-            await semantic_cache.set(question, q_embedding, result, ttl=ttl)
-    except Exception:
-        logger.debug("Semantic cache write failed", exc_info=True)
+
+    await _retry_async(
+        "Redis cache write",
+        lambda: cache.set(cache_key(question), result, ttl_seconds=ttl),
+    )
+
+    q_embedding = last_embedding
+    if not q_embedding:
+        q_embedding = await get_embedding(embedding_provider, question)
+    if q_embedding:
+        await _retry_async(
+            "Semantic cache write",
+            lambda: semantic_cache.set(question, q_embedding, result, ttl=ttl),
+        )

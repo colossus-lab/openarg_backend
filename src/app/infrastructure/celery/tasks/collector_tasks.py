@@ -805,9 +805,97 @@ def _compact_wide_dataframe(df: pd.DataFrame, max_columns: int = _MAX_SQL_COLUMN
     return compacted
 
 
+def _detect_schema_drift(
+    engine, table_name: str, new_df: pd.DataFrame
+) -> dict[str, list[str]] | None:
+    """Compare the existing cache table schema to the incoming DataFrame.
+
+    Returns a dict with ``added``, ``removed`` and ``type_changed`` column
+    lists if drift is detected, or None if the table does not exist or the
+    schemas match. Used to emit a structured warning BEFORE we replace the
+    table — operators need visibility when an upstream schema shifts
+    because downstream SQL sandbox queries and NL2SQL prompts assume the
+    schema is stable. Read-only, non-blocking: if the inspection itself
+    fails, we return None and let the write proceed.
+    """
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT column_name, data_type "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :tn"
+                ),
+                {"tn": table_name},
+            ).fetchall()
+            conn.rollback()
+    except Exception:
+        return None
+
+    if not rows:
+        return None  # new table, no drift
+
+    existing = {r[0]: r[1] for r in rows}
+    incoming = {str(c) for c in new_df.columns}
+
+    added = sorted(incoming - existing.keys())
+    removed = sorted(set(existing.keys()) - incoming)
+
+    # Rough type drift check: compare pandas dtype kind to PG type family.
+    type_changed: list[str] = []
+    pg_numeric = {"integer", "bigint", "smallint", "numeric", "double precision", "real"}
+    pg_text = {"text", "character varying", "character", "varchar"}
+    pg_temporal = {"date", "timestamp without time zone", "timestamp with time zone", "time"}
+    for col in sorted(incoming & existing.keys()):
+        pg_type = existing[col].lower()
+        pd_dtype = str(new_df[col].dtype)
+        pd_kind = new_df[col].dtype.kind  # i,u,f,O,M,b
+        if pd_kind in ("i", "u", "f") and pg_type not in pg_numeric:
+            type_changed.append(f"{col}: {pg_type} -> {pd_dtype}")
+        elif pd_kind == "O" and pg_type not in pg_text:
+            type_changed.append(f"{col}: {pg_type} -> {pd_dtype}")
+        elif pd_kind == "M" and pg_type not in pg_temporal:
+            type_changed.append(f"{col}: {pg_type} -> {pd_dtype}")
+
+    if not (added or removed or type_changed):
+        return None
+    return {"added": added, "removed": removed, "type_changed": type_changed}
+
+
 def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
-    """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs."""
+    """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs.
+
+    Before the write, inspect the existing table schema (if any) for
+    drift — column additions, removals, or type shifts — and emit a
+    structured warning so operators know when an upstream feed changed.
+    This does not block the write; downstream SQL sandbox/NL2SQL consumers
+    may still break on the new schema, but at least the drift is visible
+    in logs and metrics instead of surfacing as a mysterious "column does
+    not exist" error hours later.
+    """
     df = _sanitize_columns(df)
+
+    if kwargs.get("if_exists") == "replace":
+        drift = _detect_schema_drift(engine, table_name, df)
+        if drift is not None:
+            logger.warning(
+                "schema_drift_detected table=%s added=%s removed=%s type_changed=%s",
+                table_name,
+                drift["added"],
+                drift["removed"],
+                drift["type_changed"],
+            )
+            try:
+                from app.infrastructure.monitoring.metrics import MetricsCollector
+
+                MetricsCollector().record_connector_call(
+                    f"schema_drift:{table_name}",
+                    latency_ms=0,
+                    error=True,
+                )
+            except Exception:
+                logger.debug("Could not record schema_drift metric", exc_info=True)
+
     try:
         df.to_sql(table_name, engine, **kwargs)
     except Exception as exc:

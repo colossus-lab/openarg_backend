@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import unicodedata
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
@@ -310,6 +311,11 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 for idx, sid in enumerate(series_ids):
                     val = row[idx + 1]
                     if val is not None and is_percent:
+                        # API returns percent_change as a fraction (0.152 = 15.2%).
+                        # We multiply by 100 so downstream consumers get a human
+                        # number ("15.2"). The unit is signaled via metadata.unit
+                        # and metadata.value_scale so the analyst prompt, charts,
+                        # and UI know not to display "15.2%" as "1520%".
                         val = round(val * 100, 2)
                     label = id_to_label.get(sid, sid)
                     record[label] = val
@@ -318,6 +324,20 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             if not records:
                 return None
 
+            metadata: dict[str, Any] = {
+                "total_records": len(records),
+                "fetched_at": datetime.now(UTC).isoformat(),
+                "description": "; ".join(field_descriptions),
+                "units": field_units,
+            }
+            if representation:
+                metadata["representation"] = representation
+            if is_percent:
+                # Explicit contract for downstream consumers: values are already
+                # scaled to percentage points (e.g., 15.2 means 15.2%).
+                metadata["unit"] = "percent"
+                metadata["value_scale"] = "percentage_points"
+
             return DataResult(
                 source="series_tiempo",
                 portal_name="API de Series de Tiempo",
@@ -325,12 +345,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 dataset_title=dataset_title,
                 format="time_series",
                 records=records,
-                metadata={
-                    "total_records": len(records),
-                    "fetched_at": datetime.now(UTC).isoformat(),
-                    "description": "; ".join(field_descriptions),
-                    "units": field_units,
-                },
+                metadata=metadata,
             )
         except ConnectorError:
             raise
