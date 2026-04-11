@@ -116,6 +116,7 @@ class BedrockLLMAdapter(ILLMProvider):
         messages: list[LLMMessage],
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        usage_out: dict[str, int] | None = None,
     ) -> AsyncIterator[str]:
         system_parts, api_messages = self._build_messages(messages)
 
@@ -139,3 +140,12 @@ class BedrockLLMAdapter(ILLMProvider):
                 text = delta.get("text", "")
                 if text:
                     yield text
+            elif "metadata" in event and usage_out is not None:
+                # FIX-006: capture token usage from the final metadata event.
+                # Bedrock Converse Stream emits metadata with usage at the end.
+                usage = event["metadata"].get("usage", {})
+                input_tokens = int(usage.get("inputTokens", 0))
+                output_tokens = int(usage.get("outputTokens", 0))
+                usage_out["input_tokens"] = input_tokens
+                usage_out["output_tokens"] = output_tokens
+                usage_out["total_tokens"] = input_tokens + output_tokens

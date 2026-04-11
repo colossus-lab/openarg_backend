@@ -33,7 +33,19 @@ class ILLMProvider(ABC):
         messages: list[LLMMessage],
         temperature: float = 0.0,
         max_tokens: int = 4096,
-    ) -> AsyncIterator[str]: ...
+        usage_out: dict[str, int] | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream text chunks from the LLM.
+
+        If ``usage_out`` is provided (a mutable dict), the adapter MUST
+        populate it with token usage information when the stream ends:
+        ``{"input_tokens": int, "output_tokens": int, "total_tokens": int}``.
+        Callers can then read the dict after iterating the stream to
+        attribute token costs to the request.
+
+        FIX-006: tracks token usage in streaming mode (previously lost).
+        """
+        ...
 
     async def chat_json(
         self,
