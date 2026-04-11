@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 _MAX_MAP_FEATURES = 500
 
+# FR-025a: soft character budget for the assembled analyst prompt.
+# Claude Haiku 4.5 has a ~200k token context; at a conservative 4 chars
+# per token that's ~800k chars available. We reserve roughly one quarter
+# of that for the user-role prompt, leaving the rest for the system
+# prompt, the LLM response, and future memory-context growth. If we
+# swap models, bump this constant — that's the one place it lives.
+ANALYST_PROMPT_MAX_CHARS = 50_000
+
 
 def _build_map_data(results: list) -> dict[str, Any] | None:
     """Build a GeoJSON FeatureCollection from data results that contain geometry.
@@ -80,6 +88,156 @@ def _strip_meta(text: str) -> str:
     return _RE_META_TRUNC.sub("", text).strip()
 
 
+# ── Prompt budget enforcement (FR-025a/b/c/d, DEBT-011 fix) ────────
+
+
+def _truncate_segment(
+    segment: str,
+    over: int,
+    *,
+    label: str,
+    keep_from: str = "tail",
+    keep_floor: int = 0,
+) -> tuple[str, int]:
+    """Drop enough characters from ``segment`` to net-reduce its length by ``over``.
+
+    ``keep_from="tail"`` keeps the last chars (for memory_ctx — the most
+    recent conversation turns). ``keep_from="head"`` keeps the first
+    chars (for data_context and errors_block — the highest-priority
+    records/warnings come first). ``keep_floor`` is a minimum number of
+    chars we refuse to drop below, so even a very-over-budget prompt
+    still carries SOME signal from each segment when possible.
+
+    Returns ``(new_segment, net_chars_removed)``. ``net_chars_removed``
+    is the delta between the old and new segment length — the caller
+    uses this to decrement its running "chars still to drop" budget.
+    The returned segment includes an inline sentinel naming the label
+    and the number of raw chars dropped from the original, per FR-025c.
+
+    Subtlety: the sentinel itself adds chars back. If we naively dropped
+    exactly ``over`` chars, the net reduction would be ``over -
+    len(sentinel)``, leaving the caller under-reduced. To avoid that,
+    we drop a larger raw count (``over + sentinel headroom``) so the net
+    reduction is always at least ``over``.
+    """
+    if over <= 0 or not segment:
+        return segment, 0
+    available_to_drop = max(0, len(segment) - keep_floor)
+    if available_to_drop == 0:
+        return segment, 0
+
+    # Upper bound on the sentinel's own length — the format is
+    # "[... {label} truncated: {drop} chars dropped]\n" where label is
+    # small and drop count is at most ~7 digits. 60 chars covers it
+    # with headroom, and slightly over-dropping is strictly better than
+    # under-dropping when the caller has a hard budget ceiling.
+    sentinel_headroom = 60
+    drop_target = over + sentinel_headroom
+    drop = min(drop_target, available_to_drop)
+
+    if drop >= len(segment):
+        # Replace the whole segment with the sentinel.
+        sentinel = f"[... {label} truncated: {len(segment)} chars dropped]"
+        return sentinel, max(len(segment) - len(sentinel), 0)
+
+    sentinel = f"[... {label} truncated: {drop} chars dropped]"
+    keep = len(segment) - drop
+    if keep_from == "tail":
+        new_segment = f"{sentinel}\n{segment[-keep:]}"
+    else:
+        new_segment = f"{segment[:keep]}\n{sentinel}"
+
+    net_removed = len(segment) - len(new_segment)
+    if net_removed <= 0:
+        # keep_floor + sentinel overhead means we cannot actually shrink
+        # the segment without going below the floor. Return the
+        # original untouched and report zero drops — the caller will
+        # spill into the next priority segment.
+        return segment, 0
+    return new_segment, net_removed
+
+
+def _enforce_prompt_budget(
+    static_overhead: int,
+    data_context: str,
+    errors_block: str,
+    memory_ctx: str,
+) -> tuple[str, str, str]:
+    """Trim the three truncatable segments to fit within the budget (FR-025b).
+
+    Priority order (drop first → drop last): memory_ctx, data_context,
+    errors_block. Static text (question, intent, instructions, skill
+    block) is NEVER trimmed — if the static overhead alone is already
+    over budget, we raise ``ValueError`` because that is a programming
+    bug, not a runtime condition.
+
+    When truncation fires, emits a single structured WARNING log with
+    the final size, budget, and per-segment drop counts (FR-025d).
+    """
+    if static_overhead >= ANALYST_PROMPT_MAX_CHARS:
+        raise ValueError(
+            f"Analyst static prompt overhead is {static_overhead} chars, "
+            f"over budget {ANALYST_PROMPT_MAX_CHARS}. This is a programming "
+            "bug — adjust ANALYST_PROMPT_MAX_CHARS or trim the static text."
+        )
+
+    available = ANALYST_PROMPT_MAX_CHARS - static_overhead
+    current = len(data_context) + len(errors_block) + len(memory_ctx)
+
+    if current <= available:
+        return data_context, errors_block, memory_ctx
+
+    original_sizes = (len(data_context), len(errors_block), len(memory_ctx))
+    over = current - available
+    dropped_memory = dropped_data = dropped_errors = 0
+
+    # Priority 1: memory_ctx — oldest, most dispensable.
+    if over > 0 and memory_ctx:
+        memory_ctx, dropped_memory = _truncate_segment(
+            memory_ctx, over, label="memory_ctx", keep_from="tail"
+        )
+        over -= dropped_memory
+
+    # Priority 2: data_context — keep the head (highest-priority sources).
+    if over > 0 and data_context:
+        data_context, dropped_data = _truncate_segment(
+            data_context, over, label="data_context", keep_from="head", keep_floor=500
+        )
+        over -= dropped_data
+
+    # Priority 3: errors_block — keep the head (headline warnings first).
+    if over > 0 and errors_block:
+        errors_block, dropped_errors = _truncate_segment(
+            errors_block, over, label="errors_block", keep_from="head"
+        )
+        over -= dropped_errors
+
+    final_size = static_overhead + len(data_context) + len(errors_block) + len(memory_ctx)
+
+    logger.warning(
+        "analyst prompt truncated: budget=%d final_size=%d "
+        "memory_dropped=%d/%d data_dropped=%d/%d errors_dropped=%d/%d",
+        ANALYST_PROMPT_MAX_CHARS,
+        final_size,
+        dropped_memory, original_sizes[2],
+        dropped_data, original_sizes[0],
+        dropped_errors, original_sizes[1],
+    )
+
+    if over > 0:
+        # Every truncatable was exhausted and we are STILL over budget —
+        # means the static text + minimum segment floors exceed the
+        # budget. Defensive: raise instead of sending a prompt we know
+        # the model will reject.
+        raise ValueError(
+            f"Analyst prompt still {final_size} chars after truncation, "
+            f"over budget {ANALYST_PROMPT_MAX_CHARS}. Raise the budget or "
+            "reduce the minimum keep_floor."
+        )
+
+    return data_context, errors_block, memory_ctx
+
+
 # ── Analysis prompt builder (same logic as _build_analysis_prompt) ─
 
 
@@ -120,21 +278,41 @@ def _build_analysis_prompt(
     if skill_context and skill_context.get("analyst"):
         skill_block = "\n\n--- FORMATO REQUERIDO POR SKILL ---\n" + skill_context["analyst"]
 
-    return (
-        f'PREGUNTA DEL USUARIO: "{question}"\n'
-        f"FECHA ACTUAL: {today}\n"
-        f"INTENCIÓN: {plan.intent}\n\n"
-        f"DATOS RECOLECTADOS:\n{data_context}\n"
-        f"{errors_block}"
-        f"{memory_ctx_analyst}\n\n"
-        "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
-        "para no repetir contexto innecesariamente y para mantener coherencia "
-        "con respuestas anteriores.\n\n"
-        "Respondé de forma breve y conversacional. Destacá el dato más importante, "
-        "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
-        "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
-        f"{skill_block}"
-    )
+    def _assemble(dc: str, eb: str, mc: str) -> str:
+        return (
+            f'PREGUNTA DEL USUARIO: "{question}"\n'
+            f"FECHA ACTUAL: {today}\n"
+            f"INTENCIÓN: {plan.intent}\n\n"
+            f"DATOS RECOLECTADOS:\n{dc}\n"
+            f"{eb}"
+            f"{mc}\n\n"
+            "Si hay historial de conversación, tené en cuenta lo que ya se discutió "
+            "para no repetir contexto innecesariamente y para mantener coherencia "
+            "con respuestas anteriores.\n\n"
+            "Respondé de forma breve y conversacional. Destacá el dato más importante, "
+            "dá contexto mínimo, y sugerí preguntas de seguimiento para profundizar. "
+            "Si los datos permiten un gráfico claro, incluilo con <!--CHART:{}-->."
+            f"{skill_block}"
+        )
+
+    assembled = _assemble(data_context, errors_block, memory_ctx_analyst)
+
+    # FR-025a/b/c/d: enforce the prompt budget. If the first-pass
+    # assembly fits, return it unchanged. Otherwise trim the three
+    # truncatable segments in priority order and re-assemble — the
+    # static overhead is computed as the delta between the assembled
+    # prompt and the sum of the truncatable segments, which keeps the
+    # helper format-agnostic.
+    if len(assembled) > ANALYST_PROMPT_MAX_CHARS:
+        static_overhead = len(assembled) - (
+            len(data_context) + len(errors_block) + len(memory_ctx_analyst)
+        )
+        data_context, errors_block, memory_ctx_analyst = _enforce_prompt_budget(
+            static_overhead, data_context, errors_block, memory_ctx_analyst
+        )
+        assembled = _assemble(data_context, errors_block, memory_ctx_analyst)
+
+    return assembled
 
 
 async def analyst_node(state: OpenArgState) -> dict:

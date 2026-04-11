@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-11
 **Hexagonal scope**: Application (analyst + policy nodes + chart builder) + Infrastructure (Bedrock streaming LLM)
 **Parent**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -59,6 +59,16 @@ This phase also owns the chart builder helpers and the META-tag extraction logic
 - **FR-024**: The analyst MUST buffer streaming chunks to avoid emitting incomplete tags.
 - **FR-025**: The analyst MUST strip internal tags (`<!--CHART:-->`, `<!--META:-->`) from `clean_answer` before returning it.
 
+### Prompt budget (DEBT-011)
+- **FR-025a**: The analyst MUST enforce a soft **character budget** on the assembled user-role prompt (`analysis_prompt`) before calling `chat_stream()`. The budget lives in code as a single module-level constant `ANALYST_PROMPT_MAX_CHARS` whose default value is chosen to fit comfortably within Claude Haiku 4.5's context window with headroom for the response — approximately one-quarter of the model's window (~50k characters ≈ ~12.5k tokens at 4 chars/token). The constant is discoverable from one place so future model swaps need only bump it.
+- **FR-025b**: When the assembled prompt exceeds `ANALYST_PROMPT_MAX_CHARS`, the analyst MUST truncate it in a deterministic priority order — drop the oldest and most dispensable segments first — so a budget overflow **never** causes the LLM call to fail with a 400 from Bedrock. The priority order from highest-to-lowest *drop priority* (i.e., truncate first) is:
+  1. `memory_ctx_analyst` — oldest, most dispensable, and the analyst already ignores it on the no-data path anyway.
+  2. `data_context` (the `DATOS RECOLECTADOS` block) — trim records from the tail, keeping the first N intact so the most relevant sources survive.
+  3. `errors_block` — warnings get shortened to headlines only, dropping exception details.
+  The **user question, the intent line, the static instructions and the skill block** are NEVER truncated. If after dropping all three truncatable segments the prompt still exceeds the budget, the static text alone is over budget and is a programming bug — raise `ValueError` rather than silently send something the model will reject.
+- **FR-025c**: Each truncation event MUST leave a human-readable sentinel in the assembled prompt naming the segment that was trimmed and the character count that was dropped, so the LLM knows the context was cut and the operator can grep logs for truncation frequency. Example: `[... memory_ctx truncated: 4200 chars dropped]`.
+- **FR-025d**: The analyst MUST emit a structured `WARNING` log whenever truncation fires, including the final prompt size, the budget, and a breakdown of characters dropped per segment. This is the observability handle for "my prompts are too big lately" — without it the operator has no idea if the budget is being exercised or never touched.
+
 ### Security (cross-reference)
 - **FR-042**: The pipeline MUST NOT leak `analysis_prompt`, tracebacks, or internal prompts to the client. *(This phase is the primary producer of `analysis_prompt` — the streaming whitelist defined in the HTTP router enforces the outbound contract. See also Phase E / top-level spec.)*
 
@@ -93,7 +103,7 @@ This phase also owns the chart builder helpers and the META-tag extraction logic
 - **[DEBT-001]** — ~~**Token count always 0 in streaming mode**~~ **FIXED 2026-04-10**: `analyst.py` now passes a `usage_out` dict to `chat_stream()` and the Bedrock / fallback adapters populate it from the stream metadata event. `finalize.py` forwards the real count to `MetricsCollector.record_tokens_used()`. See `FIX_BACKLOG.md#fix-006`.
 - **[DEBT-007]** — **Fragile chart building heuristics** (`chart_builder.py:15-100`). Hardcoded column-name patterns (`fecha`, `nombre`, `patrimonio`) don't scale to new schemas.
 - **[DEBT-008]** — ~~**Token counting absent in the `policy` node**~~ **FIXED 2026-04-10** as part of FIX-006: `usage_out` is threaded through the shared LLM port so any node that streams (analyst, policy) gets correct token counts.
-- **[DEBT-011]** — **Analyst prompt building is string concat** — it doesn't truncate the context to the token budget limit. Prompts can blow up.
+- **[DEBT-011]** — ~~**Analyst prompt building is string concat**~~ **FIXED 2026-04-11**: the analyst now enforces a soft character budget (`ANALYST_PROMPT_MAX_CHARS`, default ~50k chars ≈ ~12.5k tokens) before the LLM call, truncating in a deterministic priority order (memory → data context → errors), leaving a human-readable sentinel per truncation, and logging a structured WARNING with the per-segment breakdown whenever truncation fires. User question, intent, static instructions, and skill block are never truncated. See FR-025a/b/c/d.
 
 ---
 
