@@ -12,8 +12,22 @@ from app.infrastructure.auth import GoogleJwtValidator, InvalidGoogleToken
 logger = logging.getLogger(__name__)
 
 _ALWAYS_PUBLIC = frozenset({"/health", "/health/ready", "/api/v1/ask"})
-_SERVICE_PREFIXES = ("/api/v1/data/",)
+_SERVICE_PREFIXES = ("/api/v1/data/", "/api/v1/admin/")
 _DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})
+
+# FR-007a: admin-gated endpoints are exempt from Google JWT validation.
+# They already require ``X-API-Key`` (APIKeyMiddleware) plus ``X-Admin-Key``
+# (``_verify_admin_key`` dependency inside each handler), so layering a
+# user JWT on top would only block ops tasks — there is no real user
+# driving these calls. See ``specs/003-auth/spec.md`` FR-007a.
+_ADMIN_ONLY_PATHS = frozenset(
+    {
+        "/api/v1/transparency/rescore",
+        "/api/v1/transparency/rescrape",
+        "/api/v1/transparency/snapshot-staff",
+        "/api/v1/transparency/flush-cache",
+    }
+)
 
 _env = os.getenv("APP_ENV", "local").lower()
 _PUBLIC_PATHS = _ALWAYS_PUBLIC | _DEV_PUBLIC if _env != "prod" else _ALWAYS_PUBLIC
@@ -61,7 +75,11 @@ class GoogleJwtAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
-        if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _SERVICE_PREFIXES):
+        if (
+            path in _PUBLIC_PATHS
+            or path in _ADMIN_ONLY_PATHS
+            or any(path.startswith(p) for p in _SERVICE_PREFIXES)
+        ):
             return await call_next(request)
 
         bearer_token = _extract_bearer(request.headers.get("Authorization", ""))

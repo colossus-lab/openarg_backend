@@ -36,7 +36,21 @@ async def _whoami(request: Request) -> JSONResponse:
 
 
 def _build_app(validator: Any) -> Starlette:
-    app = Starlette(routes=[Route("/me", _whoami), Route("/health", _whoami)])
+    app = Starlette(
+        routes=[
+            Route("/me", _whoami),
+            Route("/health", _whoami),
+            # Admin paths used by the FR-007a exemption tests below
+            Route("/api/v1/transparency/flush-cache", _whoami, methods=["POST"]),
+            Route("/api/v1/transparency/rescore", _whoami, methods=["POST"]),
+            Route("/api/v1/transparency/rescrape", _whoami, methods=["POST"]),
+            Route("/api/v1/transparency/snapshot-staff", _whoami, methods=["POST"]),
+            Route("/api/v1/admin/tasks/", _whoami),
+            Route("/api/v1/admin/tasks/123/run", _whoami, methods=["POST"]),
+            # A transparency GET that MUST stay behind JWT (not admin-only)
+            Route("/api/v1/transparency/health", _whoami),
+        ]
+    )
     app.add_middleware(GoogleJwtAuthMiddleware, validator=validator)
     return app
 
@@ -98,6 +112,51 @@ def test_public_path_skips_validation() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"email": ""}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/transparency/flush-cache",
+        "/api/v1/transparency/rescore",
+        "/api/v1/transparency/rescrape",
+        "/api/v1/transparency/snapshot-staff",
+    ],
+)
+def test_transparency_admin_path_skips_jwt(path: str) -> None:
+    """FR-007a: the four admin-gated transparency POSTs MUST be exempt
+    from Google JWT validation — they live behind X-Admin-Key, not a
+    user session. Before this fix, ops could not flush the cache or
+    trigger rescrapes without forging a Google JWT."""
+    validator = _StubValidator({})
+    client = TestClient(_build_app(validator))
+
+    response = client.post(path)
+
+    assert response.status_code == 200
+    assert response.json() == {"email": ""}
+
+
+def test_admin_tasks_prefix_skips_jwt() -> None:
+    """FR-007a: ``/api/v1/admin/*`` is entirely admin-only and skips JWT."""
+    validator = _StubValidator({})
+    client = TestClient(_build_app(validator))
+
+    assert client.get("/api/v1/admin/tasks/").status_code == 200
+    assert client.post("/api/v1/admin/tasks/123/run").status_code == 200
+
+
+def test_transparency_read_path_still_requires_jwt() -> None:
+    """Non-admin transparency GETs (consumed by the frontend with a
+    real session) MUST still require a valid Google JWT. The FR-007a
+    exemption is targeted at admin mutations only."""
+    validator = _StubValidator({})
+    client = TestClient(_build_app(validator))
+
+    response = client.get("/api/v1/transparency/health")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Authorization: Bearer <jwt> required"}
 
 
 def test_helper_returns_empty_when_state_not_set() -> None:
