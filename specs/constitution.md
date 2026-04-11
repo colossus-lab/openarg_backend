@@ -1,6 +1,6 @@
 # OpenArg Constitution
 
-**Version**: 1.1.0
+**Version**: 1.2.0
 **Status**: Draft (reverse-engineered from codebase + `CLAUDE.md` + `MEMORY.md`)
 **Last synced with code**: 2026-04-11
 **Scope**: Backend (`openarg_backend`). Frontend has its own `constitution.md`.
@@ -30,6 +30,42 @@ Concretely, when designing or reviewing a change:
 7. **When in doubt, write the dumbest version that works, ship it, and let usage teach you what to generalize.**
 
 A spec that violates this axiom for a good reason must cite the reason inline ("complexity justified because X") and open a debt item to revisit once the assumption is validated. Complexity without justification is a bug in the design.
+
+---
+
+## 0.5. Spec → Code → Verify (axiom)
+
+**Every change follows a three-step cadence, in strict order.** This is the second principal axiom alongside §0 Keep It Simple.
+
+1. **Modify the spec first.** Before writing any production code, update the relevant `spec.md` / `plan.md` under `specs/` to describe the new behavior in WHAT/WHY terms. Add or edit FRs, update the output contract, append or strike tech-debt entries. If no spec section needs to change, the code probably doesn't need to change either — or the spec is incomplete, in which case complete it first.
+
+2. **Then write the code.** Make it match the spec as-written, not the other way around. If you discover during coding that the spec is wrong, STOP, fix the spec, then return to the code. Do not diverge and reconcile later.
+
+3. **Then verify.** Run `make code.test`, run `ruff` and `mypy`, grep the diff against the spec's FRs to check for contradictions. Bump the spec's `Last synced with code` field. If verification reveals a mismatch, repair whichever side is wrong — usually it is the spec that under-specified a detail you had to invent while coding.
+
+### Why the order matters
+
+- Writing the spec first forces you to think in the **domain language** before you are tempted by implementation details. Implementation-first thinking produces specs that are thinly-disguised code commentary.
+- The spec is the contract reviewers check the code against. If the spec arrives after the code, reviewers have nothing to check, and specs quietly rot into fiction.
+- The first caller of a new abstraction is the spec itself: if you cannot defend the abstraction in FR form, you probably shouldn't add the code.
+- Specs that move **after** code always lag. Specs that move **before** code stay current by construction.
+
+### When you may bend this rule
+
+- **Pure typo / rename / autoformat** — no spec change needed.
+- **Test-only changes** that cover existing behavior — the spec already describes what's being tested.
+- **Reverting a recent regression** to restore a previously-specified state — both sides can revert in the same commit.
+
+### Never bend when
+
+- You are adding a new `FR-NNN` or `SC-NNN`.
+- You are changing an existing FR's acceptance criteria.
+- You are closing a `[DEBT-NNN]` or `[CL-NNN]` entry — the strikethrough + `FIXED YYYY-MM-DD` marker lives in the spec and must land in the same commit as the code fix.
+- You are touching a file that already has a sibling `spec.md` / `plan.md`.
+
+### The bright line
+
+Any PR that modifies `src/` without touching the corresponding `specs/` will be asked by reviewers to fix the drift before merging. The contributor contract in [`README.md#spec-driven-design-is-the-contract`](../README.md#spec-driven-design-is-the-contract) is the enforcement hook. This axiom exists because even the original author of these specs caught himself skipping the cadence twice in a single session: the cadence is cheap, the drift is expensive, and the only way not to skip it is to make it non-negotiable.
 
 ---
 
