@@ -226,6 +226,19 @@ CI runs unit tests, integration tests, and type checking against PostgreSQL 16 +
 
 ---
 
+## Spec-Driven Design
+
+This repo is documented using a reverse-SDD approach (inspired by [GitHub Spec Kit](https://github.com/github/spec-kit)): every module has a `spec.md` (what the code does and why) and a `plan.md` (how it is implemented). Specs live under [`specs/`](specs/) and are the source of truth for architectural intent.
+
+| Entry point | Description |
+|----------|-------------|
+| [`specs/README.md`](specs/README.md) | Index of all 13 module specs |
+| [`specs/constitution.md`](specs/constitution.md) | Non-negotiable principles (hexagonal, DI, async-first, etc.) |
+| [`specs/000-architecture/`](specs/000-architecture/) | Macro architecture, layers, auth inventory |
+| [`specs/001-query-pipeline/`](specs/001-query-pipeline/) | 16-node LangGraph pipeline spec |
+| [`specs/FIX_BACKLOG.md`](specs/FIX_BACKLOG.md) | Prioritized backlog of fixes discovered during spec review |
+| [`specs/REVIEW_REPORT_2026-04-10.md`](specs/REVIEW_REPORT_2026-04-10.md) | Senior-engineer review report cross-checking specs against code |
+
 ## Documentation
 
 | Document | Description |
