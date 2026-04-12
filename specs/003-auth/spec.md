@@ -23,7 +23,7 @@ The **API keys** module for programmatic access is documented in `008-developers
 | **Save history** | Toggle that decides whether the user's conversations are persisted (default: true). |
 | **Privacy accepted** | Timestamp of when the user accepted the privacy policy. |
 | **ARCO** | Rights of Access, Rectification, Cancellation, Opposition (Argentine law). |
-| **X-User-Email** | Custom header used to identify the authenticated user in a request. |
+| **X-User-Email** | *Legacy.* Header used to pass the authenticated user's email through the trusted proxy before FIX-005 was enforced on 2026-04-11. **No longer read by the backend.** Identity now comes from the verified Google JWT `email` claim via `Authorization: Bearer <google_id_token>`. Term preserved here only so readers of old commits / logs know what it refers to. |
 
 ## 3. User Stories
 
@@ -84,8 +84,8 @@ The **API keys** module for programmatic access is documented in `008-developers
   - **Production**: allowlist **BYPASSED** (`OPEN_BETA=true` or empty allowlist + open domains). Public access.
   - **Admins**: operators listed in `ADMIN_EMAILS` (the `requireAdmin()` helper exists and is used by the transparency endpoint).
 
-  The backend trusts the `X-User-Email` it receives from the frontend (already validated by NextAuth), without its own cryptographic enforcement. See `../../openarg_frontend/specs/004-auth/` for details and FIX-005 for the planned migration to server-side JWT validation.
-- **[RESOLVED CL-003]** — Backend-own JWT session tokens: **future work, not prioritized for now**. FIX-005 implements validation of the Google OAuth JWT (the token NextAuth already emits), which closes the immediate security gap. Emitting backend-own session tokens is evaluated later if the trust model changes.
+  As of **2026-04-11 (FIX-005 enforced)** the backend no longer depends on that trust chain for identity: `GoogleJwtAuthMiddleware` validates the Google OAuth ID token via JWKS on every authenticated request and extracts the email from the verified claim. The frontend allowlist is still the first gate (NextAuth's `signIn` callback), but backend auth is now independently cryptographic. See `../../openarg_frontend/specs/004-auth/` for the frontend side.
+- **[RESOLVED CL-003]** — Backend-own JWT session tokens: **not needed**. FIX-005 validates the Google OAuth ID token (the one NextAuth already emits) on every request, which closes the immediate security gap without the extra complexity of issuing backend-own sessions. Re-evaluate only if the trust model changes (for example, if we ever move off Google OAuth).
 - **[RESOLVED CL-004]** — `delete_user_and_data` **does NOT need to cascade to S3 or the semantic cache**. Decision: no user-identifiable data is stored in S3 (it is storage for public datasets, not per-user content) or in the semantic cache (it caches queries + responses with no user_id associated in the hash). The current cascade over `conversations`, `messages`, `user_queries` is sufficient to fulfill the right to cancellation.
 
 ## 8. Tech Debt Discovered

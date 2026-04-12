@@ -7,7 +7,7 @@
 - Priority: **High** (security or user-visible correctness) / **Medium** (structural debt) / **Low** (nice-to-fix).
 - Status: `Pending` | `In progress` | `Completed`.
 
-**Overall status**: Updated 2026-04-11 after a third fix pass under strict §0.5 spec-first discipline. **7 out of 8** fixes applied (FIX-001, FIX-002, FIX-003, FIX-004, FIX-006, FIX-007, FIX-008). The only remaining item is FIX-005 (X-User-Email → JWT server-side validation), which is deliberately deferred because it requires coordinated front+back rollout that cannot be done autonomously.
+**Overall status**: Updated 2026-04-11 after multiple fix passes under strict §0.5 spec-first discipline. **13 of 16** fixes applied: FIX-001 through FIX-004, FIX-006 through FIX-013. FIX-005 (Google JWT server-side validation) was implemented and deployed to staging in `dual` mode first and then flipped to `enforced` on 2026-04-11 — all auth now runs through `Authorization: Bearer <google_id_token>`, the legacy `X-User-Email` header path was deleted, and admin-key endpoints are exempt per FR-007a. Three items are **deferred**: FIX-014 (DB-first refactor for `series_tiempo` + `bcra`, architectural follow-up), FIX-015 (full RENABAP ingest, data expansion), and FIX-016 (DDJJ scope expansion to senadores/ejecutivo/jueces).
 
 **Relation to specs**: Each fix is referenced from its corresponding `spec.md` in the "Open Questions" section (now with marker `[RESOLVED CL-XXX]` → `specs/FIX_BACKLOG.md#FIX-NNN`).
 
@@ -21,10 +21,18 @@
 | FIX-002 | Medium | `002a-bcra` | BCRA deduplicate broken methods | ✅ Completed 2026-04-10 |
 | FIX-003 | Low | `002a-bcra` + Celery config | BCRA schedule timezone → ART | ✅ Completed (already applied) |
 | FIX-004 | Medium | `001-query-pipeline` + `010-sandbox-sql` | NL2SQL subgraph integration | ✅ Completed 2026-04-11 |
-| FIX-005 | **High (security)** | `003-auth` | X-User-Email → JWT server-side validation | Pending (front+back coord.) |
+| FIX-005 | **High (security)** | `003-auth` | X-User-Email → JWT server-side validation | ✅ Completed 2026-04-11 (enforced + FR-007a admin exemption) |
 | FIX-006 | Medium | `001-query-pipeline` | Token counting via Bedrock stream metadata | ✅ Completed 2026-04-10 |
 | FIX-007 | Medium | `004-semantic-cache` | Semantic cache cleanup task (expired entries never deleted) | ✅ Completed 2026-04-10 |
 | FIX-008 | Low-Medium | `002f-staff` | Staff diff misses field changes (transfers between offices invisible) | ✅ Completed 2026-04-11 |
+| FIX-009 | Medium | `002h-ddjj` + `001-query-pipeline` | DDJJ top-N requests return partial results (compact ranking) | ✅ Completed 2026-04-11 |
+| FIX-010 | Medium | `001-chat-bridge` + `001-query-pipeline` | Chart rendering regression (finalize return missing chart_data) | ✅ Completed 2026-04-11 |
+| FIX-011 | Medium | `001-query-pipeline/001d-analysis` | Analyst leaks `cache_*` internal identifiers in answers | ✅ Completed 2026-04-11 |
+| FIX-012 | Medium | `001-query-pipeline/001d-analysis` | Analyst apologetic preface masks real data | ✅ Completed 2026-04-11 |
+| FIX-013 | Medium | `002-connectors/002b-series-tiempo` | Series fetch retry without date range on empty result | ✅ Completed 2026-04-11 |
+| FIX-014 | Medium | `001-query-pipeline` + `002a-bcra` + `002b-series-tiempo` | DB-first refactor for connectors with daily snapshots | ⏸ Deferred (architectural) |
+| FIX-015 | Low | `002-connectors` (ingestion) | Full RENABAP per-barrio ingest | ⏸ Deferred (data expansion) |
+| FIX-016 | Low | `002-connectors/002h-ddjj` | DDJJ scope expansion to senadores / ejecutivo / jueces | ⏸ Deferred (data expansion) |
 
 ---
 
@@ -654,13 +662,10 @@ Extend the DDJJ ingest to include senadores + ejecutivo declarations from the Of
 
 ## Final notes
 
-- **Suggested implementation order** (considering dependencies and impact):
-  1. `FIX-003` (timezone) — 30 minutes, 2 lines, low risk
-  2. `FIX-002` (BCRA dedup) — 1-2 hours, hygiene, low risk
-  3. `FIX-001` (BCRA errors) — 2-3 hours, visible UX, medium risk (tests needed)
-  4. `FIX-006` (token counting) — 3-4 hours, requires changes to the LLM port, medium risk
-  5. `FIX-004` (NL2SQL integration) — 4-6 hours, structural refactor, medium risk
-  6. `FIX-005` (JWT validation) — **days**, requires backend+frontend coordination, high risk but critical for security
+- **Deferred items** — the next ones to pick up whenever there is time:
+  1. `FIX-014` (DB-first refactor for series_tiempo + bcra) — architectural follow-up. Requires wiring a PG read session into `execute_series_step` / `execute_bcra_step`, defining staleness semantics, and mapping daily-snapshot columns to the query-path shape. Estimated 2–3 hours of focused work. High value: closes the FR-013 compliance gap and makes both connectors faster, more resilient, and less dependent on upstream availability.
+  2. `FIX-015` (full RENABAP per-barrio ingest) — data expansion. The current `cache_registro_nacional_de_barrios_populares` table is a 58-row × 2-column summary. Ingesting the full shapefile/CSV with per-barrio ownership and location fields would unlock queries like "qué porcentaje de terrenos son privados" that today fall back to an honest "no data".
+  3. `FIX-016` (DDJJ scope expansion: senadores / ejecutivo / jueces) — data expansion. Today the dataset only has 195 diputados per `002h-ddjj/spec.md` FR-001. Expanding to the other branches opens the Adorni / Bullrich / Kicillof / etc. query paths currently answered with "out of scope".
 
 - **When to start**: at the user's discretion. This backlog is the actionable guide. There is no self-imposed urgency; the fixes wait for an explicit decision.
 

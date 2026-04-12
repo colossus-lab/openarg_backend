@@ -19,10 +19,12 @@
 
 | Method | Path | Auth | Behavior |
 |---|---|---|---|
-| POST | `/developers/keys` | X-User-Email + BACKEND_API_KEY | Create key (revoke existing first); return plaintext once |
-| GET | `/developers/keys` | X-User-Email + BACKEND_API_KEY | List user's keys (masked) |
-| DELETE | `/developers/keys/{id}` | X-User-Email + BACKEND_API_KEY | Deactivate key |
-| GET | `/developers/usage` | X-User-Email + BACKEND_API_KEY | Usage summary |
+| POST | `/developers/keys` | `Authorization: Bearer <google_id_token>` + `X-API-Key: <BACKEND_API_KEY>` | Create key (revoke existing first); return plaintext once |
+| GET | `/developers/keys` | `Authorization: Bearer <google_id_token>` + `X-API-Key: <BACKEND_API_KEY>` | List user's keys (masked) |
+| DELETE | `/developers/keys/{id}` | `Authorization: Bearer <google_id_token>` + `X-API-Key: <BACKEND_API_KEY>` | Deactivate key |
+| GET | `/developers/usage` | `Authorization: Bearer <google_id_token>` + `X-API-Key: <BACKEND_API_KEY>` | Usage summary |
+
+The user identity is read from the verified Google JWT `email` claim via `get_request_user_email(request)` inside each handler — see FIX-005 and `specs/003-auth/spec.md` FR-007. Admin endpoints (not listed here) are exempt from Google JWT under FR-007a.
 
 ## 3. Key Generation
 

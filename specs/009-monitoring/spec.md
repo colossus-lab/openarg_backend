@@ -12,7 +12,7 @@
 
 **Operational observability** module: exposes component-level health checks (`GET /health`), in-memory metrics (`GET /api/v1/metrics`, `GET /metrics/prometheus`), and captures metrics via ASGI middleware. Enables outage detection, per-endpoint/connector performance tracking, and exposure for Prometheus scraping.
 
-It is the module that **does not depend on Sentry** (not yet configured — see open debt in `MEMORY.md`).
+It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in production so the Sentry SDK initializes as a silent no-op. Open debt.
 
 ## 2. Ubiquitous Language
 

@@ -1,7 +1,7 @@
 # OpenArg Constitution
 
 **Version**: 1.2.0
-**Status**: Draft (reverse-engineered from codebase + `CLAUDE.md` + `MEMORY.md`)
+**Status**: Draft (reverse-engineered from the live codebase plus the historical `CLAUDE.md` at the repo root; a private `MEMORY.md` that lived outside the repo was also consulted during the initial pass but is **not** part of the OSS tree).
 **Last synced with code**: 2026-04-11
 **Scope**: Backend (`openarg_backend`). Frontend has its own `constitution.md`.
 
@@ -178,7 +178,7 @@ All accesses to external services MUST implement:
 2. **Metrics**: `MetricsCollector` singleton (`infrastructure/monitoring/metrics.py`) tracks requests, connectors, cache hits, tokens used. Exposed via `GET /api/v1/metrics`.
 3. **Health checks**: `HealthCheckService` (`infrastructure/monitoring/health.py`) with per-component checks. Endpoints: `GET /health`, `GET /health/ready`.
 4. **Audit trail**: `infrastructure/audit/` records sensitive actions (API key creation, admin actions).
-5. **Sentry**: NOT yet configured. Open debt (`MEMORY.md: "Sentry DSN not configured"`).
+5. **Sentry**: NOT yet configured. Open debt — `SENTRY_DSN` env var is unset in production.
 
 ---
 
@@ -214,7 +214,7 @@ All accesses to external services MUST implement:
 2. **Infrastructure code in English** (international standard).
 3. **End-user messages in Spanish** (friendly pipeline status messages, HTTP errors).
 4. **Logs in English** for compatibility with observability tools.
-5. **Commits**: do not add `Co-Authored-By` at the end of the message (see `MEMORY.md: "Do NOT add Co-Authored-By to commits"`).
+5. **Commits**: do not add `Co-Authored-By` at the end of the message (house convention).
 6. **PRs**: go to `staging`, not `main`/`master`.
 
 ---

@@ -65,7 +65,7 @@ OpenArg's public API for **external integrators**. A single endpoint: `POST /api
 - **Conversational memory** — stateless.
 - **OAuth flow** — see `003-auth/`.
 - **Sandbox SQL endpoint** — not exposed in the public API.
-- **Billing / Payments** — see MEMORY.md, not implemented.
+- **Billing / Payments** — not implemented; rate limiting is the only free-tier guardrail today.
 
 ## 7. Open Questions
 

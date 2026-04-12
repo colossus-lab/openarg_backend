@@ -37,13 +37,15 @@ class IUserRepository(ABC):
 
 ## 3. Endpoints
 
+All authenticated endpoints below require `Authorization: Bearer <google_id_token>` — validated by `GoogleJwtAuthMiddleware` against Google's JWKS (FIX-005, enforced 2026-04-11) — **plus** the shared service token in `X-API-Key`. The user identity is read from the verified Google JWT `email` claim inside each handler via `get_request_user_email(request)`.
+
 | Method | Path | Auth | Rate Limit | Behavior |
 |---|---|---|---|---|
-| POST | `/users/sync` | None (frontend-initiated) | — | Upsert user from NextAuth Google OAuth; returns user dict |
-| GET | `/users/me` | X-User-Email header | — | Return current user profile |
-| PATCH | `/users/me/settings` | X-User-Email header | — | Update `save_history` toggle; cascade-delete conversations if disabled |
-| GET | `/users/me/data` | X-User-Email header | — | Export all user data as JSON (data portability) |
-| DELETE | `/users/me` | X-User-Email header | — | Delete user and all data (ARCO erasure) |
+| POST | `/users/sync` | Bearer + X-API-Key (first sync after login) | — | Upsert user from NextAuth Google OAuth; returns user dict |
+| GET | `/users/me` | Bearer + X-API-Key | — | Return current user profile |
+| PATCH | `/users/me/settings` | Bearer + X-API-Key | — | Update `save_history` toggle; cascade-delete conversations if disabled |
+| GET | `/users/me/data` | Bearer + X-API-Key | — | Export all user data as JSON (data portability) |
+| DELETE | `/users/me` | Bearer + X-API-Key | — | Delete user and all data (ARCO erasure) |
 
 ## 4. Persistence
 
@@ -81,7 +83,7 @@ Foreign keys with `ON DELETE CASCADE` from:
 
 ## 7. Deviations from Constitution
 
-- **Principle XII (Security)**: the `X-User-Email` header-trust model is acceptable but suboptimal — it does not strictly meet "auth via JWT" as stated in the constitution. Accepted for OAuth simplicity.
+- ~~**Principle XII (Security)**: the `X-User-Email` header-trust model is acceptable but suboptimal — it does not strictly meet "auth via JWT" as stated in the constitution.~~ **CLOSED 2026-04-11 via FIX-005**: the backend now validates the Google OAuth ID token itself at the API layer via `GoogleJwtAuthMiddleware` + JWKS, so authenticated endpoints are fully JWT-verified. Admin-key endpoints remain exempt per FR-007a because they carry their own `X-Admin-Key` authentication.
 
 ---
 

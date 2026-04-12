@@ -36,7 +36,7 @@ Endpoints for **authenticated users** to manage their own **API keys**: create, 
 - **FR-006**: DELETE MUST set `is_active=false` (soft delete), not delete the record.
 - **FR-007**: GET /keys MUST return masked keys (only prefix + metadata).
 - **FR-008**: GET /usage MUST aggregate statistics from `api_usage`.
-- **FR-009**: All endpoints MUST authenticate with `X-User-Email` + `BACKEND_API_KEY`.
+- **FR-009**: All endpoints MUST authenticate with **`Authorization: Bearer <google_id_token>`** (validated by `GoogleJwtAuthMiddleware` against Google's JWKS per FIX-005) plus the shared service token `X-API-Key: <BACKEND_API_KEY>`. The user identity is read from the verified Google JWT `email` claim, never from a header the frontend can set directly.
 
 ## 4. Success Criteria
 

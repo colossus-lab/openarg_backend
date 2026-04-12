@@ -12,7 +12,7 @@
 
 **Vector** cache that stores pipeline responses so that semantically similar queries return pre-computed results. It implements a dual strategy: **exact hash match** (fast, SHA-256) followed by **similarity match** (pgvector HNSW). Variable TTLs based on the detected intent type (real-time / daily / static). It works transparently to the pipeline: the `cache_check` node queries it and `finalize` writes to it.
 
-It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `::type` casts were replaced with `CAST(:param AS type)` to fix a write bug (see `MEMORY.md`).
+It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `::type` casts were replaced with `CAST(:param AS type)` to fix a write bug where the cache was silently not persisting.
 
 ## 2. Ubiquitous Language
 

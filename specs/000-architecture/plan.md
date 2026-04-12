@@ -237,7 +237,7 @@ See `presentation/http/controllers/root_router.py` and `CLAUDE.md` section "API 
 
 | # | Mechanism | Usage | How it's passed | Where it's validated |
 |---|---|---|---|---|
-| 1 | **JWT NextAuth** (Google OAuth) | Frontend chat, browser users | `X-User-Email` header (today, via proxy trust); migration to JWT validation planned (FIX-005) | Frontend middleware + backend trust |
+| 1 | **Google OAuth ID token** (obtained by NextAuth) | Frontend chat, browser users | `Authorization: Bearer <google_id_token>` injected by the Next.js server routes | `GoogleJwtAuthMiddleware` validates signature via Google JWKS + verifies `iss`/`aud`/`exp`/`email_verified` per FIX-005. Admin-gated endpoints are exempt under FR-007a (they use `X-Admin-Key` instead). |
 | 2 | **User API keys** `oarg_sk_*` | Public API `/api/v1/ask` for developers | `Authorization: Bearer oarg_sk_...` | Backend validates SHA-256 hash in DB |
 | 3 | **`BACKEND_API_KEY`** service token | Frontend↔backend (chat pipeline) | `X-API-Key` header in POST OR `?api_key=...` query param (only WS handshake — Node `ws` package workaround) | `smart_query_v2_router.py:97` (POST) and `:234-244` (WS) |
 | 4 | **`ADMIN_EMAILS`** allowlist | Admin-gated endpoints (`/api/transparency`) | Email from verified JWT against env var | Frontend `requireAdmin()` — backend trusts header |
@@ -277,7 +277,7 @@ config/
     └── .secrets.toml     # Prod secrets (gitignored, injected on deploy)
 ```
 
-Loaded by `setup/config/loader.py`, validated against Pydantic classes in `setup/config/settings.py`. The source of truth in prod is `/opt/docker/openarg/.env` on the EC2 server (see `MEMORY.md`).
+Loaded by `setup/config/loader.py`, validated against Pydantic classes in `setup/config/settings.py`. In deployed environments, runtime values come from a `.env` file injected by the deploy pipeline (never checked into the repo); local development uses a copy of `.env.example` with dev credentials.
 
 ## 8. Key External Dependencies
 

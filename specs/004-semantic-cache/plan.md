@@ -75,7 +75,7 @@ async def get(question, embedding=None):
 ## 5. Set Logic (Mar 2026 fix)
 
 **Bug 1 (historical)**: the code used `:embedding::vector`, which failed on writes.
-**Fix applied** (Mar 2026, `MEMORY.md`): replaced with `CAST(:embedding AS vector)`.
+**Fix applied** (Mar 2026): replaced with `CAST(:embedding AS vector)`.
 
 ```python
 async def set(question, embedding, response, ttl):
