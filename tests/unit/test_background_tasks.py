@@ -116,7 +116,9 @@ async def test_spawn_background_cancellation_is_quiet(caplog):
     assert _active_task_count() == count_before
 
     cancellation_warnings = [
-        rec for rec in caplog.records if rec.levelno == logging.WARNING and "test.cancel" in rec.getMessage()
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "test.cancel" in rec.getMessage()
     ]
     assert not cancellation_warnings, (
         "cancelled tasks must not log a WARNING, but got: "

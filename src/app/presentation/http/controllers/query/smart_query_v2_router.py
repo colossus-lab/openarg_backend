@@ -356,9 +356,11 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     try:
                         await ensure_privacy_accepted(ws_user_email, user_repo)
                     except HTTPException as exc:
-                        detail = exc.detail if isinstance(exc.detail, dict) else {
-                            "message": str(exc.detail)
-                        }
+                        detail = (
+                            exc.detail
+                            if isinstance(exc.detail, dict)
+                            else {"message": str(exc.detail)}
+                        )
                         await ws.send_json({"type": "error", **detail})
                         await ws.close(code=4403)
                         return

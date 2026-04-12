@@ -11,9 +11,7 @@ from jwt.exceptions import InvalidTokenError
 logger = logging.getLogger(__name__)
 
 GOOGLE_JWKS_URI = "https://www.googleapis.com/oauth2/v3/certs"
-GOOGLE_ISSUERS: frozenset[str] = frozenset(
-    {"accounts.google.com", "https://accounts.google.com"}
-)
+GOOGLE_ISSUERS: frozenset[str] = frozenset({"accounts.google.com", "https://accounts.google.com"})
 
 
 class InvalidGoogleToken(Exception):
@@ -58,9 +56,7 @@ class GoogleJwtValidator:
             raise InvalidGoogleToken("empty token")
 
         try:
-            signing_key = await asyncio.to_thread(
-                self._jwks_client.get_signing_key_from_jwt, token
-            )
+            signing_key = await asyncio.to_thread(self._jwks_client.get_signing_key_from_jwt, token)
         except InvalidTokenError as exc:
             raise InvalidGoogleToken(f"jwks resolution failed: {exc}") from exc
         except Exception as exc:

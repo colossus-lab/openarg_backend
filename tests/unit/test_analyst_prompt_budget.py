@@ -129,9 +129,7 @@ def test_static_overhead_over_budget_raises():
 def test_truncate_segment_sentinel_format():
     """FR-025c: the sentinel names the label, and net reduction meets the target."""
     original = "A" * 1000
-    out, dropped = _truncate_segment(
-        original, over=400, label="memory_ctx", keep_from="tail"
-    )
+    out, dropped = _truncate_segment(original, over=400, label="memory_ctx", keep_from="tail")
     # Net reduction must meet (actually exceed by sentinel_headroom) the
     # requested "over" so the caller's budget loop converges.
     assert dropped >= 400
@@ -146,9 +144,7 @@ def test_truncate_segment_sentinel_format():
 def test_truncate_segment_keep_from_head():
     """Head-keeping puts the sentinel at the end — used for data_context."""
     original = "A" * 1000
-    out, dropped = _truncate_segment(
-        original, over=400, label="data_context", keep_from="head"
-    )
+    out, dropped = _truncate_segment(original, over=400, label="data_context", keep_from="head")
     assert dropped >= 400
     assert out.endswith("]")  # sentinel at the end
     assert "data_context truncated" in out

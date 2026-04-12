@@ -117,8 +117,7 @@ async def execute_series_step(
     # available series so the analyst can describe it honestly.
     if not result and (start_date or params.get("endDate")):
         logger.info(
-            "Series fetch returned empty for %s with range [%s, %s]; "
-            "retrying without date range",
+            "Series fetch returned empty for %s with range [%s, %s]; retrying without date range",
             series_ids,
             start_date,
             end_date,

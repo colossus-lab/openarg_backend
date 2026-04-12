@@ -103,14 +103,33 @@ def configure_app(
     # reverse registration order, so adding this BEFORE APIKeyMiddleware below
     # makes the API-key check run first — Google JWT validation only sees
     # requests that already passed the service-token gate.
+    #
+    # Activation rules:
+    #   - ``GOOGLE_OAUTH_CLIENT_ID`` set → middleware registers, enforces JWT.
+    #   - env var empty AND ``environment == 'prod'`` → hard fail at startup
+    #     (FR-007: prod MUST enforce JWT validation).
+    #   - env var empty in any other environment (local/dev/test/e2e) → the
+    #     middleware is skipped so integration tests, unit test harnesses and
+    #     local dev can run without needing a real Google OAuth client id.
     if settings:
         client_id = settings.security.GOOGLE_OAUTH_CLIENT_ID
-        if not client_id:
-            raise RuntimeError("GOOGLE_OAUTH_CLIENT_ID must be set")
-        app.add_middleware(
-            _gjwt.GoogleJwtAuthMiddleware,
-            validator=GoogleJwtValidator(client_id=client_id),
-        )
+        if client_id:
+            app.add_middleware(
+                _gjwt.GoogleJwtAuthMiddleware,
+                validator=GoogleJwtValidator(client_id=client_id),
+            )
+        elif environment == "prod":
+            raise RuntimeError(
+                "GOOGLE_OAUTH_CLIENT_ID must be set in production — "
+                "FIX-005 / FR-007 require JWT enforcement."
+            )
+        else:
+            logger.info(
+                "GoogleJwtAuthMiddleware skipped: GOOGLE_OAUTH_CLIENT_ID not set "
+                "(environment=%s). JWT enforcement only activates in prod or when "
+                "the env var is configured explicitly.",
+                environment,
+            )
 
     # API key middleware (if configured)
     if settings and settings.security.BACKEND_API_KEY:

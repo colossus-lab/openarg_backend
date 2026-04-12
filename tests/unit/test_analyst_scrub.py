@@ -31,8 +31,7 @@ def test_scrub_removes_bare_cache_identifier() -> None:
 
 def test_scrub_removes_parenthetical_citation() -> None:
     answer = (
-        "Los empleados públicos totalizan 3.2 millones "
-        "(Fuente: cache_empleados_publicos_nacion)."
+        "Los empleados públicos totalizan 3.2 millones (Fuente: cache_empleados_publicos_nacion)."
     )
     scrubbed = _scrub_internal_identifiers(answer)
     assert "cache_empleados_publicos_nacion" not in scrubbed
@@ -102,8 +101,7 @@ def test_drop_preface_strips_leading_no_tengo_when_data_follows() -> None:
 
 def test_drop_preface_strips_aunque_no_pude_accedere() -> None:
     answer = (
-        "Aunque no pude acceder a datos en tiempo real, "
-        "los salarios crecieron 95% desde mayo 2024."
+        "Aunque no pude acceder a datos en tiempo real, los salarios crecieron 95% desde mayo 2024."
     )
     result = _drop_apologetic_preface(answer)
     assert not result.lower().startswith("aunque no pude")
@@ -147,10 +145,7 @@ def test_drop_preface_handles_leading_whitespace() -> None:
 
 
 def test_drop_preface_is_idempotent() -> None:
-    answer = (
-        "No encontré datos específicos. "
-        "Los últimos valores disponibles son 456 y 789."
-    )
+    answer = "No encontré datos específicos. Los últimos valores disponibles son 456 y 789."
     once = _drop_apologetic_preface(answer)
     twice = _drop_apologetic_preface(once)
     assert once == twice

@@ -47,10 +47,7 @@ def cleanup_semantic_cache(self):
     try:
         with engine.begin() as conn:
             result = conn.execute(
-                text(
-                    "DELETE FROM query_cache "
-                    "WHERE expires_at < now() - INTERVAL '1 hour'"
-                )
+                text("DELETE FROM query_cache WHERE expires_at < now() - INTERVAL '1 hour'")
             )
             deleted = result.rowcount or 0
 

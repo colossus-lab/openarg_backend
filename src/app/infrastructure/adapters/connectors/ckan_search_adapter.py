@@ -463,9 +463,7 @@ class CKANSearchAdapter(ICKANSearchConnector):
                             ]
                             for resource in csv_resources[:1]:
                                 try:
-                                    records, csv_truncation = await self._fetch_csv(
-                                        resource["url"]
-                                    )
+                                    records, csv_truncation = await self._fetch_csv(resource["url"])
                                     if records:
                                         break
                                 except Exception:

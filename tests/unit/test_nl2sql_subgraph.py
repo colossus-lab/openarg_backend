@@ -73,7 +73,9 @@ class FakeSandbox:
         self._results = list(results)
         self.calls: list[str] = []
 
-    async def execute_readonly(self, sql: str, timeout_seconds: int | None = None) -> FakeSandboxResult:
+    async def execute_readonly(
+        self, sql: str, timeout_seconds: int | None = None
+    ) -> FakeSandboxResult:
         self.calls.append(sql)
         if not self._results:
             raise AssertionError("FakeSandbox ran out of scripted results")
@@ -120,9 +122,7 @@ def _stub_prompts(monkeypatch):
 async def test_happy_path_single_generation():
     """Generated SQL executes clean on the first try."""
     llm = FakeLLM(["SELECT 1"])
-    sandbox = FakeSandbox(
-        [FakeSandboxResult(rows=[{"col_a": 1}], row_count=1, columns=["col_a"])]
-    )
+    sandbox = FakeSandbox([FakeSandboxResult(rows=[{"col_a": 1}], row_count=1, columns=["col_a"])])
 
     subgraph = build_nl2sql_subgraph()
     final = await subgraph.ainvoke(_base_state(llm, sandbox))

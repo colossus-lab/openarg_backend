@@ -67,9 +67,7 @@ def spawn_background(coro: Any, *, name: str) -> asyncio.Task[Any]:
             return
         exc = t.exception()
         if exc is not None:
-            logger.warning(
-                "Background task %r raised: %s", name, exc, exc_info=exc
-            )
+            logger.warning("Background task %r raised: %s", name, exc, exc_info=exc)
 
     task.add_done_callback(_done)
     return task

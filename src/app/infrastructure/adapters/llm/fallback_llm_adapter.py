@@ -115,9 +115,7 @@ class FallbackLLMAdapter(ILLMProvider):
             name = type(svc).__name__
             try:
                 # FIX-006: forward usage_out to whichever adapter serves the stream
-                stream = svc.chat_stream(
-                    messages, temperature, max_tokens, usage_out=usage_out
-                )
+                stream = svc.chat_stream(messages, temperature, max_tokens, usage_out=usage_out)
                 first_chunk = await anext(stream)
                 logger.info("LLM stream served by %s", name)
                 yield first_chunk

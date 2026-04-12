@@ -236,7 +236,7 @@ def _drop_apologetic_preface(text: str) -> str:
         pattern = _RE_CLAUSE_OR_SENTENCE_BREAK if use_comma_break else _RE_SENTENCE_BREAK
         match = pattern.search(stripped)
         if match:
-            remainder = stripped[match.end():].lstrip()
+            remainder = stripped[match.end() :].lstrip()
             if remainder and _RE_NUMERIC.search(remainder):
                 stripped = remainder
 
@@ -245,14 +245,14 @@ def _drop_apologetic_preface(text: str) -> str:
     # whole first sentence so the user does not see "El problema es
     # claro: no tengo X" as the opener.
     heading_match = _RE_MD_HEADING_PREFIX.match(stripped)
-    heading = stripped[:heading_match.end()] if heading_match else ""
-    body = stripped[len(heading):]
+    heading = stripped[: heading_match.end()] if heading_match else ""
+    body = stripped[len(heading) :]
     first_sentence_match = _RE_SENTENCE_BREAK.search(body)
     if first_sentence_match:
-        first_sentence = body[:first_sentence_match.end()]
+        first_sentence = body[: first_sentence_match.end()]
         first_lower = first_sentence.lower()
         if any(phrase in first_lower for phrase in _NEGATION_PHRASES_LOOSE):
-            remainder = body[first_sentence_match.end():].lstrip()
+            remainder = body[first_sentence_match.end() :].lstrip()
             if remainder and _RE_NUMERIC.search(remainder):
                 stripped = heading + remainder
 
@@ -394,9 +394,12 @@ def _enforce_prompt_budget(
         "memory_dropped=%d/%d data_dropped=%d/%d errors_dropped=%d/%d",
         ANALYST_PROMPT_MAX_CHARS,
         final_size,
-        dropped_memory, original_sizes[2],
-        dropped_data, original_sizes[0],
-        dropped_errors, original_sizes[1],
+        dropped_memory,
+        original_sizes[2],
+        dropped_data,
+        original_sizes[0],
+        dropped_errors,
+        original_sizes[1],
     )
 
     if over > 0:

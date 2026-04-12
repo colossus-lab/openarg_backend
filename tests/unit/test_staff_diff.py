@@ -109,9 +109,7 @@ def test_update_detected_on_area_desempeno_change():
     """FR-009: area_desempeno change on a persisting legajo → update event."""
     prev = {"1001": _prev("1001", area_desempeno="DESPACHO DIPUTADO A")}
     current = [_curr("1001", area_desempeno="DESPACHO DIPUTADO B")]
-    changes, _, _, update_count = _compute_staff_changes(
-        prev, current, _NOW, is_first_run=False
-    )
+    changes, _, _, update_count = _compute_staff_changes(prev, current, _NOW, is_first_run=False)
     updates = [c for c in changes if c["tipo"] == "update"]
     assert len(updates) == 1
     assert update_count == 1
@@ -144,9 +142,7 @@ def test_update_detected_on_convenio_change():
     changes, _, _, _ = _compute_staff_changes(prev, current, _NOW, is_first_run=False)
     updates = [c for c in changes if c["tipo"] == "update"]
     assert len(updates) == 1
-    assert updates[0]["changes_json"] == {
-        "convenio": {"from": "TEMPORARIO", "to": "PERMANENTE"}
-    }
+    assert updates[0]["changes_json"] == {"convenio": {"from": "TEMPORARIO", "to": "PERMANENTE"}}
 
 
 def test_update_records_multiple_fields_in_one_event():
@@ -251,9 +247,7 @@ def test_none_to_value_detected_as_change(empty_field):
     prev_info[empty_field] = None
     prev = {"1001": prev_info}
     current = [_curr("1001")]
-    changes, _, _, update_count = _compute_staff_changes(
-        prev, current, _NOW, is_first_run=False
-    )
+    changes, _, _, update_count = _compute_staff_changes(prev, current, _NOW, is_first_run=False)
     assert update_count == 1
     assert empty_field in changes[0]["changes_json"]
     assert changes[0]["changes_json"][empty_field]["from"] is None
