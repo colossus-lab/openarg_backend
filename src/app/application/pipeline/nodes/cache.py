@@ -55,11 +55,28 @@ async def cache_check_node(state: OpenArgState) -> dict:
 
 
 async def cache_reply_node(state: OpenArgState) -> dict:
-    """Build the final answer from a cache hit (terminal node)."""
+    """Build the final answer from a cache hit (terminal node).
+
+    FIX-011 / FIX-012 defense-in-depth: the analyst scrubs now run on
+    every fresh generation, but the semantic cache may still contain
+    pre-fix answers (apologetic prefaces, ``cache_*`` leaks, etc).
+    Re-applying the scrubs here means even stale cached answers are
+    cleaned before reaching the browser, so we never have to
+    forcibly flush caches on every deploy.
+    """
+    # Local import to avoid a circular dependency between nodes.
+    from app.application.pipeline.nodes.analyst import (
+        _drop_apologetic_preface,
+        _scrub_internal_identifiers,
+    )
+
     cached: dict[str, Any] = state.get("cached_result") or {}
+    raw_answer = cached.get("answer", "")
+    clean_answer = _scrub_internal_identifiers(raw_answer)
+    clean_answer = _drop_apologetic_preface(clean_answer)
 
     return {
-        "clean_answer": cached.get("answer", ""),
+        "clean_answer": clean_answer,
         "sources": cached.get("sources", []),
         "chart_data": cached.get("chart_data"),
         "map_data": cached.get("map_data"),
