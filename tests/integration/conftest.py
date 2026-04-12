@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.pipeline.nodes import PipelineDeps
 from app.application.smart_query_service import SmartQueryService
+from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.connectors.argentina_datos import IArgentinaDatosConnector
@@ -25,6 +26,7 @@ from app.domain.ports.connectors.staff import IStaffConnector
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
+from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
@@ -153,6 +155,31 @@ class MockProvider(Provider):
     def chat_repo(self) -> IChatRepository:
         mock = MagicMock(spec=IChatRepository)
         mock.get_conversation_messages = AsyncMock(return_value=[])
+        return mock
+
+    @provide
+    def user_repo(self) -> IUserRepository:
+        """Mock IUserRepository — consumed by ``ensure_privacy_accepted`` on
+        the smart query endpoint (it calls ``get_by_email`` and silently
+        passes when the user does not exist, which is our case here).
+        The users_router test suite uses its own mocks on a per-test basis.
+        """
+        mock = MagicMock(spec=IUserRepository)
+        mock.get_by_email = AsyncMock(return_value=None)
+        mock.upsert_by_email = AsyncMock()
+        mock.export_user_data = AsyncMock(return_value={})
+        mock.delete_user_and_data = AsyncMock()
+        mock.delete_user_conversations = AsyncMock()
+        mock.update = AsyncMock()
+        return mock
+
+    @provide
+    def api_key_repo(self) -> IApiKeyRepository:
+        """Mock IApiKeyRepository — needed by the developers/keys router."""
+        mock = MagicMock(spec=IApiKeyRepository)
+        mock.create = AsyncMock()
+        mock.get_by_user_id = AsyncMock(return_value=[])
+        mock.revoke = AsyncMock()
         return mock
 
     @provide
