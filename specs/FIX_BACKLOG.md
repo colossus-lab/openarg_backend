@@ -7,7 +7,7 @@
 - Priority: **High** (security or user-visible correctness) / **Medium** (structural debt) / **Low** (nice-to-fix).
 - Status: `Pending` | `In progress` | `Completed`.
 
-**Overall status**: Updated 2026-04-11 after multiple fix passes under strict §0.5 spec-first discipline. **13 of 16** fixes applied: FIX-001 through FIX-004, FIX-006 through FIX-013. FIX-005 (Google JWT server-side validation) was implemented and deployed to staging in `dual` mode first and then flipped to `enforced` on 2026-04-11 — all auth now runs through `Authorization: Bearer <google_id_token>`, the legacy `X-User-Email` header path was deleted, and admin-key endpoints are exempt per FR-007a. Three items are **deferred**: FIX-014 (DB-first refactor for `series_tiempo` + `bcra`, architectural follow-up), FIX-015 (full RENABAP ingest, data expansion), and FIX-016 (DDJJ scope expansion to senadores/ejecutivo/jueces).
+**Overall status**: Updated 2026-04-12 after multiple fix passes under strict §0.5 spec-first discipline. **14 of 17** fixes applied: FIX-001 through FIX-013 and FIX-017. FIX-005 (Google JWT server-side validation) was implemented and deployed to staging in `dual` mode first and then flipped to `enforced` on 2026-04-11 — all auth now runs through `Authorization: Bearer <google_id_token>`, the legacy `X-User-Email` header path was deleted, and admin-key endpoints are exempt per FR-007a. FIX-017 (defensive JSON encoder) was added on 2026-04-12 after a prod regression: the post-deploy cache flush exposed a latent `datetime is not JSON serializable` crash in three serialization sinks (Redis, semantic cache, WebSocket v2). Three items remain **deferred**: FIX-014 (DB-first refactor for `series_tiempo` + `bcra`, architectural follow-up), FIX-015 (full RENABAP ingest, data expansion), and FIX-016 (DDJJ scope expansion to senadores/ejecutivo/jueces).
 
 **Relation to specs**: Each fix is referenced from its corresponding `spec.md` in the "Open Questions" section (now with marker `[RESOLVED CL-XXX]` → `specs/FIX_BACKLOG.md#FIX-NNN`).
 
@@ -33,6 +33,7 @@
 | FIX-014 | Medium | `001-query-pipeline` + `002a-bcra` + `002b-series-tiempo` | DB-first refactor for connectors with daily snapshots | ⏸ Deferred (architectural) |
 | FIX-015 | Low | `002-connectors` (ingestion) | Full RENABAP per-barrio ingest | ⏸ Deferred (data expansion) |
 | FIX-016 | Low | `002-connectors/002h-ddjj` | DDJJ scope expansion to senadores / ejecutivo / jueces | ⏸ Deferred (data expansion) |
+| FIX-017 | **High** | `004-semantic-cache` + `001-query-pipeline` + `004-caching` | JSON serialization crash on non-primitive state values | ✅ Completed 2026-04-12 |
 
 ---
 
@@ -657,6 +658,67 @@ Ingest the full RENABAP shapefile/CSV (the public one on datos.gob.ar has per-ba
 
 ### Proposed resolution
 Extend the DDJJ ingest to include senadores + ejecutivo declarations from the Oficina Anticorrupción portal (they publish all three branches). Until then, the test is marked `xfail(reason="DDJJ scope is diputados only per 002h-ddjj/spec.md FR-001 — FIX-016")`.
+
+---
+
+## FIX-017: JSON serialization crash on non-primitive state values
+
+**Priority**: **High** (user-visible correctness)
+**Status**: ✅ **Completed 2026-04-12**
+**Modules**: `004-semantic-cache` + `001-query-pipeline` (WebSocket v2) + `004-caching` (Redis)
+**Type**: Defensive serialization
+
+### Problem
+
+After the 2026-04-12 prod deploy + cache flush, the first fresh execution of simple queries that touch the BCRA / series-tiempo / sandbox connectors (e.g. *"Mostrame la evolución de las reservas del BCRA"*) started returning `[error: respuesta no disponible]`. Backend logs showed three stacked failures on the same pipeline run:
+
+```
+Redis cache write failed after 3 attempts: Object of type datetime is not JSON serializable
+Semantic cache write failed     TypeError('Object of type datetime is not JSON serializable')
+WebSocket v2 error              TypeError('Object of type datetime is not JSON serializable')
+```
+
+The pipeline itself finished correctly (`duration_ms ~17s`, audit log emitted), but all three serialization sinks (Redis cache write, semantic cache insert, WebSocket `complete` event) use `json.dumps` without a `default=` encoder, so any non-primitive value in the finalized state aborts the write. The WebSocket failure was the user-visible symptom — the `complete` event never reached the browser.
+
+**Why it only surfaced now**: the semantic cache had accumulated pre-serialized responses for popular BCRA/reservas queries over time. Those queries always returned from cache, so the fresh pipeline path was never exercised end-to-end. The admin-flush on deploy removed the cached entries and exposed the latent bug on the next query.
+
+**Origin of the `datetime` object**: could not be identified from the logs (structlog did not render the traceback inline). It could come from any field added to the state across the pipeline — pandas-derived records, `metadata.fetched_at` converted by a middleware, a `datetime.date` value snuck in from a DB read, etc. Regardless of origin, the serialization layer must not crash on common Python types.
+
+### Resolution
+
+Centralized defensive JSON encoder in a new `infrastructure/serialization/` package:
+
+- `json_default(obj)` handles `datetime.datetime`, `datetime.date`, `datetime.time`, `decimal.Decimal`, `uuid.UUID`, `bytes`, `set`, `frozenset`, `pathlib.Path`, and objects with `__json__` / `model_dump` / `to_dict`. Falls through to `TypeError` for genuinely unknown types.
+- `safe_dumps(obj, **kwargs)` is a thin wrapper over `json.dumps` that plugs in `json_default` as `default=`.
+- `to_json_safe(obj)` walks a nested structure and returns a copy with the same conversions applied — used where we need to call `ws.send_json` (Starlette's `send_json` uses `json.dumps` internally with no `default=` hook).
+
+Three serialization sites now use the helper:
+
+1. `infrastructure/adapters/cache/redis_cache_adapter.py:25` — `safe_dumps(value)` instead of `json.dumps(value)`.
+2. `infrastructure/adapters/cache/semantic_cache.py:178` — `safe_dumps(response, ensure_ascii=False)`.
+3. `presentation/http/controllers/query/smart_query_v2_router.py` — all `ws.send_json(payload)` calls routed through a local `_safe_send_json(ws, payload)` helper that applies `to_json_safe` before delegating.
+
+### Acceptance criteria
+
+- [x] New module `src/app/infrastructure/serialization/json_safe.py` with `json_default`, `safe_dumps`, `to_json_safe`.
+- [x] Unit tests covering every supported type + nested structures + unknown-type fallthrough.
+- [x] Three serialization sites updated.
+- [x] Regression scenario: a pipeline payload carrying `datetime` / `date` / `Decimal` inside `records` no longer crashes Redis write, semantic cache write, or WebSocket send.
+
+### Files
+
+- `src/app/infrastructure/serialization/__init__.py` (new, re-exports the helper)
+- `src/app/infrastructure/serialization/json_safe.py` (new)
+- `tests/unit/test_json_safe.py` (new)
+- `src/app/infrastructure/adapters/cache/redis_cache_adapter.py` (patched)
+- `src/app/infrastructure/adapters/cache/semantic_cache.py` (patched)
+- `src/app/presentation/http/controllers/query/smart_query_v2_router.py` (patched)
+- `specs/004-semantic-cache/spec.md` (note — updated)
+- `specs/FIX_BACKLOG.md` (this entry)
+
+### Follow-up (not part of FIX-017)
+
+The *origin* of the `datetime` value injected into the state remains unidentified. FIX-017 is a defensive fix at the serialization layer — future work should add a debug log in the WebSocket v2 error handler that reports which top-level state key first failed the probe, so the upstream producer can be traced and fixed at the source (e.g., by converting to `isoformat()` in the connector). Tracked as an open DEBT note in `specs/001-query-pipeline/spec.md`.
 
 ---
 

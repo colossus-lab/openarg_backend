@@ -28,6 +28,7 @@ from app.application.pipeline.state import OpenArgState
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
+from app.infrastructure.serialization import json_default, to_json_safe
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
@@ -64,6 +65,26 @@ _STREAM_ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "map_data",
     }
 )
+
+
+async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
+    """Send ``payload`` as JSON text, absorbing non-primitive values.
+
+    Starlette's ``WebSocket.send_json`` calls ``json.dumps`` internally
+    without a ``default=`` hook, so any ``datetime`` / ``Decimal`` / ``UUID``
+    / ``bytes`` that sneaks into the state aborts the ``complete`` event
+    with ``TypeError`` and the browser sees *"respuesta no disponible"*.
+    We pre-serialize with :func:`json_default` and fall back to a recursive
+    :func:`to_json_safe` walk if the encoder still refuses — the goal is
+    that the WebSocket send path never crashes on a common Python type.
+
+    See ``specs/FIX_BACKLOG.md#FIX-017``.
+    """
+    try:
+        text = json.dumps(payload, default=json_default, ensure_ascii=False)
+    except TypeError:
+        text = json.dumps(to_json_safe(payload), ensure_ascii=False)
+    await ws.send_text(text)
 
 
 def _filter_stream_payload(payload: Any) -> Any:
@@ -323,7 +344,9 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
 
                 raw_text = await ws.receive_text()
                 if len(raw_text) > 10_000:
-                    await ws.send_json({"type": "error", "message": "Message too large (max 10KB)"})
+                    await _safe_send_json(
+                        ws, {"type": "error", "message": "Message too large (max 10KB)"}
+                    )
                     await ws.close(code=4400)
                     return
 
@@ -333,8 +356,8 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 if not has_query_param_auth:
                     msg_api_key = raw.get("api_key", "")
                     if not _validate_api_key_value(msg_api_key):
-                        await ws.send_json(
-                            {"type": "error", "message": "Invalid or missing API key"}
+                        await _safe_send_json(
+                            ws, {"type": "error", "message": "Invalid or missing API key"}
                         )
                         await ws.close(code=4401)
                         return
@@ -345,7 +368,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 )
                 if await _check_ws_rate_limit(cache, ws_identifier):
                     audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
-                    await ws.send_json({"type": "error", "message": "Rate limit exceeded"})
+                    await _safe_send_json(ws, {"type": "error", "message": "Rate limit exceeded"})
                     await ws.close(code=4429)
                     return
 
@@ -361,7 +384,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                             if isinstance(exc.detail, dict)
                             else {"message": str(exc.detail)}
                         )
-                        await ws.send_json({"type": "error", **detail})
+                        await _safe_send_json(ws, {"type": "error", **detail})
                         await ws.close(code=4403)
                         return
 
@@ -370,7 +393,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 policy_mode = raw.get("policy_mode", False)
 
                 if not question or len(question) > 10000:
-                    await ws.send_json({"type": "error", "message": "question is required"})
+                    await _safe_send_json(ws, {"type": "error", "message": "question is required"})
                     await ws.close()
                     return
 
@@ -397,13 +420,14 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         # _filter_stream_payload applies FR-038 (fail-closed
                         # allowlist, SEC-07) AND FR-038b (WARNING log on any
                         # dropped key — DEBT-017 fix 2026-04-11).
-                        await ws.send_json(_filter_stream_payload(payload))
+                        await _safe_send_json(ws, _filter_stream_payload(payload))
                     elif mode == "updates":
                         # Node completed — check if it's a terminal node
                         for node_name, update in payload.items():
                             if node_name in ("fast_reply", "cache_reply", "clarify_reply"):
                                 # Terminal node — send complete event
-                                await ws.send_json(
+                                await _safe_send_json(
+                                    ws,
                                     {
                                         "type": "complete",
                                         "answer": update.get("clean_answer", ""),
@@ -413,11 +437,12 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                                         "confidence": update.get("confidence", 1.0),
                                         "citations": update.get("citations", []),
                                         "documents": update.get("documents"),
-                                    }
+                                    },
                                 )
                             elif node_name == "finalize":
                                 # Pipeline complete — get full state
-                                await ws.send_json(
+                                await _safe_send_json(
+                                    ws,
                                     {
                                         "type": "complete",
                                         "answer": update.get("clean_answer", ""),
@@ -428,7 +453,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                                         "citations": update.get("citations", []),
                                         "documents": update.get("documents"),
                                         "warnings": update.get("warnings", []),
-                                    }
+                                    },
                                 )
 
     except WebSocketDisconnect:
@@ -436,7 +461,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
     except Exception:
         logger.exception("WebSocket v2 error")
         with contextlib.suppress(Exception):
-            await ws.send_json({"type": "error", "message": "Internal error"})
+            await _safe_send_json(ws, {"type": "error", "message": "Internal error"})
     finally:
         with contextlib.suppress(Exception):
             await ws.close()

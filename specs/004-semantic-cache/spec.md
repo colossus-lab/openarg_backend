@@ -52,6 +52,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
   - Static (ddjj, sesiones, ckan, catalogo, legisladores, georef): 7200s
   - Default: 1800s
 - **FR-008**: `cleanup()` MUST delete expired entries and return the count.
+- **FR-009**: The write path MUST use a defensive JSON encoder (`safe_dumps` from `infrastructure/serialization/json_safe.py`) so that non-primitive values (`datetime`, `date`, `Decimal`, `UUID`, `bytes`, `set`, `Path`) in the cached response do not raise `TypeError` and abort the insert. Origin-level sanitation at connectors is still the long-term goal; FR-009 is the belt-and-braces guarantee that the cache write never crashes the pipeline. See `FIX_BACKLOG.md#FIX-017`.
 
 ## 5. Success Criteria
 
@@ -89,6 +90,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
 - **[DEBT-004]** — ~~**No scheduled cleanup task**~~ **FIXED 2026-04-10**: `celery/tasks/cache_cleanup_tasks.py` adds `cleanup_semantic_cache` — a Celery beat task that runs every 6h on the `ingest` queue and deletes entries with `expires_at < now() - INTERVAL '1 hour'`. See `FIX_BACKLOG.md#fix-007`.
 - **[DEBT-005]** — **Hardcoded TTL mapping** in code, not in config.
 - **[DEBT-006]** — **No abstract port** — used directly by the pipeline (similar to BCRA/DDJJ).
+- **[DEBT-007]** — ~~**`json.dumps` without `default=` crashed on non-primitives**~~ **FIXED 2026-04-12** via `FIX-017`: the write path now uses `safe_dumps` which plugs in the project-wide `json_default` encoder. The origin of the `datetime` value injected into pipeline state is **still unidentified** — tracked as an observability follow-up in `specs/001-query-pipeline/spec.md`.
 
 ---
 
