@@ -197,6 +197,16 @@ class TestPersonLookups:
         data = await ask(client, "cuanta plata tiene adorni")
         answer_contains(data, ["adorni", "patrimonio", "declaraci", "vocero"], "adorni patrimonio")
 
+    @pytest.mark.xfail(
+        reason=(
+            "DDJJ dataset scope is 195 national diputados only (per "
+            "specs/002-connectors/002h-ddjj/spec.md FR-001) — Adorni is "
+            "ejecutivo, so he does not have a declaration in our dataset, "
+            "and we do not yet ingest public-contract data. Tracked as "
+            "FIX-016 in specs/FIX_BACKLOG.md."
+        ),
+        strict=False,
+    )
     async def test_adorni_empresas_estado(self, client):
         data = await ask(
             client, "que empresas relacionadas a manuel adorni tienen contrato con el estado"

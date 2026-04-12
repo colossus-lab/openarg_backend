@@ -66,6 +66,14 @@ Each specific connector (see `002a-bcra/`, `002b-series-tiempo/`, etc.) is a **c
 - **FR-010**: Every connector MUST use `ConnectorError` with a specific `ErrorCode.CN_<NAME>_*` for upstream errors.
 - **FR-011**: Every connector MUST honor the timeouts and rate limits of the external source (no spamming).
 - **FR-012**: Every connector MUST have unit tests for the adapter (mocking HTTP) and for its pipeline step (with an adapter double).
+- **FR-013** (DB-first norm, 2026-04-11): **Every connector that maintains a daily snapshot MUST serve pipeline queries from the cached PG tables FIRST, and MAY fall through to the live external API only when the cache is missing, stale, or the requested slice is outside the snapshot's coverage.** This is a cross-cutting architectural rule — duplicating data the daily snapshot already wrote to PG by pinging upstream on every user query makes the pipeline slower, less resilient, and misaligned with the beat work. Current compliance audited 2026-04-11:
+  - ✅ `presupuesto` / CKAN: answered via the sandbox NL2SQL path on `cache_*` tables.
+  - ✅ `staff` (HCDN): reads directly from `staff_snapshots` / `staff_changes` PG tables.
+  - ✅ `ddjj`, `sesiones`: local files, no API at all.
+  - ❌ `series_tiempo`: `cache_series_*` tables exist with ~5.1K rows from the daily snapshot, but the query path pegs the datos.gob.ar API on every request. Tracked as **FIX-014** in `specs/FIX_BACKLOG.md`.
+  - ❌ `bcra`: partial `cache_bcra_*` (39 rows) but the adapter always hits the BCRA statistics API. Same FIX-014 scope.
+  - ⚠️ `argentina_datos`: no snapshot yet — adding one is a separate feature, not a query-path refactor.
+  - ⚠️ `ckan_search`, `georef`: metadata / geocoding APIs that are intentionally live; explicitly exempt from this rule.
 
 ## 5. Success Criteria
 

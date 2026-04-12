@@ -109,6 +109,27 @@ async def execute_series_step(
         collapse=collapse,
         representation=representation,
     )
+    # FR-009 / FIX-013: when a catalog-matched fetch returns empty AND the
+    # request carried an explicit date range, retry once without the
+    # range. This handles queries that asked for a month the upstream
+    # API has not yet published (e.g. "IPC de febrero 2026" on a day
+    # when only January data is out). The retry returns the latest
+    # available series so the analyst can describe it honestly.
+    if not result and (start_date or params.get("endDate")):
+        logger.info(
+            "Series fetch returned empty for %s with range [%s, %s]; "
+            "retrying without date range",
+            series_ids,
+            start_date,
+            end_date,
+        )
+        result = await series.fetch(
+            series_ids=series_ids,
+            start_date=None,
+            end_date=None,
+            collapse=collapse,
+            representation=representation,
+        )
     if not result:
         raise ConnectorError(
             error_code=ErrorCode.CN_SERIES_UNAVAILABLE,

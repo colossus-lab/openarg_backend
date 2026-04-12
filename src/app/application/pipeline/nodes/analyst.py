@@ -88,6 +88,181 @@ def _strip_meta(text: str) -> str:
     return _RE_META_TRUNC.sub("", text).strip()
 
 
+# ── Internal-identifier scrub (FR-025e, FIX-011 fix) ─────────────
+
+# Matches bare internal identifiers the analyst sometimes cites verbatim.
+# The pattern is intentionally narrow: only tokens that start with one of
+# the internal prefixes ``cache_`` / ``dataset_chunks`` / ``pgvector`` /
+# ``query_cache`` / ``cached_datasets`` get scrubbed. The word boundary
+# prevents partial matches inside legitimate prose.
+_RE_INTERNAL_IDENTIFIER = re.compile(
+    r"\b(?:cache_[\w]+|dataset_chunks|pgvector|query_cache|cached_datasets)\b",
+    re.IGNORECASE,
+)
+# Matches a parenthetical or punctuation-wrapped citation like
+# "(Fuente: cache_leyes_sancionadas)" so we remove the whole aside,
+# not just the identifier leaving dangling "(Fuente: )" behind.
+_RE_INTERNAL_CITATION = re.compile(
+    r"[\s,;]*[\(\[][^)\]]*\b(?:cache_[\w]+|dataset_chunks|pgvector|query_cache|cached_datasets)\b[^)\]]*[\)\]]",
+    re.IGNORECASE,
+)
+
+
+def _scrub_internal_identifiers(text: str) -> str:
+    """Remove internal sandbox/infrastructure identifiers from analyst output.
+
+    Closes FIX-011 — the analyst LLM sometimes cites ``cache_*`` table names
+    verbatim (e.g. "(Fuente: cache_leyes_sancionadas)"), leaking internal
+    infrastructure naming to the user. We first strip entire
+    parenthetical/bracket citations that contain such a token, then strip
+    any remaining bare tokens, and finally collapse the leftover
+    whitespace so the prose reads cleanly.
+    """
+    if not text:
+        return text
+    scrubbed = _RE_INTERNAL_CITATION.sub("", text)
+    scrubbed = _RE_INTERNAL_IDENTIFIER.sub("", scrubbed)
+    # Collapse the whitespace runs left behind by the removals, but
+    # preserve paragraph breaks.
+    scrubbed = re.sub(r"[ \t]+", " ", scrubbed)
+    scrubbed = re.sub(r" *\n *", "\n", scrubbed)
+    scrubbed = re.sub(r"\n{3,}", "\n\n", scrubbed)
+    return scrubbed.strip()
+
+
+# ── Apologetic preface stripper (FR-025f, FIX-012 fix) ───────────
+
+_APOLOGETIC_OPENERS = (
+    "no tengo",
+    "no cuento con",
+    "no encontré",
+    "no encontre",
+    "no pude acceder",
+    "no pude obtener",
+    "no dispongo",
+    "no hay datos",
+    "no cuentan con",
+    "aunque no tengo",
+    "aunque no pude",
+    "si bien no tengo",
+    "si bien no pude",
+    "lamentablemente no",
+)
+
+# Subordinate-clause openers can use either a comma or a full stop as
+# the break ("Aunque no pude X, el dato..." or "Aunque no tengo X. El
+# dato..."). The rest use a full sentence break only.
+_COMMA_BREAK_OPENERS = ("aunque ", "si bien ", "lamentablemente ")
+
+_RE_SENTENCE_BREAK = re.compile(r"([.!?]+[\*_\"'\)\]]*)(\s+|\s*$)")
+_RE_CLAUSE_OR_SENTENCE_BREAK = re.compile(r"([,.!?]+[\*_\"'\)\]]*)(\s+|\s*$)")
+_RE_NUMERIC = re.compile(r"\d")
+
+# Mid-sentence ", pero/mas/aunque/sin embargo no tengo X" clauses.
+# The LLM often writes "Tenemos X, pero no tengo Y específico. Sin
+# embargo, tenemos Z" — we strip the negative sub-clause so the
+# sentence becomes "Tenemos X. Sin embargo, tenemos Z".
+_RE_MID_NEGATION_CLAUSE = re.compile(
+    r",\s*(?:pero|mas|aunque|sin\s+embargo)\s+"
+    r"(?:no\s+tengo|no\s+cuento\s+con|no\s+encontr[eé]|no\s+pude\s+(?:acceder|obtener)|no\s+dispongo)"
+    r"[^.!?]*",
+    re.IGNORECASE,
+)
+
+# Negation phrases that can appear anywhere inside the first sentence.
+# Used to detect and drop the whole first sentence when the rest of the
+# answer has real numeric data (e.g. "El problema es claro: no tengo X.
+# Sin embargo, la inflación fue 2.88%" → drops the first sentence).
+_NEGATION_PHRASES_LOOSE = (
+    "no tengo",
+    "no cuento con",
+    "no encontré",
+    "no encontre",
+    "no pude acceder",
+    "no pude obtener",
+    "no dispongo",
+    "no hay datos",
+    "no cuentan con",
+)
+
+# Markdown heading prefix: "# Title\n\n" or "## Title\n\n" etc.
+_RE_MD_HEADING_PREFIX = re.compile(r"^(?:\s*#{1,6}\s*[^\n]*\n+)*")
+
+
+def _drop_apologetic_preface(text: str) -> str:
+    """Remove apologetic prefaces while preserving real data.
+
+    Closes FIX-012. Handles three distinct LLM patterns where the prompt
+    rule against "No tengo X pero..." constructions is ignored:
+
+    1. **Leading apologetic opener** — the whole first sentence starts
+       with "No tengo/No encontré/Aunque no pude/..." and the data
+       appears in the next sentence.
+    2. **Mid-sentence negative clause** — the first sentence says
+       "Tenemos X, pero no tengo Y específico" and we strip the
+       ", pero no tengo Y..." sub-clause so the sentence reads
+       "Tenemos X."
+    3. **Loose negation in the first sentence** — the first sentence
+       leads with a markdown heading or bold and then contains a
+       negation phrase anywhere inside it ("El problema es claro: no
+       tengo X"). We drop the whole first sentence, keeping the rest.
+
+    All three strips are gated on the answer containing numeric data
+    somewhere — honest "not found" responses (RENABAP, Adorni ejecutivo)
+    are preserved because there is nothing below the disclaimer.
+    """
+    if not text:
+        return text
+    # Never touch a response without any numeric data — that is an
+    # honest "no data" answer and the disclaimer is the entire payload.
+    if not _RE_NUMERIC.search(text):
+        return text
+
+    # Pattern 2: strip ", pero no tengo X..." mid-sentence sub-clauses.
+    # Applied across the whole text because these clauses can appear in
+    # any sentence, not just the first one.
+    text = _RE_MID_NEGATION_CLAUSE.sub("", text)
+
+    stripped = text.lstrip()
+    if not stripped:
+        return text
+
+    # Pattern 1: leading sentence literally starts with an apologetic
+    # opener ("No tengo X pero ...", "Aunque no pude ...", etc).
+    lower = stripped.lower()
+    matched_opener = next((op for op in _APOLOGETIC_OPENERS if lower.startswith(op)), None)
+    if matched_opener is not None:
+        use_comma_break = any(lower.startswith(op) for op in _COMMA_BREAK_OPENERS)
+        pattern = _RE_CLAUSE_OR_SENTENCE_BREAK if use_comma_break else _RE_SENTENCE_BREAK
+        match = pattern.search(stripped)
+        if match:
+            remainder = stripped[match.end():].lstrip()
+            if remainder and _RE_NUMERIC.search(remainder):
+                stripped = remainder
+
+    # Pattern 3: first sentence (possibly preceded by a markdown heading)
+    # contains a loose negation phrase somewhere inside it. Drop the
+    # whole first sentence so the user does not see "El problema es
+    # claro: no tengo X" as the opener.
+    heading_match = _RE_MD_HEADING_PREFIX.match(stripped)
+    heading = stripped[:heading_match.end()] if heading_match else ""
+    body = stripped[len(heading):]
+    first_sentence_match = _RE_SENTENCE_BREAK.search(body)
+    if first_sentence_match:
+        first_sentence = body[:first_sentence_match.end()]
+        first_lower = first_sentence.lower()
+        if any(phrase in first_lower for phrase in _NEGATION_PHRASES_LOOSE):
+            remainder = body[first_sentence_match.end():].lstrip()
+            if remainder and _RE_NUMERIC.search(remainder):
+                stripped = heading + remainder
+
+    # Capitalize the first letter of the result if it is lowercase and
+    # not inside a markdown heading line.
+    if stripped and stripped[0].islower():
+        stripped = stripped[0].upper() + stripped[1:]
+    return stripped
+
+
 # ── Prompt budget enforcement (FR-025a/b/c/d, DEBT-011 fix) ────────
 
 
@@ -411,6 +586,17 @@ async def analyst_node(state: OpenArgState) -> dict:
         # Parse META confidence/citations
         confidence, citations = extract_meta(clean_answer)
         clean_answer = _strip_meta(clean_answer)
+
+        # FR-025e (FIX-011): scrub internal sandbox/infra identifiers the
+        # analyst sometimes cites verbatim (``cache_*``, ``dataset_chunks``,
+        # ``pgvector``, ``query_cache``, ``cached_datasets``).
+        clean_answer = _scrub_internal_identifiers(clean_answer)
+        # FR-025f (FIX-012): drop a leading "No tengo X pero..." sentence
+        # when real data follows — the LLM sometimes opens with a
+        # disclaimer even with useful data below. Honest "no data"
+        # responses are preserved because the scrub requires numeric
+        # content in the remainder.
+        clean_answer = _drop_apologetic_preface(clean_answer)
 
         # Low confidence: just lower the confidence score, don't prepend text
         # (adding disclaimers triggers negative-phrase detection in E2E tests

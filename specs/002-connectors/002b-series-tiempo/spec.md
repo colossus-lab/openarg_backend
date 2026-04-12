@@ -47,6 +47,7 @@ The Series de Tiempo connector allows querying Argentina's macroeconomic indicat
 - **FR-006**: MUST set `endDate` to today when the user does not specify a range.
 - **FR-007**: MUST daily-snapshot 12 key series persisted in PG (tables `cache_series_*`).
 - **FR-008**: MUST return `DataResult` with records containing `fecha` + human-readable fields per series.
+- **FR-009**: When a catalog-matched `fetch()` returns an empty response AND the request carried an explicit `start_date`/`end_date`, the pipeline-level `execute_series_step` MUST retry the fetch once **without** the date range. Rationale: the user often asks for a specific month (e.g., *"IPC de febrero 2026"*) before INDEC publishes it, so the narrow-range call returns `data: []` and the adapter gives up. Retrying without the range returns the latest available data, which the analyst can then frame as *"los datos más recientes son de enero 2026: X%"*. Zero retry is attempted when the fetch itself (HTTP/connectivity) fails — retry only triggers on an empty successful response. (FIX-007g, 2026-04-11.)
 
 ## 5. Success Criteria
 
