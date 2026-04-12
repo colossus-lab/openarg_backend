@@ -12,6 +12,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.infrastructure.serialization import safe_dumps
+
 logger = logging.getLogger(__name__)
 
 # TTL by data freshness (seconds)
@@ -175,7 +177,7 @@ class SemanticCache:
                         "hash": q_hash,
                         "question": question,
                         "emb": emb_str,
-                        "response": json.dumps(response, ensure_ascii=False),
+                        "response": safe_dumps(response, ensure_ascii=False),
                         "ttl": ttl,
                         "expires_at": expires_at,
                     },

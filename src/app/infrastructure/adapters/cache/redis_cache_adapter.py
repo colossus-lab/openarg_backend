@@ -6,6 +6,7 @@ from typing import Any
 import redis.asyncio as aioredis
 
 from app.domain.ports.cache.cache_port import ICacheService
+from app.infrastructure.serialization import safe_dumps
 
 
 class RedisCacheAdapter(ICacheService):
@@ -22,7 +23,7 @@ class RedisCacheAdapter(ICacheService):
             return value
 
     async def set(self, key: str, value: Any, ttl_seconds: int = 3600) -> None:
-        serialized = json.dumps(value) if not isinstance(value, str) else value
+        serialized = safe_dumps(value) if not isinstance(value, str) else value
         await self._redis.set(key, serialized, ex=ttl_seconds)
 
     async def delete(self, key: str) -> None:
