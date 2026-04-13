@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     map_tables()
+    from app.presentation.http.controllers.query.smart_query_v2_router import (
+        init_pipeline_persistence,
+        shutdown_pipeline_persistence,
+    )
 
     # Security validation at startup
     settings: AppSettings | None = getattr(app.state, "settings", None)
@@ -52,8 +56,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.warning("DB warm-up failed (will retry on first request): %s", exc)
 
+    await init_pipeline_persistence()
+
     logger.info("OpenArg API started")
     yield
+    await shutdown_pipeline_persistence()
     if hasattr(app.state, "dishka_container"):
         await app.state.dishka_container.close()
     logger.info("OpenArg API shutdown")

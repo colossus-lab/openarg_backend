@@ -747,7 +747,14 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "coparticipacion": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_coparticipacion_federal_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_*"],
+            "table_notes": (
+                "No existe una tabla unica cache_presupuesto_coparticipacion_federal_*. "
+                "Buscá en tablas de presupuesto nacional columnas o descripciones "
+                "relacionadas con coparticipacion, transferencias automaticas o distribucion federal."
+            ),
+        },
         "confidence": 0.90,
         "description": "Coparticipacion federal de impuestos",
     },

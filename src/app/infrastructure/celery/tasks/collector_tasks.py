@@ -71,11 +71,37 @@ _COLLECT_DISPATCH_BATCH_SIZE = int(os.getenv("OPENARG_COLLECT_DISPATCH_BATCH_SIZ
 _COLLECT_DISPATCH_STEP_SECONDS = int(os.getenv("OPENARG_COLLECT_DISPATCH_STEP_SECONDS", "30"))
 _COLLECT_MAX_INFLIGHT = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT", "100"))
 _COLLECT_MAX_INFLIGHT_PER_PORTAL = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT_PER_PORTAL", "10"))
+_COLLECT_DATASET_LOCK_PREFIX = "collect_dataset"
+_BULK_COLLECT_LOCK_KEY = 8_004_001
 
 
 def _temp_dir() -> str:
     """Return the temp directory used by collector tasks."""
     return os.getenv("OPENARG_TEMP_DIR", "/tmp")
+
+
+def _lock_key(*parts: str) -> int:
+    """Build a stable advisory-lock key from string parts."""
+    digest = hashlib.sha1("::".join(parts).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big", signed=False) & 0x7FFF_FFFF_FFFF_FFFF
+
+
+def _try_advisory_lock(engine, key: int) -> bool:
+    """Try to acquire a PostgreSQL advisory lock for the current session."""
+    with engine.connect() as conn:
+        acquired = conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}).scalar()
+        conn.rollback()
+    return bool(acquired)
+
+
+def _release_advisory_lock(engine, key: int) -> None:
+    """Release a previously acquired PostgreSQL advisory lock."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+            conn.rollback()
+    except Exception:
+        logger.debug("Could not release advisory lock %s", key, exc_info=True)
 
 
 def _has_temp_space(required_bytes: int, reserve_bytes: int = _TEMP_SPACE_RESERVE_BYTES) -> bool:
@@ -406,6 +432,50 @@ def _reconcile_cache_coverage(
     }
 
 
+def _revive_schema_mismatch(engine, *, redispatch: bool = False) -> dict[str, int]:
+    """Move legacy schema_mismatch rows back into the retry path."""
+    revived = 0
+
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT CAST(dataset_id AS text) AS dataset_id
+                FROM cached_datasets
+                WHERE status = 'schema_mismatch'
+                  AND retry_count < :max
+                """
+            ),
+            {"max": MAX_TOTAL_ATTEMPTS},
+        ).fetchall()
+
+        for row in rows:
+            conn.execute(
+                text(
+                    """
+                    UPDATE cached_datasets
+                    SET status = 'error',
+                        error_message = 'Recovered from schema_mismatch for retry',
+                        updated_at = NOW()
+                    WHERE dataset_id = CAST(:did AS uuid)
+                      AND status = 'schema_mismatch'
+                    """
+                ),
+                {"did": row.dataset_id},
+            )
+            conn.execute(
+                text("UPDATE datasets SET is_cached = false WHERE id = CAST(:did AS uuid)"),
+                {"did": row.dataset_id},
+            )
+            revived += 1
+
+    if redispatch:
+        for row in rows:
+            collect_dataset.delay(str(row.dataset_id))
+
+    return {"revived_schema_mismatch": revived}
+
+
 def _sanitize_table_name(name: str, portal: str = "") -> str:
     clean = re.sub(r"[^a-z0-9_]", "_", name.lower())
     clean = re.sub(r"_+", "_", clean).strip("_")
@@ -447,6 +517,124 @@ def _consolidated_table_name(base_table_name: str, columns) -> str:
     suffix = f"_g{_schema_suffix(columns)}"
     trimmed = base_table_name[: max(1, 63 - len(suffix))]
     return f"{trimmed}{suffix}"
+
+
+def _create_alias_view(engine, alias_table_name: str, source_table_name: str) -> None:
+    """Create a stable alias view so duplicate-format datasets remain queryable."""
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP VIEW IF EXISTS "{alias_table_name}" CASCADE'))  # noqa: S608
+        conn.execute(text(f'DROP TABLE IF EXISTS "{alias_table_name}" CASCADE'))  # noqa: S608
+        conn.execute(
+            text(
+                f'CREATE VIEW "{alias_table_name}" AS SELECT * FROM "{source_table_name}"'
+            )  # noqa: S608
+        )
+
+
+def _materialize_format_duplicate_aliases(
+    engine,
+    *,
+    title: str,
+    portal: str,
+    group_table_name: str,
+    stem_to_winner: dict[str, tuple[str, str, str]],
+) -> dict[str, int]:
+    """Create alias views for duplicate-format resources that share the same canonical source."""
+    created = 0
+    skipped_missing_source = 0
+
+    with engine.connect() as conn:
+        resources = conn.execute(
+            text(
+                "SELECT CAST(d.id AS text) as id, d.format, d.download_url "
+                "FROM datasets d "
+                "WHERE d.title = :title AND d.portal = :portal"
+            ),
+            {"title": title, "portal": portal},
+        ).fetchall()
+        conn.rollback()
+
+    for resource in resources:
+        url = resource.download_url or ""
+        if not url:
+            continue
+        path = url.split("?")[0].split("#")[0]
+        dot = path.rfind(".")
+        stem = path[:dot] if dot > 0 else path
+        winner = stem_to_winner.get(stem)
+        if not winner:
+            continue
+        winner_id, _winner_fmt, _winner_url = winner
+        if winner_id == resource.id:
+            continue
+
+        source_table = _resource_table_name(group_table_name, winner_id)
+        alias_table = _resource_table_name(group_table_name, resource.id)
+        if not _table_exists(engine, source_table):
+            skipped_missing_source += 1
+            continue
+
+        with engine.begin() as conn:
+            source_row = conn.execute(
+                text(
+                    """
+                    SELECT row_count, columns_json, size_bytes, s3_key
+                    FROM cached_datasets
+                    WHERE dataset_id = CAST(:did AS uuid)
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"did": winner_id},
+            ).fetchone()
+
+        _create_alias_view(engine, alias_table, source_table)
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_datasets
+                        (dataset_id, table_name, status, row_count, columns_json, size_bytes, s3_key, error_message, updated_at)
+                    VALUES
+                        (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :size, :s3, :msg, NOW())
+                    ON CONFLICT (table_name) DO UPDATE SET
+                        dataset_id = CAST(:did AS uuid),
+                        status = 'ready',
+                        row_count = :rows,
+                        columns_json = :cols,
+                        size_bytes = :size,
+                        s3_key = :s3,
+                        error_message = :msg,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "did": resource.id,
+                    "tn": alias_table,
+                    "rows": source_row.row_count if source_row else None,
+                    "cols": source_row.columns_json if source_row else None,
+                    "size": source_row.size_bytes if source_row else None,
+                    "s3": source_row.s3_key if source_row else None,
+                    "msg": f"format_duplicate_of:{winner_id}",
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE datasets SET is_cached = true, row_count = COALESCE(:rows, row_count) "
+                    "WHERE id = CAST(:did AS uuid)"
+                ),
+                {
+                    "did": resource.id,
+                    "rows": source_row.row_count if source_row else None,
+                },
+            )
+        created += 1
+
+    return {
+        "created_aliases": created,
+        "skipped_missing_source": skipped_missing_source,
+    }
 
 
 _CONTENT_TYPES = {
@@ -599,6 +787,308 @@ def _read_shapefile_from_zip(zip_path: str) -> pd.DataFrame | None:
         return None
 
 
+def _parse_zip_archive(
+    zf,
+    *,
+    zip_path: str,
+    dataset_id: str,
+    table_name: str,
+    engine,
+    append_mode: bool,
+    nested_depth: int = 0,
+) -> dict:
+    """Parse a ZIP archive, recursing one level into nested ZIP members."""
+    import zipfile
+
+    sampled_note: str | None = None
+    row_count = 0
+    columns: list[str] = []
+
+    for name in zf.namelist():
+        lower = name.lower()
+        if lower.endswith((".csv", ".txt")):
+            csv_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", dir=_temp_dir())
+            csv_tmp_path = csv_tmp.name
+            csv_tmp.close()
+            try:
+                with zf.open(name) as zf_entry, open(csv_tmp_path, "wb") as out:
+                    while True:
+                        block = zf_entry.read(256 * 1024)
+                        if not block:
+                            break
+                        out.write(block)
+                row_count, columns, csv_trunc = _load_csv_chunked(
+                    csv_tmp_path,
+                    table_name,
+                    engine,
+                    source_dataset_id=dataset_id,
+                    force_append=append_mode,
+                )
+                if csv_trunc:
+                    sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
+                    logger.warning(
+                        "Dataset %s (zip/csv) truncated at %d rows",
+                        dataset_id,
+                        row_count,
+                    )
+            finally:
+                try:
+                    os.unlink(csv_tmp_path)
+                except OSError:
+                    pass
+            return {
+                "parsed": True,
+                "table_name": table_name,
+                "append_mode": append_mode,
+                "row_count": row_count,
+                "columns": columns,
+                "sampled_note": sampled_note,
+                "result": None,
+            }
+
+        if lower.endswith((".xlsx", ".xls")):
+            with zf.open(name) as f:
+                content = f.read()
+            try:
+                df = _read_excel_frame(io.BytesIO(content), nrows=MAX_TABLE_ROWS)
+            except ValueError as exc:
+                if str(exc) == "excel_no_worksheets":
+                    logger.warning(
+                        "ZIP %s: skipping excel member %s with no worksheets",
+                        dataset_id,
+                        name,
+                    )
+                    continue
+                raise
+            original_len = len(df)
+            if original_len >= MAX_TABLE_ROWS:
+                sampled_note = (
+                    f"sampled: first {MAX_TABLE_ROWS} rows kept"
+                    f" (excel in zip, file may have more)"
+                )
+                logger.warning(
+                    "Dataset %s (zip/excel) truncated at %d rows",
+                    dataset_id,
+                    MAX_TABLE_ROWS,
+                )
+            df["_source_dataset_id"] = dataset_id
+            table_name, append_mode, routed_status = _route_table_for_schema(
+                engine,
+                dataset_id,
+                table_name,
+                df.columns,
+                append_mode=append_mode,
+            )
+            if routed_status:
+                if routed_status == "resource_table_full":
+                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
+            _to_sql_safe(
+                df,
+                table_name,
+                engine,
+                if_exists="append" if append_mode else "replace",
+                index=False,
+            )
+            return {
+                "parsed": True,
+                "table_name": table_name,
+                "append_mode": append_mode,
+                "row_count": len(df),
+                "columns": list(df.columns),
+                "sampled_note": sampled_note,
+                "result": None,
+            }
+
+        if lower.endswith(".geojson"):
+            with zf.open(name) as f:
+                content = f.read()
+            raw_geo = json.loads(content)
+            features = raw_geo.get("features", []) if isinstance(raw_geo, dict) else []
+            if features:
+                df = _geojson_features_to_df(features)
+            else:
+                df = pd.json_normalize(raw_geo if isinstance(raw_geo, list) else [raw_geo])
+            if len(df) > MAX_TABLE_ROWS:
+                sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                logger.warning(
+                    "Dataset %s (zip/geojson) truncated from %d to %d rows",
+                    dataset_id,
+                    len(df),
+                    MAX_TABLE_ROWS,
+                )
+                df = df.iloc[:MAX_TABLE_ROWS]
+            df["_source_dataset_id"] = dataset_id
+            table_name, append_mode, routed_status = _route_table_for_schema(
+                engine,
+                dataset_id,
+                table_name,
+                df.columns,
+                append_mode=append_mode,
+            )
+            if routed_status:
+                if routed_status == "resource_table_full":
+                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
+            _to_sql_safe(
+                df,
+                table_name,
+                engine,
+                if_exists="append" if append_mode else "replace",
+                index=False,
+            )
+            return {
+                "parsed": True,
+                "table_name": table_name,
+                "append_mode": append_mode,
+                "row_count": len(df),
+                "columns": list(df.columns),
+                "sampled_note": sampled_note,
+                "result": None,
+            }
+
+        if lower.endswith(".json"):
+            with zf.open(name) as f:
+                content = f.read()
+            try:
+                df = pd.read_json(io.BytesIO(content))
+            except ValueError:
+                raw_j = json.loads(content)
+                if isinstance(raw_j, list):
+                    df = pd.json_normalize(raw_j)
+                elif isinstance(raw_j, dict):
+                    for k in ("data", "results", "records", "rows"):
+                        if k in raw_j and isinstance(raw_j[k], list):
+                            df = pd.json_normalize(raw_j[k])
+                            break
+                    else:
+                        df = pd.json_normalize([raw_j])
+                else:
+                    continue
+            if len(df) > MAX_TABLE_ROWS:
+                sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                logger.warning(
+                    "Dataset %s (zip/json) truncated from %d to %d rows",
+                    dataset_id,
+                    len(df),
+                    MAX_TABLE_ROWS,
+                )
+                df = df.iloc[:MAX_TABLE_ROWS]
+            df["_source_dataset_id"] = dataset_id
+            table_name, append_mode, routed_status = _route_table_for_schema(
+                engine,
+                dataset_id,
+                table_name,
+                df.columns,
+                append_mode=append_mode,
+            )
+            if routed_status:
+                if routed_status == "resource_table_full":
+                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
+            _to_sql_safe(
+                df,
+                table_name,
+                engine,
+                if_exists="append" if append_mode else "replace",
+                index=False,
+            )
+            return {
+                "parsed": True,
+                "table_name": table_name,
+                "append_mode": append_mode,
+                "row_count": len(df),
+                "columns": list(df.columns),
+                "sampled_note": sampled_note,
+                "result": None,
+            }
+
+        if nested_depth < 1 and lower.endswith(".zip"):
+            nested_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=_temp_dir())
+            nested_tmp_path = nested_tmp.name
+            nested_tmp.close()
+            try:
+                with zf.open(name) as zf_entry, open(nested_tmp_path, "wb") as out:
+                    while True:
+                        block = zf_entry.read(256 * 1024)
+                        if not block:
+                            break
+                        out.write(block)
+                try:
+                    with zipfile.ZipFile(nested_tmp_path) as nested_zf:
+                        nested_result = _parse_zip_archive(
+                            nested_zf,
+                            zip_path=nested_tmp_path,
+                            dataset_id=dataset_id,
+                            table_name=table_name,
+                            engine=engine,
+                            append_mode=append_mode,
+                            nested_depth=nested_depth + 1,
+                        )
+                except zipfile.BadZipFile:
+                    logger.warning("ZIP %s: nested member %s is not a valid ZIP", dataset_id, name)
+                    continue
+                if nested_result.get("parsed") or nested_result.get("result") is not None:
+                    return nested_result
+            finally:
+                try:
+                    os.unlink(nested_tmp_path)
+                except OSError:
+                    pass
+
+    has_shp = any(n.lower().endswith(".shp") for n in zf.namelist())
+    if has_shp:
+        df = _read_shapefile_from_zip(zip_path)
+        if df is not None and len(df) > 0:
+            if len(df) > MAX_TABLE_ROWS:
+                sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} rows (shapefile)"
+                logger.warning(
+                    "Dataset %s (zip/shp) truncated from %d to %d rows",
+                    dataset_id,
+                    len(df),
+                    MAX_TABLE_ROWS,
+                )
+                df = df.iloc[:MAX_TABLE_ROWS]
+            df["_source_dataset_id"] = dataset_id
+            table_name, append_mode, routed_status = _route_table_for_schema(
+                engine,
+                dataset_id,
+                table_name,
+                df.columns,
+                append_mode=append_mode,
+            )
+            if routed_status:
+                if routed_status == "resource_table_full":
+                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
+            _to_sql_safe(
+                df,
+                table_name,
+                engine,
+                if_exists="append" if append_mode else "replace",
+                index=False,
+            )
+            return {
+                "parsed": True,
+                "table_name": table_name,
+                "append_mode": append_mode,
+                "row_count": len(df),
+                "columns": list(df.columns),
+                "sampled_note": sampled_note,
+                "result": None,
+            }
+
+    return {
+        "parsed": False,
+        "table_name": table_name,
+        "append_mode": append_mode,
+        "row_count": 0,
+        "columns": [],
+        "sampled_note": None,
+        "result": None,
+    }
+
+
 def _stream_download(
     url: str, dest_path: str, verify_ssl: bool = True, max_bytes: int = 500 * 1024 * 1024
 ) -> int:
@@ -744,6 +1234,30 @@ def _make_unique_columns(columns) -> list[str]:
     return normalized
 
 
+def _serialize_nested_value(value):
+    """Convert Python container values into stable JSON strings for SQL writes."""
+    if isinstance(value, dict | list | tuple | set):
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+        except TypeError:
+            return json.dumps(str(value), ensure_ascii=False)
+    return value
+
+
+def _serialize_structured_cells(df: pd.DataFrame) -> pd.DataFrame:
+    """Stringify nested JSON-like cells that psycopg cannot adapt automatically."""
+    if df.empty:
+        return df
+
+    normalized = df.copy()
+    for column in normalized.columns:
+        series = normalized[column]
+        if getattr(series.dtype, "kind", None) != "O":
+            continue
+        normalized[column] = series.map(_serialize_nested_value)
+    return normalized
+
+
 def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Clean column names: strip whitespace, non-breaking spaces, normalize.
 
@@ -758,6 +1272,7 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
         df.columns = new_header
 
+    df = _serialize_structured_cells(df)
     return _compact_wide_dataframe(df)
 
 
@@ -1181,10 +1696,22 @@ def _route_table_for_schema(
         if resource_rows >= MAX_TABLE_ROWS:
             with engine.begin() as conn:
                 conn.execute(
-                    text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
+                    text(
+                        """
+                        UPDATE cached_datasets
+                        SET status = 'error',
+                            error_message = 'resource_table_full',
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:id AS uuid)
+                        """
+                    ),
                     {"id": dataset_id},
                 )
-            return resource_table, True, "table_full"
+                conn.execute(
+                    text("UPDATE datasets SET is_cached = false WHERE id = CAST(:id AS uuid)"),
+                    {"id": dataset_id},
+                )
+            return resource_table, False, "resource_table_full"
 
         try:
             with engine.connect() as conn:
@@ -1244,8 +1771,15 @@ def collect_dataset(self, dataset_id: str):
     download_ms = 0
     parse_ms = 0
     upload_ms = 0
+    lock_key = _lock_key(_COLLECT_DATASET_LOCK_PREFIX, dataset_id)
+    lock_acquired = False
 
     try:
+        lock_acquired = _try_advisory_lock(engine, lock_key)
+        if not lock_acquired:
+            logger.info("Dataset %s is already being collected, skipping duplicate run", dataset_id)
+            return {"dataset_id": dataset_id, "status": "already_collecting"}
+
         # Get dataset info
         with engine.begin() as conn:
             row = conn.execute(
@@ -1291,6 +1825,7 @@ def collect_dataset(self, dataset_id: str):
 
         # Resource staging is the primary materialization path: each dataset gets its own table.
         append_mode = False
+        previous_cache_state = None
         with engine.begin() as conn:
             cached = conn.execute(
                 text(
@@ -1298,6 +1833,26 @@ def collect_dataset(self, dataset_id: str):
                     "WHERE table_name = :tn AND status = 'ready'"
                 ),
                 {"tn": table_name},
+            ).fetchone()
+            previous_cache_state = conn.execute(
+                text(
+                    """
+                    SELECT d.is_cached,
+                           cd.table_name,
+                           cd.row_count AS cached_row_count,
+                           cd.columns_json,
+                           cd.s3_key,
+                           cd.error_message
+                    FROM datasets d
+                    LEFT JOIN cached_datasets cd
+                      ON cd.dataset_id = d.id
+                    WHERE d.id = CAST(:id AS uuid)
+                    ORDER BY CASE WHEN cd.status = 'ready' THEN 0 ELSE 1 END,
+                             cd.updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """
+                ),
+                {"id": dataset_id},
             ).fetchone()
 
         if cached:
@@ -1408,6 +1963,8 @@ def collect_dataset(self, dataset_id: str):
                             append_mode=append_mode,
                         )
                         if routed_status:
+                            if routed_status == "resource_table_full":
+                                return {"dataset_id": dataset_id, "error": routed_status}
                             logger.info(
                                 "Dataset %s resolved early status %s on %s",
                                 dataset_id,
@@ -1471,212 +2028,24 @@ def collect_dataset(self, dataset_id: str):
                         countdown=int(backoff + random.uniform(0, backoff * 0.3)),
                     )
 
-                parsed = False
-                for name in zf.namelist():
-                    lower = name.lower()
-                    if lower.endswith((".csv", ".txt")):
-                        # Extract CSV to temp file, then chunked load
-                        csv_tmp = tempfile.NamedTemporaryFile(
-                            delete=False, suffix=".csv", dir=_temp_dir()
-                        )
-                        csv_tmp_path = csv_tmp.name
-                        csv_tmp.close()
-                        try:
-                            with zf.open(name) as zf_entry, open(csv_tmp_path, "wb") as out:
-                                while True:
-                                    block = zf_entry.read(256 * 1024)
-                                    if not block:
-                                        break
-                                    out.write(block)
-                            row_count, columns, csv_trunc = _load_csv_chunked(
-                                csv_tmp_path,
-                                table_name,
-                                engine,
-                                source_dataset_id=dataset_id,
-                                force_append=append_mode,
-                            )
-                            if csv_trunc:
-                                sampled_note = (
-                                    f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
-                                )
-                                logger.warning(
-                                    "Dataset %s (zip/csv) truncated at %d rows",
-                                    dataset_id,
-                                    row_count,
-                                )
-                        finally:
-                            try:
-                                os.unlink(csv_tmp_path)
-                            except OSError:
-                                pass
-                        parsed = True
-                        break
-                    elif lower.endswith((".xlsx", ".xls")):
-                        with zf.open(name) as f:
-                            content = f.read()
-                        try:
-                            df = _read_excel_frame(io.BytesIO(content), nrows=MAX_TABLE_ROWS)
-                        except ValueError as exc:
-                            if str(exc) == "excel_no_worksheets":
-                                logger.warning(
-                                    "ZIP %s: skipping excel member %s with no worksheets",
-                                    dataset_id,
-                                    name,
-                                )
-                                continue
-                            raise
-                        original_len = len(df)
-                        if original_len >= MAX_TABLE_ROWS:
-                            sampled_note = (
-                                f"sampled: first {MAX_TABLE_ROWS} rows kept"
-                                f" (excel in zip, file may have more)"
-                            )
-                            logger.warning(
-                                "Dataset %s (zip/excel) truncated at %d rows",
-                                dataset_id,
-                                MAX_TABLE_ROWS,
-                            )
-                        df["_source_dataset_id"] = dataset_id
-                        table_name, append_mode, routed_status = _route_table_for_schema(
-                            engine,
-                            dataset_id,
-                            table_name,
-                            df.columns,
-                            append_mode=append_mode,
-                        )
-                        if routed_status:
-                            return {"dataset_id": dataset_id, "status": routed_status}
-                        if append_mode:
-                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
-                        else:
-                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
-                        row_count, columns = len(df), list(df.columns)
-                        parsed = True
-                        break
-                    elif lower.endswith(".geojson"):
-                        with zf.open(name) as f:
-                            content = f.read()
-                        raw_geo = json.loads(content)
-                        features = raw_geo.get("features", []) if isinstance(raw_geo, dict) else []
-                        if features:
-                            df = _geojson_features_to_df(features)
-                        else:
-                            df = pd.json_normalize(
-                                raw_geo if isinstance(raw_geo, list) else [raw_geo]
-                            )
-                        if len(df) > MAX_TABLE_ROWS:
-                            sampled_note = (
-                                f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
-                            )
-                            logger.warning(
-                                "Dataset %s (zip/geojson) truncated from %d to %d rows",
-                                dataset_id,
-                                len(df),
-                                MAX_TABLE_ROWS,
-                            )
-                            df = df.iloc[:MAX_TABLE_ROWS]
-                        df["_source_dataset_id"] = dataset_id
-                        table_name, append_mode, routed_status = _route_table_for_schema(
-                            engine,
-                            dataset_id,
-                            table_name,
-                            df.columns,
-                            append_mode=append_mode,
-                        )
-                        if routed_status:
-                            return {"dataset_id": dataset_id, "status": routed_status}
-                        if append_mode:
-                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
-                        else:
-                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
-                        row_count, columns = len(df), list(df.columns)
-                        parsed = True
-                        break
-                    elif lower.endswith(".json"):
-                        with zf.open(name) as f:
-                            content = f.read()
-                        try:
-                            df = pd.read_json(io.BytesIO(content))
-                        except ValueError:
-                            raw_j = json.loads(content)
-                            if isinstance(raw_j, list):
-                                df = pd.json_normalize(raw_j)
-                            elif isinstance(raw_j, dict):
-                                for k in ("data", "results", "records", "rows"):
-                                    if k in raw_j and isinstance(raw_j[k], list):
-                                        df = pd.json_normalize(raw_j[k])
-                                        break
-                                else:
-                                    df = pd.json_normalize([raw_j])
-                            else:
-                                continue
-                        if len(df) > MAX_TABLE_ROWS:
-                            sampled_note = (
-                                f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
-                            )
-                            logger.warning(
-                                "Dataset %s (zip/json) truncated from %d to %d rows",
-                                dataset_id,
-                                len(df),
-                                MAX_TABLE_ROWS,
-                            )
-                            df = df.iloc[:MAX_TABLE_ROWS]
-                        df["_source_dataset_id"] = dataset_id
-                        table_name, append_mode, routed_status = _route_table_for_schema(
-                            engine,
-                            dataset_id,
-                            table_name,
-                            df.columns,
-                            append_mode=append_mode,
-                        )
-                        if routed_status:
-                            return {"dataset_id": dataset_id, "status": routed_status}
-                        if append_mode:
-                            _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
-                        else:
-                            _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
-                        row_count, columns = len(df), list(df.columns)
-                        parsed = True
-                        break
-                # Fallback: try reading as shapefile (ZIP may contain .shp/.dbf)
-                if not parsed:
-                    has_shp = any(n.lower().endswith(".shp") for n in zf.namelist())
-                    if has_shp:
-                        df = _read_shapefile_from_zip(tmp_path)
-                        if df is not None and len(df) > 0:
-                            if len(df) > MAX_TABLE_ROWS:
-                                sampled_note = (
-                                    f"sampled: first {MAX_TABLE_ROWS} of {len(df)} rows (shapefile)"
-                                )
-                                logger.warning(
-                                    "Dataset %s (zip/shp) truncated from %d to %d rows",
-                                    dataset_id,
-                                    len(df),
-                                    MAX_TABLE_ROWS,
-                                )
-                                df = df.iloc[:MAX_TABLE_ROWS]
-                            df["_source_dataset_id"] = dataset_id
-                            table_name, append_mode, routed_status = _route_table_for_schema(
-                                engine,
-                                dataset_id,
-                                table_name,
-                                df.columns,
-                                append_mode=append_mode,
-                            )
-                            if routed_status:
-                                return {"dataset_id": dataset_id, "status": routed_status}
-                            if append_mode:
-                                _to_sql_safe(
-                                    df, table_name, engine, if_exists="append", index=False
-                                )
-                            else:
-                                _to_sql_safe(
-                                    df, table_name, engine, if_exists="replace", index=False
-                                )
-                            row_count, columns = len(df), list(df.columns)
-                            parsed = True
+                zip_result = _parse_zip_archive(
+                    zf,
+                    zip_path=tmp_path,
+                    dataset_id=dataset_id,
+                    table_name=table_name,
+                    engine=engine,
+                    append_mode=append_mode,
+                )
+                if zip_result.get("result") is not None:
+                    return zip_result["result"]
 
-                if not parsed:
+                if zip_result.get("parsed"):
+                    table_name = zip_result["table_name"]
+                    append_mode = zip_result["append_mode"]
+                    row_count = zip_result["row_count"]
+                    columns = zip_result["columns"]
+                    sampled_note = zip_result["sampled_note"]
+                else:
                     logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
                     _set_error_status(
                         engine, dataset_id, "zip_no_parseable_file", table_name=table_name
@@ -1719,6 +2088,8 @@ def collect_dataset(self, dataset_id: str):
                     append_mode=append_mode,
                 )
                 if routed_status:
+                    if routed_status == "resource_table_full":
+                        return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
@@ -1756,6 +2127,8 @@ def collect_dataset(self, dataset_id: str):
                     append_mode=append_mode,
                 )
                 if routed_status:
+                    if routed_status == "resource_table_full":
+                        return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
@@ -1795,6 +2168,8 @@ def collect_dataset(self, dataset_id: str):
                     append_mode=append_mode,
                 )
                 if routed_status:
+                    if routed_status == "resource_table_full":
+                        return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
@@ -1822,6 +2197,8 @@ def collect_dataset(self, dataset_id: str):
                     append_mode=append_mode,
                 )
                 if routed_status:
+                    if routed_status == "resource_table_full":
+                        return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
@@ -1856,6 +2233,8 @@ def collect_dataset(self, dataset_id: str):
                     append_mode=append_mode,
                 )
                 if routed_status:
+                    if routed_status == "resource_table_full":
+                        return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
                     _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
@@ -1882,6 +2261,15 @@ def collect_dataset(self, dataset_id: str):
                         ),
                         {"rows": row_count, "id": dataset_id},
                     )
+                from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+
+                index_dataset_embedding.delay(dataset_id)
+
+                from app.infrastructure.celery.tasks.catalog_enrichment_tasks import (
+                    enrich_single_table,
+                )
+
+                enrich_single_table.delay(table_name)
                 parse_ms = int((time.monotonic() - parse_started_at) * 1000)
                 total_ms = int((time.monotonic() - started_at) * 1000)
                 logger.info(
@@ -1931,11 +2319,7 @@ def collect_dataset(self, dataset_id: str):
 
             # Update dataset — track whether this is a new cache for conditional re-embedding
             with engine.begin() as conn:
-                prev = conn.execute(
-                    text("SELECT is_cached FROM datasets WHERE id = CAST(:id AS uuid)"),
-                    {"id": dataset_id},
-                ).fetchone()
-                was_cached = prev.is_cached if prev else False
+                was_cached = previous_cache_state.is_cached if previous_cache_state else False
                 conn.execute(
                     text(
                         "UPDATE datasets SET is_cached = true, row_count = :rows WHERE id = CAST(:id AS uuid)"
@@ -1946,8 +2330,25 @@ def collect_dataset(self, dataset_id: str):
             # Add PostGIS native geometry column if this is a geo dataset
             _ensure_postgis_geom(engine, table_name, columns)
 
-            # Re-embed only on first cache (enriches with sample rows); skip if already embedded
-            if not was_cached:
+            previous_table_name = previous_cache_state.table_name if previous_cache_state else None
+            previous_row_count = previous_cache_state.cached_row_count if previous_cache_state else None
+            previous_columns_json = (
+                previous_cache_state.columns_json if previous_cache_state else None
+            )
+            previous_s3_key = previous_cache_state.s3_key if previous_cache_state else None
+            previous_sampled_note = (
+                previous_cache_state.error_message if previous_cache_state else None
+            )
+            should_refresh_embeddings = (
+                (not was_cached)
+                or previous_table_name != table_name
+                or previous_row_count != row_count
+                or previous_columns_json != columns_json
+                or previous_s3_key != s3_key
+                or previous_sampled_note != sampled_note
+            )
+
+            if should_refresh_embeddings:
                 from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
 
                 index_dataset_embedding.delay(dataset_id)
@@ -2026,6 +2427,9 @@ def collect_dataset(self, dataset_id: str):
                     "Request Denied",
                     "Name or service not known",
                     "TooManyColumns",
+                    "file_too_large",
+                    "No columns to parse from file",
+                    "Excel file format cannot be determined",
                 )
             )
             or "TooManyRedirects" in type(exc).__name__
@@ -2081,10 +2485,12 @@ def collect_dataset(self, dataset_id: str):
         jitter = random.uniform(0, backoff * 0.3)
         raise self.retry(exc=exc, countdown=int(backoff + jitter)) from exc
     finally:
+        if lock_acquired:
+            _release_advisory_lock(engine, lock_key)
         engine.dispose()
 
 
-@celery_app.task(name="openarg.bulk_collect_all", bind=True, soft_time_limit=120, time_limit=180)
+@celery_app.task(name="openarg.bulk_collect_all", bind=True, soft_time_limit=300, time_limit=420)
 def bulk_collect_all(self, portal: str | None = None):
     """Descarga y cachea TODOS los datasets no cacheados.
 
@@ -2093,8 +2499,14 @@ def bulk_collect_all(self, portal: str | None = None):
              which handles format dedup, schema probing, and row budgets.
     """
     engine = get_sync_engine()
+    lock_acquired = False
 
     try:
+        lock_acquired = _try_advisory_lock(engine, _BULK_COLLECT_LOCK_KEY)
+        if not lock_acquired:
+            logger.info("bulk_collect_all skipped because another run already holds the lock")
+            return {"status": "skipped_already_running"}
+
         reconciled = _reconcile_cache_coverage(
             engine,
             redispatch=False,
@@ -2106,6 +2518,13 @@ def bulk_collect_all(self, portal: str | None = None):
                 reconciled["orphaned_ready"],
                 reconciled["fixed_cached_flags"],
                 reconciled["reindexed_missing_chunks"],
+            )
+
+        revived_schema = _revive_schema_mismatch(engine, redispatch=False)
+        if revived_schema["revived_schema_mismatch"]:
+            logger.warning(
+                "Bulk collect revived %s schema_mismatch rows back into retry",
+                revived_schema["revived_schema_mismatch"],
             )
 
         recycled = _recycle_stuck_downloads(engine, redispatch=False)
@@ -2122,7 +2541,7 @@ def bulk_collect_all(self, portal: str | None = None):
             "SELECT CAST(d.id AS text), d.portal FROM datasets d "
             "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
             "WHERE d.is_cached = false "
-            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed', 'schema_mismatch')) "
+            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed')) "
             "AND d.title NOT IN ("
             "  SELECT title FROM datasets "
             "  WHERE portal = d.portal AND is_cached = false "
@@ -2223,11 +2642,14 @@ def bulk_collect_all(self, portal: str | None = None):
             "reconciled_orphaned_ready": reconciled["orphaned_ready"],
             "reconciled_cached_flags": reconciled["fixed_cached_flags"],
             "reindexed_missing_chunks": reconciled["reindexed_missing_chunks"],
+            "revived_schema_mismatch": revived_schema["revived_schema_mismatch"],
             "recycled_stale_ready": recycled["recovered_ready"],
             "recycled_stale_error": recycled["recycled_error"],
             "recycled_stale_failed": recycled["recycled_failed"],
         }
     finally:
+        if lock_acquired:
+            _release_advisory_lock(engine, _BULK_COLLECT_LOCK_KEY)
         engine.dispose()
 
 
@@ -2311,12 +2733,18 @@ def collect_large_group(self, title: str, portal: str):
             )
 
         consolidation_scheduled = False
+        alias_materialization_scheduled = False
         if deduped:
             consolidate_group_tables.apply_async(
                 args=[title, portal],
                 countdown=(dispatched_batches * _COLLECT_DISPATCH_STEP_SECONDS) + 60,
             )
             consolidation_scheduled = True
+            materialize_format_duplicate_aliases.apply_async(
+                args=[title, portal],
+                countdown=(dispatched_batches * _COLLECT_DISPATCH_STEP_SECONDS) + 30,
+            )
+            alias_materialization_scheduled = True
 
         # Leave remaining (beyond 200) pending for a later pass
         deferred_count = 0
@@ -2329,17 +2757,8 @@ def collect_large_group(self, title: str, portal: str):
                 deferred_count,
             )
 
-        # Mark format-dupes as cached
         deduped_ids = {did for did, _, _ in deduped}
         format_dupes = [r.id for r in resources if r.id not in deduped_ids]
-        if format_dupes:
-            with engine.begin() as conn:
-                for fid in format_dupes:
-                    conn.execute(
-                        text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
-                        {"id": fid},
-                    )
-            logger.info(f"Marked {len(format_dupes)} format-duplicate resources as cached")
 
         return {
             "title": title,
@@ -2349,12 +2768,67 @@ def collect_large_group(self, title: str, portal: str):
             "dispatched": min(len(deduped), 200),
             "dispatch_batches": dispatched_batches,
             "deferred": deferred_count,
-            "format_dupes_skipped": len(format_dupes),
+            "format_dupes_pending_alias": len(format_dupes),
             "consolidation_scheduled": consolidation_scheduled,
+            "alias_materialization_scheduled": alias_materialization_scheduled,
         }
     except Exception as exc:
         logger.warning(f"collect_large_group failed for '{title}' ({portal})", exc_info=True)
         raise self.retry(exc=exc, countdown=60) from exc
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.materialize_format_duplicate_aliases",
+    bind=True,
+    soft_time_limit=300,
+    time_limit=420,
+)
+def materialize_format_duplicate_aliases(self, title: str, portal: str):
+    """Create alias views for lower-priority format duplicates after canonical resources land."""
+    engine = get_sync_engine()
+    try:
+        group_table_name = _sanitize_table_name(title, portal)
+        with engine.connect() as conn:
+            resources = conn.execute(
+                text(
+                    "SELECT CAST(d.id AS text) as id, d.format, d.download_url "
+                    "FROM datasets d "
+                    "WHERE d.title = :title AND d.portal = :portal"
+                ),
+                {"title": title, "portal": portal},
+            ).fetchall()
+            conn.rollback()
+
+        stem_to_winner: dict[str, tuple[str, str, str]] = {}
+        for resource in resources:
+            url = resource.download_url or ""
+            if not url:
+                continue
+            path = url.split("?")[0].split("#")[0]
+            dot = path.rfind(".")
+            stem = path[:dot] if dot > 0 else path
+            fmt = (resource.format or "").lower().strip()
+            priority = _FORMAT_PRIORITY.get(fmt, 99)
+            if stem not in stem_to_winner or priority < _FORMAT_PRIORITY.get(
+                stem_to_winner[stem][1],
+                99,
+            ):
+                stem_to_winner[stem] = (resource.id, fmt, url)
+
+        stats = _materialize_format_duplicate_aliases(
+            engine,
+            title=title,
+            portal=portal,
+            group_table_name=group_table_name,
+            stem_to_winner=stem_to_winner,
+        )
+        return {
+            "title": title,
+            "portal": portal,
+            **stats,
+        }
     finally:
         engine.dispose()
 

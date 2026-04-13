@@ -2,7 +2,7 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Parent plan**: [../plan.md](../plan.md)
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-12
 
 ---
 
@@ -90,11 +90,40 @@ Detects when a re-collect produces a schema that no longer matches the existing 
 - Drop & recreate the `cache_*` table with the new schema (current behavior), updating `cached_datasets.columns_json`.
 - Re-trigger `index_dataset_embedding` because the columns chunk is now stale.
 
+### 5.3 Single-flight locking
+
+- `collect_dataset(dataset_id)` now acquires a PostgreSQL advisory lock derived from `dataset_id` before any network or SQL write work starts.
+- If the lock is already held, the duplicate invocation exits immediately with `status="already_collecting"`.
+- `bulk_collect_all()` now acquires a dedicated advisory lock before running reconciliation / recycle / dispatch logic. Overlapping runs exit as `status="skipped_already_running"` instead of dispatching duplicate collector waves.
+
+### 5.4 Deterministic failure short-circuit
+
+- Some ingestion errors are now treated as terminal on the first failure instead of burning the retry budget:
+  - `file_too_large`
+  - empty CSV payloads (`No columns to parse from file`)
+  - unsupported/invalid Excel payloads where pandas cannot determine an engine
+- Goal: reduce retry churn and free collector slots for genuinely recoverable failures.
+
+### 5.5 Nested ZIP handling
+
+- The collector now parses one nested ZIP layer before giving up on `zip_no_parseable_file`.
+- This specifically covers portals that publish bundles like `dataset.zip -> archivo_geojson.zip` or `dataset.zip -> archivo_shp.zip`.
+- The nested archive inherits the same row caps and schema-routing logic as direct ZIP members.
+
+### 5.6 Sandbox compatibility normalization
+
+- Query-planner hints and NL2SQL execution now normalize several stale cache names seen in staging logs:
+  - `cache_series_tiempo_*` -> `cache_series_*`
+  - `cache_bcra_principales_variables` -> `cache_bcra_cotizaciones`
+  - `cache_presupuesto_nacional` -> latest matching `cache_presupuesto_*`
+- `coparticipacion` no longer routes to a non-existent dedicated cache table; it now points to generic budget tables plus table notes so NL2SQL searches the correct domain without inventing a table name.
+
 ## 6. `cached_datasets` Lifecycle
 
 ```
 pending → downloading → ready
                     ↘ error → (retry up to N) → permanently_failed
+                    ↘ permanently_failed   # deterministic non-retryable failures
 ```
 
 - Row created on first `collect_dataset` dispatch.

@@ -51,6 +51,17 @@ ALL_PORTALS = [
 ]
 
 
+def _startup_bootstrap_enabled() -> bool:
+    """Return True only when startup bootstrap is explicitly enabled.
+
+    Heavy recovery/bootstrap work must be scheduled by beat or invoked
+    manually. Running it from every worker process startup creates
+    duplicate bulk collect runs and contention spikes.
+    """
+    raw = os.getenv("OPENARG_ENABLE_STARTUP_BOOTSTRAP", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def create_celery() -> Celery:
     broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
@@ -334,6 +345,12 @@ celery_app = create_celery()
 @celery_app.on_after_finalize.connect
 def _initial_scrape(sender, **kwargs):
     """Dispatch scrape only for portals with no datasets in the DB."""
+    if not _startup_bootstrap_enabled():
+        logger.info(
+            "Startup bootstrap disabled — skipping initial scrape/bulk/transparency dispatch"
+        )
+        return
+
     from sqlalchemy import text
 
     from app.infrastructure.celery.tasks._db import get_sync_engine

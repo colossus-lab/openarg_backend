@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Application (core) + Infrastructure (nodes/adapters)
 **Related plan**: [./plan.md](./plan.md)
 
@@ -13,6 +13,8 @@
 The **Query Pipeline** is the functional heart of OpenArg: the **stateful LangGraph graph** that transforms a user's natural-language question into a structured response with cited sources, optional charts, optional maps, and conversational memory. It coordinates **classification**, **semantic cache**, **multi-source retrieval**, **LLM analysis with streaming**, **adaptive replanning**, and **finalization with side effects**.
 
 It is the composition of 16 nodes + 1 subgraph (NL2SQL, not integrated) + ~6 helpers in a DAG topology with a controlled replanning loop. Exposed via HTTP sync (`/api/v1/query/smart`) and WebSocket streaming (`/api/v1/query/ws/smart`).
+
+The pipeline now initializes its LangGraph checkpointer at app startup, caches compiled graphs separately for persistent vs non-persistent execution, closes persistence resources during application shutdown, and tolerates the known concurrent checkpoint-schema setup race between multiple Uvicorn workers. When persistence is truly unavailable, the pipeline falls back explicitly to a non-persistent graph instead of silently reusing a stale compiled graph.
 
 This top-level document is an **index**. Detailed functional requirements, tech debt, and open questions now live in the sub-modules below.
 
@@ -78,6 +80,7 @@ See [`./plan.md`](./plan.md) for the conditional-edge functions and full state d
 - The frontend understands the streaming event format (status, chunk, clarification, complete).
 - LangGraph and its `custom` / `updates` `stream_mode` are stable.
 - Connectors return `DataResult` honoring the contract.
+- Pipeline persistence is app-scoped: startup attempts to initialize the checkpointer once, request handlers reuse the initialized resource, and shutdown releases it.
 
 ### Out of scope (this whole module)
 - **Detail of each individual connector** — see specs under `002-connectors/`.

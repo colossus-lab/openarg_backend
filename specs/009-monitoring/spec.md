@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-12
 **Hexagonal scope**: Infrastructure + Presentation
 **Related plan**: [./plan.md](./plan.md)
 
@@ -50,6 +50,7 @@ It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in
 - **FR-008**: MUST support optional auth with `X-API-Key` on `/health` (if `BACKEND_API_KEY` is set, returns minimal info without the key).
 - **FR-009**: Stuck task detection: `cached_datasets.status='downloading' AND updated_at < now() - 30min`.
 - **FR-010**: Recent errors count: 24h window.
+- **FR-011**: Heavy bootstrap work (bulk collect, transparency bootstrap, large backfills) MUST NOT be dispatched implicitly on every Celery worker startup unless an explicit operator opt-in flag is enabled.
 
 ## 5. Success Criteria
 
@@ -86,6 +87,7 @@ It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in
 - **[DEBT-003]** — **Sentry not configured** — no external error monitoring.
 - **[DEBT-004]** — **No distributed traces** — limited cross-service debugging.
 - **[DEBT-005]** — **`/health/ready` performs no real checks** — always 200.
+- **[DEBT-006]** — **No dedicated metric for startup-bootstrap suppression** — operators can infer it from logs/env, but it is not yet surfaced in `/api/v1/metrics` or Prometheus.
 
 ---
 

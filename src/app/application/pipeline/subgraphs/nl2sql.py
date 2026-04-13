@@ -56,6 +56,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from app.application.pipeline._background_tasks import spawn_background
+from app.application.pipeline.connectors.cache_table_selection import rewrite_legacy_sql_tables
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.llm_provider import LLMMessage
 from app.prompts import load_prompt
@@ -191,10 +192,12 @@ async def execute_sql_node(state: NL2SQLState) -> dict:
     """FR-002: execute the generated SQL against the sandbox."""
     sandbox = state["sandbox"]
     generated_sql = state["generated_sql"]
+    available_tables = [table.table_name for table in state.get("tables") or []]
+    rewritten_sql = rewrite_legacy_sql_tables(generated_sql, available_tables)
 
-    result = await sandbox.execute_readonly(generated_sql)
+    result = await sandbox.execute_readonly(rewritten_sql)
 
-    updates: dict[str, Any] = {"result": result}
+    updates: dict[str, Any] = {"result": result, "generated_sql": rewritten_sql}
     if result.error:
         updates["last_error"] = result.error
     else:

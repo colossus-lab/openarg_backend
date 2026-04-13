@@ -12,6 +12,7 @@ import logging
 import os
 import secrets as _secrets_mod
 import threading
+from contextlib import AsyncExitStack
 from typing import Any
 
 from dishka import AsyncContainer
@@ -34,8 +35,9 @@ from app.setup.app_factory import limiter
 # Module-level cache for compiled graph (compile once, reuse)
 _graph_lock = threading.Lock()
 _checkpointer_lock = asyncio.Lock()
-_compiled_graph = None
+_compiled_graphs: dict[bool, Any] = {}
 _checkpointer = None  # AsyncPostgresSaver instance (lazy)
+_checkpointer_stack: AsyncExitStack | None = None
 _checkpointer_attempted = False  # Prevent repeated init attempts
 
 logger = logging.getLogger(__name__)
@@ -116,12 +118,33 @@ def _filter_stream_payload(payload: Any) -> Any:
 
 def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type: ignore[no-untyped-def]
     """Return the compiled graph, compiling it once (thread-safe)."""
-    global _compiled_graph  # noqa: PLW0603
-    if _compiled_graph is None:
+    global _compiled_graphs  # noqa: PLW0603
+    cache_key = bool(checkpointer)
+    if cache_key not in _compiled_graphs:
         with _graph_lock:
-            if _compiled_graph is None:
-                _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
-    return _compiled_graph
+            if cache_key not in _compiled_graphs:
+                _compiled_graphs[cache_key] = build_pipeline_graph(
+                    deps, checkpointer=checkpointer
+                )
+    return _compiled_graphs[cache_key]
+
+
+async def _open_checkpointer(conn_str: str) -> tuple[AsyncExitStack, Any]:
+    """Open an AsyncPostgresSaver inside an AsyncExitStack."""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    stack = AsyncExitStack()
+    saver = await stack.enter_async_context(AsyncPostgresSaver.from_conn_string(conn_str))
+    return stack, saver
+
+
+def _is_benign_checkpointer_setup_race(exc: Exception) -> bool:
+    """Return True for the known concurrent setup race on checkpoint migrations."""
+    message = str(exc)
+    return (
+        "checkpoint_migrations_pkey" in message
+        and "duplicate key value violates unique constraint" in message
+    )
 
 
 async def _get_checkpointer():
@@ -131,7 +154,7 @@ async def _get_checkpointer():
     unavailable (missing dependency or missing env var).
     Thread-safe via asyncio.Lock with double-check pattern.
     """
-    global _checkpointer, _checkpointer_attempted  # noqa: PLW0603
+    global _checkpointer, _checkpointer_attempted, _checkpointer_stack  # noqa: PLW0603
 
     if _checkpointer is not None:
         return _checkpointer
@@ -152,20 +175,54 @@ async def _get_checkpointer():
             return None
 
         try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
             conn_str = db_url.replace("postgresql+psycopg://", "postgresql://")
-            saver = AsyncPostgresSaver.from_conn_string(conn_str)
-            await saver.setup()
+            stack, saver = await _open_checkpointer(conn_str)
+            try:
+                await saver.setup()
+                logger.info("LangGraph checkpointer initialised (PostgreSQL)")
+            except Exception as exc:
+                if not _is_benign_checkpointer_setup_race(exc):
+                    raise
+                with contextlib.suppress(Exception):
+                    await stack.aclose()
+                stack, saver = await _open_checkpointer(conn_str)
+                logger.info(
+                    "LangGraph checkpointer initialised after concurrent setup race"
+                )
             _checkpointer = saver
-            logger.info("LangGraph checkpointer initialised (PostgreSQL)")
+            _checkpointer_stack = stack
             return saver
         except Exception:
+            if _checkpointer_stack is not None:
+                with contextlib.suppress(Exception):
+                    await _checkpointer_stack.aclose()
+                _checkpointer_stack = None
             logger.warning(
                 "LangGraph checkpointer not available — running without persistence",
                 exc_info=True,
             )
             return None
+
+
+async def init_pipeline_persistence() -> None:
+    """Warm up the optional LangGraph checkpointer during app startup."""
+    await _get_checkpointer()
+
+
+async def shutdown_pipeline_persistence() -> None:
+    """Release app-scoped persistence resources on shutdown."""
+    global _checkpointer, _checkpointer_stack, _checkpointer_attempted, _compiled_graphs  # noqa: PLW0603
+
+    async with _checkpointer_lock:
+        stack = _checkpointer_stack
+        _checkpointer = None
+        _checkpointer_stack = None
+        _checkpointer_attempted = False
+        _compiled_graphs = {}
+
+    if stack is not None:
+        with contextlib.suppress(Exception):
+            await stack.aclose()
 
 
 router = APIRouter(prefix="/query", tags=["smart-query"])
@@ -333,14 +390,9 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 deps = await request_scope.get(PipelineDeps)
 
                 # Compile graph once (thread-safe), set deps per-request
-                global _compiled_graph  # noqa: PLW0603
                 checkpointer = await _get_checkpointer()
-                if _compiled_graph is None:
-                    with _graph_lock:
-                        if _compiled_graph is None:
-                            _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
                 set_deps(deps)
-                graph = _compiled_graph
+                graph = _get_or_compile_graph(deps, checkpointer)
 
                 raw_text = await ws.receive_text()
                 if len(raw_text) > 10_000:

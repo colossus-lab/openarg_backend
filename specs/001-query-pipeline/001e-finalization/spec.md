@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-11
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Application (finalize node) + Infrastructure (Redis, pgvector semantic cache, PG audit, metrics)
 **Parent**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -74,6 +74,9 @@ The phase also owns the `_background_tasks: set[asyncio.Task]` registry and the 
 
 ### Checkpointing
 - **FR-040**: When `AsyncPostgresSaver` is configured and `conversation_id` is present, the system MUST persist state by `thread_id` for resumable runs and multi-turn memory.
+- **FR-040a**: The LangGraph checkpointer lifecycle MUST be app-scoped: initialize once during application startup, reuse during requests, and close on shutdown. Request handlers MUST NOT create ad-hoc saver instances that can fail silently or diverge from the compiled graph.
+- **FR-040b**: The compiled graph cache MUST respect whether checkpointing is enabled. A graph compiled without persistence MUST NOT be reused as the persistent graph for later requests.
+- **FR-040c**: Concurrent worker startup MUST tolerate LangGraph checkpoint schema races. If another worker finishes the saver setup first, the losing worker MUST reopen the saver and continue with persistence instead of degrading the whole process to non-persistent mode.
 
 ### Security (cross-reference)
 - **FR-042**: The pipeline MUST NOT leak `analysis_prompt`, tracebacks, or internal prompts to the client. *(The streaming-key whitelist in the HTTP router is the enforcement point.)*
@@ -110,6 +113,8 @@ The phase also owns the `_background_tasks: set[asyncio.Task]` registry and the 
 - **[DEBT-012]** — ~~**`asyncio.create_task()` fire-and-forget**~~ **FIXED 2026-04-10**: `finalize.py` now uses a module-level `_background_tasks: set[asyncio.Task]` with a `_spawn_background()` helper that keeps a strong reference and attaches a `done_callback` logging any unhandled exception. Prevents CPython's weak-ref task GC and surfaces background failures in logs.
 - **[DEBT-014]** — **`_get_or_compile_graph()` uses `threading.Lock` in async context** (`graph.py:41-48`). Thread safety in async is subtle and can cause rare bugs.
 - **[DEBT-015]** — **`_get_checkpointer()` holds global state** with a double-check pattern. It does not reset if `DATABASE_URL` changes at runtime.
+- **[DEBT-019]** — **Lazy checkpointer initialisation in request handlers can drift from the app lifecycle**. If the first lazy init fails or returns the wrong object shape, the router can silently pin the process to a non-persistent graph until restart. The preferred model is app-scoped startup/shutdown ownership.
+- **[DEBT-020]** — ~~**Concurrent startup can race inside `AsyncPostgresSaver.setup()` and downgrade one worker to non-persistent mode**~~ **FIXED 2026-04-13**: the router now treats the `checkpoint_migrations_pkey` duplicate-key race as benign, reopens a fresh saver, and keeps persistence enabled on the losing worker.
 - **[DEBT-017]** — ~~**Streaming key whitelist is hardcoded and drops unknown keys silently**~~ **FIXED 2026-04-11**: the allowlist has been hoisted to a module-level `_STREAM_ALLOWED_PAYLOAD_KEYS` frozenset in `smart_query_v2_router.py`, and a new `_filter_stream_payload()` helper emits a `WARNING` log naming the dropped keys and the event `type` whenever the filter discards anything from a `custom` payload. The allowlist is still **fail-closed** — prompts and tracebacks still MUST NOT leak to the browser — but developers now get a visible signal when a new node emits a field they forgot to add, instead of silent drops. See FR-038/FR-038a/FR-038b above.
 - **[DEBT-018]** — **Origin of non-primitive values in finalized state is not instrumented**. `FIX-017` fixed the symptom at the serialization layer (`_safe_send_json`, `safe_dumps`), but the *which connector injected the `datetime`* question remains unanswered — structlog did not render the traceback inline in the 2026-04-12 prod logs, and the fix shipped before the origin was traced. Follow-up: extend the WebSocket v2 `except Exception` handler to probe the last-known `update` dict and log which top-level key first fails `json_default`, so the next fresh-query regression points directly at the producing node / connector instead of at the serializer. See `FIX_BACKLOG.md#FIX-017` **Follow-up** section.
 

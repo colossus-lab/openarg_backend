@@ -158,6 +158,25 @@ async def test_self_correction_one_retry():
 
 
 @pytest.mark.asyncio
+async def test_legacy_table_alias_is_rewritten_before_execution():
+    llm = FakeLLM(['SELECT * FROM cache_series_tiempo_ipc LIMIT 10'])
+    sandbox = FakeSandbox([FakeSandboxResult(rows=[{"fecha": "2026-01-01"}], row_count=1)])
+
+    subgraph = build_nl2sql_subgraph()
+    final = await subgraph.ainvoke(
+        _base_state(
+            llm,
+            sandbox,
+            tables=[FakeTable(table_name="cache_series_inflacion_ipc", columns=["fecha", "valor"])],
+            tables_context="Table: cache_series_inflacion_ipc\n  Columns: fecha, valor",
+        )
+    )
+
+    assert final["data_results"][0].records
+    assert sandbox.calls == ['SELECT * FROM cache_series_inflacion_ipc LIMIT 10']
+
+
+@pytest.mark.asyncio
 async def test_retries_exhausted_triggers_last_resort_success(monkeypatch):
     """Both retries error, last_resort SELECT * LIMIT 10 succeeds."""
 

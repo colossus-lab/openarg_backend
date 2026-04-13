@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
-from app.application.pipeline.connectors.cache_table_selection import prefer_consolidated_table
+from app.application.pipeline.connectors.cache_table_selection import (
+    build_table_compat_notes,
+    expand_table_hints_compat,
+    prefer_consolidated_table,
+)
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 
 if TYPE_CHECKING:
@@ -374,6 +378,9 @@ async def execute_sandbox_step(
                         table_notes = _hint.params["table_notes"]
                     if table_hints and table_notes:
                         break
+        if table_hints:
+            table_hints = expand_table_hints_compat(table_hints)
+
         logger.info(
             "Sandbox step %s: %d cached tables, hints=%s, query=%s",
             step.id,
@@ -547,9 +554,12 @@ async def execute_sandbox_step(
             tables_context_parts.append(part)
         tables_context = "\n\n".join(tables_context_parts)
 
+        compat_notes = build_table_compat_notes([t.table_name for t in tables[:50]])
+        all_table_notes = "\n".join(note for note in [table_notes, compat_notes] if note)
+
         # Inject table_notes (resolved early at top of function) into NL2SQL context
-        if table_notes:
-            tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{table_notes}"
+        if all_table_notes:
+            tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{all_table_notes}"
 
         # Retrieve dynamic few-shot examples from successful past queries
         few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
@@ -582,7 +592,7 @@ async def execute_sandbox_step(
             "nl_query": nl_query,
             "tables": tables,
             "tables_context": tables_context,
-            "table_notes": table_notes,
+            "table_notes": all_table_notes,
             "catalog_entries": catalog_entries,
             "table_descriptions": table_descriptions,
             "few_shot_block": few_shot_block or "",

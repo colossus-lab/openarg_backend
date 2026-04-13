@@ -203,6 +203,13 @@ class TestCachedDataRoutes:
         top = hints[0]
         assert top.action == "query_sesiones"
 
+    def test_coparticipacion_uses_generic_budget_tables(self):
+        hints = resolve_hints("como se distribuye la coparticipacion federal")
+        top = hints[0]
+        assert top.action == "query_sandbox"
+        assert top.params.get("tables") == ["cache_presupuesto_*"]
+        assert "coparticipacion" in top.params.get("table_notes", "").lower()
+
 
 class TestFormatHints:
     def test_empty_hints(self):

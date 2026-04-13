@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered (top-level index)
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-12
 **Hexagonal scope**: Domain + Infrastructure + Presentation + Workers
 **Related plan**: [./plan.md](./plan.md)
 
@@ -17,7 +17,7 @@ This module has been split into two sub-modules:
 | Sub-module | Scope |
 |---|---|
 | [006a-catalog](./006a-catalog/spec.md) | `Dataset` entity, metadata, `IDatasetRepository`, `/api/v1/datasets/` listing/stats/download endpoints. |
-| [006b-ingestion](./006b-ingestion/spec.md) | `scrape_catalog → collect_dataset → index_dataset_embedding` pipeline, `cached_datasets` lifecycle, dynamic `cache_*` tables, 5-chunk embedding strategy, S3 upload. |
+| [006b-ingestion](./006b-ingestion/spec.md) | `scrape_catalog → collect_dataset → index_dataset_embedding` pipeline, `cached_datasets` lifecycle, per-resource staging + consolidation of dynamic `cache_*` tables, 5-chunk embedding strategy, S3 upload. |
 
 ## 2. Sub-module Map
 

@@ -78,7 +78,7 @@ FUENTES DE DATOS DISPONIBLES:
 9. **Sandbox SQL** (query_sandbox): Consulta directa a tablas de datos cacheados vía NL2SQL
    - **1.800+ tablas cache_* con 27M de filas** de datos de gobierno argentino pre-descargados
    - Categorías: elecciones, presupuesto, salud, transporte, empleo, agro, energía, comercio exterior, monetario, seguridad, ambiente, educación, cultura, turismo, demografía
-   - Prefijos: presupuesto nacional (cache_presupuesto_*), clasificadores presupuestarios/dimensiones (cache_presupuesto_dim_*), Buenos Aires Compras (cache_bac_*), INDEC (cache_indec_*), Rosario (cache_rosario_*), Senado (cache_senado_*), Córdoba Legislatura (cache_cordoba_leg_*), BCRA (cache_bcra_*), GeoRef (cache_georef_*), Series de Tiempo (cache_series_tiempo_*)
+   - Prefijos: presupuesto nacional (cache_presupuesto_*), clasificadores presupuestarios/dimensiones (cache_presupuesto_dim_*), Buenos Aires Compras (cache_bac_*), INDEC (cache_indec_*), Rosario (cache_rosario_*), Senado (cache_senado_*), Córdoba Legislatura (cache_cordoba_leg_*), BCRA (cache_bcra_*), GeoRef (cache_georef_*), Series de Tiempo (cache_series_*)
    - **Preferí query_sandbox sobre search_ckan cuando los datos probablemente ya están cacheados localmente** — es más rápido y confiable
    - Genera SQL automáticamente desde lenguaje natural
    - Parámetros: { "query": "descripción en lenguaje natural de lo que se quiere consultar", "tables": ["cache_presupuesto_*"] (opcional, para guiar la búsqueda) }
