@@ -7,7 +7,7 @@
 - Priority: **High** (security or user-visible correctness) / **Medium** (structural debt) / **Low** (nice-to-fix).
 - Status: `Pending` | `In progress` | `Completed`.
 
-**Overall status**: Updated 2026-04-12 after multiple fix passes under strict §0.5 spec-first discipline. **15 of 18** fixes applied: FIX-001 through FIX-013, FIX-017, and FIX-018. FIX-005 (Google JWT server-side validation) was implemented and deployed to staging in `dual` mode first and then flipped to `enforced` on 2026-04-11 — all auth now runs through `Authorization: Bearer <google_id_token>`, the legacy `X-User-Email` header path was deleted, and admin-key endpoints are exempt per FR-007a. FIX-017 (defensive JSON encoder) was added on 2026-04-12 after a prod regression: the post-deploy cache flush exposed a latent `datetime is not JSON serializable` crash in three serialization sinks (Redis, semantic cache, WebSocket v2). Three items remain **deferred**: FIX-014 (DB-first refactor for `series_tiempo` + `bcra`, architectural follow-up), FIX-015 (full RENABAP ingest, data expansion), and FIX-016 (DDJJ scope expansion to senadores/ejecutivo/jueces).
+**Overall status**: Updated 2026-04-13 after multiple fix passes under strict §0.5 spec-first discipline. **15 of 18** fixes applied: FIX-001 through FIX-013, FIX-017, and FIX-018. FIX-005 (Google JWT server-side validation) was implemented and deployed to staging in `dual` mode first and then flipped to `enforced` on 2026-04-11 — all auth now runs through `Authorization: Bearer <google_id_token>`, the legacy `X-User-Email` header path was deleted, and admin-key endpoints are exempt per FR-007a. FIX-017 (defensive JSON encoder) was added on 2026-04-12 after a prod regression: the post-deploy cache flush exposed a latent `datetime is not JSON serializable` crash in three serialization sinks (Redis, semantic cache, WebSocket v2). FIX-018 remains completed in its main scope, with one explicitly documented follow-up debt for SEPA sibling-table routing. Three items remain **deferred**: FIX-014 (DB-first refactor for `series_tiempo` + `bcra`, architectural follow-up), FIX-015 (full RENABAP ingest, data expansion), and FIX-016 (DDJJ scope expansion to senadores/ejecutivo/jueces).
 
 **Relation to specs**: Each fix is referenced from its corresponding `spec.md` in the "Open Questions" section (now with marker `[RESOLVED CL-XXX]` → `specs/FIX_BACKLOG.md#FIX-NNN`).
 
@@ -34,6 +34,7 @@
 | FIX-015 | Low | `002-connectors` (ingestion) | Full RENABAP per-barrio ingest | ⏸ Deferred (data expansion) |
 | FIX-016 | Low | `002-connectors/002h-ddjj` | DDJJ scope expansion to senadores / ejecutivo / jueces | ⏸ Deferred (data expansion) |
 | FIX-017 | **High** | `004-semantic-cache` + `001-query-pipeline` + `004-caching` | JSON serialization crash on non-primitive state values | ✅ Completed 2026-04-12 |
+| FIX-018 | **High** | `006-datasets/006b-ingestion` + `010-collector-tasks` | Collector execution hardening for duplicate runs and retry churn | ✅ Completed 2026-04-12 |
 
 ---
 
@@ -174,7 +175,7 @@ This fix affects **all** beat schedules, not just BCRA. Verify `ingest-bac`, `in
 **Spec**: `specs/001-query-pipeline/spec.md` DEBT-016 + sandbox SQL
 
 ### Problem
-`application/pipeline/subgraphs/nl2sql.py` exists as a complete LangGraph subgraph with `generate_sql_node`, `execute_sql_node`, `fix_sql_node` nodes and conditional edges for a retry loop. But **it is not integrated into the main graph**. The current NL2SQL logic lives inlined in `application/pipeline/connectors/sandbox.py` (with its own ad-hoc retry loop).
+`application/pipeline/subgraphs/nl2sql.py` existed as a complete LangGraph subgraph with `generate_sql_node`, `execute_sql_node`, `fix_sql_node` nodes and conditional edges for a retry loop, but it was historically left unused while the live NL2SQL logic lived inlined inside `application/pipeline/connectors/sandbox.py` (with its own ad-hoc retry loop).
 
 Result:
 - Duplicated code: two implementations of the same loop (subgraph + inline in connector)
@@ -190,15 +191,15 @@ Integrate the `nl2sql.py` subgraph into the real flow:
 4. The subgraph returns `DataResult` to the main graph like any other connector
 
 ### Acceptance criteria
-- [ ] `application/pipeline/subgraphs/nl2sql.py` is invoked from `application/pipeline/connectors/sandbox.py` or from a node in the main graph
-- [ ] The inlined retry loop in `connectors/sandbox.py` is removed
-- [ ] External behavior preserved:
-  - [ ] Only SELECT/WITH allowed (3-layer validation intact)
-  - [ ] Max 2 self-correction retries
-  - [ ] Same response to the user under the same conditions
-- [ ] Integration tests for the `/sandbox/ask` endpoint still pass
-- [ ] A new unit test for the isolated subgraph (mock LLM and sandbox)
-- [ ] The query pipeline `[DEBT-016]` debt is resolved
+- [x] `application/pipeline/subgraphs/nl2sql.py` is invoked from `application/pipeline/connectors/sandbox.py`
+- [x] The inlined retry loop in `connectors/sandbox.py` is removed
+- [x] External behavior preserved:
+  - [x] Only SELECT/WITH allowed (3-layer validation intact)
+  - [x] Max 2 self-correction retries
+  - [x] Same response to the user under the same conditions
+- [x] Integration tests for the `/sandbox/ask` endpoint still pass
+- [x] A new unit test for the isolated subgraph (mock LLM and sandbox)
+- [x] The query pipeline `[DEBT-016]` debt is resolved
 
 ### Affected files
 - `application/pipeline/subgraphs/nl2sql.py` — possible refactor to expose a cleaner interface
@@ -793,6 +794,42 @@ Additional validation:
 
 - `pytest -q tests/unit/test_pipeline_p2_tasks.py tests/unit/test_dataset_index.py tests/unit/test_nl2sql_subgraph.py` → `74 passed`
 - `pytest -q tests/unit/test_error_scenarios.py tests/unit/test_pipeline_p2_tasks.py tests/unit/test_dataset_index.py tests/unit/test_nl2sql_subgraph.py` → `95 passed`
+
+Second follow-up completed on 2026-04-12:
+
+6. **ZIP classification + diagnostics**
+   - The collector now emits structured ZIP summaries (extension mix, file counts, sample members) before parsing.
+   - Pure-document archives are now classified as `zip_document_bundle` instead of accumulating under `zip_no_parseable_file`.
+   - Goal: separate genuine parser debt from archives that never contained tabular/geospatial data in the first place.
+
+Additional validation:
+
+- `pytest -q tests/unit/test_pipeline_p2_tasks.py` → `20 passed`
+- `pytest -q tests/unit/test_error_scenarios.py tests/unit/test_pipeline_p2_tasks.py tests/unit/test_dataset_index.py tests/unit/test_nl2sql_subgraph.py` → `98 passed`
+
+Third follow-up completed on 2026-04-12:
+
+7. **Nested geospatial bundles + SEPA CSV dialects**
+   - The collector now prioritizes nested geospatial ZIP/KMZ members deterministically so bundle-of-bundles archives do not depend on member order.
+   - Added KML extraction support for ZIP-contained vector payloads through Fiona.
+   - CSV dialect detection now recognizes UTF-8 BOM headers and pipe-delimited files, which targets staging bundles such as SEPA / Precios Claros.
+
+Fourth follow-up completed on 2026-04-12:
+
+8. **Multi-member ZIP traversal**
+   - The collector now keeps traversing parseable members inside outer ZIP bundles instead of stopping at the first success.
+   - Compatible members are aggregated by target table, which lets SEPA-style bundles append repeated nested CSV payloads into the same cache table.
+   - Remaining debt: richer operator metadata for sibling schema-variant tables created from one dataset when a bundle contains genuinely different CSV shapes.
+
+9. **Partial progress for multi-table bundles**
+   - `cached_datasets` now gets incremental per-table progress updates while a multi-table ZIP run is still materializing sibling tables.
+   - Goal: operators can inspect row counts and detected columns before the task reaches its final `ready` state.
+
+10. **Exact schema routing during long bundle appends**
+   - Staging logs on 2026-04-13 still showed one SEPA failure mode after partial progress landed: `_to_sql_safe()` could drop and recreate a sibling schema table mid-run when a later member only partially overlapped the existing columns.
+   - Append compatibility is now exact-set based instead of subset/superset based, and the routing check uses the same sanitized SQL-visible column names as `_to_sql_safe()`, so later members with a different shape route into their own schema variant before any write.
+   - Goal: preserve already materialized sibling tables and avoid destructive mid-run refreshes during long commercial bundle ingestion.
+   - Status after staging retest: **partially improved but not closed**. The remaining debt is a deeper routing bug where long SEPA runs can still oscillate between sibling schema tables; leave this for a future structural fix based on a stable per-bundle schema-signature map.
 
 ### Files
 

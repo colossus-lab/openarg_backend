@@ -12,7 +12,7 @@
 
 The **Query Pipeline** is the functional heart of OpenArg: the **stateful LangGraph graph** that transforms a user's natural-language question into a structured response with cited sources, optional charts, optional maps, and conversational memory. It coordinates **classification**, **semantic cache**, **multi-source retrieval**, **LLM analysis with streaming**, **adaptive replanning**, and **finalization with side effects**.
 
-It is the composition of 16 nodes + 1 subgraph (NL2SQL, not integrated) + ~6 helpers in a DAG topology with a controlled replanning loop. Exposed via HTTP sync (`/api/v1/query/smart`) and WebSocket streaming (`/api/v1/query/ws/smart`).
+It is the composition of 16 nodes + 1 integrated subgraph (NL2SQL inside the sandbox execution path) + ~6 helpers in a DAG topology with a controlled replanning loop. Exposed via HTTP sync (`/api/v1/query/smart`) and WebSocket streaming (`/api/v1/query/ws/smart`).
 
 The pipeline now initializes its LangGraph checkpointer at app startup, caches compiled graphs separately for persistent vs non-persistent execution, closes persistence resources during application shutdown, and tolerates the known concurrent checkpoint-schema setup race between multiple Uvicorn workers. When persistence is truly unavailable, the pipeline falls back explicitly to a non-persistent graph instead of silently reusing a stale compiled graph.
 
@@ -86,7 +86,7 @@ See [`./plan.md`](./plan.md) for the conditional-edge functions and full state d
 - **Detail of each individual connector** — see specs under `002-connectors/`.
 - **Internal mechanism of the semantic cache** — see `004-semantic-cache/`.
 - **Vector search over `table_catalog`** — see `011-table-catalog/`.
-- **NL2SQL implementation** — inlined in the sandbox connector (see `010-sandbox-sql/`); the `nl2sql.py` subgraph exists but is not integrated (DEBT-016 in `001c-execution/`).
+- **NL2SQL implementation** — delegated from the sandbox connector to the integrated `application/pipeline/subgraphs/nl2sql.py` subgraph (see `010-sandbox-sql/010b-nl2sql/` and the closed DEBT-016 in `001c-execution/`).
 - **Policy agent** — delegates to `policy_agent.py` (not part of the main graph).
 - **Multi-language support** — the pipeline is designed for Spanish.
 - **Executable code generation** — only read-only SQL sandbox, no Python/JS.

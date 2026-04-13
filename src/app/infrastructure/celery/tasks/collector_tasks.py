@@ -17,6 +17,7 @@ import re
 import shutil
 import tempfile
 import time
+from collections import Counter
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -46,6 +47,44 @@ _DOMAINS_SKIP_SSL = frozenset(
 
 
 logger = logging.getLogger(__name__)
+
+_ZIP_PARSEABLE_SUFFIXES = frozenset(
+    {
+        ".csv",
+        ".txt",
+        ".xlsx",
+        ".xls",
+        ".geojson",
+        ".json",
+        ".kml",
+        ".kmz",
+        ".shp",
+        ".dbf",
+        ".shx",
+        ".prj",
+        ".cpg",
+        ".zip",
+    }
+)
+_ZIP_DOCUMENT_SUFFIXES = frozenset(
+    {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+)
 
 
 def _should_verify_ssl(url: str) -> bool:
@@ -833,6 +872,141 @@ def _read_shapefile_from_zip(zip_path: str) -> pd.DataFrame | None:
     return None
 
 
+def _read_vector_file_with_fiona(path: str) -> pd.DataFrame | None:
+    """Read a local vector file with fiona and normalize to a DataFrame."""
+    try:
+        import fiona
+    except ImportError:
+        logger.warning("fiona not installed — cannot parse vector file %s", path)
+        return None
+
+    features = []
+    try:
+        with fiona.open(path) as src:
+            for i, feat in enumerate(src):
+                if i >= MAX_TABLE_ROWS:
+                    break
+                geom = dict(feat.get("geometry", {})) if feat.get("geometry") else {}
+                props = dict(feat.get("properties", {})) if feat.get("properties") else {}
+                features.append({"type": "Feature", "geometry": geom, "properties": props})
+    except Exception:
+        logger.warning("Vector file read failed for %s", path, exc_info=True)
+        return None
+
+    if not features:
+        return None
+    return _geojson_features_to_df(features)
+
+
+def _read_kml_from_zip(zip_path: str) -> pd.DataFrame | None:
+    """Read a KML/KMZ member from a ZIP archive using fiona."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            kml_members = [
+                name
+                for name in zf.namelist()
+                if name.lower().endswith((".kml", ".kmz")) and not name.endswith("/")
+            ]
+            if not kml_members:
+                return None
+
+            with tempfile.TemporaryDirectory(dir=_temp_dir()) as extract_dir:
+                for member in kml_members:
+                    target_path = os.path.join(extract_dir, member)
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    with zf.open(member) as src, open(target_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    df = _read_vector_file_with_fiona(target_path)
+                    if df is not None:
+                        return df
+    except Exception:
+        logger.warning("Failed to read KML from %s", zip_path, exc_info=True)
+        return None
+
+    return None
+
+
+def _zip_member_suffix(name: str) -> str:
+    basename = os.path.basename(name.rstrip("/"))
+    return os.path.splitext(basename)[1].lower()
+
+
+def _zip_structure_summary(member_names: list[str]) -> dict[str, object]:
+    file_members = [name for name in member_names if not name.endswith("/")]
+    suffix_counter = Counter(_zip_member_suffix(name) or "<noext>" for name in file_members)
+    parseable_count = sum(1 for name in file_members if _zip_member_suffix(name) in _ZIP_PARSEABLE_SUFFIXES)
+    document_count = sum(1 for name in file_members if _zip_member_suffix(name) in _ZIP_DOCUMENT_SUFFIXES)
+    directory_depths = [
+        max(0, len([part for part in name.split("/") if part]) - 1)
+        for name in file_members
+    ]
+    max_depth = max(directory_depths, default=0)
+    return {
+        "file_count": len(file_members),
+        "directory_count": sum(1 for name in member_names if name.endswith("/")),
+        "max_depth": max_depth,
+        "extensions": dict(sorted(suffix_counter.items())),
+        "parseable_count": parseable_count,
+        "document_count": document_count,
+        "sample_members": file_members[:10],
+    }
+
+
+def _zip_only_documents(summary: dict[str, object]) -> bool:
+    file_count = int(summary.get("file_count", 0) or 0)
+    parseable_count = int(summary.get("parseable_count", 0) or 0)
+    document_count = int(summary.get("document_count", 0) or 0)
+    extensions = set((summary.get("extensions") or {}).keys())
+    if file_count == 0:
+        return False
+    if parseable_count > 0:
+        return False
+    if document_count != file_count:
+        return False
+    return all(ext in _ZIP_DOCUMENT_SUFFIXES for ext in extensions if ext != "<noext>")
+
+
+def _append_parsed_zip_member(parsed_members: list[dict[str, object]], member_result: dict) -> None:
+    """Accumulate parsed ZIP-member results by target table."""
+    table_name = str(member_result["table_name"])
+    row_count = int(member_result.get("row_count", 0) or 0)
+    columns = [str(c) for c in member_result.get("columns", [])]
+    sampled_note = member_result.get("sampled_note")
+
+    for existing in parsed_members:
+        if existing["table_name"] != table_name:
+            continue
+        existing["row_count"] = int(existing.get("row_count", 0) or 0) + row_count
+        existing["columns"] = columns or existing.get("columns", [])
+        if sampled_note:
+            existing["sampled_note"] = sampled_note
+        return
+
+    parsed_members.append(
+        {
+            "table_name": table_name,
+            "row_count": row_count,
+            "columns": columns,
+            "sampled_note": sampled_note,
+        }
+    )
+
+
+def _snapshot_member_tables(parsed_members: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return a detached copy of parsed-member progress for callbacks/results."""
+    return [
+        {
+            "table_name": str(member["table_name"]),
+            "row_count": int(member.get("row_count", 0) or 0),
+            "columns": [str(c) for c in member.get("columns", [])],
+            "sampled_note": member.get("sampled_note"),
+        }
+        for member in parsed_members
+    ]
+
+
 def _parse_zip_archive(
     zf,
     *,
@@ -842,20 +1016,141 @@ def _parse_zip_archive(
     engine,
     append_mode: bool,
     nested_depth: int = 0,
+    existing_member_tables: set[str] | None = None,
+    progress_callback=None,
 ) -> dict:
     """Parse a ZIP archive, recursing one level into nested ZIP members."""
     import zipfile
 
-    sampled_note: str | None = None
-    row_count = 0
-    columns: list[str] = []
+    def _nested_zip_priority(name: str) -> tuple[int, str]:
+        lower_name = name.lower()
+        if lower_name.endswith(".kmz"):
+            return (2, lower_name)
+        try:
+            with zf.open(name) as nested_entry:
+                with zipfile.ZipFile(io.BytesIO(nested_entry.read())) as nested_inner:
+                    nested_summary = _zip_structure_summary(nested_inner.namelist())
+        except Exception:
+            return (9, lower_name)
 
-    for name in zf.namelist():
+        nested_exts = set((nested_summary.get("extensions") or {}).keys())
+        if {".geojson", ".json"} & nested_exts:
+            return (0, lower_name)
+        if ".shp" in nested_exts:
+            return (1, lower_name)
+        if {".kml", ".kmz"} & nested_exts:
+            return (2, lower_name)
+        if nested_summary.get("parseable_count"):
+            return (3, lower_name)
+        return (9, lower_name)
+
+    known_member_tables = set(existing_member_tables or set())
+
+    def _record_dataframe(df: pd.DataFrame, *, sampled: str | None = None) -> dict:
+        nonlocal table_name, current_append_mode
+        df = df.copy()
+        df["_source_dataset_id"] = dataset_id
+        # Route using the same normalized schema that will be written to SQL.
+        # Otherwise append-mode decisions can be made against raw upstream
+        # headers while `_to_sql_safe()` later renames/deduplicates columns,
+        # which is exactly how long SEPA runs end up hitting destructive
+        # drop/recreate retries mid-bundle.
+        df = _sanitize_columns(df)
+        table_name, current_append_mode, routed_status = _route_table_for_schema(
+            engine,
+            dataset_id,
+            table_name,
+            df.columns,
+            append_mode=current_append_mode,
+        )
+        if routed_status == "already_appended" and any(
+            member["table_name"] == table_name for member in parsed_members
+        ):
+            routed_status = None
+        if routed_status == "already_appended" and table_name in known_member_tables:
+            routed_status = None
+        if routed_status:
+            if routed_status == "resource_table_full":
+                return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+            return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
+
+        _to_sql_safe(
+            df,
+            table_name,
+            engine,
+            if_exists="append" if current_append_mode else "replace",
+            index=False,
+        )
+
+        member_result = {
+            "parsed": True,
+            "table_name": table_name,
+            "append_mode": True,
+            "row_count": len(df),
+            "columns": list(df.columns),
+            "sampled_note": sampled,
+            "result": None,
+        }
+        _append_parsed_zip_member(parsed_members, member_result)
+        known_member_tables.add(str(table_name))
+        if progress_callback:
+            progress_callback(_snapshot_member_tables(parsed_members))
+        current_append_mode = True
+        return member_result
+
+    current_append_mode = append_mode
+    sampled_note: str | None = None
+    parsed_members: list[dict[str, object]] = []
+    member_names = zf.namelist()
+    summary = _zip_structure_summary(member_names)
+
+    logger.info(
+        "ZIP structure dataset=%s depth=%s files=%s dirs=%s parseable=%s documents=%s extensions=%s sample=%s",
+        dataset_id,
+        summary["max_depth"],
+        summary["file_count"],
+        summary["directory_count"],
+        summary["parseable_count"],
+        summary["document_count"],
+        summary["extensions"],
+        summary["sample_members"],
+    )
+
+    if _zip_only_documents(summary):
+        logger.warning(
+            "ZIP %s classified as non-tabular document bundle: extensions=%s sample=%s",
+            dataset_id,
+            summary["extensions"],
+            summary["sample_members"],
+        )
+        return {
+            "parsed": False,
+            "table_name": table_name,
+            "append_mode": append_mode,
+            "row_count": 0,
+            "columns": [],
+            "sampled_note": None,
+            "result": {"error": "zip_document_bundle"},
+        }
+
+    ordered_member_names = list(member_names)
+    nested_zip_members = [
+        name
+        for name in member_names
+        if name.lower().endswith((".zip", ".kmz")) and not name.endswith("/")
+    ]
+    if nested_zip_members and nested_depth < 1:
+        prioritized_nested = sorted(nested_zip_members, key=_nested_zip_priority)
+        non_nested = [name for name in member_names if name not in nested_zip_members]
+        ordered_member_names = non_nested + prioritized_nested
+
+    for name in ordered_member_names:
         lower = name.lower()
         if lower.endswith((".csv", ".txt")):
             csv_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", dir=_temp_dir())
             csv_tmp_path = csv_tmp.name
             csv_tmp.close()
+            csv_sampled_note = None
             try:
                 with zf.open(name) as zf_entry, open(csv_tmp_path, "wb") as out:
                     while True:
@@ -863,34 +1158,24 @@ def _parse_zip_archive(
                         if not block:
                             break
                         out.write(block)
-                row_count, columns, csv_trunc = _load_csv_chunked(
-                    csv_tmp_path,
-                    table_name,
-                    engine,
-                    source_dataset_id=dataset_id,
-                    force_append=append_mode,
-                )
-                if csv_trunc:
-                    sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
+                csv_params = _detect_csv_params(csv_tmp_path)
+                preview_df = pd.read_csv(csv_tmp_path, nrows=MAX_TABLE_ROWS, **csv_params)
+                if len(preview_df) >= MAX_TABLE_ROWS:
+                    csv_sampled_note = f"sampled: first {MAX_TABLE_ROWS} rows kept (limit {MAX_TABLE_ROWS})"
                     logger.warning(
                         "Dataset %s (zip/csv) truncated at %d rows",
                         dataset_id,
-                        row_count,
+                        MAX_TABLE_ROWS,
                     )
+                record_result = _record_dataframe(preview_df, sampled=csv_sampled_note)
+                if record_result.get("result") is not None:
+                    return record_result
             finally:
                 try:
                     os.unlink(csv_tmp_path)
                 except OSError:
                     pass
-            return {
-                "parsed": True,
-                "table_name": table_name,
-                "append_mode": append_mode,
-                "row_count": row_count,
-                "columns": columns,
-                "sampled_note": sampled_note,
-                "result": None,
-            }
+            continue
 
         if lower.endswith((".xlsx", ".xls")):
             with zf.open(name) as f:
@@ -917,34 +1202,10 @@ def _parse_zip_archive(
                     dataset_id,
                     MAX_TABLE_ROWS,
                 )
-            df["_source_dataset_id"] = dataset_id
-            table_name, append_mode, routed_status = _route_table_for_schema(
-                engine,
-                dataset_id,
-                table_name,
-                df.columns,
-                append_mode=append_mode,
-            )
-            if routed_status:
-                if routed_status == "resource_table_full":
-                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
-                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
-            _to_sql_safe(
-                df,
-                table_name,
-                engine,
-                if_exists="append" if append_mode else "replace",
-                index=False,
-            )
-            return {
-                "parsed": True,
-                "table_name": table_name,
-                "append_mode": append_mode,
-                "row_count": len(df),
-                "columns": list(df.columns),
-                "sampled_note": sampled_note,
-                "result": None,
-            }
+            record_result = _record_dataframe(df, sampled=sampled_note)
+            if record_result.get("result") is not None:
+                return record_result
+            continue
 
         if lower.endswith(".geojson"):
             with zf.open(name) as f:
@@ -964,34 +1225,10 @@ def _parse_zip_archive(
                     MAX_TABLE_ROWS,
                 )
                 df = df.iloc[:MAX_TABLE_ROWS]
-            df["_source_dataset_id"] = dataset_id
-            table_name, append_mode, routed_status = _route_table_for_schema(
-                engine,
-                dataset_id,
-                table_name,
-                df.columns,
-                append_mode=append_mode,
-            )
-            if routed_status:
-                if routed_status == "resource_table_full":
-                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
-                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
-            _to_sql_safe(
-                df,
-                table_name,
-                engine,
-                if_exists="append" if append_mode else "replace",
-                index=False,
-            )
-            return {
-                "parsed": True,
-                "table_name": table_name,
-                "append_mode": append_mode,
-                "row_count": len(df),
-                "columns": list(df.columns),
-                "sampled_note": sampled_note,
-                "result": None,
-            }
+            record_result = _record_dataframe(df, sampled=sampled_note)
+            if record_result.get("result") is not None:
+                return record_result
+            continue
 
         if lower.endswith(".json"):
             with zf.open(name) as f:
@@ -1020,36 +1257,45 @@ def _parse_zip_archive(
                     MAX_TABLE_ROWS,
                 )
                 df = df.iloc[:MAX_TABLE_ROWS]
-            df["_source_dataset_id"] = dataset_id
-            table_name, append_mode, routed_status = _route_table_for_schema(
-                engine,
-                dataset_id,
-                table_name,
-                df.columns,
-                append_mode=append_mode,
-            )
-            if routed_status:
-                if routed_status == "resource_table_full":
-                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
-                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
-            _to_sql_safe(
-                df,
-                table_name,
-                engine,
-                if_exists="append" if append_mode else "replace",
-                index=False,
-            )
-            return {
-                "parsed": True,
-                "table_name": table_name,
-                "append_mode": append_mode,
-                "row_count": len(df),
-                "columns": list(df.columns),
-                "sampled_note": sampled_note,
-                "result": None,
-            }
+            record_result = _record_dataframe(df, sampled=sampled_note)
+            if record_result.get("result") is not None:
+                return record_result
+            continue
 
-        if nested_depth < 1 and lower.endswith(".zip"):
+        if lower.endswith(".kml"):
+            kml_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".kml", dir=_temp_dir())
+            kml_tmp_path = kml_tmp.name
+            kml_tmp.close()
+            try:
+                with zf.open(name) as zf_entry, open(kml_tmp_path, "wb") as out:
+                    while True:
+                        block = zf_entry.read(256 * 1024)
+                        if not block:
+                            break
+                        out.write(block)
+                df = _read_vector_file_with_fiona(kml_tmp_path)
+                if df is None:
+                    continue
+                if len(df) > MAX_TABLE_ROWS:
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} rows (kml)"
+                    logger.warning(
+                        "Dataset %s (zip/kml) truncated from %d to %d rows",
+                        dataset_id,
+                        len(df),
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.iloc[:MAX_TABLE_ROWS]
+                record_result = _record_dataframe(df, sampled=sampled_note)
+                if record_result.get("result") is not None:
+                    return record_result
+            finally:
+                try:
+                    os.unlink(kml_tmp_path)
+                except OSError:
+                    pass
+            continue
+
+        if nested_depth < 1 and lower.endswith((".zip", ".kmz")):
             nested_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=_temp_dir())
             nested_tmp_path = nested_tmp.name
             nested_tmp.close()
@@ -1068,13 +1314,33 @@ def _parse_zip_archive(
                             dataset_id=dataset_id,
                             table_name=table_name,
                             engine=engine,
-                            append_mode=append_mode,
+                            append_mode=current_append_mode,
                             nested_depth=nested_depth + 1,
+                            existing_member_tables=known_member_tables,
+                            progress_callback=None,
                         )
                 except zipfile.BadZipFile:
                     logger.warning("ZIP %s: nested member %s is not a valid ZIP", dataset_id, name)
                     continue
-                if nested_result.get("parsed") or nested_result.get("result") is not None:
+                if nested_result.get("parsed"):
+                    nested_members = nested_result.get("member_tables") or [
+                        {
+                            "table_name": nested_result["table_name"],
+                            "row_count": nested_result["row_count"],
+                            "columns": nested_result["columns"],
+                            "sampled_note": nested_result["sampled_note"],
+                        }
+                    ]
+                    for member in nested_members:
+                        _append_parsed_zip_member(parsed_members, member)
+                        known_member_tables.add(str(member["table_name"]))
+                    if progress_callback:
+                        progress_callback(_snapshot_member_tables(parsed_members))
+                    current_append_mode = True
+                    continue
+                if nested_result.get("result") is not None:
+                    if nested_result["result"].get("error") == "zip_document_bundle":
+                        continue
                     return nested_result
             finally:
                 try:
@@ -1082,7 +1348,7 @@ def _parse_zip_archive(
                 except OSError:
                     pass
 
-    has_shp = any(n.lower().endswith(".shp") for n in zf.namelist())
+    has_shp = any(n.lower().endswith(".shp") for n in member_names)
     if has_shp:
         df = _read_shapefile_from_zip(zip_path)
         if df is not None and len(df) > 0:
@@ -1095,39 +1361,49 @@ def _parse_zip_archive(
                     MAX_TABLE_ROWS,
                 )
                 df = df.iloc[:MAX_TABLE_ROWS]
-            df["_source_dataset_id"] = dataset_id
-            table_name, append_mode, routed_status = _route_table_for_schema(
-                engine,
-                dataset_id,
-                table_name,
-                df.columns,
-                append_mode=append_mode,
-            )
-            if routed_status:
-                if routed_status == "resource_table_full":
-                    return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
-                return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
-            _to_sql_safe(
-                df,
-                table_name,
-                engine,
-                if_exists="append" if append_mode else "replace",
-                index=False,
-            )
-            return {
-                "parsed": True,
-                "table_name": table_name,
-                "append_mode": append_mode,
-                "row_count": len(df),
-                "columns": list(df.columns),
-                "sampled_note": sampled_note,
-                "result": None,
-            }
+            record_result = _record_dataframe(df, sampled=sampled_note)
+            if record_result.get("result") is not None:
+                return record_result
+
+    has_kml = any(n.lower().endswith((".kml", ".kmz")) for n in member_names)
+    if has_kml:
+        df = _read_kml_from_zip(zip_path)
+        if df is not None and len(df) > 0:
+            if len(df) > MAX_TABLE_ROWS:
+                sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} rows (kml)"
+                logger.warning(
+                    "Dataset %s (zip/kml) truncated from %d to %d rows",
+                    dataset_id,
+                    len(df),
+                    MAX_TABLE_ROWS,
+                )
+                df = df.iloc[:MAX_TABLE_ROWS]
+            record_result = _record_dataframe(df, sampled=sampled_note)
+            if record_result.get("result") is not None:
+                return record_result
+
+    if parsed_members:
+        primary = parsed_members[0]
+        total_rows = sum(int(member.get("row_count", 0) or 0) for member in parsed_members)
+        latest_sampled = next(
+            (member.get("sampled_note") for member in reversed(parsed_members) if member.get("sampled_note")),
+            None,
+        )
+        return {
+            "parsed": True,
+            "table_name": str(primary["table_name"]),
+            "append_mode": True,
+            "row_count": total_rows,
+            "columns": list(primary.get("columns", [])),
+            "sampled_note": latest_sampled,
+            "member_tables": parsed_members,
+            "result": None,
+        }
 
     return {
         "parsed": False,
         "table_name": table_name,
-        "append_mode": append_mode,
+        "append_mode": current_append_mode,
         "row_count": 0,
         "columns": [],
         "sampled_note": None,
@@ -1166,19 +1442,26 @@ def _detect_csv_params(file_path: str) -> dict:
     """Read first few lines to detect encoding and separator."""
     params: dict = {"on_bad_lines": "skip"}
 
-    # Try UTF-8 first
+    # Try UTF-8 with BOM stripping first
     try:
-        with open(file_path, encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8-sig") as f:
             header = f.readline()
-        params["encoding"] = "utf-8"
+        params["encoding"] = "utf-8-sig"
     except UnicodeDecodeError:
         params["encoding"] = "latin-1"
         with open(file_path, encoding="latin-1") as f:
             header = f.readline()
 
     # Auto-detect separator
-    if header.count(";") > header.count(","):
-        params["sep"] = ";"
+    candidate_counts = {
+        ",": header.count(","),
+        ";": header.count(";"),
+        "|": header.count("|"),
+        "\t": header.count("\t"),
+    }
+    best_sep, best_count = max(candidate_counts.items(), key=lambda item: item[1])
+    if best_count > 0:
+        params["sep"] = best_sep
 
     return params
 
@@ -1649,7 +1932,16 @@ def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: st
 def _check_schema_compat_columns(engine, table_name: str, columns) -> bool:
     """Check if columns are compatible with an existing table for append.
 
-    Returns True if schemas are compatible (subset in either direction), False otherwise.
+    Returns True only when the normalized SQL-visible column set matches exactly.
+
+    Subset/superset matching looked attractive for noisy upstream feeds, but it
+    causes an operationally worse failure mode for long-running bundle ingestion:
+    pandas `to_sql(..., if_exists="append")` will still try to insert the
+    incoming columns, and PostgreSQL will reject the write if the table is
+    missing any of them. At that point `_to_sql_safe()` has to drop/recreate the
+    table mid-run, which destroys already materialized sibling progress. Exact
+    equality is a safer routing boundary: genuinely different shapes get their
+    own schema-variant table up front instead of colliding during append.
     """
     try:
         with engine.connect() as conn:
@@ -1666,7 +1958,7 @@ def _check_schema_compat_columns(engine, table_name: str, columns) -> bool:
             conn.rollback()
         new_cols = set(_schema_columns(columns))
         existing_cols_clean = existing_cols - {"_source_dataset_id"}
-        return new_cols.issubset(existing_cols_clean) or existing_cols_clean.issubset(new_cols)
+        return new_cols == existing_cols_clean
     except Exception:
         return True  # If check fails, allow append
 
@@ -1818,6 +2110,12 @@ def collect_dataset(self, dataset_id: str):
     parse_ms = 0
     upload_ms = 0
     lock_key = _lock_key(_COLLECT_DATASET_LOCK_PREFIX, dataset_id)
+
+    def _update_task_state_safe(*, state: str, meta: dict) -> None:
+        task_id = getattr(getattr(self, "request", None), "id", None)
+        if not task_id:
+            return
+        self.update_state(state=state, meta=meta)
     lock_acquired = False
 
     try:
@@ -1848,6 +2146,9 @@ def collect_dataset(self, dataset_id: str):
 
         # Ensure a cached_datasets row exists EARLY so failures are always tracked
         _ensure_cached_entry(engine, dataset_id, table_name)
+        _update_task_state_safe(
+            state="STARTED", meta={"dataset_id": dataset_id, "stage": "collecting"}
+        )
 
         if not download_url:
             logger.warning(f"Dataset {dataset_id} has no download URL")
@@ -1992,6 +2293,7 @@ def collect_dataset(self, dataset_id: str):
             row_count = 0
             columns: list[str] = []
             sampled_note: str | None = None  # set when dataset is truncated
+            member_tables: list[dict[str, object]] = []
             parse_started_at = time.monotonic()
 
             if fmt in ("csv", "txt"):
@@ -2074,6 +2376,39 @@ def collect_dataset(self, dataset_id: str):
                         countdown=int(backoff + random.uniform(0, backoff * 0.3)),
                     )
 
+                def _update_partial_member_progress(member_snapshot: list[dict[str, object]]) -> None:
+                    with engine.begin() as conn:
+                        for member in member_snapshot:
+                            conn.execute(
+                                text(
+                                    """
+                                    UPDATE cached_datasets SET
+                                        status = 'downloading',
+                                        row_count = :rows,
+                                        columns_json = :cols,
+                                        size_bytes = :size,
+                                        s3_key = :s3key,
+                                        updated_at = NOW()
+                                    WHERE table_name = :tn
+                                    """
+                                ),
+                                {
+                                    "rows": int(member.get("row_count", 0) or 0),
+                                    "cols": json.dumps([str(c) for c in member.get("columns", [])]),
+                                    "size": file_size,
+                                    "s3key": s3_key,
+                                    "tn": str(member["table_name"]),
+                                },
+                            )
+                    _update_task_state_safe(
+                        state="STARTED",
+                        meta={
+                            "dataset_id": dataset_id,
+                            "stage": "materializing_members",
+                            "member_tables": member_snapshot,
+                        },
+                    )
+
                 zip_result = _parse_zip_archive(
                     zf,
                     zip_path=tmp_path,
@@ -2081,9 +2416,18 @@ def collect_dataset(self, dataset_id: str):
                     table_name=table_name,
                     engine=engine,
                     append_mode=append_mode,
+                    progress_callback=_update_partial_member_progress,
                 )
                 if zip_result.get("result") is not None:
-                    return zip_result["result"]
+                    result_payload = zip_result["result"]
+                    if result_payload.get("error") == "zip_document_bundle":
+                        _set_error_status(
+                            engine,
+                            dataset_id,
+                            "zip_document_bundle",
+                            table_name=table_name,
+                        )
+                    return result_payload
 
                 if zip_result.get("parsed"):
                     table_name = zip_result["table_name"]
@@ -2091,8 +2435,22 @@ def collect_dataset(self, dataset_id: str):
                     row_count = zip_result["row_count"]
                     columns = zip_result["columns"]
                     sampled_note = zip_result["sampled_note"]
+                    member_tables = list(zip_result.get("member_tables") or [])
+                    if member_tables:
+                        _update_task_state_safe(
+                            state="STARTED",
+                            meta={
+                                "dataset_id": dataset_id,
+                                "stage": "materialized_members",
+                                "member_tables": member_tables,
+                            },
+                        )
                 else:
-                    logger.warning(f"ZIP {dataset_id}: no parseable file found in {zf.namelist()}")
+                    logger.warning(
+                        "ZIP %s: no parseable file found in %s",
+                        dataset_id,
+                        member_names := zf.namelist(),
+                    )
                     _set_error_status(
                         engine, dataset_id, "zip_no_parseable_file", table_name=table_name
                     )
@@ -2297,7 +2655,48 @@ def collect_dataset(self, dataset_id: str):
 
             if append_mode:
                 # Append mode: update row_count from actual table, keep status 'ready'
-                _update_row_count_after_append(engine, table_name)
+                if member_tables:
+                    with engine.begin() as conn:
+                        for member in member_tables:
+                            member_table_name = str(member["table_name"])
+                            member_row_count = int(member.get("row_count", 0) or 0)
+                            member_columns_json = json.dumps(
+                                [str(c) for c in member.get("columns", [])]
+                            )
+                            conn.execute(
+                                text(
+                                    """
+                                    UPDATE cached_datasets SET
+                                        status = 'ready',
+                                        row_count = :rows,
+                                        columns_json = :cols,
+                                        size_bytes = :size,
+                                        s3_key = :s3key,
+                                        error_message = :sampled,
+                                        updated_at = NOW()
+                                    WHERE table_name = :tn
+                                    """
+                                ),
+                                {
+                                    "rows": member_row_count,
+                                    "cols": member_columns_json,
+                                    "size": file_size,
+                                    "s3key": s3_key,
+                                    "sampled": member.get("sampled_note"),
+                                    "tn": member_table_name,
+                                },
+                            )
+                    row_count = sum(int(member.get("row_count", 0) or 0) for member in member_tables)
+                    sampled_note = next(
+                        (
+                            member.get("sampled_note")
+                            for member in reversed(member_tables)
+                            if member.get("sampled_note")
+                        ),
+                        sampled_note,
+                    )
+                else:
+                    _update_row_count_after_append(engine, table_name)
                 # Also mark this dataset as cached in datasets table
                 with engine.begin() as conn:
                     conn.execute(
@@ -2338,6 +2737,7 @@ def collect_dataset(self, dataset_id: str):
                     "rows": row_count,
                     "status": "appended",
                     "s3_key": s3_key,
+                    "member_tables": member_tables or None,
                 }
 
             # Update cache status (include sampling note when truncated)
@@ -2428,6 +2828,7 @@ def collect_dataset(self, dataset_id: str):
                 "rows": row_count,
                 "columns": columns,
                 "s3_key": s3_key,
+                "member_tables": member_tables or None,
             }
 
         finally:
@@ -2778,14 +3179,19 @@ def collect_large_group(self, title: str, portal: str):
                 step_seconds=_COLLECT_DISPATCH_STEP_SECONDS,
             )
 
+        deduped_ids = {did for did, _, _ in deduped}
+        format_dupes = [r.id for r in resources if r.id not in deduped_ids]
+
         consolidation_scheduled = False
         alias_materialization_scheduled = False
-        if deduped:
+        dispatched_count = min(len(deduped), 200)
+        if dispatched_count > 1:
             consolidate_group_tables.apply_async(
                 args=[title, portal],
                 countdown=(dispatched_batches * _COLLECT_DISPATCH_STEP_SECONDS) + 60,
             )
             consolidation_scheduled = True
+        if format_dupes:
             materialize_format_duplicate_aliases.apply_async(
                 args=[title, portal],
                 countdown=(dispatched_batches * _COLLECT_DISPATCH_STEP_SECONDS) + 30,
@@ -2802,9 +3208,6 @@ def collect_large_group(self, title: str, portal: str):
                 portal,
                 deferred_count,
             )
-
-        deduped_ids = {did for did, _, _ in deduped}
-        format_dupes = [r.id for r in resources if r.id not in deduped_ids]
 
         return {
             "title": title,

@@ -10,7 +10,6 @@ from app.infrastructure.persistence_sqla.provider import MainAsyncSession
 
 class PgVectorSearchAdapter(IVectorSearch):
     _RETRIEVAL_VECTOR_ONLY = "vector_only"
-    _RETRIEVAL_HYBRID_LIGHT = "hybrid_light"
     _RETRIEVAL_HYBRID_FULL = "hybrid_full"
 
     def __init__(self, session: MainAsyncSession) -> None:
@@ -110,8 +109,6 @@ class PgVectorSearchAdapter(IVectorSearch):
         """Scale candidate fetch size to the chosen retrieval mode."""
         if retrieval_mode == cls._RETRIEVAL_VECTOR_ONLY:
             multiplier = 2
-        elif retrieval_mode == cls._RETRIEVAL_HYBRID_LIGHT:
-            multiplier = 4
         else:
             multiplier = 6
         return limit * multiplier
@@ -122,15 +119,11 @@ class PgVectorSearchAdapter(IVectorSearch):
         term_count = cls._meaningful_term_count(query_text)
         if term_count < 2:
             return cls._RETRIEVAL_VECTOR_ONLY
-        if term_count < 4:
-            return cls._RETRIEVAL_HYBRID_LIGHT
         return cls._RETRIEVAL_HYBRID_FULL
 
     @classmethod
     def _bm25_rrf_weight(cls, retrieval_mode: str) -> float:
         """Scale BM25 contribution based on retrieval mode."""
-        if retrieval_mode == cls._RETRIEVAL_HYBRID_LIGHT:
-            return 0.6
         return 1.0
 
     @classmethod
@@ -138,15 +131,11 @@ class PgVectorSearchAdapter(IVectorSearch):
         """Drop clearly weak vector candidates before ranking/fusion."""
         if retrieval_mode == cls._RETRIEVAL_VECTOR_ONLY:
             return 0.20
-        if retrieval_mode == cls._RETRIEVAL_HYBRID_LIGHT:
-            return 0.15
         return 0.10
 
     @classmethod
     def _bm25_candidate_min_score(cls, retrieval_mode: str) -> float:
         """Drop clearly weak BM25 candidates before ranking/fusion."""
-        if retrieval_mode == cls._RETRIEVAL_HYBRID_LIGHT:
-            return 0.02
         return 0.01
 
     @classmethod
@@ -162,15 +151,6 @@ class PgVectorSearchAdapter(IVectorSearch):
         # Leave headroom so good hybrid matches are not filtered out by an unreachable default.
         hybrid_cap = theoretical_max_rrf * 0.4
         return min(requested_min_score, hybrid_cap)
-
-    @staticmethod
-    def _should_accept_vector_fast_path(results: list[SearchResult], limit: int) -> bool:
-        """Return vector results directly when they already look strong enough."""
-        if not results:
-            return False
-        top_score = results[0].score
-        enough_results = len(results) >= min(limit, 4)
-        return top_score >= 0.62 or (top_score >= 0.55 and enough_results)
 
     @staticmethod
     def _retry_result_threshold(limit: int) -> int:
@@ -356,20 +336,9 @@ class PgVectorSearchAdapter(IVectorSearch):
                 if float(row.score) >= effective_min_score
             ]
 
-        if initial_mode != self._RETRIEVAL_VECTOR_ONLY:
-            vector_fast_results = await self.search_datasets(
-                query_embedding,
-                limit=limit,
-                portal_filter=portal_filter,
-            )
-            if self._should_accept_vector_fast_path(vector_fast_results, limit):
-                return vector_fast_results
-
         results = await _run_mode(initial_mode)
         if len(results) < self._retry_result_threshold(limit):
             if initial_mode == self._RETRIEVAL_VECTOR_ONLY:
-                results = await _run_mode(self._RETRIEVAL_HYBRID_LIGHT)
-            elif initial_mode == self._RETRIEVAL_HYBRID_LIGHT:
                 results = await _run_mode(self._RETRIEVAL_HYBRID_FULL)
 
         return results

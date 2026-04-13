@@ -3,8 +3,8 @@
 **Related spec**: [./spec.md](./spec.md)
 **Parent plan**: [../plan.md](../plan.md)
 **Type**: Forward
-**Status**: Draft — pending user review
-**Last synced with code**: 2026-04-11
+**Status**: Draft
+**Last synced with code**: 2026-04-13
 
 ---
 
@@ -83,11 +83,6 @@ class NL2SQLState(TypedDict, total=False):
     catalog_entries: dict         # dict[table_name -> catalog metadata]
     table_descriptions: list[str] # pre-computed display names
     few_shot_block: str           # rendered examples (may be empty)
-    llm: ILLMProvider
-    sandbox: ISQLSandbox
-    embedding: IEmbeddingProvider | None
-    semantic_cache: SemanticCache | None
-    indec_pattern_match: bool     # caller pre-computed INDEC_PATTERN.search(nl_query)
     max_attempts: int             # default 2
 
     # --- working ---
@@ -101,18 +96,18 @@ class NL2SQLState(TypedDict, total=False):
     data_results: list[DataResult]  # FR-012: exactly one element before END
 ```
 
-Dependency injection via state (rather than closures) is deliberate: it lets tests construct a state dict with mocked `llm` / `sandbox` / `embedding` and invoke the compiled subgraph directly. Constitution §0 — the dumbest version that works.
+Runtime dependencies (`llm`, `sandbox`, `embedding`, `semantic_cache`) are intentionally kept OUTSIDE the persisted LangGraph state. The caller sets them in a request-scoped `ContextVar` helper around `ainvoke()`, and node functions read them from that runtime context. This preserves testability without leaking non-serializable adapters into checkpoint snapshots.
 
 ## 4. Node responsibilities
 
 | Node | Reads | Writes | Side effects |
 |---|---|---|---|
-| `generate_sql_node` | `llm`, `nl_query`, `tables_context`, `few_shot_block` | `generated_sql`, `attempt=0`, `used_fallback=False` | 1 LLM call |
-| `execute_sql_node` | `sandbox`, `generated_sql` | `result`, `last_error` (or cleared) | 1 SQL execute |
-| `fix_sql_node` | `llm`, `generated_sql`, `last_error`, `tables_context` | `generated_sql`, `attempt++` | 1 LLM call |
-| `last_resort_node` | `sandbox`, `tables` | `result`, `generated_sql`, `used_fallback=True` | 1 SQL execute (best-effort) |
+| `generate_sql_node` | runtime `llm`, `nl_query`, `tables_context`, `few_shot_block` | `generated_sql`, `attempt=0`, `used_fallback=False` | 1 LLM call |
+| `execute_sql_node` | runtime `sandbox`, `generated_sql` | `result`, `last_error` (or cleared) | 1 SQL execute |
+| `fix_sql_node` | runtime `llm`, `generated_sql`, `last_error`, `tables_context` | `generated_sql`, `attempt++` | 1 LLM call |
+| `last_resort_node` | runtime `sandbox`, `tables` | `result`, `generated_sql`, `used_fallback=True` | 1 SQL execute (best-effort) |
 | `indec_fallback_node` | `nl_query` | `data_results` (replaces empty) | HTTP call to live INDEC API |
-| `save_success_node` | `result`, `generated_sql`, `tables`, `embedding`, `semantic_cache`, `used_fallback` | — | Spawns fire-and-forget `save_successful_query` held by `_background_tasks` set |
+| `save_success_node` | `result`, `generated_sql`, `tables`, runtime `embedding`, runtime `semantic_cache`, `used_fallback` | — | Spawns fire-and-forget `save_successful_query` held by `_background_tasks` set |
 | `format_result_node` | `result`, `generated_sql`, `table_descriptions`, `used_fallback`, `APP_ENV` | `data_results` | — |
 
 ## 5. Prompts
@@ -207,22 +202,23 @@ async def execute_sandbox_step(step, sandbox, llm, embedding, vector_search, sem
 
     # 4. Delegate to the compiled subgraph
     compiled = await get_compiled_nl2sql_subgraph()
-    initial_state = {
-        "nl_query": nl_query,
-        "tables": tables,
-        "tables_context": tables_context,
-        "table_notes": table_notes,
-        "catalog_entries": catalog_entries,
-        "table_descriptions": table_descriptions,
-        "few_shot_block": few_shot_block or "",
-        "llm": llm,
-        "sandbox": sandbox,
-        "embedding": embedding,
-        "semantic_cache": semantic_cache,
-        "indec_pattern_match": bool(INDEC_PATTERN.search(nl_query)),
-        "max_attempts": 2,
-    }
-    final_state = await compiled.ainvoke(initial_state)
+    with nl2sql_runtime(
+        llm=llm,
+        sandbox=sandbox,
+        embedding=embedding,
+        semantic_cache=semantic_cache,
+    ):
+        initial_state = {
+            "nl_query": nl_query,
+            "tables": tables,
+            "tables_context": tables_context,
+            "table_notes": table_notes,
+            "catalog_entries": catalog_entries,
+            "table_descriptions": table_descriptions,
+            "few_shot_block": few_shot_block or "",
+            "max_attempts": 2,
+        }
+        final_state = await compiled.ainvoke(initial_state)
     return final_state.get("data_results", []) or []
 ```
 

@@ -17,6 +17,8 @@ class Message(BaseEntity):
     chart_data: list[dict] | None = None
     map_data: dict | None = None
     documents: list[dict] | None = None
+    confidence: float | None = None
+    ui_trace: dict | None = None
     feedback: str | None = None  # "up" | "down" | None
     feedback_comment: str | None = None
     # FR-015 (001d-conversation-lifecycle): true when the assistant

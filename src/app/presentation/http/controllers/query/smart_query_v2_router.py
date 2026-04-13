@@ -29,7 +29,7 @@ from app.application.pipeline.state import OpenArgState
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
-from app.infrastructure.serialization import json_default, to_json_safe
+from app.infrastructure.serialization import safe_dumps, to_json_safe
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
@@ -65,6 +65,7 @@ _STREAM_ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "question",
         "options",
         "map_data",
+        "connector",
     }
 )
 
@@ -78,30 +79,6 @@ _COMPLETE_EVENT_KEYS: tuple[str, ...] = (
     "documents",
     "warnings",
 )
-
-
-def _log_non_serializable_top_level_fields(payload: Any) -> None:
-    """Log top-level payload keys that still fail ``json_default``.
-
-    This is intentionally shallow: the goal is to identify which top-level
-    state section sent the encoder down the slow fallback path, without
-    spamming logs with every nested leaf.
-    """
-    if not isinstance(payload, dict):
-        return
-
-    bad_fields: list[str] = []
-    for key, value in payload.items():
-        try:
-            json.dumps(value, default=json_default, ensure_ascii=False)
-        except TypeError:
-            bad_fields.append(f"{key}:{type(value).__name__}")
-
-    if bad_fields:
-        logger.warning(
-            "safe_send_json falling back to to_json_safe for top-level fields %s",
-            bad_fields,
-        )
 
 
 def _build_complete_event(update: Any) -> dict[str, Any] | None:
@@ -130,17 +107,14 @@ async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
     without a ``default=`` hook, so any ``datetime`` / ``Decimal`` / ``UUID``
     / ``bytes`` that sneaks into the state aborts the ``complete`` event
     with ``TypeError`` and the browser sees *"respuesta no disponible"*.
-    We pre-serialize with :func:`json_default` and fall back to a recursive
-    :func:`to_json_safe` walk if the encoder still refuses — the goal is
-    that the WebSocket send path never crashes on a common Python type.
+    Normalize once with :func:`to_json_safe`, then serialize once with
+    :func:`safe_dumps` — the goal is that the WebSocket send path never
+    crashes on a common Python type and avoids retrying a failed dump in
+    this hot path.
 
     See ``specs/FIX_BACKLOG.md#FIX-017``.
     """
-    try:
-        text = json.dumps(payload, default=json_default, ensure_ascii=False)
-    except TypeError:
-        _log_non_serializable_top_level_fields(payload)
-        text = json.dumps(to_json_safe(payload), ensure_ascii=False)
+    text = safe_dumps(to_json_safe(payload), ensure_ascii=False)
     await ws.send_text(text)
 
 

@@ -4,7 +4,7 @@
 **Parent plan**: [../plan.md](../plan.md)
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 
 ---
 
@@ -16,7 +16,7 @@
 | | `execute_steps` node | `application/pipeline/nodes/executor.py` |
 | **Application / Step executor** | `execute_steps()`, `dispatch_step_with_retry()`, connector dispatch table | `application/pipeline/step_executor.py` |
 | **Application / Connectors (pipeline steps)** | One module per connector step | `application/pipeline/connectors/*.py` |
-| **Application / Subgraphs** | NL2SQL subgraph (**not integrated** — see DEBT-016) | `application/pipeline/subgraphs/nl2sql.py` |
+| **Application / Subgraphs** | NL2SQL subgraph (integrated via the sandbox connector; DEBT-016 closed) | `application/pipeline/subgraphs/nl2sql.py` |
 | **Application / State** | `_resettable_add` reducer for `data_results` / `step_warnings` | `application/pipeline/state.py` |
 | **Infrastructure / Connectors** | 13 providers (see `002-connectors/`) | `infrastructure/adapters/...` |
 | **Infrastructure / SQL sandbox** | Read-only PG sandbox | `infrastructure/adapters/sandbox/pg_sandbox_adapter.py` |
@@ -92,15 +92,15 @@ Read by execution (from upstream phases):
 
 ## 5. NL2SQL Execution Model
 
-The current as-built pipeline does **not** run the NL2SQL subgraph at `application/pipeline/subgraphs/nl2sql.py`. Instead, the sandbox connector (`connectors/sandbox.py` step + `infrastructure/adapters/sandbox/pg_sandbox_adapter.py`) handles NL2SQL inline:
+The current as-built pipeline **does** run the NL2SQL subgraph at `application/pipeline/subgraphs/nl2sql.py`, but it does so behind the sandbox connector boundary rather than as a peer node in the main graph:
 
-1. Accept a natural-language query + table hints.
-2. Prompt the LLM for a SQL query.
-3. Execute read-only against PG.
-4. Return rows as a `DataResult`.
-5. If execution fails, the connector itself retries or surfaces a `step_warning`.
+1. `execute_steps` dispatches the sandbox connector with the natural-language query + table hints.
+2. The sandbox connector handles table discovery and state construction.
+3. It then invokes the compiled NL2SQL subgraph (`generate_sql_node → execute_sql_node → fix_sql_node`).
+4. The subgraph returns a standard `DataResult` to the execution phase.
+5. Retry/fix behavior is now owned by the subgraph, not by an inline imperative loop.
 
-The standalone subgraph is dead code (**[DEBT-016]**). If reactivated, it would be invoked from within `execute_steps` for `query_sandbox`-style actions and would share state via a nested `OpenArgState`-like TypedDict.
+This closes **[DEBT-016]** while preserving the phase boundary: Phase C still sees NL2SQL as an opaque sub-call inside the sandbox execution slot.
 
 ## 6. Deviations from Constitution
 

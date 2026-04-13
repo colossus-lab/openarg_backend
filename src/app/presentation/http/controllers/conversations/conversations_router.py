@@ -38,6 +38,8 @@ class MessageCreate(BaseModel):
     chart_data: list[dict[str, Any]] | None = None
     map_data: dict[str, Any] | None = None
     documents: list[dict[str, Any]] | None = None
+    confidence: float | None = None
+    ui_trace: dict[str, Any] | None = None
     # Set by the frontend chat bridge when the assistant message is being
     # persisted on an error path (stream broke, WS failure, backend 5xx).
     # FR-014/FR-015 of 001-chat-bridge/001d-conversation-lifecycle — the
@@ -56,6 +58,8 @@ class MessageResponse(BaseModel):
     chart_data: list[dict[str, Any]] | None = None
     map_data: dict[str, Any] | None = None
     documents: list[dict[str, Any]] | None = None
+    confidence: float | None = None
+    ui_trace: dict[str, Any] | None = None
     errored: bool = False
     created_at: str
     feedback: str | None = None
@@ -193,6 +197,8 @@ async def get_conversation(
                 chart_data=m.chart_data,
                 map_data=m.map_data,
                 documents=m.documents,
+                confidence=getattr(m, "confidence", None),
+                ui_trace=getattr(m, "ui_trace", None),
                 errored=getattr(m, "errored", False),
                 created_at=m.created_at.isoformat(),
                 feedback=m.feedback,
@@ -267,6 +273,8 @@ async def add_message(
         chart_data=body.chart_data,
         map_data=body.map_data,
         documents=body.documents,
+        confidence=body.confidence,
+        ui_trace=body.ui_trace,
         errored=body.errored,
     )
     saved = await chat_repo.add_message(message)
@@ -280,6 +288,8 @@ async def add_message(
         chart_data=saved.chart_data,
         map_data=saved.map_data,
         documents=saved.documents,
+        confidence=getattr(saved, "confidence", None),
+        ui_trace=getattr(saved, "ui_trace", None),
         errored=getattr(saved, "errored", False),
         created_at=saved.created_at.isoformat(),
         feedback=saved.feedback,
@@ -313,6 +323,8 @@ async def get_messages(
             chart_data=m.chart_data,
             map_data=m.map_data,
             documents=m.documents,
+            confidence=getattr(m, "confidence", None),
+            ui_trace=getattr(m, "ui_trace", None),
             errored=getattr(m, "errored", False),
             created_at=m.created_at.isoformat(),
             feedback=m.feedback,
@@ -363,6 +375,8 @@ async def submit_feedback(
         chart_data=updated.chart_data,
         map_data=updated.map_data,
         documents=updated.documents,
+        confidence=getattr(updated, "confidence", None),
+        ui_trace=getattr(updated, "ui_trace", None),
         errored=getattr(updated, "errored", False),
         created_at=updated.created_at.isoformat(),
         feedback=updated.feedback,

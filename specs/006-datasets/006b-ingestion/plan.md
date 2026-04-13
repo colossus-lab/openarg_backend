@@ -2,7 +2,7 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Parent plan**: [../plan.md](../plan.md)
-**Last synced with code**: 2026-04-12
+**Last synced with code**: 2026-04-13
 
 ---
 
@@ -110,13 +110,62 @@ Detects when a re-collect produces a schema that no longer matches the existing 
 - This specifically covers portals that publish bundles like `dataset.zip -> archivo_geojson.zip` or `dataset.zip -> archivo_shp.zip`.
 - The nested archive inherits the same row caps and schema-routing logic as direct ZIP members.
 
-### 5.6 Sandbox compatibility normalization
+### 5.6 ZIP diagnostics and document-bundle classification
+
+- Before parsing ZIP members, the collector now logs a structured summary:
+  - file count
+  - directory count
+  - max directory depth
+  - extension histogram
+  - parseable vs documentary member counts
+  - sample member names
+- If a ZIP contains only documentary payloads (`.pdf`, office docs, images) and no parseable/tabular members, the collector short-circuits to `zip_document_bundle` instead of lumping it under `zip_no_parseable_file`.
+
+### 5.7 Sandbox compatibility normalization
 
 - Query-planner hints and NL2SQL execution now normalize several stale cache names seen in staging logs:
   - `cache_series_tiempo_*` -> `cache_series_*`
   - `cache_bcra_principales_variables` -> `cache_bcra_cotizaciones`
   - `cache_presupuesto_nacional` -> latest matching `cache_presupuesto_*`
 - `coparticipacion` no longer routes to a non-existent dedicated cache table; it now points to generic budget tables plus table notes so NL2SQL searches the correct domain without inventing a table name.
+
+### 5.8 Nested geospatial bundles and pipe-delimited CSVs
+
+- Some remaining staging ZIP failures are not malformed archives but mixed bundles:
+  - outer ZIPs that contain multiple inner geospatial variants (`geojson`, `shp`, `kml`)
+  - nested CSV bundles such as SEPA / Precios Claros, where members use UTF-8 BOM headers and `|` as delimiter
+- The collector now prioritizes nested geospatial ZIP/KMZ members deterministically:
+  - nested GeoJSON/JSON first
+  - then shapefiles
+  - then KML/KMZ
+- The ZIP parser now supports KML payloads via Fiona-backed extraction.
+- CSV dialect detection now recognizes `utf-8-sig`, `|`, and tab delimiters in addition to the previous `,` / `;`.
+
+### 5.9 Multi-member ZIP traversal
+
+- SEPA-style archives still exposed a second issue after delimiter detection: the collector stopped after the first parseable inner ZIP member.
+- The collector now keeps traversing parseable members inside the same outer ZIP and aggregates rows by target table when the routed schema stays compatible.
+- This keeps the current single-dataset materialization model, while still allowing commercial bundles to append repeated same-schema members across many nested ZIPs.
+- Remaining follow-up: when one commercial bundle contains several different schemas (`comercio.csv`, `sucursales.csv`, `productos.csv`), keep improving the operator-facing metadata so every sibling table is easier to inspect from admin/status surfaces.
+
+### 5.10 Partial progress visibility for sibling tables
+
+- Multi-table bundles such as SEPA can run for long enough that operators need partial visibility before the final `ready` transition.
+- The collector now writes incremental `cached_datasets` progress for each sibling table as soon as that table is materialized:
+  - `status='downloading'`
+  - `row_count`
+  - `columns_json`
+  - `size_bytes`
+  - `s3_key`
+- This keeps the final lifecycle unchanged while making in-flight runs observable from the DB and admin tooling.
+
+### 5.11 Exact schema routing for append-mode bundles
+
+- Staging exposed one more collector edge case after partial progress landed: a long SEPA run could still hit `_to_sql_safe()` drop/recreate retries when a later member had a subset/superset of columns for an existing sibling table.
+- The collector now treats append compatibility as an exact normalized column-set match, not subset/superset compatibility.
+- The routing check now runs on the same sanitized column names that `_to_sql_safe()` writes, so schema decisions and SQL inserts stay aligned.
+- Effect: later members with a slightly different shape are routed into their own schema-variant table early, preserving already materialized sibling tables and their partial progress instead of dropping them mid-run.
+- Remaining debt: staging still shows SEPA sibling-table oscillation in some long runs, so the next pass should promote schema routing to a stable per-bundle signature registry instead of reusing the mutable “current table” cursor across members.
 
 ## 6. `cached_datasets` Lifecycle
 

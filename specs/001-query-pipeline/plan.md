@@ -3,7 +3,7 @@
 **Related spec**: [./spec.md](./spec.md)
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 
 ---
 
@@ -26,7 +26,7 @@ This top-level plan keeps only **graph-wide concerns**: hexagonal mapping, entry
 | **Presentation** | `smart_query_v2_router.py` | `presentation/http/controllers/query/smart_query_v2_router.py` |
 | **Application / Graph** | Graph builder, state, edges | `application/pipeline/{graph,state,edges}.py` |
 | **Application / Nodes** | 16 nodes | `application/pipeline/nodes/*.py` |
-| **Application / Subgraphs** | NL2SQL (not integrated) | `application/pipeline/subgraphs/nl2sql.py` |
+| **Application / Subgraphs** | NL2SQL (integrated through the sandbox connector) | `application/pipeline/subgraphs/nl2sql.py` |
 | **Application / Helpers** | Context builder, cache manager, chart builder, step executor, classifiers, history | `application/pipeline/{context_builder,cache_manager,chart_builder,step_executor,classifiers,history}.py` |
 | **Application / Connectors** | Pipeline steps per connector | `application/pipeline/connectors/*.py` |
 | **Infrastructure / Celery** | Offline pipeline | `infrastructure/celery/tasks/analyst_tasks.py` |

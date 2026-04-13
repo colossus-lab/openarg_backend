@@ -4,7 +4,7 @@
 **Parent plan**: [../plan.md](../plan.md)
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 
 ---
 
@@ -68,7 +68,7 @@ This keeps a strong reference to every fire-and-forget task (so CPython's weak-r
 The HTTP router applies a hardcoded whitelist (`smart_query_v2_router.py:324-335`) to every custom event before forwarding it to the WS client:
 
 ```
-type, step, detail, progress, message, status, content, question, options, map_data
+type, step, detail, progress, message, status, content, question, options, map_data, connector
 ```
 
 Any other key (e.g. `analysis_prompt`, traceback, error object) is silently dropped. This is defense in depth — the analyst already strips internal tags from `clean_answer` (see Phase D), and the coordinator/planner/executor never populate the dropped keys in the first place.

@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered (top-level index)
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Domain + Application + Infrastructure + Presentation
 **Related plan**: [./plan.md](./plan.md)
 
@@ -17,7 +17,7 @@ This module has been split into two sub-modules:
 | Sub-module | Scope |
 |---|---|
 | [010a-sql-sandbox](./010a-sql-sandbox/spec.md) | Read-only executor, 3-layer SQL validation (regex + allowlist + sqlglot AST), `ThreadPoolExecutor(max_workers=2)`, `/api/v1/sandbox/query` and `/api/v1/sandbox/tables`. |
-| [010b-nl2sql](./010b-nl2sql/spec.md) | LLM → SQL → execute retry loop, `generate_sql_node → execute_sql_node → fix_sql_node` subgraph (FIX-004 pending), table catalog + few-shot integration, `/api/v1/sandbox/ask`. |
+| [010b-nl2sql](./010b-nl2sql/spec.md) | LLM → SQL → execute retry loop, `generate_sql_node → execute_sql_node → fix_sql_node` subgraph, table catalog + few-shot integration, `/api/v1/sandbox/ask`. |
 
 ## 2. Sub-module Map
 

@@ -17,6 +17,7 @@ import pytest
 from app.application.pipeline.subgraphs.nl2sql import (
     build_nl2sql_subgraph,
     get_compiled_nl2sql_subgraph,
+    nl2sql_runtime,
 )
 
 # ── Fakes / fixtures ─────────────────────────────────────────
@@ -91,14 +92,28 @@ def _base_state(llm: FakeLLM, sandbox: FakeSandbox, **overrides: Any) -> dict[st
         "catalog_entries": {},
         "table_descriptions": ["cache_test: Test dataset"],
         "few_shot_block": "",
-        "llm": llm,
-        "sandbox": sandbox,
-        "embedding": None,
-        "semantic_cache": None,
         "max_attempts": 2,
     }
     state.update(overrides)
     return state
+
+
+async def _invoke_subgraph(
+    subgraph: Any,
+    state: dict[str, Any],
+    *,
+    llm: Any,
+    sandbox: Any,
+    embedding: Any = None,
+    semantic_cache: Any = None,
+):
+    with nl2sql_runtime(
+        llm=llm,
+        sandbox=sandbox,
+        embedding=embedding,
+        semantic_cache=semantic_cache,
+    ):
+        return await subgraph.ainvoke(state)
 
 
 # Stub load_prompt so we don't require real prompt files in unit tests.
@@ -125,7 +140,7 @@ async def test_happy_path_single_generation():
     sandbox = FakeSandbox([FakeSandboxResult(rows=[{"col_a": 1}], row_count=1, columns=["col_a"])])
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     data_results = final["data_results"]
     assert len(data_results) == 1
@@ -148,7 +163,7 @@ async def test_self_correction_one_retry():
     )
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     assert len(final["data_results"]) == 1
     assert final["data_results"][0].records
@@ -163,13 +178,16 @@ async def test_legacy_table_alias_is_rewritten_before_execution():
     sandbox = FakeSandbox([FakeSandboxResult(rows=[{"fecha": "2026-01-01"}], row_count=1)])
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(
+    final = await _invoke_subgraph(
+        subgraph,
         _base_state(
             llm,
             sandbox,
             tables=[FakeTable(table_name="cache_series_inflacion_ipc", columns=["fecha", "valor"])],
             tables_context="Table: cache_series_inflacion_ipc\n  Columns: fecha, valor",
-        )
+        ),
+        llm=llm,
+        sandbox=sandbox,
     )
 
     assert final["data_results"][0].records
@@ -199,7 +217,7 @@ async def test_retries_exhausted_triggers_last_resort_success(monkeypatch):
     )
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     dr = final["data_results"][0]
     assert dr.records
@@ -225,7 +243,7 @@ async def test_last_resort_also_fails_emits_error_data_result(monkeypatch):
     )
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     dr = final["data_results"][0]
     assert dr.records == []
@@ -265,7 +283,7 @@ async def test_empty_indec_triggers_fallback(monkeypatch):
     sandbox = FakeSandbox([FakeSandboxResult(rows=[], row_count=0, columns=["col_a"])])
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     data_results = final["data_results"]
     assert len(data_results) == 1
@@ -279,7 +297,7 @@ async def test_empty_non_indec_skips_fallback():
     sandbox = FakeSandbox([FakeSandboxResult(rows=[], row_count=0, columns=["col_a"])])
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     dr = final["data_results"][0]
     assert dr.source == "sandbox:nl2sql"
@@ -298,7 +316,7 @@ async def test_prod_env_redacts_generated_sql(monkeypatch):
     sandbox = FakeSandbox([FakeSandboxResult(rows=[{"x": 1}], row_count=1, columns=["x"])])
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     meta = final["data_results"][0].metadata
     assert "generated_sql" not in meta
@@ -313,7 +331,7 @@ async def test_local_env_includes_generated_sql(monkeypatch):
     sandbox = FakeSandbox([FakeSandboxResult(rows=[{"x": 1}], row_count=1, columns=["x"])])
 
     subgraph = build_nl2sql_subgraph()
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     meta = final["data_results"][0].metadata
     assert meta.get("generated_sql") == "SELECT 1"
@@ -327,13 +345,22 @@ async def test_missing_embedding_reaches_save_success_without_crash(caplog):
 
     subgraph = build_nl2sql_subgraph()
     # Base state already has embedding=None, semantic_cache=None.
-    final = await subgraph.ainvoke(_base_state(llm, sandbox))
+    final = await _invoke_subgraph(subgraph, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
 
     # The subgraph must still produce a DataResult — it does not crash on
     # missing deps. The save_success side effect may log a warning asynchronously,
     # but the subgraph return path is unaffected.
     assert len(final["data_results"]) == 1
     assert final["data_results"][0].records
+
+
+@pytest.mark.asyncio
+async def test_missing_runtime_context_fails_fast():
+    """The checkpoint-safe state contract requires runtime services outside state."""
+    subgraph = build_nl2sql_subgraph()
+
+    with pytest.raises(RuntimeError, match="runtime dependency 'llm' not initialised"):
+        await subgraph.ainvoke(_base_state(FakeLLM(["SELECT 1"]), FakeSandbox([])))
 
 
 @pytest.mark.asyncio
@@ -347,3 +374,16 @@ async def test_compile_once_is_idempotent():
     first = await get_compiled_nl2sql_subgraph()
     second = await get_compiled_nl2sql_subgraph()
     assert first is second
+
+
+@pytest.mark.asyncio
+async def test_compiled_subgraph_runs_with_runtime_context_and_minimal_state():
+    """Production path keeps non-serializable adapters out of checkpointed state."""
+    llm = FakeLLM(["SELECT 1"])
+    sandbox = FakeSandbox([FakeSandboxResult(rows=[{"x": 1}], row_count=1, columns=["x"])])
+
+    compiled = await get_compiled_nl2sql_subgraph()
+    final = await _invoke_subgraph(compiled, _base_state(llm, sandbox), llm=llm, sandbox=sandbox)
+
+    assert len(final["data_results"]) == 1
+    assert final["data_results"][0].records == [{"x": 1}]

@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-12
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Infrastructure (Workers) + Domain
 **Parent module**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -60,6 +60,14 @@ Important architectural clarification: the collector no longer writes directly i
 - **FR-018**: Deterministic oversized/empty-file ingestion errors (for example `file_too_large`, empty CSV payloads, and unsupported Excel payloads) MUST bypass Celery retries and transition directly to a terminal collector error state.
 - **FR-019**: ZIP datasets MUST parse one nested ZIP layer when the outer archive wraps the real payload (for example nested GeoJSON or shapefile bundles) instead of failing immediately as `zip_no_parseable_file`.
 - **FR-020**: Sandbox-facing collector consumers MUST normalize known legacy cache table aliases (`cache_series_tiempo_*`, `cache_bcra_principales_variables`, `cache_presupuesto_nacional`) toward canonical current tables or patterns before generating/executing SQL.
+- **FR-021**: ZIP archives that contain only documentary/non-tabular payloads (for example PDFs or office documents) MUST be classified separately from parser failures and recorded as a terminal document-bundle collector error.
+- **FR-022**: ZIP parsing MUST emit structured diagnostics including extension mix, member-count summary, and sample members so operators can distinguish parseable geospatial bundles from unsupported archives directly from logs.
+- **FR-023**: ZIP archives that contain multiple nested geospatial bundles MUST prioritize parseable payloads deterministically, preferring nested GeoJSON/JSON first, then shapefiles, then KML/KMZ, instead of depending on archive member order.
+- **FR-024**: The collector MUST support KML payloads found directly inside ZIP archives or inside one-level nested ZIP/KMZ bundles when Fiona/GDAL can read them.
+- **FR-025**: CSV dialect detection MUST recognize UTF-8 BOM headers and pipe-delimited payloads so bundles such as SEPA/Precios Claros do not collapse into a single-column parse.
+- **FR-026**: ZIP bundles that contain multiple parseable inner archives or files MUST keep traversing parseable members instead of stopping at the first success, aggregating rows per target table when schemas remain compatible.
+- **FR-027**: While a multi-table ZIP bundle is still running, `cached_datasets` MUST expose partial per-table progress (`row_count`, `columns_json`, and table presence) for the sibling tables already materialized instead of leaving them opaque until the task finishes.
+- **FR-028**: Schema compatibility for append-mode collector writes MUST require an exact normalized column-set match. The routing decision MUST use the same sanitized SQL-visible column names that the final write path uses. Subset/superset schemas MUST be routed into distinct schema-variant tables before writing, instead of relying on mid-run drop/recreate retries.
 
 ## 5. Success Criteria
 
@@ -71,6 +79,12 @@ Important architectural clarification: the collector no longer writes directly i
 - **SC-007**: Overlapping `bulk_collect_all` invocations MUST not dispatch overlapping waves of collector tasks.
 - **SC-008**: A ZIP containing a single nested ZIP with a supported payload MUST be collected successfully without manual unpacking.
 - **SC-009**: Known legacy sandbox table aliases MUST no longer produce direct `Table missing` failures when a canonical replacement exists.
+- **SC-010**: Pure-document ZIP bundles MUST stop accumulating under `zip_no_parseable_file`; they should surface as a distinct terminal collector error.
+- **SC-011**: Bundle-of-bundles geospatial datasets such as Buenos Aires Province `Cursos de agua` MUST no longer depend on nested member order to be collected successfully.
+- **SC-012**: Pipe-delimited CSV payloads with BOM-prefixed headers MUST materialize with separate SQL columns rather than a single delimiter-packed header string.
+- **SC-013**: Multi-archive commercial bundles such as SEPA MUST append compatible rows across multiple nested ZIP members instead of materializing only the first inner archive.
+- **SC-014**: During a long multi-table collector run, operators MUST be able to observe sibling table growth from `cached_datasets` before the final `ready` transition.
+- **SC-015**: Long-running commercial bundles such as SEPA MUST stop dropping/recreating sibling schema tables mid-run just because later members have subset/superset columns; those members should route into distinct schema variants up front.
 
 ## 6. Assumptions & Out of Scope
 
@@ -102,6 +116,7 @@ Important architectural clarification: the collector no longer writes directly i
 - **[DEBT-007]** — **Spec drift risk**: the ingestion implementation now relies on resource staging + consolidation, but downstream modules still sometimes assume a single canonical cache table per dataset.
 - **[DEBT-008]** — **Bulk orchestration still shares the same worker queue as heavy data collection**. Singleton locking prevents overlap, but `bulk_collect_all` still competes with long-running `collect_dataset` tasks for worker slots.
 - **[DEBT-009]** — **Some semantic routes still depend on broad budget hints instead of domain-specific cache tables**. `coparticipacion` is now routed safely to generic budget tables, but a dedicated ingest or catalog entry is still missing.
+- **[DEBT-010]** — **SEPA-style multi-table bundles still oscillate between sibling schema tables during long runs**. Even after partial progress and schema-normalization fixes, staging still shows mid-run `Schema mismatch ... dropping and retrying` on sibling tables such as `..._s1f1121c6` and `..._s292105ce`. The likely next structural fix is to replace mutable “current table” routing with a stable per-bundle schema-signature map.
 
 ---
 

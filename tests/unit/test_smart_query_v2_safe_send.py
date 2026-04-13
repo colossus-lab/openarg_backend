@@ -26,6 +26,7 @@ import pytest
 
 from app.presentation.http.controllers.query.smart_query_v2_router import (
     _build_complete_event,
+    _filter_stream_payload,
     _safe_send_json,
 )
 
@@ -171,19 +172,19 @@ async def test_safe_send_json_does_not_touch_send_json(
     assert len(ws.sent_text) == 1
 
 
-async def test_safe_send_json_logs_top_level_field_when_fallback_is_needed(
+async def test_safe_send_json_normalizes_unknown_type_in_single_pass(
     ws: _FakeWebSocket,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     class _Weird:
-        pass
+        def __repr__(self) -> str:
+            return "<weird-object>"
 
     payload = {"type": "complete", "answer": "ok", "meta": {"weird": _Weird()}}
 
     await _safe_send_json(ws, payload)  # type: ignore[arg-type]
 
-    assert "safe_send_json falling back to to_json_safe" in caplog.text
-    assert "meta:dict" in caplog.text
+    parsed = json.loads(ws.sent_text[0])
+    assert parsed["meta"]["weird"] == "<weird-object>"
 
 
 def test_build_complete_event_uses_state_shape_not_node_name() -> None:
@@ -204,3 +205,14 @@ def test_build_complete_event_uses_state_shape_not_node_name() -> None:
         "documents": None,
         "warnings": ["warn"],
     }
+
+
+def test_filter_stream_payload_keeps_connector_metadata() -> None:
+    payload = {
+        "type": "status",
+        "step": "searching",
+        "connector": "query_series",
+        "detail": "Consultando series...",
+    }
+
+    assert _filter_stream_payload(payload) == payload

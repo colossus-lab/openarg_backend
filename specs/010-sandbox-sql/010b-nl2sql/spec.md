@@ -1,8 +1,8 @@
 # Spec: NL2SQL (LLM → SQL → Execute Retry Loop)
 
 **Type**: Forward (behavior contract for FIX-004 integration)
-**Status**: Draft — pending user review
-**Last synced with code**: 2026-04-11
+**Status**: Draft
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Application (pipeline subgraph) + Presentation
 **Parent module**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -69,7 +69,8 @@ Historically (until 2026-04-10) the entire NL2SQL loop lived **inlined** inside 
 
 ### State contract (input)
 
-- **FR-010**: The caller (sandbox connector) MUST provide the following fields in the initial state: `nl_query`, `tables` (already filtered list), `tables_context` (rendered string), `catalog_entries` (dict keyed by table name), `table_descriptions` (pre-computed list), `few_shot_block` (string, may be empty), `llm`, `sandbox`, `embedding`, `semantic_cache`, `max_attempts` (int, default 2). The caller MUST NOT pre-compute `indec_pattern_match` — see FR-011.
+- **FR-010**: The caller (sandbox connector) MUST provide the following checkpoint-safe fields in the initial state: `nl_query`, `tables` (already filtered list), `tables_context` (rendered string), `catalog_entries` (dict keyed by table name), `table_descriptions` (pre-computed list), `few_shot_block` (string, may be empty), `max_attempts` (int, default 2). The caller MUST NOT pre-compute `indec_pattern_match` — see FR-011.
+- **FR-010a**: Runtime service objects (`llm`, `sandbox`, `embedding`, `semantic_cache`) MUST travel outside the LangGraph state via request-scoped runtime context, not as persisted state fields. This keeps checkpoint serialization free of non-msgpack-serializable adapters such as `FallbackLLMAdapter`. The production caller wraps `compiled_subgraph.ainvoke(...)` in `nl2sql_runtime(...)`; regression-tested by `test_compiled_subgraph_runs_with_runtime_context_and_minimal_state`.
 - **FR-011**: The subgraph MUST NOT perform table discovery, hint resolution, catalog enrichment, or table-description building itself. Those steps belong to the caller. This boundary exists to keep the subgraph testable in isolation with mock dependencies. **However**, the subgraph MUST compute `INDEC_PATTERN.search(nl_query)` **internally** (not as a caller-provided state field) — forcing the caller to know about INDEC would leak a connector-internal concept into the pipeline dispatch layer for zero benefit.
 
 ### Output contract
@@ -91,6 +92,7 @@ Historically (until 2026-04-10) the entire NL2SQL loop lived **inlined** inside 
 
 - **FR-019**: The subgraph MUST be compiled at most once per process. A `get_compiled_nl2sql_subgraph()` helper MUST cache the compiled instance and guard concurrent initialization with an `asyncio.Lock` (double-check pattern).
 - **FR-020**: The compiled subgraph MUST be stateless with respect to per-request data. All per-request data flows through the state dict passed to `ainvoke()`.
+- **FR-020a**: The compiled subgraph MAY read request-scoped runtime dependencies from a `ContextVar`-backed helper, provided those dependencies are set/reset by the caller around `ainvoke()` and never leak into checkpointed state snapshots.
 
 ## 5. Success Criteria
 
@@ -130,6 +132,7 @@ Historically (until 2026-04-10) the entire NL2SQL loop lived **inlined** inside 
 - **[CLOSED — FIX-004] 2026-04-11** — The NL2SQL subgraph is no longer dead code. The inline loop in `connectors/sandbox.py` has been removed and replaced with a call to the compiled subgraph defined in `application/pipeline/subgraphs/nl2sql.py`. The duplication between the two implementations is gone.
 - **[DEBT-001]** — **2 self-correction retries is a magic constant** passed through state. It is configurable per-invocation but not exposed through settings or DI. Low priority.
 - **[DEBT-002]** — **`_route_after_format` reads `state.result` AFTER `format_result_node` already consumed it**. This works because state fields are preserved across nodes, but it is subtle — a future refactor that reshapes the state risks silently breaking the INDEC branch. Add an explicit `needs_indec_fallback` flag computed by `format_result_node` if the edge function grows.
+- **[DEBT-003]** — ~~**Runtime dependencies were threaded through LangGraph state (`llm`, `sandbox`, `embedding`, `semantic_cache`), which became unsafe once checkpointing was active because `FallbackLLMAdapter` and friends are not msgpack-serializable.**~~ **FIXED 2026-04-13**: runtime services now live in request-scoped context, while the persisted state contains only checkpoint-safe data.
 
 ---
 

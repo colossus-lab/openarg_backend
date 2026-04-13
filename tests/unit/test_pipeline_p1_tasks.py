@@ -208,7 +208,7 @@ class TestCollectLargeGroupP1:
         assert result["dispatch_batches"] == 20
         assert result["deferred"] == 5
         assert result["consolidation_scheduled"] is True
-        assert result["alias_materialization_scheduled"] is True
+        assert result["alias_materialization_scheduled"] is False
         assert mock_group_result.apply_async.call_count == 20
         countdowns = [
             call.kwargs["countdown"] for call in mock_group_result.apply_async.call_args_list
@@ -218,10 +218,7 @@ class TestCollectLargeGroupP1:
             args=["Pauta Publicitaria", "caba"],
             countdown=660,
         )
-        mock_materialize_aliases.assert_called_once_with(
-            args=["Pauta Publicitaria", "caba"],
-            countdown=630,
-        )
+        mock_materialize_aliases.assert_not_called()
         mock_engine.begin.assert_not_called()
 
     @patch("app.infrastructure.celery.tasks.collector_tasks.materialize_format_duplicate_aliases.apply_async")
@@ -269,16 +266,13 @@ class TestCollectLargeGroupP1:
         assert result["dispatched"] == 3
         assert result["deferred"] == 0
         assert result["consolidation_scheduled"] is True
-        assert result["alias_materialization_scheduled"] is True
+        assert result["alias_materialization_scheduled"] is False
         mock_group_result.apply_async.assert_called_once_with(countdown=0)
         mock_consolidate_group.assert_called_once_with(
             args=["Pauta Publicitaria", "caba"],
             countdown=90,
         )
-        mock_materialize_aliases.assert_called_once_with(
-            args=["Pauta Publicitaria", "caba"],
-            countdown=60,
-        )
+        mock_materialize_aliases.assert_not_called()
 
 
 class TestBulkCollectAllP4:

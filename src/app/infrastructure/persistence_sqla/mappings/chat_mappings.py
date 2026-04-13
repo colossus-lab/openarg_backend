@@ -4,6 +4,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     String,
     Table,
@@ -71,6 +72,8 @@ def map_chat_tables() -> None:
         Column("chart_data", JSONB, nullable=True),
         Column("map_data", JSONB, nullable=True),
         Column("documents", JSONB, nullable=True),
+        Column("confidence", Float, nullable=True),
+        Column("ui_trace", JSONB, nullable=True),
         Column("feedback", String(10), nullable=True),
         Column("feedback_comment", Text, nullable=True),
         # FR-015 (001d-conversation-lifecycle): persists the error flag from
