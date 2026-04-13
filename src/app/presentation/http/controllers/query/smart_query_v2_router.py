@@ -68,6 +68,60 @@ _STREAM_ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset(
     }
 )
 
+_COMPLETE_EVENT_KEYS: tuple[str, ...] = (
+    "answer",
+    "sources",
+    "chart_data",
+    "map_data",
+    "confidence",
+    "citations",
+    "documents",
+    "warnings",
+)
+
+
+def _log_non_serializable_top_level_fields(payload: Any) -> None:
+    """Log top-level payload keys that still fail ``json_default``.
+
+    This is intentionally shallow: the goal is to identify which top-level
+    state section sent the encoder down the slow fallback path, without
+    spamming logs with every nested leaf.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    bad_fields: list[str] = []
+    for key, value in payload.items():
+        try:
+            json.dumps(value, default=json_default, ensure_ascii=False)
+        except TypeError:
+            bad_fields.append(f"{key}:{type(value).__name__}")
+
+    if bad_fields:
+        logger.warning(
+            "safe_send_json falling back to to_json_safe for top-level fields %s",
+            bad_fields,
+        )
+
+
+def _build_complete_event(update: Any) -> dict[str, Any] | None:
+    """Return a browser ``complete`` event from a terminal-looking update."""
+    if not isinstance(update, dict):
+        return None
+    if "clean_answer" not in update:
+        return None
+    return {
+        "type": "complete",
+        "answer": update.get("clean_answer", ""),
+        "sources": update.get("sources", []),
+        "chart_data": update.get("chart_data"),
+        "map_data": update.get("map_data"),
+        "confidence": update.get("confidence", 1.0),
+        "citations": update.get("citations", []),
+        "documents": update.get("documents"),
+        "warnings": update.get("warnings", []),
+    }
+
 
 async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
     """Send ``payload`` as JSON text, absorbing non-primitive values.
@@ -85,6 +139,7 @@ async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
     try:
         text = json.dumps(payload, default=json_default, ensure_ascii=False)
     except TypeError:
+        _log_non_serializable_top_level_fields(payload)
         text = json.dumps(to_json_safe(payload), ensure_ascii=False)
     await ws.send_text(text)
 
@@ -476,37 +531,14 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     elif mode == "updates":
                         # Node completed — check if it's a terminal node
                         for node_name, update in payload.items():
-                            if node_name in ("fast_reply", "cache_reply", "clarify_reply"):
-                                # Terminal node — send complete event
-                                await _safe_send_json(
-                                    ws,
-                                    {
-                                        "type": "complete",
-                                        "answer": update.get("clean_answer", ""),
-                                        "sources": update.get("sources", []),
-                                        "chart_data": update.get("chart_data"),
-                                        "map_data": update.get("map_data"),
-                                        "confidence": update.get("confidence", 1.0),
-                                        "citations": update.get("citations", []),
-                                        "documents": update.get("documents"),
-                                    },
+                            complete_event = _build_complete_event(update)
+                            if complete_event is None:
+                                logger.debug(
+                                    "Ignoring non-terminal stream update from node %s",
+                                    node_name,
                                 )
-                            elif node_name == "finalize":
-                                # Pipeline complete — get full state
-                                await _safe_send_json(
-                                    ws,
-                                    {
-                                        "type": "complete",
-                                        "answer": update.get("clean_answer", ""),
-                                        "sources": update.get("sources", []),
-                                        "chart_data": update.get("chart_data"),
-                                        "map_data": update.get("map_data"),
-                                        "confidence": update.get("confidence", 1.0),
-                                        "citations": update.get("citations", []),
-                                        "documents": update.get("documents"),
-                                        "warnings": update.get("warnings", []),
-                                    },
-                                )
+                                continue
+                            await _safe_send_json(ws, complete_event)
 
     except WebSocketDisconnect:
         logger.debug("WebSocket v2 client disconnected")

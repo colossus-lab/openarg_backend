@@ -2,7 +2,7 @@
 
 **Version**: 1.2.0
 **Status**: Draft (reverse-engineered from the live codebase plus the historical `CLAUDE.md` at the repo root; a private `MEMORY.md` that lived outside the repo was also consulted during the initial pass but is **not** part of the OSS tree).
-**Last synced with code**: 2026-04-11
+**Last synced with code**: 2026-04-12
 **Scope**: Backend (`openarg_backend`). Frontend has its own `constitution.md`.
 
 ---
@@ -178,7 +178,7 @@ All accesses to external services MUST implement:
 2. **Metrics**: `MetricsCollector` singleton (`infrastructure/monitoring/metrics.py`) tracks requests, connectors, cache hits, tokens used. Exposed via `GET /api/v1/metrics`.
 3. **Health checks**: `HealthCheckService` (`infrastructure/monitoring/health.py`) with per-component checks. Endpoints: `GET /health`, `GET /health/ready`.
 4. **Audit trail**: `infrastructure/audit/` records sensitive actions (API key creation, admin actions).
-5. **Sentry**: NOT yet configured. Open debt — `SENTRY_DSN` env var is unset in production.
+5. **Sentry**: configured conditionally via `setup_sentry()` in `setup/logging_config.py`. It is a runtime no-op when `SENTRY_DSN` is unset.
 
 ---
 
@@ -196,13 +196,13 @@ All accesses to external services MUST implement:
 ## IX. Testing
 
 1. **`pytest` is the only test runner**.
-2. **~697 maintained tests** (baseline Mar 2026).
+2. **Hundreds of maintained tests**. A local default-suite run on 2026-04-12 produced **885 passed, 1 skipped, 140 deselected**.
 3. **Levels**:
    - **Unit**: domain + application, without real DB.
    - **Integration**: with real PostgreSQL + Redis (Docker services in CI).
    - **The DB is not mocked in integration tests.** (Principle analogous to Spec Kit's advice: "Integration-First".)
 4. **Coverage target**: no hard percentage established, but CI fails if it drops significantly.
-5. **Type checking**: `mypy --strict` in CI. No function may remain untyped.
+5. **Type checking**: CI runs `mypy src/`. The tracked config enables `check_untyped_defs = true`, but the repo is **not** currently on full `--strict`.
 6. **Lint**: `ruff` with 100-character max line length.
 7. **CI workflow**: `.github/workflows/test.yml` runs unit + integration + mypy on every PR.
 
@@ -223,10 +223,11 @@ All accesses to external services MUST implement:
 
 1. **Primary: AWS Bedrock Claude Haiku 4.5**. All LLM calls default to this model.
 2. **Fallback: Google Gemini 2.5 Flash**. Activated when Bedrock fails or is rate-limited.
-3. **Embeddings: AWS Bedrock Cohere Embed Multilingual v3** (1024-dim). OpenAI is not used.
-4. **Prompts** live in `application/pipeline/prompts/` or similar — never hardcoded in business logic.
-5. **Tokens counted and logged** per request (see `MetricsCollector`).
-6. **Pipeline with LangGraph**: stateful graph with checkpointing. Do not use ad-hoc chains outside the graph.
+3. **Anthropic adapter exists in the codebase but is not part of the active Dishka-wired fallback chain today.**
+4. **Embeddings: AWS Bedrock Cohere Embed Multilingual v3** (1024-dim). OpenAI is not used.
+5. **Prompts** live in `application/pipeline/prompts/` or similar — never hardcoded in business logic.
+6. **Tokens counted and logged** per request (see `MetricsCollector`).
+7. **Pipeline with LangGraph**: stateful graph with checkpointing. Do not use ad-hoc chains outside the graph.
 
 ---
 

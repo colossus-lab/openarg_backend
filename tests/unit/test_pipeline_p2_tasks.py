@@ -11,6 +11,7 @@ import pytest
 from app.infrastructure.celery.tasks.collector_tasks import (
     _make_unique_columns,
     _parse_zip_archive,
+    _read_shapefile_from_zip,
     _resource_table_name,
     _route_table_for_schema,
     _sanitize_columns,
@@ -166,6 +167,52 @@ class TestCollectorP2:
         assert result["row_count"] == 1
         assert "_source_dataset_id" in result["columns"]
         mock_to_sql_safe.assert_called_once()
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._geojson_features_to_df")
+    def test_read_shapefile_from_zip_extracts_nested_members_when_direct_zip_open_fails(
+        self,
+        mock_geojson_to_df,
+        tmp_path: Path,
+    ):
+        mock_geojson_to_df.return_value = "df-ok"
+        zip_path = tmp_path / "shape.zip"
+
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("NHT_2017/NHT_2017.shp", b"fake-shp")
+            zf.writestr("NHT_2017/NHT_2017.dbf", b"fake-dbf")
+            zf.writestr("NHT_2017/NHT_2017.shx", b"fake-shx")
+            zf.writestr("NHT_2017/NHT_2017.prj", b"fake-prj")
+
+        class _FakeCollection:
+            def __init__(self, features):
+                self._features = features
+
+            def __enter__(self):
+                return iter(self._features)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        features = [
+            {
+                "geometry": {"type": "Point", "coordinates": [-58.4, -34.6]},
+                "properties": {"nombre": "barrio"},
+            }
+        ]
+
+        with patch.dict("sys.modules", {"fiona": MagicMock()}):
+            import fiona  # type: ignore
+
+            fiona.listlayers.side_effect = RuntimeError("zip open failed")
+            fiona.open.return_value = _FakeCollection(features)
+
+            result = _read_shapefile_from_zip(str(zip_path))
+
+        assert result == "df-ok"
+        assert fiona.open.call_count == 1
+        opened_path = fiona.open.call_args.args[0]
+        assert opened_path.endswith("NHT_2017/NHT_2017.shp")
+        mock_geojson_to_df.assert_called_once()
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")

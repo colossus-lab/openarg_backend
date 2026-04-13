@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from app.presentation.http.controllers.query.smart_query_v2_router import (
+    _build_complete_event,
     _safe_send_json,
 )
 
@@ -168,3 +169,38 @@ async def test_safe_send_json_does_not_touch_send_json(
 
     assert ws.sent_json_calls == 0
     assert len(ws.sent_text) == 1
+
+
+async def test_safe_send_json_logs_top_level_field_when_fallback_is_needed(
+    ws: _FakeWebSocket,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _Weird:
+        pass
+
+    payload = {"type": "complete", "answer": "ok", "meta": {"weird": _Weird()}}
+
+    await _safe_send_json(ws, payload)  # type: ignore[arg-type]
+
+    assert "safe_send_json falling back to to_json_safe" in caplog.text
+    assert "meta:dict" in caplog.text
+
+
+def test_build_complete_event_uses_state_shape_not_node_name() -> None:
+    update = {
+        "clean_answer": "ok",
+        "sources": [{"name": "x", "url": "", "portal": "p"}],
+        "warnings": ["warn"],
+    }
+
+    assert _build_complete_event(update) == {
+        "type": "complete",
+        "answer": "ok",
+        "sources": [{"name": "x", "url": "", "portal": "p"}],
+        "chart_data": None,
+        "map_data": None,
+        "confidence": 1.0,
+        "citations": [],
+        "documents": None,
+        "warnings": ["warn"],
+    }

@@ -759,11 +759,25 @@ def _geojson_features_to_df(features: list[dict]) -> pd.DataFrame:
 
 def _read_shapefile_from_zip(zip_path: str) -> pd.DataFrame | None:
     """Read a shapefile from a ZIP archive using fiona, return DataFrame or None."""
+    import zipfile
+
     try:
         import fiona
     except ImportError:
         logger.warning("fiona not installed — cannot parse shapefiles")
         return None
+
+    def _features_to_df(src) -> pd.DataFrame | None:
+        features = []
+        for i, feat in enumerate(src):
+            if i >= MAX_TABLE_ROWS:
+                break
+            geom = dict(feat.get("geometry", {})) if feat.get("geometry") else {}
+            props = dict(feat.get("properties", {})) if feat.get("properties") else {}
+            features.append({"type": "Feature", "geometry": geom, "properties": props})
+        if not features:
+            return None
+        return _geojson_features_to_df(features)
 
     try:
         # fiona can read directly from zip:// paths
@@ -771,20 +785,52 @@ def _read_shapefile_from_zip(zip_path: str) -> pd.DataFrame | None:
         if not layers:
             return None
         with fiona.open(f"zip://{zip_path}", layer=layers[0]) as src:
-            features = []
-            for i, feat in enumerate(src):
-                if i >= MAX_TABLE_ROWS:
-                    break
-                # fiona features are dict-like; convert geometry to GeoJSON dict
-                geom = dict(feat.get("geometry", {})) if feat.get("geometry") else {}
-                props = dict(feat.get("properties", {})) if feat.get("properties") else {}
-                features.append({"type": "Feature", "geometry": geom, "properties": props})
-            if not features:
+            return _features_to_df(src)
+    except Exception:
+        logger.warning("Direct zip shapefile read failed for %s", zip_path, exc_info=True)
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            shp_members = [name for name in zf.namelist() if name.lower().endswith(".shp")]
+            if not shp_members:
                 return None
-            return _geojson_features_to_df(features)
+
+            with tempfile.TemporaryDirectory(dir=_temp_dir()) as extract_dir:
+                for shp_member in shp_members:
+                    base_name = os.path.splitext(shp_member)[0]
+                    sibling_prefix = f"{base_name}."
+                    members_to_extract = [
+                        name
+                        for name in zf.namelist()
+                        if name.startswith(sibling_prefix)
+                        or name == shp_member
+                    ]
+                    for member in members_to_extract:
+                        if member.endswith("/"):
+                            continue
+                        target_path = os.path.join(extract_dir, member)
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        with zf.open(member) as src, open(target_path, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+
+                    local_shp_path = os.path.join(extract_dir, shp_member)
+                    try:
+                        with fiona.open(local_shp_path) as src:
+                            df = _features_to_df(src)
+                            if df is not None:
+                                return df
+                    except Exception:
+                        logger.warning(
+                            "Extracted shapefile read failed for %s member %s",
+                            zip_path,
+                            shp_member,
+                            exc_info=True,
+                        )
     except Exception:
         logger.warning("Failed to read shapefile from %s", zip_path, exc_info=True)
         return None
+
+    return None
 
 
 def _parse_zip_archive(

@@ -124,7 +124,7 @@ The system has two main audiences:
 
 ## 8. Tech Debt Discovered (macro)
 
-- **[DEBT-001]** — **Sentry not configured**. Error monitoring disabled in production.
+- **[DEBT-001]** — **Sentry is only conditionally active**. The backend has `setup_sentry()` wiring in `setup/logging_config.py`, but if `SENTRY_DSN` is unset in a deploy, external error monitoring is effectively absent and the system falls back to logs + in-memory metrics.
 - **[DEBT-002]** — **Missing threshold/reranking/dedup in vector search**. Results can be noisy.
 - **[DEBT-003]** — **10 CKAN portals down** without removal from the active catalog (santa_fe, modernizacion, ambiente, rio_negro, jujuy, salta, la_plata, cordoba_prov, cultura, cordoba_muni).
 - **[DEBT-004]** — **Backup folder `openarg_backend_backup/`** coexists in the workspace — cleanup pending.
