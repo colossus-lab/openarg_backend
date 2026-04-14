@@ -16,6 +16,7 @@ from app.application.pipeline.chart_builder import (
     extract_llm_charts,
     extract_meta,
 )
+from app.application.pipeline.citation_guard import ground_citations
 from app.application.pipeline.context_builder import (
     build_capabilities_block,
     build_data_context,
@@ -600,6 +601,12 @@ async def analyst_node(state: OpenArgState) -> dict:
         # responses are preserved because the scrub requires numeric
         # content in the remainder.
         clean_answer = _drop_apologetic_preface(clean_answer)
+        citations, grounding_warnings, confidence = ground_citations(
+            clean_answer,
+            citations,
+            results,
+            confidence,
+        )
 
         # Low confidence: just lower the confidence score, don't prepend text
         # (adding disclaimers triggers negative-phrase detection in E2E tests
@@ -618,6 +625,7 @@ async def analyst_node(state: OpenArgState) -> dict:
             "map_data": map_data,
             "confidence": confidence,
             "citations": citations,
+            "step_warnings": grounding_warnings,
             "tokens_used": tokens_used,
         }
     except Exception:

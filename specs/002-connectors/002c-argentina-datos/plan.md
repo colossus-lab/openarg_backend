@@ -2,7 +2,7 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Type**: Reverse-engineered
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 
 ---
 
@@ -18,7 +18,11 @@
 
 ```python
 class IArgentinaDatosConnector(ABC):
-    async def fetch_dolar(self, casa: str | None = None) -> DataResult | None: ...
+    async def fetch_dolar(
+        self,
+        casa: str | None = None,
+        ultimo: bool = False,
+    ) -> DataResult | None: ...
     async def fetch_riesgo_pais(self, ultimo: bool = False) -> DataResult | None: ...
     async def fetch_inflacion(self) -> DataResult | None: ...
 ```
@@ -31,13 +35,17 @@ class IArgentinaDatosConnector(ABC):
 
 | Endpoint | Method | Returns |
 |---|---|---|
-| `/v1/cotizaciones/dolares` | GET | List of all casas |
-| `/v1/cotizaciones/dolares/{casa}` | GET | Series of a specific casa (last 60) |
+| `https://api.argentinadatos.com/v1/cotizaciones/dolares` | GET | Historical list of all casas |
+| `https://api.argentinadatos.com/v1/cotizaciones/dolares/{casa}` | GET | Historical series of a specific casa (last 60) |
+| `https://dolarapi.com/v1/dolares` | GET | Current list of all casas |
+| `https://dolarapi.com/v1/dolares/{casa}` | GET | Current value for one casa |
 | `/v1/finanzas/indices/riesgo-pais` | GET | Country risk series |
 | `/v1/finanzas/indices/riesgo-pais/ultimo` | GET | Last value |
 | `/v1/finanzas/indices/inflacion` | GET | Monthly inflation |
 
-Base URL: `https://api.argentinadatos.com`
+Base URLs:
+- `https://api.argentinadatos.com`
+- `https://dolarapi.com`
 
 No auth. No retry visible at the adapter level.
 
@@ -46,7 +54,9 @@ No auth. No retry visible at the adapter level.
 `execute_argentina_datos_step(step, adapter)`:
 1. Reads `step.params.type` (`dolar` | `riesgo_pais` | `inflacion`)
 2. Routing:
-   - `dolar` → `adapter.fetch_dolar(casa=params.get("casa"))`
+   - `dolar` + `ultimo=true` → `adapter.fetch_dolar(casa=params.get("casa"), ultimo=True)`
+   - `dolar` + `historico=true` → `adapter.fetch_dolar(casa=params.get("casa"), ultimo=False)`
+   - `dolar` without explicit flags → fetches both in parallel and returns `[spot_actual, serie_historica]`
    - `riesgo_pais` → `adapter.fetch_riesgo_pais(ultimo=params.get("ultimo", False))`
    - `inflacion` → `adapter.fetch_inflacion()`
 3. Returns `[result]` if not `None`, otherwise `[]`

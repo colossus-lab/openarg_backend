@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.application.pipeline.cache_manager import check_cache, get_cached_dict
+from app.application.pipeline.cache_manager import check_cache, get_cached_dict, write_cache
 from app.application.pipeline.chart_builder import extract_meta
 from app.application.smart_query_service import (
     SmartQueryService,
@@ -196,6 +197,122 @@ class TestExecuteFullPipeline:
         assert result.tokens_used == 100  # From FakeLLMResponse
         assert result.confidence == 1.0  # Default confidence
 
+    async def test_full_pipeline_degrades_confidence_for_unsupported_citation_numbers(
+        self, service, mock_deps
+    ):
+        fake_plan = ExecutionPlan(
+            query="¿cuál fue la inflación?",
+            intent="consulta_datos",
+            steps=[
+                PlanStep(
+                    id="step_1",
+                    action="query_argentina_datos",
+                    description="Fetch inflation",
+                    params={"type": "inflacion"},
+                )
+            ],
+        )
+
+        mock_deps["llm"].chat.return_value = FakeLLMResponse(
+            content=(
+                "La inflación fue 200 en 2025."
+                '<!--META:{"confidence":0.93,"citations":[{"claim":"La inflación fue 200 en 2025","source":"IPC Nacional"}]}-->'
+            )
+        )
+        mock_deps["arg_datos"].fetch_inflacion.return_value = DataResult(
+            source="argentina_datos",
+            portal_name="datos.gob.ar",
+            portal_url="https://datos.gob.ar",
+            dataset_title="IPC Nacional",
+            format="time_series",
+            records=[{"anio": 2025, "inflacion": 117.8}],
+            metadata={"total_records": 1, "fetched_at": "2026-04-13"},
+        )
+
+        with (
+            patch(
+                "app.application.smart_query_service.generate_plan",
+                return_value=fake_plan,
+            ),
+            patch(
+                "app.application.smart_query_service.load_memory",
+                return_value={},
+            ),
+            patch(
+                "app.application.smart_query_service.build_memory_context_prompt",
+                return_value="",
+            ),
+        ):
+            result = await service.execute("¿cuál fue la inflación?", user_id="test@test.com")
+
+        assert result.confidence == 0.45
+        assert result.warnings
+        assert result.citations[0]["verified"] is False
+
+    async def test_prepare_query_inputs_overlaps_memory_history_and_catalog_work(
+        self, service, mock_deps
+    ):
+        events: list[str] = []
+        release = asyncio.Event()
+        service._chat_repo = AsyncMock()
+
+        async def fake_load_memory(_cache, session_id):
+            events.append(f"memory:start:{session_id}")
+            await release.wait()
+            events.append("memory:end")
+            return {"summary": "memo"}
+
+        async def fake_load_history(conversation_id, _chat_repo):
+            events.append(f"history:start:{conversation_id}")
+            await release.wait()
+            events.append("history:end")
+            return "history ctx"
+
+        async def fake_catalog_hints(query, _sandbox, _embedding):
+            events.append(f"catalog:start:{query}")
+            await release.wait()
+            events.append("catalog:end")
+            return [{"table": "cache_demo"}]
+
+        def fake_memory_prompt(memory, for_analyst=False):
+            flavor = "analyst" if for_analyst else "planner"
+            return f"{flavor}:{memory.get('summary', '')}"
+
+        with (
+            patch("app.application.smart_query_service.load_memory", side_effect=fake_load_memory),
+            patch("app.application.smart_query_service.load_chat_history", side_effect=fake_load_history),
+            patch(
+                "app.application.smart_query_service.discover_catalog_hints_for_planner",
+                side_effect=fake_catalog_hints,
+            ),
+            patch(
+                "app.application.smart_query_service.build_memory_context_prompt",
+                side_effect=fake_memory_prompt,
+            ),
+        ):
+            task = asyncio.create_task(
+                service._prepare_query_inputs("Cuánto gastó Córdoba en salud", "conv-123")
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            assert "memory:start:conv-123" in events
+            assert "history:start:conv-123" in events
+            assert any(event.startswith("catalog:start:") for event in events)
+            assert "memory:end" not in events
+            assert "history:end" not in events
+            assert "catalog:end" not in events
+
+            release.set()
+            prepared = await task
+
+        assert prepared.session_id == "conv-123"
+        assert prepared.planner_ctx == "history ctx"
+        assert prepared.memory_ctx == "planner:memo"
+        assert prepared.memory_ctx_analyst == "analyst:memo"
+        assert prepared.catalog_hints == [{"table": "cache_demo"}]
+        assert prepared.preprocessed_q
+
 
 class TestConnectorFailureGraceful:
     async def test_one_connector_fails_rest_continues(self, service, mock_deps):
@@ -329,6 +446,61 @@ class TestCacheEmbeddingPassed:
 
         assert cached_dict == {"answer": "cached", "sources": []}
         assert embedding is None
+
+    async def test_write_cache_overlaps_redis_write_with_embedding_and_semantic_write(
+        self, service, mock_deps
+    ):
+        events: list[str] = []
+        redis_release = asyncio.Event()
+        embedding_release = asyncio.Event()
+
+        async def fake_cache_set(*_args, **_kwargs):
+            events.append("redis:start")
+            await redis_release.wait()
+            events.append("redis:end")
+
+        async def fake_embed(_question):
+            events.append("embed:start")
+            await embedding_release.wait()
+            events.append("embed:end")
+            return [0.5, 0.6]
+
+        async def fake_semantic_set(*_args, **_kwargs):
+            events.append("semantic:start")
+            events.append("semantic:end")
+
+        mock_deps["cache"].set.side_effect = fake_cache_set
+        mock_deps["embedding"].embed.side_effect = fake_embed
+        mock_deps["semantic_cache"].set.side_effect = fake_semantic_set
+
+        task = asyncio.create_task(
+            write_cache(
+                "pregunta",
+                {"answer": "respuesta"},
+                "consulta_datos",
+                mock_deps["cache"],
+                mock_deps["embedding"],
+                mock_deps["semantic_cache"],
+            )
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert "redis:start" in events
+        assert "embed:start" in events
+        assert "redis:end" not in events
+        assert "semantic:start" not in events
+
+        embedding_release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert "semantic:start" in events
+        assert "redis:end" not in events
+
+        redis_release.set()
+        await task
+
+        assert events.index("semantic:start") < events.index("redis:end")
 
 
 class TestMetaParsing:

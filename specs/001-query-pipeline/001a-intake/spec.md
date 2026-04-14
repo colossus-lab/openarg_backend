@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Application (pipeline nodes) + Infrastructure (Redis, pgvector semantic cache)
 **Parent**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -20,7 +20,7 @@ It covers the first four nodes of the LangGraph graph:
 3. `load_memory` — conversational memory restoration (session + chat history).
 4. `preprocess` — deterministic query normalization (acronyms, temporal, provinces, synonyms).
 
-The phase ends when the state is either routed to a terminal fast-reply/cache-reply node (short-circuit) or advanced to the **Planning phase** with a preprocessed query + loaded memory context.
+The phase ends when the state is either routed to a terminal fast-reply/cache-reply node (short-circuit) or advanced to the **Planning phase** with a preprocessed query + loaded memory context. In the current implementation, the pre-planner preparation overlaps independent I/O: Redis memory load, DB chat-history load, and catalog-hint discovery run concurrently instead of serially.
 
 ## 2. Ubiquitous Language
 
@@ -68,6 +68,7 @@ The phase ends when the state is either routed to a terminal fast-reply/cache-re
 - **FR-007**: The system MUST load session memory by `conversation_id` from Redis.
 - **FR-008**: The system MUST load chat history (last 6 messages) from the DB.
 - **FR-009**: The system MUST maintain two versions of the context: full `memory_ctx` (planner) and light `memory_ctx_analyst` (to avoid data bleed in the analyst).
+- **FR-009a**: The system MUST overlap independent pre-planner work where possible. Session memory load, chat-history load, and catalog-hint discovery MUST NOT be serialized behind one another when they can run concurrently.
 - *(Note: FR-010 — memory update post-finalize — belongs to Phase E: Finalization.)*
 
 ### Security

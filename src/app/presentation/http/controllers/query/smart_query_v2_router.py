@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import secrets as _secrets_mod
-import threading
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -33,7 +32,7 @@ from app.infrastructure.serialization import safe_dumps, to_json_safe
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
-_graph_lock = threading.Lock()
+_compiled_graphs_lock = asyncio.Lock()
 _checkpointer_lock = asyncio.Lock()
 _compiled_graphs: dict[bool, Any] = {}
 _checkpointer = None  # AsyncPostgresSaver instance (lazy)
@@ -145,12 +144,12 @@ def _filter_stream_payload(payload: Any) -> Any:
     return {k: v for k, v in payload.items() if k in _STREAM_ALLOWED_PAYLOAD_KEYS}
 
 
-def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type: ignore[no-untyped-def]
+async def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type: ignore[no-untyped-def]
     """Return the compiled graph, compiling it once (thread-safe)."""
     global _compiled_graphs  # noqa: PLW0603
     cache_key = bool(checkpointer)
     if cache_key not in _compiled_graphs:
-        with _graph_lock:
+        async with _compiled_graphs_lock:
             if cache_key not in _compiled_graphs:
                 _compiled_graphs[cache_key] = build_pipeline_graph(
                     deps, checkpointer=checkpointer
@@ -304,8 +303,8 @@ async def smart_query_v2(
     await ensure_privacy_accepted(body.user_email, user_repo)
 
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
-    checkpointer = await _get_checkpointer()
-    compiled_graph = _get_or_compile_graph(deps, checkpointer)
+    checkpointer = _checkpointer
+    compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
     user_id = body.user_email or "anonymous"
@@ -419,9 +418,9 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 deps = await request_scope.get(PipelineDeps)
 
                 # Compile graph once (thread-safe), set deps per-request
-                checkpointer = await _get_checkpointer()
+                checkpointer = _checkpointer
                 set_deps(deps)
-                graph = _get_or_compile_graph(deps, checkpointer)
+                graph = await _get_or_compile_graph(deps, checkpointer)
 
                 raw_text = await ws.receive_text()
                 if len(raw_text) > 10_000:

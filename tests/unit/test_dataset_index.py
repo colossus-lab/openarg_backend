@@ -158,6 +158,24 @@ class TestEconomicRoutes:
         assert top.action == "query_argentina_datos"
         assert top.params.get("type") == "dolar"
         assert top.params.get("casa") == "blue"
+        assert top.params.get("ultimo") is True
+
+    def test_dolar_historico_keeps_series_mode(self):
+        hints = resolve_hints("cotizacion historica del dolar blue")
+        top = hints[0]
+        assert top.action == "query_argentina_datos"
+        assert top.params.get("type") == "dolar"
+        assert top.params.get("casa") == "blue"
+        assert top.params.get("historico") is True
+
+    def test_dolar_unspecified_returns_dual_mode(self):
+        hints = resolve_hints("cotizacion dolar blue")
+        top = hints[0]
+        assert top.action == "query_argentina_datos"
+        assert top.params.get("type") == "dolar"
+        assert top.params.get("casa") == "blue"
+        assert "ultimo" not in top.params
+        assert "historico" not in top.params
 
     def test_riesgo_pais(self):
         hints = resolve_hints("riesgo pais argentina")

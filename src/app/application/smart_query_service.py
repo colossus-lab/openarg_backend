@@ -31,6 +31,7 @@ from app.application.pipeline.chart_builder import (
     extract_llm_charts,
     extract_meta,
 )
+from app.application.pipeline.citation_guard import ground_citations
 from app.application.pipeline.classifiers import (
     _CASUAL_RESPONSES,  # noqa: F401 — re-export for tests
     _FAREWELL_PATTERN,  # noqa: F401 — re-export for tests
@@ -122,6 +123,17 @@ class SmartQueryResult:
     warnings: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class PreparedQueryInputs:
+    session_id: str
+    memory: Any
+    memory_ctx: str
+    memory_ctx_analyst: str
+    planner_ctx: str
+    preprocessed_q: str
+    catalog_hints: list[dict[str, Any]]
+
+
 def _dict_to_result(d: dict[str, Any]) -> SmartQueryResult:
     """Convert a cached dict to a SmartQueryResult."""
     return SmartQueryResult(
@@ -194,6 +206,59 @@ class SmartQueryService:
             semantic_cache=self._semantic_cache,
         )
 
+    async def _prepare_query_inputs(
+        self,
+        question: str,
+        conversation_id: str,
+    ) -> PreparedQueryInputs:
+        """Prepare planner inputs while overlapping independent I/O work."""
+        session_id = conversation_id or ""
+        memory_task = asyncio.create_task(load_memory(self._cache, session_id))
+        history_task = (
+            asyncio.create_task(load_chat_history(conversation_id, self._chat_repo))
+            if conversation_id and self._chat_repo
+            else None
+        )
+        catalog_hints_task: asyncio.Task[list[dict[str, Any]]] | None = None
+
+        try:
+            _q = expand_acronyms(question)
+            _q, _ = normalize_temporal(_q)
+            _q = normalize_provinces(_q)
+            preprocessed_q = expand_synonyms(_q)
+
+            catalog_hints_task = asyncio.create_task(
+                discover_catalog_hints_for_planner(
+                    preprocessed_q, self._sandbox, self._embedding
+                )
+            )
+
+            memory = await memory_task
+            chat_history = await history_task if history_task is not None else ""
+            catalog_hints = await catalog_hints_task
+        except Exception:
+            if not memory_task.done():
+                memory_task.cancel()
+            if history_task is not None and not history_task.done():
+                history_task.cancel()
+            if catalog_hints_task is not None and not catalog_hints_task.done():
+                catalog_hints_task.cancel()
+            raise
+
+        memory_ctx = build_memory_context_prompt(memory)
+        memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
+        planner_ctx = chat_history or memory_ctx
+
+        return PreparedQueryInputs(
+            session_id=session_id,
+            memory=memory,
+            memory_ctx=memory_ctx,
+            memory_ctx_analyst=memory_ctx_analyst,
+            planner_ctx=planner_ctx,
+            preprocessed_q=preprocessed_q,
+            catalog_hints=catalog_hints,
+        )
+
     # ── Public API ──────────────────────────────────────────
 
     async def execute(
@@ -244,31 +309,15 @@ class SmartQueryService:
             if cached_dict is not None:
                 return _dict_to_result(cached_dict)
 
-        # 2. Memory (Redis summaries + DB chat history)
-        session_id = conversation_id or ""
-        memory = await load_memory(self._cache, session_id)
-        memory_ctx = build_memory_context_prompt(memory)
-        memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
-        chat_history = await load_chat_history(conversation_id, self._chat_repo)
-        planner_ctx = chat_history or memory_ctx
-
-        # 3. Preprocess query
-        _q = expand_acronyms(question)
-        _q, _ = normalize_temporal(_q)
-        _q = normalize_provinces(_q)
-        preprocessed_q = expand_synonyms(_q)
-
-        # 4. Discover relevant cached tables for the planner
-        catalog_hints = await discover_catalog_hints_for_planner(
-            preprocessed_q, self._sandbox, self._embedding
-        )
+        # 2-4. Prepare memory/history/query normalization/catalog hints
+        prepared = await self._prepare_query_inputs(question, conversation_id)
 
         # 5. Plan (1 LLM call)
         plan = await generate_plan(
             self._llm,
-            preprocessed_q,
-            memory_context=planner_ctx,
-            catalog_hints=catalog_hints,
+            prepared.preprocessed_q,
+            memory_context=prepared.planner_ctx,
+            catalog_hints=prepared.catalog_hints,
         )
 
         # Handle clarification from planner
@@ -286,7 +335,7 @@ class SmartQueryService:
             )
 
         # Inject search_datasets fallback if plan has no vector/data step
-        _inject_vector_fallback(plan, question, preprocessed_q)
+        _inject_vector_fallback(plan, question, prepared.preprocessed_q)
 
         logger.info(
             "Plan for '%s': intent=%s, steps=%d",
@@ -307,7 +356,7 @@ class SmartQueryService:
             question,
             plan,
             results,
-            memory_ctx_analyst,
+            prepared.memory_ctx_analyst,
             all_warnings,
             has_records=result_payloads.has_records,
         )
@@ -344,11 +393,19 @@ class SmartQueryService:
         if policy_mode:
             try:
                 policy_text = await analyze_policy(
-                    self._llm, plan, results, clean_answer, memory_ctx
+                    self._llm, plan, results, clean_answer, prepared.memory_ctx
                 )
                 clean_answer += "\n\n---\n\n" + policy_text
             except Exception:
                 logger.warning("Policy agent failed", exc_info=True)
+
+        citations, grounding_warnings, confidence = ground_citations(
+            clean_answer,
+            citations,
+            results,
+            confidence,
+        )
+        all_warnings.extend(grounding_warnings)
 
         sources = result_payloads.sources
         documents = result_payloads.documents
@@ -374,7 +431,15 @@ class SmartQueryService:
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=duration_ms)
 
         # 10. Memory update (fire-and-forget)
-        asyncio.create_task(self._update_memory_bg(session_id, memory, plan, results, clean_answer))
+        asyncio.create_task(
+            self._update_memory_bg(
+                prepared.session_id,
+                prepared.memory,
+                plan,
+                results,
+                clean_answer,
+            )
+        )
 
         # 11. Save conversation history
         if session:
@@ -435,7 +500,6 @@ class SmartQueryService:
             return
 
         # Cache check (skip in policy mode)
-        session_id = conversation_id or ""
         if not policy_mode:
             cached_result, _ = await get_cached_dict(
                 question,
@@ -456,32 +520,15 @@ class SmartQueryService:
                 }
                 return
 
-        # Memory
-        memory = await load_memory(self._cache, session_id)
-        memory_ctx = build_memory_context_prompt(memory)
-        memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
-
-        chat_history = await load_chat_history(conversation_id, self._chat_repo)
-        planner_ctx = chat_history or memory_ctx
-
-        # Preprocess query
-        _q = expand_acronyms(question)
-        _q, _ = normalize_temporal(_q)
-        _q = normalize_provinces(_q)
-        preprocessed_q = expand_synonyms(_q)
-
-        # Discover relevant cached tables for the planner
-        catalog_hints = await discover_catalog_hints_for_planner(
-            preprocessed_q, self._sandbox, self._embedding
-        )
+        prepared = await self._prepare_query_inputs(question, conversation_id)
 
         # Plan (1 LLM call)
         yield {"type": "status", "step": "planning"}
         plan = await generate_plan(
             self._llm,
-            preprocessed_q,
-            memory_context=planner_ctx,
-            catalog_hints=catalog_hints,
+            prepared.preprocessed_q,
+            memory_context=prepared.planner_ctx,
+            catalog_hints=prepared.catalog_hints,
         )
 
         # Handle clarification
@@ -495,7 +542,7 @@ class SmartQueryService:
             return
 
         # Inject search_datasets fallback
-        _inject_vector_fallback(plan, question, preprocessed_q)
+        _inject_vector_fallback(plan, question, prepared.preprocessed_q)
 
         yield {
             "type": "status",
@@ -519,7 +566,7 @@ class SmartQueryService:
             question,
             plan,
             results,
-            memory_ctx_analyst,
+            prepared.memory_ctx_analyst,
             all_warnings,
             has_records=result_payloads.has_records,
         )
@@ -576,7 +623,7 @@ class SmartQueryService:
             try:
                 yield {"type": "status", "step": "policy_analysis"}
                 policy_text = await analyze_policy(
-                    self._llm, plan, results, clean_answer, memory_ctx
+                    self._llm, plan, results, clean_answer, prepared.memory_ctx
                 )
                 separator = "\n\n---\n\n"
                 yield {"type": "chunk", "content": separator + policy_text}
@@ -602,7 +649,15 @@ class SmartQueryService:
         audit_query(user=user_id, question=question, intent=plan.intent, duration_ms=0)
 
         # Memory update (fire-and-forget)
-        asyncio.create_task(self._update_memory_bg(session_id, memory, plan, results, clean_answer))
+        asyncio.create_task(
+            self._update_memory_bg(
+                prepared.session_id,
+                prepared.memory,
+                plan,
+                results,
+                clean_answer,
+            )
+        )
 
         # Cache write
         try:

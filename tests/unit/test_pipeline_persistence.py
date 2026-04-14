@@ -115,7 +115,7 @@ async def test_checkpointer_recovers_from_concurrent_setup_race(monkeypatch) -> 
     assert events[-1] == "exit:second"
 
 
-def test_compiled_graph_cache_distinguishes_persistence_mode(monkeypatch) -> None:
+async def test_compiled_graph_cache_distinguishes_persistence_mode(monkeypatch) -> None:
     built: list[bool] = []
 
     def _fake_build(_deps, checkpointer=None):
@@ -125,10 +125,10 @@ def test_compiled_graph_cache_distinguishes_persistence_mode(monkeypatch) -> Non
     monkeypatch.setattr(router, "build_pipeline_graph", _fake_build)
     router._compiled_graphs = {}
 
-    no_persist_1 = router._get_or_compile_graph(object(), None)
-    no_persist_2 = router._get_or_compile_graph(object(), None)
-    persist_1 = router._get_or_compile_graph(object(), object())
-    persist_2 = router._get_or_compile_graph(object(), object())
+    no_persist_1 = await router._get_or_compile_graph(object(), None)
+    no_persist_2 = await router._get_or_compile_graph(object(), None)
+    persist_1 = await router._get_or_compile_graph(object(), object())
+    persist_2 = await router._get_or_compile_graph(object(), object())
 
     assert no_persist_1 is no_persist_2
     assert persist_1 is persist_2
