@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-13
+**Last synced with code**: 2026-04-14
 **Hexagonal scope**: Application (finalize node) + Infrastructure (Redis, pgvector semantic cache, PG audit, metrics)
 **Parent**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -63,10 +63,15 @@ The phase also owns the `_background_tasks: set[asyncio.Task]` registry and the 
 - **FR-035**: Finalize MUST compute `duration_ms` from `_start_time`.
 - **FR-036**: Finalize MUST trigger cache write + memory update as fire-and-forget.
 - **FR-036a**: Finalize MUST return ``chart_data``, ``map_data``, ``confidence``, ``citations``, ``sources`` and ``documents`` in its return dict so the LangGraph `updates` stream can forward them to the browser's `complete` event. LangGraph passes only the node's return dict to the update handler — anything the finalize node reads from state but does not re-emit is silently lost. Regression-tested by a unit test on `finalize_node` output keys (FIX-010, 2026-04-11).
+- **FR-036a1**: The WebSocket router MUST emit the browser `complete` event only from terminal nodes (`finalize`, `cache_reply`, `fast_reply`). Intermediate updates that happen to contain `clean_answer` (for example `analyst`) are not terminal and MUST NOT close the stream early, otherwise the browser receives `answer/confidence` without the finalized `sources/documents/chart_data` payload.
 - **FR-036b**: Citations reaching finalization MUST already be grounded against `data_results`. Each citation may include verification metadata (`verified`, `grounding`, `unsupported_numbers`) so downstream clients can distinguish a source list from a verified numeric claim trail.
 - **FR-036c**: If the analyst produces numeric claims that cannot be grounded in `data_results`, the pipeline MUST emit a warning and clamp confidence downward instead of silently shipping the claim as fully trusted.
 - **FR-036e**: Grounding MUST consider not only raw numeric cells from records/metadata but also basic derived summary counts from the collected result set when those counts are directly observable from the pipeline output. Examples: number of datasets returned in a listing response, number of rows in a returned time series. These summary counts are valid evidence and MUST NOT force confidence down to `baja` merely because they are not explicit columns in the upstream dataset payload.
 - **FR-036f**: Grounding MUST also recognize temporal numbers embedded in result strings when they are directly observable facts of the returned data, especially years/dates present in record fields, metadata, or dataset titles. Responses such as BCRA series summaries (`2026`) or dataset listings that mention titled periods (`Relevamiento educativo 2024`) MUST NOT be downgraded just because those years are not stored as standalone numeric cells.
+- **FR-036g**: Confidence clamping MUST distinguish between a fully unsupported numeric claim and a mostly grounded claim that includes a small derived number (for example a percentage change computed from two grounded values). The latter still warrants a warning, but it MUST degrade to `media` rather than `baja` when at least two independent numeric anchors in the same citation are grounded.
+- **FR-036h**: Final confidence MUST be derived deterministically from grounded evidence categories, not from the raw META confidence emitted by the analyst. At minimum the scoring model MUST distinguish: fully verified direct claims, soft warnings on mostly grounded derived claims, hard failures on unsupported numeric claims, and source-link warnings on ungrounded non-numeric claims.
+- **FR-036i**: Basic direct-data answers with verified citations MUST resolve to `alta` confidence even if the narrative includes a secondary derived comparison (for example "salto", "%", "casi X millones") that is warned but backed by the same source context. A single soft warning MUST NOT drag an otherwise grounded answer to `media`.
+- **FR-036j**: Comparative narrative claims expressed as trend language rather than exact finance verbs — for example "recuperación", "rebote", "repunte", "subieron", "crecieron", "se revirtió la tendencia" — MUST be treated as derived-comparison soft warnings when they are attached to an otherwise well-grounded direct-data answer. They may keep a warning, but they MUST NOT collapse the whole answer to `baja` on their own.
 - **FR-036d**: The cache payload written by finalization MUST include the same result-quality fields the browser sees on the fresh answer path: at minimum `confidence`, `citations`, and `warnings`. Repeated identical queries served from cache MUST preserve the same quality chip and grounding state as the original answer.
 
 ### Streaming (terminal event)

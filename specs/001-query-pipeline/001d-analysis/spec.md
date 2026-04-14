@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-11
+**Last synced with code**: 2026-04-14
 **Hexagonal scope**: Application (analyst + policy nodes + chart builder) + Infrastructure (Bedrock streaming LLM)
 **Parent**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -54,11 +54,13 @@ This phase also owns the chart builder helpers and the META-tag extraction logic
 - **FR-019**: The analyst MUST build the prompt contextualizing data, memory, errors, and skills.
 - **FR-020**: The analyst MUST use the `analyst.md` prompt in the normal flow and `analyst_no_data.md` in the fallback (no data).
 - **FR-021**: The analyst MUST extract `confidence` and `citations` from meta tags (`<!--META:confidence=X, citations=[...]-->`).
+- **FR-021a**: The analyst's META `confidence` is advisory only. The final confidence shown to the user MUST be recalculated downstream from grounded evidence, not taken verbatim from the LLM output.
 - **FR-022**: The analyst MUST build charts deterministically when there are temporal/categorical + numeric columns, with fallback to LLM-generated charts.
 - **FR-023**: The analyst MUST build GeoJSON `map_data` when the records contain `_geometry_geojson`.
 - **FR-024**: The analyst MUST buffer streaming chunks to avoid emitting incomplete tags.
 - **FR-025**: The analyst MUST strip internal tags (`<!--CHART:-->`, `<!--META:-->`) from `clean_answer` before returning it.
 - **FR-025e**: The analyst MUST scrub **internal identifiers** from `clean_answer` before returning it: any token matching `cache_*` (sandbox table names), `dataset_chunks`, `pgvector`, `query_cache`, or `cached_datasets` MUST be removed or replaced with a neutral phrase. The LLM sometimes cites these names verbatim when summarizing which source answered the query — they leak internal infrastructure naming to the user. Regression-tested by unit tests on the scrub helper and enforced at the E2E layer via `helpers.py::_INTERNAL_LEAKS`. (FIX-011, 2026-04-11.)
+- **FR-025g**: The analyst MUST NOT introduce freshly computed numeric claims that are not explicit in the provided results. If the answer needs to describe a trend between two grounded values, it should use qualitative language ("subió", "bajó", "se recuperó") unless the exact percentage/change/count was already supplied by upstream data or deterministically precomputed by the pipeline.
 - **FR-025f**: The analyst MUST NOT open its answer with an apologetic preface of the form *"No tengo / No encontré / No pude acceder a X pero ..."* **when the answer continues with real data afterwards**. The prompt (`analyst.txt`) forbids this construction, and a post-processing step MUST detect and strip a leading negative-phrase sentence when the remaining text contains numeric data, so the user sees the actual answer first, not a disclaimer. Responses that genuinely have no data remain honest — the scrub applies only when data IS present below the apologetic preface. The same scrub runs in `cache_reply_node` as defense-in-depth so stale cached answers are cleaned at read-time. (FIX-012, 2026-04-11.)
 
 ### Prompt budget (DEBT-011)

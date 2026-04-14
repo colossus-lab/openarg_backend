@@ -79,10 +79,20 @@ _COMPLETE_EVENT_KEYS: tuple[str, ...] = (
     "warnings",
 )
 
+_TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
+    {
+        "finalize",
+        "cache_reply",
+        "fast_reply",
+    }
+)
 
-def _build_complete_event(update: Any) -> dict[str, Any] | None:
+
+def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
     """Return a browser ``complete`` event from a terminal-looking update."""
     if not isinstance(update, dict):
+        return None
+    if node_name not in _TERMINAL_COMPLETE_NODES:
         return None
     if "clean_answer" not in update:
         return None
@@ -504,7 +514,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     elif mode == "updates":
                         # Node completed — check if it's a terminal node
                         for node_name, update in payload.items():
-                            complete_event = _build_complete_event(update)
+                            complete_event = _build_complete_event(node_name, update)
                             if complete_event is None:
                                 logger.debug(
                                     "Ignoring non-terminal stream update from node %s",

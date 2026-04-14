@@ -187,14 +187,14 @@ async def test_safe_send_json_normalizes_unknown_type_in_single_pass(
     assert parsed["meta"]["weird"] == "<weird-object>"
 
 
-def test_build_complete_event_uses_state_shape_not_node_name() -> None:
+def test_build_complete_event_uses_state_shape_for_terminal_nodes() -> None:
     update = {
         "clean_answer": "ok",
         "sources": [{"name": "x", "url": "", "portal": "p"}],
         "warnings": ["warn"],
     }
 
-    assert _build_complete_event(update) == {
+    assert _build_complete_event("finalize", update) == {
         "type": "complete",
         "answer": "ok",
         "sources": [{"name": "x", "url": "", "portal": "p"}],
@@ -205,6 +205,15 @@ def test_build_complete_event_uses_state_shape_not_node_name() -> None:
         "documents": None,
         "warnings": ["warn"],
     }
+
+
+def test_build_complete_event_ignores_non_terminal_analyst_update() -> None:
+    update = {
+        "clean_answer": "respuesta parcial",
+        "confidence": 0.45,
+    }
+
+    assert _build_complete_event("analyst", update) is None
 
 
 def test_filter_stream_payload_keeps_connector_metadata() -> None:

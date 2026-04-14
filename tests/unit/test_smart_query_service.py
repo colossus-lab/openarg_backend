@@ -195,7 +195,7 @@ class TestExecuteFullPipeline:
 
         assert result.answer  # LLM should have responded
         assert result.tokens_used == 100  # From FakeLLMResponse
-        assert result.confidence == 1.0  # Default confidence
+        assert result.confidence == 0.8  # Deterministic fallback with data but no structured citations
 
     async def test_full_pipeline_degrades_confidence_for_unsupported_citation_numbers(
         self, service, mock_deps
@@ -248,6 +248,70 @@ class TestExecuteFullPipeline:
         assert result.confidence == 0.45
         assert result.warnings
         assert result.citations[0]["verified"] is False
+
+    async def test_full_pipeline_uses_deterministic_confidence_for_basic_bcra_style_query(
+        self, service, mock_deps
+    ):
+        fake_plan = ExecutionPlan(
+            query="Mostrame la evolucion de las reservas del BCRA",
+            intent="consulta_datos",
+            steps=[
+                PlanStep(
+                    id="step_1",
+                    action="query_argentina_datos",
+                    description="Fetch reservas",
+                    params={"type": "inflacion"},
+                )
+            ],
+        )
+
+        mock_deps["llm"].chat.return_value = FakeLLMResponse(
+            content=(
+                "Las reservas del BCRA alcanzaron $41.167 millones en diciembre de 2025, "
+                "tras un salto de casi $14.000 millones en abril."
+                '<!--META:{"confidence":0.31,"citations":['
+                '{"claim":"Las reservas alcanzaron $41.167 millones en diciembre de 2025","source":"Reservas Internacionales BCRA Saldos"},'
+                '{"claim":"En abril de 2025 hubo un salto de casi $14.000 millones","source":"Reservas Internacionales BCRA Saldos"}'
+                "]}-->"
+            )
+        )
+        mock_deps["arg_datos"].fetch_inflacion.return_value = DataResult(
+            source="series_tiempo",
+            portal_name="API de Series de Tiempo",
+            portal_url="https://datos.gob.ar/series/api/series/?ids=174.1_RRVAS_IDOS_0_0_36",
+            dataset_title="Reservas Internacionales BCRA Saldos",
+            format="time_series",
+            records=[
+                {"fecha": "2025-03-01", "reservas": 24986.0},
+                {"fecha": "2025-04-01", "reservas": 38928.0},
+                {"fecha": "2025-12-01", "reservas": 41167.0},
+            ],
+            metadata={"fetched_at": "2026-04-14", "units": "Millones de dólares"},
+        )
+
+        with (
+            patch(
+                "app.application.smart_query_service.generate_plan",
+                return_value=fake_plan,
+            ),
+            patch(
+                "app.application.smart_query_service.load_memory",
+                return_value={},
+            ),
+            patch(
+                "app.application.smart_query_service.build_memory_context_prompt",
+                return_value="",
+            ),
+        ):
+            result = await service.execute(
+                "Mostrame la evolucion de las reservas del BCRA",
+                user_id="test@test.com",
+            )
+
+        assert result.confidence == 0.85
+        assert result.citations[0]["verified"] is True
+        assert result.citations[1]["verified"] is False
+        assert result.warnings
 
     async def test_prepare_query_inputs_overlaps_memory_history_and_catalog_work(
         self, service, mock_deps
