@@ -2449,7 +2449,7 @@ def collect_dataset(self, dataset_id: str):
                     logger.warning(
                         "ZIP %s: no parseable file found in %s",
                         dataset_id,
-                        member_names := zf.namelist(),
+                        zf.namelist(),
                     )
                     _set_error_status(
                         engine, dataset_id, "zip_no_parseable_file", table_name=table_name

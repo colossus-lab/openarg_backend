@@ -1,26 +1,26 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.infrastructure.celery.tasks.collector_tasks import (
-    _detect_csv_params,
     _check_schema_compat_columns,
+    _detect_csv_params,
     _make_unique_columns,
     _parse_zip_archive,
     _read_kml_from_zip,
     _read_shapefile_from_zip,
-    _zip_structure_summary,
     _resource_table_name,
     _route_table_for_schema,
     _sanitize_columns,
     _schema_table_name,
     _serialize_structured_cells,
+    _zip_structure_summary,
     bulk_collect_all,
     collect_dataset,
 )
@@ -292,9 +292,9 @@ class TestCollectorP2:
         progress_snapshots: list[list[dict[str, object]]] = []
 
         with zipfile.ZipFile(nested_one, "w") as zf:
-            zf.writestr("comercio.csv", "\ufeffid|nombre\n1|Alpha\n".encode("utf-8"))
+            zf.writestr("comercio.csv", "\ufeffid|nombre\n1|Alpha\n".encode())
         with zipfile.ZipFile(nested_two, "w") as zf:
-            zf.writestr("comercio.csv", "\ufeffid|nombre\n2|Beta\n".encode("utf-8"))
+            zf.writestr("comercio.csv", "\ufeffid|nombre\n2|Beta\n".encode())
         with zipfile.ZipFile(outer_zip_path, "w") as zf:
             zf.write(nested_one, arcname="2026-04-07/sepa_a.zip")
             zf.write(nested_two, arcname="2026-04-07/sepa_b.zip")
@@ -338,7 +338,6 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        import pandas as pd
 
         def _sanitize(df):
             normalized = df.copy()
