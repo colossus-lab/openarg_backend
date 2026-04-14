@@ -6,6 +6,10 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from app.application.pipeline.connectors.cache_table_selection import (
+    build_table_compat_notes,
+    rewrite_legacy_sql_tables,
+)
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
@@ -152,6 +156,9 @@ async def ask_natural_language(
             f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
         )
     tables_context = "\n\n".join(tables_context_parts)
+    compat_notes = build_table_compat_notes(table_names)
+    if compat_notes:
+        tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{compat_notes}"
 
     # 3. Ask the LLM to generate SQL
     system_prompt = load_prompt("nl2sql", tables_context=tables_context, few_shot_block="")
@@ -164,7 +171,10 @@ async def ask_natural_language(
         temperature=0.0,
         max_tokens=1024,
     )
-    generated_sql = _strip_sql_fences(llm_response.content.strip())
+    generated_sql = rewrite_legacy_sql_tables(
+        _strip_sql_fences(llm_response.content.strip()),
+        table_names,
+    )
 
     # 4. Execute with self-correction loop (max 2 retries on error)
     max_retries = 2
@@ -191,7 +201,10 @@ async def ask_natural_language(
             temperature=0.0,
             max_tokens=1024,
         )
-        generated_sql = _strip_sql_fences(llm_response.content.strip())
+        generated_sql = rewrite_legacy_sql_tables(
+            _strip_sql_fences(llm_response.content.strip()),
+            table_names,
+        )
         result = await sandbox.execute_readonly(generated_sql)
 
     return AskResponse(

@@ -8,12 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
-from app.application.pipeline.connectors.cache_table_selection import prefer_consolidated_table
+from app.application.pipeline.connectors.cache_table_selection import (
+    build_table_compat_notes,
+    expand_table_hints_compat,
+    prefer_consolidated_table,
+)
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 
 if TYPE_CHECKING:
@@ -23,6 +28,72 @@ if TYPE_CHECKING:
     from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_text.lower().split())
+
+
+def _is_dataset_discovery_query(query: str) -> bool:
+    normalized = _normalize_text(query)
+    if "dataset" not in normalized:
+        return False
+    padded = f" {normalized} "
+    discovery_markers = (
+        " que datasets ",
+        " que dataset ",
+        " cuales datasets ",
+        " cuales dataset ",
+        " lista de datasets ",
+        " listado de datasets ",
+        " mostrar datasets ",
+        " mostrame datasets ",
+        " datasets disponibles ",
+        " hay en ",
+        " hay de ",
+    )
+    return any(marker in padded for marker in discovery_markers)
+
+
+def _build_dataset_discovery_results(
+    *,
+    nl_query: str,
+    tables: list[Any],
+    catalog_entries: dict[str, dict[str, Any]],
+) -> list[DataResult]:
+    records: list[dict[str, Any]] = []
+    for table in tables[:20]:
+        entry = catalog_entries.get(table.table_name, {})
+        records.append(
+            {
+                "table_name": table.table_name,
+                "display_name": entry.get("display_name") or table.table_name,
+                "description": entry.get("description") or "",
+                "domain": entry.get("domain") or "",
+                "subdomain": entry.get("subdomain") or "",
+                "row_count": table.row_count or 0,
+                "columns": list(table.columns or []),
+            }
+        )
+
+    return [
+        DataResult(
+            source="sandbox:dataset_discovery",
+            portal_name="Cache Local (descubrimiento de datasets)",
+            portal_url="",
+            dataset_title=f"Datasets relacionados: {nl_query[:100]}",
+            format="json",
+            records=records,
+            metadata={
+                "dataset_discovery": True,
+                "total_matches": len(tables),
+                "returned_matches": len(records),
+                "fetched_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +445,9 @@ async def execute_sandbox_step(
                         table_notes = _hint.params["table_notes"]
                     if table_hints and table_notes:
                         break
+        if table_hints:
+            table_hints = expand_table_hints_compat(table_hints)
+
         logger.info(
             "Sandbox step %s: %d cached tables, hints=%s, query=%s",
             step.id,
@@ -521,6 +595,18 @@ async def execute_sandbox_step(
         # Enrich tables with semantic catalog metadata if available
         catalog_entries = await get_catalog_entries([t.table_name for t in tables[:50]], sandbox)
 
+        if _is_dataset_discovery_query(nl_query):
+            logger.info(
+                "Sandbox step %s resolved as dataset discovery query; returning %d table candidates without NL2SQL",
+                step.id,
+                len(tables),
+            )
+            return _build_dataset_discovery_results(
+                nl_query=nl_query,
+                tables=tables,
+                catalog_entries=catalog_entries,
+            )
+
         tables_context_parts = []
         for t in tables[:50]:
             cols = ", ".join(t.columns) if t.columns else "(no column info)"
@@ -547,9 +633,12 @@ async def execute_sandbox_step(
             tables_context_parts.append(part)
         tables_context = "\n\n".join(tables_context_parts)
 
+        compat_notes = build_table_compat_notes([t.table_name for t in tables[:50]])
+        all_table_notes = "\n".join(note for note in [table_notes, compat_notes] if note)
+
         # Inject table_notes (resolved early at top of function) into NL2SQL context
-        if table_notes:
-            tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{table_notes}"
+        if all_table_notes:
+            tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{all_table_notes}"
 
         # Retrieve dynamic few-shot examples from successful past queries
         few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
@@ -575,6 +664,7 @@ async def execute_sandbox_step(
         # contract. FIX-004 (2026-04-11).
         from app.application.pipeline.subgraphs.nl2sql import (
             get_compiled_nl2sql_subgraph,
+            nl2sql_runtime,
         )
 
         compiled_subgraph = await get_compiled_nl2sql_subgraph()
@@ -582,17 +672,19 @@ async def execute_sandbox_step(
             "nl_query": nl_query,
             "tables": tables,
             "tables_context": tables_context,
-            "table_notes": table_notes,
+            "table_notes": all_table_notes,
             "catalog_entries": catalog_entries,
             "table_descriptions": table_descriptions,
             "few_shot_block": few_shot_block or "",
-            "llm": llm,
-            "sandbox": sandbox,
-            "embedding": embedding,
-            "semantic_cache": semantic_cache,
             "max_attempts": 2,
         }
-        final_state = await compiled_subgraph.ainvoke(initial_state)
+        with nl2sql_runtime(
+            llm=llm,
+            sandbox=sandbox,
+            embedding=embedding,
+            semantic_cache=semantic_cache,
+        ):
+            final_state = await compiled_subgraph.ainvoke(initial_state)
         return final_state.get("data_results", []) or []
     except Exception:
         logger.warning("Sandbox step %s failed", step.id, exc_info=True)

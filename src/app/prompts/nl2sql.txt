@@ -25,6 +25,9 @@ Rules:
 - Use GROUP BY for summaries, ORDER BY for rankings.
 - For date columns stored as text, use standard comparison (WHERE fecha >= '2024-01-01').
 - When multiple candidate tables exist, choose the one that covers the requested time period or data.
+- Budget tables are year-suffixed. Use the exact table from context such as `cache_presupuesto_credito_2025`, never invented aliases like `cache_presupuesto_nacional` or unsuffixed names like `cache_presupuesto_credito`.
+- Time-series cache tables use the `cache_series_*` prefix, not `cache_series_tiempo_*`.
+- If table notes mention a legacy alias, always use the canonical table name from those notes in the final SQL.
 
 Table selection guidelines:
 - When the user asks for a RATE (tasa), prefer tables with 'tasa' in the name or small row counts with pre-aggregated data. Do NOT query raw record tables (hundreds of thousands of rows) and try to compute rates from them.
@@ -40,7 +43,7 @@ Table selection guidelines:
 Examples:
 
 Question: ¿Cuánto se gastó en el programa "Asignaciones Familiares" en 2024?
-SQL: SELECT ejercicio, programa_desc, CAST(devengado AS NUMERIC) AS devengado FROM cache_presupuesto_credito WHERE programa_desc ILIKE '%asignaciones familiares%' AND ejercicio = '2024' ORDER BY CAST(devengado AS NUMERIC) DESC LIMIT 100
+SQL: SELECT ejercicio_presupuestario, programa_desc, CAST(credito_devengado AS NUMERIC) AS devengado FROM cache_presupuesto_credito_2024 WHERE programa_desc ILIKE '%asignaciones familiares%' AND ejercicio_presupuestario = '2024' ORDER BY CAST(credito_devengado AS NUMERIC) DESC LIMIT 100
 
 Question: ¿Cuáles son los 10 proveedores con más contratos en Buenos Aires Compras?
 SQL: SELECT suppliers_name, COUNT(*) AS total_contratos, SUM(CAST(awards_value_amount AS NUMERIC)) AS monto_total FROM cache_bac_awards WHERE suppliers_name IS NOT NULL AND awards_value_amount ~ '^\d+\.?\d*$' GROUP BY suppliers_name ORDER BY total_contratos DESC LIMIT 10
@@ -52,7 +55,7 @@ Question: ¿Quién es el gobernador de Córdoba?
 SQL: SELECT provincia, gobernador, partido, inicio_mandato FROM cache_gobernadores WHERE provincia ILIKE '%cordoba%' OR provincia ILIKE '%córdoba%' LIMIT 5
 
 Question: ¿Cuál es el presupuesto total por jurisdicción en 2025?
-SQL: SELECT jurisdiccion_desc, SUM(CAST(credito_vigente AS NUMERIC)) AS total_credito FROM cache_presupuesto_credito WHERE ejercicio = '2025' AND credito_vigente ~ '^\-?\d+\.?\d*$' GROUP BY jurisdiccion_desc ORDER BY total_credito DESC LIMIT 50
+SQL: SELECT jurisdiccion_desc, SUM(CAST(credito_vigente AS NUMERIC)) AS total_credito FROM cache_presupuesto_credito_2025 WHERE ejercicio_presupuestario = '2025' AND credito_vigente ~ '^\-?\d+\.?\d*$' GROUP BY jurisdiccion_desc ORDER BY total_credito DESC LIMIT 50
 
 Question: ¿Cuál era la tasa de mortalidad fetal en 1980?
 SQL: SELECT * FROM cache_tasa_de_mortalidad_fetal_por_sexo WHERE anio = '1980' LIMIT 50

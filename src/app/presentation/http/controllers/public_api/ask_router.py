@@ -23,10 +23,8 @@ from app.application.pipeline.state import OpenArgState
 from app.domain.entities.api_key.api_key import ApiUsage
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
-from app.presentation.http.controllers.query.smart_query_v2_router import (
-    _get_checkpointer,
-    _get_or_compile_graph,
-)
+from app.presentation.http.controllers.query import smart_query_v2_router as smart_router
+from app.presentation.http.controllers.query.smart_query_v2_router import _get_or_compile_graph
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +62,8 @@ async def public_ask(
     rate_info = await check_rate_limit(api_key, cache, client_ip=client_ip)
 
     # 3. Reuse the same compiled graph as the frontend endpoint
-    checkpointer = await _get_checkpointer()
-    compiled_graph = _get_or_compile_graph(deps, checkpointer)
+    checkpointer = smart_router._checkpointer
+    compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     nodes_pkg.set_deps(deps)
 
     # 4. Run pipeline

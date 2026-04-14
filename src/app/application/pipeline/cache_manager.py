@@ -184,17 +184,29 @@ async def write_cache(
         logger.debug("Skipping cache write for error response")
         return
     ttl = ttl_for_intent(intent)
-
-    await _retry_async(
-        "Redis cache write",
-        lambda: cache.set(cache_key(question), result, ttl_seconds=ttl),
+    redis_write_task = asyncio.create_task(
+        _retry_async(
+            "Redis cache write",
+            lambda: cache.set(cache_key(question), result, ttl_seconds=ttl),
+        )
     )
 
-    q_embedding = last_embedding
-    if not q_embedding:
-        q_embedding = await get_embedding(embedding_provider, question)
-    if q_embedding:
-        await _retry_async(
-            "Semantic cache write",
-            lambda: semantic_cache.set(question, q_embedding, result, ttl=ttl),
-        )
+    try:
+        q_embedding = last_embedding
+        if not q_embedding:
+            q_embedding = await get_embedding(embedding_provider, question)
+
+        if q_embedding:
+            semantic_write_task = asyncio.create_task(
+                _retry_async(
+                    "Semantic cache write",
+                    lambda: semantic_cache.set(question, q_embedding, result, ttl=ttl),
+                )
+            )
+            await asyncio.gather(redis_write_task, semantic_write_task)
+        else:
+            await redis_write_task
+    except Exception:
+        if not redis_write_task.done():
+            redis_write_task.cancel()
+        raise

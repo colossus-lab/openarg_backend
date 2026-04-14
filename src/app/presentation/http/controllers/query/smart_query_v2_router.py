@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import secrets as _secrets_mod
-import threading
+from contextlib import AsyncExitStack
 from typing import Any
 
 from dishka import AsyncContainer
@@ -28,14 +28,15 @@ from app.application.pipeline.state import OpenArgState
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
-from app.infrastructure.serialization import json_default, to_json_safe
+from app.infrastructure.serialization import safe_dumps, to_json_safe
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
-_graph_lock = threading.Lock()
+_compiled_graphs_lock = asyncio.Lock()
 _checkpointer_lock = asyncio.Lock()
-_compiled_graph = None
+_compiled_graphs: dict[bool, Any] = {}
 _checkpointer = None  # AsyncPostgresSaver instance (lazy)
+_checkpointer_stack: AsyncExitStack | None = None
 _checkpointer_attempted = False  # Prevent repeated init attempts
 
 logger = logging.getLogger(__name__)
@@ -63,8 +64,49 @@ _STREAM_ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "question",
         "options",
         "map_data",
+        "connector",
     }
 )
+
+_COMPLETE_EVENT_KEYS: tuple[str, ...] = (
+    "answer",
+    "sources",
+    "chart_data",
+    "map_data",
+    "confidence",
+    "citations",
+    "documents",
+    "warnings",
+)
+
+_TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
+    {
+        "finalize",
+        "cache_reply",
+        "fast_reply",
+    }
+)
+
+
+def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
+    """Return a browser ``complete`` event from a terminal-looking update."""
+    if not isinstance(update, dict):
+        return None
+    if node_name not in _TERMINAL_COMPLETE_NODES:
+        return None
+    if "clean_answer" not in update:
+        return None
+    return {
+        "type": "complete",
+        "answer": update.get("clean_answer", ""),
+        "sources": update.get("sources", []),
+        "chart_data": update.get("chart_data"),
+        "map_data": update.get("map_data"),
+        "confidence": update.get("confidence", 1.0),
+        "citations": update.get("citations", []),
+        "documents": update.get("documents"),
+        "warnings": update.get("warnings", []),
+    }
 
 
 async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
@@ -74,16 +116,14 @@ async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
     without a ``default=`` hook, so any ``datetime`` / ``Decimal`` / ``UUID``
     / ``bytes`` that sneaks into the state aborts the ``complete`` event
     with ``TypeError`` and the browser sees *"respuesta no disponible"*.
-    We pre-serialize with :func:`json_default` and fall back to a recursive
-    :func:`to_json_safe` walk if the encoder still refuses — the goal is
-    that the WebSocket send path never crashes on a common Python type.
+    Normalize once with :func:`to_json_safe`, then serialize once with
+    :func:`safe_dumps` — the goal is that the WebSocket send path never
+    crashes on a common Python type and avoids retrying a failed dump in
+    this hot path.
 
     See ``specs/FIX_BACKLOG.md#FIX-017``.
     """
-    try:
-        text = json.dumps(payload, default=json_default, ensure_ascii=False)
-    except TypeError:
-        text = json.dumps(to_json_safe(payload), ensure_ascii=False)
+    text = safe_dumps(to_json_safe(payload), ensure_ascii=False)
     await ws.send_text(text)
 
 
@@ -114,14 +154,35 @@ def _filter_stream_payload(payload: Any) -> Any:
     return {k: v for k, v in payload.items() if k in _STREAM_ALLOWED_PAYLOAD_KEYS}
 
 
-def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type: ignore[no-untyped-def]
+async def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type: ignore[no-untyped-def]
     """Return the compiled graph, compiling it once (thread-safe)."""
-    global _compiled_graph  # noqa: PLW0603
-    if _compiled_graph is None:
-        with _graph_lock:
-            if _compiled_graph is None:
-                _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
-    return _compiled_graph
+    global _compiled_graphs  # noqa: PLW0603
+    cache_key = bool(checkpointer)
+    if cache_key not in _compiled_graphs:
+        async with _compiled_graphs_lock:
+            if cache_key not in _compiled_graphs:
+                _compiled_graphs[cache_key] = build_pipeline_graph(
+                    deps, checkpointer=checkpointer
+                )
+    return _compiled_graphs[cache_key]
+
+
+async def _open_checkpointer(conn_str: str) -> tuple[AsyncExitStack, Any]:
+    """Open an AsyncPostgresSaver inside an AsyncExitStack."""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    stack = AsyncExitStack()
+    saver = await stack.enter_async_context(AsyncPostgresSaver.from_conn_string(conn_str))
+    return stack, saver
+
+
+def _is_benign_checkpointer_setup_race(exc: Exception) -> bool:
+    """Return True for the known concurrent setup race on checkpoint migrations."""
+    message = str(exc)
+    return (
+        "checkpoint_migrations_pkey" in message
+        and "duplicate key value violates unique constraint" in message
+    )
 
 
 async def _get_checkpointer():
@@ -131,7 +192,7 @@ async def _get_checkpointer():
     unavailable (missing dependency or missing env var).
     Thread-safe via asyncio.Lock with double-check pattern.
     """
-    global _checkpointer, _checkpointer_attempted  # noqa: PLW0603
+    global _checkpointer, _checkpointer_attempted, _checkpointer_stack  # noqa: PLW0603
 
     if _checkpointer is not None:
         return _checkpointer
@@ -152,20 +213,54 @@ async def _get_checkpointer():
             return None
 
         try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
             conn_str = db_url.replace("postgresql+psycopg://", "postgresql://")
-            saver = AsyncPostgresSaver.from_conn_string(conn_str)
-            await saver.setup()
+            stack, saver = await _open_checkpointer(conn_str)
+            try:
+                await saver.setup()
+                logger.info("LangGraph checkpointer initialised (PostgreSQL)")
+            except Exception as exc:
+                if not _is_benign_checkpointer_setup_race(exc):
+                    raise
+                with contextlib.suppress(Exception):
+                    await stack.aclose()
+                stack, saver = await _open_checkpointer(conn_str)
+                logger.info(
+                    "LangGraph checkpointer initialised after concurrent setup race"
+                )
             _checkpointer = saver
-            logger.info("LangGraph checkpointer initialised (PostgreSQL)")
+            _checkpointer_stack = stack
             return saver
         except Exception:
+            if _checkpointer_stack is not None:
+                with contextlib.suppress(Exception):
+                    await _checkpointer_stack.aclose()
+                _checkpointer_stack = None
             logger.warning(
                 "LangGraph checkpointer not available — running without persistence",
                 exc_info=True,
             )
             return None
+
+
+async def init_pipeline_persistence() -> None:
+    """Warm up the optional LangGraph checkpointer during app startup."""
+    await _get_checkpointer()
+
+
+async def shutdown_pipeline_persistence() -> None:
+    """Release app-scoped persistence resources on shutdown."""
+    global _checkpointer, _checkpointer_stack, _checkpointer_attempted, _compiled_graphs  # noqa: PLW0603
+
+    async with _checkpointer_lock:
+        stack = _checkpointer_stack
+        _checkpointer = None
+        _checkpointer_stack = None
+        _checkpointer_attempted = False
+        _compiled_graphs = {}
+
+    if stack is not None:
+        with contextlib.suppress(Exception):
+            await stack.aclose()
 
 
 router = APIRouter(prefix="/query", tags=["smart-query"])
@@ -218,8 +313,8 @@ async def smart_query_v2(
     await ensure_privacy_accepted(body.user_email, user_repo)
 
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
-    checkpointer = await _get_checkpointer()
-    compiled_graph = _get_or_compile_graph(deps, checkpointer)
+    checkpointer = _checkpointer
+    compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
     user_id = body.user_email or "anonymous"
@@ -333,14 +428,9 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 deps = await request_scope.get(PipelineDeps)
 
                 # Compile graph once (thread-safe), set deps per-request
-                global _compiled_graph  # noqa: PLW0603
-                checkpointer = await _get_checkpointer()
-                if _compiled_graph is None:
-                    with _graph_lock:
-                        if _compiled_graph is None:
-                            _compiled_graph = build_pipeline_graph(deps, checkpointer=checkpointer)
+                checkpointer = _checkpointer
                 set_deps(deps)
-                graph = _compiled_graph
+                graph = await _get_or_compile_graph(deps, checkpointer)
 
                 raw_text = await ws.receive_text()
                 if len(raw_text) > 10_000:
@@ -424,37 +514,14 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     elif mode == "updates":
                         # Node completed — check if it's a terminal node
                         for node_name, update in payload.items():
-                            if node_name in ("fast_reply", "cache_reply", "clarify_reply"):
-                                # Terminal node — send complete event
-                                await _safe_send_json(
-                                    ws,
-                                    {
-                                        "type": "complete",
-                                        "answer": update.get("clean_answer", ""),
-                                        "sources": update.get("sources", []),
-                                        "chart_data": update.get("chart_data"),
-                                        "map_data": update.get("map_data"),
-                                        "confidence": update.get("confidence", 1.0),
-                                        "citations": update.get("citations", []),
-                                        "documents": update.get("documents"),
-                                    },
+                            complete_event = _build_complete_event(node_name, update)
+                            if complete_event is None:
+                                logger.debug(
+                                    "Ignoring non-terminal stream update from node %s",
+                                    node_name,
                                 )
-                            elif node_name == "finalize":
-                                # Pipeline complete — get full state
-                                await _safe_send_json(
-                                    ws,
-                                    {
-                                        "type": "complete",
-                                        "answer": update.get("clean_answer", ""),
-                                        "sources": update.get("sources", []),
-                                        "chart_data": update.get("chart_data"),
-                                        "map_data": update.get("map_data"),
-                                        "confidence": update.get("confidence", 1.0),
-                                        "citations": update.get("citations", []),
-                                        "documents": update.get("documents"),
-                                        "warnings": update.get("warnings", []),
-                                    },
-                                )
+                                continue
+                            await _safe_send_json(ws, complete_event)
 
     except WebSocketDisconnect:
         logger.debug("WebSocket v2 client disconnected")

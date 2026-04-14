@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-11
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Infrastructure (transparent to pipeline)
 **Related plan**: [./plan.md](./plan.md)
 
@@ -53,6 +53,7 @@ It is one of the modules with a **critical fix applied in Mar 2026**: the SQL `:
   - Default: 1800s
 - **FR-008**: `cleanup()` MUST delete expired entries and return the count.
 - **FR-009**: The write path MUST use a defensive JSON encoder (`safe_dumps` from `infrastructure/serialization/json_safe.py`) so that non-primitive values (`datetime`, `date`, `Decimal`, `UUID`, `bytes`, `set`, `Path`) in the cached response do not raise `TypeError` and abort the insert. Origin-level sanitation at connectors is still the long-term goal; FR-009 is the belt-and-braces guarantee that the cache write never crashes the pipeline. See `FIX_BACKLOG.md#FIX-017`.
+- **FR-010**: The cache write path MUST overlap independent work on the request tail: the Redis write starts immediately, embedding generation runs in parallel when needed, and the semantic-cache write joins once the embedding is ready. The pipeline MUST NOT wait for Redis to finish before starting the embedding/semantic branch.
 
 ## 5. Success Criteria
 

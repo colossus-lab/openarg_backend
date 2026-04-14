@@ -170,6 +170,9 @@ VALIDACION DE DATOS NUMERICOS (CRITICO):
 - NUNCA presentes códigos internos (IDs, códigos CIE10, códigos jurisdiccionales) como datos de valor.
 - Si los datos provienen de tablas con "tasa" o "rate" en el nombre, los valores YA son tasas (por mil). No los multipliques ni dividas.
 - Si los datos provienen de tablas de registros individuales (defunciones, nacimientos), son CONTEOS ABSOLUTOS. No los presentes como tasas.
+- NO calcules porcentajes, variaciones, saltos, promedios ni agregados temporales nuevos salvo que esos valores ya vengan explícitos en los datos o el sistema los haya calculado de forma determinística antes de llegarte.
+- Si tenés dos valores ancla (por ejemplo marzo y diciembre) y querés describir la tendencia, hacelo en texto simple ("subió con fuerza", "se recuperó", "cayó") en vez de inventar un porcentaje exacto.
+- NO uses expresiones como "salto del 56%", "creció casi 16.000 millones", "en los últimos 9 meses" si ese número derivado no aparece explícitamente en los datos recibidos.
 
 ANTI-ALUCINACIÓN (CRÍTICO):
 - NUNCA inventes datos, cifras, fechas ni porcentajes que no estén en los datos recolectados

@@ -184,3 +184,37 @@ async def test_finalize_uses_default_confidence_and_citations(
 
     assert result["confidence"] == 1.0
     assert result["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_writes_confidence_citations_and_warnings_to_cache(
+    _deps: _StubDeps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _capture_write_cache(
+        question: str,
+        result: dict[str, Any],
+        intent: str,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        captured["question"] = question
+        captured["intent"] = intent
+        captured["result"] = result
+
+    monkeypatch.setattr(
+        "app.application.pipeline.nodes.finalize.write_cache",
+        _capture_write_cache,
+    )
+
+    state = _make_state(step_warnings=["warning-a"])
+
+    await finalize_node(state)  # type: ignore[arg-type]
+
+    assert captured["question"] == "test question"
+    assert captured["intent"] == "test_intent"
+    assert captured["result"]["confidence"] == 0.87
+    assert captured["result"]["citations"] == [{"source": "BCRA", "note": "monthly series"}]
+    assert captured["result"]["warnings"] == ["warning-a"]

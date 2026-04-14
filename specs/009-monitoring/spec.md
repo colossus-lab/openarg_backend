@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-12
 **Hexagonal scope**: Infrastructure + Presentation
 **Related plan**: [./plan.md](./plan.md)
 
@@ -12,7 +12,7 @@
 
 **Operational observability** module: exposes component-level health checks (`GET /health`), in-memory metrics (`GET /api/v1/metrics`, `GET /metrics/prometheus`), and captures metrics via ASGI middleware. Enables outage detection, per-endpoint/connector performance tracking, and exposure for Prometheus scraping.
 
-It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in production so the Sentry SDK initializes as a silent no-op. Open debt.
+It is the module that **does not require Sentry to function**. The backend does have conditional Sentry wiring via `setup_sentry()` in `setup/logging_config.py`, but the health/metrics surface works independently and remains useful even when `SENTRY_DSN` is unset and the SDK becomes a no-op.
 
 ## 2. Ubiquitous Language
 
@@ -50,6 +50,7 @@ It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in
 - **FR-008**: MUST support optional auth with `X-API-Key` on `/health` (if `BACKEND_API_KEY` is set, returns minimal info without the key).
 - **FR-009**: Stuck task detection: `cached_datasets.status='downloading' AND updated_at < now() - 30min`.
 - **FR-010**: Recent errors count: 24h window.
+- **FR-011**: Heavy bootstrap work (bulk collect, transparency bootstrap, large backfills) MUST NOT be dispatched implicitly on every Celery worker startup unless an explicit operator opt-in flag is enabled.
 
 ## 5. Success Criteria
 
@@ -66,7 +67,7 @@ It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in
 - Prometheus scrape is optional (not configured upstream today).
 
 ### Out of scope
-- **Sentry** (error monitoring) — known debt, not configured.
+- **Sentry-based alerting strategy** — the SDK can be wired, but alert routing / operational policy is outside this module.
 - **Distributed traces** (OpenTelemetry) — not implemented.
 - **Alerting** — no alert rules defined.
 - **Dashboard** (Grafana) — responsibility of the operational layer, not the code.
@@ -75,7 +76,7 @@ It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in
 ## 7. Open Questions
 
 - **[NEEDS CLARIFICATION CL-001]** — Is anyone currently scraping `/metrics/prometheus`? The endpoint exists but it is unknown whether it has a consumer.
-- **[RESOLVED CL-002]** — Sentry **accepted debt, not a priority**. No configuration plan in the short term. The project still has no external error monitoring; it depends on local logs and the in-memory `MetricsCollector`.
+- **[RESOLVED CL-002]** — **Sentry is wired conditionally, not absent.** `setup_sentry()` in `setup/logging_config.py` initializes the SDK when `SENTRY_DSN` is present and becomes a silent no-op otherwise. The open uncertainty is operational: whether the DSN is configured in a given environment.
 - **[RESOLVED CL-003]** — **Hardcoded**. In `health.py:116` the query uses the literal SQL `INTERVAL '30 minutes'`. No env var or settings. To change the threshold, edit the SQL.
 - **[RESOLVED CL-004]** — **Symbolic**. `/health/ready` returns `{"status": "ready"}` unconditionally without real checks (see `health_router.py:32-34`). Useful as a simple liveness probe (the process is alive), not as real readiness. For effective readiness use `/health` which does perform component checks via `HealthCheckService.check_all()`.
 
@@ -83,9 +84,10 @@ It is the module that **does not depend on Sentry** — `SENTRY_DSN` is unset in
 
 - **[DEBT-001]** — **`MetricsCollector` is an in-memory singleton** — it resets on every restart, does not persist.
 - **[DEBT-002]** — **Latency samples keep only the last 100** per connector (FIFO, not a real histogram).
-- **[DEBT-003]** — **Sentry not configured** — no external error monitoring.
+- **[DEBT-003]** — **External error monitoring still depends on env wiring** — the code initializes Sentry conditionally, but if `SENTRY_DSN` is unset in a deploy, the system falls back to logs + in-memory metrics only.
 - **[DEBT-004]** — **No distributed traces** — limited cross-service debugging.
 - **[DEBT-005]** — **`/health/ready` performs no real checks** — always 200.
+- **[DEBT-006]** — **No dedicated metric for startup-bootstrap suppression** — operators can infer it from logs/env, but it is not yet surfaced in `/api/v1/metrics` or Prometheus.
 
 ---
 

@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-11
+**Last synced with code**: 2026-04-12
 **Hexagonal scope**: Domain + Infrastructure
 **Related plan**: [./plan.md](./plan.md)
 
@@ -47,6 +47,8 @@
 - **FR-007**: `index_dataset` MUST insert chunks into `dataset_chunks` with the persisted embedding.
 - **FR-008**: `delete_dataset_chunks` MUST delete all chunks for a given `dataset_id` (for reindex).
 - **FR-009**: The HNSW index on `dataset_chunks.embedding` MUST use `vector_cosine_ops`.
+- **FR-010**: Any query with lexical signal (at least 2 meaningful terms) MUST execute the `HYBRID_FULL` retrieval path directly, skipping the standalone vector fast-path precheck and preserving portal filters and RRF fusion.
+- **FR-011**: The retrieval strategy MUST expose only two effective modes at runtime: `VECTOR_ONLY` for low-signal queries and `HYBRID_FULL` for lexical queries. `HYBRID_LIGHT` is out of the active routing path.
 
 ## 5. Success Criteria
 
@@ -74,7 +76,7 @@
 - **[NEEDS CLARIFICATION CL-001]** — Is the `min_similarity=0.55` threshold empirical? Against which test dataset?
 - **[NEEDS CLARIFICATION CL-002]** — Is `rrf_k=60` tuned or is it the standard default?
 - **[RESOLVED CL-003]** — A dataset **cannot** have more than 3 chunks. `index_dataset_embedding` in `src/app/infrastructure/celery/tasks/scraper_tasks.py:595-674` builds a fixed pipeline: chunk 1 (main metadata), chunk 2 (columns, only if `cols` non-empty), chunk 3 (context/use-case). There is no loop over a variable number of chunks — datasets without columns end up with 2 chunks, all others with 3. The "3" is a generation cap, not a retrieval cap. (resolved 2026-04-11 via code inspection)
-- **[RESOLVED CL-004]** — The heuristic at `src/app/infrastructure/adapters/search/pgvector_search_adapter.py:97-101` is: tokenise the query on `\w+`, keep tokens with length ≥ 3, return `True` if at least **2 meaningful tokens** remain. Edge cases: single-word queries like "inflación" return `False` (1 meaningful token) → BM25 is skipped, so lexical-only queries with a single keyword rely on pure vector. Queries with lots of stopwords (`de`, `la`, `el`) also collapse to few meaningful tokens. Tracked separately as `DEBT-002`. (resolved 2026-04-11 via code inspection)
+- **[RESOLVED CL-004]** — The heuristic at `src/app/infrastructure/adapters/search/pgvector_search_adapter.py` tokenises the query on `\w+`, keeps tokens with length ≥ 3, and treats queries with at least **2 meaningful tokens** as lexical-signal queries that go straight to `HYBRID_FULL`. Single-word queries like "inflación" still fall back to `VECTOR_ONLY`. Queries with lots of stopwords (`de`, `la`, `el`) can still collapse to few meaningful tokens. Tracked separately as `DEBT-002`. (updated 2026-04-12 via code inspection)
 - **[NEEDS CLARIFICATION CL-005]** — Known debt from the initial reverse-engineering pass: "Vector search lacks threshold, reranking, dedup". Plan to close it?
 
 ## 8. Tech Debt Discovered
@@ -85,6 +87,7 @@
 - **[DEBT-004]** — **No dedup** across similar chunks of the same dataset.
 - **[DEBT-005]** — **Hardcoded 5-chunk strategy** (`scraper_tasks.py:592-695`) — no configurable chunking.
 - **[DEBT-006]** — **No metrics** for search quality (precision/recall).
+- **[DEBT-007]** — ~~**`HYBRID_FULL` no longer pays the standalone vector precheck roundtrip, but `HYBRID_LIGHT` still does.**~~ **FIXED 2026-04-12**: lexical queries now route directly to `HYBRID_FULL`, so the extra vector-precheck roundtrip is gone from the active lexical path altogether.
 
 ---
 

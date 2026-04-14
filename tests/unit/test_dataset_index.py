@@ -158,6 +158,24 @@ class TestEconomicRoutes:
         assert top.action == "query_argentina_datos"
         assert top.params.get("type") == "dolar"
         assert top.params.get("casa") == "blue"
+        assert top.params.get("ultimo") is True
+
+    def test_dolar_historico_keeps_series_mode(self):
+        hints = resolve_hints("cotizacion historica del dolar blue")
+        top = hints[0]
+        assert top.action == "query_argentina_datos"
+        assert top.params.get("type") == "dolar"
+        assert top.params.get("casa") == "blue"
+        assert top.params.get("historico") is True
+
+    def test_dolar_unspecified_returns_dual_mode(self):
+        hints = resolve_hints("cotizacion dolar blue")
+        top = hints[0]
+        assert top.action == "query_argentina_datos"
+        assert top.params.get("type") == "dolar"
+        assert top.params.get("casa") == "blue"
+        assert "ultimo" not in top.params
+        assert "historico" not in top.params
 
     def test_riesgo_pais(self):
         hints = resolve_hints("riesgo pais argentina")
@@ -202,6 +220,13 @@ class TestCachedDataRoutes:
         hints = resolve_hints("diario de sesiones congreso")
         top = hints[0]
         assert top.action == "query_sesiones"
+
+    def test_coparticipacion_uses_generic_budget_tables(self):
+        hints = resolve_hints("como se distribuye la coparticipacion federal")
+        top = hints[0]
+        assert top.action == "query_sandbox"
+        assert top.params.get("tables") == ["cache_presupuesto_*"]
+        assert "coparticipacion" in top.params.get("table_notes", "").lower()
 
 
 class TestFormatHints:

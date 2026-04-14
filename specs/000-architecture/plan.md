@@ -313,7 +313,7 @@ Loaded by `setup/config/loader.py`, validated against Pydantic classes in `setup
 - **Principle I (Hexagonal)**: violated by BCRA connector without port (`[002a-bcra/DEBT-001]`). Isolated.
 - **Principle III (Single DI via Dishka)**: violated by Celery workers that instantiate adapters inline when they need a sync engine. Structural debt, not resolved.
 - **Principle IV (Async-first)**: Celery workers are sync by nature of Celery 5 — accepted exception, not debt.
-- **Principle VII (Observability)**: Sentry not configured. No distributed tracing. Metrics only in-memory (not exported to Prometheus/Grafana). Open debt.
+- **Principle VII (Observability)**: Sentry is wired conditionally rather than guaranteed; when `SENTRY_DSN` is unset, the backend falls back to logs + in-memory metrics only. No distributed tracing. Metrics remain primarily in-memory (plus Prometheus export where enabled). Open debt.
 - **Principle VIII (Migrations via Alembic)**: violated by dynamic `cache_*` tables created with `df.to_sql()` — accepted exception by the nature of the use case.
 
 ---

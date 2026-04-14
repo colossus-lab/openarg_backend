@@ -25,6 +25,8 @@ from typing import Any
 import pytest
 
 from app.presentation.http.controllers.query.smart_query_v2_router import (
+    _build_complete_event,
+    _filter_stream_payload,
     _safe_send_json,
 )
 
@@ -168,3 +170,58 @@ async def test_safe_send_json_does_not_touch_send_json(
 
     assert ws.sent_json_calls == 0
     assert len(ws.sent_text) == 1
+
+
+async def test_safe_send_json_normalizes_unknown_type_in_single_pass(
+    ws: _FakeWebSocket,
+) -> None:
+    class _Weird:
+        def __repr__(self) -> str:
+            return "<weird-object>"
+
+    payload = {"type": "complete", "answer": "ok", "meta": {"weird": _Weird()}}
+
+    await _safe_send_json(ws, payload)  # type: ignore[arg-type]
+
+    parsed = json.loads(ws.sent_text[0])
+    assert parsed["meta"]["weird"] == "<weird-object>"
+
+
+def test_build_complete_event_uses_state_shape_for_terminal_nodes() -> None:
+    update = {
+        "clean_answer": "ok",
+        "sources": [{"name": "x", "url": "", "portal": "p"}],
+        "warnings": ["warn"],
+    }
+
+    assert _build_complete_event("finalize", update) == {
+        "type": "complete",
+        "answer": "ok",
+        "sources": [{"name": "x", "url": "", "portal": "p"}],
+        "chart_data": None,
+        "map_data": None,
+        "confidence": 1.0,
+        "citations": [],
+        "documents": None,
+        "warnings": ["warn"],
+    }
+
+
+def test_build_complete_event_ignores_non_terminal_analyst_update() -> None:
+    update = {
+        "clean_answer": "respuesta parcial",
+        "confidence": 0.45,
+    }
+
+    assert _build_complete_event("analyst", update) is None
+
+
+def test_filter_stream_payload_keeps_connector_metadata() -> None:
+    payload = {
+        "type": "status",
+        "step": "searching",
+        "connector": "query_series",
+        "detail": "Consultando series...",
+    }
+
+    assert _filter_stream_payload(payload) == payload

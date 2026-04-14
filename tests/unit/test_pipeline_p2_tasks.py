@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -8,11 +9,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.infrastructure.celery.tasks.collector_tasks import (
+    _check_schema_compat_columns,
+    _detect_csv_params,
     _make_unique_columns,
+    _parse_zip_archive,
+    _read_kml_from_zip,
+    _read_shapefile_from_zip,
     _resource_table_name,
     _route_table_for_schema,
     _sanitize_columns,
     _schema_table_name,
+    _serialize_structured_cells,
+    _zip_structure_summary,
+    bulk_collect_all,
     collect_dataset,
 )
 from app.infrastructure.celery.tasks.embedding_tasks import index_sesiones_chunks
@@ -44,6 +53,37 @@ class _ScalarResult:
 
 
 class TestCollectorP2:
+    @patch("app.infrastructure.celery.tasks.collector_tasks._try_advisory_lock")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_collect_dataset_skips_duplicate_run_when_dataset_lock_is_held(
+        self,
+        mock_get_engine,
+        mock_try_advisory_lock,
+    ):
+        mock_get_engine.return_value = MagicMock()
+        mock_try_advisory_lock.return_value = False
+
+        result = collect_dataset.run("11111111-1111-1111-1111-111111111111")
+
+        assert result == {
+            "dataset_id": "11111111-1111-1111-1111-111111111111",
+            "status": "already_collecting",
+        }
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._try_advisory_lock")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_bulk_collect_all_skips_when_lock_is_held(
+        self,
+        mock_get_engine,
+        mock_try_advisory_lock,
+    ):
+        mock_get_engine.return_value = MagicMock()
+        mock_try_advisory_lock.return_value = False
+
+        result = bulk_collect_all.run()
+
+        assert result == {"status": "skipped_already_running"}
+
     def test_sanitize_columns_compacts_overflow_into_json_column(self):
         data = {f"col_{i}": [i] for i in range(1505)}
 
@@ -65,6 +105,452 @@ class TestCollectorP2:
             "DEPARTAMENTOS_2",
             "DEPARTAMENTOS_3",
         ]
+
+    def test_serialize_structured_cells_jsonifies_nested_values(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {
+                "scalar": [1],
+                "payload": [{"a": 1, "b": [1, 2]}],
+                "items": [["x", "y"]],
+            }
+        )
+
+        serialized = _serialize_structured_cells(df)
+
+        assert serialized.loc[0, "scalar"] == 1
+        assert json.loads(serialized.loc[0, "payload"]) == {"a": 1, "b": [1, 2]}
+        assert json.loads(serialized.loc[0, "items"]) == ["x", "y"]
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    def test_parse_zip_archive_reads_nested_geojson_zip(
+        self,
+        mock_route_table,
+        mock_to_sql_safe,
+        tmp_path: Path,
+    ):
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
+        )
+        nested_zip_path = tmp_path / "nested.zip"
+        outer_zip_path = tmp_path / "outer.zip"
+
+        geojson_payload = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"nombre": "rio"},
+                    "geometry": {"type": "Point", "coordinates": [-58.4, -34.6]},
+                }
+            ],
+        }
+
+        with zipfile.ZipFile(nested_zip_path, "w") as nested_zf:
+            nested_zf.writestr("cuerpos.geojson", json.dumps(geojson_payload))
+        with zipfile.ZipFile(outer_zip_path, "w") as outer_zf:
+            outer_zf.write(nested_zip_path, arcname="capa_geojson.zip")
+
+        with zipfile.ZipFile(outer_zip_path) as zf:
+            result = _parse_zip_archive(
+                zf,
+                zip_path=str(outer_zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_geo_test",
+                engine=MagicMock(),
+                append_mode=False,
+            )
+
+        assert result["parsed"] is True
+        assert result["row_count"] == 1
+        assert "_source_dataset_id" in result["columns"]
+        mock_to_sql_safe.assert_called_once()
+
+    def test_zip_structure_summary_detects_document_bundle(self):
+        summary = _zip_structure_summary(
+            [
+                "actas/",
+                "actas/reunion-1.pdf",
+                "actas/reunion-2.pdf",
+                "actas/adjunto.docx",
+            ]
+        )
+
+        assert summary["file_count"] == 3
+        assert summary["parseable_count"] == 0
+        assert summary["document_count"] == 3
+        assert summary["extensions"] == {".docx": 1, ".pdf": 2}
+
+    def test_parse_zip_archive_marks_document_bundle_as_terminal_document_error(
+        self,
+        tmp_path: Path,
+    ):
+        zip_path = tmp_path / "docs.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("actas/reunion-1.pdf", b"%PDF-1.7")
+            zf.writestr("actas/reunion-2.pdf", b"%PDF-1.7")
+
+        with zipfile.ZipFile(zip_path) as zf:
+            result = _parse_zip_archive(
+                zf,
+                zip_path=str(zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_docs_test",
+                engine=MagicMock(),
+                append_mode=False,
+            )
+
+        assert result["parsed"] is False
+        assert result["result"] == {"error": "zip_document_bundle"}
+
+    def test_detect_csv_params_supports_bom_and_pipe_separator(self, tmp_path: Path):
+        csv_path = tmp_path / "sepa.csv"
+        csv_path.write_text("\ufeffid|nombre|precio\n1|yerba|100\n", encoding="utf-8")
+
+        params = _detect_csv_params(str(csv_path))
+
+        assert params["encoding"] == "utf-8-sig"
+        assert params["sep"] == "|"
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    def test_parse_zip_archive_accumulates_rows_across_multiple_nested_csv_zips(
+        self,
+        mock_route_table,
+        mock_to_sql_safe,
+        tmp_path: Path,
+    ):
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
+        )
+        nested_one = tmp_path / "sepa_a.zip"
+        nested_two = tmp_path / "sepa_b.zip"
+        outer_zip_path = tmp_path / "sepa_bundle.zip"
+
+        comercio_a = "\ufeffid_comercio|nombre\n1|Alpha\n"
+        comercio_b = "\ufeffid_comercio|nombre\n2|Beta\n"
+
+        with zipfile.ZipFile(nested_one, "w") as zf:
+            zf.writestr("comercio.csv", comercio_a.encode("utf-8"))
+        with zipfile.ZipFile(nested_two, "w") as zf:
+            zf.writestr("comercio.csv", comercio_b.encode("utf-8"))
+        with zipfile.ZipFile(outer_zip_path, "w") as zf:
+            zf.write(nested_one, arcname="2026-04-07/sepa_a.zip")
+            zf.write(nested_two, arcname="2026-04-07/sepa_b.zip")
+
+        with zipfile.ZipFile(outer_zip_path) as zf:
+            result = _parse_zip_archive(
+                zf,
+                zip_path=str(outer_zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_sepa_bundle_test",
+                engine=MagicMock(),
+                append_mode=False,
+            )
+
+        assert result["parsed"] is True
+        assert result["row_count"] == 2
+        assert result["append_mode"] is True
+        assert result["member_tables"] == [
+            {
+                "table_name": "cache_sepa_bundle_test",
+                "row_count": 2,
+                "columns": ["id_comercio", "nombre", "_source_dataset_id"],
+                "sampled_note": None,
+            }
+        ]
+        assert mock_to_sql_safe.call_count == 2
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    def test_parse_zip_archive_reports_partial_progress_for_multi_member_bundle(
+        self,
+        mock_route_table,
+        mock_to_sql_safe,
+        tmp_path: Path,
+    ):
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
+        )
+        nested_one = tmp_path / "sepa_a.zip"
+        nested_two = tmp_path / "sepa_b.zip"
+        outer_zip_path = tmp_path / "sepa_bundle.zip"
+        progress_snapshots: list[list[dict[str, object]]] = []
+
+        with zipfile.ZipFile(nested_one, "w") as zf:
+            zf.writestr("comercio.csv", "\ufeffid|nombre\n1|Alpha\n".encode())
+        with zipfile.ZipFile(nested_two, "w") as zf:
+            zf.writestr("comercio.csv", "\ufeffid|nombre\n2|Beta\n".encode())
+        with zipfile.ZipFile(outer_zip_path, "w") as zf:
+            zf.write(nested_one, arcname="2026-04-07/sepa_a.zip")
+            zf.write(nested_two, arcname="2026-04-07/sepa_b.zip")
+
+        with zipfile.ZipFile(outer_zip_path) as zf:
+            _parse_zip_archive(
+                zf,
+                zip_path=str(outer_zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_sepa_bundle_test",
+                engine=MagicMock(),
+                append_mode=False,
+                progress_callback=lambda snapshot: progress_snapshots.append(snapshot),
+            )
+
+        assert len(progress_snapshots) == 2
+        assert progress_snapshots[0] == [
+            {
+                "table_name": "cache_sepa_bundle_test",
+                "row_count": 1,
+                "columns": ["id", "nombre", "_source_dataset_id"],
+                "sampled_note": None,
+            }
+        ]
+        assert progress_snapshots[1] == [
+            {
+                "table_name": "cache_sepa_bundle_test",
+                "row_count": 2,
+                "columns": ["id", "nombre", "_source_dataset_id"],
+                "sampled_note": None,
+            }
+        ]
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._sanitize_columns")
+    def test_parse_zip_archive_routes_using_sanitized_columns(
+        self,
+        mock_sanitize_columns,
+        mock_route_table,
+        mock_to_sql_safe,
+        tmp_path: Path,
+    ):
+
+        def _sanitize(df):
+            normalized = df.copy()
+            normalized.columns = ["id_comercio", "nombre_normalizado", "_source_dataset_id"]
+            return normalized
+
+        mock_sanitize_columns.side_effect = _sanitize
+        mock_route_table.return_value = ("cache_sepa_bundle_test", False, None)
+
+        outer_zip_path = tmp_path / "sepa_bundle.zip"
+        comercio = "\ufeffid comercio|Nombre\n1|Alpha\n"
+
+        with zipfile.ZipFile(outer_zip_path, "w") as zf:
+            zf.writestr("comercio.csv", comercio.encode("utf-8"))
+
+        with zipfile.ZipFile(outer_zip_path) as zf:
+            result = _parse_zip_archive(
+                zf,
+                zip_path=str(outer_zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_sepa_bundle_test",
+                engine=MagicMock(),
+                append_mode=False,
+            )
+
+        assert result["parsed"] is True
+        routed_columns = mock_route_table.call_args.args[3]
+        assert list(routed_columns) == ["id_comercio", "nombre_normalizado", "_source_dataset_id"]
+        written_df = mock_to_sql_safe.call_args.args[0]
+        assert list(written_df.columns) == ["id_comercio", "nombre_normalizado", "_source_dataset_id"]
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    def test_parse_zip_archive_ignores_already_appended_for_same_table_within_current_run(
+        self,
+        mock_route_table,
+        mock_to_sql_safe,
+        tmp_path: Path,
+    ):
+        def _route(engine, dataset_id, table_name, columns, append_mode):
+            if mock_to_sql_safe.call_count >= 1:
+                return table_name, True, "already_appended"
+            return table_name, append_mode, None
+
+        mock_route_table.side_effect = _route
+        nested_one = tmp_path / "sepa_a.zip"
+        nested_two = tmp_path / "sepa_b.zip"
+        outer_zip_path = tmp_path / "sepa_bundle.zip"
+
+        comercio_a = "\ufeffid_comercio|nombre\n1|Alpha\n"
+        comercio_b = "\ufeffid_comercio|nombre\n2|Beta\n"
+
+        with zipfile.ZipFile(nested_one, "w") as zf:
+            zf.writestr("comercio.csv", comercio_a.encode("utf-8"))
+        with zipfile.ZipFile(nested_two, "w") as zf:
+            zf.writestr("comercio.csv", comercio_b.encode("utf-8"))
+        with zipfile.ZipFile(outer_zip_path, "w") as zf:
+            zf.write(nested_one, arcname="2026-04-07/sepa_a.zip")
+            zf.write(nested_two, arcname="2026-04-07/sepa_b.zip")
+
+        with zipfile.ZipFile(outer_zip_path) as zf:
+            result = _parse_zip_archive(
+                zf,
+                zip_path=str(outer_zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_sepa_bundle_test",
+                engine=MagicMock(),
+                append_mode=False,
+            )
+
+        assert result["parsed"] is True
+        assert result["row_count"] == 2
+        assert mock_to_sql_safe.call_count == 2
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._geojson_features_to_df")
+    def test_read_shapefile_from_zip_extracts_nested_members_when_direct_zip_open_fails(
+        self,
+        mock_geojson_to_df,
+        tmp_path: Path,
+    ):
+        mock_geojson_to_df.return_value = "df-ok"
+        zip_path = tmp_path / "shape.zip"
+
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("NHT_2017/NHT_2017.shp", b"fake-shp")
+            zf.writestr("NHT_2017/NHT_2017.dbf", b"fake-dbf")
+            zf.writestr("NHT_2017/NHT_2017.shx", b"fake-shx")
+            zf.writestr("NHT_2017/NHT_2017.prj", b"fake-prj")
+
+        class _FakeCollection:
+            def __init__(self, features):
+                self._features = features
+
+            def __enter__(self):
+                return iter(self._features)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        features = [
+            {
+                "geometry": {"type": "Point", "coordinates": [-58.4, -34.6]},
+                "properties": {"nombre": "barrio"},
+            }
+        ]
+
+        with patch.dict("sys.modules", {"fiona": MagicMock()}):
+            import fiona  # type: ignore
+
+            fiona.listlayers.side_effect = RuntimeError("zip open failed")
+            fiona.open.return_value = _FakeCollection(features)
+
+            result = _read_shapefile_from_zip(str(zip_path))
+
+        assert result == "df-ok"
+        assert fiona.open.call_count == 1
+        opened_path = fiona.open.call_args.args[0]
+        assert opened_path.endswith("NHT_2017/NHT_2017.shp")
+        mock_geojson_to_df.assert_called_once()
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._geojson_features_to_df")
+    def test_read_kml_from_zip_extracts_nested_member_and_reads_with_fiona(
+        self,
+        mock_geojson_to_df,
+        tmp_path: Path,
+    ):
+        mock_geojson_to_df.return_value = "df-kml"
+        zip_path = tmp_path / "kml.zip"
+
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("capas/cursos.kml", b"<kml></kml>")
+
+        class _FakeCollection:
+            def __init__(self, features):
+                self._features = features
+
+            def __enter__(self):
+                return iter(self._features)
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        features = [
+            {
+                "geometry": {"type": "Point", "coordinates": [-58.5, -34.6]},
+                "properties": {"nombre": "curso"},
+            }
+        ]
+
+        with patch.dict("sys.modules", {"fiona": MagicMock()}):
+            import fiona  # type: ignore
+
+            fiona.open.return_value = _FakeCollection(features)
+
+            result = _read_kml_from_zip(str(zip_path))
+
+        assert result == "df-kml"
+        opened_path = fiona.open.call_args.args[0]
+        assert opened_path.endswith("capas/cursos.kml")
+        mock_geojson_to_df.assert_called_once()
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    def test_parse_zip_archive_prioritizes_nested_geojson_over_kml_bundle(
+        self,
+        mock_route_table,
+        mock_to_sql_safe,
+        tmp_path: Path,
+    ):
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
+        )
+        geojson_nested_path = tmp_path / "geojson_nested.zip"
+        kml_nested_path = tmp_path / "kml_nested.zip"
+        outer_zip_path = tmp_path / "outer_bundle.zip"
+
+        geojson_payload = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"nombre": "curso"},
+                    "geometry": {"type": "Point", "coordinates": [-58.4, -34.6]},
+                }
+            ],
+        }
+
+        with zipfile.ZipFile(geojson_nested_path, "w") as nested_geojson:
+            nested_geojson.writestr("shp/cursos.geojson", json.dumps(geojson_payload))
+        with zipfile.ZipFile(kml_nested_path, "w") as nested_kml:
+            nested_kml.writestr("kml/cursos.kml", b"<kml></kml>")
+        with zipfile.ZipFile(outer_zip_path, "w") as outer_zf:
+            outer_zf.write(kml_nested_path, arcname="cursos-agua-pba_kml.zip")
+            outer_zf.write(geojson_nested_path, arcname="cursos-agua-pba_geojson.zip")
+
+        with zipfile.ZipFile(outer_zip_path) as zf:
+            result = _parse_zip_archive(
+                zf,
+                zip_path=str(outer_zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_geo_bundle_test",
+                engine=MagicMock(),
+                append_mode=False,
+            )
+
+        assert result["parsed"] is True
+        assert result["row_count"] == 1
+        assert "_source_dataset_id" in result["columns"]
+        mock_to_sql_safe.assert_called_once()
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")
@@ -142,6 +628,143 @@ class TestCollectorP2:
         assert mock_ensure_cached_entry.call_count == 1
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._table_exists")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._check_schema_compat_columns")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_route_table_for_schema_marks_error_when_fallback_resource_table_is_full(
+        self,
+        mock_get_engine,
+        mock_check_schema_compat_columns,
+        mock_table_exists,
+        mock_get_table_row_count,
+        mock_ensure_cached_entry,
+    ):
+        mock_check_schema_compat_columns.return_value = True
+        mock_table_exists.side_effect = [True, True, True]
+        mock_get_table_row_count.side_effect = [500_000, 500_000]
+        conn = MagicMock()
+        conn.execute.return_value = _ScalarResult(False)
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        mock_get_engine.return_value = mock_engine
+        dataset_id = "11111111-1111-1111-1111-111111111111"
+
+        target_table, append_mode, status = _route_table_for_schema(
+            mock_engine,
+            dataset_id,
+            "cache_energia_canon_hidrocarburifero",
+            ["periodo", "valor", "_source_dataset_id"],
+            append_mode=True,
+        )
+
+        assert target_table == _resource_table_name(
+            "cache_energia_canon_hidrocarburifero",
+            dataset_id,
+        )
+        assert append_mode is False
+        assert status == "resource_table_full"
+        assert mock_ensure_cached_entry.call_count == 1
+
+    def test_check_schema_compat_columns_rejects_subset_or_superset_append(self):
+        conn = MagicMock()
+        conn.execute.return_value = _FetchAllResult(
+            [
+                SimpleNamespace(column_name="id_comercio"),
+                SimpleNamespace(column_name="nombre"),
+                SimpleNamespace(column_name="_source_dataset_id"),
+            ]
+        )
+        engine = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        assert (
+            _check_schema_compat_columns(
+                engine,
+                "cache_sepa_bundle_test",
+                ["id_comercio", "nombre", "_source_dataset_id"],
+            )
+            is True
+        )
+        assert (
+            _check_schema_compat_columns(
+                engine,
+                "cache_sepa_bundle_test",
+                ["id_comercio", "nombre", "provincia", "_source_dataset_id"],
+            )
+            is False
+        )
+        assert (
+            _check_schema_compat_columns(
+                engine,
+                "cache_sepa_bundle_test",
+                ["id_comercio", "_source_dataset_id"],
+            )
+            is False
+        )
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._set_error_status")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._stream_download")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._has_temp_space")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._try_advisory_lock")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_collect_dataset_marks_file_too_large_as_non_retryable(
+        self,
+        mock_get_engine,
+        mock_try_advisory_lock,
+        mock_has_temp_space,
+        mock_stream_download,
+        mock_set_error_status,
+        _mock_ensure_cached_entry,
+    ):
+        mock_try_advisory_lock.return_value = True
+        mock_has_temp_space.return_value = True
+        mock_stream_download.side_effect = ValueError("file_too_large: 524550144+ bytes")
+
+        dataset_row = SimpleNamespace(
+            title="Archivo enorme",
+            download_url="https://example.com/huge.csv",
+            format="csv",
+            portal="datos_gob_ar",
+            source_id="huge-1",
+        )
+        retry_row = SimpleNamespace(retry_count=0)
+
+        mock_conn = MagicMock()
+
+        def execute_side_effect(stmt, params=None):
+            query = str(stmt)
+            if "SELECT title, download_url, format, portal, source_id" in query:
+                return _FetchOneResult(dataset_row)
+            if "SELECT retry_count FROM cached_datasets" in query:
+                return _FetchOneResult(retry_row)
+            if "WHERE table_name = :tn AND status = 'ready'" in query:
+                return _FetchOneResult(None)
+            if "LEFT JOIN cached_datasets cd" in query:
+                return _FetchOneResult(None)
+            return MagicMock()
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+
+        result = collect_dataset.run("11111111-1111-1111-1111-111111111111")
+
+        assert result == {"error": "non_retryable"}
+        mock_set_error_status.assert_called_once()
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
     @patch("app.infrastructure.celery.tasks.collector_tasks._has_temp_space")
     @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
     def test_collect_dataset_retries_when_temp_space_is_insufficient(
@@ -217,7 +840,14 @@ class TestCollectorP2:
             source_id="ipc-1",
         )
         retry_row = SimpleNamespace(retry_count=0)
-        prev_cached_row = SimpleNamespace(is_cached=False)
+        prev_cached_row = SimpleNamespace(
+            is_cached=False,
+            table_name=None,
+            cached_row_count=None,
+            columns_json=None,
+            s3_key=None,
+            error_message=None,
+        )
 
         mock_conn = MagicMock()
 
@@ -231,7 +861,7 @@ class TestCollectorP2:
                 return _FetchOneResult(None)
             if "UPDATE cached_datasets SET" in query:
                 return MagicMock()
-            if "SELECT is_cached FROM datasets" in query:
+            if "SELECT d.is_cached," in query:
                 return _FetchOneResult(prev_cached_row)
             if "UPDATE datasets SET is_cached = true, row_count = :rows" in query:
                 return MagicMock()
@@ -357,7 +987,14 @@ class TestCollectorP2:
         cached_row = SimpleNamespace(
             id="cached-id", dataset_id="22222222-2222-2222-2222-222222222222"
         )
-        prev_cached_row = SimpleNamespace(is_cached=False)
+        prev_cached_row = SimpleNamespace(
+            is_cached=False,
+            table_name=None,
+            cached_row_count=None,
+            columns_json=None,
+            s3_key=None,
+            error_message=None,
+        )
 
         mock_conn = MagicMock()
 
@@ -371,7 +1008,7 @@ class TestCollectorP2:
                 return _FetchOneResult(cached_row)
             if "UPDATE cached_datasets SET" in query:
                 return MagicMock()
-            if "SELECT is_cached FROM datasets" in query:
+            if "SELECT d.is_cached," in query:
                 return _FetchOneResult(prev_cached_row)
             if "UPDATE datasets SET is_cached = true, row_count = :rows" in query:
                 return MagicMock()
@@ -398,6 +1035,82 @@ class TestCollectorP2:
             "11111111-1111-1111-1111-111111111111",
         )
         assert result["rows"] == 10
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_postgis_geom")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._upload_file_to_s3")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._load_csv_chunked")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._stream_download")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._has_temp_space")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_collect_dataset_reindexes_when_recollect_changes_cached_shape(
+        self,
+        mock_get_engine,
+        mock_has_temp_space,
+        mock_stream_download,
+        mock_load_csv_chunked,
+        mock_upload_file_to_s3,
+        _mock_ensure_postgis,
+        _mock_ensure_cached_entry,
+    ):
+        mock_has_temp_space.return_value = True
+        mock_stream_download.return_value = 123
+        mock_load_csv_chunked.return_value = (25, ["periodo", "valor", "_source_dataset_id"], False)
+        mock_upload_file_to_s3.return_value = "datasets/energia/id/canon.csv"
+
+        dataset_row = SimpleNamespace(
+            title="Canon hidrocarburifero",
+            download_url="https://example.com/canon.csv",
+            format="csv",
+            portal="energia",
+            source_id="canon-2",
+        )
+        retry_row = SimpleNamespace(retry_count=0)
+        previous_cache_state = SimpleNamespace(
+            is_cached=True,
+            table_name=_resource_table_name(
+                "cache_energia_canon_hidrocarburifero",
+                "11111111-1111-1111-1111-111111111111",
+            ),
+            cached_row_count=10,
+            columns_json=json.dumps(["periodo", "_source_dataset_id"]),
+            s3_key="datasets/energia/id/old.csv",
+            error_message=None,
+        )
+
+        mock_conn = MagicMock()
+
+        def execute_side_effect(stmt, params=None):
+            query = str(stmt)
+            if "SELECT title, download_url, format, portal, source_id" in query:
+                return _FetchOneResult(dataset_row)
+            if "SELECT retry_count FROM cached_datasets" in query:
+                return _FetchOneResult(retry_row)
+            if "WHERE table_name = :tn AND status = 'ready'" in query:
+                return _FetchOneResult(None)
+            if "SELECT d.is_cached," in query:
+                return _FetchOneResult(previous_cache_state)
+            return MagicMock()
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+
+        with (
+            patch("app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding.delay") as mock_index_delay,
+            patch(
+                "app.infrastructure.celery.tasks.catalog_enrichment_tasks.enrich_single_table.delay"
+            ) as mock_enrich_delay,
+        ):
+            result = collect_dataset.run("11111111-1111-1111-1111-111111111111")
+
+        assert result["rows"] == 25
+        mock_index_delay.assert_called_once_with("11111111-1111-1111-1111-111111111111")
+        mock_enrich_delay.assert_called_once()
 
 
 class TestEmbeddingP2:

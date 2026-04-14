@@ -49,6 +49,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,6 +58,7 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from app.application.pipeline._background_tasks import spawn_background
+from app.application.pipeline.connectors.cache_table_selection import rewrite_legacy_sql_tables
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.llm_provider import LLMMessage
 from app.prompts import load_prompt
@@ -63,13 +66,59 @@ from app.prompts import load_prompt
 logger = logging.getLogger(__name__)
 
 
+class NL2SQLRuntime(TypedDict):
+    llm: Any
+    sandbox: Any
+    embedding: Any
+    semantic_cache: Any
+
+
+_runtime_var: ContextVar[NL2SQLRuntime | None] = ContextVar("nl2sql_runtime", default=None)
+
+
+@contextmanager
+def nl2sql_runtime(
+    *,
+    llm: Any,
+    sandbox: Any,
+    embedding: Any,
+    semantic_cache: Any,
+):
+    """Bind request-scoped runtime dependencies outside checkpointed state."""
+    token = _runtime_var.set(
+        {
+            "llm": llm,
+            "sandbox": sandbox,
+            "embedding": embedding,
+            "semantic_cache": semantic_cache,
+        }
+    )
+    try:
+        yield
+    finally:
+        _runtime_var.reset(token)
+
+
+def _get_runtime() -> NL2SQLRuntime:
+    runtime = _runtime_var.get()
+    if runtime is None:
+        msg = "NL2SQL runtime not initialised — wrap ainvoke() in nl2sql_runtime(...)"
+        raise RuntimeError(msg)
+    return runtime
+
+
+def _get_runtime_optional() -> NL2SQLRuntime | None:
+    """Return the bound runtime when present, else ``None`` for test fallback."""
+    return _runtime_var.get()
+
+
 class NL2SQLState(TypedDict, total=False):
     """State flowing through the NL2SQL subgraph.
 
     See ``specs/010-sandbox-sql/010b-nl2sql/plan.md`` §3 for the full
-    field inventory and the boundary with the caller. Dependencies like
-    ``llm`` and ``sandbox`` are threaded through state so the subgraph
-    is testable in isolation with mock objects — no closure capture.
+    field inventory and the boundary with the caller. Runtime
+    dependencies may be injected either via closure-captured node
+    factories (production path) or via state (unit-test path).
     """
 
     # --- inputs (caller provides) ---
@@ -80,10 +129,6 @@ class NL2SQLState(TypedDict, total=False):
     catalog_entries: dict
     table_descriptions: list
     few_shot_block: str
-    llm: Any
-    sandbox: Any
-    embedding: Any
-    semantic_cache: Any
     max_attempts: int
     # --- working state ---
     generated_sql: str
@@ -94,6 +139,16 @@ class NL2SQLState(TypedDict, total=False):
     indec_pattern_match: bool
     # --- output ---
     data_results: list
+
+
+def _resolve_runtime_dep(state: NL2SQLState, key: str, runtime_dep: Any) -> Any:
+    """Prefer a closure-captured runtime dependency, fall back to state."""
+    if runtime_dep is not None:
+        return runtime_dep
+    if key not in state:
+        msg = f"NL2SQL runtime dependency '{key}' not initialised"
+        raise RuntimeError(msg)
+    return state[key]
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +209,8 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
     downstream edges can decide on the INDEC fallback without the caller
     having to know about it.
     """
-    llm = state["llm"]
+    runtime = _get_runtime_optional()
+    llm = _resolve_runtime_dep(state, "llm", runtime["llm"] if runtime else None)
     nl_query = state["nl_query"]
     tables_context = state["tables_context"]
     few_shot_block = state.get("few_shot_block", "")
@@ -189,12 +245,15 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
 
 async def execute_sql_node(state: NL2SQLState) -> dict:
     """FR-002: execute the generated SQL against the sandbox."""
-    sandbox = state["sandbox"]
+    runtime = _get_runtime_optional()
+    sandbox = _resolve_runtime_dep(state, "sandbox", runtime["sandbox"] if runtime else None)
     generated_sql = state["generated_sql"]
+    available_tables = [table.table_name for table in state.get("tables") or []]
+    rewritten_sql = rewrite_legacy_sql_tables(generated_sql, available_tables)
 
-    result = await sandbox.execute_readonly(generated_sql)
+    result = await sandbox.execute_readonly(rewritten_sql)
 
-    updates: dict[str, Any] = {"result": result}
+    updates: dict[str, Any] = {"result": result, "generated_sql": rewritten_sql}
     if result.error:
         updates["last_error"] = result.error
     else:
@@ -225,7 +284,8 @@ def _route_after_execute(state: NL2SQLState) -> str:
 
 async def fix_sql_node(state: NL2SQLState) -> dict:
     """FR-003: ask the LLM to fix the SQL based on the last error."""
-    llm = state["llm"]
+    runtime = _get_runtime_optional()
+    llm = _resolve_runtime_dep(state, "llm", runtime["llm"] if runtime else None)
     generated_sql = state["generated_sql"]
     last_error = state.get("last_error", "")
     tables_context = state["tables_context"]
@@ -272,7 +332,8 @@ async def last_resort_node(state: NL2SQLState) -> dict:
     error) we still flow through ``format_result`` which will emit a
     clean error ``DataResult``.
     """
-    sandbox = state["sandbox"]
+    runtime = _get_runtime_optional()
+    sandbox = _resolve_runtime_dep(state, "sandbox", runtime["sandbox"] if runtime else None)
     tables = state.get("tables") or []
 
     if not tables:
@@ -442,6 +503,7 @@ async def save_success_node(state: NL2SQLState) -> dict:
     # re-exports history helpers through its module.
     from app.application.pipeline.history import save_successful_query
 
+    runtime = _get_runtime_optional()
     tables = state.get("tables") or []
     nl_query = state["nl_query"]
     generated_sql = state.get("generated_sql", "")
@@ -452,8 +514,8 @@ async def save_success_node(state: NL2SQLState) -> dict:
             generated_sql,
             tables[0].table_name if tables else "",
             result.row_count,
-            state.get("embedding"),
-            state.get("semantic_cache"),
+            runtime["embedding"] if runtime else state.get("embedding"),
+            runtime["semantic_cache"] if runtime else state.get("semantic_cache"),
         ),
         name="nl2sql.save_success",
     )

@@ -149,16 +149,16 @@ class TestPgVectorSearchAdapter:
 
         await adapter.search_datasets_hybrid([0.1] * 1536, "inflacion cordoba", limit=5)
 
-        call_args = mock_session.execute.await_args_list[1]
+        call_args = mock_session.execute.await_args_list[0]
         params = call_args.args[1]
         query = str(call_args.args[0])
         assert "bm25_candidates AS" in query
         assert params["query_text"] == "inflacion cordoba"
-        assert params["bm25_weight"] == 0.6
-        assert params["vec_candidate_min"] == 0.15
-        assert params["bm25_candidate_min"] == 0.02
-        assert params["fetch_limit"] == 20
-        assert mock_session.execute.await_count == 2
+        assert params["bm25_weight"] == 1.0
+        assert params["vec_candidate_min"] == 0.1
+        assert params["bm25_candidate_min"] == 0.01
+        assert params["fetch_limit"] == 30
+        assert mock_session.execute.await_count == 1
 
     async def test_hybrid_search_expands_fetch_limit_for_richer_queries(
         self, adapter, mock_session
@@ -173,12 +173,46 @@ class TestPgVectorSearchAdapter:
             limit=5,
         )
 
-        call_args = mock_session.execute.await_args_list[1]
+        assert mock_session.execute.await_count == 1
+        call_args = mock_session.execute.await_args_list[0]
         params = call_args.args[1]
         assert params["bm25_weight"] == 1.0
         assert params["vec_candidate_min"] == 0.1
         assert params["bm25_candidate_min"] == 0.01
         assert params["fetch_limit"] == 30
+
+    async def test_hybrid_full_skips_vector_precheck_by_default(self, adapter, mock_session):
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_session.execute.return_value = mock_result
+
+        await adapter.search_datasets_hybrid(
+            [0.1] * 1536,
+            "inflacion cordoba empleo salarios",
+            limit=5,
+        )
+
+        assert mock_session.execute.await_count == 1
+        call_args = mock_session.execute.await_args_list[0]
+        params = call_args.args[1]
+        query = str(call_args.args[0])
+        assert "bm25_candidates AS" in query
+        assert params["query_text"] == "inflacion cordoba empleo salarios"
+        assert params["bm25_weight"] == 1.0
+        assert params["vec_candidate_min"] == 0.1
+        assert params["bm25_candidate_min"] == 0.01
+        assert params["fetch_limit"] == 30
+
+    async def test_lexical_query_skips_vector_precheck(self, adapter, mock_session):
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_session.execute.return_value = mock_result
+
+        await adapter.search_datasets_hybrid([0.1] * 1536, "inflacion cordoba", limit=5)
+
+        assert mock_session.execute.await_count == 1
+        first_query = str(mock_session.execute.await_args_list[0].args[0])
+        assert "bm25_candidates AS" in first_query
 
     async def test_hybrid_search_caps_min_score_to_reachable_rrf_range(self, adapter, mock_session):
         mock_result = MagicMock()
@@ -187,8 +221,8 @@ class TestPgVectorSearchAdapter:
 
         await adapter.search_datasets_hybrid([0.1] * 1536, "inflacion cordoba", limit=5)
 
-        params = mock_session.execute.await_args_list[1].args[1]
-        assert params["min_score"] == pytest.approx(((1.0 + 0.6) / 61) * 0.4)
+        params = mock_session.execute.await_args_list[0].args[1]
+        assert params["min_score"] == pytest.approx(((1.0 + 1.0) / 61) * 0.4)
 
     async def test_vector_only_keeps_requested_min_score(self, adapter, mock_session):
         mock_result = MagicMock()
@@ -200,28 +234,19 @@ class TestPgVectorSearchAdapter:
         first_params = mock_session.execute.await_args_list[0].args[1]
         assert first_params["min_score"] == 0.05
 
-    async def test_hybrid_light_escalates_to_full_when_results_are_sparse(
-        self, adapter, mock_session
-    ):
-        mock_result_light = MagicMock()
-        mock_result_light.fetchall.return_value = []
-        mock_result_full = MagicMock()
-        mock_result_full.fetchall.return_value = []
-        mock_result_vector = MagicMock()
-        mock_result_vector.fetchall.return_value = []
-        mock_session.execute.side_effect = [mock_result_vector, mock_result_light, mock_result_full]
+    async def test_lexical_query_does_not_requery_when_results_are_sparse(self, adapter, mock_session):
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_session.execute.return_value = mock_result
 
         await adapter.search_datasets_hybrid([0.1] * 1536, "inflacion cordoba", limit=5)
 
-        assert mock_session.execute.await_count == 3
-        second_params = mock_session.execute.await_args_list[1].args[1]
-        third_params = mock_session.execute.await_args_list[2].args[1]
-        assert second_params["bm25_weight"] == 0.6
-        assert second_params["fetch_limit"] == 20
-        assert third_params["bm25_weight"] == 1.0
-        assert third_params["fetch_limit"] == 30
+        assert mock_session.execute.await_count == 1
+        params = mock_session.execute.await_args_list[0].args[1]
+        assert params["bm25_weight"] == 1.0
+        assert params["fetch_limit"] == 30
 
-    async def test_hybrid_light_does_not_escalate_when_results_are_enough(
+    async def test_lexical_query_returns_results_without_vector_fast_path(
         self, adapter, mock_session
     ):
         rows = []
@@ -236,18 +261,16 @@ class TestPgVectorSearchAdapter:
             row.score = 0.1
             rows.append(row)
 
-        mock_fast = MagicMock()
-        mock_fast.fetchall.return_value = rows
-        mock_hybrid = MagicMock()
-        mock_hybrid.fetchall.return_value = rows
-        mock_session.execute.side_effect = [mock_fast, mock_hybrid]
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = rows
+        mock_session.execute.return_value = mock_result
 
         results = await adapter.search_datasets_hybrid([0.1] * 1536, "inflacion cordoba", limit=5)
 
         assert len(results) == 3
-        assert mock_session.execute.await_count == 2
+        assert mock_session.execute.await_count == 1
 
-    async def test_rich_query_returns_vector_fast_path_when_it_is_already_strong(
+    async def test_lexical_query_does_not_return_vector_fast_path_even_if_vector_scores_are_strong(
         self, adapter, mock_session
     ):
         rows = []
@@ -262,25 +285,25 @@ class TestPgVectorSearchAdapter:
             row.score = score
             rows.append(row)
 
-        mock_fast = MagicMock()
-        mock_fast.fetchall.return_value = rows
-        mock_session.execute.return_value = mock_fast
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = rows
+        mock_session.execute.return_value = mock_result
 
         results = await adapter.search_datasets_hybrid([0.1] * 1536, "inflacion cordoba", limit=5)
 
         first_query = str(mock_session.execute.await_args_list[0].args[0])
         assert len(results) == 4
-        assert "bm25_candidates AS" not in first_query
+        assert "bm25_candidates AS" in first_query
         assert mock_session.execute.await_count == 1
 
-    async def test_vector_only_escalates_to_hybrid_light_when_results_are_empty(
+    async def test_vector_only_escalates_to_hybrid_full_when_results_are_empty(
         self, adapter, mock_session
     ):
         mock_result_vector = MagicMock()
         mock_result_vector.fetchall.return_value = []
-        mock_result_light = MagicMock()
-        mock_result_light.fetchall.return_value = []
-        mock_session.execute.side_effect = [mock_result_vector, mock_result_light]
+        mock_result_full = MagicMock()
+        mock_result_full.fetchall.return_value = []
+        mock_session.execute.side_effect = [mock_result_vector, mock_result_full]
 
         await adapter.search_datasets_hybrid([0.1] * 1536, "ipc", limit=5)
 
@@ -293,7 +316,7 @@ class TestPgVectorSearchAdapter:
         assert "bm25_candidates AS" in second_query
         assert "query_text" not in first_params
         assert second_params["query_text"] == "ipc"
-        assert second_params["bm25_weight"] == 0.6
+        assert second_params["bm25_weight"] == 1.0
 
     async def test_vector_only_does_not_escalate_when_it_already_has_results(
         self, adapter, mock_session

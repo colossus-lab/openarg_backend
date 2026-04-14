@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-12
 **Hexagonal scope**: Full-stack
 **Related plan**: [./plan.md](./plan.md)
 
@@ -77,6 +77,7 @@ The system has two main audiences:
 - **FR-007**: The system MUST expose a public API with Bearer token and per-plan rate limiting.
 - **FR-008**: The system MUST allow authenticated users to create, list and revoke their own API keys.
 - **FR-009**: The system MUST run scheduled jobs (Celery beat) for dataset refresh.
+- **FR-009a**: Heavy ingestion bootstrap (initial scrape, bulk collect, transparency backfills) MUST run from scheduled or explicitly triggered control paths. Worker process startup MUST NOT dispatch those jobs implicitly unless an operator enables an explicit bootstrap flag for one-off recovery.
 - **FR-010**: The system MUST expose component-level health checks and in-memory metrics.
 - **FR-011**: The system MUST support read-only SQL execution over a sandbox with a table allowlist.
 - **FR-012**: The system MUST generate SQL from natural language (NL2SQL) using a vector catalog of tables.
@@ -123,7 +124,7 @@ The system has two main audiences:
 
 ## 8. Tech Debt Discovered (macro)
 
-- **[DEBT-001]** — **Sentry not configured**. Error monitoring disabled in production.
+- **[DEBT-001]** — **Sentry is only conditionally active**. The backend has `setup_sentry()` wiring in `setup/logging_config.py`, but if `SENTRY_DSN` is unset in a deploy, external error monitoring is effectively absent and the system falls back to logs + in-memory metrics.
 - **[DEBT-002]** — **Missing threshold/reranking/dedup in vector search**. Results can be noisy.
 - **[DEBT-003]** — **10 CKAN portals down** without removal from the active catalog (santa_fe, modernizacion, ambiente, rio_negro, jujuy, salta, la_plata, cordoba_prov, cultura, cordoba_muni).
 - **[DEBT-004]** — **Backup folder `openarg_backend_backup/`** coexists in the workspace — cleanup pending.
@@ -131,6 +132,7 @@ The system has two main audiences:
 - **[DEBT-006]** — **Mix of async/sync in Celery workers** via `asyncio.run()` — recurring pattern, fragile.
 - **[DEBT-007]** — **No distributed tracing** (OpenTelemetry or similar). Limited observability.
 - **[DEBT-008]** — **Partial audit trail** — structure exists but is not applied to all sensitive actions.
+- **[DEBT-009]** — **Worker startup bootstrap storm**. Celery `on_after_finalize` can dispatch heavy recovery work from every worker container, creating duplicate `bulk_collect_all` and other startup-time spikes. This is operationally unsafe and should be replaced by beat/manual control paths.
 
 ---
 

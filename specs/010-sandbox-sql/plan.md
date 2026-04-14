@@ -1,7 +1,7 @@
 # Plan: SQL Sandbox + NL2SQL (Index)
 
 **Related spec**: [./spec.md](./spec.md)
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 
 ---
 
@@ -14,7 +14,7 @@ Top-level plan for the `010-sandbox-sql` module. The module is split into two in
 | Sub-module | Plan | Scope |
 |---|---|---|
 | 010a-sql-sandbox | [010a-sql-sandbox/plan.md](./010a-sql-sandbox/plan.md) | `ISQLSandbox`, `PgSandboxAdapter`, 3-layer validation, ThreadPoolExecutor, `/query` + `/tables` endpoints. |
-| 010b-nl2sql | [010b-nl2sql/plan.md](./010b-nl2sql/plan.md) | LLM generate/execute/fix subgraph, table catalog context, `nl2sql.md` prompt, `/ask` endpoint, FIX-004 migration target. |
+| 010b-nl2sql | [010b-nl2sql/plan.md](./010b-nl2sql/plan.md) | LLM generate/execute/fix subgraph, table catalog context, `nl2sql.md` prompt, `/ask` endpoint. |
 
 ## 3. Shared Hexagonal Mapping
 
@@ -37,7 +37,7 @@ Top-level plan for the `010-sandbox-sql` module. The module is split into two in
 ## 5. Deviations from Constitution
 
 - Complies with security and hexagonal principles. The ThreadPoolExecutor is an accepted exception (sync sqlalchemy engine) in 010a.
-- FIX-004 tracked in 010b: NL2SQL subgraph currently dead code inline in `connectors/sandbox.py`.
+- FIX-004 is no longer pending: the inline NL2SQL loop was removed from `connectors/sandbox.py`, and 010b now documents the integrated subgraph as the live execution path.
 
 ---
 

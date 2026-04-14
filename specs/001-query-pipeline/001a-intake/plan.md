@@ -54,10 +54,11 @@
 ### 2.5 `load_memory`
 - **Input**: `conversation_id`, `user_id`
 - **Logic**:
-  - `load_memory()` from Redis (session memory)
-  - `build_memory_context_prompt()` → `memory_ctx`
+  - Start `load_memory()` from Redis (session memory)
+  - Start `load_chat_history()` from DB (last 6 messages) when `conversation_id` exists
+  - Both run concurrently with deterministic query preprocessing and catalog-hint lookup
+  - After both resolve: `build_memory_context_prompt()` → `memory_ctx`
   - Build lightweight `memory_ctx_analyst`
-  - `load_chat_history()` from DB (last 6 messages)
   - `planner_ctx = chat_history or memory_ctx`
 - **Streaming**: `{type: "status", step: "loading_context", detail: "Cargando contexto..."}`
 
@@ -68,6 +69,7 @@
   - `normalize_temporal()` ("hace 2 meses" → absolute date)
   - `normalize_provinces()`
   - `expand_synonyms()`
+  - Immediately after `preprocessed_query` is available, kick off `discover_catalog_hints_for_planner()` so sandbox/catalog I/O overlaps with memory/history loading
 - **Output**: `preprocessed_query`
 
 ## 3. Conditional Edges (phase-local)

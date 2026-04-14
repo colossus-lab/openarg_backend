@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-10
+**Last synced with code**: 2026-04-13
 **Hexagonal scope**: Domain + Application + Infrastructure
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -11,7 +11,7 @@
 
 ## 1. Context & Purpose
 
-Connector to the public **argentinadatos.com** API for real-time financial data: dollar quotes (oficial, blue, bolsa, contado con liqui, cripto, mayorista, solidario, tarjeta), country risk (EMBI+) and monthly inflation. It is a complement to BCRA (which only has the official dollar) and provides the parallel market versions + macro indicators that BCRA does not expose directly.
+Connector to the public **argentinadatos.com** API for historical financial data plus **DolarApi** for live spot dollar quotes. It complements BCRA (which only has the official dollar) and provides parallel market variants + macro indicators that BCRA does not expose directly.
 
 ## 2. Ubiquitous Language
 
@@ -37,11 +37,13 @@ Connector to the public **argentinadatos.com** API for real-time financial data:
 
 ## 4. Functional Requirements
 
-- **FR-001**: MUST expose an `IArgentinaDatosConnector` port with `fetch_dolar(casa)`, `fetch_riesgo_pais(ultimo)`, `fetch_inflacion()`.
+- **FR-001**: MUST expose an `IArgentinaDatosConnector` port with `fetch_dolar(casa, ultimo)`, `fetch_riesgo_pais(ultimo)`, `fetch_inflacion()`.
 - **FR-002**: MUST validate `casa` against a hardcoded allowlist.
-- **FR-003**: MUST handle responses as a single dict or as a list (the upstream endpoint returns different formats).
+- **FR-003**: MUST handle responses as a single dict or as a list (the upstream endpoints return different formats).
 - **FR-004**: MUST normalize records with fields (`fecha`, `casa`, `compra`, `venta`) for dollars; (`fecha`, `riesgo_pais`) for risk; (`fecha`, `inflacion`) for inflation.
 - **FR-005**: MUST raise `ConnectorError(CN_ARGENTINA_DATOS_UNAVAILABLE)` on failures.
+- **FR-006**: MUST preserve ArgentinaDatos for historical dollar series and switch to DolarApi only when `ultimo=true`.
+- **FR-007**: MUST return both the current spot quote and the recent historical series for dollar queries when neither `ultimo` nor `historico` is explicitly requested.
 
 ## 5. Success Criteria
 
@@ -52,11 +54,10 @@ Connector to the public **argentinadatos.com** API for real-time financial data:
 ## 6. Assumptions & Out of Scope
 
 ### Assumptions
-- The argentinadatos.com API is stable and free.
+- The argentinadatos.com API and DolarApi are stable and free.
 - The 8 casas in the allowlist are sufficient for common cases.
 
 ### Out of scope
-- Intraday data (daily close only).
 - Cross quotes (EUR/ARS, BRL/ARS).
 - Full country risk history (latest values only).
 
@@ -65,6 +66,8 @@ Connector to the public **argentinadatos.com** API for real-time financial data:
 - **[RESOLVED CL-001]** — **There is no scheduled snapshot**. Argentina Datos is 100% on-demand via the query pipeline. Confirmed: grep of `argentina_datos` in `infrastructure/celery/` returns zero tasks. The adapter is only invoked from `execute_argentina_datos_step`.
 - **[PARTIAL CL-002]** — **Hardcoded** truncation in `argentina_datos_adapter.py:54` (`recent = data[-60:]`) with no explanatory comment. Same value in `fetch_riesgo_pais()` line 104. It is not a constant, not configurable. **Why 60**: not documented — original author's decision with no written rationale. We leave it as debt already captured in `[DEBT-002]`.
 - **[RESOLVED CL-003]** — **No retry applied at any layer**. `argentina_datos_adapter.py` does not have `@with_retry` on its methods, and there is no wrapping layer. Inconsistency vs other connectors (series_tiempo, georef do have retry). Capture already existing in `[DEBT-005]`.
+- **[RESOLVED CL-004]** — **Current dollar quotes are no longer historical-only**. `fetch_dolar(..., ultimo=True)` now routes to `https://dolarapi.com/v1/dolares[/casa]`, while historical flows keep using ArgentinaDatos.
+- **[RESOLVED CL-005]** — **Unspecified dollar queries now return both views**. The pipeline step fans out to current + historical when the planner does not ask for `ultimo` or `historico`.
 
 ## 8. Tech Debt Discovered
 
@@ -74,6 +77,7 @@ Connector to the public **argentinadatos.com** API for real-time financial data:
 - **[DEBT-004]** — **No cache** between requests; redundant for low-frequency data (inflation is monthly).
 - **[DEBT-005]** — **No `@with_retry`** visible at the adapter level (inconsistent pattern vs other connectors).
 - **[DEBT-006]** — **No scheduled snapshot** visible for this connector — data is always live, increases latency.
+- **[DEBT-007]** — **Live dollar quotes depend on a second upstream** (`dolarapi.com`). There is still no explicit fallback if DolarApi fails while ArgentinaDatos historical endpoints are healthy.
 
 ---
 

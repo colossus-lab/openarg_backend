@@ -37,6 +37,29 @@ def verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> str
     return x_admin_key
 
 
+def _inspect_task_snapshot(celery_task_id: str) -> dict | None:
+    """Best-effort lookup of a task across live Celery inspect snapshots."""
+    inspect = celery_app.control.inspect(timeout=3.0)
+    snapshots = (
+        ("active", inspect.active() or {}),
+        ("reserved", inspect.reserved() or {}),
+        ("scheduled", inspect.scheduled() or {}),
+    )
+    for bucket, tasks_by_worker in snapshots:
+        for worker, tasks in tasks_by_worker.items():
+            for task in tasks:
+                if task.get("id") != celery_task_id:
+                    continue
+                return {
+                    "bucket": bucket,
+                    "worker": worker,
+                    "name": task.get("name", ""),
+                    "args": task.get("args", ""),
+                    "started": task.get("time_start"),
+                }
+    return None
+
+
 # ── Registry of all tasks ────────────────────────────────────────
 
 TASK_REGISTRY: dict[str, dict] = {
@@ -317,7 +340,19 @@ async def get_task_status(celery_task_id: str):
         response["info"] = "Task is being retried"
     elif result.state == "PENDING":
         response["completed"] = False
-        response["info"] = "Task is queued or unknown"
+        snapshot = _inspect_task_snapshot(celery_task_id)
+        if snapshot:
+            if snapshot["bucket"] == "active":
+                response["state"] = "STARTED"
+            response["info"] = {
+                "status": f"Task is {snapshot['bucket']}",
+                "worker": snapshot["worker"],
+                "name": snapshot["name"],
+                "args": snapshot["args"],
+                "started": snapshot["started"],
+            }
+        else:
+            response["info"] = "Task is queued or unknown"
     elif result.state == "REVOKED":
         response["completed"] = True
         response["info"] = "Task was cancelled"

@@ -8,6 +8,7 @@ from app.infrastructure.celery.tasks.collector_tasks import (
     audit_cache_coverage,
     collect_large_group,
     consolidate_group_tables,
+    materialize_format_duplicate_aliases,
     reconcile_cache_coverage,
     recover_stuck_tasks,
 )
@@ -161,6 +162,7 @@ class TestRunPipelineP1:
 
 
 class TestCollectLargeGroupP1:
+    @patch("app.infrastructure.celery.tasks.collector_tasks.materialize_format_duplicate_aliases.apply_async")
     @patch("app.infrastructure.celery.tasks.collector_tasks.consolidate_group_tables.apply_async")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")
     @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset")
@@ -173,6 +175,7 @@ class TestCollectLargeGroupP1:
         mock_collect_dataset,
         mock_get_row_count,
         mock_consolidate_group,
+        mock_materialize_aliases,
     ):
         mock_get_row_count.return_value = 0
         mock_collect_dataset.s.side_effect = lambda did: f"task-{did}"
@@ -205,6 +208,7 @@ class TestCollectLargeGroupP1:
         assert result["dispatch_batches"] == 20
         assert result["deferred"] == 5
         assert result["consolidation_scheduled"] is True
+        assert result["alias_materialization_scheduled"] is False
         assert mock_group_result.apply_async.call_count == 20
         countdowns = [
             call.kwargs["countdown"] for call in mock_group_result.apply_async.call_args_list
@@ -214,8 +218,10 @@ class TestCollectLargeGroupP1:
             args=["Pauta Publicitaria", "caba"],
             countdown=660,
         )
+        mock_materialize_aliases.assert_not_called()
         mock_engine.begin.assert_not_called()
 
+    @patch("app.infrastructure.celery.tasks.collector_tasks.materialize_format_duplicate_aliases.apply_async")
     @patch("app.infrastructure.celery.tasks.collector_tasks.consolidate_group_tables.apply_async")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")
     @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset")
@@ -228,6 +234,7 @@ class TestCollectLargeGroupP1:
         mock_collect_dataset,
         mock_get_row_count,
         mock_consolidate_group,
+        mock_materialize_aliases,
     ):
         mock_get_row_count.return_value = 500_000
         mock_collect_dataset.s.side_effect = lambda did: f"task-{did}"
@@ -259,14 +266,17 @@ class TestCollectLargeGroupP1:
         assert result["dispatched"] == 3
         assert result["deferred"] == 0
         assert result["consolidation_scheduled"] is True
+        assert result["alias_materialization_scheduled"] is False
         mock_group_result.apply_async.assert_called_once_with(countdown=0)
         mock_consolidate_group.assert_called_once_with(
             args=["Pauta Publicitaria", "caba"],
             countdown=90,
         )
+        mock_materialize_aliases.assert_not_called()
 
 
 class TestBulkCollectAllP4:
+    @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
     @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
     @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_inflight_counts")
@@ -283,12 +293,14 @@ class TestBulkCollectAllP4:
         mock_get_inflight_counts,
         mock_recycle_stuck,
         mock_reconcile,
+        mock_revive_schema,
     ):
         mock_reconcile.return_value = {
             "orphaned_ready": 0,
             "fixed_cached_flags": 0,
             "reindexed_missing_chunks": 0,
         }
+        mock_revive_schema.return_value = {"revived_schema_mismatch": 7}
         mock_recycle_stuck.return_value = {
             "recovered_ready": 0,
             "recycled_error": 0,
@@ -305,6 +317,7 @@ class TestBulkCollectAllP4:
 
         conn = MagicMock()
         conn.execute.side_effect = [
+            _ScalarResult(True),
             _FetchAllResult([(f"id-{i}", "datos_gob_ar") for i in range(60)]),
             _FetchAllResult(group_rows),
         ]
@@ -331,6 +344,7 @@ class TestBulkCollectAllP4:
         assert result["reconciled_orphaned_ready"] == 0
         assert result["reconciled_cached_flags"] == 0
         assert result["reindexed_missing_chunks"] == 0
+        assert result["revived_schema_mismatch"] == 7
         assert result["recycled_stale_ready"] == 0
         assert result["recycled_stale_error"] == 0
         assert result["recycled_stale_failed"] == 0
@@ -338,6 +352,7 @@ class TestBulkCollectAllP4:
         assert countdowns == [0, 0]
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
     @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_inflight_counts")
     @patch("app.infrastructure.celery.tasks.collector_tasks.collect_large_group")
@@ -352,6 +367,7 @@ class TestBulkCollectAllP4:
         mock_collect_large_group,
         mock_get_inflight_counts,
         mock_recycle_stuck,
+        mock_revive_schema,
         mock_reconcile,
     ):
         mock_reconcile.return_value = {
@@ -359,6 +375,7 @@ class TestBulkCollectAllP4:
             "fixed_cached_flags": 5,
             "reindexed_missing_chunks": 6,
         }
+        mock_revive_schema.return_value = {"revived_schema_mismatch": 7}
         mock_recycle_stuck.return_value = {
             "recovered_ready": 1,
             "recycled_error": 2,
@@ -370,6 +387,7 @@ class TestBulkCollectAllP4:
 
         conn = MagicMock()
         conn.execute.side_effect = [
+            _ScalarResult(True),
             _FetchAllResult(
                 [
                     ("id-1", "datos_gob_ar"),
@@ -403,6 +421,7 @@ class TestBulkCollectAllP4:
         assert result["reconciled_orphaned_ready"] == 4
         assert result["reconciled_cached_flags"] == 5
         assert result["reindexed_missing_chunks"] == 6
+        assert result["revived_schema_mismatch"] == 7
         assert result["recycled_stale_ready"] == 1
         assert result["recycled_stale_error"] == 2
         assert result["recycled_stale_failed"] == 3
@@ -443,6 +462,50 @@ class TestRecoverStuckTasksP5:
         assert result["recovered_downloads"] == 6
         assert result["recovered_queries"] == 0
         assert result["orphaned_ready"] == 0
+
+
+class TestFormatDuplicateAliasesP6:
+    @patch("app.infrastructure.celery.tasks.collector_tasks._materialize_format_duplicate_aliases")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_materialize_format_duplicate_aliases_builds_canonical_stem_map(
+        self,
+        mock_get_engine,
+        mock_materialize,
+    ):
+        resources = [
+            SimpleNamespace(
+                id="id-csv",
+                format="csv",
+                download_url="https://example.org/recurso.csv",
+            ),
+            SimpleNamespace(
+                id="id-xlsx",
+                format="xlsx",
+                download_url="https://example.org/recurso.xlsx",
+            ),
+            SimpleNamespace(
+                id="id-json",
+                format="json",
+                download_url="https://example.org/recurso.json",
+            ),
+        ]
+
+        conn = MagicMock()
+        conn.execute.return_value = _FetchAllResult(resources)
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+        mock_materialize.return_value = {"created_aliases": 2, "skipped_missing_source": 0}
+
+        result = materialize_format_duplicate_aliases.run("Grupo A", "caba")
+
+        assert result["created_aliases"] == 2
+        assert result["skipped_missing_source"] == 0
+        kwargs = mock_materialize.call_args.kwargs
+        assert kwargs["group_table_name"] == "cache_caba_grupo_a"
+        assert kwargs["stem_to_winner"]["https://example.org/recurso"][0] == "id-csv"
 
 
 class TestCacheCoverageP6:

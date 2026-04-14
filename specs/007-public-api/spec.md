@@ -44,6 +44,9 @@ OpenArg's public API for **external integrators**. A single endpoint: `POST /api
 - **FR-008**: The endpoint MUST invoke the query pipeline (`001-query-pipeline`) but **without persisting the conversation** (stateless).
 - **FR-009**: The endpoint MUST record usage in `api_usage` (append-only: endpoint, tokens, duration, status).
 - **FR-010**: The endpoint MUST return `{answer, sources, chart_data?, map_data?, confidence, citations, warnings}`.
+- **FR-010a**: `sources` are dataset-level provenance entries derived from executed results.
+- **FR-010b**: `citations` may include grounding metadata (`verified`, `grounding`, `unsupported_numbers`) for claim-level verification. Clients MUST treat unverified citations as best-effort, not as hard evidence.
+- **FR-010c**: When numeric claims in the answer cannot be grounded against executed results, the endpoint MUST surface that via `warnings` and a reduced `confidence` score.
 
 ## 5. Success Criteria
 

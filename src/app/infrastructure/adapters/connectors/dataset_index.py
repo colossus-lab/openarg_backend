@@ -24,6 +24,10 @@ from dataclasses import dataclass
 # Keys are the misspelled form (already normalized: no accents, lowercase);
 # Fuzzy typo correction vocabulary (built lazily from KEYWORD_ROUTES keys).
 _FUZZY_VOCAB: list[str] | None = None
+_CURRENT_VALUE_TOKENS = frozenset({"hoy", "ahora", "actual", "momento"})
+_HISTORICAL_VALUE_TOKENS = frozenset(
+    {"historico", "historica", "historicos", "historicas", "evolucion", "serie", "series"}
+)
 
 
 def _fix_typos(text: str) -> str:
@@ -100,6 +104,20 @@ def normalize_query(text: str) -> str:
     result = re.sub(r"\s+", " ", cleaned).strip()
     # Fix common typos
     return _fix_typos(result)
+
+
+def _wants_current_value(normalized: str) -> bool:
+    tokens = set(normalized.split())
+    if tokens & _CURRENT_VALUE_TOKENS:
+        return True
+    return "en este momento" in normalized
+
+
+def _wants_historical_value(normalized: str) -> bool:
+    tokens = set(normalized.split())
+    if tokens & _HISTORICAL_VALUE_TOKENS:
+        return True
+    return "ultimo ano" in normalized or "ultimos" in tokens
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +765,14 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "coparticipacion": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_coparticipacion_federal_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_*"],
+            "table_notes": (
+                "No existe una tabla unica cache_presupuesto_coparticipacion_federal_*. "
+                "Buscá en tablas de presupuesto nacional columnas o descripciones "
+                "relacionadas con coparticipacion, transferencias automaticas o distribucion federal."
+            ),
+        },
         "confidence": 0.90,
         "description": "Coparticipacion federal de impuestos",
     },
@@ -2747,6 +2772,27 @@ def resolve_hints(query: str) -> list[RoutingHint]:
     # geographic/comparison terms, replace the national-only series
     # hint with the regional one (all 7 series).
     seen_actions = _upgrade_employment_to_regional(normalized, seen_actions)
+
+    if _wants_current_value(normalized) or _wants_historical_value(normalized):
+        upgraded: dict[str, RoutingHint] = {}
+        for dedup_key, hint in seen_actions.items():
+            if hint.action == "query_argentina_datos" and hint.params.get("type") == "dolar":
+                params = dict(hint.params)
+                if _wants_current_value(normalized):
+                    params["ultimo"] = True
+                    params.pop("historico", None)
+                elif _wants_historical_value(normalized):
+                    params["historico"] = True
+                    params.pop("ultimo", None)
+                hint = RoutingHint(
+                    action=hint.action,
+                    params=params,
+                    confidence=hint.confidence,
+                    description=hint.description,
+                )
+                dedup_key = f"{hint.action}:{str(sorted(hint.params.items()))}"
+            upgraded[dedup_key] = hint
+        seen_actions = upgraded
 
     # Sort by confidence descending
     return sorted(seen_actions.values(), key=lambda h: h.confidence, reverse=True)
