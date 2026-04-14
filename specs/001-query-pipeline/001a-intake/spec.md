@@ -62,6 +62,7 @@ The phase ends when the state is either routed to a terminal fast-reply/cache-re
 ### Cache
 - **FR-004**: The system MUST check the Redis cache (exact hash) and the semantic cache (pgvector HNSW) in parallel before invoking the pipeline.
 - **FR-005**: The system MUST skip the cache when `policy_mode=True`.
+- **FR-005a**: On a cache hit, the pipeline MUST preserve the original result-quality metadata from the cached response. `cache_reply` MUST NOT fabricate `confidence=1.0` or drop `citations` / `warnings` when the original fresh answer had a lower confidence or grounding warnings.
 - *(Note: FR-006 — cache write — belongs to Phase E: Finalization.)*
 
 ### Memory

@@ -89,6 +89,9 @@ async def finalize_node(state: OpenArgState) -> dict:
         "map_data": map_data,
         "tokens_used": tokens_used,
         "documents": documents,
+        "confidence": state.get("confidence", 1.0),
+        "citations": state.get("citations", []),
+        "warnings": all_warnings,
     }
     try:
         await write_cache(

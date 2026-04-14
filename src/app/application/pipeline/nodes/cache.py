@@ -83,7 +83,7 @@ async def cache_reply_node(state: OpenArgState) -> dict:
         "tokens_used": cached.get("tokens_used", 0),
         "documents": cached.get("documents"),
         "plan_intent": "cached",
-        "confidence": 1.0,
-        "citations": [],
-        "warnings": [],
+        "confidence": cached.get("confidence", 1.0),
+        "citations": cached.get("citations", []),
+        "warnings": cached.get("warnings", []),
     }

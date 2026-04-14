@@ -10,6 +10,8 @@ from typing import Any
 from app.domain.entities.connectors.data_result import DataResult
 
 _NUM_RE = re.compile(r"(?<![\w/])[-+]?\d[\d.,]*(?:\s*%|(?:\s+(?:millones|millón|miles|mil|billones|billón)))?", re.IGNORECASE)
+_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+_DATE_RE = re.compile(r"\b(19\d{2}|20\d{2})([-/])(\d{1,2})(?:\2(\d{1,2}))?\b")
 _PATH_SKIP = {"_type"}
 _MAX_GROUNDED_ITEMS = 5
 
@@ -88,14 +90,76 @@ def _iter_evidence_values(value: Any, prefix: str = "") -> list[tuple[str, Any]]
     return rows
 
 
+def _iter_temporal_evidence_values(value: Any, prefix: str) -> list[tuple[str, Any, float]]:
+    if not isinstance(value, str):
+        return []
+    text = value.strip()
+    if not text or text.startswith("http://") or text.startswith("https://"):
+        return []
+
+    rows: list[tuple[str, Any, float]] = []
+    date_matches = list(_DATE_RE.finditer(text))
+    if date_matches:
+        for match in date_matches:
+            year = int(match.group(1))
+            month = int(match.group(3))
+            rows.append((f"{prefix}.year", year, float(year)))
+            rows.append((f"{prefix}.month", month, float(month)))
+            if match.group(4):
+                day = int(match.group(4))
+                rows.append((f"{prefix}.day", day, float(day)))
+        return rows
+
+    for match in _YEAR_RE.finditer(text):
+        year = int(match.group(1))
+        rows.append((f"{prefix}.year", year, float(year)))
+    return rows
+
+
 def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]:
     evidence: list[NumericEvidence] = []
     for result in results:
         accessed_at = _safe_str(result.metadata.get("fetched_at", ""))
+        for path, raw, normalized in _iter_temporal_evidence_values(result.dataset_title, "dataset_title"):
+            evidence.append(
+                NumericEvidence(
+                    source_name=result.dataset_title,
+                    portal=result.portal_name,
+                    url=result.portal_url,
+                    accessed_at=accessed_at,
+                    path=path,
+                    raw_value=raw,
+                    normalized=normalized,
+                )
+            )
+        record_count = len(result.records)
+        evidence.append(
+            NumericEvidence(
+                source_name=result.dataset_title,
+                portal=result.portal_name,
+                url=result.portal_url,
+                accessed_at=accessed_at,
+                path="summary.record_count",
+                raw_value=record_count,
+                normalized=float(record_count),
+            )
+        )
         for idx, record in enumerate(result.records):
             for path, raw in _iter_evidence_values(record, f"records[{idx}]"):
                 normalized = _normalize_numeric_token(_safe_str(raw))
                 if normalized is None:
+                    for temporal_path, temporal_raw, temporal_normalized in _iter_temporal_evidence_values(raw, path):
+                        evidence.append(
+                            NumericEvidence(
+                                source_name=result.dataset_title,
+                                portal=result.portal_name,
+                                url=result.portal_url,
+                                accessed_at=accessed_at,
+                                path=temporal_path,
+                                raw_value=temporal_raw,
+                                normalized=temporal_normalized,
+                            )
+                        )
                     continue
                 evidence.append(
                     NumericEvidence(
@@ -111,6 +175,18 @@ def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]
         for path, raw in _iter_evidence_values(result.metadata, "metadata"):
             normalized = _normalize_numeric_token(_safe_str(raw))
             if normalized is None:
+                for temporal_path, temporal_raw, temporal_normalized in _iter_temporal_evidence_values(raw, path):
+                    evidence.append(
+                        NumericEvidence(
+                            source_name=result.dataset_title,
+                            portal=result.portal_name,
+                            url=result.portal_url,
+                            accessed_at=accessed_at,
+                            path=temporal_path,
+                            raw_value=temporal_raw,
+                            normalized=temporal_normalized,
+                        )
+                    )
                 continue
             evidence.append(
                 NumericEvidence(
@@ -123,11 +199,23 @@ def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]
                     normalized=normalized,
                 )
             )
+    evidence.append(
+        NumericEvidence(
+            source_name="Resumen de resultados",
+            portal="",
+            url="",
+            accessed_at="",
+            path="summary.results_count",
+            raw_value=len(results),
+            normalized=float(len(results)),
+        )
+    )
     return evidence
 
 
 def _match_source_evidence(source_hint: str, evidence: list[NumericEvidence]) -> list[NumericEvidence]:
     hint = source_hint.strip().lower()
+    summary = [item for item in evidence if item.path.startswith("summary.")]
     if not hint:
         return evidence
     matched = [
@@ -135,7 +223,9 @@ def _match_source_evidence(source_hint: str, evidence: list[NumericEvidence]) ->
         for item in evidence
         if hint in item.source_name.lower() or hint in item.portal.lower()
     ]
-    return matched if matched else evidence
+    if matched:
+        return matched + [item for item in summary if item not in matched]
+    return evidence
 
 
 def _numbers_in_text(text: str) -> list[float]:
