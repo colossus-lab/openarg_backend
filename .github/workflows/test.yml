@@ -85,6 +85,7 @@ jobs:
       run: |
         ruff check src/ tests/
         ruff format src/ tests/ --check
+        python -m scripts.ci.validate_curated_sources --no-network
 
     - name: Run unit tests
       env:

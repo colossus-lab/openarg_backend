@@ -1,8 +1,8 @@
 # OpenArg Constitution
 
-**Version**: 1.2.0
+**Version**: 1.3.0
 **Status**: Draft (reverse-engineered from the live codebase plus the historical `CLAUDE.md` at the repo root; a private `MEMORY.md` that lived outside the repo was also consulted during the initial pass but is **not** part of the OSS tree).
-**Last synced with code**: 2026-04-12
+**Last synced with code**: 2026-04-25
 **Scope**: Backend (`openarg_backend`). Frontend has its own `constitution.md`.
 
 ---
@@ -66,6 +66,47 @@ A spec that violates this axiom for a good reason must cite the reason inline ("
 ### The bright line
 
 Any PR that modifies `src/` without touching the corresponding `specs/` will be asked by reviewers to fix the drift before merging. The contributor contract in [`README.md#spec-driven-design-is-the-contract`](../README.md#spec-driven-design-is-the-contract) is the enforcement hook. This axiom exists because even the original author of these specs caught himself skipping the cadence twice in a single session: the cadence is cheap, the drift is expensive, and the only way not to skip it is to make it non-negotiable.
+
+---
+
+## 0.6. Plan-and-Approve Before Non-Trivial Code (axiom)
+
+**Any non-trivial change is proposed as a plan, approved by the operator, and only then implemented.** This complements §0.5 — §0.5 says "spec changes before code", §0.6 says "plan changes before spec changes for anything beyond a typo".
+
+### What counts as non-trivial
+
+- Any change that touches more than one file.
+- Any change that introduces a new module, migration, Celery task, env var, feature flag, or API surface.
+- Any change that modifies an existing FR or SC in a `spec.md`.
+- Any destructive or hard-to-reverse operation (DROP, TRUNCATE, force-push, schema rewrite, deletion of `cache_*` tables).
+- Any "while I'm here, let me also fix this" detour — those especially require an approved plan, because they are exactly the path by which scope creeps.
+
+### The cadence
+
+1. **Surface the diagnosis first.** State the problem, the suspected root cause, and 1–3 candidate approaches. Do not jump to a fix.
+2. **Propose a concrete plan.** Files to touch, new files to create, migrations to add, tests to write, rollout steps. Show the shape, not the contents.
+3. **Wait for approval.** A green light from the operator (`ok`, `dale`, `yes`, `approved`, `ejecutá`, etc.) is the signal to start coding. Silence is not approval.
+4. **Implement strictly within the approved plan.** If during coding you discover something the plan didn't anticipate, STOP, surface it, and get a new approval. Do not "patch and explain after".
+5. **Report back.** When done, summarise what changed against the approved plan, including any deviations.
+
+### What you may do without an approved plan
+
+- **Trivial edits** — typos, `ruff --fix`, single-line bug fixes that match a clearly-broken FR.
+- **Read-only diagnostics** — running tests, `git status`, `grep`, `mypy`, generating reports.
+- **Adding tests for an already-specified behavior** — the spec is the plan.
+- **Reverting your own unapproved code** — restoring the pre-detour state needs no further approval.
+
+### Never proceed without a plan when
+
+- The user asked you to "ejecutar todo / hacelo / dale" but the task list itself spans multiple workstreams that haven't each been approved individually. The blanket approval covers the *direction*, not each constituent decision.
+- A code-review surfaces issues that need fixing — surface them first, propose fixes, wait for approval, then fix.
+- You're tempted to "just clean up while you're at it". That is exactly when the rule matters.
+
+### Why this exists
+
+The rule was added in v1.3.0 (2026-04-25) after the operator pointed out that the agent had jumped straight from a code-review to applying fixes without proposing them first. The fixes were correct, but the cadence was wrong: the operator did not get the chance to redirect, deprioritise, or split the work. Doing the right thing the wrong way still costs the operator's review time.
+
+The cost of pausing to propose is low. The cost of an unwanted change — even a correct one — is the operator's mental budget, which is the project's scarcest resource.
 
 ---
 

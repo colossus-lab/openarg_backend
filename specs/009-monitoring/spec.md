@@ -2,9 +2,10 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-12
+**Last synced with code**: 2026-04-25
 **Hexagonal scope**: Infrastructure + Presentation
 **Related plan**: [./plan.md](./plan.md)
+**Sources for new dashboards (post-WS0/WS0.5)**: `ingestion_findings`, `cache_drop_audit`, `portals`
 
 ---
 
@@ -23,6 +24,10 @@ It is the module that **does not require Sentry to function**. The backend does 
 | **MetricsCollector** | In-memory singleton with thread-safe counters (requests, connectors, cache, tokens). |
 | **Prometheus endpoint** | Export in `prometheus_client` format for scraping. |
 | **Stuck task** | Dataset in `downloading` state for >30min or user_query in an intermediate state for >30min. |
+| **Ingestion finding** *(WS0)* | Audit row in `ingestion_findings` produced by a `Detector`. Severity `info | warn | critical`, mode `pre_parse | post_parse | retrospective | state_invariant`. |
+| **State invariant violation** *(WS0.5)* | Sweep-detected divergence from `StateMachineEnforcer` invariants — e.g. `retry_count >= MAX AND status='error'`. Persisted as a finding under `mode='state_invariant'`. |
+| **Cache drop audit** | Row in `cache_drop_audit` written by the `pg_event_trigger` (migration 0036) every time a `public.cache_*` table is dropped. Captures session info to attribute the spike of 144 `Table missing` cases. |
+| **Portal health** | Row in `portals` written by `openarg.ops_portal_health` every 30 min. Carries `is_down`, `consecutive_failures`, `last_status`. |
 
 ## 3. User Stories
 
@@ -51,6 +56,12 @@ It is the module that **does not require Sentry to function**. The backend does 
 - **FR-009**: Stuck task detection: `cached_datasets.status='downloading' AND updated_at < now() - 30min`.
 - **FR-010**: Recent errors count: 24h window.
 - **FR-011**: Heavy bootstrap work (bulk collect, transparency bootstrap, large backfills) MUST NOT be dispatched implicitly on every Celery worker startup unless an explicit operator opt-in flag is enabled.
+- **FR-012** *(WS0)*: A "validation findings" view MUST aggregate `ingestion_findings` by `detector_name + severity + portal` so operators can see (a) top failing detectors, (b) which portals dominate critical findings, (c) trend over the last 7 days. Surface in `/api/v1/admin/findings` (read-only).
+- **FR-013** *(WS0.5)*: A "state-machine violations" view MUST aggregate findings under `mode='state_invariant'` by `detector_name` (which is the violation kind, e.g. `invariant_retry_max_status_error`) and report whether the enforcer is in dry-run or auto mode.
+- **FR-014** *(WS0.5)*: A "error_category breakdown" view MUST report counts of `cached_datasets` by `error_category` (closed taxonomy) so operators stop relying on `LIKE` over free-text `error_message`.
+- **FR-015** *(ops)*: `cache_drop_audit` MUST be queryable via `/api/v1/admin/cache_drops?limit=…` so the next Table-missing spike can be attributed.
+- **FR-016** *(ops)*: `portals` MUST be queryable via `/api/v1/admin/portal-health?limit=…` so operators can see current dead/healthy portal state without DB access.
+- **FR-017** *(ops)*: `portals` MUST surface in `/health` as a per-portal up/down indicator (alongside the existing component checks).
 
 ## 5. Success Criteria
 

@@ -2,10 +2,11 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-13
+**Last synced with code**: 2026-04-25
 **Hexagonal scope**: Infrastructure (Workers) + Domain
 **Parent module**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
+**Related new specs**: [013-ingestion-validation](../../013-ingestion-validation/spec.md), [014-state-machine](../../014-state-machine/spec.md)
 
 ---
 
@@ -68,6 +69,12 @@ Important architectural clarification: the collector no longer writes directly i
 - **FR-026**: ZIP bundles that contain multiple parseable inner archives or files MUST keep traversing parseable members instead of stopping at the first success, aggregating rows per target table when schemas remain compatible.
 - **FR-027**: While a multi-table ZIP bundle is still running, `cached_datasets` MUST expose partial per-table progress (`row_count`, `columns_json`, and table presence) for the sibling tables already materialized instead of leaving them opaque until the task finishes.
 - **FR-028**: Schema compatibility for append-mode collector writes MUST require an exact normalized column-set match. The routing decision MUST use the same sanitized SQL-visible column names that the final write path uses. Subset/superset schemas MUST be routed into distinct schema-variant tables before writing, instead of relying on mid-run drop/recreate retries.
+- **FR-029** *(WS0)*: The collector MUST run an `IngestionValidator` pre-parse hook **after download, before pandas**. A `critical` finding aborts ingestion, marks the row `permanently_failed` and short-circuits the S3 upload. See [013-ingestion-validation](../../013-ingestion-validation/spec.md).
+- **FR-030** *(WS0)*: The collector MUST run an `IngestionValidator` post-parse hook **after materialization, before flipping `status='ready'`**. A `critical` finding rolls back to `error`/`permanently_failed` so the planner never sees the corrupt projection.
+- **FR-031** *(WS0)*: All findings (pre-parse, post-parse, retrospective, state-invariant) MUST be persisted in `ingestion_findings` keyed by `(resource_id, detector_name, detector_version, mode, input_hash)` for idempotent UPSERTs.
+- **FR-032** *(WS0.5)*: `cached_datasets` MUST carry a `error_category` enum (closed taxonomy) updated alongside `error_message`. Operational queries MUST aggregate by category, not by `LIKE` over free text. See [014-state-machine](../../014-state-machine/spec.md).
+- **FR-033** *(WS0.5)*: A DB trigger MUST enforce the invariant `retry_count >= MAX_TOTAL_ATTEMPTS ⇒ status='permanently_failed'`. The trigger MUST treat `permanently_failed` as terminal — no further status changes or retry_count bumps.
+- **FR-034** *(WS4)*: Materialised table names MUST be produced by the deterministic `physical_namer` (≤63 chars, charset `[a-z0-9_]`, stable 8-char discriminator from `blake2b(portal, source_id)`). The legacy `_sanitize_table_name` path MUST be fed by this producer once `OPENARG_CATALOG_ONLY=1` is on.
 
 ## 5. Success Criteria
 
@@ -85,6 +92,9 @@ Important architectural clarification: the collector no longer writes directly i
 - **SC-013**: Multi-archive commercial bundles such as SEPA MUST append compatible rows across multiple nested ZIP members instead of materializing only the first inner archive.
 - **SC-014**: During a long multi-table collector run, operators MUST be able to observe sibling table growth from `cached_datasets` before the final `ready` transition.
 - **SC-015**: Long-running commercial bundles such as SEPA MUST stop dropping/recreating sibling schema tables mid-run just because later members have subset/superset columns; those members should route into distinct schema variants up front.
+- **SC-016** *(WS0)*: Zero new HTML-as-data tables (the 38 confirmed in staging Apr 2026) reach `status='ready'` after WS0 hooks are deployed.
+- **SC-017** *(WS0.5)*: Zero rows in `cached_datasets` should violate the invariants enforced by `StateMachineEnforcer.scan()` after the first sweep with auto-enforce on.
+- **SC-018** *(WS4)*: Zero `pg_type_typname_nsp_index` collision errors (the 10 confirmed in prod Apr 2026) after `physical_namer` is the only source of materialised table names.
 
 ## 6. Assumptions & Out of Scope
 

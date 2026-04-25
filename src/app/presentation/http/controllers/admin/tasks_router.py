@@ -142,6 +142,30 @@ TASK_REGISTRY: dict[str, dict] = {
         "params": [],
         "queue": "collector",
     },
+    "ws0_retrospective_sweep": {
+        "celery_name": "openarg.ws0_retrospective_sweep",
+        "description": "Run the retrospective ingestion validation sweep",
+        "params": [],
+        "queue": "ingest",
+    },
+    "ws0_5_state_invariants_sweep": {
+        "celery_name": "openarg.ws0_5_state_invariants_sweep",
+        "description": "Run the cached_datasets state invariants sweep",
+        "params": [],
+        "queue": "default",
+    },
+    "ops_portal_health": {
+        "celery_name": "openarg.ops_portal_health",
+        "description": "Run portal health checks and refresh the operational snapshot",
+        "params": [],
+        "queue": "ingest",
+    },
+    "report_failed_tasks": {
+        "celery_name": "openarg.report_failed_tasks",
+        "description": "Summarize failed Celery tasks for operator review",
+        "params": [],
+        "queue": "default",
+    },
     # --- New data sources ---
     "ingest_presupuesto": {
         "celery_name": "openarg.ingest_presupuesto",
@@ -218,6 +242,36 @@ TASK_REGISTRY: dict[str, dict] = {
     "ingest_series_tiempo": {
         "celery_name": "openarg.ingest_series_tiempo",
         "description": "Ingest Series de Tiempo economic indicators → PG",
+        "params": [],
+        "queue": "ingest",
+    },
+    "catalog_backfill": {
+        "celery_name": "openarg.catalog_backfill",
+        "description": "Backfill the logical catalog from datasets and cached_datasets",
+        "params": ["portal", "limit", "offset"],
+        "queue": "ingest",
+    },
+    "populate_catalog_embeddings": {
+        "celery_name": "openarg.populate_catalog_embeddings",
+        "description": "Populate missing embeddings for catalog_resources",
+        "params": ["batch_size", "max_batches", "dry_run"],
+        "queue": "embedding",
+    },
+    "seed_connector_endpoints": {
+        "celery_name": "openarg.seed_connector_endpoints",
+        "description": "Seed logical catalog rows for live connector endpoints",
+        "params": ["dry_run"],
+        "queue": "ingest",
+    },
+    "refresh_curated_sources": {
+        "celery_name": "openarg.refresh_curated_sources",
+        "description": "Refresh curated high-value sources into datasets and cache tracking",
+        "params": ["source_key"],
+        "queue": "ingest",
+    },
+    "ingest_censo2022": {
+        "celery_name": "openarg.ingest_censo2022",
+        "description": "Seed Censo 2022 cuadros into the logical catalog",
         "params": [],
         "queue": "ingest",
     },

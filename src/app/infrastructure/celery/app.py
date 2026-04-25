@@ -94,6 +94,12 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.reporting_tasks",
             "app.infrastructure.celery.tasks.catalog_enrichment_tasks",
             "app.infrastructure.celery.tasks.cache_cleanup_tasks",
+            "app.infrastructure.celery.tasks.ingestion_findings_sweep",
+            "app.infrastructure.celery.tasks.state_invariants_sweep",
+            "app.infrastructure.celery.tasks.ops_fixes",
+            "app.infrastructure.celery.tasks.catalog_backfill",
+            "app.infrastructure.celery.tasks.curated_loader_tasks",
+            "app.infrastructure.celery.tasks.censo2022_ingest",
         ],
     )
 
@@ -134,6 +140,15 @@ def create_celery() -> Celery:
         "openarg.enrich_all_tables": {"queue": "embedding"},
         "openarg.cleanup_semantic_cache": {"queue": "ingest"},
         "openarg.cleanup_orphan_catalog_entries": {"queue": "ingest"},
+        "openarg.ws0_retrospective_sweep": {"queue": "ingest"},
+        "openarg.ws0_5_state_invariants_sweep": {"queue": "default"},
+        "openarg.ops_temp_dir_cleanup": {"queue": "default"},
+        "openarg.ops_portal_health": {"queue": "ingest"},
+        "openarg.catalog_backfill": {"queue": "ingest"},
+        "openarg.populate_catalog_embeddings": {"queue": "embedding"},
+        "openarg.seed_connector_endpoints": {"queue": "ingest"},
+        "openarg.refresh_curated_sources": {"queue": "ingest"},
+        "openarg.ingest_censo2022": {"queue": "ingest"},
     }
 
     app.conf.task_default_queue = "scraper"
@@ -323,6 +338,35 @@ def create_celery() -> Celery:
             "cleanup-orphan-catalog-entries": {
                 "task": "openarg.cleanup_orphan_catalog_entries",
                 "schedule": crontab(hour=3, minute=30),  # Daily 3:30 AM ART
+                "options": {"queue": "ingest"},
+            },
+            # --- Curated sources refresh (weekly Sun 03:30 ART) ---
+            "refresh-curated-sources": {
+                "task": "openarg.refresh_curated_sources",
+                "schedule": crontab(day_of_week=0, hour=3, minute=30),
+                "options": {"queue": "ingest"},
+            },
+            # --- WS0 retrospective ingestion validation sweep (bridge: every 30 min) ---
+            "ws0-retrospective-sweep": {
+                "task": "openarg.ws0_retrospective_sweep",
+                "schedule": crontab(minute="12,42"),
+                "options": {"queue": "ingest"},
+            },
+            # --- WS0.5 state machine invariants sweep (every 30 min) ---
+            "ws0-5-state-invariants-sweep": {
+                "task": "openarg.ws0_5_state_invariants_sweep",
+                "schedule": crontab(minute="7,37"),
+                "options": {"queue": "default"},
+            },
+            # --- Operational: /tmp cleanup (hourly) + portal health (every 30 min) ---
+            "ops-temp-dir-cleanup": {
+                "task": "openarg.ops_temp_dir_cleanup",
+                "schedule": crontab(minute=10),
+                "options": {"queue": "default"},
+            },
+            "ops-portal-health": {
+                "task": "openarg.ops_portal_health",
+                "schedule": crontab(minute="*/30"),
                 "options": {"queue": "ingest"},
             },
             # --- Reporting / Dead Letter visibility ---

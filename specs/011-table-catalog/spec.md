@@ -1,10 +1,11 @@
 # Spec: Table Catalog (NL2SQL Discovery)
 
 **Type**: Reverse-engineered
-**Status**: Draft
-**Last synced with code**: 2026-04-11
+**Status**: Draft — being supplanted by [015-catalog-resources](../015-catalog-resources/spec.md)
+**Last synced with code**: 2026-04-25
 **Hexagonal scope**: Infrastructure (meta-task, cross-cutting)
 **Related plan**: [./plan.md](./plan.md)
+**Successor**: [015-catalog-resources](../015-catalog-resources/spec.md) (logical catalog, post-WS2)
 
 ---
 
@@ -13,6 +14,14 @@
 Vector registry of **semantic metadata for cached tables**, used by the query pipeline to **discover which table to query** given a natural-language question. It is populated automatically via `catalog_enrichment_tasks` (see `002o-catalog-enrichment/`) which uses Bedrock Claude Haiku to generate descriptions + Bedrock Cohere for embeddings.
 
 It was part of **Optimization Category 3 (Mar 2026)** — migration 0019 created the table, auto-enrichment in the collector, context for NL2SQL.
+
+### Transition status (Apr 2026)
+
+`table_catalog` is being supplanted by [`catalog_resources`](../015-catalog-resources/spec.md) (WS2). During the transition:
+- `table_catalog` continues to serve materialized-table discovery for the existing planner path.
+- `catalog_resources` is consulted in addition (`OPENARG_HYBRID_DISCOVERY=1`) or instead (`OPENARG_CATALOG_ONLY=1`) of `table_catalog`.
+- After the staging cutover (see `scripts/staging_reset.py`), staging runs in catalog-only mode and `table_catalog` is empty there.
+- Production keeps both layers until WS6 cutover criteria are met.
 
 ## 2. Ubiquitous Language
 

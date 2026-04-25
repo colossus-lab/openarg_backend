@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +82,9 @@ def _register_dataset(
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
                     (:sid, :title, :desc, :org, :portal, :url, :dl, 'csv', :cols, :tags,
-                     :now, true, :rows)
+                     :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
@@ -109,23 +110,20 @@ def _register_dataset(
         dataset_id = dataset_row[0] if dataset_row else None
 
         if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "now": now,
-                },
+            finalized = _finalize_cached_dataset(
+                engine,
+                dataset_id=dataset_id,
+                portal=portal.portal_key,
+                source_id=source_id,
+                table_name=table_name,
+                row_count=len(df),
+                columns=list(df.columns),
+                declared_format="csv",
+                download_url=url,
+                now=now,
             )
+            if not finalized["ok"]:
+                return None
 
     return dataset_id
 

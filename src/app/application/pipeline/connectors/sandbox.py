@@ -14,6 +14,11 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
+from app.application.discovery import (
+    catalog_discovery,
+    catalog_only_mode,
+    discovery_enabled,
+)
 from app.application.pipeline.connectors.cache_table_selection import (
     build_table_compat_notes,
     expand_table_hints_compat,
@@ -211,6 +216,11 @@ async def discover_catalog_hints_for_planner(
         return ""
     try:
         q_embedding = await embedding.embed(query)
+        # In `OPENARG_CATALOG_ONLY` cutover mode, skip the legacy
+        # `table_catalog` query entirely and let `_hybrid_logical_hints`
+        # drive discovery from `catalog_resources` alone.
+        if catalog_only_mode():
+            return await _hybrid_logical_hints(query, q_embedding, limit=limit)
         embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
         loop = asyncio.get_running_loop()
 
@@ -245,7 +255,10 @@ async def discover_catalog_hints_for_planner(
 
         rows = await loop.run_in_executor(None, _search)
         if not rows:
-            return ""
+            # WS3 hybrid discovery — when no materialized table matches, try
+            # the logical catalog so the planner can still see resources that
+            # exist conceptually (or live-API connectors).
+            return await _hybrid_logical_hints(query, q_embedding, limit=limit)
 
         lines = ["TABLAS CACHEADAS RELEVANTES (datos reales descargados, usar query_sandbox):"]
         for table_name, display_name, description, row_count, score in rows:
@@ -262,9 +275,58 @@ async def discover_catalog_hints_for_planner(
             "\nSi alguna de estas tablas es relevante para la pregunta, "
             "usá la acción query_sandbox con table_hints incluyendo el nombre exacto de la tabla."
         )
+        # Append logical catalog hints when the feature flag is on. Optional,
+        # additive — doesn't break the existing planner path.
+        logical_hints = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+        if logical_hints:
+            lines.append("")
+            lines.append(logical_hints)
         return "\n".join(lines)
     except Exception:
         logger.debug("catalog hints for planner failed", exc_info=True)
+        return ""
+
+
+async def _hybrid_logical_hints(
+    query: str, q_embedding: list[float] | None, *, limit: int
+) -> str:
+    """WS3 — surface `catalog_resources` to the planner when the flag is on.
+
+    Returns a planner-facing block describing logical resources that match
+    the query (whether materialized, pending or connector_endpoint).
+    """
+    if not discovery_enabled():
+        return ""
+    try:
+        loop = asyncio.get_running_loop()
+        discovery = catalog_discovery()
+
+        def _search() -> list:
+            if q_embedding:
+                return discovery.find_by_embedding(q_embedding, k=limit)
+            return discovery.find_by_text(query, k=limit)
+
+        results = await loop.run_in_executor(None, _search)
+        if not results:
+            return ""
+        lines = [
+            "RECURSOS LÓGICOS RELEVANTES (catalog_resources, pueden no estar materializados):"
+        ]
+        for r in results:
+            tag = r.materialization_status.upper()
+            line = f"  - [{tag}] {r.display_name or r.canonical_title} (kind={r.resource_kind})"
+            if r.materialized_table_name:
+                line += f" → tabla `{r.materialized_table_name}`"
+            if getattr(r, "score", 0):
+                line += f" [score: {round(r.score, 2)}]"
+            lines.append(line)
+        lines.append(
+            "Para LIVE_API/PENDING usá el conector apropiado (BCRA, series_tiempo, etc.). "
+            "Para READY usá query_sandbox con la tabla indicada."
+        )
+        return "\n".join(lines)
+    except Exception:
+        logger.debug("hybrid logical hints failed", exc_info=True)
         return ""
 
 

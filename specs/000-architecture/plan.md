@@ -2,8 +2,57 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Type**: Reverse-engineered
-**Status**: Draft
-**Last synced with code**: 2026-04-10
+**Status**: Draft — extended with WS0/WS0.5/WS2/WS3/WS4/WS5 modules (2026-04-25)
+**Last synced with code**: 2026-04-25
+
+## Collector rewrite addendum (2026-04-25)
+
+Six new application-layer modules were added per [collector_plan.md](../../../collector_plan.md):
+
+```
+src/app/application/
+├── validation/         # WS0  — IngestionValidator + 14 detectors + collector_hooks + findings_repository
+├── state_machine/      # WS0.5 — Status enum + transitions + StateMachineEnforcer
+├── catalog/            # WS4  — title_extractor (canonical) + physical_namer (deterministic table name)
+├── discovery/          # WS3  — CatalogDiscovery (hybrid + catalog-only modes)
+├── expander/           # WS5  — MultiFileExpander (per-file ZIP rules)
+└── pipeline/parsers/   # WS5  — HierarchicalHeaderParser (INDEC year+quarter+month)
+```
+
+New domain entity:
+- `app/domain/entities/dataset/catalog_resource.py` — `CatalogResource` (logical catalog row) with status/kind enum constants.
+
+New persistence:
+- `catalog_resources` (migration 0035) — vector(1024) HNSW + parent_resource_id + check constraints.
+- `ingestion_findings` (migration 0033) — audit trail for the validator.
+- `cached_datasets.error_category` (migration 0034) — closed taxonomy + retry-invariant trigger.
+- `cache_drop_audit` (migration 0036) — pg_event_trigger logs every `DROP TABLE cache_*`.
+
+New Celery tasks:
+- `openarg.ws0_retrospective_sweep` (every 6h) — validator Modo 3.
+- `openarg.ws0_5_state_invariants_sweep` (every 30 min) — state-machine enforcer.
+- `openarg.catalog_backfill` — populates `catalog_resources` from existing `datasets`+`cached_datasets`.
+- `openarg.refresh_curated_sources` (weekly) — loads `config/curated_sources.json` into `datasets`.
+- `openarg.ingest_censo2022` — Censo 2022 cuadro-by-cuadro seeder.
+- `openarg.ops_temp_dir_cleanup` (hourly) — `/tmp/tmp*` sweep.
+- `openarg.ops_portal_health` (every 30 min) — pings each portal, marks dead ones in `portals`.
+
+New scripts:
+- `scripts/diagnostics/factual_map.py` — WS1 read-only diagnostic.
+- `scripts/staging_reset.py` — destructive wipe + re-scrape (refuses in prod).
+- `scripts/ci/validate_curated_sources.py` — CI check for `config/curated_sources.json`.
+
+New specs:
+- [013-ingestion-validation](../013-ingestion-validation/) — WS0.
+- [014-state-machine](../014-state-machine/) — WS0.5.
+- [015-catalog-resources](../015-catalog-resources/) — WS2 + WS3 + WS4.
+
+Feature flags introduced:
+- `OPENARG_DISABLE_INGESTION_VALIDATOR=1` — disable WS0 hooks (Modos 1+2).
+- `OPENARG_SWEEP_AUTOFLIP=1` — let WS0 Modo 3 flip materialization_status.
+- `OPENARG_WS0_5_AUTO_ENFORCE=1` — let WS0.5 enforcer auto-correct (default dry-run).
+- `OPENARG_HYBRID_DISCOVERY=1` — append catalog_resources hits in the planner.
+- `OPENARG_CATALOG_ONLY=1` — replace `table_catalog` entirely (staging cutover).
 
 ---
 

@@ -12,6 +12,12 @@ from app.domain.entities.connectors.data_result import DataResult
 _NUM_RE = re.compile(r"(?<![\w/])[-+]?\d[\d.,]*(?:\s*%|(?:\s+(?:millones|millón|miles|mil|billones|billón)))?", re.IGNORECASE)
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 _DATE_RE = re.compile(r"\b(19\d{2}|20\d{2})([-/])(\d{1,2})(?:\2(\d{1,2}))?\b")
+_DATE_DMY_RE = re.compile(r"\b(\d{1,2})([-/])(\d{1,2})\2(19\d{2}|20\d{2})\b")
+_DATE_TEXT_RE = re.compile(
+    r"\b\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?:(?:\s+de)?\s+(?:19\d{2}|20\d{2}))?\b",
+    re.IGNORECASE,
+)
+_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
 _PATH_SKIP = {"_type"}
 _MAX_GROUNDED_ITEMS = 5
 
@@ -301,17 +307,27 @@ def _match_source_evidence(source_hint: str, evidence: list[NumericEvidence]) ->
 
 def _numbers_in_text(text: str) -> list[float]:
     values: list[float] = []
-    for match in _NUM_RE.findall(text):
+    stripped = _TIME_RE.sub(" ", _DATE_TEXT_RE.sub(" ", _DATE_DMY_RE.sub(" ", _DATE_RE.sub(" ", text))))
+    for match in _NUM_RE.findall(stripped):
         normalized = _normalize_numeric_token(match)
         if normalized is not None:
             values.append(normalized)
     return values
 
 
+def _is_rounded_quote_match(target: float, item: NumericEvidence) -> bool:
+    if item.path.endswith(".compra") or item.path.endswith(".venta"):
+        if float(target).is_integer() and not float(item.normalized).is_integer():
+            return math.isclose(item.normalized, target, rel_tol=0.0, abs_tol=0.5)
+    return False
+
+
 def _matches_any(target: float, evidence: list[NumericEvidence]) -> list[NumericEvidence]:
     hits: list[NumericEvidence] = []
     for item in evidence:
-        if math.isclose(item.normalized, target, rel_tol=1e-6, abs_tol=1e-6):
+        if math.isclose(item.normalized, target, rel_tol=1e-6, abs_tol=1e-6) or _is_rounded_quote_match(
+            target, item
+        ):
             hits.append(item)
     return hits
 

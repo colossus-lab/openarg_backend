@@ -12,6 +12,29 @@ from app.domain.entities.connectors.data_result import DataResult
 logger = logging.getLogger(__name__)
 
 
+def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, Any]]:
+    return sorted(rows, key=lambda row: str(row.get(x_key, "")))
+
+
+def _looks_like_mixed_quote_snapshot(
+    result: DataResult,
+    rows: list[dict[str, Any]],
+    x_key: str,
+    numeric_keys: list[str],
+) -> bool:
+    if x_key != "fecha":
+        return False
+    if not rows:
+        return False
+    if {key.lower() for key in numeric_keys} != {"compra", "venta"}:
+        return False
+    title = result.dataset_title.lower()
+    if "todas las casas" not in title:
+        return False
+    x_values = [str(row.get(x_key, "")) for row in rows]
+    return len(set(x_values)) < len(x_values)
+
+
 def build_deterministic_charts(
     results: list[DataResult], max_charts: int = 4
 ) -> list[dict[str, Any]]:
@@ -107,6 +130,14 @@ def build_deterministic_charts(
             continue
 
         is_time = result.format == "time_series" or time_key == "fecha"
+        if is_time:
+            clean = _sort_chart_rows(clean, x_key)
+        if _looks_like_mixed_quote_snapshot(result, clean, x_key, numeric_keys):
+            logger.info(
+                "Skipping misleading mixed quote line chart for dataset '%s'",
+                result.dataset_title,
+            )
+            continue
         chart_type = "line_chart" if is_time else "bar_chart"
         title = result.dataset_title
         units = result.metadata.get("units")

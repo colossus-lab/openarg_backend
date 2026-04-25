@@ -18,14 +18,34 @@ import shutil
 import tempfile
 import time
 from collections import Counter
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
+from app.application.expander import MultiFileExpander
+from app.application.validation.collector_hooks import (
+    is_critical as _ws0_is_critical,
+)
+from app.application.validation.collector_hooks import (
+    validate_post_parse as _ws0_validate_post_parse,
+)
+from app.application.validation.collector_hooks import (
+    validate_pre_parse as _ws0_validate_pre_parse,
+)
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+
+
+def _read_byte_sample(path: str, n: int = 4096) -> bytes:
+    """Read up to n bytes from disk for ingestion validators."""
+    try:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except Exception:
+        return b""
 
 # Domains with known SSL certificate issues (self-signed, missing intermediates).
 _DOMAINS_SKIP_SSL = frozenset(
@@ -1017,6 +1037,7 @@ def _parse_zip_archive(
     append_mode: bool,
     nested_depth: int = 0,
     existing_member_tables: set[str] | None = None,
+    member_names_override: list[str] | None = None,
     progress_callback=None,
 ) -> dict:
     """Parse a ZIP archive, recursing one level into nested ZIP members."""
@@ -1101,7 +1122,7 @@ def _parse_zip_archive(
     current_append_mode = append_mode
     sampled_note: str | None = None
     parsed_members: list[dict[str, object]] = []
-    member_names = zf.namelist()
+    member_names = list(member_names_override or zf.namelist())
     summary = _zip_structure_summary(member_names)
 
     logger.info(
@@ -1926,7 +1947,125 @@ def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: st
                     {"msg": error_msg[:500], "did": dataset_id},
                 )
     except Exception:
-        logger.debug("Could not update error status for %s", dataset_id, exc_info=True)
+        # Was logger.debug — silently swallowed status-update failures left
+        # orphaned datasets in inconsistent states. Surface at warning so the
+        # operator can correlate with worker errors.
+        logger.warning(
+            "Could not update error status for dataset %s (msg=%r)",
+            dataset_id,
+            error_msg[:120],
+            exc_info=True,
+        )
+
+
+def _finalize_cached_dataset(
+    engine,
+    *,
+    dataset_id: str,
+    portal: str,
+    source_id: str,
+    table_name: str,
+    row_count: int,
+    columns: list[str],
+    declared_format: str,
+    download_url: str | None = None,
+    declared_size_bytes: int | None = None,
+    s3_key: str | None = None,
+    error_message: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Apply the WS0 post-parse gate, then persist the final cached state."""
+    finalized_at = now or datetime.now(UTC)
+    normalized_columns = [str(c) for c in columns]
+    columns_json = json.dumps(normalized_columns)
+
+    finding = _ws0_validate_post_parse(
+        engine,
+        dataset_id=dataset_id,
+        portal=portal,
+        source_id=source_id,
+        download_url=download_url,
+        declared_format=declared_format,
+        table_name=table_name,
+        materialized_columns=normalized_columns,
+        materialized_row_count=row_count,
+        declared_size_bytes=declared_size_bytes,
+        columns_json=columns_json,
+    )
+    if _ws0_is_critical(finding):
+        msg = f"ingestion_validation_failed:{finding.detector_name}"
+        logger.warning(
+            "Dataset %s failed specialized post-parse gate by %s: %s",
+            dataset_id,
+            finding.detector_name,
+            finding.message,
+        )
+        _set_error_status(engine, dataset_id, msg, table_name=table_name)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE datasets "
+                        "SET is_cached = false, updated_at = :now "
+                        "WHERE id = CAST(:did AS uuid)"
+                    ),
+                    {"did": dataset_id, "now": finalized_at},
+                )
+        except Exception:
+            logger.debug(
+                "Could not clear datasets.is_cached after WS0 rejection for %s",
+                dataset_id,
+                exc_info=True,
+            )
+        return {"ok": False, "status": "rejected", "error": msg}
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO cached_datasets (
+                    dataset_id, table_name, status, row_count,
+                    columns_json, size_bytes, s3_key, error_message, updated_at
+                ) VALUES (
+                    CAST(:did AS uuid), :tn, 'ready', :rows,
+                    :cols, :size, :s3, :msg, :now
+                )
+                ON CONFLICT (table_name) DO UPDATE SET
+                    dataset_id = CAST(:did AS uuid),
+                    status = 'ready',
+                    row_count = EXCLUDED.row_count,
+                    columns_json = EXCLUDED.columns_json,
+                    size_bytes = EXCLUDED.size_bytes,
+                    s3_key = EXCLUDED.s3_key,
+                    error_message = EXCLUDED.error_message,
+                    updated_at = :now
+                """
+            ),
+            {
+                "did": dataset_id,
+                "tn": table_name,
+                "rows": row_count,
+                "cols": columns_json,
+                "size": declared_size_bytes,
+                "s3": s3_key,
+                "msg": error_message,
+                "now": finalized_at,
+            },
+        )
+        conn.execute(
+            text(
+                "UPDATE datasets "
+                "SET is_cached = true, row_count = :rows, updated_at = :now "
+                "WHERE id = CAST(:did AS uuid)"
+            ),
+            {
+                "did": dataset_id,
+                "rows": row_count,
+                "now": finalized_at,
+            },
+        )
+
+    return {"ok": True, "status": "ready", "columns_json": columns_json}
 
 
 def _check_schema_compat_columns(engine, table_name: str, columns) -> bool:
@@ -2276,6 +2415,33 @@ def collect_dataset(self, dataset_id: str):
                     raise
             download_ms = int((time.monotonic() - download_started_at) * 1000)
 
+            # WS0 Modo 1 — pre-parse guard: reject HTML-as-data, GDrive
+            # warnings, .rar disguised as .zip, etc. before pandas touches it.
+            # Findings are persisted FIRST (so the audit trail captures the
+            # rejection) and then the upload is short-circuited — we never
+            # push HTML/.rar garbage to S3.
+            _ws0_pre_finding = _ws0_validate_pre_parse(
+                engine,
+                dataset_id=dataset_id,
+                portal=portal,
+                source_id=source_id,
+                download_url=download_url,
+                declared_format=fmt,
+                raw_byte_sample=_read_byte_sample(tmp_path),
+                declared_size_bytes=file_size,
+                table_name=table_name,
+            )
+            if _ws0_is_critical(_ws0_pre_finding):
+                msg = f"ingestion_validation_failed:{_ws0_pre_finding.detector_name}"
+                logger.warning(
+                    "Dataset %s rejected pre-parse by %s: %s",
+                    dataset_id,
+                    _ws0_pre_finding.detector_name,
+                    _ws0_pre_finding.message,
+                )
+                _set_error_status(engine, dataset_id, msg, table_name=table_name)
+                return {"error": msg}
+
             # Upload raw file to S3 (from disk, not memory)
             s3_key = None
             try:
@@ -2345,30 +2511,63 @@ def collect_dataset(self, dataset_id: str):
             elif fmt == "zip":
                 import zipfile
 
-                max_decompressed = 500 * 1024 * 1024
                 try:
                     zf = zipfile.ZipFile(tmp_path)
                 except zipfile.BadZipFile:
                     logger.warning(f"ZIP {dataset_id}: not a valid ZIP file")
                     _set_error_status(engine, dataset_id, "bad_zip_file", table_name=table_name)
                     return {"error": "bad_zip_file"}
-                total_size = sum(info.file_size for info in zf.infolist())
-                if total_size > max_decompressed:
+
+                expansion = MultiFileExpander().expand(tmp_path)
+                if expansion.skipped_oversized:
+                    largest = expansion.skipped_oversized[0]
                     logger.warning(
-                        f"ZIP {dataset_id}: decompressed size {total_size} exceeds limit"
+                        "ZIP %s: oversized entry rejected by multi-file expander: %s",
+                        dataset_id,
+                        largest,
                     )
                     _set_error_status(
                         engine,
                         dataset_id,
-                        f"zip_too_large: {total_size} bytes decompressed",
+                        f"zip_entry_too_large: {largest}",
                         table_name=table_name,
                     )
-                    return {"error": f"zip_too_large: {total_size} bytes"}
-                if not _has_temp_space(total_size):
+                    return {"error": f"zip_entry_too_large: {largest}"}
+
+                expanded_member_names = [entry.name for entry in expansion.expanded]
+                expanded_total_size = sum(entry.size_bytes for entry in expansion.expanded)
+                if not expanded_member_names and expansion.document_bundle:
+                    logger.warning(
+                        "ZIP %s classified as document bundle by multi-file expander",
+                        dataset_id,
+                    )
+                    _set_error_status(
+                        engine,
+                        dataset_id,
+                        "zip_document_bundle",
+                        table_name=table_name,
+                    )
+                    return {"error": "zip_document_bundle"}
+
+                if not expanded_member_names:
+                    logger.warning(
+                        "ZIP %s: no parseable entry selected by multi-file expander (unknown=%s)",
+                        dataset_id,
+                        expansion.unknown,
+                    )
+                    _set_error_status(
+                        engine,
+                        dataset_id,
+                        "zip_no_parseable_file",
+                        table_name=table_name,
+                    )
+                    return {"error": "zip_no_parseable_file"}
+
+                if not _has_temp_space(expanded_total_size):
                     logger.warning(
                         "ZIP %s: insufficient temp space for %d decompressed bytes",
                         dataset_id,
-                        total_size,
+                        expanded_total_size,
                     )
                     backoff = min(120 * (2**self.request.retries), 600)
                     raise self.retry(
@@ -2416,6 +2615,7 @@ def collect_dataset(self, dataset_id: str):
                     table_name=table_name,
                     engine=engine,
                     append_mode=append_mode,
+                    member_names_override=expanded_member_names,
                     progress_callback=_update_partial_member_progress,
                 )
                 if zip_result.get("result") is not None:
@@ -2656,9 +2856,56 @@ def collect_dataset(self, dataset_id: str):
             if append_mode:
                 # Append mode: update row_count from actual table, keep status 'ready'
                 if member_tables:
+                    # WS0 Modo 2 (per-member) — gate every ZIP child the same
+                    # way as a single-file ingest. Members rejected by the
+                    # post-parse detectors are marked permanently_failed
+                    # instead of ready so the planner never sees a corrupt
+                    # member table even when its sibling members succeeded.
+                    rejected_members: dict[str, str] = {}
+                    for _member in member_tables:
+                        _member_table = str(_member["table_name"])
+                        _member_columns = [str(c) for c in _member.get("columns", [])]
+                        _member_rows = int(_member.get("row_count", 0) or 0)
+                        _member_finding = _ws0_validate_post_parse(
+                            engine,
+                            dataset_id=dataset_id,
+                            portal=portal,
+                            source_id=source_id,
+                            download_url=download_url,
+                            declared_format=fmt,
+                            table_name=_member_table,
+                            materialized_columns=_member_columns,
+                            materialized_row_count=_member_rows,
+                            declared_size_bytes=file_size,
+                            columns_json=json.dumps(_member_columns),
+                        )
+                        if _ws0_is_critical(_member_finding):
+                            rejected_members[_member_table] = (
+                                f"ingestion_validation_failed:{_member_finding.detector_name}"
+                            )
+                            logger.warning(
+                                "ZIP member %s rejected post-parse by %s: %s",
+                                _member_table,
+                                _member_finding.detector_name,
+                                _member_finding.message,
+                            )
                     with engine.begin() as conn:
                         for member in member_tables:
                             member_table_name = str(member["table_name"])
+                            if member_table_name in rejected_members:
+                                conn.execute(
+                                    text(
+                                        "UPDATE cached_datasets "
+                                        "SET status = 'permanently_failed', "
+                                        "    error_message = :msg, updated_at = NOW() "
+                                        "WHERE table_name = :tn"
+                                    ),
+                                    {
+                                        "tn": member_table_name,
+                                        "msg": rejected_members[member_table_name][:500],
+                                    },
+                                )
+                                continue
                             member_row_count = int(member.get("row_count", 0) or 0)
                             member_columns_json = json.dumps(
                                 [str(c) for c in member.get("columns", [])]
@@ -2742,6 +2989,33 @@ def collect_dataset(self, dataset_id: str):
 
             # Update cache status (include sampling note when truncated)
             columns_json = json.dumps([str(c) for c in columns])
+
+            # WS0 Modo 2 — post-parse gate: catch single-column HTML blobs,
+            # zero-row materializations and similar before flipping to ready.
+            _ws0_post_finding = _ws0_validate_post_parse(
+                engine,
+                dataset_id=dataset_id,
+                portal=portal,
+                source_id=source_id,
+                download_url=download_url,
+                declared_format=fmt,
+                table_name=table_name,
+                materialized_columns=[str(c) for c in columns],
+                materialized_row_count=row_count,
+                declared_size_bytes=file_size,
+                columns_json=columns_json,
+            )
+            if _ws0_is_critical(_ws0_post_finding):
+                msg = f"ingestion_validation_failed:{_ws0_post_finding.detector_name}"
+                logger.warning(
+                    "Dataset %s failed post-parse gate by %s: %s",
+                    dataset_id,
+                    _ws0_post_finding.detector_name,
+                    _ws0_post_finding.message,
+                )
+                _set_error_status(engine, dataset_id, msg, table_name=table_name)
+                return {"error": msg}
+
             with engine.begin() as conn:
                 conn.execute(
                     text("""
