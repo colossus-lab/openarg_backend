@@ -25,8 +25,8 @@ def upgrade() -> None:
         CREATE TABLE IF NOT EXISTS cache_drop_audit (
             id BIGSERIAL PRIMARY KEY,
             object_name TEXT NOT NULL,
-            session_user TEXT,
-            current_user TEXT,
+            session_user_name TEXT,
+            current_user_name TEXT,
             client_addr TEXT,
             application_name TEXT,
             query TEXT,
@@ -53,7 +53,7 @@ def upgrade() -> None:
                            inet_client_addr() AS client_addr
                       INTO session_info;
                     INSERT INTO cache_drop_audit (
-                        object_name, session_user, current_user,
+                        object_name, session_user_name, current_user_name,
                         client_addr, application_name, query
                     ) VALUES (
                         r.object_identity,

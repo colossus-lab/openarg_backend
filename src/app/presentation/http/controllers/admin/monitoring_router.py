@@ -109,8 +109,8 @@ async def get_cache_drops(limit: int = 50):
                 text(
                     """
                     SELECT object_name,
-                           session_user,
-                           current_user,
+                           session_user_name,
+                           current_user_name,
                            client_addr,
                            application_name,
                            query,
