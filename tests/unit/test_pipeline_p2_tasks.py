@@ -10,6 +10,7 @@ import pytest
 
 from app.infrastructure.celery.tasks.collector_tasks import (
     _check_schema_compat_columns,
+    _count_bulk_collect_remaining,
     _detect_csv_params,
     _make_unique_columns,
     _parse_zip_archive,
@@ -83,6 +84,28 @@ class TestCollectorP2:
         result = bulk_collect_all.run()
 
         assert result == {"status": "skipped_already_running"}
+
+    def test_count_bulk_collect_remaining_uses_valid_child_aliases(self):
+        executed = []
+
+        class _Conn:
+            def execute(self, stmt, params=None):
+                executed.append(str(stmt))
+                return _ScalarResult(0)
+
+            def rollback(self):
+                return None
+
+        engine = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=_Conn())
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = _count_bulk_collect_remaining(engine)
+
+        assert result == {"eligible_individual": 0, "eligible_groups": 0}
+        joined = "\n".join(executed)
+        assert "WHERE cd.dataset_id = d2.id" in joined
+        assert "WHERE cd2.dataset_id" not in joined
 
     def test_sanitize_columns_compacts_overflow_into_json_column(self):
         data = {f"col_{i}": [i] for i in range(1505)}

@@ -76,6 +76,8 @@ Both flags disabled by default in production; staging will run with `OPENARG_CAT
 - **FR-005**: The backfill task (`openarg.catalog_backfill`) MUST be idempotent — re-runs UPSERT by `resource_identity` without duplicating rows.
 - **FR-006**: When a dataset has multiple `cached_datasets` rows (schema variants), the backfill MUST pick the most authoritative one (preferring `status='ready'`, then most recently updated) so each `resource_identity` resolves to a single deterministic row.
 - **FR-007**: `OPENARG_CATALOG_ONLY=1` MUST bypass the legacy `table_catalog` query in the planner hints path. Other serving paths remain on the legacy lookup until the hybrid cutover work is completed.
+- **FR-008**: `scripts/staging_reset.py` MUST auto-dispatch the full rebuild chain after a destructive wipe: `seed_connector_endpoints`, `scrape_catalog` (when `--reset-datasets` is used), a first `catalog_backfill`, `bulk_collect_all`, `reconcile_cache_coverage`, and a final `catalog_backfill`. A reset that stops at scrape-only state is considered incomplete because `catalog_resources.materialization_status` would remain stale in `pending`.
+- **FR-009**: The `bulk_collect_all` phase in that rebuild chain MUST be convergence-driven: one reset-triggered dispatch MUST keep chaining follow-up passes until no eligible materialization work remains, or until the configured bounded depth guard is reached and logged.
 
 ## 6. Success Criteria
 
@@ -83,6 +85,8 @@ Both flags disabled by default in production; staging will run with `OPENARG_CAT
 - **SC-002**: `physical_namer` produces zero collisions across the full prod dataset.
 - **SC-003**: With `OPENARG_HYBRID_DISCOVERY=1`, the planner sees both legacy `table_catalog` hits and `catalog_resources` hits in the same hints block. With `OPENARG_CATALOG_ONLY=1`, only the new ones.
 - **SC-004**: `staging_reset.py --dry-run` reports exactly the cache_* table count + the 5–6 base tables it would truncate. With `--i-understand-this-deletes-data`, executes them in <60 s on staging-sized data.
+- **SC-005**: After `staging_reset.py --i-understand-this-deletes-data --reset-datasets`, staging MUST eventually converge to a state where `catalog_resources.materialization_status='ready'` tracks post-reset `cached_datasets.status='ready'` without requiring a manual operator rerun of `catalog_backfill`.
+- **SC-006**: Operators MUST not need to manually re-trigger `bulk_collect_all` after a reset just because the first wave drained before all eligible datasets were materialized.
 
 ## 7. Out of Scope
 

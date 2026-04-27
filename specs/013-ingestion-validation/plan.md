@@ -18,6 +18,7 @@
 - After `_stream_download` returns: `validate_pre_parse(...)` — short-circuits on critical findings before S3 upload.
 - Before main `UPDATE status='ready'`: `validate_post_parse(...)` — flips to error on critical findings.
 - Specialized collectors (`bcra_tasks`, `indec_tasks`, `senado_tasks`, `mapa_estado_tasks`, `georef_tasks`, `presupuesto_tasks`, `gobernadores_tasks`, `dkan_tasks`, `series_tiempo_tasks`, `cordoba_leg_tasks`, `bac_tasks`) MUST call `_finalize_cached_dataset(...)` instead of writing `status='ready'` inline.
+- The retrospective sweep must pass both `materialized_row_count` and `declared_row_count` into `validate_retrospective(...)`; otherwise metadata detectors lose the comparison input and the hook crashes instead of persisting findings.
 
 ## Beat schedule
 ```python

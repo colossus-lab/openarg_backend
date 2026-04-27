@@ -32,6 +32,8 @@ New Celery tasks:
 - `openarg.ws0_retrospective_sweep` (every 6h) — validator Modo 3.
 - `openarg.ws0_5_state_invariants_sweep` (every 30 min) — state-machine enforcer.
 - `openarg.catalog_backfill` — populates `catalog_resources` from existing `datasets`+`cached_datasets`.
+- `openarg.seed_connector_endpoints` — inserts the logical `live_api` rows for connector-backed capabilities.
+- `openarg.bulk_collect_all` / `openarg.reconcile_cache_coverage` — materialization + recovery phase that must run after a destructive staging reset.
 - `openarg.refresh_curated_sources` (weekly) — loads `config/curated_sources.json` into `datasets`.
 - `openarg.ingest_censo2022` — Censo 2022 cuadro-by-cuadro seeder.
 - `openarg.ops_temp_dir_cleanup` (hourly) — `/tmp/tmp*` sweep.
@@ -39,7 +41,7 @@ New Celery tasks:
 
 New scripts:
 - `scripts/diagnostics/factual_map.py` — WS1 read-only diagnostic.
-- `scripts/staging_reset.py` — destructive wipe + re-scrape (refuses in prod).
+- `scripts/staging_reset.py` — destructive wipe + full rebuild dispatch chain (seed connectors, scrape, backfill, bulk collect, reconcile, final backfill; refuses in prod).
 - `scripts/ci/validate_curated_sources.py` — CI check for `config/curated_sources.json`.
 
 New specs:

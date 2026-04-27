@@ -130,6 +130,10 @@ _COLLECT_DISPATCH_BATCH_SIZE = int(os.getenv("OPENARG_COLLECT_DISPATCH_BATCH_SIZ
 _COLLECT_DISPATCH_STEP_SECONDS = int(os.getenv("OPENARG_COLLECT_DISPATCH_STEP_SECONDS", "30"))
 _COLLECT_MAX_INFLIGHT = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT", "100"))
 _COLLECT_MAX_INFLIGHT_PER_PORTAL = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT_PER_PORTAL", "10"))
+_BULK_COLLECT_RETRY_DELAY_SECONDS = int(os.getenv("OPENARG_BULK_COLLECT_RETRY_DELAY_SECONDS", "300"))
+_BULK_COLLECT_MAX_CHAIN_DEPTH = int(os.getenv("OPENARG_BULK_COLLECT_MAX_CHAIN_DEPTH", "48"))
+_BULK_COLLECT_SOFT_TIME_LIMIT = int(os.getenv("OPENARG_BULK_COLLECT_SOFT_TIME_LIMIT", "600"))
+_BULK_COLLECT_TIME_LIMIT = int(os.getenv("OPENARG_BULK_COLLECT_TIME_LIMIT", "720"))
 _COLLECT_DATASET_LOCK_PREFIX = "collect_dataset"
 _BULK_COLLECT_LOCK_KEY = 8_004_001
 
@@ -229,6 +233,77 @@ def _throttle_collect_rows(
         per_portal[portal] = per_portal.get(portal, 0) + 1
 
     return selected, deferred
+
+
+def _count_bulk_collect_remaining(engine, portal: str | None = None) -> dict[str, int]:
+    """Count remaining eligible work for bulk collection.
+
+    Excludes datasets already marked `ready` or terminally
+    `permanently_failed`, so callers can use this as a convergence signal.
+    """
+    params: dict[str, object] = {}
+    portal_clause = ""
+    if portal:
+        portal_clause = " AND d.portal = :portal"
+        params["portal"] = portal
+
+    eligible_filter = (
+        "d.is_cached = false "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM cached_datasets cd "
+        "  WHERE cd.dataset_id = d.id "
+        "    AND cd.status IN ('ready', 'permanently_failed')"
+        ")"
+    )
+    eligible_filter_d2 = (
+        "d2.is_cached = false "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM cached_datasets cd "
+        "  WHERE cd.dataset_id = d2.id "
+        "    AND cd.status IN ('ready', 'permanently_failed')"
+        ")"
+    )
+
+    individual_sql = text(
+        f"""
+        SELECT COUNT(*)
+        FROM datasets d
+        WHERE {eligible_filter}
+          {portal_clause}
+          AND d.title NOT IN (
+            SELECT d2.title
+            FROM datasets d2
+            WHERE d2.portal = d.portal
+              AND {eligible_filter_d2}
+            GROUP BY d2.title, d2.portal
+            HAVING COUNT(*) > 50
+          )
+        """
+    )
+
+    group_sql = text(
+        f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT d.title, d.portal
+            FROM datasets d
+            WHERE {eligible_filter}
+              {portal_clause}
+            GROUP BY d.title, d.portal
+            HAVING COUNT(*) > 50
+        ) large_groups
+        """
+    )
+
+    with engine.connect() as conn:
+        individual = int(conn.execute(individual_sql, params).scalar() or 0)
+        groups = int(conn.execute(group_sql, params).scalar() or 0)
+        conn.rollback()
+
+    return {
+        "eligible_individual": individual,
+        "eligible_groups": groups,
+    }
 
 
 def _recycle_stuck_downloads(
@@ -3211,8 +3286,13 @@ def collect_dataset(self, dataset_id: str):
         engine.dispose()
 
 
-@celery_app.task(name="openarg.bulk_collect_all", bind=True, soft_time_limit=300, time_limit=420)
-def bulk_collect_all(self, portal: str | None = None):
+@celery_app.task(
+    name="openarg.bulk_collect_all",
+    bind=True,
+    soft_time_limit=_BULK_COLLECT_SOFT_TIME_LIMIT,
+    time_limit=_BULK_COLLECT_TIME_LIMIT,
+)
+def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
     """Descarga y cachea TODOS los datasets no cacheados.
 
     Phase 1: Dispatch individual collect_dataset for groups with <=50 siblings.
@@ -3260,13 +3340,22 @@ def bulk_collect_all(self, portal: str | None = None):
         # ── Phase 1: individual datasets (groups <= 50 siblings) ──
         query = (
             "SELECT CAST(d.id AS text), d.portal FROM datasets d "
-            "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
             "WHERE d.is_cached = false "
-            "AND (cd.status IS NULL OR cd.status NOT IN ('ready', 'permanently_failed')) "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM cached_datasets cd "
+            "  WHERE cd.dataset_id = d.id "
+            "    AND cd.status IN ('ready', 'permanently_failed')"
+            ") "
             "AND d.title NOT IN ("
-            "  SELECT title FROM datasets "
-            "  WHERE portal = d.portal AND is_cached = false "
-            "  GROUP BY title, portal "
+            "  SELECT d2.title FROM datasets d2 "
+            "  WHERE d2.portal = d.portal "
+            "    AND d2.is_cached = false "
+            "    AND NOT EXISTS ("
+            "      SELECT 1 FROM cached_datasets cd2 "
+            "      WHERE cd2.dataset_id = d2.id "
+            "        AND cd2.status IN ('ready', 'permanently_failed')"
+            "    ) "
+            "  GROUP BY d2.title, d2.portal "
             "  HAVING COUNT(*) > 50"
             ")"
         )
@@ -3303,13 +3392,24 @@ def bulk_collect_all(self, portal: str | None = None):
         large_query = (
             "SELECT d.title, d.portal, COUNT(*) as cnt FROM datasets d "
             "WHERE d.is_cached = false "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM cached_datasets cd "
+            "  WHERE cd.dataset_id = d.id "
+            "    AND cd.status IN ('ready', 'permanently_failed')"
+            ") "
+        )
+        large_params: dict[str, object] = {}
+        if portal:
+            large_query += " AND d.portal = :portal "
+            large_params["portal"] = portal
+        large_query += (
             "GROUP BY d.title, d.portal "
             "HAVING COUNT(*) > 50 "
             "ORDER BY COUNT(*) ASC "
             "LIMIT 100"
         )
         with engine.connect() as conn:
-            large_groups = conn.execute(text(large_query)).fetchall()
+            large_groups = conn.execute(text(large_query), large_params).fetchall()
 
         remaining_total_slots = max(_COLLECT_MAX_INFLIGHT - inflight_total - phase1_count, 0)
         remaining_portal_slots = {
@@ -3341,9 +3441,51 @@ def bulk_collect_all(self, portal: str | None = None):
                 step_seconds=_COLLECT_DISPATCH_STEP_SECONDS,
             )
 
+        immediate_continue = (
+            phase1_count > 0
+            or phase2_count > 0
+            or deferred_individual > 0
+            or deferred_groups > 0
+            or inflight_total > 0
+        )
+        remaining = {"eligible_individual": 0, "eligible_groups": 0}
+        should_continue = immediate_continue
+        if not immediate_continue:
+            remaining = _count_bulk_collect_remaining(engine, portal=portal)
+            should_continue = (
+                remaining["eligible_individual"] > 0
+                or remaining["eligible_groups"] > 0
+            )
+
+        followup_scheduled = False
+        converged = False
+        if should_continue and chain_depth < _BULK_COLLECT_MAX_CHAIN_DEPTH:
+            bulk_collect_all.apply_async(
+                kwargs={"portal": portal, "chain_depth": chain_depth + 1},
+                countdown=_BULK_COLLECT_RETRY_DELAY_SECONDS,
+            )
+            followup_scheduled = True
+        elif should_continue and chain_depth >= _BULK_COLLECT_MAX_CHAIN_DEPTH:
+            logger.warning(
+                "Bulk collect reached max chain depth=%s with work remaining: eligible_individual=%s eligible_groups=%s deferred_individual=%s deferred_groups=%s inflight_total=%s",
+                chain_depth,
+                remaining["eligible_individual"],
+                remaining["eligible_groups"],
+                deferred_individual,
+                deferred_groups,
+                inflight_total,
+            )
+        else:
+            reconcile_cache_coverage.apply_async(countdown=60)
+            from app.infrastructure.celery.tasks.catalog_backfill import catalog_backfill_task
+
+            catalog_backfill_task.apply_async(countdown=180)
+            converged = True
+
         logger.info(
             "Bulk collect: inflight_total=%s phase1=%s individual (%s batches, %s deferred) "
-            "phase2=%s large groups (%s batches, %s deferred)",
+            "phase2=%s large groups (%s batches, %s deferred) remaining_individual=%s "
+            "remaining_groups=%s followup_scheduled=%s converged=%s chain_depth=%s",
             inflight_total,
             phase1_count,
             phase1_batches,
@@ -3351,6 +3493,11 @@ def bulk_collect_all(self, portal: str | None = None):
             phase2_count,
             phase2_batches,
             deferred_groups,
+            remaining["eligible_individual"],
+            remaining["eligible_groups"],
+            followup_scheduled,
+            converged,
+            chain_depth,
         )
         return {
             "dispatched_individual": phase1_count,
@@ -3367,6 +3514,11 @@ def bulk_collect_all(self, portal: str | None = None):
             "recycled_stale_ready": recycled["recovered_ready"],
             "recycled_stale_error": recycled["recycled_error"],
             "recycled_stale_failed": recycled["recycled_failed"],
+            "remaining_eligible_individual": remaining["eligible_individual"],
+            "remaining_eligible_groups": remaining["eligible_groups"],
+            "followup_scheduled": followup_scheduled,
+            "converged": converged,
+            "chain_depth": chain_depth,
         }
     finally:
         if lock_acquired:
@@ -3411,6 +3563,11 @@ def collect_large_group(self, title: str, portal: str):
                     "SELECT CAST(d.id AS text) as id, d.format, d.download_url "
                     "FROM datasets d "
                     "WHERE d.title = :title AND d.portal = :portal AND d.is_cached = false "
+                    "AND NOT EXISTS ("
+                    "  SELECT 1 FROM cached_datasets cd "
+                    "  WHERE cd.dataset_id = d.id "
+                    "    AND cd.status IN ('ready', 'permanently_failed')"
+                    ") "
                     "ORDER BY d.format, d.id"
                 ),
                 {"title": title, "portal": portal},

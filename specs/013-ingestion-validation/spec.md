@@ -65,6 +65,7 @@ This is the foundation for the WS5 rebuild — without WS0 the rebuild reintrodu
 - **FR-008**: `OPENARG_DISABLE_INGESTION_VALIDATOR=1` MUST disable the runtime hooks (Modo 1+2) without disabling Modo 3.
 - **FR-009**: Specialized collector tasks that materialize directly to `cache_*` MUST finalize through a shared post-parse helper before writing `cached_datasets.status='ready'`. The generic collector path and the specialized collectors must share the same WS0 Modo 2 gate.
 - **FR-010**: ZIP ingestion MUST classify members entry-by-entry using `MultiFileExpander`; the 500MB policy applies per expanded entry, not to the aggregate decompressed size of the archive.
+- **FR-011**: Retrospective sweeps MUST propagate both `materialized_row_count` and `declared_row_count` into `ResourceContext` so metadata integrity detectors can compare runtime table state against stored collector metadata without the hook itself crashing.
 
 ## 5. Success Criteria
 

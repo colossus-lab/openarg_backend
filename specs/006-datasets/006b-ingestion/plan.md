@@ -95,6 +95,8 @@ Detects when a re-collect produces a schema that no longer matches the existing 
 - `collect_dataset(dataset_id)` now acquires a PostgreSQL advisory lock derived from `dataset_id` before any network or SQL write work starts.
 - If the lock is already held, the duplicate invocation exits immediately with `status="already_collecting"`.
 - `bulk_collect_all()` now acquires a dedicated advisory lock before running reconciliation / recycle / dispatch logic. Overlapping runs exit as `status="skipped_already_running"` instead of dispatching duplicate collector waves.
+- `bulk_collect_all()` now also behaves as a bounded convergence loop: if a pass still sees eligible uncached work, deferred work, or inflight collector activity, it re-enqueues itself after a delay and only stops on convergence or after hitting the configured max chain depth.
+- The convergence loop now short-circuits the expensive recount path when the pass already has enough evidence to continue, and its soft/hard Celery limits are configurable (`OPENARG_BULK_COLLECT_SOFT_TIME_LIMIT`, `OPENARG_BULK_COLLECT_TIME_LIMIT`) so rebuild waves do not die on a fixed 300s edge.
 
 ### 5.4 Deterministic failure short-circuit
 

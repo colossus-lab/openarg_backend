@@ -35,6 +35,18 @@ USAGE
   APP_ENV=staging python -m scripts.staging_reset --i-understand-this-deletes-data
   APP_ENV=staging python -m scripts.staging_reset --i-understand-this-deletes-data \\
       --reset-datasets    # also wipe `datasets`, force full re-scrape
+
+POST-RESET REBUILD
+------------------
+After the wipe, the script now dispatches the full rebuild chain, not just the
+logical scrape:
+  1. `seed_connector_endpoints` immediately
+  2. `scrape_catalog` for all portals (when `--reset-datasets` is used)
+  3. `catalog_backfill` once the scrape inventory is back
+  4. `bulk_collect_all` to materialize datasets into `cached_datasets/cache_*`
+  5. `reconcile_cache_coverage` to clean/fix any drift
+  6. a second `catalog_backfill` so `catalog_resources.materialization_status`
+     reflects the new `ready` rows instead of staying stale in `pending`
 """
 
 from __future__ import annotations
@@ -230,7 +242,7 @@ def reset(engine: Engine, *, dry_run: bool, reset_datasets: bool) -> ResetSummar
 
 
 def _trigger_repopulation(*, also_scrape: bool) -> None:
-    """Best-effort: kick off scrape (if requested) + catalog backfill via Celery.
+    """Best-effort: kick off the full post-reset rebuild via Celery.
 
     If celery isn't reachable, we just log a hint — the operator can run the
     tasks manually.
@@ -239,23 +251,58 @@ def _trigger_repopulation(*, also_scrape: bool) -> None:
         from app.infrastructure.celery.app import ALL_PORTALS, celery_app  # noqa: F401
         from app.infrastructure.celery.tasks.catalog_backfill import (
             catalog_backfill_task,
+            seed_connector_endpoints_task,
+        )
+        from app.infrastructure.celery.tasks.collector_tasks import (
+            bulk_collect_all,
+            reconcile_cache_coverage,
         )
         from app.infrastructure.celery.tasks.scraper_tasks import scrape_catalog
     except Exception:
         logger.warning(
             "Celery not importable — skipping auto-dispatch. Run manually: "
-            "openarg.scrape_catalog (per portal) and openarg.catalog_backfill"
+            "openarg.seed_connector_endpoints, openarg.scrape_catalog (per portal), "
+            "openarg.catalog_backfill, openarg.bulk_collect_all, "
+            "openarg.reconcile_cache_coverage, openarg.catalog_backfill"
         )
         return
     try:
+        seed_connector_endpoints_task.delay()
+        logger.info("dispatched seed_connector_endpoints")
+
         if also_scrape:
             for portal in ALL_PORTALS:
                 scrape_catalog.delay(portal)
             logger.info("dispatched scrape_catalog for %d portals", len(ALL_PORTALS))
-        # Backfill runs after scrape — give a small countdown so it lands behind.
-        countdown = 600 if also_scrape else 30
-        catalog_backfill_task.apply_async(countdown=countdown)
-        logger.info("dispatched catalog_backfill (countdown=%ds)", countdown)
+
+        first_backfill_countdown = 600 if also_scrape else 30
+        bulk_collect_countdown = 1200 if also_scrape else 120
+        reconcile_countdown = bulk_collect_countdown + 900
+        final_backfill_countdown = reconcile_countdown + 300
+
+        catalog_backfill_task.apply_async(countdown=first_backfill_countdown)
+        logger.info(
+            "dispatched catalog_backfill (countdown=%ds)",
+            first_backfill_countdown,
+        )
+
+        bulk_collect_all.apply_async(countdown=bulk_collect_countdown)
+        logger.info(
+            "dispatched bulk_collect_all (countdown=%ds)",
+            bulk_collect_countdown,
+        )
+
+        reconcile_cache_coverage.apply_async(countdown=reconcile_countdown)
+        logger.info(
+            "dispatched reconcile_cache_coverage (countdown=%ds)",
+            reconcile_countdown,
+        )
+
+        catalog_backfill_task.apply_async(countdown=final_backfill_countdown)
+        logger.info(
+            "dispatched final catalog_backfill (countdown=%ds)",
+            final_backfill_countdown,
+        )
     except Exception:
         logger.warning(
             "Could not dispatch via Celery — broker unavailable? Run the "

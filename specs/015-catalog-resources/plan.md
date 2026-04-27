@@ -13,8 +13,9 @@
 | Worker | `src/app/infrastructure/celery/tasks/catalog_backfill.py` | UPSERT from datasets+cached_datasets |
 | Worker | `src/app/infrastructure/celery/tasks/catalog_backfill.py` | `seed_connector_endpoints` for live API connector rows |
 | Worker | `src/app/infrastructure/celery/tasks/censo2022_ingest.py` | Cuadro-by-cuadro seed |
+| Worker | `src/app/infrastructure/celery/tasks/collector_tasks.py` | `bulk_collect_all` + `reconcile_cache_coverage` complete post-reset materialization |
 | Wire-in | `src/app/application/pipeline/connectors/sandbox.py` | `_hybrid_logical_hints` + catalog-only short-circuit |
-| Script | `scripts/staging_reset.py` | Destructive wipe of legacy cache_* / cached_datasets / table_catalog |
+| Script | `scripts/staging_reset.py` | Destructive wipe of legacy cache_* / cached_datasets / table_catalog + full rebuild dispatch chain |
 | Tests | `tests/unit/test_catalog_naming.py`, `test_catalog_discovery.py`, `test_staging_reset_guard.py` | Naming + discovery + safety |
 
 ## Feature flags
@@ -26,12 +27,16 @@
 1. `alembic upgrade head` — applies migrations 0033..0036.
 2. `APP_ENV=staging python -m scripts.staging_reset --dry-run` — confirm what will be wiped.
 3. `APP_ENV=staging python -m scripts.staging_reset --i-understand-this-deletes-data --reset-datasets` — wipe.
-4. Wait for `scrape_catalog` to refill `datasets`.
-5. Dispatch `openarg.catalog_backfill` (auto-dispatched by the reset script).
-6. Dispatch `openarg.seed_connector_endpoints`.
-7. If Censo 2022 config is absent, `openarg.ingest_censo2022` returns `reason=missing_or_empty_config:...` rather than silently succeeding with zero rows.
-8. Set `OPENARG_CATALOG_ONLY=1` in staging env.
-9. Smoke-test the planner's discovery path.
+4. The reset script auto-dispatches:
+   - `openarg.seed_connector_endpoints`
+   - `openarg.scrape_catalog` for all portals
+   - `openarg.catalog_backfill` once the scrape inventory is back
+   - `openarg.bulk_collect_all` to materialize datasets; that task now self-requeues until convergence instead of requiring repeated manual redispatch
+   - `openarg.reconcile_cache_coverage` to fix post-reset drift
+   - a second `openarg.catalog_backfill` so `catalog_resources.materialization_status` reflects the newly-ready rows
+5. If Censo 2022 config is absent, `openarg.ingest_censo2022` returns `reason=missing_or_empty_config:...` rather than silently succeeding with zero rows.
+6. Set `OPENARG_CATALOG_ONLY=1` in staging env.
+7. Smoke-test the planner's discovery path.
 
 ## Rollout (production — hybrid only, no wipe)
 1. `alembic upgrade head`.

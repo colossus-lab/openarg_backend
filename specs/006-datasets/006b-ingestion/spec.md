@@ -58,6 +58,8 @@ Important architectural clarification: the collector no longer writes directly i
 - **FR-015**: Legacy `schema_mismatch` rows MUST be moved back into the retry path automatically during bulk collection so they do not become dead-end states.
 - **FR-016**: The collector MUST enforce single-flight semantics per `dataset_id` so concurrent duplicate `collect_dataset` runs do not download and materialize the same resource in parallel.
 - **FR-017**: `bulk_collect_all` MUST behave as a singleton orchestration pass. If another run is already in progress, the new invocation MUST exit without dispatching duplicate work.
+- **FR-017a**: `bulk_collect_all` MUST self-schedule bounded follow-up passes while eligible uncached work, deferred work, or inflight collector work still exists. A single manual trigger should continue until the collector converges instead of requiring repeated operator re-dispatches.
+- **FR-017b**: `bulk_collect_all` MUST avoid expensive "remaining work" recount queries when the current pass already knows it must continue because it dispatched work, deferred work, or observed inflight collector load. Its task time limits MUST be configurable so long rebuild waves do not die at a fixed 300s boundary.
 - **FR-018**: Deterministic oversized/empty-file ingestion errors (for example `file_too_large`, empty CSV payloads, and unsupported Excel payloads) MUST bypass Celery retries and transition directly to a terminal collector error state.
 - **FR-019**: ZIP datasets MUST parse one nested ZIP layer when the outer archive wraps the real payload (for example nested GeoJSON or shapefile bundles) instead of failing immediately as `zip_no_parseable_file`.
 - **FR-020**: Sandbox-facing collector consumers MUST normalize known legacy cache table aliases (`cache_series_tiempo_*`, `cache_bcra_principales_variables`, `cache_presupuesto_nacional`) toward canonical current tables or patterns before generating/executing SQL.
@@ -84,6 +86,8 @@ Important architectural clarification: the collector no longer writes directly i
 - **SC-005**: `cached_datasets.status="ready"` MUST always imply that the dataset is SQL-addressable either through a physical table or a collector-managed alias view.
 - **SC-006**: A duplicate dispatch storm for the same `dataset_id` MUST result in at most one active collector execution; concurrent followers exit as `already_collecting`.
 - **SC-007**: Overlapping `bulk_collect_all` invocations MUST not dispatch overlapping waves of collector tasks.
+- **SC-007a**: After a destructive rebuild kick-off, the collector MUST either converge automatically or stop only after hitting an explicit bounded chain-depth guard with structured logs showing remaining eligible work.
+- **SC-007b**: A long-running rebuild wave MUST no longer fail at the end of a pass with `SoftTimeLimitExceeded` / `another command is already in progress` just because the convergence check ran too late in the task lifecycle.
 - **SC-008**: A ZIP containing a single nested ZIP with a supported payload MUST be collected successfully without manual unpacking.
 - **SC-009**: Known legacy sandbox table aliases MUST no longer produce direct `Table missing` failures when a canonical replacement exists.
 - **SC-010**: Pure-document ZIP bundles MUST stop accumulating under `zip_no_parseable_file`; they should surface as a distinct terminal collector error.

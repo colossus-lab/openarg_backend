@@ -276,6 +276,8 @@ class TestCollectLargeGroupP1:
 
 
 class TestBulkCollectAllP4:
+    @patch("app.infrastructure.celery.tasks.collector_tasks.bulk_collect_all.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._count_bulk_collect_remaining")
     @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
     @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
     @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
@@ -294,6 +296,8 @@ class TestBulkCollectAllP4:
         mock_recycle_stuck,
         mock_reconcile,
         mock_revive_schema,
+        mock_count_remaining,
+        mock_followup_apply_async,
     ):
         mock_reconcile.return_value = {
             "orphaned_ready": 0,
@@ -348,9 +352,23 @@ class TestBulkCollectAllP4:
         assert result["recycled_stale_ready"] == 0
         assert result["recycled_stale_error"] == 0
         assert result["recycled_stale_failed"] == 0
+        assert result["remaining_eligible_individual"] == 0
+        assert result["remaining_eligible_groups"] == 0
+        assert result["followup_scheduled"] is True
+        assert result["converged"] is False
+        assert result["chain_depth"] == 0
         countdowns = [call.kwargs["countdown"] for call in group_result.apply_async.call_args_list]
         assert countdowns == [0, 0]
+        mock_count_remaining.assert_not_called()
+        mock_followup_apply_async.assert_called_once_with(
+            kwargs={"portal": None, "chain_depth": 1},
+            countdown=300,
+        )
 
+    @patch("app.infrastructure.celery.tasks.catalog_backfill.catalog_backfill_task.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.reconcile_cache_coverage.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.bulk_collect_all.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._count_bulk_collect_remaining")
     @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
     @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
     @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
@@ -369,6 +387,10 @@ class TestBulkCollectAllP4:
         mock_recycle_stuck,
         mock_revive_schema,
         mock_reconcile,
+        mock_count_remaining,
+        mock_followup_apply_async,
+        mock_reconcile_apply_async,
+        mock_catalog_backfill_apply_async,
     ):
         mock_reconcile.return_value = {
             "orphaned_ready": 4,
@@ -429,6 +451,79 @@ class TestBulkCollectAllP4:
         assert result["deferred_individual"] == 2
         assert result["dispatched_groups"] == 0
         assert result["deferred_groups"] == 3
+        assert result["remaining_eligible_individual"] == 0
+        assert result["remaining_eligible_groups"] == 0
+        assert result["followup_scheduled"] is True
+        assert result["converged"] is False
+        mock_count_remaining.assert_not_called()
+        mock_followup_apply_async.assert_called_once_with(
+            kwargs={"portal": None, "chain_depth": 1},
+            countdown=300,
+        )
+        mock_reconcile_apply_async.assert_not_called()
+        mock_catalog_backfill_apply_async.assert_not_called()
+
+    @patch("app.infrastructure.celery.tasks.catalog_backfill.catalog_backfill_task.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.reconcile_cache_coverage.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.bulk_collect_all.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._count_bulk_collect_remaining")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._get_inflight_counts")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_bulk_collect_marks_converged_and_schedules_final_sync(
+        self,
+        mock_get_engine,
+        mock_get_inflight_counts,
+        mock_recycle_stuck,
+        mock_reconcile,
+        mock_revive_schema,
+        mock_count_remaining,
+        mock_followup_apply_async,
+        mock_reconcile_apply_async,
+        mock_catalog_backfill_apply_async,
+    ):
+        mock_reconcile.return_value = {
+            "orphaned_ready": 0,
+            "fixed_cached_flags": 0,
+            "reindexed_missing_chunks": 0,
+        }
+        mock_revive_schema.return_value = {"revived_schema_mismatch": 0}
+        mock_recycle_stuck.return_value = {
+            "recovered_ready": 0,
+            "recycled_error": 0,
+            "recycled_failed": 0,
+        }
+        mock_get_inflight_counts.return_value = (0, {})
+        mock_count_remaining.return_value = {
+            "eligible_individual": 0,
+            "eligible_groups": 0,
+        }
+
+        conn = MagicMock()
+        conn.execute.side_effect = [
+            _ScalarResult(True),
+            _FetchAllResult([]),
+            _FetchAllResult([]),
+        ]
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+
+        from app.infrastructure.celery.tasks.collector_tasks import bulk_collect_all
+
+        result = bulk_collect_all.run()
+
+        assert result["dispatched_individual"] == 0
+        assert result["dispatched_groups"] == 0
+        assert result["followup_scheduled"] is False
+        assert result["converged"] is True
+        mock_followup_apply_async.assert_not_called()
+        mock_reconcile_apply_async.assert_called_once_with(countdown=60)
+        mock_catalog_backfill_apply_async.assert_called_once_with(countdown=180)
 
 
 class TestRecoverStuckTasksP5:
