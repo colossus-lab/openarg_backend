@@ -42,20 +42,25 @@ def test_finalize_cached_dataset_persists_ready_when_validator_passes(mock_valid
     )
 
     assert result["ok"] is True
-    assert mock_conn.execute.call_count == 2
+    assert result["status"] == "ready"
+    assert result["result_kind"] == "materialized_ready"
+    # Phase 4 outcome flow: _apply_cached_outcome runs UPSERT + SELECT retry_count,
+    # then _finalize_cached_dataset runs the datasets.is_cached=true UPDATE = 3 calls.
+    assert mock_conn.execute.call_count == 3
 
 
-@patch("app.infrastructure.celery.tasks.collector_tasks._set_error_status")
+@patch("app.infrastructure.celery.tasks.collector_tasks._apply_cached_outcome")
 @patch("app.infrastructure.celery.tasks.collector_tasks._ws0_validate_post_parse")
 def test_finalize_cached_dataset_marks_error_when_validator_rejects(
     mock_validate_post_parse,
-    mock_set_error_status,
+    mock_apply_outcome,
 ):
     mock_validate_post_parse.return_value = SimpleNamespace(
         detector_name="single_column_html_blob",
         message="html blob",
         severity=Severity.CRITICAL,
     )
+    mock_apply_outcome.return_value = 1  # retry_count
     mock_conn = MagicMock()
     mock_engine = MagicMock()
     mock_engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -73,7 +78,13 @@ def test_finalize_cached_dataset_marks_error_when_validator_rejects(
     )
 
     assert result["ok"] is False
-    mock_set_error_status.assert_called_once()
+    assert result["status"] == "permanently_failed"
+    # Phase 3 outcome model: rejection now goes through _apply_cached_outcome with
+    # a parser_invalid outcome instead of the legacy _set_error_status path.
+    mock_apply_outcome.assert_called_once()
+    outcome = mock_apply_outcome.call_args.kwargs["outcome"]
+    assert outcome.result_kind == "parser_invalid"
+    assert outcome.cached_status == "permanently_failed"
 
 
 @patch("app.infrastructure.celery.tasks.bcra_tasks._finalize_cached_dataset")
