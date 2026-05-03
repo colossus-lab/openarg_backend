@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -34,6 +35,42 @@ from app.application.validation.ingestion_validator import (
 logger = logging.getLogger(__name__)
 
 _validator_singleton: IngestionValidator | None = None
+
+
+def _placeholder_header_finding(ctx: ResourceContext, *, mode: Mode) -> Finding | None:
+    columns = [str(col or "").strip() for col in (ctx.materialized_columns or [])]
+    if len(columns) < 3:
+        return None
+
+    placeholder_count = 0
+    numeric_count = 0
+    for col in columns:
+        lowered = col.lower()
+        if lowered.startswith("unnamed:") or re.fullmatch(r"col_[0-9]+", lowered):
+            placeholder_count += 1
+        if re.fullmatch(r"[0-9]+", lowered):
+            numeric_count += 1
+
+    threshold = max(3, int(len(columns) * 0.35))
+    if placeholder_count < threshold and numeric_count < threshold:
+        return None
+
+    return Finding(
+        detector_name="placeholder_headers",
+        detector_version="1",
+        severity=Severity.CRITICAL,
+        mode=mode,
+        payload={
+            "column_count": len(columns),
+            "placeholder_count": placeholder_count,
+            "numeric_count": numeric_count,
+            "sample": columns[:12],
+        },
+        message=(
+            "materialized columns look like placeholder headers "
+            f"(placeholders={placeholder_count}, numeric={numeric_count}, total={len(columns)})"
+        ),
+    )
 
 
 def get_validator() -> IngestionValidator:
@@ -128,7 +165,10 @@ def validate_post_parse(engine: Engine, **kwargs: Any) -> Finding | None:
     try:
         ctx = _build_ctx(**kwargs)
         validator = get_validator()
-        findings = validator.run(ctx, Mode.POST_PARSE)
+        findings = list(validator.run(ctx, Mode.POST_PARSE))
+        extra = _placeholder_header_finding(ctx, mode=Mode.POST_PARSE)
+        if extra is not None:
+            findings.append(extra)
         _persist(engine, ctx, findings)
         return validator.first_critical(findings)
     except Exception:

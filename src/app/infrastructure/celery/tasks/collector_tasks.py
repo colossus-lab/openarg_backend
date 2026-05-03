@@ -21,6 +21,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
+import httpx
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
@@ -124,8 +125,16 @@ MAX_TOTAL_ATTEMPTS = 5
 # Maximum rows to store per dataset table.  Datasets exceeding this limit
 # are truncated to the first MAX_TABLE_ROWS rows.
 MAX_TABLE_ROWS = 500_000
+_ZIP_CSV_PREVIEW_ROWS = int(os.getenv("OPENARG_ZIP_CSV_PREVIEW_ROWS", "250"))
 _MAX_SQL_COLUMNS = 1400
 _TEMP_SPACE_RESERVE_BYTES = 256 * 1024 * 1024  # keep 256MB free for worker stability
+_CSV_TARGET_CELLS_PER_CHUNK = int(os.getenv("OPENARG_CSV_TARGET_CELLS_PER_CHUNK", "250000"))
+_CSV_MIN_CHUNK_SIZE = int(os.getenv("OPENARG_CSV_MIN_CHUNK_SIZE", "500"))
+_CSV_MAX_CHUNK_SIZE = int(os.getenv("OPENARG_CSV_MAX_CHUNK_SIZE", "50000"))
+_JSON_RECORD_MAP_STREAM_THRESHOLD_BYTES = int(
+    os.getenv("OPENARG_JSON_RECORD_MAP_STREAM_THRESHOLD_BYTES", str(16 * 1024 * 1024))
+)
+_JSON_RECORD_MAP_CHUNK_SIZE = int(os.getenv("OPENARG_JSON_RECORD_MAP_CHUNK_SIZE", "5000"))
 _COLLECT_DISPATCH_BATCH_SIZE = int(os.getenv("OPENARG_COLLECT_DISPATCH_BATCH_SIZE", "10"))
 _COLLECT_DISPATCH_STEP_SECONDS = int(os.getenv("OPENARG_COLLECT_DISPATCH_STEP_SECONDS", "30"))
 _COLLECT_MAX_INFLIGHT = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT", "100"))
@@ -136,6 +145,35 @@ _BULK_COLLECT_SOFT_TIME_LIMIT = int(os.getenv("OPENARG_BULK_COLLECT_SOFT_TIME_LI
 _BULK_COLLECT_TIME_LIMIT = int(os.getenv("OPENARG_BULK_COLLECT_TIME_LIMIT", "720"))
 _COLLECT_DATASET_LOCK_PREFIX = "collect_dataset"
 _BULK_COLLECT_LOCK_KEY = 8_004_001
+_HEAVY_COLLECT_QUEUE = os.getenv("OPENARG_HEAVY_COLLECT_QUEUE", "collector-heavy")
+_HEAVY_RETRY_QUEUE = os.getenv("OPENARG_HEAVY_RETRY_QUEUE", "collector-heavy-retry")
+_HEAVY_WIDTH_COLUMN_THRESHOLD = int(os.getenv("OPENARG_HEAVY_WIDTH_COLUMN_THRESHOLD", "600"))
+_HEAVY_METADATA_PORTAL_FORMATS: dict[str, frozenset[str]] = {
+    "datos_gob_ar": frozenset({"zip"}),
+    "diputados": frozenset({"json"}),
+}
+_HEAVY_METADATA_PORTAL_KEYWORDS: dict[str, frozenset[str]] = {
+    "datos_gob_ar": frozenset(
+        {
+            "encuesta",
+            "salud",
+            "emse",
+            "ennys",
+            "alimentos",
+            "suplementos",
+            "bebidas",
+        }
+    ),
+    "caba": frozenset(
+        {
+            "3d",
+            "edificios publicos",
+            "edificios públicos",
+            "legislatura-portena-zip",
+            "congreso-de-la-nacion-argentina-zip",
+        }
+    ),
+}
 
 
 def _temp_dir() -> str:
@@ -161,6 +199,8 @@ def _release_advisory_lock(engine, key: int) -> None:
     """Release a previously acquired PostgreSQL advisory lock."""
     try:
         with engine.connect() as conn:
+            if conn.in_transaction():
+                conn.rollback()
             conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
             conn.rollback()
     except Exception:
@@ -189,6 +229,85 @@ def _dispatch_in_batches(signatures: list, *, batch_size: int, step_seconds: int
         celery_group(batch).apply_async(countdown=dispatched_batches * step_seconds)
         dispatched_batches += 1
     return dispatched_batches
+
+
+def _row_value(row, attr: str, index: int):
+    if hasattr(row, attr):
+        return getattr(row, attr)
+    return row[index]
+
+
+def _should_route_to_heavy_from_metadata(
+    *,
+    portal: str | None,
+    fmt: str | None,
+    title: str | None = None,
+    download_url: str | None = None,
+) -> bool:
+    normalized_portal = (portal or "").strip().lower()
+    normalized_fmt = (fmt or "").strip().lower()
+
+    heavy_formats = _HEAVY_METADATA_PORTAL_FORMATS.get(normalized_portal, frozenset())
+    portal_keywords = _HEAVY_METADATA_PORTAL_KEYWORDS.get(normalized_portal, frozenset())
+    haystack = " ".join(filter(None, [title, download_url])).lower()
+
+    if normalized_fmt in heavy_formats and (
+        not portal_keywords or any(keyword in haystack for keyword in portal_keywords)
+    ):
+        return True
+
+    if not portal_keywords:
+        return False
+
+    if normalized_portal == "datos_gob_ar" and normalized_fmt not in {"csv", "txt", "zip"}:
+        return False
+
+    if normalized_portal == "caba" and normalized_fmt != "zip":
+        return False
+
+    return any(keyword in haystack for keyword in portal_keywords)
+
+
+def _should_route_to_heavy_by_width(column_count: int) -> bool:
+    return column_count >= _HEAVY_WIDTH_COLUMN_THRESHOLD
+
+
+def _is_transient_collect_error(exc: Exception) -> bool:
+    if isinstance(
+        exc,
+        httpx.RemoteProtocolError
+        | httpx.ReadTimeout
+        | httpx.ConnectTimeout
+        | httpx.ReadError
+        | httpx.ConnectError
+        | httpx.NetworkError,
+    ):
+        return True
+
+    exc_str = str(exc)
+    transient_markers = (
+        "peer closed connection without sending complete message body",
+        "Connection reset by peer",
+        "Server disconnected without sending a response",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "Connection refused",
+        "RemoteProtocolError",
+    )
+    return any(marker in exc_str for marker in transient_markers)
+
+
+def _collect_dataset_signature(
+    dataset_id: str,
+    *,
+    portal: str | None = None,
+    fmt: str | None = None,
+    title: str | None = None,
+):
+    if _should_route_to_heavy_from_metadata(portal=portal, fmt=fmt, title=title):
+        return collect_dataset.s(dataset_id, force_heavy=True).set(queue=_HEAVY_COLLECT_QUEUE)
+    return collect_dataset.s(dataset_id)
 
 
 def _get_inflight_counts(engine) -> tuple[int, dict[str, int]]:
@@ -223,12 +342,11 @@ def _throttle_collect_rows(
     per_portal = dict(inflight_by_portal)
 
     for row in rows:
-        dataset_id = str(row[0])
-        portal = str(row[1])
+        portal = str(_row_value(row, "portal", 1))
         if total >= max_total or per_portal.get(portal, 0) >= max_per_portal:
-            deferred.append((dataset_id, portal))
+            deferred.append(row)
             continue
-        selected.append((dataset_id, portal))
+        selected.append(row)
         total += 1
         per_portal[portal] = per_portal.get(portal, 0) + 1
 
@@ -1114,6 +1232,7 @@ def _parse_zip_archive(
     existing_member_tables: set[str] | None = None,
     member_names_override: list[str] | None = None,
     progress_callback=None,
+    force_text_for_wide_csv: bool = False,
 ) -> dict:
     """Parse a ZIP archive, recursing one level into nested ZIP members."""
     import zipfile
@@ -1194,6 +1313,70 @@ def _parse_zip_archive(
         current_append_mode = True
         return member_result
 
+    def _record_csv_file(file_path: str, *, sampled: str | None = None) -> dict:
+        nonlocal table_name, current_append_mode
+        csv_params = _detect_csv_params(file_path)
+        preview_df = pd.read_csv(file_path, nrows=_ZIP_CSV_PREVIEW_ROWS, **csv_params)
+        preview_df = preview_df.assign(_source_dataset_id=dataset_id)
+        preview_df = _sanitize_columns(preview_df)
+        csv_params = _stabilize_csv_params_for_width(
+            csv_params,
+            column_count=len(preview_df.columns),
+            force_text=force_text_for_wide_csv,
+        )
+        chunk_size = _csv_chunk_size_for_columns(len(preview_df.columns))
+        table_name, current_append_mode, routed_status = _route_table_for_schema(
+            engine,
+            dataset_id,
+            table_name,
+            preview_df.columns,
+            append_mode=current_append_mode,
+        )
+        if routed_status == "already_appended" and any(
+            member["table_name"] == table_name for member in parsed_members
+        ):
+            routed_status = None
+        if routed_status == "already_appended" and table_name in known_member_tables:
+            routed_status = None
+        if routed_status:
+            if routed_status == "resource_table_full":
+                return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+            return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
+
+        row_count, columns, truncated = _load_csv_chunked(
+            file_path,
+            table_name,
+            engine,
+            chunk_size=chunk_size,
+            source_dataset_id=dataset_id,
+            force_append=current_append_mode,
+            csv_params_override=csv_params,
+        )
+        sampled_note = sampled
+        if truncated:
+            sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
+            logger.warning(
+                "Dataset %s (zip/csv) truncated at %d rows",
+                dataset_id,
+                row_count,
+            )
+
+        member_result = {
+            "parsed": True,
+            "table_name": table_name,
+            "append_mode": True,
+            "row_count": row_count,
+            "columns": list(columns),
+            "sampled_note": sampled_note,
+            "result": None,
+        }
+        _append_parsed_zip_member(parsed_members, member_result)
+        known_member_tables.add(str(table_name))
+        if progress_callback:
+            progress_callback(_snapshot_member_tables(parsed_members))
+        current_append_mode = True
+        return member_result
+
     current_append_mode = append_mode
     sampled_note: str | None = None
     parsed_members: list[dict[str, object]] = []
@@ -1246,7 +1429,6 @@ def _parse_zip_archive(
             csv_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv", dir=_temp_dir())
             csv_tmp_path = csv_tmp.name
             csv_tmp.close()
-            csv_sampled_note = None
             try:
                 with zf.open(name) as zf_entry, open(csv_tmp_path, "wb") as out:
                     while True:
@@ -1254,16 +1436,7 @@ def _parse_zip_archive(
                         if not block:
                             break
                         out.write(block)
-                csv_params = _detect_csv_params(csv_tmp_path)
-                preview_df = pd.read_csv(csv_tmp_path, nrows=MAX_TABLE_ROWS, **csv_params)
-                if len(preview_df) >= MAX_TABLE_ROWS:
-                    csv_sampled_note = f"sampled: first {MAX_TABLE_ROWS} rows kept (limit {MAX_TABLE_ROWS})"
-                    logger.warning(
-                        "Dataset %s (zip/csv) truncated at %d rows",
-                        dataset_id,
-                        MAX_TABLE_ROWS,
-                    )
-                record_result = _record_dataframe(preview_df, sampled=csv_sampled_note)
+                record_result = _record_csv_file(csv_tmp_path)
                 if record_result.get("result") is not None:
                     return record_result
             finally:
@@ -1562,6 +1735,23 @@ def _detect_csv_params(file_path: str) -> dict:
     return params
 
 
+def _read_csv_preview(file_path: str, *, nrows: int, csv_params: dict | None = None) -> pd.DataFrame:
+    params = dict(csv_params) if csv_params is not None else _detect_csv_params(file_path)
+    try:
+        return pd.read_csv(file_path, nrows=nrows, **params)
+    except UnicodeDecodeError:
+        if str(params.get("encoding") or "").lower() != "latin-1":
+            fallback_params = dict(params)
+            fallback_params["encoding"] = "latin-1"
+            logger.info(
+                "CSV preview decode failed for %s with encoding=%s, retrying with latin-1",
+                file_path,
+                params.get("encoding"),
+            )
+            return pd.read_csv(file_path, nrows=nrows, **fallback_params)
+        raise
+
+
 def _csv_load_inner(
     file_path: str,
     table_name: str,
@@ -1598,7 +1788,7 @@ def _csv_load_inner(
                 chunk_df = chunk_df.iloc[:remaining]
                 truncated = True
         if source_dataset_id:
-            chunk_df["_source_dataset_id"] = source_dataset_id
+            chunk_df = chunk_df.assign(_source_dataset_id=source_dataset_id)
         if force_append:
             mode = "append"
         else:
@@ -1674,13 +1864,92 @@ def _serialize_structured_cells(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    normalized = df.copy()
+    normalized = df
     for column in normalized.columns:
         series = normalized[column]
         if getattr(series.dtype, "kind", None) != "O":
             continue
+        sample = next(
+            (
+                value
+                for value in series.head(25)
+                if value is not None and not (isinstance(value, float) and pd.isna(value))
+            ),
+            None,
+        )
+        if not isinstance(sample, dict | list | tuple | set):
+            continue
         normalized[column] = series.map(_serialize_nested_value)
     return normalized
+
+
+def _is_placeholder_column_name(value: object) -> bool:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return True
+    lowered = text_value.lower()
+    if lowered.startswith("unnamed:"):
+        return True
+    if re.fullmatch(r"col_[0-9]+", lowered):
+        return True
+    if re.fullmatch(r"[0-9]+", lowered):
+        return True
+    return False
+
+
+def _header_quality(columns) -> tuple[int, int, int]:
+    normalized = [str(col or "").strip() for col in columns]
+    placeholder_count = sum(1 for col in normalized if _is_placeholder_column_name(col))
+    alpha_count = sum(1 for col in normalized if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", col or ""))
+    nonempty_count = sum(1 for col in normalized if col)
+    return placeholder_count, alpha_count, nonempty_count
+
+
+def _maybe_promote_header_row(df: pd.DataFrame, *, max_candidate_rows: int = 5) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    current_columns = _make_unique_columns(df.columns)
+    current_placeholder, current_alpha, current_nonempty = _header_quality(current_columns)
+    total_columns = max(len(current_columns), 1)
+    suspicious_current = current_placeholder >= max(2, int(total_columns * 0.35))
+    if not suspicious_current:
+        return df
+
+    best_index: int | None = None
+    best_columns = current_columns
+    best_score = (current_placeholder, -current_alpha, -current_nonempty)
+
+    for idx in range(min(max_candidate_rows, len(df))):
+        candidate_columns = _make_unique_columns(df.iloc[idx])
+        placeholder_count, alpha_count, nonempty_count = _header_quality(candidate_columns)
+        score = (placeholder_count, -alpha_count, -nonempty_count)
+        if score < best_score:
+            best_index = idx
+            best_columns = candidate_columns
+            best_score = score
+
+    if best_index is None:
+        return df
+
+    best_placeholder, best_alpha, best_nonempty = _header_quality(best_columns)
+    improved_placeholders = best_placeholder <= max(0, current_placeholder - 3)
+    enough_signal = best_alpha >= max(3, current_alpha)
+    not_mostly_empty = best_nonempty >= max(3, int(total_columns * 0.3))
+    if not (improved_placeholders and enough_signal and not_mostly_empty):
+        return df
+
+    promoted = df.iloc[best_index + 1 :].reset_index(drop=True).copy()
+    promoted.columns = best_columns
+    logger.info(
+        "Promoted row %s as header (placeholders %s -> %s, alpha %s -> %s)",
+        best_index,
+        current_placeholder,
+        best_placeholder,
+        current_alpha,
+        best_alpha,
+    )
+    return promoted
 
 
 def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1690,12 +1959,8 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     df.columns = _make_unique_columns(df.columns)
 
-    # Detect misplaced header: if >50% of columns are "Unnamed: N", promote first row
-    unnamed_count = sum(1 for c in df.columns if str(c).startswith("Unnamed:"))
-    if unnamed_count > len(df.columns) * 0.5 and len(df) > 1:
-        new_header = _make_unique_columns(df.iloc[0])
-        df = df.iloc[1:].reset_index(drop=True)
-        df.columns = new_header
+    df = _maybe_promote_header_row(df)
+    df.columns = _make_unique_columns(df.columns)
 
     df = _serialize_structured_cells(df)
     return _compact_wide_dataframe(df)
@@ -1726,16 +1991,22 @@ def _compact_wide_dataframe(df: pd.DataFrame, max_columns: int = _MAX_SQL_COLUMN
         keep_cols = list(df.columns[:keep_budget])
 
     overflow_cols = [col for col in df.columns if col not in keep_cols]
-    overflow_frame = df[overflow_cols].where(pd.notna(df[overflow_cols]), None)
-    overflow_records = overflow_frame.to_dict(orient="records")
-
     compacted = df[keep_cols].copy()
-    compacted["_overflow_json"] = [
-        json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        if any(value is not None for value in record.values())
-        else None
-        for record in overflow_records
-    ]
+    if overflow_cols:
+        overflow_json: list[str | None] = []
+        overflow_frame = df[overflow_cols]
+        for row in overflow_frame.itertuples(index=False, name=None):
+            record = {
+                col: value
+                for col, value in zip(overflow_cols, row, strict=False)
+                if value is not None and not pd.isna(value)
+            }
+            overflow_json.append(
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")) if record else None
+            )
+        compacted["_overflow_json"] = overflow_json
+    else:
+        compacted["_overflow_json"] = None
     logger.warning(
         "Compacted wide dataset from %d to %d SQL columns (%d overflow columns stored in _overflow_json)",
         len(df.columns),
@@ -1836,30 +2107,62 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
             except Exception:
                 logger.debug("Could not record schema_drift metric", exc_info=True)
 
-    try:
-        df.to_sql(table_name, engine, **kwargs)
-    except Exception as exc:
-        exc_str = str(exc).lower()
-        schema_keywords = (
-            "column",
-            "type mismatch",
-            "incompatible",
-            "does not exist",
-            "undefined column",
-            "schema",
-            "relation",
-        )
-        if any(kw in exc_str for kw in schema_keywords):
-            logger.warning(
-                "Schema mismatch on table %s, dropping and retrying: %s",
-                table_name,
-                str(exc)[:200],
-            )
-            _drop_table_if_exists(engine, table_name)
-            kwargs["if_exists"] = "replace"
-            df.to_sql(table_name, engine, **kwargs)
-        else:
-            raise
+    table_lock_key = _lock_key("materialize_table", table_name)
+    with engine.connect() as write_conn:
+        write_conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": table_lock_key})
+        write_conn.commit()
+        try:
+            tx = write_conn.begin()
+            try:
+                df.to_sql(table_name, write_conn, **kwargs)
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                schema_keywords = (
+                    "column",
+                    "type mismatch",
+                    "incompatible",
+                    "does not exist",
+                    "undefined column",
+                    "schema",
+                    "relation",
+                )
+                if any(kw in exc_str for kw in schema_keywords):
+                    logger.warning(
+                        "Schema mismatch on table %s, dropping and retrying: %s",
+                        table_name,
+                        str(exc)[:200],
+                    )
+                    if tx.is_active:
+                        tx.rollback()
+                    with write_conn.begin():
+                        write_conn.execute(
+                            text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE')  # noqa: S608
+                        )
+                        retry_kwargs = dict(kwargs)
+                        retry_kwargs["if_exists"] = "replace"
+                        df.to_sql(table_name, write_conn, **retry_kwargs)
+                else:
+                    raise
+            else:
+                tx.commit()
+            finally:
+                if tx.is_active:
+                    tx.rollback()
+        finally:
+            try:
+                if write_conn.in_transaction():
+                    write_conn.rollback()
+            except Exception:
+                logger.debug(
+                    "Could not roll back write connection before unlock for %s",
+                    table_name,
+                    exc_info=True,
+                )
+            try:
+                write_conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": table_lock_key})
+                write_conn.rollback()
+            except Exception:
+                logger.debug("Could not release materialization lock for %s", table_name, exc_info=True)
 
 
 def _get_table_row_count(engine, table_name: str) -> int:
@@ -1934,27 +2237,50 @@ def _load_csv_chunked(
     file_path: str,
     table_name: str,
     engine,
+    chunk_size: int | None = None,
     source_dataset_id: str | None = None,
     force_append: bool = False,
+    csv_params_override: dict | None = None,
 ) -> tuple[int, list[str], bool]:
     """Load a CSV file into PostgreSQL in chunks.
 
     Returns ``(total_rows, columns, was_truncated)``.
     Stops after ``MAX_TABLE_ROWS`` rows.
     """
-    csv_params = _detect_csv_params(file_path)
-    chunk_size = 50_000
+    csv_params = dict(csv_params_override) if csv_params_override is not None else _detect_csv_params(file_path)
+    effective_chunk_size = chunk_size or _CSV_MAX_CHUNK_SIZE
     try:
         return _csv_load_inner(
             file_path,
             table_name,
             engine,
             csv_params,
-            chunk_size,
+            effective_chunk_size,
             max_rows=MAX_TABLE_ROWS,
             source_dataset_id=source_dataset_id,
             force_append=force_append,
         )
+    except UnicodeDecodeError:
+        fallback_encoding = csv_params.get("encoding")
+        if fallback_encoding != "latin-1":
+            logger.warning(
+                "CSV decode failed for %s with encoding=%s, retrying with latin-1",
+                file_path,
+                fallback_encoding,
+            )
+            fallback_params = dict(csv_params)
+            fallback_params["encoding"] = "latin-1"
+            return _csv_load_inner(
+                file_path,
+                table_name,
+                engine,
+                fallback_params,
+                effective_chunk_size,
+                max_rows=MAX_TABLE_ROWS,
+                source_dataset_id=source_dataset_id,
+                force_append=force_append,
+            )
+        raise
     except pd.errors.ParserError:
         logger.info("CSV C-parser failed, retrying with Python engine")
         csv_params["engine"] = "python"
@@ -1963,22 +2289,390 @@ def _load_csv_chunked(
             table_name,
             engine,
             csv_params,
-            chunk_size,
+            effective_chunk_size,
             max_rows=MAX_TABLE_ROWS,
             source_dataset_id=source_dataset_id,
             force_append=force_append,
         )
 
 
+def _csv_chunk_size_for_columns(column_count: int) -> int:
+    """Derive a safer CSV chunk size for wide datasets.
+
+    Target a rough upper bound in "cells per chunk" so 1,800-column CSVs
+    don't try to allocate 50k-row DataFrames in one shot.
+    """
+    safe_columns = max(column_count, 1)
+    derived = _CSV_TARGET_CELLS_PER_CHUNK // safe_columns
+    return max(_CSV_MIN_CHUNK_SIZE, min(_CSV_MAX_CHUNK_SIZE, derived))
+
+
+def _stabilize_csv_params_for_width(
+    csv_params: dict,
+    *,
+    column_count: int,
+    force_text: bool = False,
+) -> dict:
+    """Freeze dtype inference for very wide CSVs so chunks keep one schema.
+
+    On pathological survey/health datasets, pandas may infer different dtypes
+    across chunks for the same column, which later turns into append-time
+    schema churn (`text -> float64`, `double precision -> str`, etc.). For
+    very wide datasets we prefer stable all-text ingestion over repeated
+    drop/recreate loops in the heavy lane.
+    """
+    stabilized = dict(csv_params)
+    if force_text or _should_route_to_heavy_by_width(column_count):
+        stabilized["dtype"] = str
+        stabilized["keep_default_na"] = False
+        stabilized["low_memory"] = False
+    return stabilized
+
+
+def _looks_like_json_record_map(file_path: str) -> bool:
+    """Detect giant JSON payloads shaped like {"1": {...}, "2": {...}}."""
+    try:
+        with open(file_path, encoding="utf-8-sig", errors="ignore") as fh:
+            sample = fh.read(2048).lstrip()
+    except OSError:
+        return False
+    return bool(re.match(r'^\{\s*"\d+"\s*:\s*\{', sample))
+
+
+def _iter_json_record_map_values(file_path: str, *, read_size: int = 1 << 20):
+    """Yield top-level object values without loading the whole JSON blob."""
+    decoder = json.JSONDecoder()
+    with open(file_path, encoding="utf-8-sig") as fh:
+        buf = ""
+        idx = 0
+        eof = False
+
+        def _fill() -> bool:
+            nonlocal buf, idx, eof
+            if eof:
+                return False
+            chunk = fh.read(read_size)
+            if chunk == "":
+                eof = True
+                return False
+            if idx:
+                buf = buf[idx:]
+                idx = 0
+            buf += chunk
+            return True
+
+        def _skip_ws() -> None:
+            nonlocal idx
+            while True:
+                while idx < len(buf) and buf[idx].isspace():
+                    idx += 1
+                if idx < len(buf) or not _fill():
+                    return
+
+        _fill()
+        _skip_ws()
+        if idx >= len(buf) or buf[idx] != "{":
+            raise ValueError("json_record_map_expected_object")
+        idx += 1
+
+        while True:
+            _skip_ws()
+            if idx >= len(buf):
+                raise ValueError("json_record_map_unexpected_eof")
+            if buf[idx] == "}":
+                return
+            if buf[idx] == ",":
+                idx += 1
+                continue
+
+            while True:
+                try:
+                    key, next_idx = decoder.raw_decode(buf, idx)
+                    break
+                except ValueError:
+                    if not _fill():
+                        raise
+            if not isinstance(key, str):
+                raise ValueError("json_record_map_non_string_key")
+            idx = next_idx
+
+            _skip_ws()
+            if idx >= len(buf) or buf[idx] != ":":
+                raise ValueError("json_record_map_expected_colon")
+            idx += 1
+
+            _skip_ws()
+            while True:
+                try:
+                    value, next_idx = decoder.raw_decode(buf, idx)
+                    break
+                except ValueError:
+                    if not _fill():
+                        raise
+            idx = next_idx
+            yield value
+
+            if idx > read_size:
+                buf = buf[idx:]
+                idx = 0
+
+
+def _load_json_record_map_chunked(
+    file_path: str,
+    table_name: str,
+    engine,
+    dataset_id: str,
+) -> tuple[int, list[str], str, bool, str | None]:
+    """Load keyed-record JSON blobs in bounded chunks."""
+    total_rows = 0
+    columns: list[str] = []
+    sampled_note: str | None = None
+    current_table = table_name
+    append_mode = False
+    first_chunk = True
+    chunk: list[dict] = []
+
+    def _flush(rows: list[dict]) -> None:
+        nonlocal total_rows, columns, current_table, append_mode, first_chunk
+        if not rows:
+            return
+        df = pd.json_normalize(rows)
+        df["_source_dataset_id"] = dataset_id
+        if first_chunk:
+            current_table, append_mode, routed_status = _route_table_for_schema(
+                engine,
+                dataset_id,
+                current_table,
+                df.columns,
+                append_mode=False,
+            )
+            if routed_status:
+                raise RuntimeError(f"json_record_map_routed:{routed_status}")
+            columns = list(df.columns)
+            _to_sql_safe(
+                df,
+                current_table,
+                engine,
+                if_exists="append" if append_mode else "replace",
+                index=False,
+            )
+            first_chunk = False
+        else:
+            df = df.reindex(columns=columns, fill_value=None)
+            _to_sql_safe(df, current_table, engine, if_exists="append", index=False)
+        total_rows += len(df)
+
+    for value in _iter_json_record_map_values(file_path):
+        chunk.append(value if isinstance(value, dict) else {"value": value})
+        if total_rows + len(chunk) >= MAX_TABLE_ROWS:
+            remaining = MAX_TABLE_ROWS - total_rows
+            _flush(chunk[:remaining])
+            sampled_note = f"sampled: first {MAX_TABLE_ROWS} rows kept (large json record map)"
+            chunk = []
+            break
+        if len(chunk) >= _JSON_RECORD_MAP_CHUNK_SIZE:
+            _flush(chunk)
+            chunk = []
+
+    if chunk and total_rows < MAX_TABLE_ROWS:
+        _flush(chunk)
+
+    if first_chunk:
+        raise ValueError("json_record_map_no_rows")
+    return total_rows, columns, current_table, append_mode, sampled_note
+
+
+def _prune_open_cached_entries(engine, dataset_id: str, *, keep_table_name: str | None = None) -> None:
+    """Delete duplicate open cached_datasets rows for one dataset.
+
+    Keep terminal history and ready rows untouched; only collapse the noisy
+    `downloading`/`pending`/`error` duplicates that inflate the open-work view
+    and cause redundant collector churn.
+    """
+    try:
+        with engine.begin() as conn:
+            params: dict[str, object] = {"did": dataset_id}
+            sql = (
+                "DELETE FROM cached_datasets "
+                "WHERE dataset_id = CAST(:did AS uuid) "
+                "  AND status IN ('downloading', 'pending', 'error')"
+            )
+            if keep_table_name is not None:
+                sql += " AND table_name <> :tn"
+                params["tn"] = keep_table_name
+            conn.execute(text(sql), params)
+    except Exception:
+        logger.debug("Could not prune open cached entries for %s", dataset_id, exc_info=True)
+
+
+def _mark_dataset_rerouted_pending(
+    engine,
+    dataset_id: str,
+    table_name: str,
+    *,
+    reason: str,
+) -> None:
+    """Mark exactly one cached row as rerouted/pending, then collapse open duplicates."""
+    try:
+        with engine.begin() as conn:
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM cached_datasets
+                    WHERE dataset_id = CAST(:did AS uuid)
+                      AND table_name = :tn
+                    ORDER BY updated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"did": dataset_id, "tn": table_name},
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE cached_datasets
+                        SET status = 'pending',
+                            error_message = :msg,
+                            updated_at = NOW()
+                        WHERE id = :id
+                        """
+                    ),
+                    {"msg": f"rerouted_heavy:{reason}"[:500], "id": existing.id},
+                )
+            else:
+                recycled = conn.execute(
+                    text(
+                        """
+                        SELECT id
+                        FROM cached_datasets
+                        WHERE dataset_id = CAST(:did AS uuid)
+                          AND status IN ('downloading', 'pending', 'error')
+                        ORDER BY updated_at DESC NULLS LAST, id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"did": dataset_id},
+                ).fetchone()
+                if recycled:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE cached_datasets
+                            SET table_name = :tn,
+                                status = 'pending',
+                                error_message = :msg,
+                                updated_at = NOW()
+                            WHERE id = :id
+                            """
+                        ),
+                        {
+                            "tn": table_name,
+                            "msg": f"rerouted_heavy:{reason}"[:500],
+                            "id": recycled.id,
+                        },
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO cached_datasets (
+                                dataset_id, table_name, status, error_message, updated_at
+                            )
+                            VALUES (CAST(:did AS uuid), :tn, 'pending', :msg, NOW())
+                            ON CONFLICT (table_name) DO UPDATE SET
+                                status = 'pending',
+                                error_message = :msg,
+                                updated_at = NOW()
+                            """
+                        ),
+                        {
+                            "did": dataset_id,
+                            "tn": table_name,
+                            "msg": f"rerouted_heavy:{reason}"[:500],
+                        },
+                    )
+        _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
+    except Exception:
+        logger.debug("Could not mark dataset %s as rerouted pending", dataset_id, exc_info=True)
+
+
 def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
     """Ensure a cached_datasets row exists for this dataset (idempotent)."""
     try:
         with engine.begin() as conn:
+            existing = conn.execute(
+                text(
+                    """
+                    SELECT id
+                    FROM cached_datasets
+                    WHERE dataset_id = CAST(:did AS uuid)
+                      AND table_name = :tn
+                    ORDER BY updated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"did": dataset_id, "tn": table_name},
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE cached_datasets
+                        SET status = 'downloading',
+                            error_message = NULL,
+                            updated_at = NOW()
+                        WHERE id = :id
+                        """
+                    ),
+                    {"id": existing.id},
+                )
+            else:
+                recycled = conn.execute(
+                    text(
+                        """
+                        SELECT id
+                        FROM cached_datasets
+                        WHERE dataset_id = CAST(:did AS uuid)
+                          AND status IN ('downloading', 'pending', 'error')
+                        ORDER BY updated_at DESC NULLS LAST, id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"did": dataset_id},
+                ).fetchone()
+                if recycled:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE cached_datasets
+                            SET table_name = :tn,
+                                status = 'downloading',
+                                error_message = NULL,
+                                updated_at = NOW()
+                            WHERE id = :id
+                            """
+                        ),
+                        {"tn": table_name, "id": recycled.id},
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            "INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at) "
+                            "VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW()) "
+                            "ON CONFLICT (table_name) DO NOTHING"
+                        ),
+                        {"did": dataset_id, "tn": table_name},
+                    )
             conn.execute(
                 text(
-                    "INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at) "
-                    "VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW()) "
-                    "ON CONFLICT (table_name) DO NOTHING"
+                    """
+                    DELETE FROM cached_datasets
+                    WHERE dataset_id = CAST(:did AS uuid)
+                      AND table_name <> :tn
+                      AND status IN ('downloading', 'pending', 'error')
+                    """
                 ),
                 {"did": dataset_id, "tn": table_name},
             )
@@ -2021,6 +2715,7 @@ def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: st
                     ),
                     {"msg": error_msg[:500], "did": dataset_id},
                 )
+        _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
     except Exception:
         # Was logger.debug — silently swallowed status-update failures left
         # orphaned datasets in inconsistent states. Surface at warning so the
@@ -2140,6 +2835,7 @@ def _finalize_cached_dataset(
             },
         )
 
+    _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
     return {"ok": True, "status": "ready", "columns_json": columns_json}
 
 
@@ -2310,7 +3006,7 @@ def _update_row_count_after_append(engine, table_name: str):
 @celery_app.task(
     name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=1200, time_limit=1380
 )
-def collect_dataset(self, dataset_id: str):
+def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
     """
     Descarga un dataset real, lo parsea y lo guarda como tabla SQL.
     Esto permite al Analyst hacer queries SQL reales sobre los datos.
@@ -2330,6 +3026,54 @@ def collect_dataset(self, dataset_id: str):
         if not task_id:
             return
         self.update_state(state=state, meta=meta)
+
+    def _is_heavy_execution() -> bool:
+        delivery = getattr(getattr(self, "request", None), "delivery_info", None) or {}
+        return force_heavy or delivery.get("queue") in {
+            _HEAVY_COLLECT_QUEUE,
+            _HEAVY_RETRY_QUEUE,
+        }
+
+    def _current_queue() -> str | None:
+        delivery = getattr(getattr(self, "request", None), "delivery_info", None) or {}
+        return delivery.get("queue")
+
+    def _reroute_to_queue(
+        reason: str,
+        *,
+        queue: str,
+        countdown: int | None = None,
+    ) -> dict[str, object]:
+        logger.warning(
+            "Rerouting dataset %s to %s (%s)",
+            dataset_id,
+            queue,
+            reason,
+        )
+        _mark_dataset_rerouted_pending(
+            engine,
+            dataset_id,
+            table_name,
+            reason=reason,
+        )
+        apply_kwargs = {
+            "args": [dataset_id],
+            "kwargs": {"force_heavy": True},
+            "queue": queue,
+        }
+        if countdown is not None:
+            apply_kwargs["countdown"] = countdown
+        collect_dataset.apply_async(**apply_kwargs)
+        return {
+            "dataset_id": dataset_id,
+            "status": "rerouted_heavy" if queue == _HEAVY_COLLECT_QUEUE else "rerouted_heavy_retry",
+            "reason": reason,
+            "queue": queue,
+        }
+
+    def _reroute_to_heavy(reason: str) -> dict[str, object]:
+        return _reroute_to_queue(reason, queue=_HEAVY_COLLECT_QUEUE)
+
     lock_acquired = False
 
     try:
@@ -2363,6 +3107,14 @@ def collect_dataset(self, dataset_id: str):
         _update_task_state_safe(
             state="STARTED", meta={"dataset_id": dataset_id, "stage": "collecting"}
         )
+
+        if not _is_heavy_execution() and _should_route_to_heavy_from_metadata(
+            portal=portal,
+            fmt=fmt,
+            title=title,
+            download_url=download_url,
+        ):
+            return _reroute_to_heavy(f"metadata:{portal}:{fmt}")
 
         if not download_url:
             logger.warning(f"Dataset {dataset_id} has no download URL")
@@ -2540,10 +3292,20 @@ def collect_dataset(self, dataset_id: str):
             if fmt in ("csv", "txt"):
                 # Chunked CSV loading — never loads full file into memory
                 # For append mode, do a quick schema check using first chunk
+                csv_chunk_size: int | None = None
+                csv_preview_column_count: int | None = None
                 if append_mode:
                     try:
                         _csv_params = _detect_csv_params(tmp_path)
-                        preview_df = pd.read_csv(tmp_path, nrows=5, **_csv_params)
+                        preview_df = _read_csv_preview(tmp_path, nrows=5, csv_params=_csv_params)
+                        csv_preview_column_count = len(preview_df.columns) + 1
+                        if not _is_heavy_execution() and _should_route_to_heavy_by_width(
+                            len(preview_df.columns)
+                        ):
+                            return _reroute_to_heavy(
+                                f"width:{len(preview_df.columns)}:{portal}:{fmt}"
+                            )
+                        csv_chunk_size = _csv_chunk_size_for_columns(csv_preview_column_count)
                         table_name, append_mode, routed_status = _route_table_for_schema(
                             engine,
                             dataset_id,
@@ -2568,12 +3330,39 @@ def collect_dataset(self, dataset_id: str):
                             exc_info=True,
                         )
 
+                if csv_chunk_size is None:
+                    try:
+                        _csv_params = _detect_csv_params(tmp_path)
+                        preview_df = _read_csv_preview(tmp_path, nrows=5, csv_params=_csv_params)
+                        csv_preview_column_count = len(preview_df.columns) + 1
+                        if not _is_heavy_execution() and _should_route_to_heavy_by_width(
+                            len(preview_df.columns)
+                        ):
+                            return _reroute_to_heavy(
+                                f"width:{len(preview_df.columns)}:{portal}:{fmt}"
+                            )
+                        csv_chunk_size = _csv_chunk_size_for_columns(csv_preview_column_count)
+                    except Exception:
+                        logger.debug(
+                            "CSV chunk-size preview failed for %s, using default chunk size",
+                            dataset_id,
+                            exc_info=True,
+                        )
+
                 row_count, columns, csv_truncated = _load_csv_chunked(
                     tmp_path,
                     table_name,
                     engine,
+                    chunk_size=csv_chunk_size,
                     source_dataset_id=dataset_id,
                     force_append=append_mode,
+                    csv_params_override=_stabilize_csv_params_for_width(
+                        _detect_csv_params(tmp_path),
+                        column_count=csv_preview_column_count or 1,
+                        force_text=_is_heavy_execution(),
+                    )
+                    if csv_preview_column_count is not None
+                    else None,
                 )
                 if csv_truncated:
                     sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
@@ -2692,6 +3481,7 @@ def collect_dataset(self, dataset_id: str):
                     append_mode=append_mode,
                     member_names_override=expanded_member_names,
                     progress_callback=_update_partial_member_progress,
+                    force_text_for_wide_csv=_is_heavy_execution(),
                 )
                 if zip_result.get("result") is not None:
                     result_payload = zip_result["result"]
@@ -2732,49 +3522,65 @@ def collect_dataset(self, dataset_id: str):
                     return {"error": "zip_no_parseable_file"}
 
             elif fmt == "json":
-                with open(tmp_path, "rb") as f:
-                    content = f.read()
-                try:
-                    df = pd.read_json(io.BytesIO(content))
-                except ValueError:
-                    raw = json.loads(content)
-                    if isinstance(raw, list):
-                        df = pd.json_normalize(raw)
-                    elif isinstance(raw, dict):
-                        for key in ("data", "results", "records", "features", "rows"):
-                            if key in raw and isinstance(raw[key], list):
-                                df = pd.json_normalize(raw[key])
-                                break
-                        else:
-                            df = pd.json_normalize([raw])
-                    else:
-                        raise
-                if len(df) > MAX_TABLE_ROWS:
-                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
-                    logger.warning(
-                        "Dataset %s (json) truncated from %d to %d rows",
-                        dataset_id,
-                        len(df),
-                        MAX_TABLE_ROWS,
-                    )
-                    df = df.iloc[:MAX_TABLE_ROWS]
-                df["_source_dataset_id"] = dataset_id
-                table_name, append_mode, routed_status = _route_table_for_schema(
-                    engine,
-                    dataset_id,
-                    table_name,
-                    df.columns,
-                    append_mode=append_mode,
-                )
-                if routed_status:
-                    if routed_status == "resource_table_full":
-                        return {"dataset_id": dataset_id, "error": routed_status}
-                    return {"dataset_id": dataset_id, "status": routed_status}
-                if append_mode:
-                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                file_size = os.path.getsize(tmp_path)
+                if file_size >= _JSON_RECORD_MAP_STREAM_THRESHOLD_BYTES and _looks_like_json_record_map(
+                    tmp_path
+                ):
+                    try:
+                        row_count, columns, table_name, append_mode, streamed_sampled = (
+                            _load_json_record_map_chunked(tmp_path, table_name, engine, dataset_id)
+                        )
+                    except RuntimeError as exc:
+                        routed_status = str(exc).removeprefix("json_record_map_routed:")
+                        if routed_status == "resource_table_full":
+                            return {"dataset_id": dataset_id, "error": routed_status}
+                        return {"dataset_id": dataset_id, "status": routed_status}
+                    sampled_note = streamed_sampled or sampled_note
                 else:
-                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
-                row_count, columns = len(df), list(df.columns)
+                    with open(tmp_path, encoding="utf-8-sig") as f:
+                        try:
+                            raw = json.load(f)
+                        except json.JSONDecodeError:
+                            f.seek(0)
+                            df = pd.read_json(f)
+                        else:
+                            if isinstance(raw, list):
+                                df = pd.json_normalize(raw)
+                            elif isinstance(raw, dict):
+                                for key in ("data", "results", "records", "features", "rows"):
+                                    if key in raw and isinstance(raw[key], list):
+                                        df = pd.json_normalize(raw[key])
+                                        break
+                                else:
+                                    df = pd.json_normalize([raw])
+                            else:
+                                raise
+                    if len(df) > MAX_TABLE_ROWS:
+                        sampled_note = f"sampled: first {MAX_TABLE_ROWS} of {len(df)} total rows"
+                        logger.warning(
+                            "Dataset %s (json) truncated from %d to %d rows",
+                            dataset_id,
+                            len(df),
+                            MAX_TABLE_ROWS,
+                        )
+                        df = df.iloc[:MAX_TABLE_ROWS]
+                    df["_source_dataset_id"] = dataset_id
+                    table_name, append_mode, routed_status = _route_table_for_schema(
+                        engine,
+                        dataset_id,
+                        table_name,
+                        df.columns,
+                        append_mode=append_mode,
+                    )
+                    if routed_status:
+                        if routed_status == "resource_table_full":
+                            return {"dataset_id": dataset_id, "error": routed_status}
+                        return {"dataset_id": dataset_id, "status": routed_status}
+                    if append_mode:
+                        _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                    else:
+                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                    row_count, columns = len(df), list(df.columns)
 
             elif fmt == "geojson":
                 with open(tmp_path, "rb") as f:
@@ -3210,6 +4016,7 @@ def collect_dataset(self, dataset_id: str):
         raise self.retry(countdown=int(backoff + jitter))
     except Exception as exc:
         exc_str = str(exc)
+        current_queue = _current_queue()
         # Non-retryable errors — mark permanently failed immediately
         non_retryable = (
             any(
@@ -3240,6 +4047,56 @@ def collect_dataset(self, dataset_id: str):
             )
             _set_error_status(engine, dataset_id, exc_str[:500], table_name=table_name)
             return {"error": "non_retryable"}
+
+        if (
+            _is_heavy_execution()
+            and current_queue != _HEAVY_RETRY_QUEUE
+            and _is_transient_collect_error(exc)
+        ):
+            backoff = min(60 * (2**self.request.retries), 600)
+            jitter = random.uniform(0, backoff * 0.3)
+            countdown = int(backoff + jitter)
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE cached_datasets "
+                        "SET retry_count = retry_count + 1, "
+                        "    error_message = :msg, "
+                        "    updated_at = NOW(), "
+                        "    status = CASE "
+                        "      WHEN retry_count + 1 >= :max THEN 'permanently_failed' "
+                        "      ELSE 'pending' "
+                        "    END "
+                        "WHERE dataset_id = CAST(:did AS uuid)"
+                    ),
+                    {
+                        "msg": str(exc)[:500],
+                        "did": dataset_id,
+                        "max": MAX_TOTAL_ATTEMPTS,
+                    },
+                )
+                current = conn.execute(
+                    text(
+                        "SELECT retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
+                    ),
+                    {"did": dataset_id},
+                ).fetchone()
+
+            attempts = current.retry_count if current else 0
+            if attempts >= MAX_TOTAL_ATTEMPTS:
+                logger.warning(
+                    "Dataset %s permanently failed after %s attempts: %s",
+                    dataset_id,
+                    attempts,
+                    exc,
+                )
+                return {"error": "permanently_failed", "attempts": attempts}
+
+            return _reroute_to_queue(
+                f"transient_retry:{type(exc).__name__}",
+                queue=_HEAVY_RETRY_QUEUE,
+                countdown=countdown,
+            )
 
         total_ms = int((time.monotonic() - started_at) * 1000)
         logger.exception("Collection failed for dataset %s after %dms", dataset_id, total_ms)
@@ -3339,7 +4196,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
 
         # ── Phase 1: individual datasets (groups <= 50 siblings) ──
         query = (
-            "SELECT CAST(d.id AS text), d.portal FROM datasets d "
+            "SELECT CAST(d.id AS text), d.portal, d.format, d.title FROM datasets d "
             "WHERE d.is_cached = false "
             "AND NOT EXISTS ("
             "  SELECT 1 FROM cached_datasets cd "
@@ -3379,7 +4236,15 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
 
         phase1_count = len(selected_rows)
         deferred_individual = len(deferred_rows)
-        tasks = [collect_dataset.s(dataset_id) for dataset_id, _portal in selected_rows]
+        tasks = [
+            _collect_dataset_signature(
+                str(_row_value(row, "id", 0)),
+                portal=str(_row_value(row, "portal", 1)),
+                fmt=str(_row_value(row, "format", 2) or ""),
+                title=str(_row_value(row, "title", 3) or ""),
+            )
+            for row in selected_rows
+        ]
         phase1_batches = 0
         if tasks:
             phase1_batches = _dispatch_in_batches(
@@ -3416,7 +4281,11 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             portal_key: max(
                 _COLLECT_MAX_INFLIGHT_PER_PORTAL
                 - inflight_by_portal.get(portal_key, 0)
-                - sum(1 for _did, p in selected_rows if p == portal_key),
+                - sum(
+                    1
+                    for row in selected_rows
+                    if str(_row_value(row, "portal", 1)) == portal_key
+                ),
                 0,
             )
             for portal_key in {row.portal for row in large_groups}
@@ -3560,7 +4429,7 @@ def collect_large_group(self, title: str, portal: str):
         with engine.connect() as conn:
             resources = conn.execute(
                 text(
-                    "SELECT CAST(d.id AS text) as id, d.format, d.download_url "
+                    "SELECT CAST(d.id AS text) as id, d.format, d.download_url, d.title "
                     "FROM datasets d "
                     "WHERE d.title = :title AND d.portal = :portal AND d.is_cached = false "
                     "AND NOT EXISTS ("
@@ -3601,7 +4470,15 @@ def collect_large_group(self, title: str, portal: str):
 
         # Dispatch individual collect_dataset for each deduped resource (up to 200)
         # The append_mode + aggregate row cap in collect_dataset handles the rest
-        tasks = [collect_dataset.s(did) for did, _, _ in deduped[:200]]
+        tasks = [
+            _collect_dataset_signature(
+                did,
+                portal=portal,
+                fmt=fmt,
+                title=title,
+            )
+            for did, fmt, _url in deduped[:200]
+        ]
         dispatched_batches = 0
         if tasks:
             dispatched_batches = _dispatch_in_batches(

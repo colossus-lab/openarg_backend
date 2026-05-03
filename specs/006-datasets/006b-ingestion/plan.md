@@ -2,7 +2,7 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Parent plan**: [../plan.md](../plan.md)
-**Last synced with code**: 2026-04-13
+**Last synced with code**: 2026-04-27
 
 ---
 
@@ -43,6 +43,15 @@ collect_dataset(dataset_id)  [queue: collector, concurrency 4]
 index_dataset_embedding(dataset_id)  [re-trigger]
     ↓ (large files)
 upload_to_s3(dataset_id)  [queue: s3, concurrency 2]
+
+Heavy datasets can be rerouted onto a separate lane:
+
+collect_dataset(dataset_id, force_heavy=True)  [queue: collector-heavy, concurrency 1]
+
+Retry-safe reroutes must stay single-row in `cached_datasets`:
+- a heavy reroute updates one open row (or creates one if absent)
+- the collector prunes sibling `downloading` / `pending` / `error` rows immediately after the reroute marker is written
+- this keeps open-work accounting stable during long rebuilds and prevents one dataset from inflating the apparent backlog
 ```
 
 ## 4. Embedding Strategy (5 chunks per dataset)
@@ -97,6 +106,26 @@ Detects when a re-collect produces a schema that no longer matches the existing 
 - `bulk_collect_all()` now acquires a dedicated advisory lock before running reconciliation / recycle / dispatch logic. Overlapping runs exit as `status="skipped_already_running"` instead of dispatching duplicate collector waves.
 - `bulk_collect_all()` now also behaves as a bounded convergence loop: if a pass still sees eligible uncached work, deferred work, or inflight collector activity, it re-enqueues itself after a delay and only stops on convergence or after hitting the configured max chain depth.
 - The convergence loop now short-circuits the expensive recount path when the pass already has enough evidence to continue, and its soft/hard Celery limits are configurable (`OPENARG_BULK_COLLECT_SOFT_TIME_LIMIT`, `OPENARG_BULK_COLLECT_TIME_LIMIT`) so rebuild waves do not die on a fixed 300s edge.
+- The deployment command for `worker-collector` is now env-configurable (`OPENARG_COLLECTOR_CONCURRENCY`, `OPENARG_COLLECTOR_MAX_MEMORY_PER_CHILD`) and defaults to a more conservative concurrency so rebuild waves do not spawn too many heavy pandas jobs at once.
+- The collector now also supports a dedicated heavy lane:
+  - queue name: `collector-heavy` (configurable via `OPENARG_HEAVY_COLLECT_QUEUE`)
+  - worker defaults: concurrency `1`, larger per-child memory budget
+  - dispatch path: `_collect_dataset_signature(...)` routes metadata-known pathological resources directly to that lane
+  - runtime safety net: `collect_dataset()` may reroute itself before download or before chunked CSV load when metadata / preview-width heuristics show the normal lane is a poor fit
+  - large keyed JSON note: payloads like `diputados / Votaciones Nominales` still need incremental parsing inside the lane; routing them to heavy without streaming is not enough because the full-blob parser can SIGKILL even the heavy worker
+- The collector also supports a dedicated heavy retry lane:
+  - queue name: `collector-heavy-retry` (configurable via `OPENARG_HEAVY_RETRY_QUEUE`)
+  - worker defaults: concurrency `1`, isolated from both the normal lane and first-pass heavy lane
+  - dispatch path: transient heavy failures (for example `RemoteProtocolError`, partial large-body downloads, read/connect timeouts) reroute there instead of recycling only inside `collector-heavy`
+- Current heavy heuristics are intentionally conservative:
+  - all `datos_gob_ar` ZIP resources route to `collector-heavy`
+  - `datos_gob_ar` CSV/TXT resources with health/survey-style keywords route to `collector-heavy`
+  - `caba` ZIP resources whose title/URL clearly identify 3D building bundles route to `collector-heavy`
+  - top-level CSV previews with `>= OPENARG_HEAVY_WIDTH_COLUMN_THRESHOLD` columns (default `600`) reroute before the expensive chunked write starts
+- Once a dataset is in the heavy lane, very wide CSVs stop relying on pandas chunk-by-chunk dtype inference. The collector freezes those files to a text-first schema (`dtype=str`, `keep_default_na=False`, `low_memory=False`) before the chunked load so append-mode writes do not oscillate between `text`, `float64`, and `double precision` interpretations mid-run.
+- Once a dataset is in the heavy retry lane, only recoverable transport-style failures should keep circulating there. Terminal content failures (`bad_zip_file`, `html_as_data`, `403/404`, `file_too_large`, document bundles) should still end as `permanently_failed`.
+- Chunked CSV ingestion now also retries with `latin-1` if the real stream fails with `UnicodeDecodeError` after a UTF-8/UTF-8-BOM header sniff succeeded. That closes the gap where mixed-encoding legacy files were still surfacing as retryable collector noise.
+- Physical table writes are now serialized per target table name with a PostgreSQL advisory lock. That specifically protects shared schema-variant tables (`..._s<hash>`) from concurrent `CREATE/DROP/CREATE` races across different worker processes.
 
 ### 5.4 Deterministic failure short-circuit
 
@@ -142,6 +171,9 @@ Detects when a re-collect produces a schema that no longer matches the existing 
   - then KML/KMZ
 - The ZIP parser now supports KML payloads via Fiona-backed extraction.
 - CSV dialect detection now recognizes `utf-8-sig`, `|`, and tab delimiters in addition to the previous `,` / `;`.
+- ZIP-contained CSV/TXT members now reuse the same chunked loader as top-level CSV/TXT ingestion. The ZIP parser only reads a small preview (`OPENARG_ZIP_CSV_PREVIEW_ROWS`, default `250`) for dialect and schema routing before streaming the actual member into SQL in chunks.
+- CSV chunk size is now adaptive instead of fixed: the collector targets a bounded number of cells per chunk (`OPENARG_CSV_TARGET_CELLS_PER_CHUNK`, default `250000`) and clamps between `OPENARG_CSV_MIN_CHUNK_SIZE` and `OPENARG_CSV_MAX_CHUNK_SIZE`. Wide survey/health datasets therefore run with much smaller chunks than narrow tabular feeds.
+- `_overflow_json` compaction for wide datasets no longer materialises a full `to_dict(orient=\"records\")` blob for the whole overflow slice before serialisation; it now builds row payloads incrementally to reduce peak memory during very wide chunk writes.
 
 ### 5.9 Multi-member ZIP traversal
 

@@ -6,14 +6,29 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from app.infrastructure.celery.tasks.collector_tasks import (
+    _ZIP_CSV_PREVIEW_ROWS,
     _check_schema_compat_columns,
+    _collect_dataset_signature,
     _count_bulk_collect_remaining,
+    _csv_chunk_size_for_columns,
     _detect_csv_params,
+    _header_quality,
+    _is_placeholder_column_name,
+    _is_transient_collect_error,
+    _iter_json_record_map_values,
+    _load_csv_chunked,
+    _load_json_record_map_chunked,
+    _looks_like_json_record_map,
     _make_unique_columns,
+    _mark_dataset_rerouted_pending,
+    _maybe_promote_header_row,
     _parse_zip_archive,
+    _prune_open_cached_entries,
+    _read_csv_preview,
     _read_kml_from_zip,
     _read_shapefile_from_zip,
     _resource_table_name,
@@ -21,6 +36,9 @@ from app.infrastructure.celery.tasks.collector_tasks import (
     _sanitize_columns,
     _schema_table_name,
     _serialize_structured_cells,
+    _should_route_to_heavy_from_metadata,
+    _stabilize_csv_params_for_width,
+    _to_sql_safe,
     _zip_structure_summary,
     bulk_collect_all,
     collect_dataset,
@@ -128,6 +146,339 @@ class TestCollectorP2:
             "DEPARTAMENTOS_2",
             "DEPARTAMENTOS_3",
         ]
+
+    def test_csv_chunk_size_for_columns_scales_down_for_wide_datasets(self):
+        assert _csv_chunk_size_for_columns(10) == 25000
+        assert _csv_chunk_size_for_columns(1800) < 50000
+        assert _csv_chunk_size_for_columns(1800) == 500
+
+    def test_stabilize_csv_params_for_width_forces_text_on_wide_datasets(self):
+        params = _stabilize_csv_params_for_width({"sep": "|"}, column_count=1800)
+        assert params["sep"] == "|"
+        assert params["dtype"] is str
+        assert params["keep_default_na"] is False
+        assert params["low_memory"] is False
+
+    def test_placeholder_column_name_detection(self):
+        assert _is_placeholder_column_name("Unnamed: 7") is True
+        assert _is_placeholder_column_name("col_12") is True
+        assert _is_placeholder_column_name("12") is True
+        assert _is_placeholder_column_name("Provincia") is False
+
+    def test_maybe_promote_header_row_for_unnamed_excel_headers(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                ["Solicitud", "Provincia", "Departamento", "Fecha"],
+                ["A", "Buenos Aires", "La Plata", "2026-01-01"],
+                ["B", "Córdoba", "Capital", "2026-01-02"],
+            ],
+            columns=["Unnamed: 0", "Unnamed: 1", "Unnamed: 2", "Unnamed: 3"],
+        )
+
+        promoted = _maybe_promote_header_row(df)
+
+        assert list(promoted.columns) == ["Solicitud", "Provincia", "Departamento", "Fecha"]
+        assert len(promoted) == 2
+
+    def test_maybe_promote_header_row_for_numeric_placeholders(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                ["Parada ID", "Departamento", "Linea 1", "Linea 2", "Linea 3"],
+                ["1", "Capital", "100", "200", "300"],
+                ["2", "Godoy Cruz", "101", "201", "301"],
+            ],
+            columns=["100", "200", "1", "2", "3"],
+        )
+
+        promoted = _maybe_promote_header_row(df)
+
+        assert list(promoted.columns) == [
+            "Parada ID",
+            "Departamento",
+            "Linea 1",
+            "Linea 2",
+            "Linea 3",
+        ]
+        assert len(promoted) == 2
+
+    def test_header_quality_counts_placeholders_and_text(self):
+        placeholder_count, alpha_count, nonempty_count = _header_quality(
+            ["Unnamed: 0", "col_1", "2", "Provincia"]
+        )
+        assert placeholder_count == 3
+        assert alpha_count == 3
+        assert nonempty_count == 4
+
+    def test_to_sql_safe_serializes_materialization_on_table_lock(self):
+        import pandas as pd
+
+        df = pd.DataFrame({"a": [1]})
+        conn = MagicMock()
+        engine = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        conn.begin.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        conn.begin.return_value.__exit__ = MagicMock(return_value=False)
+        conn.in_transaction.return_value = False
+
+        with patch.object(pd.DataFrame, "to_sql") as mock_to_sql:
+            _to_sql_safe(df, "cache_test_table", engine, if_exists="replace", index=False)
+
+        assert mock_to_sql.call_count == 1
+        assert mock_to_sql.call_args.args[1] is conn
+        executed = [str(call.args[0]) for call in conn.execute.call_args_list]
+        assert any("pg_advisory_lock" in stmt for stmt in executed)
+        assert any("pg_advisory_unlock" in stmt for stmt in executed)
+
+    def test_to_sql_safe_unlocks_after_failed_write_transaction(self):
+        import pandas as pd
+
+        df = pd.DataFrame({"a": [1]})
+        conn = MagicMock()
+        engine = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        conn.begin.return_value.__enter__ = MagicMock(return_value=MagicMock())
+        conn.begin.return_value.__exit__ = MagicMock(return_value=False)
+        conn.in_transaction.side_effect = [False, True]
+
+        with patch.object(pd.DataFrame, "to_sql", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                _to_sql_safe(df, "cache_test_table", engine, if_exists="replace", index=False)
+
+        executed = [str(call.args[0]) for call in conn.execute.call_args_list]
+        assert any("pg_advisory_unlock" in stmt for stmt in executed)
+        conn.rollback.assert_called()
+
+    @patch("pandas.read_csv")
+    def test_read_csv_preview_retries_with_latin1(self, mock_read_csv):
+        mock_read_csv.side_effect = [
+            UnicodeDecodeError("utf-8", b"\xf1", 0, 1, "boom"),
+            MagicMock(columns=["a", "b"]),
+        ]
+
+        result = _read_csv_preview(
+            "/tmp/fake.csv",
+            nrows=5,
+            csv_params={"encoding": "utf-8-sig", "sep": ","},
+        )
+
+        assert list(result.columns) == ["a", "b"]
+        assert mock_read_csv.call_args_list[0].kwargs["encoding"] == "utf-8-sig"
+        assert mock_read_csv.call_args_list[1].kwargs["encoding"] == "latin-1"
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._csv_load_inner")
+    def test_load_csv_chunked_retries_with_latin1_after_decode_error(
+        self,
+        mock_csv_load_inner,
+    ):
+        mock_csv_load_inner.side_effect = [
+            UnicodeDecodeError("utf-8", b"\xf3", 0, 1, "boom"),
+            (3, ["a"], False),
+        ]
+
+        result = _load_csv_chunked(
+            "/tmp/fake.csv",
+            "cache_test",
+            MagicMock(),
+            chunk_size=100,
+            csv_params_override={"encoding": "utf-8-sig"},
+        )
+
+        assert result == (3, ["a"], False)
+        first_call = mock_csv_load_inner.call_args_list[0]
+        second_call = mock_csv_load_inner.call_args_list[1]
+        assert first_call.args[3]["encoding"] == "utf-8-sig"
+        assert second_call.args[3]["encoding"] == "latin-1"
+
+    def test_looks_like_json_record_map(self, tmp_path: Path):
+        file_path = tmp_path / "records.json"
+        file_path.write_text('\ufeff{"1": {"name": "a"}, "2": {"name": "b"}}', encoding="utf-8")
+
+        assert _looks_like_json_record_map(str(file_path)) is True
+
+    def test_iter_json_record_map_values_streams_rows(self, tmp_path: Path):
+        file_path = tmp_path / "records.json"
+        file_path.write_text('{"1":{"name":"a"},"2":{"name":"b"}}', encoding="utf-8")
+
+        rows = list(_iter_json_record_map_values(str(file_path), read_size=8))
+
+        assert rows == [{"name": "a"}, {"name": "b"}]
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    def test_load_json_record_map_chunked_streams_without_full_buffer(
+        self,
+        mock_route_table_for_schema,
+        mock_to_sql_safe,
+        tmp_path: Path,
+    ):
+        file_path = tmp_path / "records.json"
+        payload = {str(i): {"name": f"row-{i}", "value": i} for i in range(1, 6)}
+        file_path.write_text(json.dumps(payload), encoding="utf-8")
+        mock_route_table_for_schema.return_value = ("cache_test", False, None)
+
+        row_count, columns, table_name, append_mode, sampled_note = _load_json_record_map_chunked(
+            str(file_path),
+            "cache_test",
+            MagicMock(),
+            "dataset-1",
+        )
+
+        assert row_count == 5
+        assert "name" in columns
+        assert "_source_dataset_id" in columns
+        assert table_name == "cache_test"
+        assert append_mode is False
+        assert sampled_note is None
+        assert mock_to_sql_safe.call_count == 1
+
+    def test_prune_open_cached_entries_deletes_only_open_duplicates(self):
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+        _prune_open_cached_entries(engine, "dataset-1", keep_table_name="cache_keep")
+
+        sql = str(conn.execute.call_args.args[0])
+        params = conn.execute.call_args.args[1]
+        assert "status IN ('downloading', 'pending', 'error')" in sql
+        assert "table_name <> :tn" in sql
+        assert params == {"did": "dataset-1", "tn": "cache_keep"}
+
+    def test_mark_dataset_rerouted_pending_reuses_current_row_and_prunes(self):
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.side_effect = [
+            _FetchOneResult(SimpleNamespace(id="row-1")),
+            MagicMock(),
+            MagicMock(),
+        ]
+
+        _mark_dataset_rerouted_pending(
+            engine,
+            "dataset-1",
+            "cache_keep",
+            reason="metadata:caba:zip",
+        )
+
+        select_sql = str(conn.execute.call_args_list[0].args[0])
+        update_sql = str(conn.execute.call_args_list[1].args[0])
+        update_params = conn.execute.call_args_list[1].args[1]
+        prune_sql = str(conn.execute.call_args_list[2].args[0])
+
+        assert "WHERE dataset_id = CAST(:did AS uuid)" in select_sql
+        assert "SET status = 'pending'" in update_sql
+        assert update_params["msg"] == "rerouted_heavy:metadata:caba:zip"
+        assert update_params["id"] == "row-1"
+        assert "table_name <> :tn" in prune_sql
+
+    def test_should_route_to_heavy_from_metadata_for_datos_gob_ar_zip(self):
+        assert (
+            _should_route_to_heavy_from_metadata(
+                portal="datos_gob_ar",
+                fmt="zip",
+                title="ENNyS2 encuesta",
+            )
+            is True
+        )
+        assert (
+            _should_route_to_heavy_from_metadata(
+                portal="caba",
+                fmt="xlsx",
+                title="Padron escuelas",
+            )
+            is False
+        )
+
+    def test_should_route_to_heavy_from_metadata_for_caba_3d_zip(self):
+        assert (
+            _should_route_to_heavy_from_metadata(
+                portal="caba",
+                fmt="zip",
+                title="Edificios Públicos en 3D",
+                download_url="https://cdn.buenosaires.gob.ar/datosabiertos/.../congreso-de-la-nacion-argentina-zip.zip",
+            )
+            is True
+        )
+        assert (
+            _should_route_to_heavy_from_metadata(
+                portal="caba",
+                fmt="zip",
+                title="Padron escuelas",
+                download_url="https://cdn.buenosaires.gob.ar/datosabiertos/.../padron-escuelas.zip",
+            )
+            is False
+        )
+
+    def test_should_route_to_heavy_from_metadata_for_diputados_json(self):
+        assert (
+            _should_route_to_heavy_from_metadata(
+                portal="diputados",
+                fmt="json",
+                title="Votaciones Nominales",
+            )
+            is True
+        )
+
+    def test_is_transient_collect_error_detects_remote_protocol_errors(self):
+        assert _is_transient_collect_error(
+            httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+        )
+        assert not _is_transient_collect_error(ValueError("bad_zip_file"))
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset")
+    def test_collect_dataset_signature_routes_heavy_metadata_to_dedicated_queue(
+        self,
+        mock_collect_dataset,
+    ):
+        signature = MagicMock()
+        signature.set.return_value = "heavy-signature"
+        mock_collect_dataset.s.return_value = signature
+
+        result = _collect_dataset_signature(
+            "11111111-1111-1111-1111-111111111111",
+            portal="datos_gob_ar",
+            fmt="zip",
+            title="ENNyS2 encuesta",
+        )
+
+        assert result == "heavy-signature"
+        mock_collect_dataset.s.assert_called_once_with(
+            "11111111-1111-1111-1111-111111111111",
+            force_heavy=True,
+        )
+        signature.set.assert_called_once_with(queue="collector-heavy")
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset")
+    def test_collect_dataset_signature_routes_caba_3d_zip_to_heavy_queue(
+        self,
+        mock_collect_dataset,
+    ):
+        signature = MagicMock()
+        signature.set.return_value = "heavy-signature"
+        mock_collect_dataset.s.return_value = signature
+
+        result = _collect_dataset_signature(
+            "11111111-1111-1111-1111-111111111111",
+            portal="caba",
+            fmt="zip",
+            title="Edificios Públicos en 3D",
+        )
+
+        assert result == "heavy-signature"
+        mock_collect_dataset.s.assert_called_once_with(
+            "11111111-1111-1111-1111-111111111111",
+            force_heavy=True,
+        )
+        signature.set.assert_called_once_with(queue="collector-heavy")
 
     def test_serialize_structured_cells_jsonifies_nested_values(self):
         import pandas as pd
@@ -294,6 +645,56 @@ class TestCollectorP2:
         ]
         assert mock_to_sql_safe.call_count == 2
 
+    @patch("app.infrastructure.celery.tasks.collector_tasks._load_csv_chunked")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.pd.read_csv")
+    def test_parse_zip_archive_streams_csv_members_in_chunks(
+        self,
+        mock_read_csv,
+        mock_route_table,
+        mock_load_csv_chunked,
+        tmp_path: Path,
+    ):
+        import pandas as pd
+
+        mock_read_csv.return_value = pd.DataFrame({"id": [1], "nombre": ["Alpha"]})
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
+        )
+        mock_load_csv_chunked.return_value = (
+            2,
+            ["id", "nombre", "_source_dataset_id"],
+            False,
+        )
+        zip_path = tmp_path / "bundle.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("comercio.csv", "\ufeffid|nombre\n1|Alpha\n2|Beta\n".encode())
+
+        with zipfile.ZipFile(zip_path) as zf:
+            result = _parse_zip_archive(
+                zf,
+                zip_path=str(zip_path),
+                dataset_id="11111111-1111-1111-1111-111111111111",
+                table_name="cache_bundle_test",
+                engine=MagicMock(),
+                append_mode=False,
+            )
+
+        assert result["parsed"] is True
+        assert result["row_count"] == 2
+        assert mock_read_csv.call_args.kwargs["nrows"] == _ZIP_CSV_PREVIEW_ROWS
+        assert mock_load_csv_chunked.call_count == 1
+        assert mock_load_csv_chunked.call_args.args[0].endswith(".csv")
+        assert mock_load_csv_chunked.call_args.kwargs["chunk_size"] == _csv_chunk_size_for_columns(3)
+        assert mock_load_csv_chunked.call_args.kwargs["source_dataset_id"] == (
+            "11111111-1111-1111-1111-111111111111"
+        )
+        assert mock_load_csv_chunked.call_args.kwargs["force_append"] is False
+
     @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
     @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
     def test_parse_zip_archive_reports_partial_progress_for_multi_member_bundle(
@@ -351,14 +752,14 @@ class TestCollectorP2:
             }
         ]
 
-    @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._load_csv_chunked")
     @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
     @patch("app.infrastructure.celery.tasks.collector_tasks._sanitize_columns")
     def test_parse_zip_archive_routes_using_sanitized_columns(
         self,
         mock_sanitize_columns,
         mock_route_table,
-        mock_to_sql_safe,
+        mock_load_csv_chunked,
         tmp_path: Path,
     ):
 
@@ -369,6 +770,11 @@ class TestCollectorP2:
 
         mock_sanitize_columns.side_effect = _sanitize
         mock_route_table.return_value = ("cache_sepa_bundle_test", False, None)
+        mock_load_csv_chunked.return_value = (
+            1,
+            ["id_comercio", "nombre_normalizado", "_source_dataset_id"],
+            False,
+        )
 
         outer_zip_path = tmp_path / "sepa_bundle.zip"
         comercio = "\ufeffid comercio|Nombre\n1|Alpha\n"
@@ -389,8 +795,8 @@ class TestCollectorP2:
         assert result["parsed"] is True
         routed_columns = mock_route_table.call_args.args[3]
         assert list(routed_columns) == ["id_comercio", "nombre_normalizado", "_source_dataset_id"]
-        written_df = mock_to_sql_safe.call_args.args[0]
-        assert list(written_df.columns) == ["id_comercio", "nombre_normalizado", "_source_dataset_id"]
+        assert mock_load_csv_chunked.call_count == 1
+        assert mock_load_csv_chunked.call_args.kwargs["force_append"] is False
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._to_sql_safe")
     @patch("app.infrastructure.celery.tasks.collector_tasks._route_table_for_schema")
@@ -913,6 +1319,57 @@ class TestCollectorP2:
         )
         mock_httpx_client.assert_not_called()
 
+    @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._try_advisory_lock")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_collect_dataset_reroutes_heavy_metadata_before_download(
+        self,
+        mock_get_engine,
+        mock_try_advisory_lock,
+        _mock_ensure_cached_entry,
+        mock_apply_async,
+    ):
+        mock_try_advisory_lock.return_value = True
+
+        dataset_row = SimpleNamespace(
+            title="ENNyS2 encuesta",
+            download_url="https://example.com/ennys.zip",
+            format="zip",
+            portal="datos_gob_ar",
+            source_id="ennys-1",
+        )
+
+        mock_conn = MagicMock()
+
+        def execute_side_effect(stmt, params=None):
+            query = str(stmt)
+            if "SELECT title, download_url, format, portal, source_id" in query:
+                return _FetchOneResult(dataset_row)
+            return MagicMock()
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+
+        result = collect_dataset.run("11111111-1111-1111-1111-111111111111")
+
+        assert result == {
+            "dataset_id": "11111111-1111-1111-1111-111111111111",
+            "status": "rerouted_heavy",
+            "reason": "metadata:datos_gob_ar:zip",
+            "queue": "collector-heavy",
+        }
+        mock_apply_async.assert_called_once_with(
+            args=["11111111-1111-1111-1111-111111111111"],
+            kwargs={"force_heavy": True},
+            queue="collector-heavy",
+        )
+
     @patch("app.infrastructure.celery.tasks.collector_tasks._read_excel_frame")
     @patch("app.infrastructure.celery.tasks.collector_tasks._set_error_status")
     @patch("app.infrastructure.celery.tasks.collector_tasks._has_temp_space")
@@ -975,6 +1432,106 @@ class TestCollectorP2:
                 "cache_datos_gob_ar_ipc_nacional",
                 "11111111-1111-1111-1111-111111111111",
             ),
+        )
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks.random.uniform", return_value=0)
+    @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._has_temp_space")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._stream_download")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._try_advisory_lock")
+    def test_collect_dataset_reroutes_transient_heavy_failure_to_retry_queue(
+        self,
+        mock_try_advisory_lock,
+        mock_get_engine,
+        mock_stream_download,
+        mock_has_temp_space,
+        _mock_ensure_cached_entry,
+        mock_apply_async,
+        _mock_uniform,
+    ):
+        mock_try_advisory_lock.return_value = True
+        mock_has_temp_space.return_value = True
+        mock_stream_download.side_effect = httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body"
+        )
+
+        dataset_row = SimpleNamespace(
+            title="Edificios Públicos en 3D",
+            download_url="https://cdn.buenosaires.gob.ar/datosabiertos/3d/congreso-de-la-nacion-argentina-zip.zip",
+            format="zip",
+            portal="caba",
+            source_id="caba-3d-1",
+        )
+        retry_rows = [
+            SimpleNamespace(retry_count=0),
+            SimpleNamespace(retry_count=1),
+        ]
+        prev_cached_row = SimpleNamespace(
+            is_cached=False,
+            table_name=None,
+            cached_row_count=None,
+            columns_json=None,
+            s3_key=None,
+            error_message=None,
+        )
+
+        mock_conn = MagicMock()
+        retry_select_calls = {"count": 0}
+
+        def execute_side_effect(stmt, params=None):
+            query = str(stmt)
+            if "SELECT title, download_url, format, portal, source_id" in query:
+                return _FetchOneResult(dataset_row)
+            if "SELECT retry_count FROM cached_datasets" in query:
+                idx = min(retry_select_calls["count"], len(retry_rows) - 1)
+                retry_select_calls["count"] += 1
+                return _FetchOneResult(retry_rows[idx])
+            if "WHERE table_name = :tn AND status = 'ready'" in query:
+                return _FetchOneResult(None)
+            if "SELECT d.is_cached," in query:
+                return _FetchOneResult(prev_cached_row)
+            return MagicMock()
+
+        mock_conn.execute.side_effect = execute_side_effect
+
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+
+        request_stack = getattr(collect_dataset, "request_stack", None)
+        if request_stack is not None:
+            request_stack.push(
+                SimpleNamespace(
+                    id="task-123",
+                    retries=0,
+                    delivery_info={"queue": "collector-heavy"},
+                )
+            )
+
+        try:
+            result = collect_dataset.run(
+                "11111111-1111-1111-1111-111111111111",
+                force_heavy=True,
+            )
+        finally:
+            if request_stack is not None:
+                request_stack.pop()
+
+        assert result == {
+            "dataset_id": "11111111-1111-1111-1111-111111111111",
+            "status": "rerouted_heavy_retry",
+            "reason": "transient_retry:ConnectionError",
+            "queue": "collector-heavy-retry",
+        }
+        mock_apply_async.assert_called_once_with(
+            args=["11111111-1111-1111-1111-111111111111"],
+            kwargs={"force_heavy": True},
+            queue="collector-heavy-retry",
+            countdown=60,
         )
 
     @patch("app.infrastructure.celery.tasks.collector_tasks._ensure_cached_entry")

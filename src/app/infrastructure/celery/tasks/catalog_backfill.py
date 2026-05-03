@@ -29,8 +29,11 @@ from sqlalchemy.engine import Engine
 from app.application.catalog.physical_namer import PhysicalNamer
 from app.application.catalog.title_extractor import TitleExtractor
 from app.domain.entities.dataset.catalog_resource import (
+    MATERIALIZATION_FAILED,
+    MATERIALIZATION_NON_TABULAR,
     MATERIALIZATION_PENDING,
     MATERIALIZATION_READY,
+    RESOURCE_KIND_DOCUMENT_BUNDLE,
     RESOURCE_KIND_FILE,
 )
 from app.infrastructure.celery.app import celery_app
@@ -39,6 +42,7 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 _EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3")
 _EMBEDDING_BATCH_LIMIT = 96
+_CATALOG_BACKFILL_LOCK_KEY = 156002
 
 
 def _resource_identity(portal: str, source_id: str, sub_path: str | None = None) -> str:
@@ -82,6 +86,20 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     )
     result = json.loads(resp["body"].read())
     return result["embeddings"]
+
+
+def _try_backfill_lock(engine: Engine) -> bool:
+    with engine.connect() as conn:
+        return bool(conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": _CATALOG_BACKFILL_LOCK_KEY}).scalar())
+
+
+def _release_backfill_lock(engine: Engine) -> None:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _CATALOG_BACKFILL_LOCK_KEY})
+            conn.rollback()
+    except Exception:
+        logger.debug("Could not release catalog_backfill advisory lock", exc_info=True)
 
 
 _UPSERT_SQL = text(
@@ -287,10 +305,31 @@ _CONNECTOR_ENDPOINTS: tuple[dict[str, str], ...] = (
 )
 
 
-def _materialization_status(cached_status: str | None) -> str:
+_NON_TABULAR_ERROR_PREFIXES = (
+    "zip_document_bundle",
+    "zip_no_parseable_file",
+)
+
+
+def _materialization_status(cached_status: str | None, error_message: str | None = None) -> str:
     if cached_status == "ready":
         return MATERIALIZATION_READY
+    if cached_status == "permanently_failed":
+        msg = (error_message or "").strip().lower()
+        if any(msg.startswith(prefix) for prefix in _NON_TABULAR_ERROR_PREFIXES):
+            return MATERIALIZATION_NON_TABULAR
+        return MATERIALIZATION_FAILED
+    if cached_status == "error":
+        return MATERIALIZATION_FAILED
     return MATERIALIZATION_PENDING
+
+
+def _resource_kind(cached_status: str | None, error_message: str | None = None) -> str:
+    if cached_status == "permanently_failed":
+        msg = (error_message or "").strip().lower()
+        if msg.startswith("zip_document_bundle"):
+            return RESOURCE_KIND_DOCUMENT_BUNDLE
+    return RESOURCE_KIND_FILE
 
 
 def _filename_from_url(url: str | None, fmt: str | None) -> str | None:
@@ -337,7 +376,8 @@ def backfill_batch(
         physical_name = row.table_name or namer.build(
             portal, source_id, slug_hint=row.raw_title or source_id
         ).table_name
-        materialization = _materialization_status(row.cached_status)
+        materialization = _materialization_status(row.cached_status, row.error_message)
+        resource_kind = _resource_kind(row.cached_status, row.error_message)
         params = {
             "resource_identity": identity,
             "dataset_id": row.dataset_id or "",
@@ -351,7 +391,7 @@ def backfill_batch(
             "display_name": extraction.display_name[:1000],
             "title_source": extraction.title_source.value,
             "title_confidence": extraction.title_confidence,
-            "resource_kind": RESOURCE_KIND_FILE,
+            "resource_kind": resource_kind,
             "materialization_status": materialization,
             "materialized_table_name": physical_name,
         }
@@ -524,7 +564,24 @@ def run_seed_connector_endpoints(*, dry_run: bool = False) -> dict:
     time_limit=1080,
 )
 def catalog_backfill_task(self, *, dry_run: bool = False, max_batches: int | None = None) -> dict:
-    return run_backfill(dry_run=dry_run, max_batches=max_batches)
+    engine = get_sync_engine()
+    lock_acquired = False
+    try:
+        lock_acquired = _try_backfill_lock(engine)
+        if not lock_acquired:
+            logger.info("catalog_backfill skipped because another run already holds the lock")
+            return {"status": "skipped_already_running"}
+    finally:
+        engine.dispose()
+
+    try:
+        return run_backfill(dry_run=dry_run, max_batches=max_batches)
+    finally:
+        release_engine = get_sync_engine()
+        try:
+            _release_backfill_lock(release_engine)
+        finally:
+            release_engine.dispose()
 
 
 @celery_app.task(

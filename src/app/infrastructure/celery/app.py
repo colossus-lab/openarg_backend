@@ -369,6 +369,11 @@ def create_celery() -> Celery:
                 "schedule": crontab(minute="*/30"),
                 "options": {"queue": "ingest"},
             },
+            "catalog-backfill-refresh": {
+                "task": "openarg.catalog_backfill",
+                "schedule": crontab(minute="*/30"),
+                "options": {"queue": "ingest"},
+            },
             # --- Reporting / Dead Letter visibility ---
             "report-failed-tasks": {
                 "task": "openarg.report_failed_tasks",

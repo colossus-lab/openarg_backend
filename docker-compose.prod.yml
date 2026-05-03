@@ -133,7 +133,12 @@ services:
     image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:latest
     container_name: openarg_worker_collector
     restart: always
-    command: ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "collector", "-c", "8", "--max-memory-per-child=400000", "--loglevel=info"]
+    command:
+      [
+        "sh",
+        "-c",
+        "celery -A app.infrastructure.celery.app:celery_app worker -Q collector -c ${OPENARG_COLLECTOR_CONCURRENCY:-2} --max-memory-per-child=${OPENARG_COLLECTOR_MAX_MEMORY_PER_CHILD:-400000} --loglevel=info",
+      ]
     networks:
       - openarg_network
     deploy:
@@ -157,6 +162,86 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+    depends_on:
+      redis:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+
+  worker-collector-heavy:
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:latest
+    container_name: openarg_worker_collector_heavy
+    restart: always
+    command:
+      [
+        "sh",
+        "-c",
+        "celery -A app.infrastructure.celery.app:celery_app worker -Q ${OPENARG_HEAVY_COLLECT_QUEUE:-collector-heavy} -c ${OPENARG_HEAVY_COLLECTOR_CONCURRENCY:-1} --max-memory-per-child=${OPENARG_HEAVY_COLLECTOR_MAX_MEMORY_PER_CHILD:-800000} --loglevel=info",
+      ]
+    networks:
+      - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6G
+        reservations:
+          memory: 1G
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+      OPENARG_HEAVY_COLLECT_QUEUE: ${OPENARG_HEAVY_COLLECT_QUEUE:-collector-heavy}
+    depends_on:
+      redis:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+
+  worker-collector-heavy-retry:
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:latest
+    container_name: openarg_worker_collector_heavy_retry
+    restart: always
+    command:
+      [
+        "sh",
+        "-c",
+        "celery -A app.infrastructure.celery.app:celery_app worker -Q ${OPENARG_HEAVY_RETRY_QUEUE:-collector-heavy-retry} -c ${OPENARG_HEAVY_RETRY_COLLECTOR_CONCURRENCY:-1} --max-memory-per-child=${OPENARG_HEAVY_RETRY_COLLECTOR_MAX_MEMORY_PER_CHILD:-800000} --loglevel=info",
+      ]
+    networks:
+      - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 6G
+        reservations:
+          memory: 1G
+    volumes:
+      - ./config/prod:/app/config/prod:ro
+    env_file:
+      - .env
+    environment:
+      APP_ENV: prod
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+      OPENARG_HEAVY_RETRY_QUEUE: ${OPENARG_HEAVY_RETRY_QUEUE:-collector-heavy-retry}
     depends_on:
       redis:
         condition: service_healthy

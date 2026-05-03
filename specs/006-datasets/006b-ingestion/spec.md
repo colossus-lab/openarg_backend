@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-25
+**Last synced with code**: 2026-04-27
 **Hexagonal scope**: Infrastructure (Workers) + Domain
 **Parent module**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -71,8 +71,21 @@ Important architectural clarification: the collector no longer writes directly i
 - **FR-026**: ZIP bundles that contain multiple parseable inner archives or files MUST keep traversing parseable members instead of stopping at the first success, aggregating rows per target table when schemas remain compatible.
 - **FR-027**: While a multi-table ZIP bundle is still running, `cached_datasets` MUST expose partial per-table progress (`row_count`, `columns_json`, and table presence) for the sibling tables already materialized instead of leaving them opaque until the task finishes.
 - **FR-028**: Schema compatibility for append-mode collector writes MUST require an exact normalized column-set match. The routing decision MUST use the same sanitized SQL-visible column names that the final write path uses. Subset/superset schemas MUST be routed into distinct schema-variant tables before writing, instead of relying on mid-run drop/recreate retries.
+- **FR-028a**: ZIP-contained CSV/TXT members MUST use the same chunked load path as top-level CSV/TXT ingestion. The ZIP parser MAY read a small preview for dialect/schema routing, but it MUST NOT materialize up to `MAX_TABLE_ROWS` into a single in-memory DataFrame just to ingest one ZIP member.
+- **FR-028b**: CSV chunking MUST adapt to dataset width. Very wide CSVs (for example hundreds or thousands of columns) MUST reduce rows-per-chunk so the collector does not allocate the same 50k-row chunk size regardless of column count.
+- **FR-028c**: Wide-dataset overflow compaction MUST avoid building a full in-memory list of overflow-row dicts for the entire chunk before serialising `_overflow_json`. The collector should stream or row-build that payload so compaction itself does not become the memory spike.
+- **FR-028d**: The collector MUST support a dedicated heavy-ingestion lane for metadata-known pathological datasets (currently wide `datos_gob_ar` ZIP/CSV families plus very large `caba` 3D ZIP bundles). Dispatchers should route those resources to a separate Celery queue so they do not consume the normal collector lane.
+- **FR-028e**: `collect_dataset()` MUST be allowed to reroute itself to the heavy lane before download or before chunked CSV materialisation when lightweight metadata or preview-width heuristics indicate the dataset is pathological for the normal lane.
+- **FR-028f**: Very wide CSV datasets routed through the heavy lane MUST stabilise per-column dtype inference before chunked writes. The collector may coerce those files to text-first ingestion so chunk-to-chunk pandas inference does not trigger repeated append-time schema churn on the same table.
+- **FR-028i**: The collector MUST support a dedicated `collector-heavy-retry` lane for transient failures coming from the heavy lane (for example remote connection resets, incomplete large-body downloads, or read/connect timeouts). Recoverable heavy failures should move off the main heavy lane so one unstable upstream does not monopolise the queue.
+- **FR-028j**: Table-level advisory locks used during materialization MUST be released outside aborted write transactions. A failed write MUST NOT convert into a secondary `InFailedSqlTransaction` on `pg_advisory_unlock`, because that masks the original failure and leaves false terminal states behind.
+- **FR-028g**: Chunked CSV ingestion MUST retry with a permissive fallback encoding (currently `latin-1`) when the initial UTF-8 based read fails mid-file. Header sniffing alone is not sufficient for mixed-encoding legacy CSVs.
+- **FR-028h**: Materialization of a physical cache table MUST be serialized per target table name. Concurrent workers may still collect different datasets in parallel, but they MUST NOT create/drop/recreate the same physical table concurrently, especially shared schema-variant tables (`..._s<hash>`).
+- **FR-028k**: Large keyed JSON payloads shaped like `{"1": {...}, "2": {...}}` MUST be ingested incrementally instead of loading the full blob into memory. The collector SHOULD stream those records in bounded chunks so heavyweight JSON datasets do not SIGKILL either the normal or heavy collector lane.
 - **FR-029** *(WS0)*: The collector MUST run an `IngestionValidator` pre-parse hook **after download, before pandas**. A `critical` finding aborts ingestion, marks the row `permanently_failed` and short-circuits the S3 upload. See [013-ingestion-validation](../../013-ingestion-validation/spec.md).
 - **FR-030** *(WS0)*: The collector MUST run an `IngestionValidator` post-parse hook **after materialization, before flipping `status='ready'`**. A `critical` finding rolls back to `error`/`permanently_failed` so the planner never sees the corrupt projection.
+- **FR-030a** *(WS0)*: The collector MUST collapse duplicate open `cached_datasets` rows for the same `dataset_id` during entry creation and finalization. `downloading`/`pending`/`error` duplicates must not accumulate across retries or reroutes; only the current active row should remain open for a dataset.
+- **FR-030b** *(WS0)*: A reroute from the normal lane into `collector-heavy` or from `collector-heavy` into `collector-heavy-retry` MUST reopen at most one `cached_datasets` row for that dataset and MUST immediately prune the remaining open duplicates. Reroutes MUST NOT fan out a dataset into multiple `pending` rows.
 - **FR-031** *(WS0)*: All findings (pre-parse, post-parse, retrospective, state-invariant) MUST be persisted in `ingestion_findings` keyed by `(resource_id, detector_name, detector_version, mode, input_hash)` for idempotent UPSERTs.
 - **FR-032** *(WS0.5)*: `cached_datasets` MUST carry a `error_category` enum (closed taxonomy) updated alongside `error_message`. Operational queries MUST aggregate by category, not by `LIKE` over free text. See [014-state-machine](../../014-state-machine/spec.md).
 - **FR-033** *(WS0.5)*: A DB trigger MUST enforce the invariant `retry_count >= MAX_TOTAL_ATTEMPTS ⇒ status='permanently_failed'`. The trigger MUST treat `permanently_failed` as terminal — no further status changes or retry_count bumps.
@@ -96,6 +109,14 @@ Important architectural clarification: the collector no longer writes directly i
 - **SC-013**: Multi-archive commercial bundles such as SEPA MUST append compatible rows across multiple nested ZIP members instead of materializing only the first inner archive.
 - **SC-014**: During a long multi-table collector run, operators MUST be able to observe sibling table growth from `cached_datasets` before the final `ready` transition.
 - **SC-015**: Long-running commercial bundles such as SEPA MUST stop dropping/recreating sibling schema tables mid-run just because later members have subset/superset columns; those members should route into distinct schema variants up front.
+- **SC-015a**: ZIP-heavy rebuild waves MUST no longer kill collector worker children just because a ZIP member CSV was loaded as a single 500k-row pandas frame. ZIP/CSV members should follow the chunked path and keep the worker alive under the same row cap.
+- **SC-015b**: Extremely wide CSV datasets must stop reusing the same fixed 50k-row chunk size as narrow files. The collector should scale down chunk size by column count so worker memory remains bounded during rebuild waves.
+- **SC-015c**: Overflow-column compaction on survey-style datasets (for example >1800 columns) should stop being the dominant peak-memory step of a chunk. The worker should survive compaction of those chunks without repeated `SIGKILL` loops.
+- **SC-015d**: Heavy ZIP/CSV datasets should stop blocking the normal collector lane. Normal collectors must continue draining routine datasets while pathological wide resources are isolated in the heavy queue.
+- **SC-015e**: Heavy wide CSV datasets should stop looping on `schema_drift_detected` / `Schema mismatch ... dropping and retrying` for the same table across consecutive chunks. Once routed to the heavy lane, chunk writes should keep one stable SQL schema for the run.
+- **SC-015h**: Transient heavy failures should stop recycling exclusively inside the main heavy queue. Large unstable downloads must be able to move into a separate retry lane so newly discovered heavy datasets still get a chance to start.
+- **SC-015f**: Legacy CSVs that pass the initial UTF-8 header sniff but fail later with `UnicodeDecodeError` should stop accumulating as retryable collector errors. They should either succeed via encoding fallback or fail terminally with a deterministic reason.
+- **SC-015g**: Shared schema-variant tables should stop surfacing `pg_type_typname_nsp_index` duplicate-type errors during rebuild waves. Concurrent materialization for the same target table must serialize instead of racing on `CREATE TABLE` / `DROP TABLE`.
 - **SC-016** *(WS0)*: Zero new HTML-as-data tables (the 38 confirmed in staging Apr 2026) reach `status='ready'` after WS0 hooks are deployed.
 - **SC-017** *(WS0.5)*: Zero rows in `cached_datasets` should violate the invariants enforced by `StateMachineEnforcer.scan()` after the first sweep with auto-enforce on.
 - **SC-018** *(WS4)*: Zero `pg_type_typname_nsp_index` collision errors (the 10 confirmed in prod Apr 2026) after `physical_namer` is the only source of materialised table names.
@@ -128,9 +149,10 @@ Important architectural clarification: the collector no longer writes directly i
 - **[DEBT-005]** — **No metrics** for embedding failures.
 - **[DEBT-006]** — **No sophisticated auto-retry** on collect (only basic Celery retry).
 - **[DEBT-007]** — **Spec drift risk**: the ingestion implementation now relies on resource staging + consolidation, but downstream modules still sometimes assume a single canonical cache table per dataset.
-- **[DEBT-008]** — **Bulk orchestration still shares the same worker queue as heavy data collection**. Singleton locking prevents overlap, but `bulk_collect_all` still competes with long-running `collect_dataset` tasks for worker slots.
+- **[DEBT-008]** — **Bulk orchestration still shares the normal collector queue with routine collection work**. The new heavy lane isolates pathological ZIP/CSV resources, but `bulk_collect_all` itself still runs in the normal collector queue and can compete with routine `collect_dataset` traffic.
 - **[DEBT-009]** — **Some semantic routes still depend on broad budget hints instead of domain-specific cache tables**. `coparticipacion` is now routed safely to generic budget tables, but a dedicated ingest or catalog entry is still missing.
 - **[DEBT-010]** — **SEPA-style multi-table bundles still oscillate between sibling schema tables during long runs**. Even after partial progress and schema-normalization fixes, staging still shows mid-run `Schema mismatch ... dropping and retrying` on sibling tables such as `..._s1f1121c6` and `..._s292105ce`. The likely next structural fix is to replace mutable “current table” routing with a stable per-bundle schema-signature map.
+- **[DEBT-011]** — **Collector worker stability under large wide bundles still depends on deployment tuning**. The ZIP/CSV path now streams in chunks, but operator-facing defaults such as worker concurrency and per-child memory limits still need environment-specific tuning to avoid SIGKILL churn on staging/prod.
 
 ---
 

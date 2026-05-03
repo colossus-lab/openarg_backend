@@ -322,7 +322,9 @@ class TestBulkCollectAllP4:
         conn = MagicMock()
         conn.execute.side_effect = [
             _ScalarResult(True),
-            _FetchAllResult([(f"id-{i}", "datos_gob_ar") for i in range(60)]),
+            _FetchAllResult(
+                [(f"id-{i}", "datos_gob_ar", "csv", f"Dataset {i}") for i in range(60)]
+            ),
             _FetchAllResult(group_rows),
         ]
         mock_engine = MagicMock()
@@ -412,10 +414,10 @@ class TestBulkCollectAllP4:
             _ScalarResult(True),
             _FetchAllResult(
                 [
-                    ("id-1", "datos_gob_ar"),
-                    ("id-2", "datos_gob_ar"),
-                    ("id-3", "caba"),
-                    ("id-4", "mendoza"),
+                    ("id-1", "datos_gob_ar", "csv", "Dataset 1"),
+                    ("id-2", "datos_gob_ar", "csv", "Dataset 2"),
+                    ("id-3", "caba", "csv", "Dataset 3"),
+                    ("id-4", "mendoza", "csv", "Dataset 4"),
                 ]
             ),
             _FetchAllResult(
