@@ -17,3 +17,5 @@ class CachedDataset(BaseEntity):
     status: str = "pending"  # pending, downloading, ready, error
     error_message: str = ""
     s3_key: str = ""  # key del archivo crudo en S3
+    layout_profile: str = ""
+    header_quality: str = ""

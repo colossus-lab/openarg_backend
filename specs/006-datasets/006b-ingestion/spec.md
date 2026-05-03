@@ -2,7 +2,7 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-27
+**Last synced with code**: 2026-05-03
 **Hexagonal scope**: Infrastructure (Workers) + Domain
 **Parent module**: [../spec.md](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
@@ -82,6 +82,10 @@ Important architectural clarification: the collector no longer writes directly i
 - **FR-028g**: Chunked CSV ingestion MUST retry with a permissive fallback encoding (currently `latin-1`) when the initial UTF-8 based read fails mid-file. Header sniffing alone is not sufficient for mixed-encoding legacy CSVs.
 - **FR-028h**: Materialization of a physical cache table MUST be serialized per target table name. Concurrent workers may still collect different datasets in parallel, but they MUST NOT create/drop/recreate the same physical table concurrently, especially shared schema-variant tables (`..._s<hash>`).
 - **FR-028k**: Large keyed JSON payloads shaped like `{"1": {...}, "2": {...}}` MUST be ingested incrementally instead of loading the full blob into memory. The collector SHOULD stream those records in bounded chunks so heavyweight JSON datasets do not SIGKILL either the normal or heavy collector lane.
+- **FR-028l**: Before SQL materialization, the collector MUST classify the tabular layout into an explicit `layout_profile` (currently `simple_tabular`, `presentation_sheet`, `header_multiline`, `header_sparse`, or `wide_csv`) so header handling is driven by a structural profile instead of one generic promotion heuristic.
+- **FR-028m**: After header normalization, the collector MUST attach an explicit `header_quality` label (`good`, `degraded`, `invalid`) to the in-memory DataFrame attrs. Placeholder-heavy or numeric-heavy headers must not be treated as indistinguishable from semantically good headers during the normalization pipeline.
+- **FR-028n**: One collector run MUST resolve into an explicit materialization outcome model instead of scattering implicit status decisions across branches. At minimum the implementation must distinguish `materialized_ready`, `materialized_degraded`, `parser_invalid`, `terminal_non_tabular`, `terminal_upstream`, `retryable_upstream`, and `retryable_materialization`.
+- **FR-028o**: Schema-mismatch rewrite retries MUST perform `DROP TABLE` / rebuild on a clean SQL transaction boundary. A failed first write MUST NOT poison the follow-up rewrite path with `InFailedSqlTransaction` during the table reset itself.
 - **FR-029** *(WS0)*: The collector MUST run an `IngestionValidator` pre-parse hook **after download, before pandas**. A `critical` finding aborts ingestion, marks the row `permanently_failed` and short-circuits the S3 upload. See [013-ingestion-validation](../../013-ingestion-validation/spec.md).
 - **FR-030** *(WS0)*: The collector MUST run an `IngestionValidator` post-parse hook **after materialization, before flipping `status='ready'`**. A `critical` finding rolls back to `error`/`permanently_failed` so the planner never sees the corrupt projection.
 - **FR-030a** *(WS0)*: The collector MUST collapse duplicate open `cached_datasets` rows for the same `dataset_id` during entry creation and finalization. `downloading`/`pending`/`error` duplicates must not accumulate across retries or reroutes; only the current active row should remain open for a dataset.
@@ -117,6 +121,8 @@ Important architectural clarification: the collector no longer writes directly i
 - **SC-015h**: Transient heavy failures should stop recycling exclusively inside the main heavy queue. Large unstable downloads must be able to move into a separate retry lane so newly discovered heavy datasets still get a chance to start.
 - **SC-015f**: Legacy CSVs that pass the initial UTF-8 header sniff but fail later with `UnicodeDecodeError` should stop accumulating as retryable collector errors. They should either succeed via encoding fallback or fail terminally with a deterministic reason.
 - **SC-015g**: Shared schema-variant tables should stop surfacing `pg_type_typname_nsp_index` duplicate-type errors during rebuild waves. Concurrent materialization for the same target table must serialize instead of racing on `CREATE TABLE` / `DROP TABLE`.
+- **SC-015i**: Multi-row hierarchical headers should stop collapsing into raw `Unnamed:*`, `col_N`, or numeric placeholder columns when the first two rows of the sheet already contain enough structure to build semantic SQL-visible headers.
+- **SC-015j**: Collector failures caused by schema-rewrite retries should stop surfacing as `InFailedSqlTransaction ... DROP TABLE IF EXISTS ...` when the collector is already handling the failure as a retryable materialization problem.
 - **SC-016** *(WS0)*: Zero new HTML-as-data tables (the 38 confirmed in staging Apr 2026) reach `status='ready'` after WS0 hooks are deployed.
 - **SC-017** *(WS0.5)*: Zero rows in `cached_datasets` should violate the invariants enforced by `StateMachineEnforcer.scan()` after the first sweep with auto-enforce on.
 - **SC-018** *(WS4)*: Zero `pg_type_typname_nsp_index` collision errors (the 10 confirmed in prod Apr 2026) after `physical_namer` is the only source of materialised table names.

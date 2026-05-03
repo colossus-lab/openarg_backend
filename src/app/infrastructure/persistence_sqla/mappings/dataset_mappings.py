@@ -90,6 +90,8 @@ def map_dataset_tables() -> None:
         Column("status", String(50), server_default="pending"),
         Column("error_message", Text, nullable=True),
         Column("s3_key", String(500), nullable=True),
+        Column("layout_profile", String(40), nullable=True),
+        Column("header_quality", String(20), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
         Column(
             "updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -132,6 +134,8 @@ def map_dataset_tables() -> None:
         Column("resource_kind", String(30), server_default="file"),
         Column("materialization_status", String(40), server_default="pending"),
         Column("materialized_table_name", String(255), nullable=True),
+        Column("layout_profile", String(40), nullable=True),
+        Column("header_quality", String(20), nullable=True),
         Column("parser_version", String(20), nullable=True),
         Column("normalization_version", String(20), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),

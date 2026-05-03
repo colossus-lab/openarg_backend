@@ -83,5 +83,7 @@ class CatalogResource(BaseEntity):
     resource_kind: str = RESOURCE_KIND_FILE
     materialization_status: str = MATERIALIZATION_PENDING
     materialized_table_name: str | None = None
+    layout_profile: str | None = None
+    header_quality: str | None = None
     parser_version: str | None = None
     normalization_version: str | None = None

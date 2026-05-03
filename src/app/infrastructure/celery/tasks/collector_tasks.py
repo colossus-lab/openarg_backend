@@ -18,13 +18,16 @@ import shutil
 import tempfile
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
 import pandas as pd
+import psycopg
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from app.application.expander import MultiFileExpander
 from app.application.validation.collector_hooks import (
@@ -68,6 +71,27 @@ _DOMAINS_SKIP_SSL = frozenset(
 
 
 logger = logging.getLogger(__name__)
+
+_LAYOUT_SIMPLE = "simple_tabular"
+_LAYOUT_PRESENTATION = "presentation_sheet"
+_LAYOUT_MULTILINE = "header_multiline"
+_LAYOUT_SPARSE = "header_sparse"
+_LAYOUT_WIDE = "wide_csv"
+
+_HEADER_GOOD = "good"
+_HEADER_DEGRADED = "degraded"
+_HEADER_INVALID = "invalid"
+
+_OUTCOME_MATERIALIZED_READY = "materialized_ready"
+_OUTCOME_MATERIALIZED_DEGRADED = "materialized_degraded"
+_OUTCOME_TERMINAL_NON_TABULAR = "terminal_non_tabular"
+_OUTCOME_TERMINAL_UPSTREAM = "terminal_upstream"
+_OUTCOME_RETRYABLE_UPSTREAM = "retryable_upstream"
+_OUTCOME_RETRYABLE_MATERIALIZATION = "retryable_materialization"
+_OUTCOME_PARSER_INVALID = "parser_invalid"
+
+_PARSER_VERSION = "phase4-v1"
+_NORMALIZATION_VERSION = "phase4-v1"
 
 _ZIP_PARSEABLE_SUFFIXES = frozenset(
     {
@@ -1883,6 +1907,22 @@ def _serialize_structured_cells(df: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+@dataclass(frozen=True)
+class _LayoutCandidate:
+    profile: str
+    columns: list[str]
+    rows_consumed: int
+
+
+@dataclass(frozen=True)
+class _CollectorRunOutcome:
+    result_kind: str
+    cached_status: str
+    error_message: str | None = None
+    retry_increment: int = 0
+    should_prune_open: bool = False
+
+
 def _is_placeholder_column_name(value: object) -> bool:
     text_value = str(value or "").strip()
     if not text_value:
@@ -1905,45 +1945,245 @@ def _header_quality(columns) -> tuple[int, int, int]:
     return placeholder_count, alpha_count, nonempty_count
 
 
+def _header_numeric_count(columns) -> int:
+    return sum(
+        1
+        for col in (str(col or "").strip() for col in columns)
+        if re.fullmatch(r"[0-9]+", col or "")
+    )
+
+
+def _header_quality_label(columns) -> str:
+    total_columns = max(len(columns), 1)
+    placeholder_count, alpha_count, nonempty_count = _header_quality(columns)
+    numeric_count = _header_numeric_count(columns)
+    placeholder_ratio = placeholder_count / total_columns
+    numeric_ratio = numeric_count / total_columns
+    min_nonempty = 1 if total_columns <= 2 else max(3, int(total_columns * 0.4))
+
+    if placeholder_ratio >= 0.35 or nonempty_count < min_nonempty:
+        return _HEADER_INVALID
+    if (
+        placeholder_count > 0
+        or numeric_ratio >= 0.25
+        or alpha_count < max(2, int(total_columns * 0.2))
+    ):
+        return _HEADER_DEGRADED
+    return _HEADER_GOOD
+
+
+def _normalize_header_token(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    text_value = str(value).replace("\xa0", " ").strip()
+    if not text_value or text_value.lower() == "nan":
+        return ""
+    return re.sub(r"\s+", " ", text_value)
+
+
+def _forward_fill_header_tokens(values) -> list[str]:
+    filled: list[str] = []
+    last_seen = ""
+    for value in values:
+        token = _normalize_header_token(value)
+        if token and not _is_placeholder_column_name(token):
+            last_seen = token
+            filled.append(token)
+        else:
+            filled.append(last_seen if last_seen else token)
+    return filled
+
+
+def _token_looks_like_data(token: str) -> bool:
+    normalized = token.strip()
+    if not normalized:
+        return False
+    if re.fullmatch(r"[-+]?[\d.,/%]+", normalized):
+        return True
+    if re.fullmatch(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", normalized):
+        return True
+    return False
+
+
+def _row_looks_like_header(row: list[object]) -> bool:
+    tokens = [_normalize_header_token(value) for value in row]
+    nonempty = [token for token in tokens if token]
+    if not nonempty:
+        return False
+
+    placeholder_count = sum(1 for token in nonempty if _is_placeholder_column_name(token))
+    alpha_count = sum(1 for token in nonempty if re.search(r"[A-Za-zÁ-ÿ]", token))
+    dataish_count = sum(1 for token in nonempty if _token_looks_like_data(token))
+
+    if placeholder_count >= max(1, int(len(nonempty) * 0.6)):
+        return False
+    if alpha_count < max(1, int(len(nonempty) * 0.4)):
+        return False
+    if dataish_count > max(1, int(len(nonempty) * 0.5)):
+        return False
+    return True
+
+
+def _row_has_hierarchy_signal(row: list[object]) -> bool:
+    tokens = [
+        token
+        for token in (_normalize_header_token(value) for value in row)
+        if token and not _is_placeholder_column_name(token)
+    ]
+    if not tokens:
+        return False
+    if len(tokens) != len(row):
+        return True
+    return len(set(tokens)) < len(tokens)
+
+
+def _combine_header_rows(rows: list[list[object]], *, sparse: bool = False) -> list[str]:
+    prepared_rows: list[list[str]] = []
+    for row in rows:
+        tokens = [_normalize_header_token(value) for value in row]
+        if sparse:
+            tokens = _forward_fill_header_tokens(tokens)
+        prepared_rows.append(tokens)
+
+    combined: list[str | None] = []
+    for col_values in zip(*prepared_rows, strict=False):
+        parts: list[str] = []
+        for token in col_values:
+            if not token or _is_placeholder_column_name(token):
+                continue
+            if parts and token == parts[-1]:
+                continue
+            parts.append(token)
+        combined.append(" / ".join(parts) if parts else None)
+    return _make_unique_columns(combined)
+
+
+def _candidate_is_meaningfully_better(
+    current_columns: list[str],
+    candidate_columns: list[str],
+    *,
+    rows_consumed: int,
+) -> bool:
+    total_columns = max(len(current_columns), 1)
+    current_placeholder, current_alpha, current_nonempty = _header_quality(current_columns)
+    candidate_placeholder, candidate_alpha, candidate_nonempty = _header_quality(candidate_columns)
+
+    if candidate_nonempty < max(3, int(total_columns * 0.3)):
+        return False
+
+    if candidate_placeholder <= max(0, current_placeholder - 2) and candidate_alpha >= max(
+        3, current_alpha
+    ):
+        return True
+
+    if (
+        current_placeholder >= max(2, int(total_columns * 0.35))
+        and candidate_placeholder <= max(1, int(total_columns * 0.15))
+        and candidate_alpha >= max(2, current_alpha - 1)
+    ):
+        return True
+
+    if (
+        rows_consumed >= 2
+        and candidate_placeholder < current_placeholder
+        and candidate_alpha > current_alpha
+    ):
+        return True
+
+    return False
+
+
+def _infer_layout_profile(
+    df: pd.DataFrame,
+    *,
+    max_candidate_rows: int = 5,
+) -> _LayoutCandidate:
+    current_columns = _make_unique_columns(df.columns)
+    best = _LayoutCandidate(profile=_LAYOUT_SIMPLE, columns=current_columns, rows_consumed=0)
+
+    candidate_rows = min(max_candidate_rows, len(df))
+    if df.empty or candidate_rows == 0:
+        return best
+
+    for idx in range(candidate_rows):
+        row_values = list(df.iloc[idx])
+        if not _row_looks_like_header(row_values):
+            break
+        if idx > 0:
+            break
+        promoted_columns = _make_unique_columns(df.iloc[idx])
+        if _candidate_is_meaningfully_better(
+            current_columns,
+            promoted_columns,
+            rows_consumed=idx + 1,
+        ):
+            best = _LayoutCandidate(
+                profile=_LAYOUT_PRESENTATION,
+                columns=promoted_columns,
+                rows_consumed=idx + 1,
+            )
+
+    header_like_prefix = 0
+    for idx in range(candidate_rows):
+        if _row_looks_like_header(list(df.iloc[idx])):
+            header_like_prefix += 1
+        else:
+            break
+
+    for row_count in (2,):
+        if candidate_rows < row_count:
+            continue
+        if header_like_prefix < row_count:
+            continue
+        header_rows = [list(df.iloc[idx]) for idx in range(row_count)]
+        if _row_has_hierarchy_signal(header_rows[0]):
+            combined_columns = _combine_header_rows(header_rows, sparse=False)
+            if _candidate_is_meaningfully_better(
+                current_columns,
+                combined_columns,
+                rows_consumed=row_count,
+            ):
+                best = _LayoutCandidate(
+                    profile=_LAYOUT_MULTILINE,
+                    columns=combined_columns,
+                    rows_consumed=row_count,
+                )
+        if any(_normalize_header_token(value) == "" for row in header_rows for value in row):
+            sparse_columns = _combine_header_rows(header_rows, sparse=True)
+            if _candidate_is_meaningfully_better(
+                current_columns,
+                sparse_columns,
+                rows_consumed=row_count,
+            ):
+                best = _LayoutCandidate(
+                    profile=_LAYOUT_SPARSE,
+                    columns=sparse_columns,
+                    rows_consumed=row_count,
+                )
+
+    return best
+
+
 def _maybe_promote_header_row(df: pd.DataFrame, *, max_candidate_rows: int = 5) -> pd.DataFrame:
     if df.empty:
         return df
 
+    candidate = _infer_layout_profile(df, max_candidate_rows=max_candidate_rows)
+    if candidate.rows_consumed == 0:
+        return df
+
     current_columns = _make_unique_columns(df.columns)
-    current_placeholder, current_alpha, current_nonempty = _header_quality(current_columns)
-    total_columns = max(len(current_columns), 1)
-    suspicious_current = current_placeholder >= max(2, int(total_columns * 0.35))
-    if not suspicious_current:
-        return df
+    current_placeholder, current_alpha, _ = _header_quality(current_columns)
+    best_placeholder, best_alpha, _ = _header_quality(candidate.columns)
 
-    best_index: int | None = None
-    best_columns = current_columns
-    best_score = (current_placeholder, -current_alpha, -current_nonempty)
-
-    for idx in range(min(max_candidate_rows, len(df))):
-        candidate_columns = _make_unique_columns(df.iloc[idx])
-        placeholder_count, alpha_count, nonempty_count = _header_quality(candidate_columns)
-        score = (placeholder_count, -alpha_count, -nonempty_count)
-        if score < best_score:
-            best_index = idx
-            best_columns = candidate_columns
-            best_score = score
-
-    if best_index is None:
-        return df
-
-    best_placeholder, best_alpha, best_nonempty = _header_quality(best_columns)
-    improved_placeholders = best_placeholder <= max(0, current_placeholder - 3)
-    enough_signal = best_alpha >= max(3, current_alpha)
-    not_mostly_empty = best_nonempty >= max(3, int(total_columns * 0.3))
-    if not (improved_placeholders and enough_signal and not_mostly_empty):
-        return df
-
-    promoted = df.iloc[best_index + 1 :].reset_index(drop=True).copy()
-    promoted.columns = best_columns
+    promoted = df.iloc[candidate.rows_consumed :].reset_index(drop=True).copy()
+    promoted.columns = candidate.columns
+    promoted.attrs["layout_profile"] = candidate.profile
+    promoted.attrs["header_quality"] = _header_quality_label(candidate.columns)
     logger.info(
-        "Promoted row %s as header (placeholders %s -> %s, alpha %s -> %s)",
-        best_index,
+        "Applied layout_profile=%s consuming %s header rows (placeholders %s -> %s, alpha %s -> %s)",
+        candidate.profile,
+        candidate.rows_consumed,
         current_placeholder,
         best_placeholder,
         current_alpha,
@@ -1953,14 +2193,15 @@ def _maybe_promote_header_row(df: pd.DataFrame, *, max_candidate_rows: int = 5) 
 
 
 def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean column names: strip whitespace, non-breaking spaces, normalize.
-
-    If most columns are 'Unnamed: N', treat the first data row as the real header.
-    """
+    """Normalize columns using a profile-driven header strategy before SQL writes."""
     df.columns = _make_unique_columns(df.columns)
 
     df = _maybe_promote_header_row(df)
     df.columns = _make_unique_columns(df.columns)
+    df.attrs.setdefault("layout_profile", _infer_layout_profile(df).profile if not df.empty else _LAYOUT_SIMPLE)
+    df.attrs["header_quality"] = _header_quality_label(df.columns)
+    if len(df.columns) > _HEAVY_WIDTH_COLUMN_THRESHOLD:
+        df.attrs["layout_profile"] = _LAYOUT_WIDE
 
     df = _serialize_structured_cells(df)
     return _compact_wide_dataframe(df)
@@ -2134,13 +2375,19 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
                     )
                     if tx.is_active:
                         tx.rollback()
-                    with write_conn.begin():
-                        write_conn.execute(
-                            text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE')  # noqa: S608
-                        )
-                        retry_kwargs = dict(kwargs)
-                        retry_kwargs["if_exists"] = "replace"
+                    with engine.begin() as reset_conn:
+                        reset_conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))  # noqa: S608
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs["if_exists"] = "replace"
+                    retry_tx = write_conn.begin()
+                    try:
                         df.to_sql(table_name, write_conn, **retry_kwargs)
+                    except Exception:
+                        if retry_tx.is_active:
+                            retry_tx.rollback()
+                        raise
+                    else:
+                        retry_tx.commit()
                 else:
                     raise
             else:
@@ -2728,6 +2975,330 @@ def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: st
         )
 
 
+def _degraded_headers_allowed(*, portal: str, layout_profile: str, declared_format: str) -> bool:
+    """Explicit policy gate for degraded-yet-acceptable materializations.
+
+    Phase 3 keeps backward compatibility by allowing degraded outputs through
+    an explicit policy function instead of accidental implicit acceptance.
+    """
+    if os.getenv("OPENARG_ALLOW_DEGRADED_HEADERS", "1") == "1":
+        return True
+    if layout_profile == _LAYOUT_WIDE and declared_format.lower() in {"csv", "txt"}:
+        return True
+    return portal in set(filter(None, os.getenv("OPENARG_DEGRADED_HEADER_PORTALS", "").split(",")))
+
+
+def _is_non_tabular_error_message(error_message: str | None) -> bool:
+    msg = (error_message or "").lower()
+    markers = (
+        "zip_document_bundle",
+        "zip_no_parseable_file",
+        "unsupported_format",
+        "bad_zip_file",
+        "file_too_large",
+        "zip_entry_too_large",
+    )
+    return any(marker in msg for marker in markers)
+
+
+def _materialization_outcome_for_ready(
+    *,
+    portal: str,
+    declared_format: str,
+    table_name: str,
+    row_count: int,
+    columns: list[str],
+    layout_profile: str,
+    header_quality: str,
+    ws0_finding,
+) -> _CollectorRunOutcome:
+    if _ws0_is_critical(ws0_finding):
+        return _CollectorRunOutcome(
+            result_kind=_OUTCOME_PARSER_INVALID,
+            cached_status="permanently_failed",
+            error_message=f"ingestion_validation_failed:{ws0_finding.detector_name}",
+            retry_increment=1,
+            should_prune_open=True,
+        )
+
+    if row_count <= 0:
+        return _CollectorRunOutcome(
+            result_kind=_OUTCOME_PARSER_INVALID,
+            cached_status="permanently_failed",
+            error_message="parser_invalid:no_rows_materialized",
+            retry_increment=1,
+            should_prune_open=True,
+        )
+
+    if header_quality == _HEADER_INVALID:
+        return _CollectorRunOutcome(
+            result_kind=_OUTCOME_PARSER_INVALID,
+            cached_status="permanently_failed",
+            error_message="parser_invalid:header_quality_invalid",
+            retry_increment=1,
+            should_prune_open=True,
+        )
+
+    if header_quality == _HEADER_DEGRADED:
+        if not _degraded_headers_allowed(
+            portal=portal,
+            layout_profile=layout_profile,
+            declared_format=declared_format,
+        ):
+            return _CollectorRunOutcome(
+                result_kind=_OUTCOME_PARSER_INVALID,
+                cached_status="permanently_failed",
+                error_message="parser_invalid:degraded_headers_disallowed",
+                retry_increment=1,
+                should_prune_open=True,
+            )
+        return _CollectorRunOutcome(
+            result_kind=_OUTCOME_MATERIALIZED_DEGRADED,
+            cached_status="ready",
+            error_message=f"header_quality:{header_quality};layout_profile:{layout_profile}",
+            should_prune_open=True,
+        )
+
+    return _CollectorRunOutcome(
+        result_kind=_OUTCOME_MATERIALIZED_READY,
+        cached_status="ready",
+        should_prune_open=True,
+    )
+
+
+def _classify_collect_exception(exc: Exception, *, heavy_execution: bool, current_queue: str) -> _CollectorRunOutcome:
+    exc_str = str(exc)
+    lowered = exc_str.lower()
+
+    non_retryable = (
+        any(
+            s in exc_str
+            for s in (
+                "403 Forbidden",
+                "401 Unauthorized",
+                "404 Not Found",
+                "410 Gone",
+                "illegal status line",
+                "Request Denied",
+                "Name or service not known",
+                "TooManyColumns",
+                "file_too_large",
+                "No columns to parse from file",
+                "Excel file format cannot be determined",
+            )
+        )
+        or "TooManyRedirects" in type(exc).__name__
+    )
+    if non_retryable:
+        result_kind = (
+            _OUTCOME_TERMINAL_NON_TABULAR if _is_non_tabular_error_message(exc_str) else _OUTCOME_TERMINAL_UPSTREAM
+        )
+        return _CollectorRunOutcome(
+            result_kind=result_kind,
+            cached_status="permanently_failed",
+            error_message=exc_str[:500],
+            retry_increment=1,
+            should_prune_open=True,
+        )
+
+    # Belt-and-suspenders: catch InFailedSqlTransaction by type (raw or DBAPI-wrapped).
+    # The marker-string match below also catches it via .lower(), but a typed
+    # check avoids regressions if the message format ever changes.
+    raw_inflight_failure = isinstance(exc, psycopg.errors.InFailedSqlTransaction)
+    wrapped_inflight_failure = (
+        isinstance(exc, DBAPIError)
+        and exc.orig is not None
+        and isinstance(exc.orig, psycopg.errors.InFailedSqlTransaction)
+    )
+    if raw_inflight_failure or wrapped_inflight_failure:
+        return _CollectorRunOutcome(
+            result_kind=_OUTCOME_RETRYABLE_MATERIALIZATION,
+            cached_status="error",
+            error_message=f"InFailedSqlTransaction (caught by type): {exc_str[:400]}",
+            retry_increment=1,
+        )
+
+    materialization_markers = (
+        "schema mismatch",
+        "schema_drift_detected",
+        "drop table if exists",
+        "pg_type_typname_nsp_index",
+        "infailedsqltransaction",
+        "another command is already in progress",
+    )
+    if any(marker in lowered for marker in materialization_markers):
+        return _CollectorRunOutcome(
+            result_kind=_OUTCOME_RETRYABLE_MATERIALIZATION,
+            cached_status="error",
+            error_message=exc_str[:500],
+            retry_increment=1,
+        )
+
+    if heavy_execution and current_queue != _HEAVY_RETRY_QUEUE and _is_transient_collect_error(exc):
+        return _CollectorRunOutcome(
+            result_kind=_OUTCOME_RETRYABLE_UPSTREAM,
+            cached_status="pending",
+            error_message=exc_str[:500],
+            retry_increment=1,
+        )
+
+    return _CollectorRunOutcome(
+        result_kind=_OUTCOME_RETRYABLE_UPSTREAM,
+        cached_status="error",
+        error_message=exc_str[:500],
+        retry_increment=1,
+    )
+
+
+def _apply_cached_outcome(
+    engine,
+    *,
+    dataset_id: str,
+    outcome: _CollectorRunOutcome,
+    table_name: str | None = None,
+    row_count: int | None = None,
+    columns: list[str] | None = None,
+    size_bytes: int | None = None,
+    s3_key: str | None = None,
+    layout_profile: str | None = None,
+    header_quality: str | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Persist one explicit collector outcome and return the resulting retry_count."""
+    finalized_at = now or datetime.now(UTC)
+    columns_json = json.dumps([str(c) for c in columns]) if columns is not None else None
+
+    with engine.begin() as conn:
+        if outcome.cached_status == "ready" and table_name:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_datasets (
+                        dataset_id, table_name, status, row_count,
+                        columns_json, size_bytes, s3_key, error_message,
+                        layout_profile, header_quality, updated_at
+                    ) VALUES (
+                        CAST(:did AS uuid), :tn, 'ready', :rows,
+                        :cols, :size, :s3, :msg, :layout_profile, :header_quality, :now
+                    )
+                    ON CONFLICT (table_name) DO UPDATE SET
+                        dataset_id = CAST(:did AS uuid),
+                        status = 'ready',
+                        row_count = EXCLUDED.row_count,
+                        columns_json = EXCLUDED.columns_json,
+                        size_bytes = EXCLUDED.size_bytes,
+                        s3_key = EXCLUDED.s3_key,
+                        error_message = EXCLUDED.error_message,
+                        layout_profile = EXCLUDED.layout_profile,
+                        header_quality = EXCLUDED.header_quality,
+                        updated_at = :now
+                    """
+                ),
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "rows": row_count,
+                    "cols": columns_json,
+                    "size": size_bytes,
+                    "s3": s3_key,
+                    "msg": outcome.error_message,
+                    "layout_profile": layout_profile,
+                    "header_quality": header_quality,
+                    "now": finalized_at,
+                },
+            )
+            retry_count = 0
+        elif table_name:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cached_datasets (
+                        dataset_id, table_name, status, row_count, columns_json,
+                        size_bytes, s3_key, error_message, retry_count,
+                        layout_profile, header_quality, updated_at
+                    ) VALUES (
+                        CAST(:did AS uuid), :tn, :status, :rows, :cols,
+                        :size, :s3, :msg, :retry, :layout_profile, :header_quality, :now
+                    )
+                    ON CONFLICT (table_name) DO UPDATE SET
+                        dataset_id = CAST(:did AS uuid),
+                        status = CASE
+                            WHEN :status = 'permanently_failed' THEN 'permanently_failed'
+                            WHEN cached_datasets.retry_count + :retry >= :max THEN 'permanently_failed'
+                            ELSE :status
+                        END,
+                        row_count = COALESCE(:rows, cached_datasets.row_count),
+                        columns_json = COALESCE(:cols, cached_datasets.columns_json),
+                        size_bytes = COALESCE(:size, cached_datasets.size_bytes),
+                        s3_key = COALESCE(:s3, cached_datasets.s3_key),
+                        error_message = :msg,
+                        layout_profile = COALESCE(:layout_profile, cached_datasets.layout_profile),
+                        header_quality = COALESCE(:header_quality, cached_datasets.header_quality),
+                        retry_count = cached_datasets.retry_count + :retry,
+                        updated_at = :now
+                    """
+                ),
+                {
+                    "did": dataset_id,
+                    "tn": table_name,
+                    "status": outcome.cached_status,
+                    "rows": row_count,
+                    "cols": columns_json,
+                    "size": size_bytes,
+                    "s3": s3_key,
+                    "msg": outcome.error_message,
+                    "retry": outcome.retry_increment,
+                    "layout_profile": layout_profile,
+                    "header_quality": header_quality,
+                    "max": MAX_TOTAL_ATTEMPTS,
+                    "now": finalized_at,
+                },
+            )
+            current = conn.execute(
+                text("SELECT retry_count FROM cached_datasets WHERE table_name = :tn"),
+                {"tn": table_name},
+            ).fetchone()
+            retry_count = int(current.retry_count) if current else 0
+        else:
+            conn.execute(
+                text(
+                    """
+                    UPDATE cached_datasets
+                    SET status = CASE
+                            WHEN :status = 'permanently_failed' THEN 'permanently_failed'
+                            WHEN retry_count + :retry >= :max THEN 'permanently_failed'
+                            ELSE :status
+                        END,
+                        error_message = :msg,
+                        layout_profile = COALESCE(:layout_profile, layout_profile),
+                        header_quality = COALESCE(:header_quality, header_quality),
+                        retry_count = retry_count + :retry,
+                        updated_at = :now
+                    WHERE dataset_id = CAST(:did AS uuid)
+                    """
+                ),
+                {
+                    "did": dataset_id,
+                    "status": outcome.cached_status,
+                    "msg": outcome.error_message,
+                    "retry": outcome.retry_increment,
+                    "layout_profile": layout_profile,
+                    "header_quality": header_quality,
+                    "max": MAX_TOTAL_ATTEMPTS,
+                    "now": finalized_at,
+                },
+            )
+            current = conn.execute(
+                text("SELECT COALESCE(MAX(retry_count), 0) AS retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"),
+                {"did": dataset_id},
+            ).fetchone()
+            retry_count = int(current.retry_count) if current else 0
+
+    if outcome.should_prune_open:
+        _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
+    return retry_count
+
+
 def _finalize_cached_dataset(
     engine,
     *,
@@ -2742,6 +3313,8 @@ def _finalize_cached_dataset(
     declared_size_bytes: int | None = None,
     s3_key: str | None = None,
     error_message: str | None = None,
+    layout_profile: str | None = None,
+    header_quality: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Apply the WS0 post-parse gate, then persist the final cached state."""
@@ -2762,15 +3335,42 @@ def _finalize_cached_dataset(
         declared_size_bytes=declared_size_bytes,
         columns_json=columns_json,
     )
-    if _ws0_is_critical(finding):
-        msg = f"ingestion_validation_failed:{finding.detector_name}"
+    resolved_layout_profile = (
+        layout_profile
+        or (_LAYOUT_WIDE if len(normalized_columns) > _HEAVY_WIDTH_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
+    )
+    resolved_header_quality = header_quality or _header_quality_label(normalized_columns)
+    outcome = _materialization_outcome_for_ready(
+        portal=portal,
+        declared_format=declared_format,
+        table_name=table_name,
+        row_count=row_count,
+        columns=normalized_columns,
+        layout_profile=resolved_layout_profile,
+        header_quality=resolved_header_quality,
+        ws0_finding=finding,
+    )
+
+    if outcome.cached_status != "ready":
         logger.warning(
-            "Dataset %s failed specialized post-parse gate by %s: %s",
+            "Dataset %s finalized as %s (%s)",
             dataset_id,
-            finding.detector_name,
-            finding.message,
+            outcome.result_kind,
+            outcome.error_message,
         )
-        _set_error_status(engine, dataset_id, msg, table_name=table_name)
+        _apply_cached_outcome(
+            engine,
+            dataset_id=dataset_id,
+            table_name=table_name,
+            outcome=outcome,
+            row_count=row_count,
+            columns=normalized_columns,
+            size_bytes=declared_size_bytes,
+            s3_key=s3_key,
+            layout_profile=resolved_layout_profile,
+            header_quality=resolved_header_quality,
+            now=finalized_at,
+        )
         try:
             with engine.begin() as conn:
                 conn.execute(
@@ -2787,41 +3387,22 @@ def _finalize_cached_dataset(
                 dataset_id,
                 exc_info=True,
             )
-        return {"ok": False, "status": "rejected", "error": msg}
+        return {"ok": False, "status": outcome.cached_status, "error": outcome.error_message}
 
+    _apply_cached_outcome(
+        engine,
+        dataset_id=dataset_id,
+        table_name=table_name,
+        outcome=outcome,
+        row_count=row_count,
+        columns=normalized_columns,
+        size_bytes=declared_size_bytes,
+        s3_key=s3_key,
+        layout_profile=resolved_layout_profile,
+        header_quality=resolved_header_quality,
+        now=finalized_at,
+    )
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                INSERT INTO cached_datasets (
-                    dataset_id, table_name, status, row_count,
-                    columns_json, size_bytes, s3_key, error_message, updated_at
-                ) VALUES (
-                    CAST(:did AS uuid), :tn, 'ready', :rows,
-                    :cols, :size, :s3, :msg, :now
-                )
-                ON CONFLICT (table_name) DO UPDATE SET
-                    dataset_id = CAST(:did AS uuid),
-                    status = 'ready',
-                    row_count = EXCLUDED.row_count,
-                    columns_json = EXCLUDED.columns_json,
-                    size_bytes = EXCLUDED.size_bytes,
-                    s3_key = EXCLUDED.s3_key,
-                    error_message = EXCLUDED.error_message,
-                    updated_at = :now
-                """
-            ),
-            {
-                "did": dataset_id,
-                "tn": table_name,
-                "rows": row_count,
-                "cols": columns_json,
-                "size": declared_size_bytes,
-                "s3": s3_key,
-                "msg": error_message,
-                "now": finalized_at,
-            },
-        )
         conn.execute(
             text(
                 "UPDATE datasets "
@@ -2834,9 +3415,12 @@ def _finalize_cached_dataset(
                 "now": finalized_at,
             },
         )
-
-    _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
-    return {"ok": True, "status": "ready", "columns_json": columns_json}
+    return {
+        "ok": True,
+        "status": outcome.cached_status,
+        "result_kind": outcome.result_kind,
+        "columns_json": columns_json,
+    }
 
 
 def _check_schema_compat_columns(engine, table_name: str, columns) -> bool:
@@ -3868,55 +4452,34 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     "member_tables": member_tables or None,
                 }
 
-            # Update cache status (include sampling note when truncated)
-            columns_json = json.dumps([str(c) for c in columns])
-
-            # WS0 Modo 2 — post-parse gate: catch single-column HTML blobs,
-            # zero-row materializations and similar before flipping to ready.
-            _ws0_post_finding = _ws0_validate_post_parse(
+            finalize_layout_profile = (
+                (getattr(df, "attrs", {}) or {}).get("layout_profile")
+                if "df" in locals()
+                else (_LAYOUT_WIDE if len(columns) > _HEAVY_WIDTH_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
+            )
+            finalize_header_quality = (
+                (getattr(df, "attrs", {}) or {}).get("header_quality")
+                if "df" in locals()
+                else _header_quality_label(columns)
+            )
+            finalize_result = _finalize_cached_dataset(
                 engine,
                 dataset_id=dataset_id,
                 portal=portal,
                 source_id=source_id,
-                download_url=download_url,
-                declared_format=fmt,
                 table_name=table_name,
-                materialized_columns=[str(c) for c in columns],
-                materialized_row_count=row_count,
+                row_count=row_count,
+                columns=[str(c) for c in columns],
+                declared_format=fmt,
+                download_url=download_url,
                 declared_size_bytes=file_size,
-                columns_json=columns_json,
+                s3_key=s3_key,
+                error_message=sampled_note,
+                layout_profile=finalize_layout_profile,
+                header_quality=finalize_header_quality,
             )
-            if _ws0_is_critical(_ws0_post_finding):
-                msg = f"ingestion_validation_failed:{_ws0_post_finding.detector_name}"
-                logger.warning(
-                    "Dataset %s failed post-parse gate by %s: %s",
-                    dataset_id,
-                    _ws0_post_finding.detector_name,
-                    _ws0_post_finding.message,
-                )
-                _set_error_status(engine, dataset_id, msg, table_name=table_name)
-                return {"error": msg}
-
-            with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                        UPDATE cached_datasets SET
-                            status = 'ready', row_count = :rows,
-                            columns_json = :cols, size_bytes = :size,
-                            s3_key = :s3key,
-                            error_message = :sampled,
-                            updated_at = NOW()
-                        WHERE dataset_id = CAST(:did AS uuid)
-                    """),
-                    {
-                        "rows": row_count,
-                        "cols": columns_json,
-                        "size": file_size,
-                        "s3key": s3_key,
-                        "sampled": sampled_note,
-                        "did": dataset_id,
-                    },
-                )
+            if not finalize_result["ok"]:
+                return {"error": finalize_result["error"]}
 
             # Update dataset — track whether this is a new cache for conditional re-embedding
             with engine.begin() as conn:
@@ -3940,11 +4503,12 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             previous_sampled_note = (
                 previous_cache_state.error_message if previous_cache_state else None
             )
+            current_columns_json = json.dumps([str(c) for c in columns])
             should_refresh_embeddings = (
                 (not was_cached)
                 or previous_table_name != table_name
                 or previous_row_count != row_count
-                or previous_columns_json != columns_json
+                or previous_columns_json != current_columns_json
                 or previous_s3_key != s3_key
                 or previous_sampled_note != sampled_note
             )
@@ -3996,93 +4560,51 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
     except SoftTimeLimitExceeded:
         total_ms = int((time.monotonic() - started_at) * 1000)
         logger.error("Task timed out for dataset %s after %dms", dataset_id, total_ms)
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE cached_datasets "
-                    "SET retry_count = retry_count + 1, "
-                    "    error_message = :msg, "
-                    "    updated_at = NOW(), "
-                    "    status = CASE "
-                    "      WHEN retry_count + 1 >= :max THEN 'permanently_failed' "
-                    "      ELSE 'error' "
-                    "    END "
-                    "WHERE dataset_id = CAST(:did AS uuid)"
-                ),
-                {"msg": "Task timed out", "did": dataset_id, "max": MAX_TOTAL_ATTEMPTS},
-            )
+        timeout_outcome = _CollectorRunOutcome(
+            result_kind=_OUTCOME_RETRYABLE_UPSTREAM,
+            cached_status="error",
+            error_message="Task timed out",
+            retry_increment=1,
+        )
+        attempts = _apply_cached_outcome(
+            engine,
+            dataset_id=dataset_id,
+            table_name=table_name,
+            outcome=timeout_outcome,
+        )
+        if attempts >= MAX_TOTAL_ATTEMPTS:
+            return {"error": "permanently_failed", "attempts": attempts}
         backoff = min(60 * (2**self.request.retries), 600)  # 60s, 120s, 240s, capped at 600s
         jitter = random.uniform(0, backoff * 0.3)
         raise self.retry(countdown=int(backoff + jitter))
     except Exception as exc:
-        exc_str = str(exc)
         current_queue = _current_queue()
-        # Non-retryable errors — mark permanently failed immediately
-        non_retryable = (
-            any(
-                s in exc_str
-                for s in (
-                    "403 Forbidden",
-                    "401 Unauthorized",
-                    "404 Not Found",
-                    "410 Gone",
-                    "illegal status line",
-                    "Request Denied",
-                    "Name or service not known",
-                    "TooManyColumns",
-                    "file_too_large",
-                    "No columns to parse from file",
-                    "Excel file format cannot be determined",
-                )
-            )
-            or "TooManyRedirects" in type(exc).__name__
+        outcome = _classify_collect_exception(
+            exc,
+            heavy_execution=_is_heavy_execution(),
+            current_queue=current_queue,
         )
-        if non_retryable:
+        if outcome.cached_status == "permanently_failed":
             total_ms = int((time.monotonic() - started_at) * 1000)
             logger.warning(
                 "Non-retryable error for %s after %dms: %s",
                 dataset_id,
                 total_ms,
-                exc_str[:200],
+                str(exc)[:200],
             )
-            _set_error_status(engine, dataset_id, exc_str[:500], table_name=table_name)
+            _set_error_status(engine, dataset_id, outcome.error_message or str(exc)[:500], table_name=table_name)
             return {"error": "non_retryable"}
 
-        if (
-            _is_heavy_execution()
-            and current_queue != _HEAVY_RETRY_QUEUE
-            and _is_transient_collect_error(exc)
-        ):
+        if outcome.cached_status == "pending" and outcome.result_kind == _OUTCOME_RETRYABLE_UPSTREAM:
             backoff = min(60 * (2**self.request.retries), 600)
             jitter = random.uniform(0, backoff * 0.3)
             countdown = int(backoff + jitter)
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "UPDATE cached_datasets "
-                        "SET retry_count = retry_count + 1, "
-                        "    error_message = :msg, "
-                        "    updated_at = NOW(), "
-                        "    status = CASE "
-                        "      WHEN retry_count + 1 >= :max THEN 'permanently_failed' "
-                        "      ELSE 'pending' "
-                        "    END "
-                        "WHERE dataset_id = CAST(:did AS uuid)"
-                    ),
-                    {
-                        "msg": str(exc)[:500],
-                        "did": dataset_id,
-                        "max": MAX_TOTAL_ATTEMPTS,
-                    },
-                )
-                current = conn.execute(
-                    text(
-                        "SELECT retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
-                    ),
-                    {"did": dataset_id},
-                ).fetchone()
-
-            attempts = current.retry_count if current else 0
+            attempts = _apply_cached_outcome(
+                engine,
+                dataset_id=dataset_id,
+                table_name=table_name,
+                outcome=outcome,
+            )
             if attempts >= MAX_TOTAL_ATTEMPTS:
                 logger.warning(
                     "Dataset %s permanently failed after %s attempts: %s",
@@ -4100,34 +4622,12 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
 
         total_ms = int((time.monotonic() - started_at) * 1000)
         logger.exception("Collection failed for dataset %s after %dms", dataset_id, total_ms)
-        with engine.begin() as conn:
-            # Increment retry_count and check if we should give up
-            conn.execute(
-                text(
-                    "UPDATE cached_datasets "
-                    "SET retry_count = retry_count + 1, "
-                    "    error_message = :msg, "
-                    "    updated_at = NOW(), "
-                    "    status = CASE "
-                    "      WHEN retry_count + 1 >= :max THEN 'permanently_failed' "
-                    "      ELSE 'error' "
-                    "    END "
-                    "WHERE dataset_id = CAST(:did AS uuid)"
-                ),
-                {
-                    "msg": str(exc)[:500],
-                    "did": dataset_id,
-                    "max": MAX_TOTAL_ATTEMPTS,
-                },
-            )
-            current = conn.execute(
-                text(
-                    "SELECT retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
-                ),
-                {"did": dataset_id},
-            ).fetchone()
-
-        attempts = current.retry_count if current else 0
+        attempts = _apply_cached_outcome(
+            engine,
+            dataset_id=dataset_id,
+            table_name=table_name,
+            outcome=outcome,
+        )
         if attempts >= MAX_TOTAL_ATTEMPTS:
             logger.warning(
                 f"Dataset {dataset_id} permanently failed after {attempts} attempts: {exc}"

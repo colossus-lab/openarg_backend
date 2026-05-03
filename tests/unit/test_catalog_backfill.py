@@ -6,10 +6,13 @@ from unittest.mock import MagicMock, patch
 
 from app.infrastructure.celery.tasks.catalog_backfill import (
     _build_catalog_embedding_text,
+    _derived_header_quality,
+    _derived_layout_profile,
     _materialization_status,
     _release_backfill_lock,
     _resource_kind,
     _try_backfill_lock,
+    backfill_batch,
     catalog_backfill_task,
     run_populate_catalog_embeddings,
 )
@@ -57,6 +60,20 @@ def test_materialization_status_maps_terminal_rows():
 def test_resource_kind_marks_document_bundles():
     assert _resource_kind("permanently_failed", "zip_document_bundle") == "document_bundle"
     assert _resource_kind("permanently_failed", "bad_zip_file") == "file"
+
+
+def test_catalog_metadata_derivers_fill_phase4_fields():
+    assert _derived_layout_profile("header_multiline", "ready") == "header_multiline"
+    assert _derived_layout_profile(None, "ready") == "simple_tabular"
+    assert _derived_layout_profile(None, "error") is None
+
+    assert _derived_header_quality("degraded", "ready", None) == "degraded"
+    assert _derived_header_quality(None, "ready", None) == "good"
+    assert (
+        _derived_header_quality(None, "ready", "header_quality:degraded;layout_profile:wide_csv")
+        == "degraded"
+    )
+    assert _derived_header_quality(None, "error", "timeout") is None
 
 
 def test_backfill_lock_helpers():
@@ -132,3 +149,60 @@ def test_run_populate_catalog_embeddings_updates_missing_rows(mock_boto_client, 
     payload = mock_update_conn.execute.call_args.args[1]
     assert payload[0]["id"] == "11111111-1111-1111-1111-111111111111"
     assert payload[0]["embedding"] == "[0.1,0.2,0.3]"
+
+
+@patch("app.infrastructure.celery.tasks.catalog_backfill.PhysicalNamer")
+@patch("app.infrastructure.celery.tasks.catalog_backfill.TitleExtractor")
+def test_backfill_batch_persists_layout_and_header_metadata(mock_extractor_cls, mock_namer_cls):
+    row = SimpleNamespace(
+        dataset_id="11111111-1111-1111-1111-111111111111",
+        portal="datos_gob_ar",
+        source_id="ipc-1",
+        raw_title="IPC Nacional",
+        organization="INDEC",
+        url="https://example.com/ipc.csv",
+        format="csv",
+        table_name="cache_ipc_r111",
+        s3_key="datasets/datos_gob_ar/ipc.csv",
+        cached_status="ready",
+        error_message=None,
+        layout_profile="header_multiline",
+        header_quality="degraded",
+    )
+
+    select_conn = MagicMock()
+    select_conn.execute.return_value = _FetchAllResult([row])
+    write_conn = MagicMock()
+    engine = MagicMock()
+    engine.connect.return_value.__enter__ = MagicMock(return_value=select_conn)
+    engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    engine.begin.return_value.__enter__ = MagicMock(return_value=write_conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    mock_extractor = MagicMock()
+    mock_extractor.extract.return_value = SimpleNamespace(
+        canonical_title="IPC Nacional",
+        display_name="IPC Nacional",
+        title_source=SimpleNamespace(value="metadata"),
+        title_confidence=0.9,
+    )
+    mock_extractor_cls.return_value = mock_extractor
+    mock_namer = MagicMock()
+    mock_namer.build.return_value = SimpleNamespace(table_name="cache_ipc_r111")
+    mock_namer_cls.return_value = mock_namer
+
+    read, written = backfill_batch(
+        engine,
+        offset=0,
+        limit=10,
+        dry_run=False,
+        extractor=mock_extractor,
+        namer=mock_namer,
+    )
+
+    assert (read, written) == (1, 1)
+    params = write_conn.execute.call_args.args[1]
+    assert params["layout_profile"] == "header_multiline"
+    assert params["header_quality"] == "degraded"
+    assert params["parser_version"] == "phase4-v1"
+    assert params["normalization_version"] == "phase4-v1"

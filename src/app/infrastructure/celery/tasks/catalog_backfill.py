@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 _EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3")
 _EMBEDDING_BATCH_LIMIT = 96
 _CATALOG_BACKFILL_LOCK_KEY = 156002
+_CATALOG_PARSER_VERSION = "phase4-v1"
+_CATALOG_NORMALIZATION_VERSION = "phase4-v1"
 
 
 def _resource_identity(portal: str, source_id: str, sub_path: str | None = None) -> str:
@@ -110,6 +112,8 @@ _UPSERT_SQL = text(
         raw_title, canonical_title, display_name,
         title_source, title_confidence,
         resource_kind, materialization_status, materialized_table_name,
+        layout_profile, header_quality,
+        parser_version, normalization_version,
         created_at, updated_at
     ) VALUES (
         :resource_identity, CAST(NULLIF(:dataset_id, '') AS uuid),
@@ -118,6 +122,8 @@ _UPSERT_SQL = text(
         :raw_title, :canonical_title, :display_name,
         :title_source, :title_confidence,
         :resource_kind, :materialization_status, :materialized_table_name,
+        :layout_profile, :header_quality,
+        :parser_version, :normalization_version,
         NOW(), NOW()
     )
     ON CONFLICT (resource_identity) DO UPDATE SET
@@ -130,6 +136,10 @@ _UPSERT_SQL = text(
         title_confidence = EXCLUDED.title_confidence,
         materialization_status = EXCLUDED.materialization_status,
         materialized_table_name = EXCLUDED.materialized_table_name,
+        layout_profile = EXCLUDED.layout_profile,
+        header_quality = EXCLUDED.header_quality,
+        parser_version = EXCLUDED.parser_version,
+        normalization_version = EXCLUDED.normalization_version,
         updated_at = NOW()
     """
 )
@@ -147,7 +157,9 @@ _QUERY_SQL = text(
            cd.table_name,
            cd.s3_key,
            cd.status AS cached_status,
-           cd.error_message
+           cd.error_message,
+           cd.layout_profile,
+           cd.header_quality
     FROM datasets d
     LEFT JOIN LATERAL (
         -- A dataset can have several cached_datasets rows when retries hit
@@ -156,7 +168,8 @@ _QUERY_SQL = text(
         -- recently updated. Avoids duplicate output rows that would
         -- otherwise toggle the same `resource_identity` UPSERT back and
         -- forth on each backfill iteration.
-        SELECT cd.table_name, cd.s3_key, cd.status, cd.error_message, cd.updated_at
+        SELECT cd.table_name, cd.s3_key, cd.status, cd.error_message, cd.updated_at,
+               cd.layout_profile, cd.header_quality
         FROM cached_datasets cd
         WHERE cd.dataset_id = d.id
         ORDER BY (cd.status = 'ready') DESC,
@@ -332,6 +345,29 @@ def _resource_kind(cached_status: str | None, error_message: str | None = None) 
     return RESOURCE_KIND_FILE
 
 
+def _derived_layout_profile(cached_layout_profile: str | None, cached_status: str | None) -> str | None:
+    if cached_layout_profile:
+        return cached_layout_profile
+    if cached_status == "ready":
+        return "simple_tabular"
+    return None
+
+
+def _derived_header_quality(
+    cached_header_quality: str | None,
+    cached_status: str | None,
+    error_message: str | None,
+) -> str | None:
+    if cached_header_quality:
+        return cached_header_quality
+    msg = (error_message or "").lower()
+    if "header_quality:degraded" in msg:
+        return "degraded"
+    if cached_status == "ready":
+        return "good"
+    return None
+
+
 def _filename_from_url(url: str | None, fmt: str | None) -> str | None:
     if not url:
         return None
@@ -394,6 +430,12 @@ def backfill_batch(
             "resource_kind": resource_kind,
             "materialization_status": materialization,
             "materialized_table_name": physical_name,
+            "layout_profile": _derived_layout_profile(row.layout_profile, row.cached_status),
+            "header_quality": _derived_header_quality(
+                row.header_quality, row.cached_status, row.error_message
+            ),
+            "parser_version": _CATALOG_PARSER_VERSION if row.cached_status else None,
+            "normalization_version": _CATALOG_NORMALIZATION_VERSION if row.cached_status else None,
         }
         if dry_run:
             logger.debug("dry-run upsert %s", identity)

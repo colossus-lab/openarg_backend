@@ -14,6 +14,7 @@
 | Worker | `src/app/infrastructure/celery/tasks/catalog_backfill.py` | `seed_connector_endpoints` for live API connector rows |
 | Worker | `src/app/infrastructure/celery/tasks/censo2022_ingest.py` | Cuadro-by-cuadro seed |
 | Worker | `src/app/infrastructure/celery/tasks/collector_tasks.py` | `bulk_collect_all` + `reconcile_cache_coverage` complete post-reset materialization |
+| Migration | `alembic/versions/2026_05_03_0037_add_layout_metadata_to_cached_and_catalog.py` | Adds `layout_profile` / `header_quality` to cached state + catalog projection |
 | Wire-in | `src/app/application/pipeline/connectors/sandbox.py` | `_hybrid_logical_hints` + catalog-only short-circuit |
 | Script | `scripts/staging_reset.py` | Destructive wipe of legacy cache_* / cached_datasets / table_catalog + full rebuild dispatch chain |
 | Tests | `tests/unit/test_catalog_naming.py`, `test_catalog_discovery.py`, `test_staging_reset_guard.py` | Naming + discovery + safety |
@@ -37,6 +38,13 @@
 5. If Censo 2022 config is absent, `openarg.ingest_censo2022` returns `reason=missing_or_empty_config:...` rather than silently succeeding with zero rows.
 6. Set `OPENARG_CATALOG_ONLY=1` in staging env.
 7. Smoke-test the planner's discovery path.
+
+## Phase 4 projection note
+
+- The catalog is no longer just a title/materialization mirror.
+- `collector_tasks.py` now persists `layout_profile` and `header_quality` alongside cached rows.
+- `catalog_backfill.py` projects those fields into `catalog_resources`, together with explicit parser/normalization version stamps (`phase4-v1` currently).
+- This keeps `catalog_resources` aligned with the structural quality of the collector output instead of forcing later tools to reverse-engineer quality only from `columns_json` or `error_message`.
 
 ## Rollout (production — hybrid only, no wipe)
 1. `alembic upgrade head`.

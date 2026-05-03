@@ -2,7 +2,7 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Parent plan**: [../plan.md](../plan.md)
-**Last synced with code**: 2026-04-27
+**Last synced with code**: 2026-05-03
 
 ---
 
@@ -200,6 +200,45 @@ Detects when a re-collect produces a schema that no longer matches the existing 
 - The routing check now runs on the same sanitized column names that `_to_sql_safe()` writes, so schema decisions and SQL inserts stay aligned.
 - Effect: later members with a slightly different shape are routed into their own schema-variant table early, preserving already materialized sibling tables and their partial progress instead of dropping them mid-run.
 - Remaining debt: staging still shows SEPA sibling-table oscillation in some long runs, so the next pass should promote schema routing to a stable per-bundle signature registry instead of reusing the mutable “current table” cursor across members.
+
+### 5.12 Profile-driven header normalization
+
+- The collector no longer relies only on a generic "promote the best row" heuristic for suspicious headers.
+- `_infer_layout_profile()` now classifies the leading tabular shape into one of:
+  - `simple_tabular`
+  - `presentation_sheet`
+  - `header_multiline`
+  - `header_sparse`
+  - `wide_csv`
+- `_maybe_promote_header_row()` consumes the chosen number of header rows and records the resulting `layout_profile` on `DataFrame.attrs`.
+- `_sanitize_columns()` also records a `header_quality` label (`good`, `degraded`, `invalid`) after normalization so downstream validation and future rebuild tooling can distinguish semantically strong headers from merely SQL-safe ones.
+- Current guardrails are intentionally conservative:
+  - multiline reconstruction is limited to two leading header rows
+  - sparse reconstruction only activates when those rows actually contain blanks/placeholders
+  - later data-looking rows are not allowed to override an already reasonable top-of-sheet header candidate
+
+### 5.13 Explicit materialization outcomes
+
+- The collector now has an internal outcome model for one run instead of deciding `ready/error/permanently_failed/pending` ad hoc in every branch.
+- The current explicit outcomes are:
+  - `materialized_ready`
+  - `materialized_degraded`
+  - `parser_invalid`
+  - `terminal_non_tabular`
+  - `terminal_upstream`
+  - `retryable_upstream`
+  - `retryable_materialization`
+- `_finalize_cached_dataset()` now maps post-parse validation plus `layout_profile` / `header_quality` into one of those outcomes before persisting `cached_datasets`.
+- The write path also uses the same outcome model for broad exception classes:
+  - deterministic upstream/content failures still become terminal
+  - transient heavy download failures still reroute into `collector-heavy-retry`
+  - materialization-specific exceptions (schema mismatch / aborted DDL / type-race style failures) stay retryable without pretending to be generic upstream noise
+
+### 5.14 Clean schema-rewrite reset path
+
+- `_to_sql_safe()` still retries schema mismatches by dropping and rebuilding the table, but the reset now happens on a fresh transaction boundary.
+- The first failed write is rolled back, the `DROP TABLE IF EXISTS` happens through a clean `engine.begin()` block, and only then does the collector retry the replace-write.
+- Goal: stop turning one retryable schema/materialization problem into a second-order `InFailedSqlTransaction` on the reset path itself.
 
 ## 6. `cached_datasets` Lifecycle
 

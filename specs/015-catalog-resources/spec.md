@@ -38,6 +38,8 @@ This spec governs the schema, the deterministic naming (canonical_title + materi
 | `resource_kind` | VARCHAR(30) | `file | sheet | cuadro | zip_member | document_bundle | connector_endpoint` (CHECK-constrained) |
 | `materialization_status` | VARCHAR(40) | `pending | ready | live_api | non_tabular | materialization_corrupted | failed` (CHECK-constrained) |
 | `materialized_table_name` | VARCHAR(255) | Set by `physical_namer` |
+| `layout_profile` | VARCHAR(40) | Projection of collector structural classification (`simple_tabular`, `header_multiline`, `header_sparse`, `presentation_sheet`, `wide_csv`, ...) |
+| `header_quality` | VARCHAR(20) | Projection of collector header quality (`good`, `degraded`, `invalid`) |
 | `parser_version`, `normalization_version` | VARCHAR | For invalidation when parser changes |
 | `embedding` | vector(1024) | HNSW index, cosine |
 | `created_at`, `updated_at` | TIMESTAMPTZ | |
@@ -77,6 +79,8 @@ Both flags disabled by default in production; staging will run with `OPENARG_CAT
 - **FR-005b**: `openarg.catalog_backfill` MUST run under a singleton advisory lock. If another backfill is already in progress, the new invocation MUST exit as `status='skipped_already_running'` instead of racing a second full-table UPSERT wave.
 - **FR-006**: When a dataset has multiple `cached_datasets` rows (schema variants), the backfill MUST pick the most authoritative one (preferring `status='ready'`, then most recently updated) so each `resource_identity` resolves to a single deterministic row.
 - **FR-006b**: The backfill MUST not collapse terminal materialization states into `pending`. At minimum it MUST map `cached_datasets.status='permanently_failed'` to `catalog_resources.materialization_status='failed'`, and `zip_document_bundle` / `zip_no_parseable_file` terminal rows to `materialization_status='non_tabular'`.
+- **FR-006c**: The backfill MUST project collector structural metadata into the catalog when it exists. At minimum it MUST carry forward `layout_profile`, `header_quality`, `parser_version`, and `normalization_version` from the authoritative cached/materialization row instead of treating the catalog as title-only metadata.
+- **FR-006d**: `catalog_resources` MUST be able to distinguish logically `ready` resources with degraded headers from pristine ones without inventing a new materialization status. The current model keeps `materialization_status='ready'` and stores the distinction in `header_quality`.
 - **FR-007**: `OPENARG_CATALOG_ONLY=1` MUST bypass the legacy `table_catalog` query in the planner hints path. Other serving paths remain on the legacy lookup until the hybrid cutover work is completed.
 - **FR-008**: `scripts/staging_reset.py` MUST auto-dispatch the full rebuild chain after a destructive wipe: `seed_connector_endpoints`, `scrape_catalog` (when `--reset-datasets` is used), a first `catalog_backfill`, `bulk_collect_all`, `reconcile_cache_coverage`, and a final `catalog_backfill`. A reset that stops at scrape-only state is considered incomplete because `catalog_resources.materialization_status` would remain stale in `pending`.
 - **FR-009**: The `bulk_collect_all` phase in that rebuild chain MUST be convergence-driven: one reset-triggered dispatch MUST keep chaining follow-up passes until no eligible materialization work remains, or until the configured bounded depth guard is reached and logged.
@@ -90,6 +94,7 @@ Both flags disabled by default in production; staging will run with `OPENARG_CAT
 - **SC-004**: `staging_reset.py --dry-run` reports exactly the cache_* table count + the 5–6 base tables it would truncate. With `--i-understand-this-deletes-data`, executes them in <60 s on staging-sized data.
 - **SC-005**: After `staging_reset.py --i-understand-this-deletes-data --reset-datasets`, staging MUST eventually converge to a state where `catalog_resources.materialization_status='ready'` tracks post-reset `cached_datasets.status='ready'` without requiring a manual operator rerun of `catalog_backfill`.
 - **SC-006**: Operators MUST not need to manually re-trigger `bulk_collect_all` after a reset just because the first wave drained before all eligible datasets were materialized.
+- **SC-007**: After a full backfill on a collector that already emits phase-4 metadata, `catalog_resources.layout_profile` and `catalog_resources.header_quality` MUST be populated for materially cached resources instead of remaining null across the board.
 
 ## 7. Out of Scope
 

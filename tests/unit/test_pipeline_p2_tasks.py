@@ -17,6 +17,7 @@ from app.infrastructure.celery.tasks.collector_tasks import (
     _csv_chunk_size_for_columns,
     _detect_csv_params,
     _header_quality,
+    _infer_layout_profile,
     _is_placeholder_column_name,
     _is_transient_collect_error,
     _iter_json_record_map_values,
@@ -204,6 +205,76 @@ class TestCollectorP2:
             "Linea 3",
         ]
         assert len(promoted) == 2
+
+    def test_infer_layout_profile_prefers_multiline_headers(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                ["Poblacion", "Poblacion", "Vivienda", "Vivienda"],
+                ["Total", "Mujeres", "Casas", "Departamentos"],
+                [100, 52, 20, 14],
+                [120, 60, 22, 18],
+            ],
+            columns=["Unnamed: 0", "Unnamed: 1", "Unnamed: 2", "Unnamed: 3"],
+        )
+
+        candidate = _infer_layout_profile(df)
+
+        assert candidate.profile == "header_multiline"
+        assert candidate.rows_consumed == 2
+        assert candidate.columns == [
+            "Poblacion / Total",
+            "Poblacion / Mujeres",
+            "Vivienda / Casas",
+            "Vivienda / Departamentos",
+        ]
+
+    def test_infer_layout_profile_prefers_sparse_headers(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                ["Provincia", None, "Departamento", None],
+                ["Nombre", "Codigo", "Nombre", "Codigo"],
+                ["Buenos Aires", "06", "La Plata", "441"],
+            ],
+            columns=["Unnamed: 0", "Unnamed: 1", "Unnamed: 2", "Unnamed: 3"],
+        )
+
+        candidate = _infer_layout_profile(df)
+
+        assert candidate.profile == "header_sparse"
+        assert candidate.rows_consumed == 2
+        assert candidate.columns == [
+            "Provincia / Nombre",
+            "Provincia / Codigo",
+            "Departamento / Nombre",
+            "Departamento / Codigo",
+        ]
+
+    def test_sanitize_columns_records_layout_profile_and_header_quality(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            [
+                ["Poblacion", "Poblacion", "Vivienda", "Vivienda"],
+                ["Total", "Mujeres", "Casas", "Departamentos"],
+                [100, 52, 20, 14],
+            ],
+            columns=["Unnamed: 0", "Unnamed: 1", "Unnamed: 2", "Unnamed: 3"],
+        )
+
+        normalized = _sanitize_columns(df)
+
+        assert normalized.attrs["layout_profile"] == "header_multiline"
+        assert normalized.attrs["header_quality"] == "good"
+        assert list(normalized.columns) == [
+            "Poblacion / Total",
+            "Poblacion / Mujeres",
+            "Vivienda / Casas",
+            "Vivienda / Departamentos",
+        ]
 
     def test_header_quality_counts_placeholders_and_text(self):
         placeholder_count, alpha_count, nonempty_count = _header_quality(
