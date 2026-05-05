@@ -249,3 +249,583 @@ def portal_health(self, *, portals: Iterable[str] | None = None, timeout: float 
         summary["alive"],
     )
     return summary
+
+
+# ---------- backfill_error_categories (P0-B) ----------
+
+
+@celery_app.task(
+    name="openarg.backfill_error_categories",
+    bind=True,
+    soft_time_limit=300,
+    time_limit=420,
+)
+def backfill_error_categories(self, *, batch_size: int = 200) -> dict:
+    """Re-classify legacy `cached_datasets.error_category='unknown'` rows.
+
+    Walks rows in error/permanently_failed status whose category is still
+    'unknown' (legacy from before the runtime classifier landed) and re-runs
+    the same classifier function on the existing error_message. Idempotent —
+    re-run only updates rows whose classifier output changed.
+    """
+    from app.infrastructure.celery.tasks.collector_tasks import (
+        _classify_error_category,
+    )
+
+    engine = get_sync_engine()
+    select_sql = text(
+        """
+        SELECT id::text AS id, error_message
+        FROM cached_datasets
+        WHERE error_category = 'unknown'
+          AND status IN ('error', 'permanently_failed')
+        ORDER BY updated_at DESC NULLS LAST
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    update_sql = text(
+        """
+        UPDATE cached_datasets
+        SET error_category = :cat
+        WHERE id = CAST(:id AS uuid)
+          AND error_category = 'unknown'
+        """
+    )
+    offset = 0
+    seen = 0
+    updated = 0
+    by_category: dict[str, int] = {}
+    while True:
+        with engine.connect() as conn:
+            rows = conn.execute(select_sql, {"limit": batch_size, "offset": offset}).fetchall()
+        if not rows:
+            break
+        seen += len(rows)
+        for r in rows:
+            cat = _classify_error_category(r.error_message)
+            if cat == "unknown":
+                continue
+            with engine.begin() as conn:
+                conn.execute(update_sql, {"cat": cat, "id": r.id})
+            updated += 1
+            by_category[cat] = by_category.get(cat, 0) + 1
+        offset += batch_size
+    summary = {"seen": seen, "updated": updated, "by_category": by_category}
+    logger.info("backfill_error_categories: %s", summary)
+    return summary
+
+
+# ---------- force_recollect_separator_mismatches (P0-A) ----------
+
+
+@celery_app.task(
+    name="openarg.force_recollect_separator_mismatches",
+    bind=True,
+    soft_time_limit=120,
+    time_limit=180,
+)
+def force_recollect_separator_mismatches(self, *, dry_run: bool = False) -> dict:
+    """Mark as `pending` the datasets that retrospective sweep flagged as
+    separator_mismatch but are still status='ready' with rotten data.
+
+    The retrospective sweep registers the finding but does not flip the
+    status (auto-flip is intentionally off-by-default). This task closes
+    the loop so the collector picks them up and the post-parse detector
+    aborts them as `parser_invalid` on next run, keeping the bad data out
+    of `ready`.
+    """
+    engine = get_sync_engine()
+    select_sql = text(
+        """
+        SELECT cd.id::text AS cached_id,
+               cd.dataset_id::text AS dataset_id,
+               cd.table_name
+        FROM cached_datasets cd
+        WHERE cd.status = 'ready'
+          AND EXISTS (
+              SELECT 1 FROM ingestion_findings f
+              WHERE f.resource_id = cd.dataset_id::text
+                AND f.detector_name = 'separator_mismatch'
+                AND f.severity = 'critical'
+                AND f.resolved_at IS NULL
+          )
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(select_sql).fetchall()
+    candidates = [
+        {"cached_id": r.cached_id, "dataset_id": r.dataset_id, "table_name": r.table_name}
+        for r in rows
+    ]
+    if dry_run:
+        logger.info(
+            "force_recollect_separator_mismatches dry-run: %d candidates", len(candidates)
+        )
+        return {"candidates": len(candidates), "samples": candidates[:5], "dry_run": True}
+
+    if not candidates:
+        return {"candidates": 0, "marked_pending": 0}
+
+    update_sql = text(
+        """
+        UPDATE cached_datasets
+        SET status = 'pending',
+            retry_count = 0,
+            error_message = 'force_recollect:separator_mismatch',
+            error_category = 'parse_format',
+            updated_at = NOW()
+        WHERE id = CAST(:id AS uuid)
+        """
+    )
+    marked = 0
+    with engine.begin() as conn:
+        for c in candidates:
+            conn.execute(update_sql, {"id": c["cached_id"]})
+            marked += 1
+    logger.info(
+        "force_recollect_separator_mismatches marked %d datasets pending", marked
+    )
+    return {"candidates": len(candidates), "marked_pending": marked}
+
+
+# ---------- cleanup_orphan_cache_tables (P1-F) ----------
+
+
+@celery_app.task(
+    name="openarg.cleanup_orphan_cache_tables",
+    bind=True,
+    soft_time_limit=900,
+    time_limit=1080,
+)
+def cleanup_orphan_cache_tables(self, *, dry_run: bool = True, max_drops: int = 100) -> dict:
+    """Drop collector-staged cache_* tables that have no matching cached_datasets row.
+
+    Only deletes tables whose name matches the collector physical-namer
+    suffix pattern (`_r<hex>` / `_s<hex>` / `_g<hex>`). Connector-managed
+    tables (BAC, BCRA, INDEC, presupuesto, etc.) follow a different
+    naming convention and never go through `cached_datasets`, so they
+    are intentionally outside this task's scope. The audit table is
+    excluded by name.
+
+    Each drop is recorded into `cache_drop_audit`. Defaults to
+    `dry_run=True` so the first scheduled run only counts.
+    """
+    from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
+
+    engine = get_sync_engine()
+    select_sql = text(
+        r"""
+        SELECT t.tablename
+        FROM pg_tables t
+        WHERE t.schemaname = 'public'
+          AND t.tablename LIKE 'cache_%'
+          AND t.tablename <> 'cache_drop_audit'
+          AND (
+              t.tablename ~ '_r[0-9a-f]{8,12}(_s[0-9a-f]{6,10})*$'
+              OR t.tablename ~ '_s[0-9a-f]{6,10}(_s[0-9a-f]{6,10})*$'
+              OR t.tablename ~ '_g[0-9a-f]{6,10}$'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM cached_datasets cd WHERE cd.table_name = t.tablename
+          )
+        ORDER BY t.tablename
+        LIMIT :limit
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(select_sql, {"limit": max_drops + 1}).fetchall()
+    candidates = [r.tablename for r in rows]
+    truncated = len(candidates) > max_drops
+    candidates = candidates[:max_drops]
+    if dry_run:
+        logger.info(
+            "cleanup_orphan_cache_tables dry-run: %d orphans found (truncated=%s)",
+            len(candidates),
+            truncated,
+        )
+        return {
+            "found": len(candidates),
+            "samples": candidates[:10],
+            "dry_run": True,
+            "truncated_to_max_drops": truncated,
+        }
+
+    dropped = 0
+    failed = 0
+    for tn in candidates:
+        try:
+            _record_cache_drop(
+                engine,
+                table_name=tn,
+                reason="orphan_cleanup",
+                actor="ops_fixes.cleanup_orphan_cache_tables",
+            )
+            with engine.begin() as conn:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{tn}" CASCADE'))  # noqa: S608
+            dropped += 1
+        except Exception:
+            logger.exception("Failed to drop orphan table %s", tn)
+            failed += 1
+    summary = {
+        "candidates": len(candidates),
+        "dropped": dropped,
+        "failed": failed,
+        "truncated_to_max_drops": truncated,
+    }
+    logger.info("cleanup_orphan_cache_tables: %s", summary)
+    return summary
+
+
+# ---------- retain_raw_versions (MASTERPLAN Fase 1) ----------
+
+
+@celery_app.task(
+    name="openarg.retain_raw_versions",
+    bind=True,
+    soft_time_limit=600,
+    time_limit=720,
+)
+def retain_raw_versions(
+    self, *, keep_last: int | None = None, dry_run: bool = False
+) -> dict:
+    """Drop superseded raw-schema tables beyond the per-resource retention window.
+
+    For each `resource_identity` in `raw_table_versions`, keep the latest
+    `keep_last` versions; for older versions:
+
+    1. `DROP TABLE raw."<table_name>"` (recorded via `_record_cache_drop` for
+       audit consistency).
+    2. `DELETE FROM raw_table_versions` for that row.
+
+    The default for `keep_last` comes from the env var
+    `OPENARG_RAW_RETENTION_KEEP_LAST` (fallback 3). Lowering this from 3 to 2
+    typically frees ~30% of the raw schema disk usage at the cost of one
+    less rollback step per resource.
+
+    Idempotent: re-running with the same args is a no-op once the trim has
+    been applied. `dry_run=True` reports candidates without touching anything.
+    """
+    from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
+
+    if keep_last is None:
+        try:
+            keep_last = int(os.getenv("OPENARG_RAW_RETENTION_KEEP_LAST", "3"))
+        except (TypeError, ValueError):
+            keep_last = 3
+    if keep_last < 1:
+        raise ValueError("keep_last must be >= 1")
+
+    engine = get_sync_engine()
+    select_sql = text(
+        """
+        WITH ranked AS (
+            SELECT
+                resource_identity,
+                version,
+                schema_name,
+                table_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY resource_identity ORDER BY version DESC
+                ) AS rn
+            FROM raw_table_versions
+        )
+        SELECT resource_identity, version, schema_name, table_name
+        FROM ranked
+        WHERE rn > :keep
+        ORDER BY resource_identity, version
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(select_sql, {"keep": keep_last}).fetchall()
+    candidates = [
+        {
+            "resource_identity": r.resource_identity,
+            "version": int(r.version),
+            "schema_name": r.schema_name,
+            "table_name": r.table_name,
+        }
+        for r in rows
+    ]
+    if dry_run:
+        logger.info(
+            "retain_raw_versions dry-run: %d candidates (keep_last=%d)",
+            len(candidates),
+            keep_last,
+        )
+        return {
+            "found": len(candidates),
+            "samples": candidates[:10],
+            "dry_run": True,
+            "keep_last": keep_last,
+        }
+
+    dropped = 0
+    failed = 0
+    for c in candidates:
+        qualified_name = f"{c['schema_name']}.{c['table_name']}"
+        try:
+            _record_cache_drop(
+                engine,
+                table_name=qualified_name,
+                reason="retain_raw_versions",
+                actor="ops_fixes.retain_raw_versions",
+                extra={
+                    "resource_identity": c["resource_identity"],
+                    "version": c["version"],
+                    "keep_last": keep_last,
+                },
+            )
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE'
+                    )
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM raw_table_versions "
+                        "WHERE resource_identity = :rid AND version = :v"
+                    ),
+                    {"rid": c["resource_identity"], "v": c["version"]},
+                )
+            dropped += 1
+        except Exception:
+            logger.exception("Failed to drop raw version %s", qualified_name)
+            failed += 1
+    summary = {
+        "candidates": len(candidates),
+        "dropped": dropped,
+        "failed": failed,
+        "keep_last": keep_last,
+    }
+    logger.info("retain_raw_versions: %s", summary)
+    return summary
+
+
+# ---------- invariant counter cleanup (drift sweep) ----------
+
+
+@celery_app.task(
+    name="openarg.cleanup_invariants",
+    bind=True,
+    soft_time_limit=120,
+    time_limit=180,
+)
+def cleanup_invariants(self) -> dict[str, int]:
+    """Periodic clamp/cleanup for the three invariant counters that drift.
+
+    Specifically:
+      1. `cached_datasets.error_category = 'unknown'` for `permanently_failed`
+         rows whose `error_message` matches a known classifier pattern that
+         the live classifier missed (catches new error shapes between code
+         deploys).
+      2. `cached_datasets.retry_count > 5` (violates the trigger-enforced
+         invariant; clamp back to 5).
+      3. Orphan tables in `raw.*` without entry in `raw_table_versions`
+         (registers them under `backfill_postauto::<table>` so the Serving
+         Port can resolve them — better than dropping data).
+
+    Returns a dict with counts of rows modified per category.
+    """
+    engine = get_sync_engine()
+    fixed_unknown = 0
+    fixed_retry = 0
+    fixed_orphans = 0
+
+    with engine.begin() as conn:
+        # Cover BOTH `error` (retry-able) and `permanently_failed` (terminal)
+        # so transient `error` rows have a meaningful category in dashboards
+        # before they either succeed (re-classification → category irrelevant)
+        # or are promoted to `permanently_failed` (where the classifier in
+        # `_apply_cached_outcome` will re-evaluate anyway). For `error` rows
+        # that don't match a pattern, we leave `unknown` instead of forcing
+        # `parse_format` — `unknown` on retry-able status is fine; only
+        # terminal `permanently_failed` should be guaranteed-classified.
+        result = conn.execute(
+            text(
+                """
+                UPDATE cached_datasets
+                SET error_category = CASE
+                    WHEN error_message ILIKE '%redirect%' THEN 'download_http_error'
+                    WHEN error_message ILIKE '%zip_entry%' THEN 'policy_too_large'
+                    WHEN error_message ILIKE '%stuck%' OR error_message ILIKE '%queue purged%' OR error_message ILIKE '%recovered%' THEN 'orchestration_recovery_loop'
+                    WHEN error_message ILIKE '%duplicatecolumn%' OR error_message ILIKE '%specified more than once%' THEN 'parse_schema_mismatch'
+                    WHEN error_message ILIKE '%unsupported driver%' OR error_message ILIKE '%bad_zip%' THEN 'parse_format'
+                    WHEN status = 'permanently_failed' THEN 'parse_format'
+                    ELSE error_category
+                END
+                WHERE error_category = 'unknown'
+                  AND status IN ('error', 'permanently_failed')
+                  AND error_message IS NOT NULL
+                """
+            )
+        )
+        fixed_unknown = result.rowcount or 0
+
+        result = conn.execute(
+            text(
+                "UPDATE cached_datasets SET retry_count = 5 "
+                "WHERE retry_count > 5"
+            )
+        )
+        fixed_retry = result.rowcount or 0
+
+        # Two-pass orphan registration. First pass tries to recover the
+        # canonical `<portal>::<source_id>` identity by joining through
+        # `cached_datasets` → `datasets`: if a dataset row owns this
+        # table, register under its natural identity so future versions
+        # of the same dataset slot in correctly (and `retain_raw_versions`
+        # can prune the lineage). Second pass falls back to
+        # `backfill_postauto::<table_name>` for tables whose owning
+        # dataset can't be resolved (legacy artifacts of the wipe).
+        result_canonical = conn.execute(
+            text(
+                """
+                INSERT INTO raw_table_versions (
+                    resource_identity, version, schema_name, table_name, row_count
+                )
+                SELECT
+                    d.portal || '::' || d.source_id,
+                    COALESCE(
+                        NULLIF(regexp_replace(t.table_name, '^.*__v', ''), '')::int,
+                        1
+                    ),
+                    'raw',
+                    t.table_name,
+                    cd.row_count
+                FROM information_schema.tables t
+                JOIN cached_datasets cd ON cd.table_name = t.table_name
+                JOIN datasets d ON d.id = cd.dataset_id
+                LEFT JOIN raw_table_versions rtv
+                    ON rtv.schema_name = 'raw'
+                    AND rtv.table_name = t.table_name
+                WHERE t.table_schema = 'raw'
+                  AND rtv.table_name IS NULL
+                ON CONFLICT (resource_identity, version) DO UPDATE SET
+                    schema_name = EXCLUDED.schema_name,
+                    table_name = EXCLUDED.table_name,
+                    row_count = COALESCE(EXCLUDED.row_count, raw_table_versions.row_count)
+                """
+            )
+        )
+        canonical_registered = result_canonical.rowcount or 0
+
+        result_fallback = conn.execute(
+            text(
+                """
+                INSERT INTO raw_table_versions (
+                    resource_identity, version, schema_name, table_name, row_count
+                )
+                SELECT
+                    'backfill_postauto::' || t.table_name,
+                    1,
+                    'raw',
+                    t.table_name,
+                    NULL
+                FROM information_schema.tables t
+                LEFT JOIN raw_table_versions rtv
+                    ON rtv.schema_name = 'raw'
+                    AND rtv.table_name = t.table_name
+                WHERE t.table_schema = 'raw'
+                  AND rtv.table_name IS NULL
+                ON CONFLICT (resource_identity, version) DO NOTHING
+                """
+            )
+        )
+        fixed_orphans = canonical_registered + (result_fallback.rowcount or 0)
+
+        # 4. Sync `datasets.is_cached` with the actual cached_datasets state.
+        # Drift here is rare but happens when a sweep marks a row `error`
+        # without flipping is_cached back to false (or vice versa).
+        result_drift = conn.execute(
+            text(
+                """
+                UPDATE datasets d
+                SET is_cached = false
+                WHERE d.is_cached = true
+                  AND NOT EXISTS (
+                      SELECT 1 FROM cached_datasets cd
+                      WHERE cd.dataset_id = d.id AND cd.status = 'ready'
+                  )
+                """
+            )
+        )
+        fixed_is_cached_drift = result_drift.rowcount or 0
+
+        # 5. mart_definitions.last_row_count drift.
+        # When a build_mart races a refresh_mart, or when a build path falls
+        # back to `last_row_count=0` after a partial failure, the metadata
+        # claims "empty mart" while the matview has rows. This hides a real
+        # mart from the discovery surface (`COALESCE(last_row_count,0) > 0`
+        # filter in /data/tables). Detect by joining mart_definitions with
+        # pg_class.reltuples and refresh metadata when they disagree.
+        result_mart_drift = conn.execute(
+            text(
+                """
+                UPDATE mart_definitions md
+                SET last_row_count = GREATEST(c.reltuples::bigint, 0),
+                    updated_at = NOW()
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = md.mart_schema
+                  AND c.relname = md.mart_view_name
+                  AND c.relkind = 'm'
+                  AND COALESCE(md.last_row_count, 0) = 0
+                  AND c.reltuples > 0
+                """
+            )
+        )
+        fixed_mart_row_count = result_mart_drift.rowcount or 0
+
+        # 6. Drop empty orphan raw tables (0 rows, no rtv entry, no
+        # cached_datasets owner). These are leftovers from CREATE TABLE +
+        # INSERT raw_table_versions transactions that aborted between the
+        # two statements. Keep orphans WITH data — those go through the
+        # canonical/fallback registration path above so the data survives.
+        empty_orphans_rows = conn.execute(
+            text(
+                """
+                SELECT t.table_name
+                FROM information_schema.tables t
+                LEFT JOIN raw_table_versions rtv
+                    ON rtv.schema_name = 'raw'
+                    AND rtv.table_name = t.table_name
+                LEFT JOIN cached_datasets cd ON cd.table_name = t.table_name
+                LEFT JOIN pg_class c
+                    ON c.relname = t.table_name
+                    AND c.relnamespace = (
+                        SELECT oid FROM pg_namespace WHERE nspname = 'raw'
+                    )
+                WHERE t.table_schema = 'raw'
+                  AND rtv.table_name IS NULL
+                  AND cd.table_name IS NULL
+                  AND COALESCE(c.reltuples, 0) = 0
+                """
+            )
+        ).fetchall()
+        dropped_empty_orphans = 0
+        for row in empty_orphans_rows:
+            try:
+                conn.execute(text(f'DROP TABLE IF EXISTS raw."{row.table_name}"'))
+                dropped_empty_orphans += 1
+            except Exception:
+                logger.warning(
+                    "cleanup_invariants: could not drop empty orphan raw.%s",
+                    row.table_name,
+                    exc_info=True,
+                )
+
+    summary = {
+        "fixed_unknown_category": fixed_unknown,
+        "clamped_retry_count": fixed_retry,
+        "registered_orphan_tables": fixed_orphans,
+        "canonical_orphans_registered": canonical_registered,
+        "fixed_is_cached_drift": fixed_is_cached_drift,
+        "fixed_mart_row_count": fixed_mart_row_count,
+        "dropped_empty_orphans": dropped_empty_orphans,
+    }
+    if any(summary.values()):
+        logger.warning("cleanup_invariants: %s", summary)
+    else:
+        logger.info("cleanup_invariants: nothing to fix")
+    return summary

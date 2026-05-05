@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import time
 from collections import Counter
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -29,6 +30,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from app.application.catalog.physical_namer import RawPhysicalName, RawPhysicalNamer
 from app.application.expander import MultiFileExpander
 from app.application.validation.collector_hooks import (
     is_critical as _ws0_is_critical,
@@ -163,6 +165,12 @@ _COLLECT_DISPATCH_BATCH_SIZE = int(os.getenv("OPENARG_COLLECT_DISPATCH_BATCH_SIZ
 _COLLECT_DISPATCH_STEP_SECONDS = int(os.getenv("OPENARG_COLLECT_DISPATCH_STEP_SECONDS", "30"))
 _COLLECT_MAX_INFLIGHT = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT", "100"))
 _COLLECT_MAX_INFLIGHT_PER_PORTAL = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT_PER_PORTAL", "10"))
+# When the collector queue's inflight count crosses this threshold, route
+# part of the new dispatch wave to the heavy worker so the spare CPU on
+# `worker_collector_heavy` (~0.2% baseline) absorbs the overflow.
+_COLLECT_HEAVY_OVERFLOW_THRESHOLD = int(
+    os.getenv("OPENARG_COLLECT_HEAVY_OVERFLOW_THRESHOLD", "70")
+)
 _BULK_COLLECT_RETRY_DELAY_SECONDS = int(os.getenv("OPENARG_BULK_COLLECT_RETRY_DELAY_SECONDS", "300"))
 _BULK_COLLECT_MAX_CHAIN_DEPTH = int(os.getenv("OPENARG_BULK_COLLECT_MAX_CHAIN_DEPTH", "48"))
 _BULK_COLLECT_SOFT_TIME_LIMIT = int(os.getenv("OPENARG_BULK_COLLECT_SOFT_TIME_LIMIT", "600"))
@@ -175,6 +183,11 @@ _HEAVY_WIDTH_COLUMN_THRESHOLD = int(os.getenv("OPENARG_HEAVY_WIDTH_COLUMN_THRESH
 _HEAVY_METADATA_PORTAL_FORMATS: dict[str, frozenset[str]] = {
     "datos_gob_ar": frozenset({"zip"}),
     "diputados": frozenset({"json"}),
+    # Vaca Muerta + producción de pozos: el dataset enero-actualidad
+    # llega al cap de 500K rows y tarda 100-180s por archivo,
+    # monopolizando 1 fork del worker normal. Routing a heavy libera
+    # los slots normales para datasets más rápidos.
+    "energia": frozenset({"csv"}),
 }
 _HEAVY_METADATA_PORTAL_KEYWORDS: dict[str, frozenset[str]] = {
     "datos_gob_ar": frozenset(
@@ -186,6 +199,17 @@ _HEAVY_METADATA_PORTAL_KEYWORDS: dict[str, frozenset[str]] = {
             "alimentos",
             "suplementos",
             "bebidas",
+        }
+    ),
+    "energia": frozenset(
+        {
+            # Slugs/títulos típicos del feed de Secretaría de Energía
+            # que disparan archivos > 100MB.
+            "produccion de petroleo",
+            "produccion de gas",
+            "produccion-de-petroleo",
+            "produccion-de-gas",
+            "pozo",
         }
     ),
     "caba": frozenset(
@@ -328,9 +352,17 @@ def _collect_dataset_signature(
     portal: str | None = None,
     fmt: str | None = None,
     title: str | None = None,
+    heavy_overflow: bool = False,
 ):
     if _should_route_to_heavy_from_metadata(portal=portal, fmt=fmt, title=title):
         return collect_dataset.s(dataset_id, force_heavy=True).set(queue=_HEAVY_COLLECT_QUEUE)
+    if heavy_overflow:
+        # Normal collector queue is saturated → drain part of the wave to
+        # the heavy worker. The heavy worker is otherwise idle most of the
+        # time (rare datasets with metadata signaling heavy). `force_heavy`
+        # is False so the task uses the normal pandas/limit configs; the
+        # only difference is which worker picks it up.
+        return collect_dataset.s(dataset_id).set(queue=_HEAVY_COLLECT_QUEUE)
     return collect_dataset.s(dataset_id)
 
 
@@ -472,6 +504,7 @@ def _recycle_stuck_downloads(
                 UPDATE cached_datasets
                 SET status = 'permanently_failed',
                     error_message = 'Exhausted retries while stuck in downloading',
+                    error_category = 'orchestration_recovery_loop',
                     updated_at = NOW()
                 WHERE status = 'downloading'
                   AND updated_at < NOW() - (:age_minutes * INTERVAL '1 minute')
@@ -607,8 +640,48 @@ def _reconcile_cache_coverage(
     orphaned_ready = 0
     fixed_cached_flags = 0
     reindexed_missing_chunks = 0
+    revived_missing_table = 0
 
     with engine.begin() as conn:
+        # Reverse of the orphaned_ready path below: rows that were marked
+        # `error` with "Table missing" by a *previous* sweep but whose
+        # physical table is back. This happens after schema-recovery
+        # operations (alembic downgrade/upgrade, manual restore) where the
+        # raw schema is briefly absent — the sweep at that moment marks
+        # the rows as missing, then the schema returns but the rows stay
+        # stuck in `error`. Without this branch, every wipe-and-rebuild
+        # leaves a permanent debris of false-missing rows.
+        revived = conn.execute(
+            text(
+                """
+                UPDATE cached_datasets cd
+                SET status = 'ready',
+                    retry_count = 0,
+                    error_message = NULL,
+                    error_category = 'unknown',
+                    updated_at = NOW()
+                WHERE cd.status = 'error'
+                  AND cd.error_message = 'Table missing: marked for re-download'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM information_schema.tables t
+                      WHERE t.table_schema IN ('public', 'raw', 'staging', 'mart')
+                        AND t.table_name = cd.table_name
+                  )
+                RETURNING dataset_id
+                """
+            )
+        ).fetchall()
+        revived_missing_table = len(revived)
+        for row in revived:
+            conn.execute(
+                text(
+                    "UPDATE datasets SET is_cached = true "
+                    "WHERE id = CAST(:did AS uuid) AND is_cached = false"
+                ),
+                {"did": str(row.dataset_id)},
+            )
+
         orphaned_rows = conn.execute(
             text(
                 """
@@ -617,9 +690,12 @@ def _reconcile_cache_coverage(
                 WHERE cd.status = 'ready'
                   AND cd.table_name IS NOT NULL
                   AND NOT EXISTS (
+                      -- The table can live in `public` (legacy `cache_*`),
+                      -- `raw` (Phase 1 medallion), `staging` (Phase 2), or
+                      -- `mart` (Phase 3). Any of those is "exists".
                       SELECT 1
                       FROM information_schema.tables t
-                      WHERE t.table_schema = 'public'
+                      WHERE t.table_schema IN ('public', 'raw', 'staging', 'mart')
                         AND t.table_name = cd.table_name
                   )
                 """
@@ -705,6 +781,7 @@ def _reconcile_cache_coverage(
         "orphaned_ready": orphaned_ready,
         "fixed_cached_flags": fixed_cached_flags,
         "reindexed_missing_chunks": reindexed_missing_chunks,
+        "revived_missing_table": revived_missing_table,
     }
 
 
@@ -797,6 +874,13 @@ def _consolidated_table_name(base_table_name: str, columns) -> str:
 
 def _create_alias_view(engine, alias_table_name: str, source_table_name: str) -> None:
     """Create a stable alias view so duplicate-format datasets remain queryable."""
+    _record_cache_drop(
+        engine,
+        table_name=alias_table_name,
+        reason="alias_view_replace",
+        actor="collector._create_alias_view",
+        extra={"source_table_name": source_table_name},
+    )
     with engine.begin() as conn:
         conn.execute(text(f'DROP VIEW IF EXISTS "{alias_table_name}" CASCADE'))  # noqa: S608
         conn.execute(text(f'DROP TABLE IF EXISTS "{alias_table_name}" CASCADE'))  # noqa: S608
@@ -866,6 +950,27 @@ def _materialize_format_duplicate_aliases(
 
         _create_alias_view(engine, alias_table, source_table)
 
+        # If the winner row was inserted with row_count=0 (race window where
+        # the alias was created before the winner's count was finalized),
+        # fall back to COUNT(*) on the source table so the alias reflects
+        # the real data volume — otherwise the catalog reports a "ready"
+        # alias with 0 rows, which the analyst skips.
+        winner_rows = source_row.row_count if source_row else None
+        if not winner_rows:
+            try:
+                with engine.connect() as conn:
+                    cnt = conn.execute(
+                        text(f'SELECT COUNT(*) FROM "{source_table}"')  # noqa: S608
+                    ).scalar()
+                    conn.rollback()
+                winner_rows = int(cnt) if cnt is not None else None
+            except Exception:
+                logger.debug(
+                    "Could not COUNT source table %s for alias row_count fallback",
+                    source_table,
+                    exc_info=True,
+                )
+
         with engine.begin() as conn:
             conn.execute(
                 text(
@@ -888,7 +993,7 @@ def _materialize_format_duplicate_aliases(
                 {
                     "did": resource.id,
                     "tn": alias_table,
-                    "rows": source_row.row_count if source_row else None,
+                    "rows": winner_rows,
                     "cols": source_row.columns_json if source_row else None,
                     "size": source_row.size_bytes if source_row else None,
                     "s3": source_row.s3_key if source_row else None,
@@ -902,7 +1007,7 @@ def _materialize_format_duplicate_aliases(
                 ),
                 {
                     "did": resource.id,
-                    "rows": source_row.row_count if source_row else None,
+                    "rows": winner_rows,
                 },
             )
         created += 1
@@ -1062,8 +1167,21 @@ def _read_shapefile_from_zip(zip_path: str) -> pd.DataFrame | None:
             return None
         with fiona.open(f"zip://{zip_path}", layer=layers[0]) as src:
             return _features_to_df(src)
-    except Exception:
-        logger.warning("Direct zip shapefile read failed for %s", zip_path, exc_info=True)
+    except Exception as exc:
+        # Corrupt-zip / unsupported-format fails are logged at the outcome
+        # layer (`bad_zip_file`); a stack trace here just adds noise.
+        msg = str(exc)
+        is_known = (
+            "not recognized as being in a supported file format" in msg
+            or "Failed to open dataset" in msg
+            or "BadZipFile" in type(exc).__name__
+        )
+        logger.warning(
+            "Direct zip shapefile read failed for %s: %s",
+            zip_path,
+            msg if is_known else "see traceback",
+            exc_info=not is_known,
+        )
 
     try:
         with zipfile.ZipFile(zip_path) as zf:
@@ -1117,6 +1235,15 @@ def _read_vector_file_with_fiona(path: str) -> pd.DataFrame | None:
         logger.warning("fiona not installed — cannot parse vector file %s", path)
         return None
 
+    # Enable KML/LIBKML drivers if the underlying GDAL build supports them.
+    # Best-effort: if the driver isn't compiled in, the open() will still
+    # raise DriverError and we fall through to the bottom of the function.
+    for driver in ("KML", "LIBKML"):
+        try:
+            fiona.supported_drivers[driver] = "rw"
+        except Exception:
+            pass
+
     features = []
     try:
         with fiona.open(path) as src:
@@ -1126,8 +1253,17 @@ def _read_vector_file_with_fiona(path: str) -> pd.DataFrame | None:
                 geom = dict(feat.get("geometry", {})) if feat.get("geometry") else {}
                 props = dict(feat.get("properties", {})) if feat.get("properties") else {}
                 features.append({"type": "Feature", "geometry": geom, "properties": props})
-    except Exception:
-        logger.warning("Vector file read failed for %s", path, exc_info=True)
+    except Exception as exc:
+        msg = str(exc)
+        # `unsupported driver: 'KML'` means the GDAL build lacks KML support;
+        # the dataset is then routed to `policy_non_tabular` upstream.
+        is_known_driver = "unsupported driver" in msg
+        logger.warning(
+            "Vector file read failed for %s: %s",
+            path,
+            msg if is_known_driver else "see traceback",
+            exc_info=not is_known_driver,
+        )
         return None
 
     if not features:
@@ -1785,6 +1921,8 @@ def _csv_load_inner(
     max_rows: int = 0,
     source_dataset_id: str | None = None,
     force_append: bool = False,
+    *,
+    write_schema: str | None = None,
 ) -> tuple[int, list[str], bool]:
     """Inner CSV loading loop.
 
@@ -1792,6 +1930,8 @@ def _csv_load_inner(
     When *max_rows* > 0 the loader stops after writing that many rows.
     When *source_dataset_id* is provided, adds ``_source_dataset_id`` column.
     When *force_append* is True, all chunks use ``if_exists='append'``.
+    `write_schema` selects which Postgres schema to materialize into; when
+    None the legacy `public` default applies.
     """
     total_rows = 0
     columns: list[str] = []
@@ -1817,7 +1957,9 @@ def _csv_load_inner(
             mode = "append"
         else:
             mode = "replace" if is_first else "append"
-        _to_sql_safe(chunk_df, table_name, engine, if_exists=mode, index=False)
+        _to_sql_safe(
+            chunk_df, table_name, engine, schema=write_schema, if_exists=mode, index=False
+        )
         total_rows += len(chunk_df)
         if is_first:
             columns = list(chunk_df.columns)
@@ -1842,6 +1984,12 @@ def _csv_load_inner(
 
 def _drop_table_if_exists(engine, table_name: str):
     """Explicitly DROP a cache table if it exists."""
+    _record_cache_drop(
+        engine,
+        table_name=table_name,
+        reason="schema_refresh",
+        actor="collector._drop_table_if_exists",
+    )
     with engine.begin() as conn:
         conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))  # noqa: S608
     logger.info("Dropped table %s for schema refresh", table_name)
@@ -2258,7 +2406,7 @@ def _compact_wide_dataframe(df: pd.DataFrame, max_columns: int = _MAX_SQL_COLUMN
 
 
 def _detect_schema_drift(
-    engine, table_name: str, new_df: pd.DataFrame
+    engine, table_name: str, new_df: pd.DataFrame, *, schema: str | None = None
 ) -> dict[str, list[str]] | None:
     """Compare the existing cache table schema to the incoming DataFrame.
 
@@ -2269,16 +2417,19 @@ def _detect_schema_drift(
     because downstream SQL sandbox queries and NL2SQL prompts assume the
     schema is stable. Read-only, non-blocking: if the inspection itself
     fails, we return None and let the write proceed.
+
+    `schema` selects which Postgres schema to inspect; default `public`.
     """
+    target_schema = schema or "public"
     try:
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
                     "SELECT column_name, data_type "
                     "FROM information_schema.columns "
-                    "WHERE table_schema = 'public' AND table_name = :tn"
+                    "WHERE table_schema = :sch AND table_name = :tn"
                 ),
-                {"tn": table_name},
+                {"sch": target_schema, "tn": table_name},
             ).fetchall()
             conn.rollback()
     except Exception:
@@ -2314,7 +2465,7 @@ def _detect_schema_drift(
     return {"added": added, "removed": removed, "type_changed": type_changed}
 
 
-def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
+def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | None = None, **kwargs):
     """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs.
 
     Before the write, inspect the existing table schema (if any) for
@@ -2324,14 +2475,22 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
     may still break on the new schema, but at least the drift is visible
     in logs and metrics instead of surfacing as a mysterious "column does
     not exist" error hours later.
+
+    `schema` selects the target Postgres schema. Explicit `schema=` always
+    wins; when None, falls back to the `_current_write_schema` ContextVar
+    (set by `collect_dataset` for the duration of the task). When that is
+    also None, the legacy `public` default applies.
     """
+    if schema is None:
+        schema = _current_write_schema.get()
     df = _sanitize_columns(df)
 
     if kwargs.get("if_exists") == "replace":
-        drift = _detect_schema_drift(engine, table_name, df)
+        drift = _detect_schema_drift(engine, table_name, df, schema=schema)
         if drift is not None:
             logger.warning(
-                "schema_drift_detected table=%s added=%s removed=%s type_changed=%s",
+                "schema_drift_detected schema=%s table=%s added=%s removed=%s type_changed=%s",
+                schema or "public",
                 table_name,
                 drift["added"],
                 drift["removed"],
@@ -2341,21 +2500,25 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
                 from app.infrastructure.monitoring.metrics import MetricsCollector
 
                 MetricsCollector().record_connector_call(
-                    f"schema_drift:{table_name}",
+                    f"schema_drift:{schema or 'public'}.{table_name}",
                     latency_ms=0,
                     error=True,
                 )
             except Exception:
                 logger.debug("Could not record schema_drift metric", exc_info=True)
 
-    table_lock_key = _lock_key("materialize_table", table_name)
+    lock_namespace = f"materialize_table:{schema or 'public'}"
+    table_lock_key = _lock_key(lock_namespace, table_name)
     with engine.connect() as write_conn:
         write_conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": table_lock_key})
         write_conn.commit()
         try:
             tx = write_conn.begin()
             try:
-                df.to_sql(table_name, write_conn, **kwargs)
+                if schema is not None:
+                    df.to_sql(table_name, write_conn, schema=schema, **kwargs)
+                else:
+                    df.to_sql(table_name, write_conn, **kwargs)
             except Exception as exc:
                 exc_str = str(exc).lower()
                 schema_keywords = (
@@ -2375,16 +2538,51 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, **kwargs):
                     )
                     if tx.is_active:
                         tx.rollback()
+                    drop_qualified = (
+                        f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
+                    )
+                    _record_cache_drop(
+                        engine,
+                        table_name=f"{schema}.{table_name}" if schema else table_name,
+                        reason="schema_mismatch_recreate",
+                        actor="collector._to_sql_safe",
+                        extra={"exc": str(exc)[:300]},
+                    )
                     with engine.begin() as reset_conn:
-                        reset_conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))  # noqa: S608
+                        reset_conn.execute(text(f'DROP TABLE IF EXISTS {drop_qualified} CASCADE'))  # noqa: S608
                     retry_kwargs = dict(kwargs)
                     retry_kwargs["if_exists"] = "replace"
+                    # Force a hard dedup before the retry: `_sanitize_columns`
+                    # already runs `_make_unique_columns`, but post-sanitize
+                    # transforms (`_compact_wide_dataframe`, structured-cell
+                    # serialization, raw-metadata injection) can re-introduce
+                    # collisions when an upstream feed has near-identical
+                    # column labels. `loc[:, ~duplicated()]` keeps the first
+                    # occurrence of each name so CREATE TABLE never sees
+                    # `specified more than once`.
+                    df = df.loc[:, ~df.columns.duplicated()]
                     retry_tx = write_conn.begin()
                     try:
-                        df.to_sql(table_name, write_conn, **retry_kwargs)
-                    except Exception:
+                        # Forward `schema` so the retry creates the table in
+                        # the same medallion layer the caller asked for —
+                        # otherwise pandas falls back to the connection's
+                        # default search_path (typically `public`).
+                        if schema is not None:
+                            df.to_sql(table_name, write_conn, schema=schema, **retry_kwargs)
+                        else:
+                            df.to_sql(table_name, write_conn, **retry_kwargs)
+                    except Exception as retry_exc:
                         if retry_tx.is_active:
                             retry_tx.rollback()
+                        # Demote the retry-failure log so we don't print the
+                        # second (already-known) traceback when the upstream
+                        # is structurally broken — the outer caller still
+                        # marks the dataset failed via `_apply_cached_outcome`.
+                        logger.warning(
+                            "Retry write also failed for %s after schema dedup: %s",
+                            table_name,
+                            str(retry_exc)[:200],
+                        )
                         raise
                     else:
                         retry_tx.commit()
@@ -2488,11 +2686,14 @@ def _load_csv_chunked(
     source_dataset_id: str | None = None,
     force_append: bool = False,
     csv_params_override: dict | None = None,
+    *,
+    write_schema: str | None = None,
 ) -> tuple[int, list[str], bool]:
     """Load a CSV file into PostgreSQL in chunks.
 
     Returns ``(total_rows, columns, was_truncated)``.
     Stops after ``MAX_TABLE_ROWS`` rows.
+    `write_schema` selects medallion layer; defaults to legacy `public`.
     """
     csv_params = dict(csv_params_override) if csv_params_override is not None else _detect_csv_params(file_path)
     effective_chunk_size = chunk_size or _CSV_MAX_CHUNK_SIZE
@@ -2506,6 +2707,7 @@ def _load_csv_chunked(
             max_rows=MAX_TABLE_ROWS,
             source_dataset_id=source_dataset_id,
             force_append=force_append,
+            write_schema=write_schema,
         )
     except UnicodeDecodeError:
         fallback_encoding = csv_params.get("encoding")
@@ -2526,6 +2728,7 @@ def _load_csv_chunked(
                 max_rows=MAX_TABLE_ROWS,
                 source_dataset_id=source_dataset_id,
                 force_append=force_append,
+                write_schema=write_schema,
             )
         raise
     except pd.errors.ParserError:
@@ -2540,6 +2743,7 @@ def _load_csv_chunked(
             max_rows=MAX_TABLE_ROWS,
             source_dataset_id=source_dataset_id,
             force_append=force_append,
+            write_schema=write_schema,
         )
 
 
@@ -2930,39 +3134,34 @@ def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
 def _set_error_status(engine, dataset_id: str, error_msg: str, *, table_name: str | None = None):
     """Mark cached_datasets as permanently_failed for deterministic errors.
 
+    Wrapper around `_apply_cached_outcome` that synthesizes a `_CollectorRunOutcome`
+    for legacy callers that knew about deterministic failures before the outcome
+    model existed. Per constitution §0.7, every terminal-status write must flow
+    through the canonical `_apply_cached_outcome` path so `error_category` is
+    classified consistently.
+
     Deterministic errors (unsupported format, file too large, zip bomb, etc.)
     will never succeed on retry, so we mark them permanently_failed immediately
     to prevent infinite re-dispatch loops from bulk_collect_all.
     """
+    outcome = _CollectorRunOutcome(
+        result_kind=_OUTCOME_TERMINAL_NON_TABULAR
+        if _is_non_tabular_error_message(error_msg)
+        else _OUTCOME_TERMINAL_UPSTREAM,
+        cached_status="permanently_failed",
+        error_message=error_msg[:500],
+        retry_increment=1,
+        should_prune_open=True,
+    )
     try:
-        with engine.begin() as conn:
-            if table_name:
-                # UPSERT: works even if no row exists yet
-                conn.execute(
-                    text(
-                        "INSERT INTO cached_datasets "
-                        "(dataset_id, table_name, status, error_message, retry_count, updated_at) "
-                        "VALUES (CAST(:did AS uuid), :tn, 'permanently_failed', :msg, 1, NOW()) "
-                        "ON CONFLICT (table_name) DO UPDATE SET "
-                        "status = 'permanently_failed', "
-                        "error_message = :msg, "
-                        "retry_count = cached_datasets.retry_count + 1, "
-                        "updated_at = NOW()"
-                    ),
-                    {"msg": error_msg[:500], "did": dataset_id, "tn": table_name},
-                )
-            else:
-                # Fallback: plain UPDATE when table_name is unknown
-                conn.execute(
-                    text(
-                        "UPDATE cached_datasets SET status = 'permanently_failed', "
-                        "error_message = :msg, retry_count = retry_count + 1, "
-                        "updated_at = NOW() "
-                        "WHERE dataset_id = CAST(:did AS uuid)"
-                    ),
-                    {"msg": error_msg[:500], "did": dataset_id},
-                )
-        _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
+        # _apply_cached_outcome handles classification + persistence + pruning
+        # (the canonical path per constitution §0.7).
+        _apply_cached_outcome(
+            engine,
+            dataset_id=dataset_id,
+            outcome=outcome,
+            table_name=table_name,
+        )
     except Exception:
         # Was logger.debug — silently swallowed status-update failures left
         # orphaned datasets in inconsistent states. Surface at warning so the
@@ -3085,6 +3284,14 @@ def _classify_collect_exception(exc: Exception, *, heavy_execution: bool, curren
                 "file_too_large",
                 "No columns to parse from file",
                 "Excel file format cannot be determined",
+                # Structural DataFrame issues — retrying without changing
+                # the upstream payload reproduces the exact same failure.
+                # Treat as terminal so the dataset goes to
+                # `permanently_failed` with `parse_schema_mismatch`
+                # immediately instead of cycling through retries that all
+                # log full tracebacks.
+                "DuplicateColumn",
+                "specified more than once",
             )
         )
         or "TooManyRedirects" in type(exc).__name__
@@ -3150,6 +3357,428 @@ def _classify_collect_exception(exc: Exception, *, heavy_execution: bool, curren
     )
 
 
+def _classify_error_category(
+    error_message: str | None,
+    *,
+    exc: Exception | None = None,
+) -> str:
+    """Map free-text error messages + optional exception type to closed taxonomy.
+
+    Used by `_apply_cached_outcome` to populate `cached_datasets.error_category`
+    so operational dashboards can `GROUP BY error_category` instead of doing
+    `LIKE` over free text. Buckets align with spec 014 §3.
+    """
+    if exc is not None and isinstance(exc, psycopg.errors.InFailedSqlTransaction):
+        return "materialize_table_collision"
+    if exc is not None and isinstance(exc, DBAPIError) and exc.orig is not None:
+        if isinstance(exc.orig, psycopg.errors.InFailedSqlTransaction):
+            return "materialize_table_collision"
+
+    msg = (error_message or "").lower()
+    if not msg:
+        return "unknown"
+
+    # Validation outputs (WS0)
+    if "ingestion_validation_failed:html_as_data" in msg:
+        return "validation_failed"
+    if "ingestion_validation_failed:row_count" in msg:
+        return "validation_failed"
+    if "ingestion_validation_failed:" in msg:
+        return "validation_failed"
+
+    # Parser-side
+    if msg.startswith("parser_invalid:"):
+        return "validation_failed"
+    if "no columns to parse from file" in msg:
+        return "parse_format"
+    if "excel file format cannot be determined" in msg:
+        return "parse_format"
+    if "schema mismatch" in msg or "schema_drift_detected" in msg:
+        return "parse_schema_mismatch"
+    if "unicodedecodeerror" in msg or "codec can't decode" in msg:
+        return "parse_encoding"
+
+    # Materialization-side
+    if "infailedsqltransaction" in msg or "current transaction is aborted" in msg:
+        return "materialize_table_collision"
+    if "duplicate key value violates unique constraint" in msg:
+        return "materialize_table_collision"
+    if "pg_type_typname_nsp_index" in msg:
+        return "materialize_table_collision"
+    if "another command is already in progress" in msg:
+        return "materialize_table_collision"
+    if "execution failed on sql 'insert into" in msg:
+        # pandas-side INSERT failures normally mean the materialized columns
+        # the worker tried to write don't match the existing physical schema —
+        # most often because the parser produced suffixed columns like
+        # "1.foo", "2.foo" from a multi-sheet/multi-csv concat.
+        return "parse_schema_mismatch"
+    if "execution failed on sql" in msg:
+        return "parse_schema_mismatch"
+    if "duplicatecolumn" in msg or "specified more than once" in msg:
+        return "parse_schema_mismatch"
+    if "no space left on device" in msg or "disk full" in msg:
+        return "materialize_disk_full"
+    if "resource_table_full" in msg:
+        return "materialize_disk_full"
+
+    # Archive
+    if "bad_zip_file" in msg or "zip_no_parseable_file" in msg:
+        return "policy_non_tabular"
+    if "zip_document_bundle" in msg:
+        return "policy_non_tabular"
+
+    # Policy
+    if "file_too_large" in msg or "zip_entry_too_large" in msg:
+        return "policy_too_large"
+
+    # Network / HTTP
+    if "403 forbidden" in msg or "401 unauthorized" in msg:
+        return "download_http_error"
+    if "404 not found" in msg or "410 gone" in msg:
+        return "download_http_error"
+    if "exceeded maximum allowed redirects" in msg or "toomanyredirects" in msg:
+        return "download_http_error"
+    if "5" in msg and ("server error" in msg or " 500" in msg or " 502" in msg or " 503" in msg or " 504" in msg):
+        return "download_http_error"
+    if "name or service not known" in msg or "no route to host" in msg:
+        return "download_network"
+    if "connection refused" in msg or "connection reset" in msg:
+        return "download_network"
+    if "timed out" in msg or "read operation timed out" in msg or "timeout" in msg:
+        return "download_timeout"
+
+    # Metadata
+    if "no_download_url" in msg or "missing_download_url" in msg:
+        return "metadata_no_url"
+
+    # Orchestration recovery
+    if "exhausted retries" in msg or "stuck in" in msg:
+        return "orchestration_recovery_loop"
+    if "table missing" in msg or "marked for re-download" in msg:
+        return "orchestration_table_missing"
+
+    return "unknown"
+
+
+def _record_cache_drop(
+    engine,
+    *,
+    table_name: str,
+    reason: str,
+    actor: str = "collector",
+    extra: dict | None = None,
+) -> None:
+    """Application-side audit of DROP TABLE on cache_* tables.
+
+    AWS RDS does not expose SUPERUSER, so the original mig 0036 plan to use
+    a pg_event_trigger is unavailable. Instead we INSERT here before each
+    DROP TABLE so we still capture the operationally-driven drops. Drops
+    issued manually (psql admin) are not captured here — fall back to RDS
+    audit logs / CloudTrail for those.
+    """
+    if not table_name:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO cache_drop_audit (object_name, reason, actor, extra)
+                    VALUES (:obj, :reason, :actor, CAST(:extra AS jsonb))
+                    """
+                ),
+                {
+                    "obj": table_name,
+                    "reason": reason[:500],
+                    "actor": actor,
+                    "extra": json.dumps(extra) if extra else None,
+                },
+            )
+    except Exception:
+        # Don't let audit failures break the actual drop path.
+        logger.warning(
+            "Could not record cache_drop_audit for %s (reason=%s)",
+            table_name,
+            reason[:60],
+            exc_info=True,
+        )
+
+
+# ─── Phase 1/1.5 (MASTERPLAN) — raw schema helpers ──────────────────────────
+#
+# `_resolve_collect_destination` is the entry point: callers in `collect_dataset`
+# call it instead of `_sanitize_table_name` to decide where the materialized
+# table lives (raw vs. legacy public). The choice is gated by the
+# `OPENARG_USE_RAW_LAYER` env flag so rollback is `unset env, restart workers`.
+
+_RAW_NAMER = RawPhysicalNamer()
+
+# Whitelist of allowed `raw_schema` literals when `_apply_cached_outcome`
+# composes a qualified name. Defends against any future caller that might
+# pass an attacker-controlled schema string into the SQL composition.
+_RAW_SCHEMA_ALLOWED = frozenset({"raw"})
+
+# Per-task context variable that propagates the medallion target schema
+# from `collect_dataset` (where `_resolve_collect_destination` runs) down
+# to every `_to_sql_safe` call site — including the deeply-nested CSV
+# chunk loaders, JSON record map loaders, and ZIP parsers that don't
+# receive `write_schema` as an explicit kwarg.
+#
+# When the ContextVar is set, `_to_sql_safe(schema=None, ...)` falls back
+# to it. Explicit `schema=` kwargs always win.
+_current_write_schema: ContextVar[str | None] = ContextVar(
+    "_current_write_schema", default=None
+)
+
+
+@dataclass(frozen=True)
+class _CollectDestination:
+    """Where a single `collect_dataset` run will materialize its table.
+
+    `qualified_name` is what `cached_datasets.table_name` should store and what
+    `catalog_resources.materialized_table_name` should point to: `<schema>.<bare>`
+    when schema is non-public, otherwise the bare name (preserving the legacy
+    `cache_*` look so existing callers keep working).
+    """
+
+    schema: str  # "raw" or "public"
+    bare_name: str  # `<portal>__<slug>__<discrim>__v<N>` for raw, `cache_*` for legacy
+    version: int  # 1+ for raw; 0 for legacy (no versioning)
+    resource_identity: str  # `{portal}::{source_id}`
+
+    @property
+    def qualified_name(self) -> str:
+        return f"{self.schema}.{self.bare_name}" if self.schema != "public" else self.bare_name
+
+
+def _use_raw_layer() -> bool:
+    """Feature flag: write to schema `raw` with versioning.
+
+    Default OFF so the first deploy is a no-op and operators flip the flag
+    when ready for cutover.
+    """
+    return os.getenv("OPENARG_USE_RAW_LAYER", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _collect_write_chunk(
+    df: pd.DataFrame,
+    table_name: str,
+    engine,
+    *,
+    write_schema: str | None,
+    source_url: str | None = None,
+    source_file_hash: str | None = None,
+    parser_version: str | None = None,
+    **kwargs,
+) -> None:
+    """Wrap `_to_sql_safe` so each call site does not repeat the metadata
+    injection. When `write_schema == 'raw'` the DataFrame gets the lineage
+    columns appended; for legacy `public` writes the call passes through.
+    """
+    if write_schema == "raw":
+        df = _inject_raw_metadata_columns(
+            df,
+            source_url=source_url,
+            source_file_hash=source_file_hash,
+            parser_version=parser_version,
+            collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
+        )
+    _to_sql_safe(df, table_name, engine, schema=write_schema, **kwargs)
+
+
+def _resolve_collect_destination(
+    engine,
+    dataset_id: str,
+    *,
+    portal: str,
+    source_id: str,
+    title: str,
+) -> _CollectDestination:
+    """Decide where the next materialization for `dataset_id` should land.
+
+    Raw path (`OPENARG_USE_RAW_LAYER=1`): bumps `raw_table_versions` and returns
+    a versioned name in schema `raw`.
+
+    Legacy path (default): returns the historical `cache_<portal>_<slug>__<hash>`
+    name in schema `public` so the codebase keeps working unchanged until
+    operators flip the flag.
+    """
+    resource_identity = _resource_identity(portal, source_id)
+    if _use_raw_layer():
+        raw = _resolve_raw_table_for_dataset(
+            engine,
+            dataset_id,
+            portal=portal,
+            source_id=source_id,
+            slug_hint=title,
+        )
+        return _CollectDestination(
+            schema="raw",
+            bare_name=raw.bare_name,
+            version=raw.version,
+            resource_identity=resource_identity,
+        )
+    # Legacy path — keep current behavior bit-for-bit.
+    group_table_name = _sanitize_table_name(title, portal)
+    legacy_name = _resource_table_name(group_table_name, dataset_id)
+    return _CollectDestination(
+        schema="public",
+        bare_name=legacy_name,
+        version=0,
+        resource_identity=resource_identity,
+    )
+
+
+def _resolve_raw_table_for_dataset(
+    engine,
+    dataset_id: str,
+    *,
+    portal: str | None = None,
+    source_id: str | None = None,
+    slug_hint: str = "",
+) -> RawPhysicalName:
+    """Resolve the raw-schema table name for the next ingest of `dataset_id`.
+
+    Reads `raw_table_versions` to find the previous max version; bumps by 1.
+    `portal` and `source_id` may be passed explicitly; if omitted, they are
+    looked up from the `datasets` row.
+
+    Concurrency: the read-then-bump uses `pg_advisory_xact_lock` keyed by
+    `resource_identity` so two collectors running the same dataset
+    simultaneously serialize on this section. The lock is transaction-scoped
+    so it auto-releases at COMMIT — no leak risk if the function raises.
+    """
+    if not portal or not source_id:
+        with engine.connect() as conn:
+            ds = conn.execute(
+                text(
+                    "SELECT portal, source_id, COALESCE(title, '') AS title "
+                    "FROM datasets WHERE id = CAST(:did AS uuid)"
+                ),
+                {"did": dataset_id},
+            ).fetchone()
+            conn.rollback()
+        if ds is None:
+            raise ValueError(f"dataset {dataset_id} not found")
+        portal = portal or ds.portal
+        source_id = source_id or ds.source_id
+        slug_hint = slug_hint or ds.title
+
+    resource_identity = _resource_identity(portal, source_id)
+    lock_key = _lock_key("raw_table_version_bump", resource_identity)
+    with engine.begin() as conn:
+        # Transaction-scoped advisory lock: two callers with the same
+        # resource_identity serialize here. The lock releases at COMMIT.
+        conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+        prev = conn.execute(
+            text(
+                "SELECT COALESCE(MAX(version), 0) AS v "
+                "FROM raw_table_versions WHERE resource_identity = :rid"
+            ),
+            {"rid": resource_identity},
+        ).fetchone()
+        next_version = int(prev.v) + 1 if prev else 1
+    return _RAW_NAMER.build(portal, source_id, version=next_version, slug_hint=slug_hint)
+
+
+def _resource_identity(portal: str, source_id: str, sub_path: str | None = None) -> str:
+    """Deterministic key for `catalog_resources.resource_identity`.
+
+    Mirrors the contract in spec 015 §2: `{portal}::{source_id}[::{sub_path}]`.
+    """
+    base = f"{portal}::{source_id}"
+    return f"{base}::{sub_path}" if sub_path else base
+
+
+def _register_raw_version(
+    engine,
+    *,
+    resource_identity: str,
+    version: int,
+    table_name: str,
+    schema_name: str = "raw",
+    row_count: int | None = None,
+    size_bytes: int | None = None,
+    source_url: str | None = None,
+    source_file_hash: str | None = None,
+    parser_version: str | None = None,
+    collector_version: str | None = None,
+    is_truncated: bool = False,
+) -> None:
+    """Insert a new entry into `raw_table_versions` and mark prior versions
+    of the same `resource_identity` as superseded.
+
+    Idempotent on `(resource_identity, version)` — re-running with the same
+    version is a no-op (`ON CONFLICT DO NOTHING`).
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO raw_table_versions (
+                    resource_identity, version, schema_name, table_name,
+                    row_count, size_bytes, source_url, source_file_hash,
+                    parser_version, collector_version, is_truncated
+                ) VALUES (
+                    :rid, :v, :sch, :tn,
+                    :rc, :sz, :url, :hash,
+                    :pv, :cv, :trunc
+                )
+                ON CONFLICT (resource_identity, version) DO NOTHING
+                """
+            ),
+            {
+                "rid": resource_identity,
+                "v": version,
+                "sch": schema_name,
+                "tn": table_name,
+                "rc": row_count,
+                "sz": size_bytes,
+                "url": source_url,
+                "hash": source_file_hash,
+                "pv": parser_version,
+                "cv": collector_version,
+                "trunc": is_truncated,
+            },
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE raw_table_versions
+                SET superseded_at = NOW()
+                WHERE resource_identity = :rid
+                  AND version < :v
+                  AND superseded_at IS NULL
+                """
+            ),
+            {"rid": resource_identity, "v": version},
+        )
+
+
+def _inject_raw_metadata_columns(
+    df: pd.DataFrame,
+    *,
+    source_url: str | None = None,
+    source_file_hash: str | None = None,
+    parser_version: str | None = None,
+    collector_version: str | None = None,
+) -> pd.DataFrame:
+    """Add per-row lineage columns expected on every raw table.
+
+    `_ingested_at` is a server-side default in the table; not set here so
+    the database supplies it consistently. `_ingest_row_id` is a BIGSERIAL
+    PK added by the caller via ALTER TABLE after the bulk INSERT, since
+    `df.to_sql` does not declare PKs.
+    """
+    df = df.copy()
+    df["_source_url"] = source_url
+    df["_source_file_hash"] = source_file_hash
+    df["_parser_version"] = parser_version
+    df["_collector_version"] = collector_version
+    return df
+
+
 def _apply_cached_outcome(
     engine,
     *,
@@ -3163,10 +3792,21 @@ def _apply_cached_outcome(
     layout_profile: str | None = None,
     header_quality: str | None = None,
     now: datetime | None = None,
+    # MASTERPLAN Fase 1.5 — raw-layer destination metadata. When `raw_schema`
+    # is "raw" and the outcome is `ready`, this function ALSO registers the
+    # new version in `raw_table_versions` and updates
+    # `catalog_resources.materialized_table_name` to the qualified `raw.<name>`
+    # form. All four fields default to None so legacy callers are unchanged.
+    raw_schema: str | None = None,
+    raw_version: int | None = None,
+    resource_identity: str | None = None,
+    source_url: str | None = None,
+    is_truncated: bool = False,
 ) -> int:
     """Persist one explicit collector outcome and return the resulting retry_count."""
     finalized_at = now or datetime.now(UTC)
     columns_json = json.dumps([str(c) for c in columns]) if columns is not None else None
+    error_category = _classify_error_category(outcome.error_message)
 
     with engine.begin() as conn:
         if outcome.cached_status == "ready" and table_name:
@@ -3176,10 +3816,11 @@ def _apply_cached_outcome(
                     INSERT INTO cached_datasets (
                         dataset_id, table_name, status, row_count,
                         columns_json, size_bytes, s3_key, error_message,
-                        layout_profile, header_quality, updated_at
+                        error_category, layout_profile, header_quality, updated_at
                     ) VALUES (
                         CAST(:did AS uuid), :tn, 'ready', :rows,
-                        :cols, :size, :s3, :msg, :layout_profile, :header_quality, :now
+                        :cols, :size, :s3, :msg,
+                        :error_category, :layout_profile, :header_quality, :now
                     )
                     ON CONFLICT (table_name) DO UPDATE SET
                         dataset_id = CAST(:did AS uuid),
@@ -3189,6 +3830,7 @@ def _apply_cached_outcome(
                         size_bytes = EXCLUDED.size_bytes,
                         s3_key = EXCLUDED.s3_key,
                         error_message = EXCLUDED.error_message,
+                        error_category = EXCLUDED.error_category,
                         layout_profile = EXCLUDED.layout_profile,
                         header_quality = EXCLUDED.header_quality,
                         updated_at = :now
@@ -3202,6 +3844,7 @@ def _apply_cached_outcome(
                     "size": size_bytes,
                     "s3": s3_key,
                     "msg": outcome.error_message,
+                    "error_category": error_category,
                     "layout_profile": layout_profile,
                     "header_quality": header_quality,
                     "now": finalized_at,
@@ -3214,11 +3857,12 @@ def _apply_cached_outcome(
                     """
                     INSERT INTO cached_datasets (
                         dataset_id, table_name, status, row_count, columns_json,
-                        size_bytes, s3_key, error_message, retry_count,
-                        layout_profile, header_quality, updated_at
+                        size_bytes, s3_key, error_message, error_category,
+                        retry_count, layout_profile, header_quality, updated_at
                     ) VALUES (
                         CAST(:did AS uuid), :tn, :status, :rows, :cols,
-                        :size, :s3, :msg, :retry, :layout_profile, :header_quality, :now
+                        :size, :s3, :msg, :error_category,
+                        :retry, :layout_profile, :header_quality, :now
                     )
                     ON CONFLICT (table_name) DO UPDATE SET
                         dataset_id = CAST(:did AS uuid),
@@ -3232,6 +3876,7 @@ def _apply_cached_outcome(
                         size_bytes = COALESCE(:size, cached_datasets.size_bytes),
                         s3_key = COALESCE(:s3, cached_datasets.s3_key),
                         error_message = :msg,
+                        error_category = :error_category,
                         layout_profile = COALESCE(:layout_profile, cached_datasets.layout_profile),
                         header_quality = COALESCE(:header_quality, cached_datasets.header_quality),
                         retry_count = cached_datasets.retry_count + :retry,
@@ -3247,6 +3892,7 @@ def _apply_cached_outcome(
                     "size": size_bytes,
                     "s3": s3_key,
                     "msg": outcome.error_message,
+                    "error_category": error_category,
                     "retry": outcome.retry_increment,
                     "layout_profile": layout_profile,
                     "header_quality": header_quality,
@@ -3270,6 +3916,7 @@ def _apply_cached_outcome(
                             ELSE :status
                         END,
                         error_message = :msg,
+                        error_category = :error_category,
                         layout_profile = COALESCE(:layout_profile, layout_profile),
                         header_quality = COALESCE(:header_quality, header_quality),
                         retry_count = retry_count + :retry,
@@ -3281,6 +3928,7 @@ def _apply_cached_outcome(
                     "did": dataset_id,
                     "status": outcome.cached_status,
                     "msg": outcome.error_message,
+                    "error_category": error_category,
                     "retry": outcome.retry_increment,
                     "layout_profile": layout_profile,
                     "header_quality": header_quality,
@@ -3296,6 +3944,138 @@ def _apply_cached_outcome(
 
     if outcome.should_prune_open:
         _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
+
+    # MASTERPLAN Fase 1.5 — when a raw-layer materialization landed `ready`,
+    # register the version in `raw_table_versions` and bubble the qualified
+    # name up to `catalog_resources.materialized_table_name` so the Serving
+    # Port adapter (and any downstream reader) can resolve the new physical
+    # location. The registration + catalog UPDATE happen in a single
+    # transaction so the catalog never points at a version that is not in
+    # the registry. Failure aborts the auto-promote — staging running on a
+    # missing version would always fail.
+    if (
+        outcome.cached_status == "ready"
+        and table_name
+        and raw_schema in _RAW_SCHEMA_ALLOWED  # validate raw_schema literal
+        and raw_version is not None
+        and resource_identity
+    ):
+        raw_finalized = False
+        try:
+            _register_raw_version(
+                engine,
+                resource_identity=resource_identity,
+                version=raw_version,
+                table_name=table_name,
+                schema_name=raw_schema,
+                row_count=row_count,
+                size_bytes=size_bytes,
+                source_url=source_url,
+                parser_version=os.getenv("OPENARG_PARSER_VERSION") or None,
+                collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
+                is_truncated=is_truncated,
+            )
+            qualified = f'{raw_schema}."{table_name}"'
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE catalog_resources
+                        SET materialized_table_name = :qn,
+                            materialization_status = 'ready',
+                            parser_version = COALESCE(:pv, parser_version),
+                            updated_at = NOW()
+                        WHERE resource_identity = :rid
+                        """
+                    ),
+                    {
+                        "qn": qualified,
+                        "pv": os.getenv("OPENARG_PARSER_VERSION") or None,
+                        "rid": resource_identity,
+                    },
+                )
+            # Purge stale `ready` rows of the SAME dataset that point to
+            # an older version of THIS resource. `_prune_open_cached_entries`
+            # only purges `downloading/pending/error` by design, so when v2
+            # lands the v1 row stays as `ready` and shows up as an orphan
+            # in the catalog (raw_table_versions live ≠ cached_datasets
+            # row's table_name). This DELETE is scoped to rows that are
+            # provably superseded — never touches legacy public.cache_*
+            # `ready` rows that have no raw_table_versions entry.
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM cached_datasets cd
+                        USING raw_table_versions rtv
+                        WHERE cd.dataset_id = CAST(:did AS uuid)
+                          AND cd.status = 'ready'
+                          AND cd.table_name <> :current_table
+                          AND rtv.table_name = cd.table_name
+                          AND rtv.resource_identity = :rid
+                          AND rtv.superseded_at IS NOT NULL
+                        """
+                    ),
+                    {
+                        "did": dataset_id,
+                        "current_table": table_name,
+                        "rid": resource_identity,
+                    },
+                )
+            raw_finalized = True
+        except Exception:
+            logger.warning(
+                "Could not finalize raw-layer registration for %s (resource=%s, v=%s); "
+                "skipping auto-promote",
+                table_name,
+                resource_identity,
+                raw_version,
+                exc_info=True,
+            )
+
+        # Auto-refresh marts that consume this portal. We dispatch one
+        # `refresh_mart` task per matching mart, but with a `task_id` that
+        # buckets timestamps into 120s windows: Celery rejects duplicate
+        # task_ids, so 50 raw landings within the same 2-min window
+        # produce ONE refresh per mart, not 50. Trade: a refresh can be
+        # delayed up to 120s after the last landing — acceptable for a
+        # mart layer.
+        if (
+            raw_finalized
+            and os.getenv("OPENARG_AUTO_REFRESH_MARTS", "0").lower()
+            in ("1", "true", "yes")
+        ):
+            try:
+                # Import inside the branch to avoid the circular dep at
+                # module load (mart_tasks imports collector_tasks helpers).
+                from app.infrastructure.celery.tasks.mart_tasks import (
+                    find_marts_for_portal,
+                    refresh_mart,
+                )
+
+                # Debounce: pin `task_id` per mart_id (no time bucket).
+                # Celery rejects duplicate task_ids while the prior task is
+                # still in queue or running, so 50 raw landings within one
+                # mart's refresh window collapse to ONE refresh. Once that
+                # refresh finishes, the next landing kicks off a new one.
+                # The previous bucket-based approach had a boundary-race
+                # bug where landings on either side of `now / 120s` ended
+                # up in different buckets and ran back-to-back.
+                portal_for_dispatch = resource_identity.split("::", 1)[0]
+                for mart_id in find_marts_for_portal(portal_for_dispatch):
+                    refresh_mart.apply_async(
+                        args=[mart_id],
+                        queue="ingest",
+                        task_id=f"refresh_mart:{mart_id}",
+                        expires=120,
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not enqueue refresh_mart for portal of %s",
+                    resource_identity,
+                    exc_info=True,
+                )
+
     return retry_count
 
 
@@ -3316,6 +4096,11 @@ def _finalize_cached_dataset(
     layout_profile: str | None = None,
     header_quality: str | None = None,
     now: datetime | None = None,
+    # MASTERPLAN Fase 1.5 — see `_apply_cached_outcome` for semantics.
+    raw_schema: str | None = None,
+    raw_version: int | None = None,
+    resource_identity: str | None = None,
+    is_truncated: bool = False,
 ) -> dict[str, object]:
     """Apply the WS0 post-parse gate, then persist the final cached state."""
     finalized_at = now or datetime.now(UTC)
@@ -3370,6 +4155,11 @@ def _finalize_cached_dataset(
             layout_profile=resolved_layout_profile,
             header_quality=resolved_header_quality,
             now=finalized_at,
+            raw_schema=raw_schema,
+            raw_version=raw_version,
+            resource_identity=resource_identity,
+            source_url=download_url,
+            is_truncated=is_truncated,
         )
         try:
             with engine.begin() as conn:
@@ -3401,6 +4191,11 @@ def _finalize_cached_dataset(
         layout_profile=resolved_layout_profile,
         header_quality=resolved_header_quality,
         now=finalized_at,
+        raw_schema=raw_schema,
+        raw_version=raw_version,
+        resource_identity=resource_identity,
+        source_url=download_url,
+        is_truncated=is_truncated,
     )
     with engine.begin() as conn:
         conn.execute(
@@ -3683,8 +4478,28 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
         title, download_url, fmt = row.title, row.download_url, row.format
         fmt = _detect_format_from_url(download_url, fmt)
         portal, source_id = row.portal, row.source_id
-        group_table_name = _sanitize_table_name(title, portal)
-        table_name = _resource_table_name(group_table_name, dataset_id)
+
+        # MASTERPLAN Fase 1.5: route through the destination resolver so the
+        # raw-layer feature flag controls where the table lands. When
+        # `OPENARG_USE_RAW_LAYER` is unset/0 the resolver returns the legacy
+        # `cache_<portal>_<slug>__<hash>` name in schema `public`, so this
+        # call is a no-op for current production behavior.
+        destination = _resolve_collect_destination(
+            engine,
+            dataset_id,
+            portal=portal,
+            source_id=source_id,
+            title=title,
+        )
+        write_schema: str | None = destination.schema if destination.schema != "public" else None
+        table_name = destination.bare_name
+
+        # MASTERPLAN Fase 1.5: bind the destination schema to the task
+        # ContextVar so every internal `_to_sql_safe` call (including the
+        # ones inside chunked CSV loaders, JSON record map loaders and ZIP
+        # parsers that don't receive `write_schema` as a kwarg) honors the
+        # medallion target. The token is reset in the `finally` below.
+        _write_schema_token = _current_write_schema.set(write_schema)
 
         # Ensure a cached_datasets row exists EARLY so failures are always tracked
         _ensure_cached_entry(engine, dataset_id, table_name)
@@ -3940,6 +4755,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     chunk_size=csv_chunk_size,
                     source_dataset_id=dataset_id,
                     force_append=append_mode,
+                    write_schema=write_schema,
                     csv_params_override=_stabilize_csv_params_for_width(
                         _detect_csv_params(tmp_path),
                         column_count=csv_preview_column_count or 1,
@@ -4161,9 +4977,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                             return {"dataset_id": dataset_id, "error": routed_status}
                         return {"dataset_id": dataset_id, "status": routed_status}
                     if append_mode:
-                        _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                        _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
                     else:
-                        _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                        _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
                     row_count, columns = len(df), list(df.columns)
 
             elif fmt == "geojson":
@@ -4200,9 +5016,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
                 else:
-                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
@@ -4241,9 +5057,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
                 else:
-                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "ods":
@@ -4270,9 +5086,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
                 else:
-                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "xml":
@@ -4306,9 +5122,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _to_sql_safe(df, table_name, engine, if_exists="append", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
                 else:
-                    _to_sql_safe(df, table_name, engine, if_exists="replace", index=False)
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
                 row_count, columns = len(df), list(df.columns)
 
             else:
@@ -4362,7 +5178,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     text(
                                         "UPDATE cached_datasets "
                                         "SET status = 'permanently_failed', "
-                                        "    error_message = :msg, updated_at = NOW() "
+                                        "    error_message = :msg, "
+                                        "    error_category = 'validation_failed', "
+                                        "    updated_at = NOW() "
                                         "WHERE table_name = :tn"
                                     ),
                                     {
@@ -4398,6 +5216,43 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     "tn": member_table_name,
                                 },
                             )
+                    # Register each ZIP member in `raw_table_versions` so the
+                    # Serving Port and mart auto-refresh can discover them.
+                    # Each member becomes its own identity (sub-path = member
+                    # table_name) so version stays at 1 — idempotent on
+                    # `(resource_identity, version)`. Skip legacy paths
+                    # (member tables in schema `public`, e.g. `cache_*`).
+                    if _use_raw_layer():
+                        for member in member_tables:
+                            member_table_name = str(member["table_name"])
+                            if member_table_name in rejected_members:
+                                continue
+                            if member_table_name.startswith("cache_"):
+                                # Legacy public path; raw layer not in play.
+                                continue
+                            try:
+                                _register_raw_version(
+                                    engine,
+                                    resource_identity=_resource_identity(
+                                        portal, source_id, sub_path=member_table_name
+                                    ),
+                                    version=1,
+                                    table_name=member_table_name,
+                                    schema_name="raw",
+                                    row_count=int(member.get("row_count", 0) or 0),
+                                    size_bytes=file_size,
+                                    source_url=download_url,
+                                    parser_version=os.getenv("OPENARG_PARSER_VERSION") or None,
+                                    collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Could not register raw version for ZIP member %s "
+                                    "(dataset=%s); table will be invisible to Serving Port",
+                                    member_table_name,
+                                    dataset_id,
+                                    exc_info=True,
+                                )
                     row_count = sum(int(member.get("row_count", 0) or 0) for member in member_tables)
                     sampled_note = next(
                         (
@@ -4477,6 +5332,10 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 error_message=sampled_note,
                 layout_profile=finalize_layout_profile,
                 header_quality=finalize_header_quality,
+                raw_schema=destination.schema if destination.schema != "public" else None,
+                raw_version=destination.version if destination.version > 0 else None,
+                resource_identity=destination.resource_identity,
+                is_truncated=bool(sampled_note),
             )
             if not finalize_result["ok"]:
                 return {"error": finalize_result["error"]}
@@ -4555,6 +5414,12 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             try:
                 os.unlink(tmp_path)
             except OSError:
+                pass
+            # Reset the medallion-target ContextVar so the NEXT task in
+            # this worker process doesn't inherit the schema we set.
+            try:
+                _current_write_schema.reset(_write_schema_token)
+            except (LookupError, NameError):
                 pass
 
     except SoftTimeLimitExceeded:
@@ -4672,10 +5537,13 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         )
         if any(reconciled.values()):
             logger.warning(
-                "Bulk collect reconciled cache coverage before dispatch: orphaned_ready=%s fixed_cached_flags=%s reindexed_missing_chunks=%s",
+                "Bulk collect reconciled cache coverage before dispatch: "
+                "orphaned_ready=%s fixed_cached_flags=%s "
+                "reindexed_missing_chunks=%s revived_missing_table=%s",
                 reconciled["orphaned_ready"],
                 reconciled["fixed_cached_flags"],
                 reconciled["reindexed_missing_chunks"],
+                reconciled.get("revived_missing_table", 0),
             )
 
         revived_schema = _revive_schema_mismatch(engine, redispatch=False)
@@ -4695,32 +5563,77 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             )
 
         # ── Phase 1: individual datasets (groups <= 50 siblings) ──
+        # Excludes `downloading` so the dispatcher does NOT re-dispatch a
+        # dataset whose previous task is still in flight. Stuck downloads
+        # are unstuck by `_recycle_stuck_downloads` (30-min stale sweep),
+        # which moves them to `error`/`permanently_failed` — at that point
+        # the row becomes eligible again.
+        #
+        # Fairness: the outer `ORDER BY rn, portal` interleaves rows so the
+        # LIMIT N batch always carries representation from every portal.
+        # The previous `ORDER BY portal, title` starved alphabetically-late
+        # portals (mendoza, tucumán, etc.) when alphabetically-early portals
+        # had thousands of pending datasets — they never reached the LIMIT
+        # window. With round-robin, a 5000-row batch from 16 portals takes
+        # ~313 datasets per portal off the top before going to a second pass.
+        # Failure budget: portals whose 24h failure rate >= 50% are
+        # excluded from the dispatch SELECT. Continuing to retry those
+        # datasets wastes slots that could process portals that actually
+        # complete. The exclusion is *self-resolving* — when the rate
+        # drops back below 50% (because new attempts succeed or the
+        # 24-hour window slides past the failures), the portal becomes
+        # eligible again on the next bulk run, no manual intervention.
+        # Threshold is 2× failed >= total because the SQL does
+        # `failed * 2 >= total`, which avoids a division and the
+        # zero-divide edge case for portals with 0 history.
         query = (
-            "SELECT CAST(d.id AS text), d.portal, d.format, d.title FROM datasets d "
-            "WHERE d.is_cached = false "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM cached_datasets cd "
-            "  WHERE cd.dataset_id = d.id "
-            "    AND cd.status IN ('ready', 'permanently_failed')"
-            ") "
-            "AND d.title NOT IN ("
-            "  SELECT d2.title FROM datasets d2 "
-            "  WHERE d2.portal = d.portal "
-            "    AND d2.is_cached = false "
-            "    AND NOT EXISTS ("
-            "      SELECT 1 FROM cached_datasets cd2 "
-            "      WHERE cd2.dataset_id = d2.id "
-            "        AND cd2.status IN ('ready', 'permanently_failed')"
+            "WITH burned_portals AS ( "
+            "  SELECT d2.portal "
+            "  FROM datasets d2 "
+            "  JOIN cached_datasets cd2 ON cd2.dataset_id = d2.id "
+            "  WHERE cd2.updated_at > now() - interval '24 hour' "
+            "  GROUP BY d2.portal "
+            "  HAVING COUNT(*) >= 20 "
+            "    AND COUNT(*) FILTER (WHERE cd2.status='permanently_failed') * 2 >= COUNT(*) "
+            "), "
+            "eligible AS ( "
+            "  SELECT CAST(d.id AS text) AS id, d.portal, d.format, d.title "
+            "  FROM datasets d "
+            "  WHERE d.is_cached = false "
+            "    AND d.portal NOT IN (SELECT portal FROM burned_portals) "
+            "    AND NOT EXISTS ( "
+            "      SELECT 1 FROM cached_datasets cd "
+            "      WHERE cd.dataset_id = d.id "
+            "        AND cd.status IN ('ready', 'permanently_failed', 'downloading') "
             "    ) "
-            "  GROUP BY d2.title, d2.portal "
-            "  HAVING COUNT(*) > 50"
-            ")"
+            "    AND d.title NOT IN ( "
+            "      SELECT d2.title FROM datasets d2 "
+            "      WHERE d2.portal = d.portal "
+            "        AND d2.is_cached = false "
+            "        AND NOT EXISTS ( "
+            "          SELECT 1 FROM cached_datasets cd2 "
+            "          WHERE cd2.dataset_id = d2.id "
+            "            AND cd2.status IN ('ready', 'permanently_failed', 'downloading') "
+            "        ) "
+            "      GROUP BY d2.title, d2.portal "
+            "      HAVING COUNT(*) > 50 "
+            "    ) "
+            "{portal_clause}"
+            ") "
+            "SELECT id, portal, format, title FROM ( "
+            "  SELECT id, portal, format, title, "
+            "         ROW_NUMBER() OVER (PARTITION BY portal ORDER BY title) AS rn "
+            "  FROM eligible "
+            ") sub "
+            "ORDER BY rn, portal "
+            "LIMIT 5000"
         )
         params: dict = {}
+        portal_clause = ""
         if portal:
-            query += " AND d.portal = :portal"
+            portal_clause = "    AND d.portal = :portal "
             params["portal"] = portal
-        query += " ORDER BY d.portal, d.title LIMIT 5000"
+        query = query.replace("{portal_clause}", portal_clause)
 
         with engine.connect() as conn:
             rows = conn.execute(text(query), params).fetchall()
@@ -4736,15 +5649,35 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
 
         phase1_count = len(selected_rows)
         deferred_individual = len(deferred_rows)
+        # Heavy overflow: if the collector queue is already loaded, half of
+        # the new wave is routed to the heavy worker. The cutoff threshold
+        # keeps the heavy worker reserved for genuinely heavy datasets when
+        # the normal queue is healthy; it only kicks in once the normal
+        # queue is past `_COLLECT_HEAVY_OVERFLOW_THRESHOLD` inflight tasks.
+        _heavy_overflow_active = (
+            inflight_total >= _COLLECT_HEAVY_OVERFLOW_THRESHOLD
+        )
         tasks = [
             _collect_dataset_signature(
                 str(_row_value(row, "id", 0)),
                 portal=str(_row_value(row, "portal", 1)),
                 fmt=str(_row_value(row, "format", 2) or ""),
                 title=str(_row_value(row, "title", 3) or ""),
+                # Stripe overflow across both queues so neither stays idle.
+                heavy_overflow=(_heavy_overflow_active and (idx % 2 == 1)),
             )
-            for row in selected_rows
+            for idx, row in enumerate(selected_rows)
         ]
+        if _heavy_overflow_active:
+            logger.info(
+                "Heavy overflow active: collector inflight=%d ≥ threshold=%d; "
+                "striping %d/%d new tasks to %s",
+                inflight_total,
+                _COLLECT_HEAVY_OVERFLOW_THRESHOLD,
+                len(selected_rows) // 2,
+                len(selected_rows),
+                _HEAVY_COLLECT_QUEUE,
+            )
         phase1_batches = 0
         if tasks:
             phase1_batches = _dispatch_in_batches(
@@ -4754,25 +5687,46 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             )
 
         # ── Phase 2: large groups (>50 siblings) ──
+        # Round-robin by portal mirrors Phase 1 fairness; failure budget
+        # mirrors Phase 1 too — burned portals are excluded so we don't
+        # consume slots on groups that systematically fail.
         large_query = (
-            "SELECT d.title, d.portal, COUNT(*) as cnt FROM datasets d "
-            "WHERE d.is_cached = false "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM cached_datasets cd "
-            "  WHERE cd.dataset_id = d.id "
-            "    AND cd.status IN ('ready', 'permanently_failed')"
+            "WITH burned_portals AS ( "
+            "  SELECT d2.portal "
+            "  FROM datasets d2 "
+            "  JOIN cached_datasets cd2 ON cd2.dataset_id = d2.id "
+            "  WHERE cd2.updated_at > now() - interval '24 hour' "
+            "  GROUP BY d2.portal "
+            "  HAVING COUNT(*) >= 20 "
+            "    AND COUNT(*) FILTER (WHERE cd2.status='permanently_failed') * 2 >= COUNT(*) "
+            "), "
+            "grouped AS ( "
+            "  SELECT d.title, d.portal, COUNT(*) AS cnt FROM datasets d "
+            "  WHERE d.is_cached = false "
+            "    AND d.portal NOT IN (SELECT portal FROM burned_portals) "
+            "    AND NOT EXISTS ( "
+            "      SELECT 1 FROM cached_datasets cd "
+            "      WHERE cd.dataset_id = d.id "
+            "        AND cd.status IN ('ready', 'permanently_failed', 'downloading') "
+            "    ) "
+            "{portal_clause}"
+            "  GROUP BY d.title, d.portal "
+            "  HAVING COUNT(*) > 50 "
             ") "
-        )
-        large_params: dict[str, object] = {}
-        if portal:
-            large_query += " AND d.portal = :portal "
-            large_params["portal"] = portal
-        large_query += (
-            "GROUP BY d.title, d.portal "
-            "HAVING COUNT(*) > 50 "
-            "ORDER BY COUNT(*) ASC "
+            "SELECT title, portal, cnt FROM ( "
+            "  SELECT title, portal, cnt, "
+            "         ROW_NUMBER() OVER (PARTITION BY portal ORDER BY cnt ASC) AS rn "
+            "  FROM grouped "
+            ") sub "
+            "ORDER BY rn, portal "
             "LIMIT 100"
         )
+        large_params: dict[str, object] = {}
+        large_portal_clause = ""
+        if portal:
+            large_portal_clause = "    AND d.portal = :portal "
+            large_params["portal"] = portal
+        large_query = large_query.replace("{portal_clause}", large_portal_clause)
         with engine.connect() as conn:
             large_groups = conn.execute(text(large_query), large_params).fetchall()
 
@@ -4835,8 +5789,16 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             )
             followup_scheduled = True
         elif should_continue and chain_depth >= _BULK_COLLECT_MAX_CHAIN_DEPTH:
+            # The previous behaviour silently dropped the remaining work
+            # (just logged a warning). Under load the chain hits 48 with
+            # thousands of pending datasets — those would never be picked
+            # up unless an operator manually re-triggered. Restart the
+            # chain at depth 0 with a longer countdown so the loop is
+            # guaranteed to converge eventually.
             logger.warning(
-                "Bulk collect reached max chain depth=%s with work remaining: eligible_individual=%s eligible_groups=%s deferred_individual=%s deferred_groups=%s inflight_total=%s",
+                "Bulk collect reached max chain depth=%s with work remaining "
+                "(eligible_individual=%s eligible_groups=%s deferred_individual=%s "
+                "deferred_groups=%s inflight_total=%s); resetting chain to 0",
                 chain_depth,
                 remaining["eligible_individual"],
                 remaining["eligible_groups"],
@@ -4844,6 +5806,11 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
                 deferred_groups,
                 inflight_total,
             )
+            bulk_collect_all.apply_async(
+                kwargs={"portal": portal, "chain_depth": 0},
+                countdown=300,  # 5min cooldown before resetting
+            )
+            followup_scheduled = True
         else:
             reconcile_cache_coverage.apply_async(countdown=60)
             from app.infrastructure.celery.tasks.catalog_backfill import catalog_backfill_task
@@ -4935,7 +5902,7 @@ def collect_large_group(self, title: str, portal: str):
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM cached_datasets cd "
                     "  WHERE cd.dataset_id = d.id "
-                    "    AND cd.status IN ('ready', 'permanently_failed')"
+                    "    AND cd.status IN ('ready', 'permanently_failed', 'downloading')"
                     ") "
                     "ORDER BY d.format, d.id"
                 ),
@@ -5143,7 +6110,8 @@ def recover_stuck_tasks(self):
                 table_exists = conn.execute(
                     text(
                         "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = :tn AND table_schema = 'public')"
+                        "WHERE table_name = :tn "
+                        "AND table_schema IN ('public', 'raw', 'staging', 'mart'))"
                     ),
                     {"tn": row.table_name},
                 ).scalar()

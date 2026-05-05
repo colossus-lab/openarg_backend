@@ -100,6 +100,9 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.catalog_backfill",
             "app.infrastructure.celery.tasks.curated_loader_tasks",
             "app.infrastructure.celery.tasks.censo2022_ingest",
+            # Medallion mart tasks (raw → mart, no staging layer).
+            "app.infrastructure.celery.tasks.mart_tasks",
+            "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
 
@@ -109,7 +112,13 @@ def create_celery() -> Celery:
         "openarg.index_dataset": {"queue": "embedding"},
         "openarg.index_sesiones": {"queue": "embedding"},
         "openarg.collect_data": {"queue": "collector"},
-        "openarg.bulk_collect_all": {"queue": "collector"},
+        # `bulk_collect_all` orchestrates dispatch — it must NOT queue
+        # behind the collect_data backlog or the chain dies (the followup
+        # apply_async with countdown=300 ends up at the tail of a queue
+        # that drains at ~6 tasks/min). Dedicated `orchestrator` queue
+        # keeps it responsive.
+        "openarg.bulk_collect_all": {"queue": "orchestrator"},
+        "openarg.collect_large_group": {"queue": "orchestrator"},
         "openarg.analyze_query": {"queue": "analyst"},
         "openarg.score_portal_health": {"queue": "transparency"},
         "openarg.analyze_session_topics": {"queue": "transparency"},
@@ -141,6 +150,21 @@ def create_celery() -> Celery:
         "openarg.cleanup_semantic_cache": {"queue": "ingest"},
         "openarg.cleanup_orphan_catalog_entries": {"queue": "ingest"},
         "openarg.ws0_retrospective_sweep": {"queue": "ingest"},
+        "openarg.close_resolved_findings": {"queue": "ingest"},
+        "openarg.backfill_error_categories": {"queue": "ingest"},
+        "openarg.force_recollect_separator_mismatches": {"queue": "ingest"},
+        "openarg.cleanup_orphan_cache_tables": {"queue": "ingest"},
+        # Medallion mart tasks (raw → mart, no staging layer).
+        "openarg.build_mart": {"queue": "ingest"},
+        "openarg.refresh_mart": {"queue": "ingest"},
+        "openarg.retain_raw_versions": {"queue": "ingest"},
+        "openarg.cleanup_invariants": {"queue": "ingest"},
+        "openarg.refresh_via_b_marts": {"queue": "ingest"},
+        "openarg.dbt_run": {"queue": "ingest"},
+        "openarg.dbt_test": {"queue": "ingest"},
+        "openarg.dbt_build": {"queue": "ingest"},
+        "openarg.dbt_docs_generate": {"queue": "ingest"},
+        "openarg.dbt_parse": {"queue": "ingest"},
         "openarg.ws0_5_state_invariants_sweep": {"queue": "default"},
         "openarg.ops_temp_dir_cleanup": {"queue": "default"},
         "openarg.ops_portal_health": {"queue": "ingest"},
@@ -221,7 +245,7 @@ def create_celery() -> Celery:
     app.conf.beat_schedule["bulk-collect-datasets"] = {
         "task": "openarg.bulk_collect_all",
         "schedule": crontab(hour="1,7,13,19", minute=45),
-        "options": {"queue": "collector"},
+        "options": {"queue": "orchestrator"},
     }
 
     # Transparency analysis — runs after scraping completes (~06:15 ART)
@@ -246,6 +270,50 @@ def create_celery() -> Celery:
                 "task": "openarg.recover_stuck_tasks",
                 "schedule": crontab(minute="*/15"),
                 "options": {"queue": "default"},
+            },
+            "close-resolved-findings": {
+                "task": "openarg.close_resolved_findings",
+                "schedule": crontab(minute="*/15"),
+                "options": {"queue": "ingest"},
+            },
+            "cleanup-orphan-cache-tables": {
+                "task": "openarg.cleanup_orphan_cache_tables",
+                "schedule": crontab(day_of_week=0, hour=3, minute=0),  # Sunday 3 AM
+                "kwargs": {"dry_run": True},  # default dry-run for safety
+                "options": {"queue": "ingest"},
+            },
+            "retain-raw-versions": {
+                # Drop superseded raw tables beyond the configured retention
+                # window per resource. Without this, every re-collection of
+                # a dataset accumulates a __vN+1 table and the old __vN
+                # sticks around forever (each can be hundreds of MB).
+                # `keep_last=None` defers to env `OPENARG_RAW_RETENTION_KEEP_LAST`
+                # (fallback 3) so ops can change retention without redeploy.
+                # Runs every 6h.
+                "task": "openarg.retain_raw_versions",
+                "schedule": crontab(minute=0, hour="*/6"),
+                "kwargs": {"keep_last": None, "dry_run": False},
+                "options": {"queue": "ingest"},
+            },
+            "cleanup-invariants-hourly": {
+                # Hourly drift sweep for the three invariant counters that
+                # accumulate when a new error shape escapes the classifier
+                # or a code path materializes a table without registering
+                # it in raw_table_versions. Idempotent: zero-effect when
+                # there's nothing to fix.
+                "task": "openarg.cleanup_invariants",
+                "schedule": crontab(minute=15),  # every hour at :15
+                "options": {"queue": "ingest"},
+            },
+            "refresh-via-b-marts-daily": {
+                # Vía-B writers (presupuesto monthly, staff weekly, bcra
+                # daily) leave their marts stale between runs. This cron
+                # forces a daily REFRESH so demos/queries always see at
+                # most a 24-hour-old aggregate. Idempotent — refreshing
+                # an unchanged source is cheap.
+                "task": "openarg.refresh_via_b_marts",
+                "schedule": crontab(hour=3, minute=0),  # 03:00 ART daily
+                "options": {"queue": "ingest"},
             },
             "snapshot-staff-weekly": {
                 "task": "openarg.snapshot_staff",
