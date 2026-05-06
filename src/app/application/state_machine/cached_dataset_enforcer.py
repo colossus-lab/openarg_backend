@@ -163,12 +163,19 @@ class StateMachineEnforcer:
                 )
 
     def _scan_orphan_ready(self, engine: Engine) -> Iterable[Violation]:
-        """status='ready' but table doesn't exist (the 13 + 144 'Table missing')."""
+        """status='ready' but table doesn't exist (the 13 + 144 'Table missing').
+
+        The table can live in any of the medallion schemas (`public` for
+        legacy `cache_*`, `raw` for Phase 1, `staging` for Phase 2, `mart`
+        for Phase 3). The orphan scan considers ALL of them — a hit in any
+        schema means the resource is still materialized somewhere.
+        """
         sql = text(
             "SELECT cd.dataset_id::text AS dataset_id, cd.table_name "
             "FROM cached_datasets cd "
             "LEFT JOIN information_schema.tables t "
-            "  ON t.table_name = cd.table_name AND t.table_schema = 'public' "
+            "  ON t.table_name = cd.table_name "
+            " AND t.table_schema IN ('public', 'raw', 'staging', 'mart') "
             "WHERE cd.status = 'ready' AND cd.table_name IS NOT NULL AND t.table_name IS NULL"
         )
         with engine.connect() as conn:

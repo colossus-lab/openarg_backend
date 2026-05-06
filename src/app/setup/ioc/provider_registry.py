@@ -8,7 +8,6 @@ from dishka import Provider, Scope, make_async_container, provide
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.application.pipeline.nodes import PipelineDeps
-from app.application.smart_query_service import SmartQueryService
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
@@ -22,6 +21,7 @@ from app.domain.ports.dataset.dataset_repository import IDatasetRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
+from app.domain.ports.serving.serving_port import IServingPort
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.adapters.cache.cached_embedding_service import CachedEmbeddingService
 from app.infrastructure.adapters.cache.redis_cache_adapter import RedisCacheAdapter
@@ -42,6 +42,7 @@ from app.infrastructure.adapters.llm.fallback_llm_adapter import FallbackLLMAdap
 from app.infrastructure.adapters.llm.gemini_adapter import GeminiLLMAdapter
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
 from app.infrastructure.adapters.search.pgvector_search_adapter import PgVectorSearchAdapter
+from app.infrastructure.adapters.serving.legacy_serving_adapter import LegacyServingAdapter
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
 from app.infrastructure.adapters.source.datos_gob_ar_adapter import DatosGobArAdapter
 from app.infrastructure.adapters.user.user_repository_sqla import UserRepositorySQLA
@@ -105,6 +106,19 @@ class DatasetProvider(Provider):  # type: ignore[misc]
     @provide  # type: ignore[untyped-decorator]
     def vector_search(self, session: MainAsyncSession) -> IVectorSearch:
         return PgVectorSearchAdapter(session)
+
+
+class ServingProvider(Provider):  # type: ignore[misc]
+    """MASTERPLAN Fase 4 — `IServingPort` is the only entry point the
+    LangGraph pipeline uses to reach data. The adapter switches between
+    cache/raw/staging/mart layers transparently as the medallion fills.
+    """
+
+    scope = Scope.REQUEST
+
+    @provide  # type: ignore[untyped-decorator]
+    def serving_port(self, engine: AsyncEngine) -> IServingPort:
+        return LegacyServingAdapter(engine)
 
 
 class LLMProvider(Provider):  # type: ignore[misc]
@@ -269,42 +283,10 @@ class ConnectorProvider(Provider):  # type: ignore[misc]
 class ApplicationProvider(Provider):  # type: ignore[misc]
     scope = Scope.REQUEST
 
-    @provide  # type: ignore[untyped-decorator]
-    def smart_query_service(
-        self,
-        llm: ILLMProvider,
-        embedding: IEmbeddingProvider,
-        vector_search: IVectorSearch,
-        cache: ICacheService,
-        series: ISeriesTiempoConnector,
-        arg_datos: IArgentinaDatosConnector,
-        georef: IGeorefConnector,
-        ckan: ICKANSearchConnector,
-        sesiones: ISesionesConnector,
-        ddjj: DDJJAdapter,
-        semantic_cache: SemanticCache,
-        staff: IStaffConnector,
-        bcra: BCRAAdapter,
-        sandbox: ISQLSandbox,
-        chat_repo: IChatRepository,
-    ) -> SmartQueryService:
-        return SmartQueryService(
-            llm=llm,
-            embedding=embedding,
-            vector_search=vector_search,
-            cache=cache,
-            series=series,
-            arg_datos=arg_datos,
-            georef=georef,
-            ckan=ckan,
-            sesiones=sesiones,
-            ddjj=ddjj,
-            semantic_cache=semantic_cache,
-            staff=staff,
-            bcra=bcra,
-            sandbox=sandbox,
-            chat_repo=chat_repo,
-        )
+    # Legacy `SmartQueryService` provider was removed 2026-05-05 alongside
+    # the `query_router` and `smart_query_router` endpoints. All chat
+    # traffic flows through the LangGraph pipeline (smart_query_v2_router
+    # → LangGraphProvider). See specs/020-legacy-pipeline-tests-migration.
 
 
 class LangGraphProvider(Provider):  # type: ignore[misc]
@@ -335,6 +317,7 @@ class LangGraphProvider(Provider):  # type: ignore[misc]
         bcra: BCRAAdapter,
         sandbox: ISQLSandbox,
         chat_repo: IChatRepository,
+        serving_port: IServingPort,
     ) -> PipelineDeps:
         from app.infrastructure.monitoring.metrics import MetricsCollector
 
@@ -355,6 +338,7 @@ class LangGraphProvider(Provider):  # type: ignore[misc]
             semantic_cache=semantic_cache,
             chat_repo=chat_repo,
             metrics=MetricsCollector(),
+            serving_port=serving_port,
         )
 
 
@@ -375,6 +359,7 @@ def get_providers() -> Iterable[Provider]:
     return (
         DatabaseProvider(),
         DatasetProvider(),
+        ServingProvider(),
         LLMProvider(),
         DataSourceProvider(),
         CacheProvider(),

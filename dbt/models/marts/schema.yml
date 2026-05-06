@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: series_economicas
+    description: |
+      Series temporales económicas unificadas (BCRA por ahora; INDEC y
+      datos.gob.ar series-tiempo se incorporan a medida que aterrizan
+      vía sus contracts).
+    columns:
+      - name: serie_id
+        description: Identificador canónico de la serie (prefijo de fuente)
+        tests:
+          - not_null
+      - name: fecha
+        description: Fecha de la observación
+        tests:
+          - not_null
+      - name: valor
+        description: Valor numérico de la serie en la fecha
+        tests:
+          - not_null
+      - name: unidad
+        description: Unidad de medida
+      - name: fuente
+        description: Organismo que publica la serie
+        tests:
+          - accepted_values:
+              values: ['BCRA', 'INDEC', 'series_tiempo']

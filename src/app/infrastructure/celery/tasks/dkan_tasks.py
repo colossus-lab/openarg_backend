@@ -109,21 +109,24 @@ def _register_dataset(
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            finalized = _finalize_cached_dataset(
-                engine,
-                dataset_id=dataset_id,
-                portal=portal.portal_key,
-                source_id=source_id,
-                table_name=table_name,
-                row_count=len(df),
-                columns=list(df.columns),
-                declared_format="csv",
-                download_url=url,
-                now=now,
-            )
-            if not finalized["ok"]:
-                return None
+    # Out of the begin() block: cached_datasets INSERT inside
+    # _finalize_cached_dataset opens its own tx and would otherwise race
+    # the uncommitted datasets row, hitting fk_cached_datasets_dataset_id.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal.portal_key,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format="csv",
+            download_url=url,
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 

@@ -41,6 +41,9 @@ dependencies = [
     "httpx>=0.28.0",
     "aiofiles>=24.1.0",
 
+    # YAML config (used by marts).
+    "pyyaml>=6.0",
+
     # AWS
     "boto3>=1.28.0",
 
@@ -84,6 +87,15 @@ test = [
     "pytest-rerunfailures>=14.0",
     "httpx>=0.28.0",
     "factory-boy>=3.3.0",
+]
+
+# MASTERPLAN Fase 5 — dbt is OPTIONAL. The medallion runs end-to-end
+# without dbt via the Celery tasks in `application.marts`. Install this
+# extra (`pip install openarg[dbt]`) only when you want lineage / tests /
+# docs from dbt on top.
+dbt = [
+    "dbt-core>=1.8.0",
+    "dbt-postgres>=1.8.0",
 ]
 
 [build-system]

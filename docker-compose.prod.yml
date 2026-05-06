@@ -252,13 +252,18 @@ services:
     image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-ingest:latest
     container_name: openarg_worker_ingest
     restart: always
-    command: ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "ingest", "-c", "2", "--max-memory-per-child=500000", "--loglevel=info"]
+    # `orchestrator` queue carries `bulk_collect_all` and
+    # `collect_large_group`. Routed here (rather than `collector`) to keep
+    # the chain followups responsive when the collector queue is saturated
+    # with long-running downloads. `-c 4` so dispatcher tasks (60-180 s)
+    # never block ingest snapshots from running concurrently.
+    command: ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "ingest,orchestrator", "-c", "4", "--max-memory-per-child=500000", "--loglevel=info"]
     networks:
       - openarg_network
     deploy:
       resources:
         limits:
-          cpus: "1"
+          cpus: "2"
           memory: 2G
         reservations:
           memory: 512M

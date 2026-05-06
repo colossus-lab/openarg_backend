@@ -344,6 +344,60 @@ class TestSearchDeduplication:
         # All returned tables are unique
         assert len(set(tables)) == 2
 
+    async def test_raw_table_catalog_hits_appear_without_dataset_id(self, monkeypatch):
+        sandbox = AsyncMock(spec=ISQLSandbox)
+        sandbox.list_cached_tables.return_value = []
+
+        class _FakeConn:
+            def execute(self, *_args, **_kwargs):
+                return type(
+                    "_Rows",
+                    (),
+                    {
+                        "fetchall": lambda self: [
+                            type(
+                                "_Row",
+                                (),
+                                {
+                                    "table_name": "raw.energia__produccion__abcd1234__v1",
+                                    "display_name": "Producción de energía",
+                                    "description": "Serie raw de producción",
+                                    "score": 0.88,
+                                },
+                            )()
+                        ]
+                    },
+                )()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        class _FakeEngine:
+            def connect(self):
+                return _FakeConn()
+
+        sandbox._get_engine = lambda: _FakeEngine()
+
+        vector_search = AsyncMock(spec=IVectorSearch)
+        vector_search.search_datasets.return_value = []
+
+        fast_app = _build_app(
+            monkeypatch,
+            sandbox=sandbox,
+            vector_search=vector_search,
+        )
+        status, body = await _post_search(
+            fast_app,
+            {"query": "producción de energía", "limit": 5},
+        )
+
+        assert status == 200
+        assert len(body) == 1
+        assert body[0]["table_name"] == "raw.energia__produccion__abcd1234__v1"
+
 
 # ===================================================================
 # 2. Relevance threshold

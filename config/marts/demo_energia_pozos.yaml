@@ -1,0 +1,91 @@
+id: demo_energia_pozos
+version: 0.2.0
+description: |
+  Producción mensual de pozos de petróleo, gas e hidrocarburos por
+  empresa y provincia. Datos de la Secretaría de Energía argentina.
+  Cubre el snapshot pinneado al `resource_identity` listado en
+  `sources` (~500K filas, año 2018).
+
+  COBERTURA LIMITADA — La Secretaría de Energía publica la producción
+  particionada en ~30 datasets (uno por snapshot/período), cada uno
+  con su propio `resource_identity` y CSVs de schemas no totalmente
+  alineados (39-52 columnas según la versión). Hacer UNION ALL via
+  `live_tables_by_table_pattern` falla con
+  `each UNION query must have the same number of columns`. La
+  solución estructural es extender el macro para que acepte un
+  proyector de columnas (`live_tables_by_table_pattern(pattern,
+  columns=[...])`) y emita `SELECT col1, col2 ... FROM tN` en cada
+  miembro del UNION en vez de `SELECT *`. Hasta entonces este mart
+  documenta solo el snapshot 2018 como demo del flujo end-to-end.
+domain: energia
+
+sources:
+  portals: [energia]
+  resource_patterns: ["energia::333fd72a-9b83-4bc1-bc94-0f5940b52331"]
+
+canonical_columns:
+  - name: anio
+    type: int
+    description: Año de la observación
+  - name: mes
+    type: int
+    description: Mes del registro (1-12)
+  - name: empresa
+    type: text
+    description: Nombre comercial del operador del pozo
+  - name: provincia
+    type: text
+    description: Región / provincia donde está el pozo (`formprod` en raw)
+  - name: prod_petroleo_m3
+    type: float
+    description: Producción mensual de petróleo del pozo en m³
+  - name: prod_gas_dam3
+    type: float
+    description: Producción mensual de gas en miles de m³ (dam³)
+
+sql: |
+  -- Aggregate producción mensual a través de TODOS los snapshots de
+  -- producción de pozos que aterrizaron en raw. La versión 0.1 del
+  -- mart apuntaba a un solo resource_identity (una sola partición de
+  -- ~500K rows truncadas, año 2018 únicamente). La versión 0.2 amplía
+  -- vía pattern matching para cubrir todos los años disponibles.
+  --
+  -- `prod_pet` y `prod_gas` aterrizan como TEXT cuando el CSV upstream
+  -- incluye valores no-numéricos (e.g. "N/A", coma decimal ARG-locale,
+  -- espacios). El CASE con regex valida formato antes del cast: tokens
+  -- parseables → float, resto → NULL (excluidos del SUM).
+  -- v0.1.3 fix: el GROUP BY antes incluía `empresa, sigla, formprod`
+  -- pero el SELECT proyectaba `COALESCE(empresa, sigla)`. Cuando
+  -- `empresa` tenía valor, el COALESCE lo elegía pero el GROUP BY
+  -- igual discriminaba por `sigla`, así que cada (anio, mes, empresa)
+  -- producía múltiples rows con la misma proyección visible. La
+  -- matview pasaba de 927 grupos lógicos a 499,670 rows. Ahora
+  -- agrupamos por la EXPRESIÓN proyectada (positional) para que
+  -- la matview tenga 1 fila por (anio, mes, empresa, provincia).
+  SELECT
+    anio::int                                            AS anio,
+    mes::int                                             AS mes,
+    COALESCE(NULLIF(empresa, ''), NULLIF(sigla, ''), '') AS empresa,
+    COALESCE(formprod, '')::text                         AS provincia,
+    SUM(CASE
+      WHEN replace(prod_pet::text, ',', '.') ~ '^-?[0-9]+(\.[0-9]+)?$'
+      THEN replace(prod_pet::text, ',', '.')::float
+      ELSE NULL
+    END)                                                 AS prod_petroleo_m3,
+    SUM(CASE
+      WHEN replace(prod_gas::text, ',', '.') ~ '^-?[0-9]+(\.[0-9]+)?$'
+      THEN replace(prod_gas::text, ',', '.')::float
+      ELSE NULL
+    END)                                                 AS prod_gas_dam3
+  FROM {{ live_tables_by_table_pattern(
+      'energia__produccion_de_petroleo_y_gas_por_pozo*',
+      expected_columns=['anio', 'mes', 'idempresa', 'empresa', 'sigla', 'formprod', 'prod_pet', 'prod_gas']
+  ) }} energia_pozos
+  WHERE anio IS NOT NULL AND mes IS NOT NULL
+  GROUP BY 1, 2, 3, 4
+
+refresh:
+  policy: on_upstream_change
+  # Sin unique_index: las combinaciones (anio, mes, empresa, provincia)
+  # no son únicas en la fuente (mismas claves con sub-grupos distintos).
+  # Aceptamos REFRESH no concurrente para este demo.

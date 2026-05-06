@@ -1,19 +1,33 @@
 """Integration tests for the full query pipeline (plan -> dispatch -> analyze).
 
-These tests mock external services (LLM, DB) but exercise the real orchestration
-logic in SmartQueryService, verifying that plan generation, step dispatch,
-error handling, and analysis work together correctly.
+Skipped at module level — the legacy SmartQueryService monolith was
+removed on 2026-05-05; these tests should migrate to per-node tests
+against the LangGraph pipeline. Plan: specs/020-legacy-pipeline-tests-migration.
+
+These tests originally mocked external services (LLM, DB) but exercised
+the real orchestration logic in SmartQueryService.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock, patch
+import pytest
 
-from app.application.smart_query_service import SmartQueryResult, SmartQueryService
-from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
-from app.domain.exceptions.connector_errors import ConnectorError
-from app.domain.exceptions.error_codes import ErrorCode
+pytestmark = pytest.mark.skip(
+    reason="Legacy SmartQueryService removed; tests TODO — see specs/020-legacy-pipeline-tests-migration/spec.md"
+)
+
+# Placeholders so the module loads without ImportError for the names the
+# test bodies still reference. The pytestmark above prevents execution.
+from dataclasses import dataclass  # noqa: E402,F401
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402,F401
+
+# from app.application.smart_query_service import SmartQueryResult, SmartQueryService
+SmartQueryService = object  # type: ignore[assignment,misc]
+SmartQueryResult = object  # type: ignore[assignment,misc]
+
+from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep  # noqa: E402,F401
+from app.domain.exceptions.connector_errors import ConnectorError  # noqa: E402,F401
+from app.domain.exceptions.error_codes import ErrorCode  # noqa: E402,F401
 
 
 @dataclass

@@ -74,21 +74,24 @@ def _register_dataset(engine, endpoint: str, table_name: str, df: pd.DataFrame):
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            finalized = _finalize_cached_dataset(
-                engine,
-                dataset_id=dataset_id,
-                portal=portal,
-                source_id=source_id,
-                table_name=table_name,
-                row_count=len(df),
-                columns=list(df.columns),
-                declared_format="json",
-                download_url=f"{API_URL}/{endpoint}",
-                now=now,
-            )
-            if not finalized["ok"]:
-                return None
+    # `_finalize_cached_dataset` opens its own transactions; calling it
+    # inside the `engine.begin()` block above made the cached_datasets
+    # INSERT race the uncommitted datasets row and trip the FK constraint.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format="json",
+            download_url=f"{API_URL}/{endpoint}",
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 

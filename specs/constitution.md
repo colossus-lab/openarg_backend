@@ -1,8 +1,8 @@
 # OpenArg Constitution
 
-**Version**: 1.3.0
+**Version**: 1.4.0
 **Status**: Draft (reverse-engineered from the live codebase plus the historical `CLAUDE.md` at the repo root; a private `MEMORY.md` that lived outside the repo was also consulted during the initial pass but is **not** part of the OSS tree).
-**Last synced with code**: 2026-04-25
+**Last synced with code**: 2026-05-04
 **Scope**: Backend (`openarg_backend`). Frontend has its own `constitution.md`.
 
 ---
@@ -107,6 +107,28 @@ Any PR that modifies `src/` without touching the corresponding `specs/` will be 
 The rule was added in v1.3.0 (2026-04-25) after the operator pointed out that the agent had jumped straight from a code-review to applying fixes without proposing them first. The fixes were correct, but the cadence was wrong: the operator did not get the chance to redirect, deprioritise, or split the work. Doing the right thing the wrong way still costs the operator's review time.
 
 The cost of pausing to propose is low. The cost of an unwanted change — even a correct one — is the operator's mental budget, which is the project's scarcest resource.
+
+---
+
+## 0.7. Single Path to Terminal Status (axiom)
+
+Added 2026-05-04 (v1.4.0). Formalises FR-009 of [spec 014](./014-state-machine/spec.md).
+
+**Rule**: Every code path that writes a terminal `cached_datasets.status` (`permanently_failed`, `error`, `schema_mismatch`) MUST classify `error_message` via `_classify_error_category` and write `error_category` in the same SQL statement. No path may set `status` to a terminal value without also writing `error_category`.
+
+### Why this exists
+
+In April 2026 production showed 26 datasets in `permanently_failed` with `error_category='unknown'` despite the classifier having matching rules for every one of their `error_message` strings. The cause: `_set_error_status` (deterministic-error fast path) wrote `status` directly without invoking the classifier, so `error_category` stayed at the column's previous value or default `unknown`. The classifier was correct; the architecture allowed an end-run around it.
+
+### What this means for new code
+
+- Single helper. There is one canonical helper that writes terminal states. New code that needs to mark a row terminal MUST call that helper, not `UPDATE cached_datasets SET status='permanently_failed'` directly.
+- Linter rule (deferred). A future ruff/AST check should fail PRs that contain `SET status = '` followed by a terminal value without `error_category =` in the same string.
+- No backdoor in migrations. Alembic data-migrations that flip statuses MUST also set `error_category` (to a meaningful bucket or the explicit `'unknown'` literal — never leave it at default).
+
+### When you may bend this rule
+
+You may not. The rule exists because every backdoor produced a real production bug.
 
 ---
 

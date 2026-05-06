@@ -147,6 +147,61 @@ class GDriveScanWarningDetector(Detector):
         return None
 
 
+class SeparatorMismatchDetector(Detector):
+    """CSV parsed with the wrong delimiter — the entire row collapses into a
+    single column whose name is the raw header line containing the actual
+    delimiter (`;`, `|`, tab) embedded as text.
+
+    Confirmed pattern in prod (May 2026): 186 tables with <=2 cols totaling
+    22.8M rows, including `cache_caba_subte_viajes_molinetes_*` (8.4M rows
+    with single col `"FECHA;DESDE;HASTA;LINEA;MOLINETE;..."`).
+
+    Distinct from `SingleColumnDetector` (which fires on HTML-parsed-as-CSV).
+    This one targets delimiter mismatch — col names look like data, not HTML.
+    """
+
+    name = "separator_mismatch"
+    version = "1"
+    severity = Severity.CRITICAL
+    _SUSPICIOUS_DELIMITERS = (";", "|", "\t")
+    _AUX_COL_NAMES = frozenset({"_source_dataset_id"})
+
+    def applicable_to(self, ctx: ResourceContext) -> bool:
+        return bool(ctx.materialized_columns)
+
+    def run(self, ctx: ResourceContext, mode: Mode) -> Finding | None:
+        cols = ctx.materialized_columns or []
+        # Skip if too many cols — only suspicious when 1-2 (single col + aux)
+        data_cols = [str(c) for c in cols if str(c) not in self._AUX_COL_NAMES]
+        if not data_cols or len(data_cols) > 2:
+            return None
+
+        first = data_cols[0]
+        # Must be longer than a typical short header
+        if len(first) < 20:
+            return None
+
+        for sep in self._SUSPICIOUS_DELIMITERS:
+            count = first.count(sep)
+            if count >= 2:
+                return self._finding(
+                    mode=mode,
+                    payload={
+                        "first_column_name": first[:200],
+                        "embedded_delimiter": sep if sep != "\t" else "\\t",
+                        "delimiter_count_in_header": count,
+                        "total_columns": len(cols),
+                    },
+                    message=(
+                        f"materialized table has {len(cols)} columns and the first "
+                        f"column name embeds {count} '{sep if sep != chr(9) else 'TAB'}' "
+                        "delimiters — likely separator mismatch on parse"
+                    ),
+                    should_redownload=True,
+                )
+        return None
+
+
 class EncodingMismatchDetector(Detector):
     """Bytes that look like latin-1 read as UTF-8 (mojibake).
 

@@ -45,6 +45,15 @@ _EMBEDDING_BATCH_LIMIT = 96
 _CATALOG_BACKFILL_LOCK_KEY = 156002
 _CATALOG_PARSER_VERSION = "phase4-v1"
 _CATALOG_NORMALIZATION_VERSION = "phase4-v1"
+# When backfilling, datasets that already had `cached_status` set were
+# parsed with whatever parser was alive when they were first ingested —
+# possibly `phase3` or earlier. Marking them as `phase4-v1` would lie:
+# the metadata would say "parsed with the new parser" without any
+# reingest. We use a distinct sentinel so dashboards / reingest filters
+# (`WHERE parser_version != 'phase4-v1'`) can tell apart genuine
+# phase4-v1 rows from backfilled rows of unknown provenance.
+_BACKFILL_LEGACY_PARSER_VERSION = "legacy:unknown"
+_BACKFILL_LEGACY_NORMALIZATION_VERSION = "legacy:unknown"
 
 
 def _resource_identity(portal: str, source_id: str, sub_path: str | None = None) -> str:
@@ -90,18 +99,58 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
     return result["embeddings"]
 
 
+# Same pattern as collector_tasks._HELD_ADVISORY_LOCKS — keep the
+# acquiring connection open between acquire and release so the session
+# lock survives.
+_HELD_BACKFILL_LOCK: dict[int, "object"] = {}
+
+
 def _try_backfill_lock(engine: Engine) -> bool:
-    with engine.connect() as conn:
-        return bool(conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": _CATALOG_BACKFILL_LOCK_KEY}).scalar())
+    if _CATALOG_BACKFILL_LOCK_KEY in _HELD_BACKFILL_LOCK:
+        return False
+    conn = engine.connect()
+    try:
+        acquired = bool(
+            conn.execute(
+                text("SELECT pg_try_advisory_lock(:key)"),
+                {"key": _CATALOG_BACKFILL_LOCK_KEY},
+            ).scalar()
+        )
+        conn.rollback()
+    except Exception:
+        logger.warning("Could not probe catalog_backfill lock", exc_info=True)
+        conn.close()
+        return False
+
+    if not acquired:
+        conn.close()
+        return False
+
+    _HELD_BACKFILL_LOCK[_CATALOG_BACKFILL_LOCK_KEY] = conn
+    return True
 
 
 def _release_backfill_lock(engine: Engine) -> None:
+    """`engine` is accepted for backward compat but ignored; the cached
+    connection from `_try_backfill_lock` is the one that holds the lock."""
+    conn = _HELD_BACKFILL_LOCK.pop(_CATALOG_BACKFILL_LOCK_KEY, None)
+    if conn is None:
+        return
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _CATALOG_BACKFILL_LOCK_KEY})
+        if conn.in_transaction():
             conn.rollback()
+        conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _CATALOG_BACKFILL_LOCK_KEY})
+        conn.rollback()
     except Exception:
-        logger.debug("Could not release catalog_backfill advisory lock", exc_info=True)
+        # Lock release failure is a real concern — it means the session
+        # lock will linger until the connection is GC'd. Warning so it
+        # surfaces in dashboards instead of being swallowed at debug.
+        logger.warning("Could not release catalog_backfill advisory lock", exc_info=True)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 _UPSERT_SQL = text(
@@ -346,11 +395,17 @@ def _resource_kind(cached_status: str | None, error_message: str | None = None) 
 
 
 def _derived_layout_profile(cached_layout_profile: str | None, cached_status: str | None) -> str | None:
-    if cached_layout_profile:
-        return cached_layout_profile
-    if cached_status == "ready":
-        return "simple_tabular"
-    return None
+    """Return the layout_profile to project into `catalog_resources`.
+
+    Earlier versions defaulted to `simple_tabular` when status='ready' even
+    if the row had no real `layout_profile` from the parser. That made
+    backfilled rows look like they had been processed by the phase4 parser,
+    inflating dashboards that filter by layout_profile and hiding the
+    `IS NOT NULL` cohort that needs reingestion. Returning None for rows
+    without an explicit profile keeps the catalog honest: dashboards can
+    distinguish "really phase4-tagged" from "we don't know yet".
+    """
+    return cached_layout_profile
 
 
 def _derived_header_quality(
@@ -358,13 +413,17 @@ def _derived_header_quality(
     cached_status: str | None,
     error_message: str | None,
 ) -> str | None:
+    """Same shape as `_derived_layout_profile`: only return what's
+    explicitly known. The `error_message` -> 'degraded' rule is the only
+    derived value left, because the message itself is hard evidence that
+    the parser flagged the header. Defaulting `ready` to 'good' lied:
+    plenty of cached_datasets ready rows from before phase4 were never
+    parsed by the new pipeline, so we can't claim 'good' for them."""
     if cached_header_quality:
         return cached_header_quality
     msg = (error_message or "").lower()
     if "header_quality:degraded" in msg:
         return "degraded"
-    if cached_status == "ready":
-        return "good"
     return None
 
 
@@ -434,8 +493,8 @@ def backfill_batch(
             "header_quality": _derived_header_quality(
                 row.header_quality, row.cached_status, row.error_message
             ),
-            "parser_version": _CATALOG_PARSER_VERSION if row.cached_status else None,
-            "normalization_version": _CATALOG_NORMALIZATION_VERSION if row.cached_status else None,
+            "parser_version": _BACKFILL_LEGACY_PARSER_VERSION if row.cached_status else None,
+            "normalization_version": _BACKFILL_LEGACY_NORMALIZATION_VERSION if row.cached_status else None,
         }
         if dry_run:
             logger.debug("dry-run upsert %s", identity)
@@ -607,23 +666,25 @@ def run_seed_connector_endpoints(*, dry_run: bool = False) -> dict:
 )
 def catalog_backfill_task(self, *, dry_run: bool = False, max_batches: int | None = None) -> dict:
     engine = get_sync_engine()
-    lock_acquired = False
-    try:
-        lock_acquired = _try_backfill_lock(engine)
-        if not lock_acquired:
-            logger.info("catalog_backfill skipped because another run already holds the lock")
-            return {"status": "skipped_already_running"}
-    finally:
-        engine.dispose()
+    # NOTE: do NOT engine.dispose() between acquire and release. The
+    # advisory lock connection is checked out from the pool and stashed
+    # in `_HELD_BACKFILL_LOCK` (kept open by `_try_backfill_lock`).
+    # Calling dispose() invalidates the pool but the checked-out
+    # connection survives — still, removing dispose() avoids confusing
+    # readers and any future regression where dispose() ends up
+    # closing held connections directly.
+    lock_acquired = _try_backfill_lock(engine)
+    if not lock_acquired:
+        logger.info("catalog_backfill skipped because another run already holds the lock")
+        return {"status": "skipped_already_running"}
 
     try:
         return run_backfill(dry_run=dry_run, max_batches=max_batches)
     finally:
-        release_engine = get_sync_engine()
-        try:
-            _release_backfill_lock(release_engine)
-        finally:
-            release_engine.dispose()
+        # `engine` is ignored by `_release_backfill_lock` (the cached
+        # connection from acquire is what holds the lock); we pass it
+        # for signature compatibility.
+        _release_backfill_lock(engine)
 
 
 @celery_app.task(

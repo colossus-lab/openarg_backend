@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -106,12 +107,14 @@ async def _invoke_subgraph(
     sandbox: Any,
     embedding: Any = None,
     semantic_cache: Any = None,
+    serving_port: Any = None,
 ):
     with nl2sql_runtime(
         llm=llm,
         sandbox=sandbox,
         embedding=embedding,
         semantic_cache=semantic_cache,
+        serving_port=serving_port,
     ):
         return await subgraph.ainvoke(state)
 
@@ -387,3 +390,62 @@ async def test_compiled_subgraph_runs_with_runtime_context_and_minimal_state():
 
     assert len(final["data_results"]) == 1
     assert final["data_results"][0].records == [{"x": 1}]
+
+
+@pytest.mark.asyncio
+async def test_explicit_mart_query_uses_serving_port() -> None:
+    llm = FakeLLM(["SELECT * FROM mart.series_economicas LIMIT 1"])
+    sandbox = FakeSandbox([])
+    serving_port = AsyncMock()
+    serving_port.query.return_value.columns = ["valor"]
+    serving_port.query.return_value.data = [[123]]
+    serving_port.query.return_value.truncated = False
+
+    subgraph = build_nl2sql_subgraph()
+    final = await _invoke_subgraph(
+        subgraph,
+        _base_state(
+            llm,
+            sandbox,
+            tables=[FakeTable(table_name="mart.series_economicas", columns=["valor"])],
+            tables_context="Table: mart.series_economicas\n  Columns: valor",
+        ),
+        llm=llm,
+        sandbox=sandbox,
+        serving_port=serving_port,
+    )
+
+    serving_port.query.assert_awaited_once_with(
+        "mart::series_economicas",
+        "SELECT * FROM mart.series_economicas LIMIT 1",
+        max_rows=1000,
+        timeout_seconds=30,
+    )
+    assert sandbox.calls == []
+    assert final["data_results"][0].records == [{"valor": 123}]
+
+
+@pytest.mark.asyncio
+async def test_serving_failure_falls_back_to_sandbox() -> None:
+    llm = FakeLLM(["SELECT * FROM mart.series_economicas LIMIT 1"])
+    sandbox = FakeSandbox([FakeSandboxResult(rows=[{"valor": 77}], row_count=1, columns=["valor"])])
+    serving_port = AsyncMock()
+    serving_port.query.side_effect = RuntimeError("serving unavailable")
+
+    subgraph = build_nl2sql_subgraph()
+    final = await _invoke_subgraph(
+        subgraph,
+        _base_state(
+            llm,
+            sandbox,
+            tables=[FakeTable(table_name="mart.series_economicas", columns=["valor"])],
+            tables_context="Table: mart.series_economicas\n  Columns: valor",
+        ),
+        llm=llm,
+        sandbox=sandbox,
+        serving_port=serving_port,
+    )
+
+    serving_port.query.assert_awaited_once()
+    assert sandbox.calls == ["SELECT * FROM mart.series_economicas LIMIT 1"]
+    assert final["data_results"][0].records == [{"valor": 77}]

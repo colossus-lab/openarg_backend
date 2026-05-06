@@ -1,6 +1,12 @@
 """CLI runner for the OpenArg evaluation framework.
 
-Usage:
+NOTE: this CLI was written against the legacy `SmartQueryService` which
+was removed on 2026-05-05. The import inside `run_evaluation` is wrapped
+in try/except so this module imports cleanly, but invoking the CLI will
+exit with `{"error": "import_failed"}` until it is migrated to drive the
+LangGraph pipeline directly. See specs/020-legacy-pipeline-tests-migration.
+
+Usage (post-migration):
     python -m tests.evaluation.run_eval --dataset path/to/golden_dataset.json --output report.json
     python -m tests.evaluation.run_eval --dry-run
     python -m tests.evaluation.run_eval --categories series_tiempo,ddjj

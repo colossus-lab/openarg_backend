@@ -1,0 +1,67 @@
+id: staff_estado
+version: 0.3.0
+description: |
+  Personal del Estado nacional con identidad legible: HCDN (snapshot semanal),
+  Senado (scrape). Cuando los conectores adicionales aterricen, las nuevas
+  fuentes se suman vía live_tables_by_portal.
+domain: gobierno
+
+sources:
+  portals: [staff_hcdn, senado]
+  resource_patterns: ["staff_hcdn::snapshots", "senado::staff"]
+
+canonical_columns:
+  - name: organismo
+    type: text
+    description: Organismo empleador (HCDN, Senado, ...)
+  - name: nombre
+    type: text
+    description: Nombre completo del agente
+  - name: cargo
+    type: text
+    description: Cargo o función desempeñada
+  - name: area
+    type: text
+    description: Área/dependencia administrativa
+
+# El SQL es resiliente a fuentes ausentes: live_table devuelve un
+# placeholder con `dummy WHERE FALSE` cuando el resource_identity no
+# está en raw_table_versions, así que envolvemos cada origen en su
+# propia CTE con cast a las canonical_columns. Si la fuente no
+# materializó aún, la CTE devuelve cero filas pero no rompe el plan.
+sql: |
+  WITH hcdn_src AS (
+    SELECT * FROM {{ live_table(
+        'staff_hcdn::snapshots',
+        expected_columns=['nombre', 'apellido', 'escalafon', 'area_desempeno', 'snapshot_date']
+    ) }}
+  ),
+  hcdn AS (
+    SELECT
+      'HCDN'::text                                              AS organismo,
+      TRIM(COALESCE(s.nombre, '') || ' ' || COALESCE(s.apellido, '')) AS nombre,
+      COALESCE(s.escalafon, '')::text                           AS cargo,
+      COALESCE(s.area_desempeno, '')::text                      AS area
+    FROM hcdn_src s
+    WHERE s.snapshot_date = (SELECT MAX(s2.snapshot_date) FROM hcdn_src s2)
+  ),
+  senado_src AS (
+    SELECT * FROM {{ live_table(
+        'senado::staff',
+        expected_columns=['employee_name', 'categoria', 'senator_name']
+    ) }}
+  ),
+  senado AS (
+    SELECT
+      'Senado'::text                              AS organismo,
+      COALESCE(s.employee_name, '')::text         AS nombre,
+      COALESCE(s.categoria, '')::text             AS cargo,
+      COALESCE(s.senator_name, '')::text          AS area
+    FROM senado_src s
+  )
+  SELECT * FROM hcdn
+  UNION ALL
+  SELECT * FROM senado
+
+refresh:
+  policy: on_upstream_change

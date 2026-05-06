@@ -29,6 +29,12 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
     columns_json = json.dumps(list(df.columns))
     now = datetime.now(UTC)
 
+    # IMPORTANT: the INSERT must commit BEFORE `_finalize_cached_dataset`
+    # runs. The latter opens its own `engine.begin()` and inserts into
+    # `cached_datasets` with a FK to `datasets.id`. If we kept everything
+    # under a single `with engine.begin()`, the FK insert would happen in
+    # a sibling transaction that does not see the still-uncommitted
+    # parent INSERT and the constraint would fire.
     with engine.begin() as conn:
         conn.execute(
             text("""
@@ -63,21 +69,21 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            finalized = _finalize_cached_dataset(
-                engine,
-                dataset_id=dataset_id,
-                portal=portal,
-                source_id=source_id,
-                table_name=table_name,
-                row_count=len(df),
-                columns=list(df.columns),
-                declared_format="json",
-                download_url="https://www.bcra.gob.ar/Estadisticas/Datos_Abiertos.asp",
-                now=now,
-            )
-            if not finalized["ok"]:
-                return None
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format="json",
+            download_url="https://www.bcra.gob.ar/Estadisticas/Datos_Abiertos.asp",
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -114,7 +120,21 @@ def snapshot_bcra(self):
             df = pd.DataFrame(cotizaciones.records)
             if not df.empty:
                 table_name = "cache_bcra_cotizaciones"
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                # If `series_economicas` (or any other mart) already
+                # depends on this table, DROP+CREATE fails. TRUNCATE
+                # + append preserves the dependency graph.
+                try:
+                    df.to_sql(table_name, engine, if_exists="replace", index=False)
+                except Exception as exc:
+                    if "DependentObjectsStillExist" not in type(exc).__name__ \
+                            and "depend on it" not in str(exc):
+                        raise
+                    logger.info(
+                        "BCRA: replace blocked by dependent view; falling back to TRUNCATE + append"
+                    )
+                    from app.infrastructure.celery.tasks._db import safe_truncate_table
+                    safe_truncate_table(engine, table_name)
+                    df.to_sql(table_name, engine, if_exists="append", index=False)
                 dataset_id = _register_dataset(
                     engine,
                     "bcra-cotizaciones",
@@ -128,6 +148,18 @@ def snapshot_bcra(self):
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so the
+                # `series_economicas` mart finds it.
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity="bcra::cotizaciones",
+                    table_name=table_name,
+                    schema_name="public",
+                    row_count=len(df),
+                )
                 results["tables"].append({"table": table_name, "rows": len(df)})
                 logger.info("BCRA cotizaciones: %d records cached", len(df))
 

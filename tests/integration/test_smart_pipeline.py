@@ -7,6 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.domain.entities.connectors.data_result import DataResult, ExecutionPlan, PlanStep
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Legacy SmartQueryService removed; tests TODO — see specs/020-legacy-pipeline-tests-migration/spec.md"
+)
+
+
 
 @dataclass
 class FakeLLMResponse:

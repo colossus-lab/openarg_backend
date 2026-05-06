@@ -21,7 +21,12 @@ from sqlalchemy import text
 from app.application.pipeline.parsers import parse_hierarchical_headers
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
-from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dataset
+from app.infrastructure.celery.tasks.collector_tasks import (
+    _combine_multirow_header,
+    _detect_data_header_range,
+    _detect_data_header_row,
+    _finalize_cached_dataset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,44 +200,42 @@ def _register_dataset(engine, ds_info: dict, table_name: str, df: pd.DataFrame):
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            finalized = _finalize_cached_dataset(
-                engine,
-                dataset_id=dataset_id,
-                portal=portal,
-                source_id=source_id,
-                table_name=table_name,
-                row_count=len(df),
-                columns=list(df.columns),
-                declared_format=ds_info["url"].rsplit(".", 1)[-1].lower()
-                if "." in ds_info["url"]
-                else "csv",
-                download_url=ds_info["url"],
-                now=now,
-            )
-            if not finalized["ok"]:
-                return None
+    # Out of the begin() block: cached_datasets INSERT inside
+    # _finalize_cached_dataset opens its own tx and would otherwise race
+    # the uncommitted datasets row, hitting fk_cached_datasets_dataset_id.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format=ds_info["url"].rsplit(".", 1)[-1].lower()
+            if "." in ds_info["url"]
+            else "csv",
+            download_url=ds_info["url"],
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
 
 def _detect_header_row(df_raw: pd.DataFrame) -> int:
-    """Find the first row that looks like a data header (many non-NaN values).
+    """Find the first row that looks like a real INDEC header.
 
-    INDEC XLS files have 3-5 rows of presentation headers (title, period,
-    empty rows) before the actual column headers.  We look for the first row
-    where ≥30 % of cells are non-NaN — that's the header or the start of data.
-    Single-cell title rows are skipped.
+    Delegates to the shared `_detect_data_header_row`, which checks for
+    non-empty alphabetic tokens and rejects rows dominated by `Unnamed:N`
+    placeholders. The previous implementation only counted non-NaN cells,
+    so a row of `["title", "Unnamed:1", "Unnamed:2", ...]` passed (≥30 %
+    non-NaN) and the WS0 validator killed it later as `placeholder_headers`.
+    Pivoted layouts (`País, 2010, 2011, ...`) keep working — pure-digit
+    tokens are NOT counted as placeholders.
     """
-    ncols = df_raw.shape[1]
-    threshold = max(3, ncols * 0.3)
-
-    for idx in range(min(15, len(df_raw))):
-        row = df_raw.iloc[idx]
-        non_null_count = row.notna().sum()
-        if non_null_count >= threshold:
-            return idx
-    return 0
+    return _detect_data_header_row(df_raw)
 
 
 def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
@@ -266,26 +269,34 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
             return None
         df.columns = parsed.columns
     else:
-        header_idx = _detect_header_row(df_raw)
-
-        # Re-read with the correct header row
-        try:
-            df = pd.read_excel(
-                io.BytesIO(content),
-                sheet_name=sheet,
-                header=header_idx,
-                engine="xlrd",
-            )
-        except Exception:
+        # Use the range detector so 2-row headers (parent merged cells +
+        # child sub-headers, common in INDEC `cuadros`) produce composite
+        # column names like `Exportaciones_Total_mensual` instead of
+        # `Unnamed: 2` from reading only the child row.
+        start, end = _detect_data_header_range(df_raw)
+        if end - start > 1:
+            df = df_raw.iloc[end:].reset_index(drop=True).copy()
+            if df.empty:
+                return None
+            df.columns = _combine_multirow_header(df_raw, start, end)
+        else:
             try:
                 df = pd.read_excel(
                     io.BytesIO(content),
                     sheet_name=sheet,
-                    header=header_idx,
-                    engine="openpyxl",
+                    header=start,
+                    engine="xlrd",
                 )
             except Exception:
-                return None
+                try:
+                    df = pd.read_excel(
+                        io.BytesIO(content),
+                        sheet_name=sheet,
+                        header=start,
+                        engine="openpyxl",
+                    )
+                except Exception:
+                    return None
 
     # Drop rows that are entirely NaN (spacer rows after header)
     df = df.dropna(how="all").reset_index(drop=True)

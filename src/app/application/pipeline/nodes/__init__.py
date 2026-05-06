@@ -31,6 +31,11 @@ class PipelineDeps:
     semantic_cache: Any  # SemanticCache
     chat_repo: Any  # IChatRepository | None
     metrics: Any  # MetricsCollector
+    # MASTERPLAN Fase 4.5 — Serving Port for the medallion-aware nodes.
+    # Optional so tests / legacy code paths that don't construct it stay
+    # working; the planner falls back to the legacy `table_catalog` query
+    # when this is None.
+    serving_port: Any = None  # IServingPort | None
 
 
 # Per-request dependency isolation using ContextVar (thread/coroutine-safe)

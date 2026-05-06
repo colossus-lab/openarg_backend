@@ -103,19 +103,188 @@ def _generate_metadata_for_table(
         }
 
 
+def _resolve_resource_identity_for_table(engine, table_name: str) -> str | None:
+    """Look up the `resource_identity` that owns a physical relation.
+
+    Resolution strategy, in priority order:
+      1. If the input is `mart.<view>`, resolve directly from
+         `mart_definitions` to `mart::<mart_id>`.
+      2. If the input is another qualified name (`raw.foo`, `staging.foo`),
+         prefer the exact match in `raw_table_versions` (live version). This
+         handles the 7% of raw tables that have no `cached_datasets` row —
+         the bare-name lookup below would mis-resolve those onto a different
+         dataset that happens to share the table_name.
+      3. Otherwise (or if the qualified lookup misses), fall back to the
+         legacy `cached_datasets` → `datasets` join. This still owns the
+         public.cache_* legacy path.
+
+    Returning the canonical `{portal}::{source_id}` shape means callers
+    don't need to know whether the resolution went through rtv or cd.
+    """
+    schema, bare = _split_qualified_name(table_name)
+    try:
+        with engine.connect() as conn:
+            if schema == "mart":
+                mart_row = conn.execute(
+                    text(
+                        """
+                        SELECT mart_id
+                        FROM mart_definitions
+                        WHERE mart_schema = :sch
+                          AND mart_view_name = :tn
+                        LIMIT 1
+                        """
+                    ),
+                    {"sch": schema, "tn": bare},
+                ).fetchone()
+                conn.rollback()
+                if mart_row and mart_row.mart_id:
+                    return f"mart::{mart_row.mart_id}"
+
+            # Prefer rtv when the input is explicitly raw/staging.
+            # `resource_identity` already encodes the portal/source so we
+            # surface it directly without rebuilding from datasets.
+            if schema not in {"public", "mart"}:
+                rtv_row = conn.execute(
+                    text(
+                        """
+                        SELECT resource_identity
+                        FROM raw_table_versions
+                        WHERE schema_name = :sch
+                          AND table_name = :tn
+                          AND superseded_at IS NULL
+                        ORDER BY version DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"sch": schema, "tn": bare},
+                ).fetchone()
+                conn.rollback()
+                if rtv_row and rtv_row.resource_identity:
+                    return str(rtv_row.resource_identity)
+
+            # Legacy path: bare name -> cached_datasets -> datasets.
+            # Restrict by schema_name on rtv via LEFT JOIN so we never
+            # match a raw row when the caller meant the public legacy row.
+            cd_row = conn.execute(
+                text(
+                    """
+                    SELECT d.portal, d.source_id
+                    FROM cached_datasets cd
+                    JOIN datasets d ON d.id = cd.dataset_id
+                    WHERE cd.table_name = :tn
+                    ORDER BY cd.updated_at DESC NULLS LAST
+                    LIMIT 1
+                    """
+                ),
+                {"tn": bare},
+            ).fetchone()
+            conn.rollback()
+    except Exception:
+        return None
+    if cd_row is None or not cd_row.portal or not cd_row.source_id:
+        return None
+    return f"{cd_row.portal}::{cd_row.source_id}"
+
+
+def _project_enrichment_to_catalog_resources(
+    engine,
+    *,
+    table_name: str,
+    metadata: dict,
+    row_count: int,
+    embedding_str: str | None,
+    quality_score: float,
+) -> None:
+    """UPSERT the LLM-generated semantic metadata into `catalog_resources`.
+
+    Idempotent on `resource_identity`: re-runs UPDATE the existing row.
+    Skips silently if the table can't be resolved to a resource (e.g. a
+    leftover orphan `cache_*` table that has no entry in `cached_datasets`).
+    """
+    resource_identity = _resolve_resource_identity_for_table(engine, table_name)
+    if resource_identity is None:
+        logger.debug(
+            "catalog_resources projection skipped for %s (no resource_identity)",
+            table_name,
+        )
+        return
+    if resource_identity.startswith("mart::"):
+        # Curated marts live in `mart_definitions`, not in
+        # `catalog_resources`. Keep the legacy `table_catalog`
+        # enrichment for these rows, but don't pretend we projected them
+        # into the canonical resource catalog when no such row exists.
+        logger.debug(
+            "catalog_resources projection skipped for %s (%s belongs to mart_definitions)",
+            table_name,
+            resource_identity,
+        )
+        return
+
+    # Derive a `taxonomy_key` from the LLM tags (first non-empty short tag).
+    tags = metadata.get("tags") or []
+    taxonomy_key: str | None = None
+    for tag in tags:
+        if isinstance(tag, str) and 0 < len(tag) <= 64:
+            taxonomy_key = tag.lower().replace(" ", "_")
+            break
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE catalog_resources
+                SET display_name = COALESCE(:dn, display_name),
+                    domain = COALESCE(:dom, domain),
+                    subdomain = COALESCE(:sub, subdomain),
+                    taxonomy_key = COALESCE(:tk, taxonomy_key),
+                    embedding = COALESCE(CAST(:emb AS vector), embedding),
+                    title_confidence = GREATEST(COALESCE(title_confidence, 0), :qs),
+                    updated_at = NOW()
+                WHERE resource_identity = :rid
+                """
+            ),
+            {
+                "dn": metadata.get("display_name"),
+                "dom": metadata.get("domain"),
+                "sub": metadata.get("subdomain"),
+                "tk": taxonomy_key,
+                "emb": embedding_str,
+                "qs": float(quality_score),
+                "rid": resource_identity,
+            },
+        )
+
+
+def _split_qualified_name(table_name: str) -> tuple[str, str]:
+    """Split `schema.table` (or just `table`) into (schema, bare). Mirrors
+    the helper in `ingestion_findings_sweep`: see that module's comment for
+    the three input shapes we accept (legacy public, qualified, quoted)."""
+    if not table_name:
+        return "public", ""
+    if "." not in table_name:
+        return "public", table_name
+    schema, _, rest = table_name.partition(".")
+    return schema.strip('"'), rest.strip('"')
+
+
 def _enrich_table(engine, table_name: str) -> bool:
     """Enrich a single table with metadata and embedding. Returns True if successful."""
+    schema, bare = _split_qualified_name(table_name)
+    safe_schema = schema.replace('"', '""')
+    safe_bare = bare.replace('"', '""')
     try:
         # Get columns and sample rows
         with engine.connect() as conn:
-            # Get column info
+            # Get column info — handle qualified names so this works for
+            # raw.* / staging.* / mart.* and not just legacy public.cache_*.
             col_result = conn.execute(
                 text(
                     "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = :tn AND table_schema = 'public' "
+                    "WHERE table_name = :tn AND table_schema = :sch "
                     "ORDER BY ordinal_position"
                 ),
-                {"tn": table_name},
+                {"tn": bare, "sch": schema},
             )
             columns = [r.column_name for r in col_result.fetchall()]
             conn.rollback()
@@ -127,7 +296,7 @@ def _enrich_table(engine, table_name: str) -> bool:
             # Get sample rows (limit 3)
             try:
                 sample_result = conn.execute(
-                    text(f'SELECT * FROM "{table_name}" LIMIT 3')  # noqa: S608
+                    text(f'SELECT * FROM "{safe_schema}"."{safe_bare}" LIMIT 3')  # noqa: S608
                 )
                 sample_rows = [dict(r._mapping) for r in sample_result.fetchall()]
                 conn.rollback()
@@ -135,10 +304,15 @@ def _enrich_table(engine, table_name: str) -> bool:
                 sample_rows = []
                 logger.debug("Could not fetch sample rows for %s", table_name, exc_info=True)
 
-            # Get row count
+            # Get row count — use the qualified name so raw.* / mart.*
+            # work, not just legacy public.cache_*. The earlier
+            # `SELECT COUNT(*) FROM "{table_name}"` shape silently
+            # interpreted `raw.foo` as a table named literally `raw.foo`
+            # in the search_path's first schema (public), giving 0 rows
+            # for every raw landing.
             try:
                 count_result = conn.execute(
-                    text(f'SELECT COUNT(*) FROM "{table_name}"')  # noqa: S608
+                    text(f'SELECT COUNT(*) FROM "{safe_schema}"."{safe_bare}"')  # noqa: S608
                 )
                 row_count = count_result.scalar() or 0
                 conn.rollback()
@@ -204,6 +378,29 @@ def _enrich_table(engine, table_name: str) -> bool:
             )
 
         logger.info("Enriched table_catalog for %s: %s", table_name, metadata.get("display_name"))
+
+        # MASTERPLAN Fase 4.5d — also write to `catalog_resources` so the
+        # canonical catalog accumulates the same semantic enrichment.
+        # `table_catalog` is preserved as a legacy projection until its
+        # readers migrate; the eventual deprecation lives outside this
+        # function. Any failure here is non-fatal — we logged success
+        # above for the legacy write.
+        try:
+            _project_enrichment_to_catalog_resources(
+                engine,
+                table_name=table_name,
+                metadata=metadata,
+                row_count=row_count,
+                embedding_str=embedding_str,
+                quality_score=1.0 if sample_rows else 0.5,
+            )
+        except Exception:
+            logger.warning(
+                "Could not project enrichment to catalog_resources for %s",
+                table_name,
+                exc_info=True,
+            )
+
         return True
 
     except Exception:

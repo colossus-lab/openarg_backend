@@ -1,10 +1,18 @@
 # Spec 013 — Ingestion Validation (WS0)
 
 **Type**: Forward-engineered (collector_plan.md WS0)
-**Status**: Implemented (code only — pending operator review and rollout)
+**Status**: Deployed to staging 2026-05-03, parser hardening 2026-05-06.
 **Hexagonal scope**: Application (Strategy) + Infrastructure (hooks + sweep)
 **Related plan**: [./plan.md](./plan.md)
 **Implements**: WS0 of [collector_plan.md](../../../collector_plan.md)
+
+**Recent updates (2026-05-06)**:
+- **Header detector relajado para layouts pivoteados**: `_detect_data_header_row` solo cuenta `Unnamed:N` y `col_N` como placeholders. Pure-numeric tokens (años como columnas en `País, 2010, 2011, 2012, ...`) son legítimos y NO descartan la fila como header. Mínimo 1 alpha cell. Recuperó 11 portales (mendoza, justicia, salud, etc.) que estaban en 0% éxito, ahora en 70-95%.
+- **Multi-row header detector**: nuevo `_detect_data_header_range(df) -> tuple[int, int]` que arranca anclando en la primera "data row" (>=3 numeric, numeric > alpha+1) y camina hacia atrás para encontrar el bloque contiguo de header rows. Soporta N-level (3, 4 niveles típicos de INDEC `Cuadro N` con `Período / Serie original / Nivel general+Variación / Números índice`). `_combine_multirow_header(df, start, end)` hace forward-fill horizontal de las filas padre y combina con `_` separator + dedup adyacente. Recuperó +36 datasets INDEC (65 → 101 ready).
+- **Multi-row guard contra falsos positivos**: rechaza candidate child rows con >30% celdas numéricas (data row impostor) — caso ESI caba donde fila de datos `["Total", "Total", "Total", "2143", "907", "1236"]` se confundía con sub-header.
+- **`_HEADER_INVALID` movido de `permanently_failed` → `error` retryable**: header_quality_invalid + placeholder_headers + html_as_data + separator_mismatch ahora son retryables. Combinado con `cleanup_invariants.fixed_zombie_errors` (status=error AND retry_count>=5 AND age>6h → permanently_failed), el sistema converge sin loops infinitos.
+- **CSV separator multi-stage sniffer**: `_detect_csv_params` ahora hace pass 1 con char-counting; si ningún separator aparece en header, pass 2 con `csv.Sniffer`; pass 3 fallback a `engine='python', sep=None`.
+- **Latin-1 encoding fallback en ZIP CSV path**: `_record_csv_file` usa `_read_csv_preview` (que ya tenía latin-1 fallback) en vez de `pd.read_csv` directo.
 
 ---
 
@@ -29,12 +37,12 @@ This is the foundation for the WS5 rebuild — without WS0 the rebuild reintrodu
 | **Soft-flip** | Retrospective mode that registers `severity=warn` findings without flipping `materialization_status`. Default during the 1-week soak. |
 | **Auto-flip** | After soak, `OPENARG_SWEEP_AUTOFLIP=1` lets retrospective findings flip `materialization_status='materialization_corrupted'`. |
 
-## 3. Detector Suite (14 detectors)
+## 3. Detector Suite (15 detectors)
 
 ### Content (need raw_bytes or materialized columns)
 1. **`HtmlAsDataDetector`** — first bytes look like HTML/XML when CSV/Excel was expected. **39 cases in prod**. *Critical, should_redownload.*
 2. **`SingleColumnDetector`** — materialized table has 1 column whose name starts with `<` / `<!DOCTYPE` / `<html`. **38 confirmed.** *Critical.*
-3. **`HeaderFlattenDetector`** — column names like `col_0..N` or `Foo.1`/`Foo.2`. **127 INDEC tables in prod.** *Warn.*
+3. **`HeaderFlattenDetector`** — column names like `col_0..N` or `Foo.1`/`Foo.2`. **127 INDEC tables in prod.** *Warn.* The post-parse variant `placeholder_headers` rejects materializations dominated by `Unnamed:*`, bare numeric headers, or `col_N` placeholders before `status='ready'` (see FR-010); failures emit `ingestion_validation_failed:placeholder_headers` and route to `error_category='validation_failed'`.
 4. **`GDriveScanWarningDetector`** — payload contains the GDrive scan interstitial. *Critical.*
 5. **`EncodingMismatchDetector`** — mojibake (`Ã±` for `ñ`) in column names or raw bytes. **3 cases in prod.** *Warn.*
 
@@ -52,6 +60,9 @@ This is the foundation for the WS5 rebuild — without WS0 the rebuild reintrodu
 12. **`TableNameCollisionDetector`** — pre-CREATE TABLE check; the candidate name truncated to 63 chars collides with an existing table owned by a different `resource_id`. **10 cases in prod.** *Critical.*
 13. **`NonTabularZipDetector`** — ZIP only contains PDFs/images. **2 ACUMAR Actas cases.** *Info — classify as `document_bundle`.*
 14. **`UnsupportedArchiveDetector`** — file declared `.zip` but magic bytes are `.rar`/`.7z`/`.gz`. **4 cases.** *Warn.*
+
+### Parser fidelity (need materialized columns or first chunk)
+15. **`SeparatorMismatchDetector`** — single-column table whose only column header contains `;`/`|`/`\t` (CSV with non-comma delimiter parsed as comma, all data collapsed into 1 column). Pre-condition for `openarg.force_recollect_separator_mismatches` operational task. *Critical, should_redownload.*
 
 ## 4. Functional Requirements
 
@@ -85,3 +96,4 @@ This is the foundation for the WS5 rebuild — without WS0 the rebuild reintrodu
 
 - **DEBT-013-001**: `MissingKeyColumnDetector` rules are hard-coded. A second iteration should pull them from `taxonomy.yml`.
 - **DEBT-013-002**: `findings_repository.persist_findings` opens one transaction per finding. Batch UPSERT would be cheaper.
+- **DEBT-013-003**: `SeparatorMismatchDetector` exists at parse-time but the legacy 186 rotten tables are not retroactively re-collected by an automated sweep. Operators must dispatch `openarg.force_recollect_separator_mismatches` manually. Move into the regular sweep cycle.

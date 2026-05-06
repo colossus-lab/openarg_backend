@@ -154,6 +154,7 @@ def create_celery() -> Celery:
         "openarg.backfill_error_categories": {"queue": "ingest"},
         "openarg.force_recollect_separator_mismatches": {"queue": "ingest"},
         "openarg.cleanup_orphan_cache_tables": {"queue": "ingest"},
+        "openarg.cleanup_raw_orphans": {"queue": "ingest"},
         # Medallion mart tasks (raw → mart, no staging layer).
         "openarg.build_mart": {"queue": "ingest"},
         "openarg.refresh_mart": {"queue": "ingest"},
@@ -277,9 +278,25 @@ def create_celery() -> Celery:
                 "options": {"queue": "ingest"},
             },
             "cleanup-orphan-cache-tables": {
+                # Drops legacy `public.cache_*` tables (collector-staged) whose
+                # cd row was deleted/replaced. Was dry_run=True for safety; now
+                # active. Sunday 3AM minimizes contention with weekday scrapes.
                 "task": "openarg.cleanup_orphan_cache_tables",
-                "schedule": crontab(day_of_week=0, hour=3, minute=0),  # Sunday 3 AM
-                "kwargs": {"dry_run": True},  # default dry-run for safety
+                "schedule": crontab(day_of_week=0, hour=3, minute=0),
+                "kwargs": {"dry_run": False, "max_drops": 200},
+                "options": {"queue": "ingest"},
+            },
+            "cleanup-raw-orphans": {
+                # Sprint RLM: drops `raw.*` tables abandoned when a dataset
+                # is reprocessed under a different physical name (upstream
+                # source_id/title/hash changed). `retain_raw_versions` only
+                # trims within a single resource_identity — orphans across
+                # identities are this task's responsibility.
+                # `min_age_hours=24` avoids racing with in-flight collects.
+                # `max_drops=50` caps RDS IO per run.
+                "task": "openarg.cleanup_raw_orphans",
+                "schedule": crontab(minute=30, hour="*/6"),
+                "kwargs": {"dry_run": False, "max_drops": 50, "min_age_hours": 24},
                 "options": {"queue": "ingest"},
             },
             "retain-raw-versions": {

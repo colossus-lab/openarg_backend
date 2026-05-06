@@ -78,21 +78,24 @@ def _register_dataset(engine, file_type: str, table_name: str, total_rows: int, 
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            finalized = _finalize_cached_dataset(
-                engine,
-                dataset_id=dataset_id,
-                portal=portal,
-                source_id=source_id,
-                table_name=table_name,
-                row_count=total_rows,
-                columns=columns,
-                declared_format="csv",
-                download_url=BAC_FILES[file_type],
-                now=now,
-            )
-            if not finalized["ok"]:
-                return None
+    # Out of the begin() block: cached_datasets INSERT inside
+    # _finalize_cached_dataset opens its own tx and would otherwise race
+    # the uncommitted datasets row, hitting fk_cached_datasets_dataset_id.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=total_rows,
+            columns=columns,
+            declared_format="csv",
+            download_url=BAC_FILES[file_type],
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -277,22 +280,30 @@ def ingest_bac(self):
             except Exception as file_exc:
                 results["errors"] += 1
                 logger.warning("Failed to ingest BAC %s", file_type, exc_info=True)
-                # Track error in cached_datasets (row created by pre-registration above)
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text(
-                                "UPDATE cached_datasets SET "
-                                "status = CASE WHEN retry_count + 1 >= 5 "
-                                "THEN 'permanently_failed' ELSE 'error' END, "
-                                "retry_count = retry_count + 1, "
-                                "error_message = :msg, updated_at = NOW() "
-                                "WHERE table_name = :tn"
-                            ),
-                            {"tn": table_name, "msg": str(file_exc)[:500]},
+                # Track error through the canonical state machine
+                # (Sprint 1.3). Previous version reimplemented the
+                # retry+permanently_failed transition inline as a raw
+                # UPDATE which drifted from `_apply_cached_outcome`
+                # (no error_category, no retry_count clamp consistency
+                # with MAX_TOTAL_ATTEMPTS). The helper keeps BAC errors
+                # under the same observability as collector errors.
+                if dataset_id_pre:
+                    try:
+                        from app.infrastructure.celery.tasks._db import (
+                            register_via_b_error,
                         )
-                except Exception:
-                    logger.debug("Could not track BAC error for %s", file_type, exc_info=True)
+
+                        register_via_b_error(
+                            engine,
+                            dataset_id=dataset_id_pre,
+                            table_name=table_name,
+                            error_message=str(file_exc),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "register_via_b_error failed for %s; refusing legacy cached_datasets bypass",
+                            file_type,
+                        )
 
         return results
 

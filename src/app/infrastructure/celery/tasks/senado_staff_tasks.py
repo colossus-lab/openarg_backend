@@ -160,6 +160,18 @@ def scrape_senado_staff(self):
             inserted,
         )
 
+        # Register `senado_staff` in `raw_table_versions` so the
+        # `staff_estado` mart (portal `senado`) finds it via `live_table()`.
+        from app.infrastructure.celery.tasks._db import register_via_b_table
+
+        register_via_b_table(
+            engine,
+            resource_identity="senado::staff",
+            table_name="senado_staff",
+            schema_name="public",
+            row_count=inserted,
+        )
+
     except SoftTimeLimitExceeded:
         raise
     except Exception as exc:

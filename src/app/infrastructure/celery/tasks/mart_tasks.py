@@ -179,6 +179,19 @@ def _upsert_mart_definition(
     last_row_count: int | None = None,
     resolved_sql: str | None = None,
 ) -> None:
+    # Invariant: mart_id and mart_view_name must coincide. Several call
+    # sites rely on this implicitly (planner discovery surfaces mart_id
+    # while sandbox executor expects `mart.<view_name>`), so divergence
+    # silently produces planner hints that the executor can't run. We
+    # enforce it explicitly here — if a future change wants to diverge,
+    # this assert points the author at every call site that needs
+    # updating (legacy_serving_adapter._discover_marts,
+    # sandbox._mart_semantic_block, sandbox.list_cached_tables).
+    if mart.id != mart.view_name:
+        raise ValueError(
+            f"Mart id/view_name mismatch: id={mart.id!r} view_name={mart.view_name!r}; "
+            "this invariant is required by planner↔executor coherence"
+        )
     # Persist the macro-resolved SQL when available so refresh_mart can
     # detect "raw versions changed" by comparing this to the next
     # resolution. When None (e.g. build_failed before resolution), fall
@@ -384,7 +397,9 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
                 text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key}
             )
         except Exception:
-            logger.debug("could not release advisory lock for %s", mart_id, exc_info=True)
+            # Lock release failure leaves the session lock until the
+            # conn is GC'd — surface it as a warning so it gets noticed.
+            logger.warning("could not release advisory lock for %s", mart_id, exc_info=True)
         try:
             lock_conn.close()
         except Exception:

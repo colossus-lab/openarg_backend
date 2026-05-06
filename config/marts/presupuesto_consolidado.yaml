@@ -1,0 +1,65 @@
+id: presupuesto_consolidado
+version: 0.3.0
+description: |
+  Crédito presupuestario nacional consolidado por año, jurisdicción y
+  programa. Fuente: API de Presupuesto Abierto (Min. Economía), tablas
+  `cache_presupuesto_credito_<anio>`. Permite responder cuánto se
+  presupuestó/ejecutó por jurisdicción/año.
+domain: presupuesto
+
+sources:
+  portals: [presupuesto_abierto]
+  resource_patterns: ["presupuesto_abierto::credito::*"]
+
+canonical_columns:
+  - name: anio
+    type: int
+    description: Año del ejercicio presupuestario
+  - name: jurisdiccion
+    type: text
+    description: Jurisdicción ejecutora
+  - name: programa
+    type: text
+    description: Nombre del programa presupuestario
+  - name: credito_vigente
+    type: numeric
+    description: Crédito vigente del programa para el ejercicio (pesos)
+  - name: credito_devengado
+    type: numeric
+    description: Crédito devengado a la fecha (pesos)
+
+# `live_tables_by_pattern` expande a un UNION ALL de todas las tablas
+# `presupuesto_abierto::credito::<anio>` registradas. Cada tabla tiene
+# las mismas columnas (mismo origen API), la suma agrega por año.
+sql: |
+  -- v0.2.1: filter `devengado <= vigente`. Por definición presupuestaria
+  -- argentina el crédito devengado nunca puede superar el vigente
+  -- (ejecutar más de lo aprobado es jurídicamente imposible). Sprint
+  -- 1.7 audit detectó 1 row violando el invariante; probablemente un
+  -- caso borde de la API upstream con datos a medio cargar. Filtramos
+  -- en el WHERE para evitar reportar números inválidos al consumer
+  -- (un dashboard de "ejecución %" mostraría >100% sin esto).
+  -- v0.3.0: la macro nueva castea cada col del UNION ALL a ::text
+  -- para evitar type mismatches entre tablas heterogéneas. El SELECT
+  -- de afuera reaplica casts a int/numeric. Eso requiere doble cast
+  -- para los aggregados (text → numeric → SUM → numeric output).
+  SELECT
+    ejercicio_presupuestario::int                AS anio,
+    COALESCE(jurisdiccion_desc, '')::text        AS jurisdiccion,
+    COALESCE(programa_desc, '')::text            AS programa,
+    SUM(credito_vigente::numeric)::numeric       AS credito_vigente,
+    SUM(credito_devengado::numeric)::numeric     AS credito_devengado
+  FROM {{ live_tables_by_pattern(
+      'presupuesto_abierto::credito::*',
+      expected_columns=['ejercicio_presupuestario', 'jurisdiccion_desc',
+                        'programa_desc', 'credito_vigente', 'credito_devengado']
+  ) }} c
+  WHERE ejercicio_presupuestario IS NOT NULL
+    AND (
+      credito_devengado IS NULL OR credito_vigente IS NULL OR
+      credito_devengado::numeric <= credito_vigente::numeric
+    )
+  GROUP BY ejercicio_presupuestario, jurisdiccion_desc, programa_desc
+
+refresh:
+  policy: on_upstream_change

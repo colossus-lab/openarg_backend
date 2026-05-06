@@ -11,6 +11,7 @@ from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dat
 from app.infrastructure.celery.tasks.georef_tasks import (
     _register_dataset as register_georef_dataset,
 )
+from app.infrastructure.celery.tasks.presupuesto_tasks import _register_dimension
 
 
 class _FetchOneResult:
@@ -129,3 +130,34 @@ def test_georef_register_dataset_returns_dataset_id_when_finalize_accepts(mock_f
 
     assert result == "22222222-2222-2222-2222-222222222222"
     mock_finalize.assert_called_once()
+
+
+@patch("app.infrastructure.celery.tasks._db.register_via_b_with_state")
+def test_presupuesto_dimension_refuses_legacy_bypass_when_state_helper_fails(
+    mock_register_via_b_with_state,
+):
+    mock_register_via_b_with_state.side_effect = RuntimeError("db helper down")
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = [
+        MagicMock(),
+        _FetchOneResult(("33333333-3333-3333-3333-333333333333",)),
+    ]
+    mock_engine = MagicMock()
+    mock_engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    df = pd.DataFrame({"codigo": [1], "descripcion": ["Ministerio"]})
+
+    try:
+        _register_dimension(
+            mock_engine,
+            "jurisdiccion",
+            {"name": "Jurisdicción", "slug": "jurisdiccion"},
+            2026,
+            "cache_presupuesto_dim_jurisdiccion_2026",
+            df,
+        )
+    except RuntimeError as exc:
+        assert "db helper down" in str(exc)
+    else:
+        raise AssertionError("expected _register_dimension to re-raise helper failure")

@@ -1,0 +1,175 @@
+id: escuelas_argentina
+version: 0.4.0
+description: |
+  Establecimientos educativos por jurisdicción. Cubre los portales que ya
+  aterrizaron datasets de escuelas: Buenos Aires Provincia, CABA, Mendoza
+  y Corrientes. Cada bloque del UNION ALL casteado al schema canónico
+  (cue, nombre, provincia, gestion, lat, lng).
+
+  v0.4.0 (2026-05-06) — Migrado a `live_tables_by_table_pattern` con
+  `expected_columns`. Los UUIDs upstream se regeneran en cada re-scrape
+  (CKAN BA Prov / Corrientes confirmado), rompiendo cualquier mart con
+  `live_table('portal::UUID')` hardcoded. El pattern matching resuelve
+  a la versión más reciente de cualquier raw table cuyo slug coincide,
+  así sobrevive a UUIDs nuevos. Cuando un portal no tiene tablas raw
+  matcheadas, la macro emite `SELECT NULL::text AS cue, ... WHERE FALSE`
+  con todas las columnas esperadas — el mart sigue construyendo con
+  los portales que SÍ matchean.
+domain: educacion
+
+sources:
+  portals: [buenos_aires_prov, caba, mendoza, corrientes]
+  resource_patterns:
+    - "*establecimientos_educativos*"
+
+canonical_columns:
+  - name: cue
+    type: text
+    description: Clave Única de Establecimiento (CUE) emitida por el Min. de Educación
+  - name: nombre
+    type: text
+    description: Denominación del establecimiento (NULL para Buenos Aires Prov, que solo expone número)
+  - name: provincia
+    type: text
+    description: Jurisdicción (Buenos Aires, CABA, Mendoza, Corrientes)
+  - name: gestion
+    type: text
+    description: Estatal, privada, social, cooperativa (NULL cuando el portal no lo expone)
+  - name: lat
+    type: numeric
+    description: Latitud WGS84 (NULL para CABA — el portal entrega POINT en CRS local)
+  - name: lng
+    type: numeric
+    description: Longitud WGS84
+
+# UNION ALL de los 4 portales que aterrizaron. Cada `live_table()` resuelve
+# al physical name más reciente del resource_identity citado, así que un
+# nuevo `__v2` upstream se incorpora sin tocar el SQL.
+sql: |
+  -- La unidad del mart es UNA fila por (CUE, provincia). El dataset
+  -- de Buenos Aires Provincia trae varias filas por CUE (una por
+  -- división/turno/período de matrícula) y Mendoza/CABA tienen
+  -- versiones de columnas similares. Sin DISTINCT ON, el conteo
+  -- miente — v0.3.0 reportaba 21,652 BA cuando solo hay ~18,943
+  -- escuelas reales. v0.3.1 dedupea explícitamente.
+  SELECT DISTINCT ON (cue, provincia)
+         cue, nombre, provincia, gestion, lat, lng
+  FROM (
+    -- Buenos Aires Provincia: ~18,943 escuelas reales (el dataset
+    -- duplica por división/turno con misma CUE). El campo nombre
+    -- es derivado de nro_escuela porque el dataset no expone nombre
+    -- comercial.
+    SELECT
+      cue::text                                           AS cue,
+      NULLIF('Escuela Nº ' || nro_escuela::text, 'Escuela Nº ') AS nombre,
+      'Buenos Aires'::text                                AS provincia,
+      NULLIF(depend_func, '')::text                       AS gestion,
+      latitud::numeric                                    AS lat,
+      longitud::numeric                                   AS lng
+    FROM {{ live_tables_by_table_pattern(
+        'buenos_aires_prov__establecimientos_educativos__*',
+        expected_columns=['cue', 'nro_escuela', 'depend_func', 'latitud', 'longitud']
+    ) }} ba_prov
+    WHERE cue IS NOT NULL
+
+    UNION ALL
+
+    -- CABA: ~2,207 escuelas únicas. `geometry` está en CRS local
+    -- (Gauss-Krüger CABA), no WGS84 — lat/lng quedan NULL hasta que
+    -- se sume ST_Transform al pipeline.
+    SELECT
+      cue::bigint::text                                   AS cue,
+      COALESCE(NULLIF(nam, ''), NULLIF(fna, ''), NULLIF(gna, ''))::text AS nombre,
+      'CABA'::text                                        AS provincia,
+      NULLIF(ges, '')::text                               AS gestion,
+      NULL::numeric                                       AS lat,
+      NULL::numeric                                       AS lng
+    FROM {{ live_tables_by_table_pattern(
+        'caba__establecimientos_educativos__*',
+        expected_columns=['cue', 'nam', 'fna', 'gna', 'ges']
+    ) }} caba_esc
+    WHERE cue IS NOT NULL
+
+    UNION ALL
+
+    -- Mendoza: ~2,311 escuelas únicas. DOS BUGS upstream que esta
+    -- query corrige:
+    --
+    -- 1) Las columnas `lati` y `longitud` están INTERCAMBIADAS en el
+    --    raw (la columna `lati` trae longitudes y viceversa). Mendoza
+    --    está alrededor de lat=-33, lng=-68; el dataset trae los
+    --    valores en las columnas opuestas. El swap acá es correcto.
+    --
+    -- 2) Los valores vienen en formato ARG-locale con separador de
+    --    miles igual al separador decimal (punto): `-68.843.619`
+    --    significa `-68.843619`. Algunos rows tienen variantes con
+    --    solo 1 punto pero la coma decimal mal posicionada
+    --    (`-688.083` debería leerse como `-68.8083`). Parsing por
+    --    casos + range filter (descarta valores fuera de rango).
+    SELECT
+      cue_escuela::text                                   AS cue,
+      NULLIF(escuela_nombre, '')::text                    AS nombre,
+      'Mendoza'::text                                     AS provincia,
+      NULLIF(gestion, '')::text                           AS gestion,
+      -- LAT viene en `longitud` (swap upstream). Range valid: -90..90.
+      CASE
+        WHEN longitud IS NULL OR longitud = '' THEN NULL
+        -- 2 puntos (formato locale): `-32.887.823` -> `-32.887823`
+        WHEN longitud ~ '^-?[0-9]+\.[0-9]+\.[0-9]+$' THEN
+          NULLIF(regexp_replace(longitud, '\.([0-9]+)$', '\1')::numeric, 0)
+        -- 1 punto + valor en rango: parse directo si cae en [-90,90]
+        WHEN longitud ~ '^-?[0-9]+(\.[0-9]+)?$' AND
+             longitud::numeric BETWEEN -90 AND 90 THEN longitud::numeric
+        -- 1 punto + valor fuera de rango: probablemente decimal mal
+        -- ubicado, e.g. `-330.849` -> `-33.0849`. Heurística: dividir
+        -- por 10 hasta caer en rango.
+        WHEN longitud ~ '^-?[0-9]+(\.[0-9]+)?$' THEN
+          CASE
+            WHEN (longitud::numeric / 10) BETWEEN -90 AND 90 THEN longitud::numeric / 10
+            WHEN (longitud::numeric / 100) BETWEEN -90 AND 90 THEN longitud::numeric / 100
+            ELSE NULL
+          END
+        ELSE NULL
+      END                                                 AS lat,
+      -- LNG viene en `lati` (swap upstream). Range valid: -180..180.
+      CASE
+        WHEN lati IS NULL OR lati = '' THEN NULL
+        WHEN lati ~ '^-?[0-9]+\.[0-9]+\.[0-9]+$' THEN
+          NULLIF(regexp_replace(lati, '\.([0-9]+)$', '\1')::numeric, 0)
+        WHEN lati ~ '^-?[0-9]+(\.[0-9]+)?$' AND
+             lati::numeric BETWEEN -180 AND 180 THEN lati::numeric
+        WHEN lati ~ '^-?[0-9]+(\.[0-9]+)?$' THEN
+          CASE
+            WHEN (lati::numeric / 10) BETWEEN -180 AND 180 THEN lati::numeric / 10
+            WHEN (lati::numeric / 100) BETWEEN -180 AND 180 THEN lati::numeric / 100
+            ELSE NULL
+          END
+        ELSE NULL
+      END                                                 AS lng
+    FROM {{ live_tables_by_table_pattern(
+        'mendoza__establecimientos_educativos__*',
+        expected_columns=['cue_escuela', 'escuela_nombre', 'gestion', 'lati', 'longitud']
+    ) }} mendoza_esc
+    WHERE cue_escuela IS NOT NULL
+
+    UNION ALL
+
+    -- Corrientes: ~365 escuelas (snapshot con CUE estable + geo WGS84).
+    SELECT
+      cue::text                                           AS cue,
+      COALESCE(NULLIF(nam, ''), NULLIF(fna, ''), NULLIF(gna, ''))::text AS nombre,
+      'Corrientes'::text                                  AS provincia,
+      NULLIF(ges, '')::text                               AS gestion,
+      lat::numeric                                        AS lat,
+      lng::numeric                                        AS lng
+    FROM {{ live_tables_by_table_pattern(
+        'corrientes__establecimientos_educativos__*',
+        expected_columns=['cue', 'nam', 'fna', 'gna', 'ges', 'lat', 'lng']
+    ) }} corr_esc
+    WHERE cue IS NOT NULL
+  ) all_escuelas
+  WHERE cue <> ''
+  ORDER BY cue, provincia, lat NULLS LAST
+
+refresh:
+  policy: on_upstream_change

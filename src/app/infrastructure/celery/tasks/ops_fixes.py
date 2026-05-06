@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
@@ -508,10 +508,9 @@ def retain_raw_versions(
     from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
 
     if keep_last is None:
-        try:
-            keep_last = int(os.getenv("OPENARG_RAW_RETENTION_KEEP_LAST", "3"))
-        except (TypeError, ValueError):
-            keep_last = 3
+        from app.setup.config.constants import RAW_RETENTION_KEEP_LAST
+
+        keep_last = RAW_RETENTION_KEEP_LAST
     if keep_last < 1:
         raise ValueError("keep_last must be >= 1")
 
@@ -602,6 +601,199 @@ def retain_raw_versions(
     return summary
 
 
+# ---------- cleanup_raw_orphans (Sprint RLM) ----------
+
+
+@celery_app.task(
+    name="openarg.cleanup_raw_orphans",
+    bind=True,
+    soft_time_limit=900,
+    time_limit=1080,
+)
+def cleanup_raw_orphans(
+    self,
+    *,
+    dry_run: bool = False,
+    max_drops: int = 50,
+    min_age_hours: int = 24,
+) -> dict:
+    """Drop raw-schema tables that no `cached_datasets` row points to.
+
+    These accumulate when a dataset is reprocessed under a different
+    physical name (upstream changed `source_id` / title / hash, producing
+    a new discriminator). The cd row is updated to the new table_name and
+    the previous raw table is left behind. `retain_raw_versions` keeps
+    only the top-N versions per `resource_identity`, but every reprocess
+    that lands under a *different* resource_identity creates a fresh
+    `rn=1` row — so the per-resource retention never kicks in. This task
+    closes that loop by dropping any `raw.*` table whose `table_name` no
+    cd row claims and whose `raw_table_versions` row is older than
+    `min_age_hours` (default 24h, to avoid races with in-flight collects).
+
+    Each drop:
+      1. Audited via `_record_cache_drop(reason='raw_orphan_cleanup')`
+      2. `DROP TABLE raw."<name>" CASCADE`
+      3. `DELETE FROM raw_table_versions` row
+
+    `max_drops` (default 50) caps drops per run to keep RDS IO bounded.
+    `dry_run` (default False) reports candidates without touching DB.
+    """
+    from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
+
+    if max_drops < 1:
+        raise ValueError("max_drops must be >= 1")
+    if min_age_hours < 0:
+        raise ValueError("min_age_hours must be >= 0")
+
+    engine = get_sync_engine()
+
+    # SAFETY NET: marts reference raw tables via `live_table('portal::source_id')`
+    # macros expanded to physical names at refresh time. If we drop a raw
+    # table whose `resource_identity` is referenced by any mart's SQL,
+    # the mart's next refresh fails with `column ... does not exist`.
+    # The earlier version of this task (sprint RLM, 2026-05-06 morning)
+    # broke `escuelas_argentina` exactly this way — protected identities
+    # are now excluded from the dispatch SELECT.
+    import re
+
+    mart_protected_select = text(
+        "SELECT mart_id, sql_definition FROM mart_definitions "
+        "WHERE sql_definition IS NOT NULL"
+    )
+    protected_identities: set[str] = set()
+    with engine.connect() as conn:
+        for row in conn.execute(mart_protected_select):
+            for match in re.finditer(
+                r"""live_table\(\s*['"]([^'"]+)['"]""",
+                row.sql_definition or "",
+            ):
+                protected_identities.add(match.group(1))
+            for match in re.finditer(
+                r"""live_tables_by_pattern\(\s*['"]([^'"]+)['"]""",
+                row.sql_definition or "",
+            ):
+                # pattern-based references protect every identity that
+                # could match the glob; conservatively skip cleanup for
+                # rtv rows whose resource_identity matches the prefix.
+                protected_identities.add(f"__pattern__:{match.group(1)}")
+    pattern_prefixes = [
+        p[len("__pattern__:") :] for p in protected_identities if p.startswith("__pattern__:")
+    ]
+    exact_protected = {p for p in protected_identities if not p.startswith("__pattern__:")}
+    if exact_protected or pattern_prefixes:
+        logger.info(
+            "cleanup_raw_orphans: %d exact + %d pattern mart-protected identities",
+            len(exact_protected),
+            len(pattern_prefixes),
+        )
+
+    select_sql = text(
+        """
+        SELECT rtv.resource_identity, rtv.version, rtv.schema_name, rtv.table_name
+        FROM raw_table_versions rtv
+        WHERE rtv.schema_name = 'raw'
+          AND rtv.created_at < NOW() - (:age_hours || ' hours')::interval
+          AND NOT EXISTS (
+              SELECT 1 FROM cached_datasets cd WHERE cd.table_name = rtv.table_name
+          )
+          AND EXISTS (
+              SELECT 1 FROM information_schema.tables t
+              WHERE t.table_schema = 'raw' AND t.table_name = rtv.table_name
+          )
+          AND (:no_exact OR rtv.resource_identity NOT IN :exact)
+        ORDER BY rtv.created_at ASC
+        LIMIT :limit
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select_sql.bindparams(
+                bindparam("exact", expanding=True),
+            ),
+            {
+                "age_hours": str(min_age_hours),
+                "limit": max_drops + 1,
+                "no_exact": len(exact_protected) == 0,
+                "exact": list(exact_protected) or [""],
+            },
+        ).fetchall()
+    # Pattern-based filter applied in Python (small set, simple glob match)
+    if pattern_prefixes:
+        from fnmatch import fnmatchcase
+
+        rows = [
+            r
+            for r in rows
+            if not any(fnmatchcase(r.resource_identity, pat) for pat in pattern_prefixes)
+        ]
+    candidates = [
+        {
+            "resource_identity": r.resource_identity,
+            "version": int(r.version),
+            "schema_name": r.schema_name,
+            "table_name": r.table_name,
+        }
+        for r in rows
+    ]
+    truncated = len(candidates) > max_drops
+    candidates = candidates[:max_drops]
+
+    if dry_run:
+        logger.info(
+            "cleanup_raw_orphans dry-run: %d candidates (truncated=%s)",
+            len(candidates),
+            truncated,
+        )
+        return {
+            "found": len(candidates),
+            "samples": [c["table_name"] for c in candidates[:10]],
+            "dry_run": True,
+            "truncated_to_max_drops": truncated,
+        }
+
+    dropped = 0
+    failed = 0
+    for c in candidates:
+        qualified = f"{c['schema_name']}.{c['table_name']}"
+        try:
+            _record_cache_drop(
+                engine,
+                table_name=qualified,
+                reason="raw_orphan_cleanup",
+                actor="ops_fixes.cleanup_raw_orphans",
+                extra={
+                    "resource_identity": c["resource_identity"],
+                    "version": c["version"],
+                },
+            )
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE'
+                    )
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM raw_table_versions "
+                        "WHERE resource_identity = :rid AND version = :v"
+                    ),
+                    {"rid": c["resource_identity"], "v": c["version"]},
+                )
+            dropped += 1
+        except Exception:
+            logger.exception("Failed to drop raw orphan %s", qualified)
+            failed += 1
+    summary = {
+        "candidates": len(candidates),
+        "dropped": dropped,
+        "failed": failed,
+        "truncated_to_max_drops": truncated,
+        "min_age_hours": min_age_hours,
+    }
+    logger.info("cleanup_raw_orphans: %s", summary)
+    return summary
+
+
 # ---------- invariant counter cleanup (drift sweep) ----------
 
 
@@ -669,6 +861,29 @@ def cleanup_invariants(self) -> dict[str, int]:
             )
         )
         fixed_retry = result.rowcount or 0
+
+        # M1 (Sprint 33): rows stuck in `error` with the retry budget
+        # exhausted (retry_count >= MAX_TOTAL_ATTEMPTS=5) AND no
+        # update for the last 6 hours are zombies — bulk_collect
+        # should have re-picked them up but didn't, often because
+        # `is_cached=false` was never reset OR the SELECT filter
+        # excluded them. Auto-mark `permanently_failed` so dashboards
+        # stop counting them as in-flight and operators can decide
+        # whether to manually re-trigger. The 6-hour grace window
+        # avoids racing with workers actively reprocessing.
+        result_zombies = conn.execute(
+            text(
+                """
+                UPDATE cached_datasets
+                SET status = 'permanently_failed',
+                    updated_at = NOW()
+                WHERE status = 'error'
+                  AND retry_count >= 5
+                  AND updated_at < NOW() - INTERVAL '6 hours'
+                """
+            )
+        )
+        fixed_zombies = result_zombies.rowcount or 0
 
         # Two-pass orphan registration. First pass tries to recover the
         # canonical `<portal>::<source_id>` identity by joining through
@@ -815,14 +1030,107 @@ def cleanup_invariants(self) -> dict[str, int]:
                     exc_info=True,
                 )
 
+        # 6.5. Datasets with multiple `ready` cached_datasets rows.
+        # Sprint 1.7 audit detected 63 datasets carrying both a legacy
+        # `cache_*` ready row AND a raw-promoted ready row. The
+        # cleanup leaves the row that owns a current
+        # `raw_table_versions` entry (canonical source of truth) and
+        # demotes the legacy duplicate to `superseded` status. Without
+        # this, `/data/tables` and downstream consumers count datasets
+        # twice. The DELETE below is conservative — only touches
+        # legacy rows when there's a corresponding live raw rtv with a
+        # different table_name; never deletes the only ready row of
+        # a dataset.
+        result_double_ready = conn.execute(
+            text(
+                """
+                DELETE FROM cached_datasets cd_legacy
+                USING cached_datasets cd_raw,
+                      raw_table_versions rtv
+                WHERE cd_legacy.dataset_id = cd_raw.dataset_id
+                  AND cd_legacy.status = 'ready'
+                  AND cd_raw.status = 'ready'
+                  AND cd_legacy.table_name <> cd_raw.table_name
+                  AND cd_legacy.table_name LIKE 'cache_%'
+                  AND rtv.schema_name = 'raw'
+                  AND rtv.table_name = cd_raw.table_name
+                  AND rtv.superseded_at IS NULL
+                """
+            )
+        )
+        fixed_double_cd_ready = result_double_ready.rowcount or 0
+
+        # NOTE — Sprint 1.6 audit found ~8,000 rows on `ready` status
+        # carrying error_category='unknown' from past failed attempts.
+        # The classifier returns 'unknown' for empty error_message and
+        # the column has a NOT NULL + CHECK enum constraint that
+        # rejects NULL and any value outside the enum. A proper fix
+        # requires either:
+        #   (a) a migration extending the enum with 'none', 'parser_tag',
+        #       'truncated' + retro-classification, or
+        #   (b) splitting "did this row ever fail?" into a separate
+        #       boolean column, leaving error_category meaningful only
+        #       for non-success states.
+        # Both shape (a) and shape (b) are tracked in spec 014 DEBT.
+        # The retroactive fix is left out of cleanup_invariants for
+        # now because it can't run inside the existing schema without
+        # the migration above.
+        fixed_unknown_on_ready = 0
+
+        # 7. datasets.row_count drift.
+        # Several recovery paths in collector_tasks set `datasets.is_cached
+        # = true` without also updating `datasets.row_count`, so today
+        # ~54% of `datasets` rows have row_count NULL even when the
+        # cached_datasets row knows the count. /data/tables and other
+        # consumers report 0 rows for those datasets, hiding their
+        # actual size. Sync from cached_datasets where we have the truth.
+        #
+        # NOTE: a dataset can have multiple `cached_datasets` rows ready
+        # (e.g. legacy public.cache_* + raw.<bare> from a vía-A landing).
+        # ~63 datasets in staging hit that case. Without `DISTINCT ON`
+        # the JOIN-update issues N updates per dataset and the final
+        # value depends on whichever row was visited last — non-
+        # deterministic when the row_counts diverge (3 datasets in
+        # staging today). The lateral subquery picks the most recently
+        # updated cd row per dataset, which is the policy we want:
+        # the latest landing reflects the current truth.
+        result_row_count_drift = conn.execute(
+            text(
+                """
+                UPDATE datasets d
+                SET row_count = src.row_count,
+                    updated_at = NOW()
+                FROM (
+                    SELECT DISTINCT ON (cd.dataset_id)
+                           cd.dataset_id,
+                           cd.row_count,
+                           cd.updated_at
+                    FROM cached_datasets cd
+                    WHERE cd.status = 'ready'
+                      AND cd.row_count IS NOT NULL
+                      AND cd.row_count > 0
+                    ORDER BY cd.dataset_id, cd.updated_at DESC NULLS LAST
+                ) src
+                WHERE src.dataset_id = d.id
+                  AND (d.row_count IS NULL OR d.row_count = 0
+                       OR d.row_count <> src.row_count)
+                """
+            )
+        )
+        fixed_dataset_row_count = result_row_count_drift.rowcount or 0
+
     summary = {
         "fixed_unknown_category": fixed_unknown,
         "clamped_retry_count": fixed_retry,
+        "fixed_zombie_errors": fixed_zombies,
         "registered_orphan_tables": fixed_orphans,
         "canonical_orphans_registered": canonical_registered,
         "fixed_is_cached_drift": fixed_is_cached_drift,
         "fixed_mart_row_count": fixed_mart_row_count,
         "dropped_empty_orphans": dropped_empty_orphans,
+        "fixed_dataset_row_count": fixed_dataset_row_count,
+        "fixed_unknown_on_ready": fixed_unknown_on_ready,
+        "fixed_double_cd_ready": fixed_double_cd_ready,
     }
     if any(summary.values()):
         logger.warning("cleanup_invariants: %s", summary)

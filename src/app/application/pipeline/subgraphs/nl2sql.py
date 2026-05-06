@@ -71,6 +71,7 @@ class NL2SQLRuntime(TypedDict):
     sandbox: Any
     embedding: Any
     semantic_cache: Any
+    serving_port: Any
 
 
 _runtime_var: ContextVar[NL2SQLRuntime | None] = ContextVar("nl2sql_runtime", default=None)
@@ -83,6 +84,7 @@ def nl2sql_runtime(
     sandbox: Any,
     embedding: Any,
     semantic_cache: Any,
+    serving_port: Any = None,
 ):
     """Bind request-scoped runtime dependencies outside checkpointed state."""
     token = _runtime_var.set(
@@ -91,6 +93,7 @@ def nl2sql_runtime(
             "sandbox": sandbox,
             "embedding": embedding,
             "semantic_cache": semantic_cache,
+            "serving_port": serving_port,
         }
     )
     try:
@@ -247,11 +250,17 @@ async def execute_sql_node(state: NL2SQLState) -> dict:
     """FR-002: execute the generated SQL against the sandbox."""
     runtime = _get_runtime_optional()
     sandbox = _resolve_runtime_dep(state, "sandbox", runtime["sandbox"] if runtime else None)
+    serving_port = runtime["serving_port"] if runtime else state.get("serving_port")
     generated_sql = state["generated_sql"]
     available_tables = [table.table_name for table in state.get("tables") or []]
     rewritten_sql = rewrite_legacy_sql_tables(generated_sql, available_tables)
 
-    result = await sandbox.execute_readonly(rewritten_sql)
+    result = await _execute_sql_with_best_backend(
+        rewritten_sql,
+        available_tables=available_tables,
+        sandbox=sandbox,
+        serving_port=serving_port,
+    )
 
     updates: dict[str, Any] = {"result": result, "generated_sql": rewritten_sql}
     if result.error:
@@ -260,6 +269,81 @@ async def execute_sql_node(state: NL2SQLState) -> dict:
         # Clear the error so a downstream success branch is unambiguous.
         updates["last_error"] = ""
     return updates
+
+
+def _first_relation_reference(sql: str) -> tuple[str | None, str | None]:
+    """Return the first `(schema, table)` referenced by FROM/JOIN, if any."""
+    import re
+
+    match = re.search(
+        r'\b(?:FROM|JOIN)\s+(?:"?(\w+)"?\.)?"?(\w+)"?',
+        sql,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+    return (match.group(1) or None, match.group(2) or None)
+
+
+def _resource_id_for_query(sql: str, *, available_tables: list[str]) -> str | None:
+    """Infer a serving resource_id from the SQL's first referenced relation.
+
+    We only force the serving path when the query explicitly targets a
+    medallion layer (`mart.*` / `raw.*`). Legacy unqualified cache_* SQL
+    keeps using the sandbox directly so we don't invent fake resource ids.
+    """
+    schema, table = _first_relation_reference(sql)
+    if not table:
+        return None
+    if schema and schema.lower() == "mart":
+        return f"mart::{table}"
+    if schema and schema.lower() == "raw":
+        qualified = f"{schema.lower()}.{table}"
+        if qualified in available_tables:
+            return f"raw::{table}"
+    return None
+
+
+async def _execute_sql_with_best_backend(
+    sql: str,
+    *,
+    available_tables: list[str],
+    sandbox: Any,
+    serving_port: Any | None,
+):
+    """Use the serving port when the query explicitly targets mart/raw.
+
+    This keeps the execution contract aligned with the discovery contract
+    without forcing legacy cache_* queries through the still-migrating
+    serving layer.
+    """
+    resource_id = _resource_id_for_query(sql, available_tables=available_tables)
+    if resource_id and serving_port is not None:
+        try:
+            from app.application.pipeline.connectors.serving_resolver import ServingResolver
+
+            resolver = ServingResolver(serving_port)
+            rows = await resolver.query(resource_id, sql)
+            dict_rows = [dict(zip(rows.columns, row, strict=False)) for row in rows.data]
+            return type(
+                "_ServingExecutionResult",
+                (),
+                {
+                    "columns": rows.columns,
+                    "rows": dict_rows,
+                    "row_count": len(dict_rows),
+                    "truncated": rows.truncated,
+                    "error": None,
+                },
+            )()
+        except Exception:
+            logger.warning(
+                "ServingPort execution failed for %s; falling back to sandbox",
+                resource_id,
+                exc_info=True,
+            )
+
+    return await sandbox.execute_readonly(sql)
 
 
 def _route_after_execute(state: NL2SQLState) -> str:

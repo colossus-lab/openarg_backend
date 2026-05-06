@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -205,22 +206,40 @@ async def discover_catalog_hints_for_planner(
     sandbox: ISQLSandbox | None,
     embedding: IEmbeddingProvider,
     limit: int = 5,
+    *,
+    serving_port: Any | None = None,
 ) -> str:
     """Search table_catalog for relevant tables and format as planner hints.
 
     This runs BEFORE the planner LLM so it knows which cached tables exist
     for the user's question. Without this, the planner only knows about
     tables matched by keyword routing in dataset_index.py.
+
+    MASTERPLAN Fase 4.5: when `serving_port` is provided AND
+    `OPENARG_PIPELINE_USE_SERVING_PORT=1`, mart/staging hits from the
+    Serving Port are prepended to the legacy block. Marts are the curated
+    surface — the planner should prefer them over raw `cache_*` tables.
     """
+    serving_block = ""
+    if serving_port is not None:
+        try:
+            serving_block = await _serving_port_planner_hints(
+                query, serving_port, limit=limit
+            )
+        except Exception:
+            logger.debug("serving port planner hints failed", exc_info=True)
+            serving_block = ""
+
     if not sandbox:
-        return ""
+        return serving_block
     try:
         q_embedding = await embedding.embed(query)
         # In `OPENARG_CATALOG_ONLY` cutover mode, skip the legacy
         # `table_catalog` query entirely and let `_hybrid_logical_hints`
         # drive discovery from `catalog_resources` alone.
         if catalog_only_mode():
-            return await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            legacy = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            return _join_hint_blocks(serving_block, legacy)
         embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
         loop = asyncio.get_running_loop()
 
@@ -258,7 +277,8 @@ async def discover_catalog_hints_for_planner(
             # WS3 hybrid discovery — when no materialized table matches, try
             # the logical catalog so the planner can still see resources that
             # exist conceptually (or live-API connectors).
-            return await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            legacy = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            return _join_hint_blocks(serving_block, legacy)
 
         lines = ["TABLAS CACHEADAS RELEVANTES (datos reales descargados, usar query_sandbox):"]
         for table_name, display_name, description, row_count, score in rows:
@@ -281,10 +301,164 @@ async def discover_catalog_hints_for_planner(
         if logical_hints:
             lines.append("")
             lines.append(logical_hints)
-        return "\n".join(lines)
+        legacy_block = "\n".join(lines)
+        return _join_hint_blocks(serving_block, legacy_block)
     except Exception:
         logger.debug("catalog hints for planner failed", exc_info=True)
+        return serving_block
+
+
+def _join_hint_blocks(*blocks: str) -> str:
+    """Concatenate non-empty hint blocks with a blank line separator."""
+    return "\n\n".join(b for b in blocks if b and b.strip())
+
+
+# Match `FROM <schema>.` and `JOIN <schema>.`. The previous regex only
+# caught FROM, so a query like `WITH x AS (SELECT ... FROM cache_legacy)
+# SELECT ... FROM x JOIN mart.foo` was tagged `cache_legacy` even though
+# it joined a mart. We now tag it `mart` (the highest layer is what
+# matters for the served_from coverage metric). A second pass over JOIN
+# keeps the simple-query path unchanged.
+_MART_SQL_RE = re.compile(r"\b(?:from|join)\s+mart\.", re.IGNORECASE)
+_STAGING_SQL_RE = re.compile(r"\b(?:from|join)\s+staging\.", re.IGNORECASE)
+_RAW_SQL_RE = re.compile(r"\b(?:from|join)\s+raw\.", re.IGNORECASE)
+
+
+def detect_serving_layer_in_sql(sql: str) -> str:
+    """Inspect a SQL statement and return the medallion layer it touches.
+
+    Used by the executor (Fase 4.5c) to emit a `served_from_layer` metric
+    so we can track mart-coverage over time without doing log scrapes.
+    Lookups are heuristic — multi-CTE queries that touch several layers
+    return the highest layer (mart > staging > raw > legacy). Both `FROM`
+    and `JOIN` are inspected so a CTE that joins a mart at the outer
+    SELECT is correctly tagged.
+    """
+    if _MART_SQL_RE.search(sql):
+        return "mart"
+    if _STAGING_SQL_RE.search(sql):
+        return "staging"
+    if _RAW_SQL_RE.search(sql):
+        return "raw"
+    return "cache_legacy"
+
+
+async def _mart_semantics_block(serving_port: Any, table_names: list[str]) -> str:
+    """MASTERPLAN Fase 4.5b — append per-column semantics for mart tables.
+
+    Looks up each table_name through the Serving Port; if the table is in
+    schema `mart` AND the schema carries a non-empty `semantics` map (built
+    from `COMMENT ON COLUMN`), formats it as an NL2SQL hint block.
+
+    Failures and non-mart tables are silently dropped — the legacy hints
+    remain intact.
+    """
+    from app.application.pipeline.connectors.serving_resolver import (
+        ServingResolver,
+        serving_port_enabled,
+    )
+    from app.domain.entities.serving import ServingLayer
+
+    if not serving_port_enabled():
         return ""
+
+    resolver = ServingResolver(serving_port)
+    blocks: list[str] = []
+    for tn in table_names:
+        # Mart resources are addressed as `mart::<mart_id>` from
+        # `_discover_marts` (mart_id == mart_view_name in current YAMLs,
+        # but they are conceptually distinct: mart_id is the logical
+        # identifier, mart_view_name is the physical Postgres relation).
+        # Planners may reference marts in three forms:
+        #   - bare mart_id:        "demo_energia_pozos"
+        #   - canonical resource:  "mart::demo_energia_pozos"
+        #   - qualified relation:  "mart.demo_energia_pozos"
+        # We build candidates that cover all three so the resolver finds
+        # the schema regardless of which form the planner emitted.
+        candidates: list[str] = []
+        if tn.startswith("mart::"):
+            candidates.append(tn)
+        elif tn.startswith("mart."):
+            # Strip the schema prefix to recover the bare view_name and
+            # try it as a mart_id resource. Today mart_id == mart_view_name
+            # so this works; if they ever diverge, this still resolves
+            # via mart_view_name lookup downstream.
+            candidates.append(f"mart::{tn[len('mart.'):]}")
+        else:
+            candidates.append(f"mart::{tn}")
+        for resource_id in candidates:
+            try:
+                schema = await resolver.get_schema(resource_id)
+            except Exception:
+                continue
+            if schema.layer != ServingLayer.MART or not schema.semantics:
+                continue
+            lines = [f"SEMÁNTICA DE COLUMNAS — {tn}:"]
+            for col, desc in schema.semantics.items():
+                lines.append(f"  - {col}: {desc}")
+            blocks.append("\n".join(lines))
+            break
+    return "\n\n".join(blocks)
+
+
+async def _serving_port_planner_hints(
+    query: str,
+    serving_port: Any,
+    *,
+    limit: int,
+) -> str:
+    """MASTERPLAN Fase 4.5 — surface mart/staging resources to the planner.
+
+    Calls `IServingPort.discover()` and formats the top hits as a planner
+    block. Marts come first; staging next; cache_legacy is suppressed here
+    because the legacy `table_catalog` block already covers it.
+    """
+    from app.application.pipeline.connectors.serving_resolver import (
+        ServingResolver,
+        serving_port_enabled,
+    )
+    from app.domain.entities.serving import ServingLayer
+
+    if not serving_port_enabled():
+        return ""
+
+    resolver = ServingResolver(serving_port)
+    try:
+        resources, layer_counts = await resolver.discover_for_planner(
+            query, limit=limit
+        )
+    except Exception:
+        logger.debug("ServingResolver.discover_for_planner failed", exc_info=True)
+        return ""
+
+    # Filter out the cache_legacy hits — those are already covered by the
+    # legacy table_catalog block downstream. We surface marts and staging
+    # explicitly so the planner sees them first.
+    preferred_layers = (ServingLayer.MART, ServingLayer.STAGING, ServingLayer.RAW)
+    preferred = [r for r in resources if r.layer in preferred_layers]
+    if not preferred:
+        return ""
+
+    lines: list[str] = []
+    by_layer: dict[ServingLayer, list] = {}
+    for r in preferred:
+        by_layer.setdefault(r.layer, []).append(r)
+
+    if ServingLayer.MART in by_layer:
+        lines.append("MARTS DISPONIBLES (vistas semánticas curadas, preferí estas):")
+        for r in by_layer[ServingLayer.MART]:
+            lines.append(f"  - {r.title}" + (f" — {r.domain}" if r.domain else ""))
+        lines.append(
+            "Para una mart, usá query_sandbox con el nombre canónico de la vista."
+        )
+
+    if ServingLayer.STAGING in by_layer:
+        lines.append("")
+        lines.append("STAGING (datasets validados por contracts):")
+        for r in by_layer[ServingLayer.STAGING]:
+            lines.append(f"  - {r.title}")
+
+    return "\n".join(lines)
 
 
 async def _hybrid_logical_hints(
@@ -477,6 +651,8 @@ async def execute_sandbox_step(
     vector_search: IVectorSearch,
     semantic_cache: SemanticCache,
     user_query: str = "",
+    *,
+    serving_port: Any | None = None,
 ) -> list[DataResult]:
     if not sandbox:
         logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
@@ -493,6 +669,72 @@ async def execute_sandbox_step(
 
     try:
         tables = await sandbox.list_cached_tables()
+        # MASTERPLAN Fase 4.5d — surface marts to the executor's table
+        # universe so a planner that suggested a mart (via the hints
+        # block built by `_serving_port_planner_hints`) actually finds
+        # it after fnmatch filtering. Without this, table_hints like
+        # `mart.staff_estado` never intersect `tables` and the filter
+        # silently falls back to listing every cache_* table → the
+        # NL2SQL subgraph never sees the mart and emits a query against
+        # legacy cache instead.
+        # `PgSandboxAdapter._engine` is a SYNCHRONOUS Engine, so the
+        # query has to run in a worker thread via `asyncio.to_thread`.
+        # The earlier version used `async with engine.connect()` directly,
+        # which AttributeError'd on `__aenter__` and silently dropped the
+        # mart enrichment. Same bug shape that hid marts from /data/search
+        # and /data/tables until Sprint 0.5/0.7 — this is the executor-side
+        # variant. Fixed here so the planner's mart hints actually match
+        # rows in the executor's `tables` universe.
+        def _query_marts_sync() -> list:
+            from sqlalchemy import text as _sql_text
+
+            engine_for_marts = getattr(sandbox, "_engine", None)
+            if engine_for_marts is None:
+                getter = getattr(sandbox, "_get_engine", None)
+                if callable(getter):
+                    engine_for_marts = getter()
+            if engine_for_marts is None:
+                return []
+            with engine_for_marts.connect() as _mart_conn:
+                return (
+                    _mart_conn.execute(
+                        _sql_text(
+                            "SELECT mart_id, mart_schema, mart_view_name, "
+                            "       last_row_count, canonical_columns_json "
+                            "FROM mart_definitions "
+                            "WHERE COALESCE(last_row_count, 0) > 0"
+                        )
+                    )
+                ).fetchall()
+
+        try:
+            import asyncio as _asyncio
+
+            from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+
+            mart_rows = await _asyncio.to_thread(_query_marts_sync)
+            for _mr in mart_rows:
+                _columns: list[str] = []
+                try:
+                    _cc = _mr.canonical_columns_json
+                    if isinstance(_cc, list):
+                        _columns = [str(c.get("name", "")) for c in _cc if c.get("name")]
+                except Exception:
+                    _columns = []
+                _schema = str(_mr.mart_schema or "mart")
+                _view = str(_mr.mart_view_name or _mr.mart_id)
+                tables.append(
+                    CachedTableInfo(
+                        table_name=f"{_schema}.{_view}",
+                        dataset_id="",
+                        row_count=int(_mr.last_row_count or 0),
+                        columns=_columns,
+                    )
+                )
+        except Exception:
+            # Mart enrichment is best-effort. Failure here just means the
+            # planner can't pick a mart; cache_legacy path keeps working.
+            logger.warning("Could not enrich tables with marts", exc_info=True)
         table_hints = params.get("tables", [])
         # Resolve table_notes and table_hints from routing when planner didn't provide them
         table_notes = params.get("table_notes", "")
@@ -702,6 +944,21 @@ async def execute_sandbox_step(
         if all_table_notes:
             tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{all_table_notes}"
 
+        # MASTERPLAN Fase 4.5b — when the planner picked a mart, append its
+        # canonical-column semantics (sourced from `pg_description`, which
+        # `build_mart` populates via `COMMENT ON COLUMN`) to the NL2SQL
+        # context. The LLM uses these to write SQL with the right semantic
+        # intent instead of guessing from column names alone.
+        if serving_port is not None:
+            try:
+                semantics_block = await _mart_semantics_block(
+                    serving_port, [t.table_name for t in tables[:10]]
+                )
+                if semantics_block:
+                    tables_context += f"\n\n{semantics_block}"
+            except Exception:
+                logger.debug("mart semantics block failed", exc_info=True)
+
         # Retrieve dynamic few-shot examples from successful past queries
         few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
 
@@ -745,9 +1002,33 @@ async def execute_sandbox_step(
             sandbox=sandbox,
             embedding=embedding,
             semantic_cache=semantic_cache,
+            serving_port=serving_port,
         ):
             final_state = await compiled_subgraph.ainvoke(initial_state)
-        return final_state.get("data_results", []) or []
+        results = final_state.get("data_results", []) or []
+
+        # MASTERPLAN Fase 4.5c — annotate every result with the medallion
+        # layer the SQL touched. The metric is a side-effect of the SQL
+        # already produced; nothing else changes about the execution path.
+        executed_sql = final_state.get("generated_sql", "")
+        if executed_sql:
+            served_layer = detect_serving_layer_in_sql(executed_sql)
+            for r in results:
+                if r.metadata is None:
+                    r.metadata = {}
+                r.metadata.setdefault("served_from_layer", served_layer)
+            try:
+                from app.infrastructure.monitoring.metrics import MetricsCollector
+
+                MetricsCollector().record_connector_call(
+                    f"sandbox:served_from:{served_layer}",
+                    latency_ms=0,
+                    error=False,
+                )
+            except Exception:
+                logger.debug("Could not record served_from_layer metric", exc_info=True)
+
+        return results
     except Exception:
         logger.warning("Sandbox step %s failed", step.id, exc_info=True)
         return []

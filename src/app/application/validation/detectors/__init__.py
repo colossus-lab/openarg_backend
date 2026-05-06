@@ -10,6 +10,7 @@ from app.application.validation.detectors.content import (
     GDriveScanWarningDetector,
     HeaderFlattenDetector,
     HtmlAsDataDetector,
+    SeparatorMismatchDetector,
     SingleColumnDetector,
 )
 from app.application.validation.detectors.metadata import (
@@ -46,6 +47,7 @@ def build_default_detectors() -> list[Detector]:
         EncodingMismatchDetector(),
         # Post-parse (need materialized state)
         SingleColumnDetector(),
+        SeparatorMismatchDetector(),
         HeaderFlattenDetector(),
         RowCountDetector(),
         MetadataIntegrityDetector(),
@@ -65,6 +67,7 @@ __all__ = [
     "MissingKeyColumnDetector",
     "NonTabularZipDetector",
     "RowCountDetector",
+    "SeparatorMismatchDetector",
     "SingleColumnDetector",
     "TableNameCollisionDetector",
     "UnsupportedArchiveDetector",

@@ -177,11 +177,15 @@ class TestQueryResponseContract:
         )
         assert resp.status_code == 200
         body = resp.json()
+        # `sampled_tables` added in Sprint 0.8 (raw-layer truncation
+        # surfacing). Older clients ignore unknown fields; the contract
+        # is "these fields exist" not "exactly these fields".
         assert set(body.keys()) == {
             "columns",
             "rows",
             "row_count",
             "truncated",
+            "sampled_tables",
             "error",
         }
 
@@ -597,12 +601,15 @@ class TestTablesResponseContract:
         assert resp.status_code == 200
         body = resp.json()["tables"]
         assert len(body) >= 1
+        # `is_truncated` added in Sprint 0.8 (raw-layer truncation flag
+        # surfaced from `raw_table_versions.is_truncated`).
         assert set(body[0].keys()) == {
             "table_name",
             "name",
             "dataset_id",
             "row_count",
             "columns",
+            "is_truncated",
         }
 
     async def test_row_count_can_be_null(self, monkeypatch):

@@ -35,6 +35,11 @@
 | FIX-016 | Low | `002-connectors/002h-ddjj` | DDJJ scope expansion to senadores / ejecutivo / jueces | ⏸ Deferred (data expansion) |
 | FIX-017 | **High** | `004-semantic-cache` + `001-query-pipeline` + `004-caching` | JSON serialization crash on non-primitive state values | ✅ Completed 2026-04-12 |
 | FIX-018 | **High** | `006-datasets/006b-ingestion` + `010-collector-tasks` | Collector execution hardening for duplicate runs and retry churn | ✅ Completed 2026-04-12 |
+| FIX-019 | Medium | `015-catalog-resources` | Port semantic enrichment (display_name, description, domain, subdomain, embedding) to write into `catalog_resources` instead of only `table_catalog` | 🔵 Open |
+| FIX-020 | Medium | `006b-ingestion` + collector | Inject synthetic PK (`_ingest_row_id BIGSERIAL`) into every cache table so re-ingest deduplicates and indexed lookups work | 🔵 Open |
+| FIX-021 | Medium | `006b-ingestion` + collector | Auto-typing post-parse: convert TEXT → date/int/float when ≥80% of column rows parse cleanly | 🔵 Open |
+| FIX-022 | Medium | `015-catalog-resources` + collector | Wire `application/expander/multi_file_expander.py` into the collector path so multi-sheet Excel and ZIP children produce N rows in `catalog_resources` with `parent_resource_id` (closes DEBT-015-004) | 🔵 Open |
+| FIX-023 | Low | ops | Periodic sweep that DROPs `cache_*` physical tables that are not referenced by `cached_datasets.table_name` (orphans), recording each via `_record_cache_drop` | 🔵 Open |
 
 ---
 
@@ -838,6 +843,157 @@ Fourth follow-up completed on 2026-04-12:
 - `specs/006-datasets/006b-ingestion/spec.md`
 - `specs/006-datasets/006b-ingestion/plan.md`
 - `specs/FIX_BACKLOG.md`
+
+---
+
+## FIX-019: Port semantic enrichment to `catalog_resources`
+
+**Priority**: Medium
+**Spec module**: `015-catalog-resources`
+**Status**: Open
+
+### Problem
+
+`catalog_enrichment_tasks.py` (`_enrich_table`, `enrich_single_table`, `enrich_all_tables`) generates `display_name`, `description`, `domain`, `subdomain`, `tags`, `quality_score` and a 1024-dim embedding via Bedrock Claude Haiku, then UPSERTs into `table_catalog`. It does NOT touch `catalog_resources`.
+
+Per spec 015, `catalog_resources` is the new authoritative logical catalog. With enrichment writing only to `table_catalog`, the new catalog stays semantically thin (raw_title + canonical_title + portal + materialization metadata) while the old catalog accumulates the rich fields. Hybrid serving cannot fully cut over while this asymmetry holds.
+
+### Fix
+
+Either:
+
+1. Port `_enrich_table` to UPSERT into `catalog_resources` keyed by `resource_identity`, populating `domain`, `subdomain`, `taxonomy_key`, `embedding`, `display_name`. Keep `table_catalog` writes as a transitional projection.
+2. Or formalize the split in spec 015: `catalog_resources` = physical manifest only, `table_catalog` = semantic index, hybrid serving joins the two. This requires updating spec 015 §2 and dropping the `domain` / `embedding` columns from `catalog_resources`.
+
+Decision belongs to direction; default proposal is option 1 (faithful to existing spec).
+
+### Files (option 1)
+
+- `src/app/infrastructure/celery/tasks/catalog_enrichment_tasks.py`
+- `tests/unit/test_catalog_enrichment.py` (if it exists, otherwise add)
+
+---
+
+## FIX-020: Inject synthetic PK in cache tables
+
+**Priority**: Medium
+**Spec module**: `006-datasets/006b-ingestion` + collector
+**Status**: Open
+
+### Problem
+
+`_to_sql_safe` uses `pandas.DataFrame.to_sql` with `if_exists='replace'|'append'`. Pandas does not declare a primary key, so every cache table is created without one. Consequences:
+
+- Re-ingest is not idempotent — repeated `append` runs duplicate rows silently.
+- No B-tree on a unique column means lookup queries seq-scan the whole table.
+- Sandbox `LIMIT N OFFSET M` paging is non-deterministic without an ORDER BY on a stable column.
+
+### Fix
+
+Add a synthetic identity column when creating each cache table:
+
+```python
+# After df.to_sql(...) creates the table, inject the PK
+conn.execute(text(
+    f'ALTER TABLE "{table_name}" '
+    f'ADD COLUMN _ingest_row_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY'
+))
+```
+
+Or move to a `CREATE TABLE` + `COPY` pattern that declares the PK upfront, bypassing `to_sql`'s `dtype=` opacity.
+
+### Files
+
+- `src/app/infrastructure/celery/tasks/collector_tasks.py` (`_to_sql_safe`)
+- `tests/unit/test_pipeline_p2_tasks.py`
+
+---
+
+## FIX-021: Auto-typing post-parse
+
+**Priority**: Medium
+**Spec module**: `006-datasets/006b-ingestion` + collector
+**Status**: Open
+
+### Problem
+
+The collector reads CSVs/Excels with pandas defaults, which leaves most columns as `object` (TEXT in SQL). Numeric and temporal columns end up TEXT, blocking arithmetic, ORDER BY semantics, and date-range filters in NL2SQL.
+
+### Fix
+
+After `to_sql`, run a per-column inference pass:
+
+```python
+for col in df.columns:
+    parsed = pd.to_datetime(df[col], errors='coerce')
+    if parsed.notna().mean() > 0.8:
+        # ALTER COLUMN to TIMESTAMP
+        ...
+    else:
+        as_num = pd.to_numeric(df[col], errors='coerce')
+        if as_num.notna().mean() > 0.8:
+            # ALTER COLUMN to NUMERIC / INTEGER
+            ...
+```
+
+Apply ALTER COLUMN ... USING with a safe cast so existing rows convert in place.
+
+### Files
+
+- `src/app/infrastructure/celery/tasks/collector_tasks.py` (post-`_to_sql_safe` hook)
+
+---
+
+## FIX-022: Wire `multi_file_expander` into the collector path
+
+**Priority**: Medium
+**Spec module**: `015-catalog-resources` + collector
+**Status**: Open
+**Closes**: `DEBT-015-004`
+
+### Problem
+
+`src/app/application/expander/multi_file_expander.py` defines the contract for one-dataset → N-children expansion (multi-sheet Excel, ZIP entries, INDEC cuadros), and `catalog_resources` schema includes `parent_resource_id`, `sheet_name`, `sub_path`, `cuadro_numero` for it. But the collector materializes 1:1: every dataset becomes one `catalog_resources` row, regardless of whether it is a multi-sheet workbook or a multi-file ZIP.
+
+### Fix
+
+Connect the expander into `collect_dataset` so:
+
+1. After download, the expander enumerates expandable children.
+2. For each child, the collector creates a child `catalog_resources` row with `parent_resource_id` pointing to the parent and the appropriate `resource_kind` (`sheet`, `zip_member`, `cuadro`).
+3. Each child resource gets its own materialization run.
+
+### Files
+
+- `src/app/infrastructure/celery/tasks/collector_tasks.py` (entry-point of materialization)
+- `src/app/application/expander/multi_file_expander.py`
+- `tests/unit/` — new test for multi-sheet + ZIP expansion
+
+---
+
+## FIX-023: Sweep orphan `cache_*` tables
+
+**Priority**: Low
+**Spec module**: ops / `015-catalog-resources`
+**Status**: Open
+
+### Problem
+
+Physical `cache_*` tables can be left behind when a dataset is renamed, retired, or its `cached_datasets` row is deleted while the table is not. They occupy disk and pollute `\dt` listings.
+
+### Fix
+
+Periodic Celery beat task (`openarg.sweep_orphan_cache_tables`) that:
+
+1. Lists all `public.cache_*` tables from `pg_tables`.
+2. Diffs against `cached_datasets.table_name`.
+3. For each orphan, calls `_record_cache_drop` (reason='orphan_sweep') and DROPs.
+4. Has `--dry-run` flag and a max-batch cap to avoid one big lock window.
+
+### Files
+
+- `src/app/infrastructure/celery/tasks/ops_fixes.py` (new task)
+- `src/app/infrastructure/celery/app.py` (beat schedule entry)
 
 ---
 

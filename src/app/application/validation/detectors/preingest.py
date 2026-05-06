@@ -61,7 +61,7 @@ class HttpErrorDetector(Detector):
     """
 
     name = "http_error"
-    version = "1"
+    version = "2"  # bumped: dead-portal hosts now CRITICAL (was implicit warn)
     severity = Severity.CRITICAL
 
     DEAD_PORTAL_HOSTS: frozenset[str] = frozenset(
@@ -83,6 +83,19 @@ class HttpErrorDetector(Detector):
         return bool(ctx.download_url) or ctx.http_status is not None
 
     def run(self, ctx: ResourceContext, mode: Mode) -> Finding | None:
+        # Hostname path: known-dead portals — checked first so a 403 from
+        # cultura.gob.ar gets escalated to critical+terminal instead of
+        # cycling through retries.
+        if ctx.download_url:
+            host = (urlparse(ctx.download_url).hostname or "").lower()
+            if host in self.DEAD_PORTAL_HOSTS:
+                return self._finding(
+                    mode=mode,
+                    payload={"host": host, "url": ctx.download_url[:200]},
+                    message=f"download URL host {host} is in known-dead portal list",
+                    severity=Severity.CRITICAL,
+                    should_redownload=False,
+                )
         # Status-code path
         status = ctx.http_status
         if status is not None and status >= 400:
@@ -93,15 +106,6 @@ class HttpErrorDetector(Detector):
                 severity=Severity.CRITICAL if status >= 500 or status in {404, 410} else Severity.WARN,
                 should_redownload=False,
             )
-        # Hostname path: known-dead portals
-        if ctx.download_url:
-            host = (urlparse(ctx.download_url).hostname or "").lower()
-            if host in self.DEAD_PORTAL_HOSTS:
-                return self._finding(
-                    mode=mode,
-                    payload={"host": host, "url": ctx.download_url[:200]},
-                    message=f"download URL host {host} is in known-dead portal list",
-                )
         return None
 
 

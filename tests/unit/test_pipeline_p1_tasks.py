@@ -328,8 +328,14 @@ class TestBulkCollectAllP4:
             _FetchAllResult(group_rows),
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
@@ -406,7 +412,14 @@ class TestBulkCollectAllP4:
             "recycled_failed": 3,
         }
         mock_get_inflight_counts.return_value = (98, {"datos_gob_ar": 9, "caba": 10})
-        mock_collect_dataset.s.side_effect = lambda did: f"task-{did}"
+
+        def _mock_signature(did):
+            sig = MagicMock()
+            sig.set = MagicMock(return_value=f"task-{did}-routed")
+            sig.__str__ = lambda self: f"task-{did}"
+            return sig
+
+        mock_collect_dataset.s.side_effect = _mock_signature
         mock_collect_large_group.s.side_effect = lambda title, portal: f"group-{title}-{portal}"
 
         conn = MagicMock()
@@ -429,8 +442,14 @@ class TestBulkCollectAllP4:
             ),
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
@@ -510,8 +529,14 @@ class TestBulkCollectAllP4:
             _FetchAllResult([]),
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
@@ -590,8 +615,14 @@ class TestFormatDuplicateAliasesP6:
         conn = MagicMock()
         conn.execute.return_value = _FetchAllResult(resources)
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
         mock_materialize.return_value = {"created_aliases": 2, "skipped_missing_source": 0}
@@ -620,8 +651,14 @@ class TestCacheCoverageP6:
             _ScalarResult(8),
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
@@ -699,8 +736,14 @@ class TestConsolidateGroupTablesP7:
             MagicMock(),  # insert source 2
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
         mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()

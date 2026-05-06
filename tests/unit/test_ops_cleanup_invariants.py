@@ -51,20 +51,32 @@ def _build_engine_with_results(results: list[_FakeResult]) -> MagicMock:
     return engine, conn
 
 
-# Standard 7-result baseline for tests that exercise no empty-orphan drops.
+# Standard baseline for tests that exercise no empty-orphan drops.
+# 6 rowcount paths + 1 SELECT + 1 double_cd_ready + 1 dataset_row_count.
 def _baseline(*rowcounts: int) -> list[_FakeResult]:
-    """Build the 7-step baseline (no empty orphan drops)."""
-    assert len(rowcounts) == 6, "need 6 rowcounts for the 6 rowcount-paths"
+    """Build the 9-step baseline (no empty orphan drops).
+
+    Order MUST match `cleanup_invariants` exec order:
+      1 classifier, 2 retry-clamp, 3 canonical-orphan, 4 fallback-orphan,
+      5 is_cached-drift, 6 mart-rowcount-drift, 7 empty-orphan-SELECT (rows=[]),
+      8 double_cd_ready (Sprint 1.7.3), 9 dataset-row-count-drift.
+
+    `fixed_unknown_on_ready` is reported in the summary but always 0:
+    the retroactive fix is blocked on a schema migration.
+    """
+    assert len(rowcounts) == 8, "need 8 rowcounts (6 invariant + double_ready + dataset_rc)"
     return [
-        *(_FakeResult(rowcount=rc) for rc in rowcounts),
+        *(_FakeResult(rowcount=rc) for rc in rowcounts[:6]),
         _FakeResult(rows=[]),  # empty-orphan SELECT, no candidates
+        _FakeResult(rowcount=rowcounts[6]),  # double_cd_ready purge
+        _FakeResult(rowcount=rowcounts[7]),  # dataset row_count drift
     ]
 
 
 def test_no_drift_returns_zero_summary():
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, _conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0))
+    engine, _conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -81,13 +93,16 @@ def test_no_drift_returns_zero_summary():
         "fixed_is_cached_drift": 0,
         "fixed_mart_row_count": 0,
         "dropped_empty_orphans": 0,
+        "fixed_dataset_row_count": 0,
+        "fixed_unknown_on_ready": 0,
+        "fixed_double_cd_ready": 0,
     }
 
 
 def test_all_paths_count_correctly():
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, _conn = _build_engine_with_results(_baseline(3, 2, 10, 4, 1, 2))
+    engine, _conn = _build_engine_with_results(_baseline(3, 2, 10, 4, 1, 2, 7, 99))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -105,6 +120,10 @@ def test_all_paths_count_correctly():
     assert summary["fixed_is_cached_drift"] == 1
     assert summary["fixed_mart_row_count"] == 2
     assert summary["dropped_empty_orphans"] == 0
+    assert summary["fixed_dataset_row_count"] == 99
+    assert summary["fixed_double_cd_ready"] == 7
+    # Always 0 — see cleanup_invariants for why this is blocked.
+    assert summary["fixed_unknown_on_ready"] == 0
 
 
 def test_drops_empty_orphans():
@@ -128,6 +147,8 @@ def test_drops_empty_orphans():
             _FakeResult(rows=[fake_orphan_a, fake_orphan_b]),  # SELECT
             _FakeResult(rowcount=0),  # DROP a
             _FakeResult(rowcount=0),  # DROP b
+            _FakeResult(rowcount=0),  # double_cd_ready purge
+            _FakeResult(rowcount=0),  # dataset row_count drift
         ]
     )
 
@@ -139,8 +160,8 @@ def test_drops_empty_orphans():
         summary = cleanup_invariants.run()
 
     assert summary["dropped_empty_orphans"] == 2
-    # 6 rowcount paths + 1 SELECT + 2 DROPs.
-    assert conn.execute.call_count == 9
+    # 6 rowcount + 1 SELECT + 2 DROPs + 1 double_cd_ready + 1 dataset_row_count = 11.
+    assert conn.execute.call_count == 11
 
 
 def test_idempotent_after_first_run():
@@ -149,9 +170,9 @@ def test_idempotent_after_first_run():
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
     # First call: drift exists.
-    engine_first, _ = _build_engine_with_results(_baseline(5, 5, 5, 5, 5, 5))
+    engine_first, _ = _build_engine_with_results(_baseline(5, 5, 5, 5, 5, 5, 5, 5))
     # Second call: nothing left to fix.
-    engine_second, _ = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0))
+    engine_second, _ = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         # First run.
@@ -178,7 +199,7 @@ def test_counts_canonical_and_fallback_separately():
     matters for dashboards that track migration progress."""
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, _ = _build_engine_with_results(_baseline(0, 0, 15, 3, 0, 0))
+    engine, _ = _build_engine_with_results(_baseline(0, 0, 15, 3, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -191,14 +212,14 @@ def test_counts_canonical_and_fallback_separately():
     assert summary["registered_orphan_tables"] == 18  # canonical + fallback
 
 
-def test_emits_7_sql_statements_when_no_orphans():
-    """Sanity: the function must emit exactly 7 statements per invocation
-    when there are no empty orphans to drop (6 rowcount paths + 1 SELECT).
-    Adding new paths is fine — silently removing one would skip a drift
-    class, which is what this test guards against."""
+def test_emits_9_sql_statements_when_no_orphans():
+    """Sanity: 6 rowcount + 1 empty-orphan SELECT + 1 double_cd_ready
+    + 1 dataset row_count = 9 total. Adding new paths is fine —
+    silently removing one would skip a drift class, which is what
+    this test guards against."""
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0))
+    engine, conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -207,4 +228,4 @@ def test_emits_7_sql_statements_when_no_orphans():
         )
         cleanup_invariants.run()
 
-    assert conn.execute.call_count == 7
+    assert conn.execute.call_count == 9

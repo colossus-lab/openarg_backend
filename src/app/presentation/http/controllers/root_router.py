@@ -29,9 +29,6 @@ from app.presentation.http.controllers.monitoring.metrics_router import (
 from app.presentation.http.controllers.public_api.ask_router import (
     router as ask_router,
 )
-from app.presentation.http.controllers.query.query_router import (
-    router as query_router,
-)
 from app.presentation.http.controllers.query.smart_query_v2_router import (
     router as smart_query_v2_router,
 )
@@ -58,9 +55,9 @@ def create_root_router() -> APIRouter:
     # Health (no prefix)
     root.include_router(health_router)
 
-    # API v1
+    # API v1. The legacy `query_router` (POST /, /quick, /{id}, /cache, ws/stream)
+    # was removed 2026-05-05; all chat traffic flows through smart_query_v2.
     api_v1 = APIRouter(prefix="/api/v1")
-    api_v1.include_router(query_router)
     api_v1.include_router(smart_query_v2_router)
     api_v1.include_router(datasets_router)
     api_v1.include_router(sandbox_router)

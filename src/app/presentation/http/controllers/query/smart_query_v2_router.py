@@ -37,7 +37,12 @@ _checkpointer_lock = asyncio.Lock()
 _compiled_graphs: dict[bool, Any] = {}
 _checkpointer = None  # AsyncPostgresSaver instance (lazy)
 _checkpointer_stack: AsyncExitStack | None = None
-_checkpointer_attempted = False  # Prevent repeated init attempts
+_checkpointer_attempted = False  # Most-recent init attempt happened
+_checkpointer_last_attempt_ts: float = 0.0  # epoch seconds of last attempt
+# Re-attempt the lazy init at most every N seconds. A transient DB blip at
+# boot used to leave persistence permanently off until process restart;
+# this TTL lets the next request retry on its own.
+_CHECKPOINTER_RETRY_TTL_SECONDS = 30.0
 
 logger = logging.getLogger(__name__)
 
@@ -191,22 +196,38 @@ async def _get_checkpointer():
     Returns the singleton checkpointer or *None* when checkpointing is
     unavailable (missing dependency or missing env var).
     Thread-safe via asyncio.Lock with double-check pattern.
+
+    Retry behaviour: a failed init flips `_checkpointer_attempted=True`.
+    Subsequent calls re-attempt after `_CHECKPOINTER_RETRY_TTL_SECONDS`
+    so a transient DB blip at boot doesn't leave persistence off forever.
     """
     global _checkpointer, _checkpointer_attempted, _checkpointer_stack  # noqa: PLW0603
+    global _checkpointer_last_attempt_ts  # noqa: PLW0603
 
     if _checkpointer is not None:
         return _checkpointer
-    if _checkpointer_attempted:
-        return None  # Already tried and failed — don't retry
+
+    import time as _time
+    now = _time.monotonic()
+    if (
+        _checkpointer_attempted
+        and (now - _checkpointer_last_attempt_ts) < _CHECKPOINTER_RETRY_TTL_SECONDS
+    ):
+        return None  # Recently failed — back off
 
     async with _checkpointer_lock:
         # Double-check after acquiring lock
         if _checkpointer is not None:
             return _checkpointer
-        if _checkpointer_attempted:
+        now = _time.monotonic()
+        if (
+            _checkpointer_attempted
+            and (now - _checkpointer_last_attempt_ts) < _CHECKPOINTER_RETRY_TTL_SECONDS
+        ):
             return None
 
         _checkpointer_attempted = True
+        _checkpointer_last_attempt_ts = now
 
         db_url = os.getenv("DATABASE_URL")
         if not db_url:
@@ -312,8 +333,10 @@ async def smart_query_v2(
     # Server-side privacy gate (defense in depth — the frontend also checks).
     await ensure_privacy_accepted(body.user_email, user_repo)
 
-    # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
-    checkpointer = _checkpointer
+    # Compile graph once (thread-safe), set deps per-request (ContextVar-safe).
+    # `_get_checkpointer()` re-attempts init after the TTL, so a DB blip at
+    # boot doesn't permanently disable persistence.
+    checkpointer = await _get_checkpointer()
     compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
@@ -427,8 +450,10 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 cache = await request_scope.get(ICacheService)
                 deps = await request_scope.get(PipelineDeps)
 
-                # Compile graph once (thread-safe), set deps per-request
-                checkpointer = _checkpointer
+                # Compile graph once (thread-safe), set deps per-request.
+                # `_get_checkpointer()` re-attempts after TTL; a transient
+                # DB blip at boot does not permanently disable persistence.
+                checkpointer = await _get_checkpointer()
                 set_deps(deps)
                 graph = await _get_or_compile_graph(deps, checkpointer)
 

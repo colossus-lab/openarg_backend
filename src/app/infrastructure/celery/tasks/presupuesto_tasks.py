@@ -135,6 +135,9 @@ def _register_dataset(engine, endpoint: str, year: int, table_name: str, df: pd.
     columns_json = json.dumps(list(df.columns))
     now = datetime.now(UTC)
 
+    # Commit the `datasets` row before calling `_finalize_cached_dataset`
+    # — it opens its own transaction for the FK-bound insert into
+    # `cached_datasets`. Sibling transactions don't see uncommitted writes.
     with engine.begin() as conn:
         conn.execute(
             text("""
@@ -169,21 +172,21 @@ def _register_dataset(engine, endpoint: str, year: int, table_name: str, df: pd.
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            finalized = _finalize_cached_dataset(
-                engine,
-                dataset_id=dataset_id,
-                portal=portal,
-                source_id=source_id,
-                table_name=table_name,
-                row_count=len(df),
-                columns=list(df.columns),
-                declared_format="json",
-                download_url=f"{API_URL}/{endpoint}",
-                now=now,
-            )
-            if not finalized["ok"]:
-                return None
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format="json",
+            download_url=f"{API_URL}/{endpoint}",
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -256,7 +259,26 @@ def ingest_presupuesto(self):
                     if len(df) > MAX_ROWS:
                         df = df.head(MAX_ROWS)
 
-                    df.to_sql(table_name, engine, if_exists="replace", index=False)
+                    # `if_exists='replace'` does DROP + CREATE under the hood,
+                    # which fails with `DependentObjectsStillExist` when a
+                    # mart materialized view (e.g. `presupuesto_consolidado`)
+                    # already references this table. Fall back to TRUNCATE +
+                    # append so the table identity (and downstream views) is
+                    # preserved across re-runs.
+                    try:
+                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                    except Exception as exc:
+                        if "DependentObjectsStillExist" not in type(exc).__name__ \
+                                and "depend on it" not in str(exc):
+                            raise
+                        logger.info(
+                            "Presupuesto %s %d: replace blocked by dependent view; "
+                            "falling back to TRUNCATE + append",
+                            endpoint, year,
+                        )
+                        from app.infrastructure.celery.tasks._db import safe_truncate_table
+                        safe_truncate_table(engine, table_name)
+                        df.to_sql(table_name, engine, if_exists="append", index=False)
 
                     dataset_id = _register_dataset(engine, endpoint, year, table_name, df)
                     if dataset_id:
@@ -265,6 +287,18 @@ def ingest_presupuesto(self):
                         )
 
                         index_dataset_embedding.delay(dataset_id)
+
+                    # Register in `raw_table_versions` so the
+                    # `presupuesto_consolidado` mart finds it.
+                    from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                    register_via_b_table(
+                        engine,
+                        resource_identity=f"presupuesto_abierto::{endpoint}::{year}",
+                        table_name=table_name,
+                        schema_name="public",
+                        row_count=len(df),
+                    )
 
                     results["ingested"] += 1
                     logger.info("Presupuesto %s %d: %d rows cached", endpoint, year, len(df))
@@ -339,24 +373,31 @@ def _register_dimension(
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "now": now,
-                },
+    # Persist the cached_datasets row through the canonical state
+    # machine instead of the previous direct INSERT. Sprint 1.2:
+    # 55 dimension tables now get layout_profile / header_quality /
+    # error_category / parser_version like every other dataset, so
+    # /data/tables and the cleanup_invariants sweep treat them
+    # consistently with the rest of the corpus.
+    if dataset_id:
+        try:
+            from app.infrastructure.celery.tasks._db import (
+                register_via_b_with_state,
             )
+
+            register_via_b_with_state(
+                engine,
+                dataset_id=dataset_id,
+                table_name=table_name,
+                columns=list(df.columns),
+                row_count=len(df),
+            )
+        except Exception:
+            logger.exception(
+                "register_via_b_with_state failed for %s; refusing legacy cached_datasets bypass",
+                table_name,
+            )
+            raise
 
     return dataset_id
 
@@ -431,7 +472,23 @@ def ingest_presupuesto_dimensiones(self):
                     if len(df) > MAX_ROWS:
                         df = df.head(MAX_ROWS)
 
-                    df.to_sql(table_name, engine, if_exists="replace", index=False)
+                    # Same DependentObjectsStillExist guard as in
+                    # ingest_presupuesto: TRUNCATE + append when a mart
+                    # already depends on this dimension table.
+                    try:
+                        df.to_sql(table_name, engine, if_exists="replace", index=False)
+                    except Exception as exc:
+                        if "DependentObjectsStillExist" not in type(exc).__name__ \
+                                and "depend on it" not in str(exc):
+                            raise
+                        logger.info(
+                            "Presupuesto dim %s %d: replace blocked by dependent view; "
+                            "falling back to TRUNCATE + append",
+                            dim_key, year,
+                        )
+                        from app.infrastructure.celery.tasks._db import safe_truncate_table
+                        safe_truncate_table(engine, table_name)
+                        df.to_sql(table_name, engine, if_exists="append", index=False)
 
                     dataset_id = _register_dimension(
                         engine, dim_key, dim_info, year, table_name, df
@@ -442,6 +499,16 @@ def ingest_presupuesto_dimensiones(self):
                         )
 
                         index_dataset_embedding.delay(dataset_id)
+
+                    from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                    register_via_b_table(
+                        engine,
+                        resource_identity=f"presupuesto_abierto::{dim_key}::{year}",
+                        table_name=table_name,
+                        schema_name="public",
+                        row_count=len(df),
+                    )
 
                     results["ingested"] += 1
                     logger.info(

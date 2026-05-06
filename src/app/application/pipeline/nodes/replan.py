@@ -87,7 +87,10 @@ async def replan_node(state: OpenArgState) -> dict:
 
         # Discover catalog hints again (same logic as planner_node)
         catalog_hints = await discover_catalog_hints_for_planner(
-            preprocessed_q, deps.sandbox, deps.embedding
+            preprocessed_q,
+            deps.sandbox,
+            deps.embedding,
+            serving_port=deps.serving_port,
         )
 
         # Generate a new plan with the enriched context

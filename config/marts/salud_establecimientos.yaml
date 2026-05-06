@@ -1,0 +1,114 @@
+id: salud_establecimientos
+version: 0.1.0
+description: |
+  Establecimientos de salud (farmacias, droguerías, listado general)
+  registrados por el Ministerio de Salud nacional. Schema canónico
+  unificado: nombre, tipo (farmacia | drogueria | establecimiento),
+  provincia, localidad, domicilio.
+
+  Sprint Marts Overhaul, fase 3 — primer mart construido sobre
+  `raw.*` con `live_tables_by_table_pattern` + `expected_columns`.
+  Muestra cómo manejar tablas heterogéneas (mismo dataset publicado
+  por el portal con casing distinto entre versions: ESTABLECIMIENTO_NOMBRE
+  vs establecimiento_nombre — el COALESCE() los unifica).
+domain: salud
+
+sources:
+  portals: [salud]
+  resource_patterns:
+    - "salud::*establecimientos*"
+
+canonical_columns:
+  - name: nombre
+    type: text
+    description: Nombre del establecimiento
+  - name: tipo
+    type: text
+    description: "farmacia | drogueria | otro (según el dataset fuente)"
+  - name: provincia
+    type: text
+    description: Jurisdicción
+  - name: localidad
+    type: text
+    description: Localidad/municipio
+  - name: domicilio
+    type: text
+    description: Dirección completa
+  - name: tipologia
+    type: text
+    description: Subtipo dentro del establecimiento (ej. Farmacia oficial, Hospital público)
+
+# UNION ALL de los 3 sub-tipos (farmacias, droguerías, listado general).
+# Cada bloque usa `live_tables_by_table_pattern` con `expected_columns`
+# para sobrevivir a versions distintas (UUIDs upstream regenerados,
+# columnas en distinta capitalization, schemas que evolucionan).
+sql: |
+  SELECT DISTINCT ON (nombre, provincia, domicilio)
+    nombre, tipo, provincia, localidad, domicilio, tipologia
+  FROM (
+    -- Farmacias
+    SELECT
+      COALESCE("ESTABLECIMIENTO_NOMBRE", "establecimiento_nombre", '')::text AS nombre,
+      'farmacia'::text                                                       AS tipo,
+      COALESCE("PROVINCIA_NOMBRE", "provincia_nombre", '')::text             AS provincia,
+      COALESCE("LOCALIDAD_NOMBRE", "localidad_nombre", '')::text             AS localidad,
+      COALESCE("DOMICILIO", "domicilio", '')::text                           AS domicilio,
+      COALESCE("TIPOLOGIA_NOMBRE", "tipologia_nombre", '')::text             AS tipologia
+    FROM {{ live_tables_by_table_pattern(
+        'salud__listado_de_establecimientos_de_farmacias__*',
+        expected_columns=[
+          'ESTABLECIMIENTO_NOMBRE', 'establecimiento_nombre',
+          'PROVINCIA_NOMBRE', 'provincia_nombre',
+          'LOCALIDAD_NOMBRE', 'localidad_nombre',
+          'DOMICILIO', 'domicilio',
+          'TIPOLOGIA_NOMBRE', 'tipologia_nombre'
+        ]
+    ) }} farmacias
+
+    UNION ALL
+
+    -- Droguerías
+    SELECT
+      COALESCE("ESTABLECIMIENTO_NOMBRE", "establecimiento_nombre", '')::text AS nombre,
+      'drogueria'::text                                                      AS tipo,
+      COALESCE("PROVINCIA_NOMBRE", "provincia_nombre", '')::text             AS provincia,
+      COALESCE("LOCALIDAD_NOMBRE", "localidad_nombre", '')::text             AS localidad,
+      COALESCE("DOMICILIO", "domicilio", '')::text                           AS domicilio,
+      COALESCE("TIPOLOGIA_NOMBRE", "tipologia_nombre", '')::text             AS tipologia
+    FROM {{ live_tables_by_table_pattern(
+        'salud__listado_de_establecimientos_de_droguerias__*',
+        expected_columns=[
+          'ESTABLECIMIENTO_NOMBRE', 'establecimiento_nombre',
+          'PROVINCIA_NOMBRE', 'provincia_nombre',
+          'LOCALIDAD_NOMBRE', 'localidad_nombre',
+          'DOMICILIO', 'domicilio',
+          'TIPOLOGIA_NOMBRE', 'tipologia_nombre'
+        ]
+    ) }} droguerias
+
+    UNION ALL
+
+    -- Listado general de establecimientos de salud
+    SELECT
+      COALESCE("ESTABLECIMIENTO_NOMBRE", "establecimiento_nombre", '')::text AS nombre,
+      'otro'::text                                                           AS tipo,
+      COALESCE("PROVINCIA_NOMBRE", "provincia_nombre", '')::text             AS provincia,
+      COALESCE("LOCALIDAD_NOMBRE", "localidad_nombre", '')::text             AS localidad,
+      COALESCE("DOMICILIO", "domicilio", '')::text                           AS domicilio,
+      COALESCE("TIPOLOGIA_NOMBRE", "tipologia_nombre", '')::text             AS tipologia
+    FROM {{ live_tables_by_table_pattern(
+        'salud__listado_establecimientos_de_salud_asentado*',
+        expected_columns=[
+          'ESTABLECIMIENTO_NOMBRE', 'establecimiento_nombre',
+          'PROVINCIA_NOMBRE', 'provincia_nombre',
+          'LOCALIDAD_NOMBRE', 'localidad_nombre',
+          'DOMICILIO', 'domicilio',
+          'TIPOLOGIA_NOMBRE', 'tipologia_nombre'
+        ]
+    ) }} listado
+  ) all_estab
+  WHERE nombre <> ''
+  ORDER BY nombre, provincia, domicilio
+
+refresh:
+  policy: on_upstream_change

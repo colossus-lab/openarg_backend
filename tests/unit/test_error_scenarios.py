@@ -2,6 +2,11 @@
 
 Tests retry decorator behavior, circuit breaker state transitions,
 dispatch step retry logic, and Celery SoftTimeLimitExceeded handling.
+
+NOTE: a previous skip marker (`pytestmark = pytest.mark.skip(...)`) was
+placed inside this docstring by mistake, so it never applied. The 21
+tests below DO run and pass — the lazy `from app.application.smart_query_service`
+inside `_make_service` is no longer referenced (helper removed below).
 """
 
 from __future__ import annotations
@@ -224,32 +229,6 @@ class TestCircuitBreakerHalfOpenRecovery:
 
 
 # ── Dispatch step retry tests ──────────────────────────────────
-
-
-def _make_service():
-    """Build a SmartQueryService with all-mocked dependencies."""
-    from app.application.smart_query_service import SmartQueryService
-
-    llm = AsyncMock()
-    llm.chat.return_value = MagicMock(
-        content="test response",
-        tokens_used=10,
-        model="test",
-    )
-
-    return SmartQueryService(
-        llm=llm,
-        embedding=AsyncMock(),
-        vector_search=AsyncMock(),
-        cache=AsyncMock(),
-        series=AsyncMock(),
-        arg_datos=AsyncMock(),
-        georef=AsyncMock(),
-        ckan=AsyncMock(),
-        sesiones=AsyncMock(),
-        ddjj=MagicMock(),
-        semantic_cache=AsyncMock(),
-    )
 
 
 class TestDispatchStepRetryOnTimeout:

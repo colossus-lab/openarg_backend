@@ -54,6 +54,8 @@ def _register_dataset(
     # Truncate format to fit varchar(50) column
     fmt_value = fmt[:50] if fmt else "csv"
 
+    # Commit `datasets` upsert before `_finalize_cached_dataset` runs so
+    # the FK to `datasets.id` is satisfied in the second transaction.
     with engine.begin() as conn:
         conn.execute(
             text("""
@@ -90,21 +92,21 @@ def _register_dataset(
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            finalized = _finalize_cached_dataset(
-                engine,
-                dataset_id=dataset_id,
-                portal=portal,
-                source_id=source_id,
-                table_name=table_name,
-                row_count=len(df),
-                columns=list(df.columns),
-                declared_format=fmt_value,
-                download_url=url,
-                now=now,
-            )
-            if not finalized["ok"]:
-                return None
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format=fmt_value,
+            download_url=url,
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -309,7 +311,19 @@ def scrape_senado(self):
                 if len(df) > MAX_ROWS:
                     df = df.head(MAX_ROWS)
 
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                try:
+                    df.to_sql(table_name, engine, if_exists="replace", index=False)
+                except Exception as exc:
+                    if "DependentObjectsStillExist" not in type(exc).__name__ \
+                            and "depend on it" not in str(exc):
+                        raise
+                    logger.info(
+                        "Senado %s: replace blocked by dependent view; "
+                        "falling back to TRUNCATE + append", label,
+                    )
+                    from app.infrastructure.celery.tasks._db import safe_truncate_table
+                    safe_truncate_table(engine, table_name)
+                    df.to_sql(table_name, engine, if_exists="append", index=False)
 
                 dataset_id = _register_dataset(engine, source_id, label, table_name, df, url, fmt)
                 if dataset_id:
@@ -318,6 +332,18 @@ def scrape_senado(self):
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so marts that target the
+                # `senado` portal find these tables via `live_table()`.
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"senado::{_sanitize_name(label)}",
+                    table_name=table_name,
+                    schema_name="public",
+                    row_count=len(df),
+                )
 
                 results["ingested"] += 1
                 logger.info("Senado %s: %d rows", label, len(df))

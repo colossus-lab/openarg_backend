@@ -296,6 +296,26 @@ def snapshot_staff(self):
         logger.error("Failed to persist staff snapshot: %s", exc)
         raise self.retry(exc=exc)
 
+    # Register the snapshot table in `raw_table_versions` so marts that
+    # query `staff_hcdn::snapshots` (e.g. `staff_estado`) can resolve it
+    # via `live_table()`. Idempotent — runs every snapshot to keep
+    # `row_count` fresh.
+    from app.infrastructure.celery.tasks._db import register_via_b_table
+
+    register_via_b_table(
+        engine,
+        resource_identity="staff_hcdn::snapshots",
+        table_name="staff_snapshots",
+        schema_name="public",
+        row_count=len(current),
+    )
+    register_via_b_table(
+        engine,
+        resource_identity="staff_hcdn::changes",
+        table_name="staff_changes",
+        schema_name="public",
+    )
+
     logger.info(
         "Staff snapshot persisted: %d employees, %d altas, %d bajas, %d updates (first_run=%s)",
         len(current),

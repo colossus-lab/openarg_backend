@@ -2,8 +2,25 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Type**: Reverse-engineered
-**Status**: Draft — extended with WS0/WS0.5/WS2/WS3/WS4/WS5 modules (2026-04-25)
-**Last synced with code**: 2026-04-25
+**Status**: Draft — extended with WS0/WS0.5/WS2/WS3/WS4/WS5 modules (2026-04-25); medallion finalised raw → mart (2026-05-04); Sprint 0.1–0.7 polish (2026-05-05)
+**Last synced with code**: 2026-05-05
+
+## Medallion finalisation (2026-05-04)
+
+The original WS3/WS4 plan envisioned a 3-tier medallion (`raw → staging → mart`). Mig 0042 dropped the `staging` schema and `staging_contract_state` table — see [spec 018](../018-contracts-staging/spec.md) marked DEPRECATED. The system now goes directly from raw landings to mart materialised views via `live_table()` macro resolution. References to staging in this plan that pre-date the deprecation are kept only as historical breadcrumbs; the schema does not exist in production.
+
+## Sprint 0.1–0.7 polish (2026-05-05)
+
+Operational hardening and bug fixes that landed AFTER the 2026-04-25 collector rewrite. Full breakdown in [spec.md §0](./spec.md#0-recent-material-changes-sprint-01--07-2026-05-04--2026-05-05). Highlights:
+
+- **Atomic raw promotion** in `_apply_cached_outcome`: registry + catalog_resources update happens BEFORE the `cached_datasets='ready'` write; failure demotes outcome to `error`. Closes the dangling-ready window where the raw promotion could fail silently.
+- **`raw_table_versions.is_truncated`** (mig 0046) flags rows that hit `MAX_TABLE_ROWS=500_000` so dashboards can tell apart full landings from sampled prefixes.
+- **Mart embeddings** auto-generated on every build (Bedrock Cohere multilingual v3) and back-filled for all 6 existing marts.
+- **Sandbox schema allowlist** widened from `('public',)` to `('public', 'mart', 'raw')` with `_PREFIX_FREE_SCHEMAS` so SELECT against curated views and raw landings is no longer rejected. `openarg_sandbox_ro` granted USAGE+SELECT on those schemas.
+- **Advisory lock helpers** (`_try_advisory_lock`, `_try_backfill_lock`) now persist the acquiring connection in a module-level dict so the session-scoped lock survives between acquire and release. Previous version closed the connection between the two calls, releasing the lock instantly — the "mutex" was effectively a no-op.
+- **Honest defaults** in `catalog_backfill`: `parser_version` → `legacy:unknown` (was lying as `phase4-v1`), `layout_profile` and `header_quality` → `None` for unknown rows (were fabricating `simple_tabular`/`good`).
+- **Sweep retrospective** UNIONs `cached_datasets` with `raw_table_versions` so the ~7% of raw rows without a cd entry are still validated.
+- **`/data/tables` includes raw** via `sandbox.list_cached_tables` JOIN with rtv; `/data/search` includes marts via embedding similarity.
 
 ## Collector rewrite addendum (2026-04-25)
 

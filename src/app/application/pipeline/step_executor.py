@@ -60,6 +60,10 @@ class ConnectorDeps:
     llm: ILLMProvider
     embedding: IEmbeddingProvider
     semantic_cache: SemanticCache
+    # MASTERPLAN Fase 4.5b/c — Serving Port for nodes that benefit from
+    # schemas + semantics or read marts directly. Optional; legacy paths
+    # still work when this is None.
+    serving_port: object | None = None
 
 
 # ── Retryable error detection ─────────────────────────────────
@@ -127,6 +131,7 @@ _DISPATCH_TABLE: dict[str, Callable[..., Any]] = {
         d.vector_search,
         d.semantic_cache,
         user_query=q,
+        serving_port=d.serving_port,
     ),
 }
 

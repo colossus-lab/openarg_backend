@@ -1,0 +1,69 @@
+id: legislatura_actividad
+version: 0.3.0
+description: |
+  Composición legislativa argentina: bloques + legisladores activos en
+  HCDN (Cámara de Diputados) y Senado de la Nación. El mart UNIONa los
+  dos cuerpos legislativos: cuando los conectores de sesiones/votaciones
+  aterricen, se sumarán como bloques adicionales sin tocar el shape.
+domain: legislativo
+
+sources:
+  portals: [diputados, senado]
+  resource_patterns:
+    - "*bloque*"
+    - "*diputado*"
+    - "*senador*"
+    - "*sesion*"
+    - "*votac*"
+
+canonical_columns:
+  - name: organismo
+    type: text
+    description: HCDN (Cámara de Diputados) o Senado (Cámara de Senadores)
+  - name: bloque
+    type: text
+    description: Bloque político
+  - name: nombre
+    type: text
+    description: Nombre completo del legislador
+  - name: distrito
+    type: text
+    description: Provincia que representa
+  - name: periodo
+    type: text
+    description: Período parlamentario (e.g. "2023-2027" para HCDN, "2023-2029" para Senado)
+
+sql: |
+  -- HCDN: 256 diputados activos. Source_id elegido explícitamente
+  -- porque hay otros datasets con el mismo nombre (bloques de partidos
+  -- vs distribución por bloque).
+  SELECT
+    'HCDN'::text                                                         AS organismo,
+    COALESCE("BLOQUE", '')::text                                         AS bloque,
+    TRIM(COALESCE("APELLIDO", '') || ' ' || COALESCE("NOMBRES", ''))     AS nombre,
+    COALESCE("DISTRITO", '')::text                                       AS distrito,
+    COALESCE("PERIODO", '')::text                                        AS periodo
+  FROM {{ live_table('diputados::233a2e63-1583-4317-99f2-10bcb12a919d') }}
+
+  UNION ALL
+
+  -- Senado: 72 senadores activos. La tabla `cache_senado_listado_senadores`
+  -- registró el snapshot post Sprint 1.5 trigger de scrape_senado.
+  -- D_LEGAL/C_LEGAL traen las fechas de inicio/fin del mandato — las
+  -- compactamos en un "<año_inicio>-<año_fin>" para coincidir con el
+  -- formato que HCDN usa (e.g. "2023-2029").
+  SELECT
+    'Senado'::text                                                       AS organismo,
+    COALESCE("BLOQUE", '')::text                                         AS bloque,
+    TRIM(COALESCE("APELLIDO", '') || ' ' || COALESCE("NOMBRE", ''))      AS nombre,
+    COALESCE("PROVINCIA", '')::text                                      AS distrito,
+    CASE
+      WHEN "D_LEGAL" IS NOT NULL AND "C_LEGAL" IS NOT NULL
+      THEN EXTRACT(YEAR FROM "D_LEGAL"::date)::int::text || '-' ||
+           EXTRACT(YEAR FROM "C_LEGAL"::date)::int::text
+      ELSE ''
+    END                                                                  AS periodo
+  FROM {{ live_table('senado::listado_senadores') }}
+
+refresh:
+  policy: on_upstream_change

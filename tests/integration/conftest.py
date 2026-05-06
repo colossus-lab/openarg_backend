@@ -13,7 +13,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.pipeline.nodes import PipelineDeps
-from app.application.smart_query_service import SmartQueryService
+# Legacy SmartQueryService was removed (see specs/020-legacy-pipeline-tests-migration).
+# All tests under this conftest are skipped via pytestmark; the type alias
+# below keeps the function annotation valid without dragging in a dead module.
+SmartQueryService = object  # type: ignore[assignment,misc]
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
@@ -182,8 +185,19 @@ class MockProvider(Provider):
         mock.revoke = AsyncMock()
         return mock
 
+    # Legacy `SmartQueryService` provider removed alongside the class.
+    # All callers (integration tests under this conftest) are skipped via
+    # pytestmark — see specs/020-legacy-pipeline-tests-migration/spec.md.
+    # The block below is preserved as a comment to ease the future
+    # migration: each dependency in the constructor maps to a node in
+    # the LangGraph pipeline.
+    #
+    # @provide
+    # def smart_query_service(self, llm, embedding, vector_search, cache,
+    #     series, arg_datos, georef, ckan, sesiones, ddjj, semantic_cache,
+    #     staff, bcra, sandbox, chat_repo) -> SmartQueryService: ...
     @provide
-    def smart_query_service(
+    def _legacy_smart_query_service_placeholder(
         self,
         llm: ILLMProvider,
         embedding: IEmbeddingProvider,
@@ -201,23 +215,15 @@ class MockProvider(Provider):
         sandbox: ISQLSandbox,
         chat_repo: IChatRepository,
     ) -> SmartQueryService:
-        return SmartQueryService(
-            llm=llm,
-            embedding=embedding,
-            vector_search=vector_search,
-            cache=cache,
-            series=series,
-            arg_datos=arg_datos,
-            georef=georef,
-            ckan=ckan,
-            sesiones=sesiones,
-            ddjj=ddjj,
-            semantic_cache=semantic_cache,
-            staff=staff,
-            bcra=bcra,
-            sandbox=sandbox,
-            chat_repo=chat_repo,
-        )
+        # Returns a no-op object — fixture exists only so the integration
+        # container resolves without errors during pytest collection.
+        # All actual fixtures are skipped at the test level.
+        # Original constructor signature kept as parameters to preserve
+        # the dependency graph for the future test migration.
+        del (llm, embedding, vector_search, cache, series, arg_datos,
+             georef, ckan, sesiones, ddjj, semantic_cache, staff, bcra,
+             sandbox, chat_repo)  # mark as intentionally unused
+        return SmartQueryService()  # type: ignore[operator]
 
     @provide
     def pipeline_deps(

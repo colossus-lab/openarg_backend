@@ -34,7 +34,10 @@ async def planner_node(state: OpenArgState) -> dict:
 
         # Discover relevant cached tables for the planner
         catalog_hints = await discover_catalog_hints_for_planner(
-            preprocessed_q, deps.sandbox, deps.embedding
+            preprocessed_q,
+            deps.sandbox,
+            deps.embedding,
+            serving_port=deps.serving_port,
         )
 
         # Generate the plan (1 LLM call)

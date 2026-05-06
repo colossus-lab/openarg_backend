@@ -83,6 +83,7 @@ class TestSandboxTableDiscovery:
         adapter = PgSandboxAdapter()
         conn = MagicMock()
         conn.execute.side_effect = [
+            # 1) cached_datasets SELECT — registered legacy public.cache_*
             _FetchAllResult(
                 [
                     MagicMock(
@@ -93,12 +94,14 @@ class TestSandboxTableDiscovery:
                     )
                 ]
             ),
+            # 2) physical public.cache_* SELECT
             _FetchAllResult(
                 [
                     MagicMock(table_name="cache_budget_sample", row_count=42),
                     MagicMock(table_name="cache_budget_sample_gaaaaaaaa", row_count=100),
                 ]
             ),
+            # 3) columns SELECT for the unregistered physical cache table
             _FetchAllResult(
                 [
                     MagicMock(column_name="a"),
@@ -106,6 +109,10 @@ class TestSandboxTableDiscovery:
                     MagicMock(column_name="_source_dataset_id"),
                 ]
             ),
+            # 4) NEW: raw_table_versions live SELECT — empty in this test
+            #    (no raw landings configured). Without this stub the adapter
+            #    would raise StopIteration when it tries to enumerate raw.
+            _FetchAllResult([]),
         ]
         engine = MagicMock()
         engine.connect.return_value.__enter__ = MagicMock(return_value=conn)

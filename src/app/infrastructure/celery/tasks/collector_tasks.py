@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import time
 from collections import Counter
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +53,61 @@ def _read_byte_sample(path: str, n: int = 4096) -> bytes:
             return f.read(n)
     except Exception:
         return b""
+
+
+# Sprint 35: portales argentinos como `datos.cultura.gob.ar`
+# rechazan requests con 403 cuando el `User-Agent` es el default de
+# `httpx/x.x.x` (firma de scrapers). Usar UA de browser estándar
+# resuelve ~66 casos confirmados sin afectar otros portales.
+# Si en el futuro algun portal cambia política y nos vuelve a bloquear,
+# podemos rotar UA o agregar `Accept` headers más específicos.
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+}
+
+
+# Recovery 3 (Sprint 34): magic-byte detector. Some portals serve a
+# `.xls` extension when the actual file is HTML (error page),
+# CSV (mis-extension), or modern XLSX (`.xlsx` mistakenly named `.xls`).
+# `pd.read_excel` then raises "Excel file format cannot be determined,
+# you must specify an engine manually." This helper inspects the first
+# 16 bytes and returns the actual format so the caller can route
+# correctly (or skip if the response is HTML).
+def _detect_format_from_bytes(path: str) -> str | None:
+    """Returns one of: 'xlsx', 'xls', 'html', 'csv', or None (unknown).
+
+    Detection uses standard magic bytes:
+      - PK\\x03\\x04            → ZIP-based: xlsx, ods, docx (assume xlsx)
+      - \\xd0\\xcf\\x11\\xe0     → OLE compound document: xls, doc (assume xls)
+      - <!DOCTYPE / <html      → HTML
+      - { or [                 → JSON (caller decides)
+      - Other text with `,` or `;` in first line → CSV
+    """
+    sample = _read_byte_sample(path, n=512)
+    if not sample:
+        return None
+    if sample.startswith(b"PK\x03\x04"):
+        return "xlsx"
+    if sample.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "xls"
+    head = sample.lstrip().lower()
+    if head.startswith(b"<!doctype") or head.startswith(b"<html") or head.startswith(b"<?xml"):
+        # XML can be data; only HTML markers indicate error page.
+        if b"<html" in head[:100] or b"<body" in head[:200]:
+            return "html"
+    # Plain-text heuristic: look at the first line for delimiters.
+    try:
+        first_line = sample.split(b"\n", 1)[0]
+        if first_line and (b"," in first_line or b";" in first_line or b"\t" in first_line):
+            return "csv"
+    except Exception:
+        pass
+    return None
 
 # Domains with known SSL certificate issues (self-signed, missing intermediates).
 _DOMAINS_SKIP_SSL = frozenset(
@@ -150,7 +206,11 @@ MAX_TOTAL_ATTEMPTS = 5
 
 # Maximum rows to store per dataset table.  Datasets exceeding this limit
 # are truncated to the first MAX_TABLE_ROWS rows.
-MAX_TABLE_ROWS = 500_000
+# Source of truth lives in `app.setup.config.constants`. The local alias
+# is kept for backward compatibility with all the existing callsites in
+# this module — re-importing the constant means a future env override
+# (`OPENARG_MAX_TABLE_ROWS`) propagates here without a code change.
+from app.setup.config.constants import MAX_TABLE_ROWS  # noqa: E402
 _ZIP_CSV_PREVIEW_ROWS = int(os.getenv("OPENARG_ZIP_CSV_PREVIEW_ROWS", "250"))
 _MAX_SQL_COLUMNS = 1400
 _TEMP_SPACE_RESERVE_BYTES = 256 * 1024 * 1024  # keep 256MB free for worker stability
@@ -179,7 +239,26 @@ _COLLECT_DATASET_LOCK_PREFIX = "collect_dataset"
 _BULK_COLLECT_LOCK_KEY = 8_004_001
 _HEAVY_COLLECT_QUEUE = os.getenv("OPENARG_HEAVY_COLLECT_QUEUE", "collector-heavy")
 _HEAVY_RETRY_QUEUE = os.getenv("OPENARG_HEAVY_RETRY_QUEUE", "collector-heavy-retry")
+# Tables with more than this many columns are routed to the heavy collector
+# queue (different worker pool with bigger memory budget). The threshold is
+# load-based, NOT a layout signal — see `_layout_profile_for_columns` for
+# the layout taxonomy. Sprint 1.7 audit found 53 ready rows tagged
+# `simple_tabular` while having 100-600 cols; the layout boundary now sits
+# at 50, the heavy queue threshold sits at 600.
 _HEAVY_WIDTH_COLUMN_THRESHOLD = int(os.getenv("OPENARG_HEAVY_WIDTH_COLUMN_THRESHOLD", "600"))
+# Threshold for `_LAYOUT_WIDE` classification — anything above this is wide
+# enough that the parser can't treat it as a normal tabular dataset (most
+# common case: pivoted timeseries with date-as-column). Lower than the
+# heavy-queue threshold by design: a 100-column table still parses fine but
+# is no longer "simple".
+_WIDE_LAYOUT_COLUMN_THRESHOLD = int(os.getenv("OPENARG_WIDE_LAYOUT_COLUMN_THRESHOLD", "50"))
+
+# Default parser version persisted to `raw_table_versions.parser_version`.
+# Sprint 1.7 audit found 833 live rtv rows with NULL — the env var simply
+# wasn't set in some staging deploys, so the registration call passed
+# None to the column. Defaulting to the active parser tag here keeps the
+# observability column populated even when ops forgets to set the env.
+_DEFAULT_PARSER_VERSION = os.getenv("OPENARG_PARSER_VERSION", "phase4")
 _HEAVY_METADATA_PORTAL_FORMATS: dict[str, frozenset[str]] = {
     "datos_gob_ar": frozenset({"zip"}),
     "diputados": frozenset({"json"}),
@@ -235,24 +314,79 @@ def _lock_key(*parts: str) -> int:
     return int.from_bytes(digest[:8], "big", signed=False) & 0x7FFF_FFFF_FFFF_FFFF
 
 
+# Per-process map of held advisory locks. PostgreSQL session locks live
+# as long as the connection that acquired them, so we MUST hold that
+# connection open between acquire and release. The previous version
+# opened a fresh `engine.connect()` per call (acquire and release each
+# in its own short-lived connection), which released the lock as soon
+# as the acquire connection closed. The next caller saw the key as free
+# and entered the critical section concurrently — the "mutex" was a
+# no-op outside the sub-millisecond probe window.
+#
+# This dict keeps the acquiring connection alive until release. Worker
+# crashes drop the connection; Postgres then releases the lock on its
+# side, which is the correct semantic.
+_HELD_ADVISORY_LOCKS: dict[int, "object"] = {}
+
+
 def _try_advisory_lock(engine, key: int) -> bool:
-    """Try to acquire a PostgreSQL advisory lock for the current session."""
-    with engine.connect() as conn:
-        acquired = conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}).scalar()
+    """Try to acquire a PostgreSQL session-level advisory lock.
+
+    Returns True if this process now holds the lock, False if another
+    session does. The acquiring connection is stashed in
+    `_HELD_ADVISORY_LOCKS` and stays open until `_release_advisory_lock`
+    closes it.
+    """
+    if key in _HELD_ADVISORY_LOCKS:
+        # Already held by this worker — re-entrant calls are not supported
+        # because pg_try_advisory_lock would return True (Postgres counts
+        # acquisitions per session) but the caller would then expect the
+        # release to drop it fully, which would require a matching number
+        # of unlocks. Forbidding re-entry keeps the invariant simple.
+        return False
+
+    conn = engine.connect()
+    try:
+        acquired = bool(
+            conn.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}).scalar()
+        )
+        # Commit/rollback so the SELECT doesn't sit in an open transaction.
+        # The lock survives because it's session-scoped, not tx-scoped.
         conn.rollback()
-    return bool(acquired)
+    except Exception:
+        logger.warning("Could not probe advisory lock %s", key, exc_info=True)
+        conn.close()
+        return False
+
+    if not acquired:
+        conn.close()
+        return False
+
+    _HELD_ADVISORY_LOCKS[key] = conn
+    return True
 
 
 def _release_advisory_lock(engine, key: int) -> None:
-    """Release a previously acquired PostgreSQL advisory lock."""
+    """Release a previously acquired PostgreSQL advisory lock and close
+    the connection that held it. `engine` is accepted for backward
+    compatibility but ignored — we use the cached connection."""
+    conn = _HELD_ADVISORY_LOCKS.pop(key, None)
+    if conn is None:
+        return
     try:
-        with engine.connect() as conn:
-            if conn.in_transaction():
-                conn.rollback()
-            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+        if conn.in_transaction():
             conn.rollback()
+        conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+        conn.rollback()
     except Exception:
-        logger.debug("Could not release advisory lock %s", key, exc_info=True)
+        # See _try_advisory_lock for why this matters: lock release
+        # failures keep the session lock alive until conn close.
+        logger.warning("Could not release advisory lock %s", key, exc_info=True)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _has_temp_space(required_bytes: int, reserve_bytes: int = _TEMP_SPACE_RESERVE_BYTES) -> bool:
@@ -438,20 +572,25 @@ def _count_bulk_collect_remaining(engine, portal: str | None = None) -> dict[str
         ")"
     )
 
+    # Sprint 24: aligned with the dispatcher SELECT — `eligible_individual`
+    # now counts rows that PASS the per-(portal,title) cap (rn <= 10), and
+    # `eligible_groups` counts the title-groups beyond the cap (the rows
+    # that the dispatcher will sample down to 10). Without alignment the
+    # report would lie: counting 1k "individual" datasets the dispatcher
+    # never picks up.
     individual_sql = text(
         f"""
         SELECT COUNT(*)
-        FROM datasets d
-        WHERE {eligible_filter}
-          {portal_clause}
-          AND d.title NOT IN (
-            SELECT d2.title
-            FROM datasets d2
-            WHERE d2.portal = d.portal
-              AND {eligible_filter_d2}
-            GROUP BY d2.title, d2.portal
-            HAVING COUNT(*) > 50
-          )
+        FROM (
+            SELECT d.id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY d.portal, d.title ORDER BY d.id
+                   ) AS title_rn
+            FROM datasets d
+            WHERE {eligible_filter}
+              {portal_clause}
+        ) ranked
+        WHERE title_rn <= 100
         """
     )
 
@@ -464,7 +603,7 @@ def _count_bulk_collect_remaining(engine, portal: str | None = None) -> dict[str
             WHERE {eligible_filter}
               {portal_clause}
             GROUP BY d.title, d.portal
-            HAVING COUNT(*) > 50
+            HAVING COUNT(*) > 100
         ) large_groups
         """
     )
@@ -701,7 +840,34 @@ def _reconcile_cache_coverage(
                 """
             )
         ).fetchall()
+        # Sprint 28 (2026-05-06): the bulk SELECT above can hit a race
+        # window where another worker is mid-flight on a `DROP TABLE x;
+        # CREATE TABLE x (...)` recreate (typical inside `_to_sql_safe`
+        # schema_mismatch_recreate). Postgres `information_schema.tables`
+        # is NOT MVCC-snapshotted — the catalog returns the current
+        # committed state, so DROP-then-CREATE in another tx makes our
+        # `NOT EXISTS` see the table as missing for the ~50-200 ms
+        # gap between DROP and CREATE. With 16 collector workers in
+        # parallel, this generated 5,578 false-positive "Table missing"
+        # marks in a single sweep (recovered manually after detection).
+        # Defense: re-verify the table is STILL missing right before the
+        # UPDATE. If a DROP/CREATE has finished by then, the table is
+        # back and we skip the row, preventing the false positive.
+        verify_sql = text(
+            "SELECT NOT EXISTS ( "
+            "  SELECT 1 FROM information_schema.tables t "
+            "  WHERE t.table_schema IN ('public', 'raw', 'staging', 'mart') "
+            "    AND t.table_name = :tn "
+            ")"
+        )
+        false_positives_skipped = 0
         for row in orphaned_rows:
+            still_missing = conn.execute(
+                verify_sql, {"tn": row.table_name}
+            ).scalar()
+            if not still_missing:
+                false_positives_skipped += 1
+                continue
             conn.execute(
                 text(
                     """
@@ -709,6 +875,7 @@ def _reconcile_cache_coverage(
                     SET status = 'error',
                         retry_count = 0,
                         error_message = 'Table missing: marked for re-download',
+                        error_category = 'orchestration_table_missing',
                         updated_at = NOW()
                     WHERE dataset_id = CAST(:did AS uuid)
                       AND status = 'ready'
@@ -721,6 +888,14 @@ def _reconcile_cache_coverage(
                 {"did": row.dataset_id},
             )
             orphaned_ready += 1
+        if false_positives_skipped:
+            logger.warning(
+                "_reconcile_cache_coverage: skipped %d candidates that "
+                "raced with concurrent DROP/CREATE recreate (false-positive "
+                "guard). True orphans marked: %d",
+                false_positives_skipped,
+                orphaned_ready,
+            )
 
         inconsistent_rows = conn.execute(
             text(
@@ -1476,7 +1651,14 @@ def _parse_zip_archive(
     def _record_csv_file(file_path: str, *, sampled: str | None = None) -> dict:
         nonlocal table_name, current_append_mode
         csv_params = _detect_csv_params(file_path)
-        preview_df = pd.read_csv(file_path, nrows=_ZIP_CSV_PREVIEW_ROWS, **csv_params)
+        # Recovery 2: use the helper that already includes latin-1 fallback
+        # when UTF-8 decode fails (some ZIPs from Argentine portals contain
+        # CSVs encoded as Windows-1252/Latin-1 — the parent _detect_csv_params
+        # detects encoding by reading the header line, but inner rows can
+        # have higher-codepoint chars that decode-fail mid-stream).
+        preview_df = _read_csv_preview(
+            file_path, nrows=_ZIP_CSV_PREVIEW_ROWS, csv_params=csv_params
+        )
         preview_df = preview_df.assign(_source_dataset_id=dataset_id)
         preview_df = _sanitize_columns(preview_df)
         csv_params = _stabilize_csv_params_for_width(
@@ -1852,7 +2034,7 @@ def _stream_download(
     total = 0
     # connect=30s, read=60s per chunk (not total). Celery soft_time_limit handles total.
     dl_timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0)
-    with httpx.Client(timeout=dl_timeout, verify=verify_ssl) as client:
+    with httpx.Client(timeout=dl_timeout, verify=verify_ssl, headers=_HTTP_HEADERS) as client:
         with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
             content_length = int(resp.headers.get("content-length", 0) or 0)
@@ -1868,20 +2050,33 @@ def _stream_download(
 
 
 def _detect_csv_params(file_path: str) -> dict:
-    """Read first few lines to detect encoding and separator."""
+    """Read first few lines to detect encoding and separator.
+
+    Two-stage detection:
+      1. Count `,` `;` `|` `\\t` in the header — picks the most frequent.
+      2. If no candidate separator appears in the header (everything
+         landed in one cell), sample more rows and try `csv.Sniffer`,
+         which detects exotic separators or quoted-field tricks. As a
+         last resort, set `sep=None, engine='python'` so pandas runs
+         its own sniffer at parse time. Sprint 24: this recovers
+         ~70 datasets `validation_failed:separator_mismatch` (DKAN
+         portals like Rosario serving CSVs with non-default delimiters).
+    """
+    import csv
+
     params: dict = {"on_bad_lines": "skip"}
 
-    # Try UTF-8 with BOM stripping first
     try:
         with open(file_path, encoding="utf-8-sig") as f:
             header = f.readline()
+            sample = header + "".join(f.readline() for _ in range(9))
         params["encoding"] = "utf-8-sig"
     except UnicodeDecodeError:
         params["encoding"] = "latin-1"
         with open(file_path, encoding="latin-1") as f:
             header = f.readline()
+            sample = header + "".join(f.readline() for _ in range(9))
 
-    # Auto-detect separator
     candidate_counts = {
         ",": header.count(","),
         ";": header.count(";"),
@@ -1891,14 +2086,29 @@ def _detect_csv_params(file_path: str) -> dict:
     best_sep, best_count = max(candidate_counts.items(), key=lambda item: item[1])
     if best_count > 0:
         params["sep"] = best_sep
+        return params
 
+    # Header has no recognizable separator. Try csv.Sniffer with a
+    # broader sample — handles exotic delimiters and headers that
+    # span multiple lines (less common but real in DKAN portals).
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;|\t")
+        params["sep"] = dialect.delimiter
+        return params
+    except csv.Error:
+        pass
+
+    # Last resort: let pandas run its own sniffer at parse time.
+    # `engine='python'` is required for `sep=None`.
+    params["sep"] = None
+    params["engine"] = "python"
     return params
 
 
 def _read_csv_preview(file_path: str, *, nrows: int, csv_params: dict | None = None) -> pd.DataFrame:
     params = dict(csv_params) if csv_params is not None else _detect_csv_params(file_path)
     try:
-        return pd.read_csv(file_path, nrows=nrows, **params)
+        df = pd.read_csv(file_path, nrows=nrows, **params)
     except UnicodeDecodeError:
         if str(params.get("encoding") or "").lower() != "latin-1":
             fallback_params = dict(params)
@@ -1908,8 +2118,38 @@ def _read_csv_preview(file_path: str, *, nrows: int, csv_params: dict | None = N
                 file_path,
                 params.get("encoding"),
             )
-            return pd.read_csv(file_path, nrows=nrows, **fallback_params)
-        raise
+            df = pd.read_csv(file_path, nrows=nrows, **fallback_params)
+            params = fallback_params
+        else:
+            raise
+    if "header" in params or "skiprows" in params:
+        return df
+    if _header_quality_label(df.columns) != _HEADER_INVALID:
+        return df
+    try:
+        df_raw = pd.read_csv(
+            file_path,
+            nrows=max(nrows, 30),
+            header=None,
+            **{k: v for k, v in params.items() if k not in ("header", "skiprows")},
+        )
+    except Exception:
+        return df
+    header_idx = _detect_data_header_row(df_raw)
+    if header_idx <= 0:
+        return df
+    try:
+        retry = pd.read_csv(file_path, nrows=nrows, skiprows=header_idx, **params)
+    except Exception:
+        return df
+    if _header_quality_label(retry.columns) == _HEADER_INVALID:
+        return df
+    logger.info(
+        "CSV header auto-detected at row %d (was invalid at row 0) in %s",
+        header_idx,
+        file_path,
+    )
+    return retry
 
 
 def _csv_load_inner(
@@ -1995,8 +2235,19 @@ def _drop_table_if_exists(engine, table_name: str):
     logger.info("Dropped table %s for schema refresh", table_name)
 
 
+_PG_NAME_LIMIT = 63
+
+
 def _make_unique_columns(columns) -> list[str]:
-    """Normalize column names and guarantee uniqueness after cleanup."""
+    """Normalize column names and guarantee uniqueness after cleanup.
+
+    Names are truncated to Postgres' 63-byte identifier limit *before*
+    dedup. Without this, two long names that share their first 63 chars
+    look distinct in Python but collide once Postgres truncates them at
+    CREATE TABLE, raising DuplicateColumn. When truncation creates a
+    collision, the candidate is suffixed `_N` while reserving space so
+    the final name still fits in 63 bytes.
+    """
     used: set[str] = set()
     counters: dict[str, int] = {}
     normalized: list[str] = []
@@ -2009,11 +2260,21 @@ def _make_unique_columns(columns) -> list[str]:
             if not base or base.lower() == "nan":
                 base = f"col_{idx}"
 
+        if len(base) > _PG_NAME_LIMIT:
+            base = base[:_PG_NAME_LIMIT]
+
         counters[base] = counters.get(base, 0) + 1
-        candidate = base if counters[base] == 1 else f"{base}_{counters[base]}"
+        if counters[base] == 1:
+            candidate = base
+        else:
+            suffix = f"_{counters[base]}"
+            trunc = base[: max(1, _PG_NAME_LIMIT - len(suffix))]
+            candidate = f"{trunc}{suffix}"
         while candidate in used:
             counters[base] += 1
-            candidate = f"{base}_{counters[base]}"
+            suffix = f"_{counters[base]}"
+            trunc = base[: max(1, _PG_NAME_LIMIT - len(suffix))]
+            candidate = f"{trunc}{suffix}"
 
         used.add(candidate)
         normalized.append(candidate)
@@ -2348,22 +2609,330 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = _make_unique_columns(df.columns)
     df.attrs.setdefault("layout_profile", _infer_layout_profile(df).profile if not df.empty else _LAYOUT_SIMPLE)
     df.attrs["header_quality"] = _header_quality_label(df.columns)
-    if len(df.columns) > _HEAVY_WIDTH_COLUMN_THRESHOLD:
+    # Sprint 1.7: layout flip uses _WIDE_LAYOUT_COLUMN_THRESHOLD (default
+    # 50) instead of the heavy-queue routing threshold (600). 53 ready
+    # rows in staging had `simple_tabular` despite 100-600 cols — the
+    # earlier check only triggered above 600 which let pivoted
+    # timeseries through with the wrong tag.
+    if len(df.columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD:
         df.attrs["layout_profile"] = _LAYOUT_WIDE
 
     df = _serialize_structured_cells(df)
     return _compact_wide_dataframe(df)
 
 
+def _detect_data_header_row(df_raw: pd.DataFrame, *, max_scan: int = 15) -> int:
+    """Find the first row that looks like a real column header.
+
+    Used when the default header=0 read produces placeholder/duplicate columns
+    because the file has presentation rows (titles, periods, blank rows) above
+    the real header. Picks the first row in [0..max_scan] whose tokens look
+    like column names — non-empty, non-placeholder, with at least one
+    alphabetic label.
+
+    Pivoted layouts (one alpha label + N year columns like
+    "País, 2010, 2011, 2012") are valid headers, so pure-digit cells are
+    NOT counted as placeholders here — only `Unnamed:` and `col_N` are.
+    Earlier the strict ≥50% alpha threshold rejected those rows, leaving
+    the file with the title row as the header and triggering the
+    `placeholder_headers` validator downstream.
+
+    Returns 0 when no better row is found, so callers fall back to default.
+
+    For multi-row headers (Excel files with merged cells where the parent
+    category lives one row above the sub-headers), see
+    `_detect_data_header_range`.
+    """
+    if df_raw.empty:
+        return 0
+    ncols = max(df_raw.shape[1], 1)
+    threshold = max(3, int(ncols * 0.4))
+    for idx in range(min(max_scan, len(df_raw))):
+        row = df_raw.iloc[idx]
+        tokens = [_normalize_header_token(v) for v in row.tolist()]
+        nonempty = sum(1 for t in tokens if t)
+        if nonempty < threshold:
+            continue
+        # Only true placeholders (Unnamed:N, col_N) count as bad — pure
+        # numeric tokens are legitimate column names in pivoted layouts.
+        placeholder = sum(
+            1
+            for t in tokens
+            if t.lower().startswith("unnamed:")
+            or re.fullmatch(r"col_[0-9]+", t.lower())
+        )
+        alpha = sum(1 for t in tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t))
+        if placeholder / max(nonempty, 1) >= 0.35:
+            continue
+        if alpha < 1:
+            continue
+        return idx
+    return 0
+
+
+def _detect_data_header_range(
+    df_raw: pd.DataFrame, *, max_scan: int = 15
+) -> tuple[int, int]:
+    """Find header row(s); supports N-level multi-row headers from merged cells.
+
+    Returns `(start, end)` where `end` is exclusive (slice-style).
+
+    Detection strategy:
+      1. **Data-row anchor**: walk down looking for the first row whose cells
+         are predominantly numeric (more numbers than alpha tokens, ≥30 %
+         filled). That's the start of data.
+      2. **Walk back** from data_start to find the contiguous block of
+         header rows. Tolerates ONE blank row between data and the
+         deepest header (INDEC files often have a spacer). Stops at the
+         second blank row or at a single-cell title row (which is not
+         a header level).
+      3. If no data-row anchor is found (e.g. text-only sheet), fall back
+         to the legacy parent+child detector for the simple two-row case,
+         then to single-row.
+
+    Examples that this resolves:
+      - INDEC `IPI Manufacturero Cuadro 1`: 4-level header
+        (Período / Serie original / Nivel general+Variación / Números índice)
+      - INDEC `Comext`: 2-level (Período/Exportaciones/Importaciones +
+        Valor/Precios/Cantidades)
+      - INDEC `balanmensual`: 2-level (Período/Exportaciones/Importaciones +
+        Total mensual/...)
+
+    Conservative on edge cases — the single-row fallback path matches the
+    earlier behavior so existing happy-path callers don't regress.
+    """
+    if df_raw.empty:
+        return 0, 1
+    ncols = df_raw.shape[1]
+
+    # Pass 0: anchor on first data row, then walk back to find the full
+    # header block. This handles N-level headers (3, 4 levels typical of
+    # INDEC `Cuadro N` sheets) that the legacy parent+child detector
+    # misses.
+    data_start: int | None = None
+    for idx in range(min(max_scan + 5, len(df_raw))):
+        row = df_raw.iloc[idx]
+        tokens = [_normalize_header_token(v) for v in row.tolist()]
+        nonempty = sum(1 for t in tokens if t)
+        if nonempty < max(2, int(ncols * 0.3)):
+            continue
+        numeric = sum(
+            1 for t in tokens if re.fullmatch(r"-?\d+([.,]\d+)?", t)
+        )
+        alpha = sum(
+            1 for t in tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t)
+        )
+        # A data row dominates with numeric cells and may have 1-2 label
+        # columns (year, period name, category). The threshold of
+        # numeric > alpha + 1 lets through rows like
+        # `[2016, "Enero", 117.05, 118.90, ...]` where there's one alpha
+        # cell ("Enero") amongst many numbers.
+        if numeric >= 3 and numeric > alpha + 1:
+            data_start = idx
+            break
+
+    if data_start is not None and data_start > 0:
+        header_end = data_start
+        header_start = header_end
+        blanks_seen = 0
+        for idx in range(header_end - 1, -1, -1):
+            row = df_raw.iloc[idx]
+            tokens = [_normalize_header_token(v) for v in row.tolist()]
+            nonempty = sum(1 for t in tokens if t)
+            if nonempty == 0:
+                blanks_seen += 1
+                if blanks_seen >= 2:
+                    break
+                continue
+            # single-cell title rows are NOT header levels
+            if nonempty < 2:
+                break
+            blanks_seen = 0  # reset after a content row
+            header_start = idx
+        if header_end - header_start >= 1:
+            return header_start, header_end
+
+    # Pass 1: parent + child row detection. The parent row of a merged
+    # header has gaps (cells the visual span of the merge above NaN in
+    # the source), the child row fills those gaps with sub-headers.
+    for idx in range(min(max_scan, max(0, len(df_raw) - 1))):
+        row_top = df_raw.iloc[idx]
+        row_next = df_raw.iloc[idx + 1]
+        top_tokens = [_normalize_header_token(v) for v in row_top.tolist()]
+        next_tokens = [_normalize_header_token(v) for v in row_next.tolist()]
+        top_filled = sum(1 for t in top_tokens if t)
+        next_filled = sum(1 for t in next_tokens if t)
+        # Parent row must have ≥2 alpha tokens (rules out single-cell titles)
+        top_alpha = sum(
+            1 for t in top_tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t)
+        )
+        if top_alpha < 2:
+            continue
+        # Parent row must NOT be a single-cell title and must have gaps
+        if top_filled < 2:
+            continue
+        if top_filled >= int(ncols * 0.85):
+            # Almost full → it is the leaf row, not a parent. Single-row case.
+            continue
+        # Child row must fill the parent's gaps with new tokens
+        if next_filled <= top_filled:
+            continue
+        gaps_filled_by_next = sum(
+            1
+            for col in range(ncols)
+            if not top_tokens[col] and next_tokens[col]
+        )
+        if gaps_filled_by_next < max(2, int(ncols * 0.3)):
+            continue
+        # Child row must look like a header (alpha labels), not data
+        next_alpha = sum(
+            1 for t in next_tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t)
+        )
+        if next_alpha < 1:
+            continue
+        # Reject when the "child" row has too many numeric cells —
+        # that's a data row, not sub-headers. Pivoted headers
+        # (`País, 2010, 2011, ...`) still pass because parent row's
+        # alpha cells are >0 and child has the alpha label too.
+        # A row like ["Total", "Total", "Total", "2143", "907", "1236"]
+        # has 3 numeric cells = 50 % of ncols → rejected.
+        next_numeric = sum(
+            1 for t in next_tokens if re.fullmatch(r"-?\d+([.,]\d+)?", t)
+        )
+        if next_numeric > max(2, int(ncols * 0.3)):
+            continue
+        # Heavy duplicates in child are NOT a rejection signal on their
+        # own: legitimate hierarchical headers like
+        # `[_, Valor, Precios, Cantidades, _, Valor, Precios, Cantidades]`
+        # (under parent `[Período, Exportaciones, _, _, _, Importaciones, _, _]`)
+        # combine into unique `Exportaciones_Valor`, `Importaciones_Valor`
+        # and so on. The numeric guard above already catches the data-row
+        # impostor case (`Total, Total, Total, 123, 456, 789`).
+        return idx, idx + 2
+
+    # Pass 2: fall back to single-row detection.
+    start = _detect_data_header_row(df_raw, max_scan=max_scan)
+    return start, start + 1
+
+
+def _combine_multirow_header(
+    df_raw: pd.DataFrame, start: int, end: int
+) -> list[str]:
+    """Build column names from one or more header rows.
+
+    Single-row case is a no-op (just the row tokens). Multi-row case
+    forward-fills the parent row horizontally (so cells merged in the
+    source span their group) and concatenates with the child row using
+    `_` as separator. Empty parts are dropped, adjacent duplicates are
+    deduped (so a parent and child with the same token don't produce
+    `Total_Total`). Empty results fall back to `col_N`.
+    """
+    if end <= start + 1:
+        return [
+            _normalize_header_token(v) for v in df_raw.iloc[start].tolist()
+        ]
+
+    rows: list[list[str]] = []
+    for i in range(start, end):
+        row_tokens = [_normalize_header_token(v) for v in df_raw.iloc[i].tolist()]
+        # forward-fill horizontally for parent rows (all but the last,
+        # where children are leaves and gaps are real `Unnamed:`).
+        if i < end - 1:
+            last_seen = ""
+            filled: list[str] = []
+            for tok in row_tokens:
+                if tok and not _is_placeholder_column_name(tok):
+                    last_seen = tok
+                    filled.append(tok)
+                else:
+                    filled.append(last_seen)
+            rows.append(filled)
+        else:
+            rows.append(row_tokens)
+
+    combined: list[str] = []
+    ncols = max(len(r) for r in rows) if rows else 0
+    for col in range(ncols):
+        parts = [
+            rows[r][col] for r in range(len(rows)) if col < len(rows[r]) and rows[r][col]
+        ]
+        # Drop adjacent duplicates: parent and child with same token
+        # collapse to a single token, not `Total_Total`.
+        deduped: list[str] = []
+        for p in parts:
+            if not deduped or deduped[-1] != p:
+                deduped.append(p)
+        combined.append("_".join(deduped) if deduped else f"col_{col}")
+    return combined
+
+
 def _read_excel_frame(source, *, nrows: int, **kwargs) -> pd.DataFrame:
-    """Read an Excel workbook and normalize empty/invalid-sheet errors."""
+    """Read an Excel workbook and normalize empty/invalid-sheet errors.
+
+    When the default header=0 read produces invalid headers (placeholder
+    columns from a multi-row layout or a title row), retry once after
+    auto-detecting the real header row. The retry only kicks in when the
+    caller didn't pass an explicit `header` or `skiprows`, so existing
+    tuned callsites keep their behavior.
+    """
     try:
-        return pd.read_excel(source, nrows=nrows, **kwargs)
+        df = pd.read_excel(source, nrows=nrows, **kwargs)
     except ValueError as exc:
         message = str(exc)
         if "0 worksheets found" in message or "Worksheet index 0 is invalid" in message:
             raise ValueError("excel_no_worksheets") from exc
         raise
+
+    if "header" in kwargs or "skiprows" in kwargs:
+        return df
+    if _header_quality_label(df.columns) != _HEADER_INVALID:
+        return df
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        df_raw = pd.read_excel(source, header=None, nrows=max(nrows, 30), **kwargs)
+    except Exception:
+        return df
+    start, end = _detect_data_header_range(df_raw)
+    if start <= 0 and end - start == 1:
+        return df
+    if end - start > 1:
+        # Multi-row header: read raw, attach combined columns, slice off
+        # the header rows. Reading with `header=[start, end-1]` would let
+        # pandas build a MultiIndex but that breaks downstream sanitizers
+        # which expect flat string columns. Combine ourselves instead.
+        try:
+            if hasattr(source, "seek"):
+                source.seek(0)
+            full = pd.read_excel(source, header=None, nrows=nrows, **kwargs)
+        except Exception:
+            return df
+        if full.empty or len(full) <= end:
+            return df
+        composite_cols = _combine_multirow_header(full, start, end)
+        retry = full.iloc[end:].reset_index(drop=True).copy()
+        retry.columns = composite_cols
+        if _header_quality_label(retry.columns) == _HEADER_INVALID:
+            return df
+        logger.info(
+            "Excel multi-row header detected rows [%d..%d), %d composite columns",
+            start,
+            end,
+            len(composite_cols),
+        )
+        return retry
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        retry = pd.read_excel(source, nrows=nrows, skiprows=start, **kwargs)
+    except Exception:
+        return df
+    if _header_quality_label(retry.columns) == _HEADER_INVALID:
+        return df
+    logger.info(
+        "Excel header auto-detected at row %d (was invalid at row 0)", start
+    )
+    return retry
 
 
 def _compact_wide_dataframe(df: pd.DataFrame, max_columns: int = _MAX_SQL_COLUMNS) -> pd.DataFrame:
@@ -2607,7 +3176,10 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                 write_conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": table_lock_key})
                 write_conn.rollback()
             except Exception:
-                logger.debug("Could not release materialization lock for %s", table_name, exc_info=True)
+                # Materialisation lock leak — surface as warning so the
+                # next collect_dataset for the same table doesn't loop on
+                # `already_collecting` waiting for the conn to GC.
+                logger.warning("Could not release materialization lock for %s", table_name, exc_info=True)
 
 
 def _get_table_row_count(engine, table_name: str) -> int:
@@ -2953,7 +3525,10 @@ def _prune_open_cached_entries(engine, dataset_id: str, *, keep_table_name: str 
                 params["tn"] = keep_table_name
             conn.execute(text(sql), params)
     except Exception:
-        logger.debug("Could not prune open cached entries for %s", dataset_id, exc_info=True)
+        # Failure here means stale `downloading/pending/error` rows
+        # linger for the dataset, which clouds the orchestrator's view
+        # of inflight work. Warning so it surfaces instead of being lost.
+        logger.warning("Could not prune open cached entries for %s", dataset_id, exc_info=True)
 
 
 def _mark_dataset_rerouted_pending(
@@ -3212,9 +3787,26 @@ def _materialization_outcome_for_ready(
     ws0_finding,
 ) -> _CollectorRunOutcome:
     if _ws0_is_critical(ws0_finding):
+        # `placeholder_headers` and `html_as_data` are both UPSTREAM
+        # transient causes (portal serves an error page or layout
+        # changed temporarily). Marking them `error` lets the next
+        # bulk wave retry; if the portal is permanently broken, the
+        # retry budget eventually moves them to `permanently_failed`.
+        # `separator_mismatch` is recoverable once the CSV sniffer
+        # picks up the right delimiter.
+        retryable_detectors = {
+            "placeholder_headers",
+            "html_as_data",
+            "separator_mismatch",
+        }
+        cached_status = (
+            "error"
+            if ws0_finding.detector_name in retryable_detectors
+            else "permanently_failed"
+        )
         return _CollectorRunOutcome(
             result_kind=_OUTCOME_PARSER_INVALID,
-            cached_status="permanently_failed",
+            cached_status=cached_status,
             error_message=f"ingestion_validation_failed:{ws0_finding.detector_name}",
             retry_increment=1,
             should_prune_open=True,
@@ -3232,7 +3824,7 @@ def _materialization_outcome_for_ready(
     if header_quality == _HEADER_INVALID:
         return _CollectorRunOutcome(
             result_kind=_OUTCOME_PARSER_INVALID,
-            cached_status="permanently_failed",
+            cached_status="error",
             error_message="parser_invalid:header_quality_invalid",
             retry_increment=1,
             should_prune_open=True,
@@ -3367,6 +3959,14 @@ def _classify_error_category(
     Used by `_apply_cached_outcome` to populate `cached_datasets.error_category`
     so operational dashboards can `GROUP BY error_category` instead of doing
     `LIKE` over free text. Buckets align with spec 014 §3.
+
+    Returns 'unknown' when there is no signal — the column has a CHECK
+    constraint that only allows the enum values defined in the
+    migration, plus a NOT NULL constraint. Distinguishing "success path
+    with no error" from "real unknown error" requires either a new
+    enum value (e.g. 'none') or a separate column flag — see DEBT for
+    the full design (a migration would also need to retro-classify
+    8K legacy rows).
     """
     if exc is not None and isinstance(exc, psycopg.errors.InFailedSqlTransaction):
         return "materialize_table_collision"
@@ -3691,6 +4291,136 @@ def _resource_identity(portal: str, source_id: str, sub_path: str | None = None)
     return f"{base}::{sub_path}" if sub_path else base
 
 
+def _register_raw_version_in_conn(
+    conn,
+    *,
+    resource_identity: str,
+    version: int,
+    table_name: str,
+    schema_name: str = "raw",
+    row_count: int | None = None,
+    size_bytes: int | None = None,
+    source_url: str | None = None,
+    source_file_hash: str | None = None,
+    parser_version: str | None = None,
+    collector_version: str | None = None,
+    is_truncated: bool = False,
+) -> None:
+    """Internal variant of `_register_raw_version` that runs within a
+    caller-supplied connection (i.e. inside an existing transaction).
+
+    Used by `_promote_to_raw_atomic` so the rtv INSERT and the catalog
+    UPDATE share a single engine.begin() — either both land or both
+    roll back. The legacy public-facing `_register_raw_version` keeps
+    its own transaction for callers that don't need atomicity with
+    catalog_resources (e.g. the `cleanup_invariants` orphan registration
+    sweep).
+    """
+    conn.execute(
+        text(
+            """
+            INSERT INTO raw_table_versions (
+                resource_identity, version, schema_name, table_name,
+                row_count, size_bytes, source_url, source_file_hash,
+                parser_version, collector_version, is_truncated
+            ) VALUES (
+                :rid, :v, :sch, :tn,
+                :rc, :sz, :url, :hash,
+                :pv, :cv, :trunc
+            )
+            ON CONFLICT (resource_identity, version) DO NOTHING
+            """
+        ),
+        {
+            "rid": resource_identity,
+            "v": version,
+            "sch": schema_name,
+            "tn": table_name,
+            "rc": row_count,
+            "sz": size_bytes,
+            "url": source_url,
+            "hash": source_file_hash,
+            "pv": parser_version,
+            "cv": collector_version,
+            "trunc": is_truncated,
+        },
+    )
+    conn.execute(
+        text(
+            """
+            UPDATE raw_table_versions
+            SET superseded_at = NOW()
+            WHERE resource_identity = :rid
+              AND version < :v
+              AND superseded_at IS NULL
+            """
+        ),
+        {"rid": resource_identity, "v": version},
+    )
+
+
+def _promote_to_raw_atomic(
+    engine,
+    *,
+    resource_identity: str,
+    version: int,
+    table_name: str,
+    schema_name: str,
+    row_count: int | None,
+    size_bytes: int | None,
+    source_url: str | None,
+    parser_version: str | None,
+    collector_version: str | None,
+    is_truncated: bool,
+) -> None:
+    """Promote a freshly materialised raw table to the medallion in a
+    SINGLE transaction.
+
+    Both writes (`raw_table_versions` insert + `catalog_resources` update)
+    must be atomic: a half-promotion (rtv has the new version but the
+    catalog still points at the old physical name) leaves `live_table()`
+    and the serving port resolving to a stale row. The previous Sprint 0.6
+    fix moved promotion BEFORE the cached_datasets='ready' write, but
+    each step still ran in its own engine.begin(), so a crash between
+    them produced the same drift.
+
+    Raises if either statement fails — the caller demotes the outcome to
+    error and the next retry re-runs the whole thing cleanly.
+    """
+    qualified = f'{schema_name}."{table_name}"'
+    with engine.begin() as conn:
+        _register_raw_version_in_conn(
+            conn,
+            resource_identity=resource_identity,
+            version=version,
+            table_name=table_name,
+            schema_name=schema_name,
+            row_count=row_count,
+            size_bytes=size_bytes,
+            source_url=source_url,
+            parser_version=parser_version,
+            collector_version=collector_version,
+            is_truncated=is_truncated,
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE catalog_resources
+                SET materialized_table_name = :qn,
+                    materialization_status = 'ready',
+                    parser_version = COALESCE(:pv, parser_version),
+                    updated_at = NOW()
+                WHERE resource_identity = :rid
+                """
+            ),
+            {
+                "qn": qualified,
+                "pv": parser_version,
+                "rid": resource_identity,
+            },
+        )
+
+
 def _register_raw_version(
     engine,
     *,
@@ -3807,6 +4537,76 @@ def _apply_cached_outcome(
     finalized_at = now or datetime.now(UTC)
     columns_json = json.dumps([str(c) for c in columns]) if columns is not None else None
     error_category = _classify_error_category(outcome.error_message)
+
+    # MASTERPLAN Fase 1.5 atomicity — promote to raw layer FIRST.
+    # The previous order persisted `cached_datasets.status='ready'` and
+    # only afterwards tried to register the raw version + update
+    # `catalog_resources`. If that second step failed, the dataset
+    # stayed `ready` while the registry/catalog had no entry, leaving
+    # `live_table()` and serving-port lookups broken until the
+    # cleanup_invariants cron registered an orphan with a fake
+    # `backfill_postauto::*` identity (loses the real portal). By trying
+    # the promotion BEFORE the cached_datasets write, a failure here
+    # demotes the outcome to `error` so cached_datasets reflects reality
+    # and the next retry has a chance to land cleanly.
+    raw_promotion_attempted = (
+        outcome.cached_status == "ready"
+        and bool(table_name)
+        and raw_schema in _RAW_SCHEMA_ALLOWED
+        and raw_version is not None
+        and bool(resource_identity)
+    )
+    raw_finalized = False
+    if raw_promotion_attempted:
+        try:
+            assert raw_schema is not None and raw_version is not None and resource_identity is not None  # for mypy
+            # Single-transaction atomic promotion: rtv INSERT + catalog
+            # UPDATE share one engine.begin() so a partial failure
+            # cannot leave them out of sync (Sprint 0.6 used 2 separate
+            # transactions which produced a small drift window).
+            _promote_to_raw_atomic(
+                engine,
+                resource_identity=resource_identity,
+                version=raw_version,
+                table_name=table_name or "",
+                schema_name=raw_schema,
+                row_count=row_count,
+                size_bytes=size_bytes,
+                source_url=source_url,
+                parser_version=_DEFAULT_PARSER_VERSION,
+                collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
+                is_truncated=is_truncated,
+            )
+            raw_finalized = True
+        except Exception as exc:
+            # Demote the outcome so cached_datasets reflects reality.
+            # The next retry of collect_dataset will rerun the same
+            # download and try the promotion again. We tag the error
+            # message so dashboards can isolate this class of failure.
+            logger.warning(
+                "Raw promotion failed for %s (resource=%s, v=%s); demoting outcome to error",
+                table_name,
+                resource_identity,
+                raw_version,
+                exc_info=True,
+            )
+            # Use `_OUTCOME_RETRYABLE_MATERIALIZATION` rather than
+            # `_OUTCOME_RETRYABLE_UPSTREAM` because this is an internal
+            # DB / promotion failure, not an upstream portal issue.
+            # Mixing them poisoned the metrics that segment retries by
+            # cause and blurred the boundary between "the source is
+            # flaky" and "we have a bug or DB hiccup". Same retry
+            # policy effect (retry_increment=1 -> goes back through
+            # the queue) but the dashboard now reports the correct
+            # category.
+            outcome = _CollectorRunOutcome(
+                result_kind=_OUTCOME_RETRYABLE_MATERIALIZATION,
+                cached_status="error",
+                error_message=f"raw_promotion_failed: {str(exc)[:200]}",
+                retry_increment=1,
+            )
+            # Recompute error_category for the demoted outcome.
+            error_category = _classify_error_category(outcome.error_message)
 
     with engine.begin() as conn:
         if outcome.cached_status == "ready" and table_name:
@@ -3945,64 +4745,22 @@ def _apply_cached_outcome(
     if outcome.should_prune_open:
         _prune_open_cached_entries(engine, dataset_id, keep_table_name=table_name)
 
-    # MASTERPLAN Fase 1.5 — when a raw-layer materialization landed `ready`,
-    # register the version in `raw_table_versions` and bubble the qualified
-    # name up to `catalog_resources.materialized_table_name` so the Serving
-    # Port adapter (and any downstream reader) can resolve the new physical
-    # location. The registration + catalog UPDATE happen in a single
-    # transaction so the catalog never points at a version that is not in
-    # the registry. Failure aborts the auto-promote — staging running on a
-    # missing version would always fail.
-    if (
-        outcome.cached_status == "ready"
-        and table_name
-        and raw_schema in _RAW_SCHEMA_ALLOWED  # validate raw_schema literal
-        and raw_version is not None
-        and resource_identity
-    ):
-        raw_finalized = False
+    # MASTERPLAN Fase 1.5 — when raw promotion landed (above, BEFORE the
+    # cached_datasets write), purge superseded `ready` rows that point at
+    # older versions of the same resource and dispatch mart refreshes.
+    # We deliberately do this AFTER the cached_datasets write so the
+    # delete + dispatch see the latest committed state.
+    if raw_finalized:
         try:
-            _register_raw_version(
-                engine,
-                resource_identity=resource_identity,
-                version=raw_version,
-                table_name=table_name,
-                schema_name=raw_schema,
-                row_count=row_count,
-                size_bytes=size_bytes,
-                source_url=source_url,
-                parser_version=os.getenv("OPENARG_PARSER_VERSION") or None,
-                collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
-                is_truncated=is_truncated,
-            )
-            qualified = f'{raw_schema}."{table_name}"'
             with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        """
-                        UPDATE catalog_resources
-                        SET materialized_table_name = :qn,
-                            materialization_status = 'ready',
-                            parser_version = COALESCE(:pv, parser_version),
-                            updated_at = NOW()
-                        WHERE resource_identity = :rid
-                        """
-                    ),
-                    {
-                        "qn": qualified,
-                        "pv": os.getenv("OPENARG_PARSER_VERSION") or None,
-                        "rid": resource_identity,
-                    },
-                )
-            # Purge stale `ready` rows of the SAME dataset that point to
-            # an older version of THIS resource. `_prune_open_cached_entries`
-            # only purges `downloading/pending/error` by design, so when v2
-            # lands the v1 row stays as `ready` and shows up as an orphan
-            # in the catalog (raw_table_versions live ≠ cached_datasets
-            # row's table_name). This DELETE is scoped to rows that are
-            # provably superseded — never touches legacy public.cache_*
-            # `ready` rows that have no raw_table_versions entry.
-            with engine.begin() as conn:
+                # Purge stale `ready` rows of the SAME dataset that point to
+                # an older version of THIS resource. `_prune_open_cached_entries`
+                # only purges `downloading/pending/error` by design, so when v2
+                # lands the v1 row stays as `ready` and shows up as an orphan
+                # in the catalog (raw_table_versions live ≠ cached_datasets
+                # row's table_name). This DELETE is scoped to rows that are
+                # provably superseded — never touches legacy public.cache_*
+                # `ready` rows that have no raw_table_versions entry.
                 conn.execute(
                     text(
                         """
@@ -4022,14 +4780,12 @@ def _apply_cached_outcome(
                         "rid": resource_identity,
                     },
                 )
-            raw_finalized = True
         except Exception:
             logger.warning(
-                "Could not finalize raw-layer registration for %s (resource=%s, v=%s); "
-                "skipping auto-promote",
+                "Could not purge superseded cached_datasets rows for %s "
+                "(resource=%s); cleanup_invariants will catch up",
                 table_name,
                 resource_identity,
-                raw_version,
                 exc_info=True,
             )
 
@@ -4073,6 +4829,41 @@ def _apply_cached_outcome(
                 logger.warning(
                     "Could not enqueue refresh_mart for portal of %s",
                     resource_identity,
+                    exc_info=True,
+                )
+
+        # Incremental enrichment dispatch — closes the embedding-coverage
+        # gap (Sprint 0.8 audit). Today only 7.4% of catalog_resources
+        # have an embedding because `populate_catalog_embeddings` is a
+        # batch task. Dispatching `enrich_single_table` per landing
+        # raises coverage to ~100% over time. Same debounce trick as
+        # refresh_mart: a stable task_id per table_name collapses
+        # repeated landings within the expires window into a single
+        # enrichment.
+        if table_name and os.getenv("OPENARG_AUTO_ENRICH", "1").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            try:
+                from app.infrastructure.celery.tasks.catalog_enrichment_tasks import (
+                    enrich_single_table,
+                )
+
+                qualified = (
+                    f"{raw_schema}.{table_name}" if raw_schema else table_name
+                )
+                enrich_single_table.apply_async(
+                    args=[qualified],
+                    queue="embedding",
+                    task_id=f"enrich:{qualified}",
+                    expires=300,
+                    countdown=60,
+                )
+            except Exception:
+                logger.warning(
+                    "Could not enqueue enrich_single_table for %s",
+                    table_name,
                     exc_info=True,
                 )
 
@@ -4122,7 +4913,7 @@ def _finalize_cached_dataset(
     )
     resolved_layout_profile = (
         layout_profile
-        or (_LAYOUT_WIDE if len(normalized_columns) > _HEAVY_WIDTH_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
+        or (_LAYOUT_WIDE if len(normalized_columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
     )
     resolved_header_quality = header_quality or _header_quality_label(normalized_columns)
     outcome = _materialization_outcome_for_ready(
@@ -4379,7 +5170,60 @@ def _update_row_count_after_append(engine, table_name: str):
                 {"cnt": new_count, "tn": table_name},
             )
     except Exception:
-        logger.debug("Could not update row_count after append for %s", table_name, exc_info=True)
+        # row_count drift propagates into datasets.row_count and into
+        # /data/tables responses. Catalogued in cleanup_invariants but
+        # the writer-side warning helps trace the path that drifted.
+        logger.warning("Could not update row_count after append for %s", table_name, exc_info=True)
+
+
+_DOWNLOAD_SIZE_CAPS_BYTES = {
+    "zip": int(os.getenv("OPENARG_MAX_DOWNLOAD_ZIP_BYTES", "200000000")),
+    "xlsx": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLSX_BYTES", "100000000")),
+    "xls": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLS_BYTES", "80000000")),
+    "csv": int(os.getenv("OPENARG_MAX_DOWNLOAD_CSV_BYTES", "500000000")),
+    "json": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),
+    "geojson": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),
+}
+_DOWNLOAD_SIZE_CAP_DEFAULT = int(
+    os.getenv("OPENARG_MAX_DOWNLOAD_DEFAULT_BYTES", "200000000")
+)
+# Threshold to route to heavy worker (with bigger memory). Below this
+# the default collector is fine. Between this and the cap → heavy queue.
+# Above the cap → policy_too_large without ever spawning a worker.
+_DOWNLOAD_HEAVY_ROUTE_BYTES = int(
+    os.getenv("OPENARG_HEAVY_ROUTE_BYTES", "50000000")
+)
+
+
+def _probe_download_size(url: str, *, timeout: float = 10.0) -> int | None:
+    """HEAD the URL and return Content-Length, or None if unknown.
+
+    Defensive on every error: any failure returns None and the caller
+    proceeds with a normal download (the worker may still SIGKILL on
+    parse, but at least we tried). Some portals don't support HEAD or
+    return Content-Length=0; treat those as "size unknown".
+    """
+    if not url:
+        return None
+    try:
+        import httpx
+        with httpx.Client(follow_redirects=True, timeout=timeout, headers=_HTTP_HEADERS) as client:
+            resp = client.head(url)
+            if resp.status_code >= 400:
+                return None
+            length = resp.headers.get("content-length")
+            if length is None:
+                return None
+            n = int(length)
+            return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _size_cap_for_format(declared_format: str | None) -> int:
+    return _DOWNLOAD_SIZE_CAPS_BYTES.get(
+        (declared_format or "").lower(), _DOWNLOAD_SIZE_CAP_DEFAULT
+    )
 
 
 @celery_app.task(
@@ -4534,6 +5378,57 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     f"after {cd_row.retry_count} attempts, skipping"
                 )
                 return {"error": "permanently_failed"}
+
+        # F2: pre-check Content-Length BEFORE downloading. Some datasets
+        # are 200-400 MB ZIP/XLSX archives whose pandas parse explodes
+        # to 1+ GB in RAM and SIGKILLs the worker. Without this check
+        # the worker dies and the same task re-spawns infinitely on
+        # other workers, draining the pool. With it: oversize files
+        # become `policy_too_large` instantly without spawning anyone.
+        # Files between 50 MB and the cap are routed to the heavy queue
+        # (1.5 GB memory limit) instead of the standard collector.
+        probed_size = _probe_download_size(download_url)
+        if probed_size is not None:
+            cap = _size_cap_for_format(fmt)
+            if probed_size > cap:
+                logger.warning(
+                    "Dataset %s file size %d bytes exceeds cap %d for format %s",
+                    dataset_id, probed_size, cap, fmt,
+                )
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE cached_datasets
+                            SET status='permanently_failed',
+                                error_message=:msg,
+                                error_category='policy_too_large',
+                                size_bytes=:size,
+                                updated_at=NOW()
+                            WHERE dataset_id=CAST(:did AS uuid)
+                            """
+                        ),
+                        {
+                            "did": dataset_id,
+                            "msg": f"file_too_large:{probed_size} bytes (cap {cap}, format {fmt})",
+                            "size": probed_size,
+                        },
+                    )
+                return {
+                    "dataset_id": dataset_id,
+                    "error": "policy_too_large",
+                    "size": probed_size,
+                }
+            if (
+                probed_size > _DOWNLOAD_HEAVY_ROUTE_BYTES
+                and not _is_heavy_execution()
+            ):
+                # Reroute to heavy worker for files between 50 MB and the
+                # per-format cap. Heavy worker has 1.5 GB memory, suitable
+                # for the parse step.
+                return _reroute_to_heavy(
+                    f"size_route:{probed_size}_bytes"
+                )
 
         # Resource staging is the primary materialization path: each dataset gets its own table.
         append_mode = False
@@ -5022,19 +5917,59 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
-                try:
-                    df = _read_excel_frame(tmp_path, nrows=MAX_TABLE_ROWS)
-                except ValueError as exc:
-                    if str(exc) == "excel_no_worksheets":
-                        logger.warning("Dataset %s: Excel workbook has no worksheets", dataset_id)
-                        _set_error_status(
-                            engine,
-                            dataset_id,
-                            "excel_no_worksheets",
-                            table_name=table_name,
+                # Recovery 3: some portals serve an .xls/.xlsx extension
+                # over a file that's actually HTML (error page), a plain
+                # CSV with the wrong extension, or vice versa. Detect the
+                # real format from magic bytes and re-route. Without this,
+                # `pd.read_excel` raises "Excel file format cannot be
+                # determined, you must specify an engine manually" and
+                # the dataset goes to permanently_failed:parse_format.
+                actual_fmt = _detect_format_from_bytes(tmp_path)
+                if actual_fmt == "html":
+                    logger.warning(
+                        "Dataset %s declared as %s but bytes are HTML — likely error page",
+                        dataset_id, fmt,
+                    )
+                    _set_error_status(
+                        engine, dataset_id,
+                        "ingestion_validation_failed:html_as_data",
+                        table_name=table_name,
+                    )
+                    return {"error": "html_as_data"}
+                if actual_fmt == "csv":
+                    logger.info(
+                        "Dataset %s declared as %s but bytes are CSV — re-routing",
+                        dataset_id, fmt,
+                    )
+                    fmt = "csv"
+                    # Fall through to the next iteration's CSV branch
+                    # by recursing through `collect_dataset` with the
+                    # corrected format would require a refactor; the
+                    # simplest path is to inline the CSV read here.
+                    csv_params = _detect_csv_params(tmp_path)
+                    df = _read_csv_preview(tmp_path, nrows=MAX_TABLE_ROWS, csv_params=csv_params)
+                else:
+                    if actual_fmt and actual_fmt != fmt:
+                        # Magic bytes disagree with declared format —
+                        # trust the bytes (e.g. xls → xlsx because the
+                        # file is actually a ZIP-based modern Excel).
+                        logger.info(
+                            "Dataset %s magic-byte format=%s overrides declared %s",
+                            dataset_id, actual_fmt, fmt,
                         )
-                        return {"error": "excel_no_worksheets"}
-                    raise
+                    try:
+                        df = _read_excel_frame(tmp_path, nrows=MAX_TABLE_ROWS)
+                    except ValueError as exc:
+                        if str(exc) == "excel_no_worksheets":
+                            logger.warning("Dataset %s: Excel workbook has no worksheets", dataset_id)
+                            _set_error_status(
+                                engine,
+                                dataset_id,
+                                "excel_no_worksheets",
+                                table_name=table_name,
+                            )
+                            return {"error": "excel_no_worksheets"}
+                        raise
                 if len(df) >= MAX_TABLE_ROWS:
                     sampled_note = (
                         f"sampled: first {MAX_TABLE_ROWS} rows kept (excel file may have more)"
@@ -5242,7 +6177,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     row_count=int(member.get("row_count", 0) or 0),
                                     size_bytes=file_size,
                                     source_url=download_url,
-                                    parser_version=os.getenv("OPENARG_PARSER_VERSION") or None,
+                                    parser_version=_DEFAULT_PARSER_VERSION,
                                     collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
                                 )
                             except Exception:
@@ -5310,7 +6245,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             finalize_layout_profile = (
                 (getattr(df, "attrs", {}) or {}).get("layout_profile")
                 if "df" in locals()
-                else (_LAYOUT_WIDE if len(columns) > _HEAVY_WIDTH_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
+                else (_LAYOUT_WIDE if len(columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
             )
             finalize_header_quality = (
                 (getattr(df, "attrs", {}) or {}).get("header_quality")
@@ -5586,6 +6521,16 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         # Threshold is 2× failed >= total because the SQL does
         # `failed * 2 >= total`, which avoids a division and the
         # zero-divide edge case for portals with 0 history.
+        # Sprint 24 (2026-05-06): el filtro `HAVING COUNT(*) > 50`
+        # excluía DEFINITIVAMENTE títulos hyper-repetidos (Pauta
+        # Publicitaria 157 copias, BAFICI 72, Balances Energéticos 80,
+        # etc.). 14 títulos × ~70 copias = 981 datasets bloqueados sin
+        # nunca procesarse — datos importantes (presupuestos nacionales,
+        # producción hidrocarburos, planeamiento urbano CABA).
+        # Reemplazado por LIMIT 10 PER (portal, title): procesamos una
+        # MUESTRA de cada serie histórica en lugar de excluirla. 10 es
+        # suficiente para queries del usuario sobre la serie y evita
+        # inflar la DB con 100s de versiones casi idénticas.
         query = (
             "WITH burned_portals AS ( "
             "  SELECT d2.portal "
@@ -5597,7 +6542,10 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             "    AND COUNT(*) FILTER (WHERE cd2.status='permanently_failed') * 2 >= COUNT(*) "
             "), "
             "eligible AS ( "
-            "  SELECT CAST(d.id AS text) AS id, d.portal, d.format, d.title "
+            "  SELECT CAST(d.id AS text) AS id, d.portal, d.format, d.title, "
+            "         ROW_NUMBER() OVER ( "
+            "           PARTITION BY d.portal, d.title ORDER BY d.id "
+            "         ) AS title_rn "
             "  FROM datasets d "
             "  WHERE d.is_cached = false "
             "    AND d.portal NOT IN (SELECT portal FROM burned_portals) "
@@ -5606,24 +6554,15 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             "      WHERE cd.dataset_id = d.id "
             "        AND cd.status IN ('ready', 'permanently_failed', 'downloading') "
             "    ) "
-            "    AND d.title NOT IN ( "
-            "      SELECT d2.title FROM datasets d2 "
-            "      WHERE d2.portal = d.portal "
-            "        AND d2.is_cached = false "
-            "        AND NOT EXISTS ( "
-            "          SELECT 1 FROM cached_datasets cd2 "
-            "          WHERE cd2.dataset_id = d2.id "
-            "            AND cd2.status IN ('ready', 'permanently_failed', 'downloading') "
-            "        ) "
-            "      GROUP BY d2.title, d2.portal "
-            "      HAVING COUNT(*) > 50 "
-            "    ) "
             "{portal_clause}"
+            "), "
+            "capped AS ( "
+            "  SELECT id, portal, format, title FROM eligible WHERE title_rn <= 100 "
             ") "
             "SELECT id, portal, format, title FROM ( "
             "  SELECT id, portal, format, title, "
             "         ROW_NUMBER() OVER (PARTITION BY portal ORDER BY title) AS rn "
-            "  FROM eligible "
+            "  FROM capped "
             ") sub "
             "ORDER BY rn, portal "
             "LIMIT 5000"
@@ -6117,6 +7056,24 @@ def recover_stuck_tasks(self):
                 ).scalar()
 
                 if not table_exists:
+                    # Sprint 28: defend against false-positive caused by
+                    # concurrent DROP/CREATE in `_to_sql_safe` recreate.
+                    # Postgres `information_schema.tables` is not
+                    # MVCC-snapshotted; a recreating worker briefly hides
+                    # the table. Re-check after a short pause; if it
+                    # reappeared, this row was a victim of the race.
+                    import time as _t
+                    _t.sleep(0.2)
+                    table_exists_recheck = conn.execute(
+                        text(
+                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+                            "WHERE table_name = :tn "
+                            "AND table_schema IN ('public', 'raw', 'staging', 'mart'))"
+                        ),
+                        {"tn": row.table_name},
+                    ).scalar()
+                    if table_exists_recheck:
+                        continue
                     conn.execute(
                         text("""
                             UPDATE cached_datasets

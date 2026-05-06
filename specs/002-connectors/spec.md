@@ -2,9 +2,16 @@
 
 **Type**: Reverse-engineered (abstraction extracted from multiple specific connectors)
 **Status**: Draft
-**Last synced with code**: 2026-04-11
+**Last synced with code**: 2026-05-06
 **Hexagonal scope**: Domain + Application + Infrastructure
 **Related plan**: [./plan.md](./plan.md)
+
+**Recent updates (2026-05-06)**:
+- **FK violation fix in 7 connectors** (`georef_tasks.py`, `indec_tasks.py`, `series_tiempo_tasks.py`, `bac_tasks.py`, `mapa_estado_tasks.py`, `gobernadores_tasks.py`, `dkan_tasks.py`): all 7 had a race condition where the `INSERT INTO datasets (...)` was committed in `engine.begin()` tx 1 but `_finalize_cached_dataset(engine, ...)` opened tx 2 internally that did NOT see the just-inserted row → `fk_cached_datasets_dataset_id` violation. Fix: moved `_finalize_cached_dataset` call OUTSIDE the `with engine.begin()` block so tx 1 commits before tx 2 starts. Recovered 7 portals (georef +4, indec +100, series_tiempo +12, bac +4, mapa_estado +2, gobernaciones +1, rosario_dkan +169) that were previously at 0 datasets.
+- **`live_table('portal::source_id')` references in marts now use `expected_columns` kwarg + pattern matching** to survive CKAN portals that regenerate `source_id` UUIDs on each scrape (BA Prov, Corrientes confirmed). See [019-marts/plan_macro_robustness.md](../019-marts/plan_macro_robustness.md).
+- **Browser User-Agent en httpx download client**: `_HTTP_HEADERS` constant con `Mozilla/5.0 ... Chrome/120` + `Accept-Language: es-AR` evita 403 Forbidden en portales que bloquean default httpx UA (datos.cultura.gob.ar confirmado).
+- **Pre-check Content-Length antes de download**: ver [017-raw-layer/spec.md](../017-raw-layer/spec.md) Recent updates.
+- **CKAN datos.gob.ar adapter — datasets sin resources** producen `download_url=''`; el filter por format en línea 35 los rechaza correctamente. Pero archivos servidos por SharePoint (Ministerio de Educación) devuelven HTML sin auth — irrecuperables sin credentials, marcados `html_as_data` y `permanently_failed`.
 
 ---
 
