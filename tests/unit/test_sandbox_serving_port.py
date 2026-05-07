@@ -56,6 +56,7 @@ async def test_marts_appear_first(monkeypatch: pytest.MonkeyPatch) -> None:
     port.discover.return_value = [
         _r("mart::a", ServingLayer.MART, "Mart A"),
         _r("staging.b", ServingLayer.STAGING, "Staging B"),
+        _r("raw.c", ServingLayer.RAW, "Raw C"),
         _r("legacy.c", ServingLayer.CACHE_LEGACY, "Legacy C"),
     ]
     block = await _serving_port_planner_hints("query", port, limit=5)
@@ -65,6 +66,9 @@ async def test_marts_appear_first(monkeypatch: pytest.MonkeyPatch) -> None:
     # Staging label appears
     assert "STAGING" in block
     assert "Staging B" in block
+    # Raw label appears
+    assert "RAW DISPONIBLE" in block
+    assert "Raw C" in block
     # cache_legacy is intentionally suppressed (covered by the legacy block)
     assert "Legacy C" not in block
 
@@ -122,6 +126,20 @@ async def test_staging_only_no_mart_section(
     block = await _serving_port_planner_hints("query", port, limit=5)
     assert "STAGING" in block
     assert "MARTS DISPONIBLES" not in block
+
+
+@pytest.mark.asyncio
+async def test_raw_only_renders_raw_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENARG_PIPELINE_USE_SERVING_PORT", "1")
+    port = AsyncMock()
+    port.discover.return_value = [_r("raw.a", ServingLayer.RAW, "Raw A")]
+    block = await _serving_port_planner_hints("query", port, limit=5)
+    assert "RAW DISPONIBLE" in block
+    assert "Raw A" in block
+    assert "MARTS DISPONIBLES" not in block
+    assert "STAGING" not in block
 
 
 # ── discover_catalog_hints_for_planner integration ────────────────────────

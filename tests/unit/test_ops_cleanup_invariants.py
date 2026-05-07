@@ -1,15 +1,4 @@
-"""Tests for `cleanup_invariants` periodic task.
-
-Covers the seven mutation paths plus idempotency:
-  1. classifier override for stale `unknown` rows
-  2. retry_count clamp
-  3. canonical orphan registration (resolves through cached_datasets → datasets)
-  4. fallback orphan registration when no dataset owns the table
-  5. is_cached drift fix
-  6. mart_definitions.last_row_count drift (matview has rows but metadata = 0)
-  7. drop empty orphan raw tables (0 rows, no rtv, no cached_datasets)
-  8. running twice in a row is a no-op
-"""
+"""Tests for `cleanup_invariants` periodic task."""
 
 from __future__ import annotations
 
@@ -39,9 +28,17 @@ def _build_engine_with_results(results: list[_FakeResult]) -> MagicMock:
     consecutive `conn.execute(...)` calls.
 
     The mutation paths consume results in this exact order:
-      1 classifier  2 retry-clamp  3 canonical-orphan  4 fallback-orphan
-      5 is_cached-drift  6 mart-rowcount-drift  7 empty-orphan-SELECT
-      8..N one-DROP-per-empty-orphan returned by step 7
+      1 classifier
+      2 retry-clamp
+      3 zombie-errors
+      4 zero-retry-zombies
+      5 canonical-orphan
+      6 fallback-orphan
+      7 is_cached-drift
+      8 mart-rowcount-drift
+      9 empty-orphan-SELECT
+      10..N one-DROP-per-empty-orphan
+      final 2 statements: double_cd_ready purge + dataset row_count drift
     """
     conn = MagicMock()
     conn.execute.side_effect = results
@@ -52,31 +49,39 @@ def _build_engine_with_results(results: list[_FakeResult]) -> MagicMock:
 
 
 # Standard baseline for tests that exercise no empty-orphan drops.
-# 6 rowcount paths + 1 SELECT + 1 double_cd_ready + 1 dataset_row_count.
+# 8 rowcount paths + 1 SELECT + 1 double_cd_ready + 1 dataset_row_count.
 def _baseline(*rowcounts: int) -> list[_FakeResult]:
-    """Build the 9-step baseline (no empty orphan drops).
+    """Build the 11-step baseline (no empty orphan drops).
 
     Order MUST match `cleanup_invariants` exec order:
-      1 classifier, 2 retry-clamp, 3 canonical-orphan, 4 fallback-orphan,
-      5 is_cached-drift, 6 mart-rowcount-drift, 7 empty-orphan-SELECT (rows=[]),
-      8 double_cd_ready (Sprint 1.7.3), 9 dataset-row-count-drift.
+      1 classifier
+      2 retry-clamp
+      3 zombie errors
+      4 zero-retry zombies
+      5 canonical-orphan
+      6 fallback-orphan
+      7 is_cached-drift
+      8 mart-rowcount-drift
+      9 empty-orphan-SELECT (rows=[])
+      10 double_cd_ready
+      11 dataset-row-count-drift
 
     `fixed_unknown_on_ready` is reported in the summary but always 0:
     the retroactive fix is blocked on a schema migration.
     """
-    assert len(rowcounts) == 8, "need 8 rowcounts (6 invariant + double_ready + dataset_rc)"
+    assert len(rowcounts) == 10, "need 10 rowcounts (8 invariant + double_ready + dataset_rc)"
     return [
-        *(_FakeResult(rowcount=rc) for rc in rowcounts[:6]),
+        *(_FakeResult(rowcount=rc) for rc in rowcounts[:8]),
         _FakeResult(rows=[]),  # empty-orphan SELECT, no candidates
-        _FakeResult(rowcount=rowcounts[6]),  # double_cd_ready purge
-        _FakeResult(rowcount=rowcounts[7]),  # dataset row_count drift
+        _FakeResult(rowcount=rowcounts[8]),  # double_cd_ready purge
+        _FakeResult(rowcount=rowcounts[9]),  # dataset row_count drift
     ]
 
 
 def test_no_drift_returns_zero_summary():
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, _conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0))
+    engine, _conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -88,6 +93,8 @@ def test_no_drift_returns_zero_summary():
     assert summary == {
         "fixed_unknown_category": 0,
         "clamped_retry_count": 0,
+        "fixed_zombie_errors": 0,
+        "fixed_zero_retry_zombies": 0,
         "registered_orphan_tables": 0,
         "canonical_orphans_registered": 0,
         "fixed_is_cached_drift": 0,
@@ -102,7 +109,7 @@ def test_no_drift_returns_zero_summary():
 def test_all_paths_count_correctly():
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, _conn = _build_engine_with_results(_baseline(3, 2, 10, 4, 1, 2, 7, 99))
+    engine, _conn = _build_engine_with_results(_baseline(3, 2, 8, 9, 10, 4, 1, 2, 7, 99))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -113,6 +120,8 @@ def test_all_paths_count_correctly():
 
     assert summary["fixed_unknown_category"] == 3
     assert summary["clamped_retry_count"] == 2
+    assert summary["fixed_zombie_errors"] == 8
+    assert summary["fixed_zero_retry_zombies"] == 9
     assert summary["canonical_orphans_registered"] == 10
     # registered_orphan_tables sums canonical + fallback (legacy field
     # for dashboards that already track this metric).
@@ -140,6 +149,8 @@ def test_drops_empty_orphans():
         [
             _FakeResult(rowcount=0),  # classifier
             _FakeResult(rowcount=0),  # retry clamp
+            _FakeResult(rowcount=0),  # zombie errors
+            _FakeResult(rowcount=0),  # zero-retry zombies
             _FakeResult(rowcount=0),  # canonical orphan registration
             _FakeResult(rowcount=0),  # fallback orphan registration
             _FakeResult(rowcount=0),  # is_cached drift
@@ -160,8 +171,8 @@ def test_drops_empty_orphans():
         summary = cleanup_invariants.run()
 
     assert summary["dropped_empty_orphans"] == 2
-    # 6 rowcount + 1 SELECT + 2 DROPs + 1 double_cd_ready + 1 dataset_row_count = 11.
-    assert conn.execute.call_count == 11
+    # 8 rowcount + 1 SELECT + 2 DROPs + 1 double_cd_ready + 1 dataset row_count = 13.
+    assert conn.execute.call_count == 13
 
 
 def test_idempotent_after_first_run():
@@ -170,9 +181,9 @@ def test_idempotent_after_first_run():
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
     # First call: drift exists.
-    engine_first, _ = _build_engine_with_results(_baseline(5, 5, 5, 5, 5, 5, 5, 5))
+    engine_first, _ = _build_engine_with_results(_baseline(5, 5, 5, 5, 5, 5, 5, 5, 5, 5))
     # Second call: nothing left to fix.
-    engine_second, _ = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0))
+    engine_second, _ = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         # First run.
@@ -199,7 +210,7 @@ def test_counts_canonical_and_fallback_separately():
     matters for dashboards that track migration progress."""
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, _ = _build_engine_with_results(_baseline(0, 0, 15, 3, 0, 0, 0, 0))
+    engine, _ = _build_engine_with_results(_baseline(0, 0, 0, 0, 15, 3, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -212,14 +223,14 @@ def test_counts_canonical_and_fallback_separately():
     assert summary["registered_orphan_tables"] == 18  # canonical + fallback
 
 
-def test_emits_9_sql_statements_when_no_orphans():
-    """Sanity: 6 rowcount + 1 empty-orphan SELECT + 1 double_cd_ready
-    + 1 dataset row_count = 9 total. Adding new paths is fine —
+def test_emits_11_sql_statements_when_no_orphans():
+    """Sanity: 8 rowcount + 1 empty-orphan SELECT + 1 double_cd_ready
+    + 1 dataset row_count = 11 total. Adding new paths is fine —
     silently removing one would skip a drift class, which is what
     this test guards against."""
     from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
 
-    engine, conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0))
+    engine, conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(
@@ -228,4 +239,66 @@ def test_emits_9_sql_statements_when_no_orphans():
         )
         cleanup_invariants.run()
 
-    assert conn.execute.call_count == 9
+    assert conn.execute.call_count == 11
+
+
+def test_mart_dependency_guards_extract_physical_raw_tables_from_resolved_sql():
+    from app.infrastructure.celery.tasks.ops_fixes import _mart_dependency_guards
+
+    row = MagicMock()
+    row.sql_definition = (
+        'SELECT * FROM raw."energia__petroleo__deadbeef__v1" '
+        "UNION ALL SELECT * FROM raw.gas__prod__cafef00d__v2"
+    )
+    live_row = MagicMock()
+    live_row.definition = 'SELECT * FROM raw."legacy__still_live__feedface__v1"'
+    conn = MagicMock()
+    conn.execute.side_effect = [
+        [row],
+        [live_row],
+    ]
+    engine = MagicMock()
+    engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+    exact, patterns, tables = _mart_dependency_guards(engine)
+
+    assert exact == set()
+    assert patterns == []
+    assert tables == {
+        "energia__petroleo__deadbeef__v1",
+        "gas__prod__cafef00d__v2",
+        "legacy__still_live__feedface__v1",
+    }
+
+
+def test_backfill_error_categories_requeries_remaining_unknown_rows_without_offset():
+    from app.infrastructure.celery.tasks.ops_fixes import backfill_error_categories
+
+    first_batch = [MagicMock(id="1", error_message="timeout upstream")]
+    second_batch = [MagicMock(id="2", error_message="403 forbidden")]
+    final_batch: list = []
+
+    select_conn = MagicMock()
+    select_conn.execute.side_effect = [
+        _FakeResult(rows=first_batch),
+        _FakeResult(rows=second_batch),
+        _FakeResult(rows=final_batch),
+    ]
+    update_conn = MagicMock()
+    engine = MagicMock()
+    engine.connect.return_value.__enter__ = MagicMock(return_value=select_conn)
+    engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    engine.begin.return_value.__enter__ = MagicMock(return_value=update_conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "app.infrastructure.celery.tasks.ops_fixes.get_sync_engine",
+            lambda: engine,
+        )
+        summary = backfill_error_categories.run(batch_size=1)
+
+    assert summary["seen"] == 2
+    assert summary["updated"] == 2
+    assert select_conn.execute.call_count == 3

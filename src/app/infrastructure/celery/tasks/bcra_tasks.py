@@ -171,5 +171,3 @@ def snapshot_bcra(self):
     except Exception as exc:
         logger.exception("BCRA snapshot failed")
         raise self.retry(exc=exc, countdown=60)
-    finally:
-        engine.dispose()

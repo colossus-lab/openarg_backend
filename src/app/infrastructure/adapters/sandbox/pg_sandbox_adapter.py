@@ -325,42 +325,6 @@ class PgSandboxAdapter(ISQLSandbox):
                 else:
                     registered_bare.add(row.table_name)
 
-            physical = conn.execute(
-                text(
-                    """
-                    SELECT t.table_name,
-                           COALESCE(s.n_live_tup::bigint, 0) AS row_count
-                    FROM information_schema.tables t
-                    LEFT JOIN pg_stat_user_tables s
-                      ON s.schemaname = t.table_schema
-                     AND s.relname = t.table_name
-                    WHERE t.table_schema = 'public'
-                      AND t.table_name LIKE 'cache_%'
-                    ORDER BY t.table_name
-                    """
-                )
-            ).fetchall()
-
-            for row in physical:
-                if row.table_name in registered_names:
-                    continue
-                columns_result = conn.execute(
-                    text(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = 'public' AND table_name = :tn "
-                        "ORDER BY ordinal_position"
-                    ),
-                    {"tn": row.table_name},
-                ).fetchall()
-                tables.append(
-                    CachedTableInfo(
-                        table_name=row.table_name,
-                        dataset_id="",
-                        row_count=int(row.row_count or 0),
-                        columns=[str(col.column_name) for col in columns_result],
-                    )
-                )
-
             # MASTERPLAN Fase 1.5 — surface raw layer tables to consumers.
             # Without this, /data/tables (which docstrings as including
             # "raw layer and curated marts") was lying: the sandbox only

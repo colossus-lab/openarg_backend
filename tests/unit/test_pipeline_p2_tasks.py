@@ -123,7 +123,7 @@ class TestCollectorP2:
 
         assert result == {"eligible_individual": 0, "eligible_groups": 0}
         joined = "\n".join(executed)
-        assert "WHERE cd.dataset_id = d2.id" in joined
+        assert "WHERE cd.dataset_id = d.id" in joined
         assert "WHERE cd2.dataset_id" not in joined
 
     def test_sanitize_columns_compacts_overflow_into_json_column(self):

@@ -102,7 +102,7 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
 # Same pattern as collector_tasks._HELD_ADVISORY_LOCKS — keep the
 # acquiring connection open between acquire and release so the session
 # lock survives.
-_HELD_BACKFILL_LOCK: dict[int, "object"] = {}
+_HELD_BACKFILL_LOCK: dict[int, object] = {}
 
 
 def _try_backfill_lock(engine: Engine) -> bool:
@@ -218,15 +218,20 @@ _QUERY_SQL = text(
         -- otherwise toggle the same `resource_identity` UPSERT back and
         -- forth on each backfill iteration.
         SELECT cd.table_name, cd.s3_key, cd.status, cd.error_message, cd.updated_at,
-               cd.layout_profile, cd.header_quality
+               cd.layout_profile, cd.header_quality,
+               rtv.schema_name AS materialized_schema
         FROM cached_datasets cd
+        LEFT JOIN raw_table_versions rtv
+          ON rtv.table_name = cd.table_name
+         AND rtv.superseded_at IS NULL
         WHERE cd.dataset_id = d.id
         ORDER BY (cd.status = 'ready') DESC,
                  cd.updated_at DESC NULLS LAST
         LIMIT 1
     ) cd ON true
-    ORDER BY d.created_at NULLS LAST
-    LIMIT :limit OFFSET :offset
+    WHERE :cursor_id IS NULL OR d.id > CAST(:cursor_id AS uuid)
+    ORDER BY d.id
+    LIMIT :limit
     """
 )
 
@@ -436,20 +441,37 @@ def _filename_from_url(url: str | None, fmt: str | None) -> str | None:
     return candidate
 
 
+def _qualified_materialized_table_name(
+    table_name: str | None,
+    *,
+    schema_name: str | None,
+    fallback_name: str,
+) -> str:
+    if not table_name:
+        return fallback_name
+    schema = (schema_name or "public").strip().strip('"')
+    bare = table_name.strip().strip('"')
+    if "." in bare:
+        return bare
+    if schema == "public":
+        return bare
+    return f'{schema}."{bare}"'
+
+
 def backfill_batch(
     engine: Engine,
     *,
-    offset: int,
+    cursor_id: str | None,
     limit: int,
     dry_run: bool,
     extractor: TitleExtractor,
     namer: PhysicalNamer,
-) -> tuple[int, int]:
+) -> tuple[int, int, str | None]:
     """Process one batch. Returns (read, written)."""
     with engine.connect() as conn:
-        rows = conn.execute(_QUERY_SQL, {"limit": limit, "offset": offset}).fetchall()
+        rows = conn.execute(_QUERY_SQL, {"limit": limit, "cursor_id": cursor_id}).fetchall()
     if not rows:
-        return 0, 0
+        return 0, 0, None
     written = 0
     for row in rows:
         portal = row.portal or ""
@@ -468,9 +490,14 @@ def backfill_batch(
         # If we have a materialized table, keep its name; otherwise compute
         # the deterministic candidate so future materializations can land on
         # the same physical name.
-        physical_name = row.table_name or namer.build(
+        fallback_physical_name = namer.build(
             portal, source_id, slug_hint=row.raw_title or source_id
         ).table_name
+        physical_name = _qualified_materialized_table_name(
+            row.table_name,
+            schema_name=getattr(row, "materialized_schema", None),
+            fallback_name=fallback_physical_name,
+        )
         materialization = _materialization_status(row.cached_status, row.error_message)
         resource_kind = _resource_kind(row.cached_status, row.error_message)
         params = {
@@ -506,7 +533,8 @@ def backfill_batch(
             written += 1
         except Exception:
             logger.exception("Failed upserting catalog_resource %s", identity)
-    return len(rows), written
+    last_dataset_id = str(getattr(rows[-1], "dataset_id", None) or "")
+    return len(rows), written, (last_dataset_id or None)
 
 
 def run_backfill(
@@ -518,15 +546,15 @@ def run_backfill(
     engine = get_sync_engine()
     extractor = TitleExtractor()
     namer = PhysicalNamer()
-    offset = 0
+    cursor_id: str | None = None
     total_read = 0
     total_written = 0
     batches = 0
     try:
         while True:
-            read, written = backfill_batch(
+            read, written, cursor_id = backfill_batch(
                 engine,
-                offset=offset,
+                cursor_id=cursor_id,
                 limit=batch_size,
                 dry_run=dry_run,
                 extractor=extractor,
@@ -536,7 +564,6 @@ def run_backfill(
                 break
             total_read += read
             total_written += written
-            offset += batch_size
             batches += 1
             if max_batches is not None and batches >= max_batches:
                 break

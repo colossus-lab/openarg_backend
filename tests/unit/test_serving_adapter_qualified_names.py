@@ -15,9 +15,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.domain.entities.serving import Schema, ServingLayer
+from app.domain.ports.serving.serving_port import QueryResourceMismatchError
 from app.infrastructure.adapters.serving.legacy_serving_adapter import (
     LegacyServingAdapter,
     _parse_qualified_name,
+    _sql_references_relation,
 )
 
 
@@ -57,14 +59,36 @@ def test_whitespace_stripped() -> None:
     assert bare == "foo"
 
 
+def test_sql_reference_match_accepts_public_unqualified() -> None:
+    assert _sql_references_relation(
+        "SELECT * FROM cache_demo",
+        schema_name="public",
+        bare_name="cache_demo",
+    )
+
+
+def test_sql_reference_match_requires_schema_for_raw() -> None:
+    assert _sql_references_relation(
+        'SELECT * FROM raw."cache_demo__v1"',
+        schema_name="raw",
+        bare_name="cache_demo__v1",
+    )
+    assert not _sql_references_relation(
+        'SELECT * FROM "cache_demo__v1"',
+        schema_name="raw",
+        bare_name="cache_demo__v1",
+    )
+
+
 @pytest.mark.asyncio
 async def test_query_uses_resource_schema_layer() -> None:
+    mart_def = SimpleNamespace(mart_schema="mart", mart_view_name="series_economicas")
     row_cursor = SimpleNamespace(
         fetchmany=lambda _n: [(1,)],
         keys=lambda: ["valor"],
     )
     conn = AsyncMock()
-    conn.execute.side_effect = [None, row_cursor]
+    conn.execute.side_effect = [SimpleNamespace(fetchone=lambda: mart_def), None, row_cursor]
     engine = MagicMock()
     engine.connect.return_value.__aenter__.return_value = conn
 
@@ -73,7 +97,9 @@ async def test_query_uses_resource_schema_layer() -> None:
         return_value=Schema(columns=["valor"], column_types={"valor": "integer"}, layer=ServingLayer.MART)
     )
 
-    rows = await adapter.query("mart::series_economicas", "SELECT 1")
+    rows = await adapter.query(
+        "mart::series_economicas", "SELECT * FROM mart.series_economicas"
+    )
 
     adapter.get_schema.assert_awaited_once_with("mart::series_economicas")
     assert rows.layer == ServingLayer.MART
@@ -107,3 +133,36 @@ async def test_explain_mart_reads_mart_definitions() -> None:
     assert entry.resource.layer == ServingLayer.MART
     assert entry.resource.domain == "economia"
     assert entry.parser_version == "v1"
+
+
+@pytest.mark.asyncio
+async def test_get_schema_accepts_raw_resource_id() -> None:
+    rows = [
+        SimpleNamespace(column_name="nombre", data_type="text"),
+        SimpleNamespace(column_name="edad", data_type="integer"),
+    ]
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value=SimpleNamespace(fetchall=lambda: rows))
+    engine = MagicMock()
+    engine.connect.return_value.__aenter__.return_value = conn
+
+    adapter = LegacyServingAdapter(engine)
+    schema = await adapter.get_schema("raw::caba__padron__abcd1234__v1")
+
+    assert schema.layer == ServingLayer.RAW
+    assert schema.columns == ["nombre", "edad"]
+    assert schema.column_types == {"nombre": "text", "edad": "integer"}
+
+
+@pytest.mark.asyncio
+async def test_query_rejects_relation_mismatch() -> None:
+    adapter = LegacyServingAdapter(MagicMock())
+    adapter.get_schema = AsyncMock(  # type: ignore[method-assign]
+        return_value=Schema(columns=["valor"], column_types={"valor": "integer"}, layer=ServingLayer.RAW)
+    )
+    adapter._expected_relation_for_resource = AsyncMock(  # type: ignore[attr-defined]
+        return_value=("raw", "caba__padron__abcd1234__v1")
+    )
+
+    with pytest.raises(QueryResourceMismatchError):
+        await adapter.query("raw::caba__padron__abcd1234__v1", "SELECT * FROM raw.otra_tabla")

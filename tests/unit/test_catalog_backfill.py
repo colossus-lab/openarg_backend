@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.infrastructure.celery.tasks.catalog_backfill import (
+    _QUERY_SQL,
     _build_catalog_embedding_text,
     _derived_header_quality,
     _derived_layout_profile,
@@ -225,9 +226,9 @@ def test_backfill_batch_persists_layout_and_header_metadata(mock_extractor_cls, 
     mock_namer.build.return_value = SimpleNamespace(table_name="cache_ipc_r111")
     mock_namer_cls.return_value = mock_namer
 
-    read, written = backfill_batch(
+    read, written, cursor_id = backfill_batch(
         engine,
-        offset=0,
+        cursor_id=None,
         limit=10,
         dry_run=False,
         extractor=mock_extractor,
@@ -235,6 +236,7 @@ def test_backfill_batch_persists_layout_and_header_metadata(mock_extractor_cls, 
     )
 
     assert (read, written) == (1, 1)
+    assert cursor_id == "11111111-1111-1111-1111-111111111111"
     params = write_conn.execute.call_args.args[1]
     assert params["layout_profile"] == "header_multiline"
     assert params["header_quality"] == "degraded"
@@ -244,3 +246,9 @@ def test_backfill_batch_persists_layout_and_header_metadata(mock_extractor_cls, 
     # genuine phase4-v1 ingestions from backfilled metadata.
     assert params["parser_version"] == "legacy:unknown"
     assert params["normalization_version"] == "legacy:unknown"
+
+
+def test_catalog_backfill_query_uses_keyset_not_offset():
+    sql = str(_QUERY_SQL)
+    assert "OFFSET" not in sql
+    assert "d.id > CAST(:cursor_id AS uuid)" in sql

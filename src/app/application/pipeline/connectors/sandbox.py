@@ -458,6 +458,12 @@ async def _serving_port_planner_hints(
         for r in by_layer[ServingLayer.STAGING]:
             lines.append(f"  - {r.title}")
 
+    if ServingLayer.RAW in by_layer:
+        lines.append("")
+        lines.append("RAW DISPONIBLE (tablas materializadas crudas, usar si no hay mart):")
+        for r in by_layer[ServingLayer.RAW]:
+            lines.append(f"  - {r.title}" + (f" — {r.domain}" if r.domain else ""))
+
     return "\n".join(lines)
 
 

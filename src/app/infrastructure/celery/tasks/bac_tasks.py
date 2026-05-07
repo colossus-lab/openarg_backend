@@ -127,9 +127,6 @@ def ingest_bac(self):
                     {"tn": table_name},
                 ).fetchone()
             if cached:
-                if cached.status == "ready":
-                    results["skipped"] += 1
-                    continue
                 if cached.status == "permanently_failed":
                     logger.info("BAC %s permanently failed, skipping", file_type)
                     results["skipped"] += 1
@@ -179,6 +176,7 @@ def ingest_bac(self):
 
                 # Stream download to temp file to avoid OOM
                 with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
+                    hit_download_cap = False
                     with httpx.Client(timeout=300.0) as client:
                         with client.stream("GET", url, follow_redirects=True) as resp:
                             resp.raise_for_status()
@@ -188,11 +186,17 @@ def ingest_bac(self):
                                 downloaded += len(data)
                                 if downloaded > MAX_DOWNLOAD_BYTES:
                                     logger.warning(
-                                        "BAC %s too large, stopping at %d bytes",
+                                        "BAC %s too large, aborting at %d bytes",
                                         file_type,
                                         downloaded,
                                     )
+                                    hit_download_cap = True
                                     break
+
+                    if hit_download_cap:
+                        raise ValueError(
+                            f"file_too_large:bac:{file_type}:{downloaded}>{MAX_DOWNLOAD_BYTES}"
+                        )
 
                     tmp.flush()
                     tmp.seek(0)
@@ -313,5 +317,3 @@ def ingest_bac(self):
     except Exception as exc:
         logger.exception("BAC ingestion failed")
         raise self.retry(exc=exc, countdown=120)
-    finally:
-        engine.dispose()

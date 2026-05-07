@@ -18,7 +18,6 @@ import shutil
 import tempfile
 import time
 from collections import Counter
-from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -44,6 +43,7 @@ from app.application.validation.collector_hooks import (
 )
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.setup.config.constants import MAX_TABLE_ROWS
 
 
 def _read_byte_sample(path: str, n: int = 4096) -> bytes:
@@ -206,11 +206,6 @@ MAX_TOTAL_ATTEMPTS = 5
 
 # Maximum rows to store per dataset table.  Datasets exceeding this limit
 # are truncated to the first MAX_TABLE_ROWS rows.
-# Source of truth lives in `app.setup.config.constants`. The local alias
-# is kept for backward compatibility with all the existing callsites in
-# this module — re-importing the constant means a future env override
-# (`OPENARG_MAX_TABLE_ROWS`) propagates here without a code change.
-from app.setup.config.constants import MAX_TABLE_ROWS  # noqa: E402
 _ZIP_CSV_PREVIEW_ROWS = int(os.getenv("OPENARG_ZIP_CSV_PREVIEW_ROWS", "250"))
 _MAX_SQL_COLUMNS = 1400
 _TEMP_SPACE_RESERVE_BYTES = 256 * 1024 * 1024  # keep 256MB free for worker stability
@@ -326,7 +321,7 @@ def _lock_key(*parts: str) -> int:
 # This dict keeps the acquiring connection alive until release. Worker
 # crashes drop the connection; Postgres then releases the lock on its
 # side, which is the correct semantic.
-_HELD_ADVISORY_LOCKS: dict[int, "object"] = {}
+_HELD_ADVISORY_LOCKS: dict[int, object] = {}
 
 
 def _try_advisory_lock(engine, key: int) -> bool:
@@ -563,15 +558,6 @@ def _count_bulk_collect_remaining(engine, portal: str | None = None) -> dict[str
         "    AND cd.status IN ('ready', 'permanently_failed')"
         ")"
     )
-    eligible_filter_d2 = (
-        "d2.is_cached = false "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM cached_datasets cd "
-        "  WHERE cd.dataset_id = d2.id "
-        "    AND cd.status IN ('ready', 'permanently_failed')"
-        ")"
-    )
-
     # Sprint 24: aligned with the dispatcher SELECT — `eligible_individual`
     # now counts rows that PASS the per-(portal,title) cap (rn <= 10), and
     # `eligible_groups` counts the title-groups beyond the cap (the rows
@@ -3185,9 +3171,10 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
 def _get_table_row_count(engine, table_name: str) -> int:
     """Get current row count for a cache table. Returns 0 if table doesn't exist."""
     try:
+        schema_name, bare_name = _resolve_physical_table_ref(table_name)
         with engine.connect() as conn:
             count = conn.execute(
-                text(f'SELECT COUNT(*) FROM "{table_name}"')  # noqa: S608
+                text(f'SELECT COUNT(*) FROM "{schema_name}"."{bare_name}"')  # noqa: S608
             ).scalar()
             conn.rollback()
             return count or 0
@@ -3197,13 +3184,14 @@ def _get_table_row_count(engine, table_name: str) -> int:
 
 def _table_exists(engine, table_name: str) -> bool:
     try:
+        schema_name, bare_name = _resolve_physical_table_ref(table_name)
         with engine.connect() as conn:
             exists = conn.execute(
                 text(
                     "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                    "WHERE table_name = :tn AND table_schema = 'public')"
+                    "WHERE table_name = :tn AND table_schema = :sch)"
                 ),
-                {"tn": table_name},
+                {"tn": bare_name, "sch": schema_name},
             ).scalar()
             conn.rollback()
         return bool(exists)
@@ -3219,16 +3207,17 @@ def _ensure_postgis_geom(engine, table_name: str, columns: list[str]) -> None:
     if "_geometry_geojson" not in columns:
         return
     try:
-        tbl = f'"{table_name}"'
-        idx_name = f"idx_{table_name}_geom"[:63]
+        schema_name, bare_name = _resolve_physical_table_ref(table_name)
+        tbl = f'"{schema_name}"."{bare_name}"'
+        idx_name = f"idx_{bare_name}_geom"[:63]
         with engine.begin() as conn:
             exists = conn.execute(
                 text(
                     "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_schema = 'public' "
+                    "WHERE table_schema = :sch "
                     "AND table_name = :tn AND column_name = 'geom'"
                 ),
-                {"tn": table_name},
+                {"tn": bare_name, "sch": schema_name},
             ).fetchone()
             if exists:
                 return
@@ -4187,6 +4176,22 @@ def _collect_write_chunk(
     _to_sql_safe(df, table_name, engine, schema=write_schema, **kwargs)
 
 
+def _resolve_physical_table_ref(table_name: str) -> tuple[str, str]:
+    """Resolve `<schema>.<bare>` vs bare names for helper SQL paths.
+
+    Most collector internals still pass the bare physical name around and rely
+    on `_current_write_schema` to decide whether the landing is going to
+    `public` or `raw`. Helper functions that hit `information_schema` or build
+    `SELECT/ALTER TABLE` SQL need the resolved schema explicitly; otherwise raw
+    landings are incorrectly inspected under `public`.
+    """
+    value = (table_name or "").strip().strip('"')
+    if "." in value:
+        schema_name, bare_name = value.split(".", 1)
+        return schema_name.strip('"') or "public", bare_name.strip('"')
+    return (_current_write_schema.get() or "public"), value
+
+
 def _resolve_collect_destination(
     engine,
     dataset_id: str,
@@ -5024,15 +5029,16 @@ def _check_schema_compat_columns(engine, table_name: str, columns) -> bool:
     own schema-variant table up front instead of colliding during append.
     """
     try:
+        schema_name, bare_name = _resolve_physical_table_ref(table_name)
         with engine.connect() as conn:
             existing_cols = set(
                 r.column_name
                 for r in conn.execute(
                     text(
                         "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_name = :tn AND table_schema = 'public'"
+                        "WHERE table_name = :tn AND table_schema = :sch"
                     ),
-                    {"tn": table_name},
+                    {"tn": bare_name, "sch": schema_name},
                 ).fetchall()
             )
             conn.rollback()
@@ -5078,10 +5084,12 @@ def _route_table_for_schema(
         return target_table, False, None
 
     try:
+        schema_name, bare_name = _resolve_physical_table_ref(target_table)
         with engine.connect() as conn:
             already_appended = conn.execute(
                 text(
-                    f'SELECT EXISTS(SELECT 1 FROM "{target_table}" WHERE _source_dataset_id = :did LIMIT 1)'
+                    f'SELECT EXISTS(SELECT 1 FROM "{schema_name}"."{bare_name}" '
+                    f'WHERE _source_dataset_id = :did LIMIT 1)'
                 ),  # noqa: S608
                 {"did": dataset_id},
             ).scalar()
@@ -5176,22 +5184,61 @@ def _update_row_count_after_append(engine, table_name: str):
         logger.warning("Could not update row_count after append for %s", table_name, exc_info=True)
 
 
-_DOWNLOAD_SIZE_CAPS_BYTES = {
-    "zip": int(os.getenv("OPENARG_MAX_DOWNLOAD_ZIP_BYTES", "200000000")),
-    "xlsx": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLSX_BYTES", "100000000")),
-    "xls": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLS_BYTES", "80000000")),
-    "csv": int(os.getenv("OPENARG_MAX_DOWNLOAD_CSV_BYTES", "500000000")),
-    "json": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),
-    "geojson": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),
+# Two-tier size caps:
+#   NORMAL_CAPS = above this, the standard collector (400MB memory)
+#                 will SIGKILL during parse → reroute to heavy.
+#   HEAVY_CAPS  = above this, even the heavy collector (1.5GB memory)
+#                 will SIGKILL → mark policy_too_large without spawning.
+# pandas RAM blow-up factors observed in prod:
+#   zip:     ~3-4× decompressed payload (CSVs concat into wide frames)
+#   xlsx:    ~5-6× (Excel workbook → DataFrame conversion is memory-hungry)
+#   xls:     ~4-5×
+#   csv:     ~2× (chunked load keeps it bounded; only initial read peaks)
+#   json:    ~5-7× (json.load + DataFrame round-trip)
+# Heavy caps are set so that worst-case RAM stays under 1.2 GB
+# (leaving headroom for OS + other in-flight tasks in the same worker).
+_DOWNLOAD_SIZE_CAPS_NORMAL_BYTES = {
+    "zip": int(os.getenv("OPENARG_MAX_DOWNLOAD_ZIP_BYTES", "200000000")),         # 200 MB
+    "xlsx": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLSX_BYTES", "100000000")),       # 100 MB
+    "xls": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLS_BYTES", "80000000")),          # 80 MB
+    "csv": int(os.getenv("OPENARG_MAX_DOWNLOAD_CSV_BYTES", "500000000")),         # 500 MB
+    "json": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),       # 100 MB
+    "geojson": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),    # 100 MB
 }
-_DOWNLOAD_SIZE_CAP_DEFAULT = int(
+_DOWNLOAD_SIZE_CAPS_HEAVY_BYTES = {
+    "zip": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_ZIP_BYTES", "2000000000")),     # 2 GB
+    "xlsx": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_XLSX_BYTES", "500000000")),    # 500 MB
+    "xls": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_XLS_BYTES", "400000000")),      # 400 MB
+    "csv": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_CSV_BYTES", "3000000000")),     # 3 GB
+    "json": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_JSON_BYTES", "500000000")),    # 500 MB
+    "geojson": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_JSON_BYTES", "500000000")), # 500 MB
+}
+_DOWNLOAD_SIZE_CAP_NORMAL_DEFAULT = int(
     os.getenv("OPENARG_MAX_DOWNLOAD_DEFAULT_BYTES", "200000000")
 )
+_DOWNLOAD_SIZE_CAP_HEAVY_DEFAULT = int(
+    os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_DEFAULT_BYTES", "1000000000")
+)
 # Threshold to route to heavy worker (with bigger memory). Below this
-# the default collector is fine. Between this and the cap → heavy queue.
-# Above the cap → policy_too_large without ever spawning a worker.
+# the default collector is fine. Above this → heavy queue.
 _DOWNLOAD_HEAVY_ROUTE_BYTES = int(
     os.getenv("OPENARG_HEAVY_ROUTE_BYTES", "50000000")
+)
+
+# Portals that consistently OOM the normal worker (large shapefiles, GIS
+# bundles, etc.) bypass HEAD probe and route unconditionally to heavy.
+# Configurable via OPENARG_HEAVY_PORTALS=p1,p2,... — default covers the
+# portals that have produced burned-portal lockouts in production.
+_HEAVY_PORTALS: frozenset[str] = frozenset(
+    p.strip()
+    for p in os.getenv("OPENARG_HEAVY_PORTALS", "cordoba_estadistica").split(",")
+    if p.strip()
+)
+
+_ENABLE_HEAD_SIZE_PROBE = os.getenv("OPENARG_ENABLE_HEAD_SIZE_PROBE", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
 )
 
 
@@ -5220,10 +5267,15 @@ def _probe_download_size(url: str, *, timeout: float = 10.0) -> int | None:
         return None
 
 
-def _size_cap_for_format(declared_format: str | None) -> int:
-    return _DOWNLOAD_SIZE_CAPS_BYTES.get(
-        (declared_format or "").lower(), _DOWNLOAD_SIZE_CAP_DEFAULT
-    )
+def _size_cap_for_format(declared_format: str | None, *, tier: str = "normal") -> int:
+    """Per-format memory cap for downloads. `tier='heavy'` returns the
+    larger cap appropriate for `worker-collector-heavy` (1.5 GB memory);
+    `tier='normal'` returns the cap for the standard collector (400 MB).
+    """
+    fmt = (declared_format or "").lower()
+    if tier == "heavy":
+        return _DOWNLOAD_SIZE_CAPS_HEAVY_BYTES.get(fmt, _DOWNLOAD_SIZE_CAP_HEAVY_DEFAULT)
+    return _DOWNLOAD_SIZE_CAPS_NORMAL_BYTES.get(fmt, _DOWNLOAD_SIZE_CAP_NORMAL_DEFAULT)
 
 
 @celery_app.task(
@@ -5351,6 +5403,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             state="STARTED", meta={"dataset_id": dataset_id, "stage": "collecting"}
         )
 
+        if not _is_heavy_execution() and portal in _HEAVY_PORTALS:
+            return _reroute_to_heavy(f"force_heavy_portal:{portal}")
+
         if not _is_heavy_execution() and _should_route_to_heavy_from_metadata(
             portal=portal,
             fmt=fmt,
@@ -5383,17 +5438,26 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
         # are 200-400 MB ZIP/XLSX archives whose pandas parse explodes
         # to 1+ GB in RAM and SIGKILLs the worker. Without this check
         # the worker dies and the same task re-spawns infinitely on
-        # other workers, draining the pool. With it: oversize files
-        # become `policy_too_large` instantly without spawning anyone.
-        # Files between 50 MB and the cap are routed to the heavy queue
-        # (1.5 GB memory limit) instead of the standard collector.
-        probed_size = _probe_download_size(download_url)
+        # other workers, draining the pool.
+        # Two-tier cap (Sprint 36):
+        #   1) size > heavy_cap → policy_too_large (even heavy worker
+        #      with 1.5 GB memory cannot parse this file safely).
+        #   2) size > normal_cap AND we're on the normal queue →
+        #      reroute to heavy worker (1.5 GB memory).
+        #   3) size > heavy_route_threshold (50 MB) AND we're on the
+        #      normal queue → reroute to heavy preemptively.
+        #   4) Otherwise → process here.
+        # Previously a SINGLE cap killed files that the heavy worker
+        # could have processed (e.g. 391 MB ZIP marked policy_too_large
+        # while heavy worker had 1.5 GB memory available).
+        probed_size = _probe_download_size(download_url) if _ENABLE_HEAD_SIZE_PROBE else None
         if probed_size is not None:
-            cap = _size_cap_for_format(fmt)
-            if probed_size > cap:
+            heavy_cap = _size_cap_for_format(fmt, tier="heavy")
+            normal_cap = _size_cap_for_format(fmt, tier="normal")
+            if probed_size > heavy_cap:
                 logger.warning(
-                    "Dataset %s file size %d bytes exceeds cap %d for format %s",
-                    dataset_id, probed_size, cap, fmt,
+                    "Dataset %s file size %d bytes exceeds HEAVY cap %d for format %s",
+                    dataset_id, probed_size, heavy_cap, fmt,
                 )
                 with engine.begin() as conn:
                     conn.execute(
@@ -5410,7 +5474,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         ),
                         {
                             "did": dataset_id,
-                            "msg": f"file_too_large:{probed_size} bytes (cap {cap}, format {fmt})",
+                            "msg": f"file_too_large:{probed_size} bytes (heavy cap {heavy_cap}, format {fmt})",
                             "size": probed_size,
                         },
                     )
@@ -5419,13 +5483,14 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     "error": "policy_too_large",
                     "size": probed_size,
                 }
-            if (
-                probed_size > _DOWNLOAD_HEAVY_ROUTE_BYTES
-                and not _is_heavy_execution()
+            if not _is_heavy_execution() and (
+                probed_size > normal_cap
+                or probed_size > _DOWNLOAD_HEAVY_ROUTE_BYTES
             ):
-                # Reroute to heavy worker for files between 50 MB and the
-                # per-format cap. Heavy worker has 1.5 GB memory, suitable
-                # for the parse step.
+                # On normal queue and the file exceeds the normal cap
+                # (would SIGKILL during parse) OR the route threshold
+                # (50 MB — small enough to fit normal but heavy worker
+                # has more headroom). Reroute to heavy.
                 return _reroute_to_heavy(
                     f"size_route:{probed_size}_bytes"
                 )
@@ -5678,10 +5743,13 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     return {"error": "bad_zip_file"}
 
                 expansion = MultiFileExpander().expand(tmp_path)
-                if expansion.skipped_oversized:
+                expanded_member_names = [entry.name for entry in expansion.expanded]
+                expanded_total_size = sum(entry.size_bytes for entry in expansion.expanded)
+
+                if expansion.skipped_oversized and not expanded_member_names:
                     largest = expansion.skipped_oversized[0]
                     logger.warning(
-                        "ZIP %s: oversized entry rejected by multi-file expander: %s",
+                        "ZIP %s: all entries oversized, rejecting (largest=%s)",
                         dataset_id,
                         largest,
                     )
@@ -5693,8 +5761,15 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     )
                     return {"error": f"zip_entry_too_large: {largest}"}
 
-                expanded_member_names = [entry.name for entry in expansion.expanded]
-                expanded_total_size = sum(entry.size_bytes for entry in expansion.expanded)
+                if expansion.skipped_oversized:
+                    logger.warning(
+                        "ZIP %s: skipping %d oversized entries (%s), proceeding with %d valid entries",
+                        dataset_id,
+                        len(expansion.skipped_oversized),
+                        expansion.skipped_oversized[:3],
+                        len(expanded_member_names),
+                    )
+
                 if not expanded_member_names and expansion.document_bundle:
                     logger.warning(
                         "ZIP %s classified as document bundle by multi-file expander",
@@ -6440,7 +6515,6 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
     finally:
         if lock_acquired:
             _release_advisory_lock(engine, lock_key)
-        engine.dispose()
 
 
 @celery_app.task(
@@ -6531,6 +6605,19 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         # MUESTRA de cada serie histórica en lugar de excluirla. 10 es
         # suficiente para queries del usuario sobre la serie y evita
         # inflar la DB con 100s de versiones casi idénticas.
+        # Sprint 38 (2026-05-07): bypass list for burned_portals. Portals in
+        # OPENARG_BYPASS_BURNED_PORTALS skip the >50% failure exclusion,
+        # useful when the runtime that caused the original burn (OOM,
+        # short timeout, ...) has been fixed and we want the dispatcher
+        # to drain the previously-blocked backlog. Without this knob,
+        # the only way to unburn a portal was to wait 24h for the window
+        # to slide.
+        bypass_burned_portals: tuple[str, ...] = tuple(
+            p.strip()
+            for p in os.getenv("OPENARG_BYPASS_BURNED_PORTALS", "").split(",")
+            if p.strip()
+        )
+
         query = (
             "WITH burned_portals AS ( "
             "  SELECT d2.portal "
@@ -6540,6 +6627,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             "  GROUP BY d2.portal "
             "  HAVING COUNT(*) >= 20 "
             "    AND COUNT(*) FILTER (WHERE cd2.status='permanently_failed') * 2 >= COUNT(*) "
+            "    {bypass_clause} "
             "), "
             "eligible AS ( "
             "  SELECT CAST(d.id AS text) AS id, d.portal, d.format, d.title, "
@@ -6572,6 +6660,12 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         if portal:
             portal_clause = "    AND d.portal = :portal "
             params["portal"] = portal
+
+        bypass_clause = ""
+        if bypass_burned_portals:
+            bypass_clause = "    AND d2.portal <> ALL(:bypass_portals) "
+            params["bypass_portals"] = list(bypass_burned_portals)
+        query = query.replace("{bypass_clause}", bypass_clause)
         query = query.replace("{portal_clause}", portal_clause)
 
         with engine.connect() as conn:
@@ -7360,8 +7454,12 @@ def reset_failed_collectors():
     """Weekly reset: give permanently_failed datasets another chance.
 
     Resets retry_count and status so the next bulk_collect cycle
-    picks them up again.  If the underlying problem persists they
-    will fail 5 more times and go back to permanently_failed.
+    picks them up again. Also flips `datasets.is_cached=false` for
+    those rows — without that, `bulk_collect_all` filters out
+    datasets with `is_cached=true` and the reset is a no-op for any
+    dataset that was previously ready and later degraded.
+    If the underlying problem persists they will fail 5 more times
+    and go back to permanently_failed.
     """
     engine = get_sync_engine()
     try:
@@ -7373,17 +7471,31 @@ def reset_failed_collectors():
                         retry_count = 0,
                         updated_at  = NOW()
                     WHERE status = 'permanently_failed'
+                    RETURNING dataset_id
                 """),
             )
-            count = result.rowcount
+            reset_ids = [str(r.dataset_id) for r in result]
+            count = len(reset_ids)
+
+            uncached = 0
+            if reset_ids:
+                uncached_result = conn.execute(
+                    text(
+                        "UPDATE datasets SET is_cached = false "
+                        "WHERE id = ANY(CAST(:ids AS uuid[])) AND is_cached = true"
+                    ),
+                    {"ids": reset_ids},
+                )
+                uncached = uncached_result.rowcount or 0
         if count:
             logger.info(
-                "Reset %d permanently_failed datasets for retry",
+                "Reset %d permanently_failed datasets for retry (also unflagged %d is_cached)",
                 count,
+                uncached,
             )
         else:
             logger.debug("No permanently_failed datasets to reset")
-        return {"reset": count}
+        return {"reset": count, "uncached": uncached}
     finally:
         engine.dispose()
 

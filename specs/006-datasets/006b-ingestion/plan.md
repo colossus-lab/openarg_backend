@@ -2,7 +2,7 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Parent plan**: [../plan.md](../plan.md)
-**Last synced with code**: 2026-05-03
+**Last synced with code**: 2026-05-07
 
 ---
 
@@ -234,6 +234,33 @@ Detects when a re-collect produces a schema that no longer matches the existing 
   - transient heavy download failures still reroute into `collector-heavy-retry`
   - materialization-specific exceptions (schema mismatch / aborted DDL / type-race style failures) stay retryable without pretending to be generic upstream noise
 
+### 5.14a Force-heavy portal allow-list (Sprint 38, 2026-05-07)
+
+- `_HEAVY_PORTALS = frozenset(os.getenv("OPENARG_HEAVY_PORTALS", "cordoba_estadistica").split(","))` lives at module top of `collector_tasks.py` (~line 5232).
+- `collect_dataset` short-circuits at the top with `if not _is_heavy_execution() and portal in _HEAVY_PORTALS: return _reroute_to_heavy(f"force_heavy_portal:{portal}")` (~line 5406). No HEAD probe, no preview, no metadata heuristic — every dataset of those portals goes to the heavy lane.
+- Used to keep `cordoba_estadistica` (≈8.8k GIS datasets, mostly shapefiles) off the normal lane regardless of single-resource size, after a normal-lane wave produced a sustained burned-portal lockout.
+
+### 5.14b Burned-portal bypass list (Sprint 38, 2026-05-07)
+
+- `bulk_collect_all` now accepts a `OPENARG_BYPASS_BURNED_PORTALS` comma-separated env var.
+- Implementation injects an extra `AND d2.portal <> ALL(:bypass_portals)` clause inside the `burned_portals` CTE (`collector_tasks.py` ~line 6615).
+- Without the bypass, the only way to drain a portal that was burned by a since-fixed runtime issue was to wait 24h for the rolling failure window to slide.
+- Operationally: set the env var, no DB / migration / beat changes. Drop it back to empty after the backlog is drained.
+
+### 5.14c ZIP skip-and-continue policy (Sprint 38, 2026-05-07)
+
+- `MultiFileExpander` returns both `expanded` (kept) and `skipped_oversized` lists.
+- Decision tree in `collect_dataset` (`collector_tasks.py` ~line 5749):
+  - `skipped_oversized AND not expanded_member_names` → `_set_error_status(... "zip_entry_too_large: <largest>")` and abort.
+  - `skipped_oversized AND expanded_member_names` → log warning with first 3 oversized names + count, proceed with the parseable members.
+- Replaces the previous all-or-nothing rule that aborted whole GTFS / Bicicletas Públicas bundles for one >500 MB sibling member.
+
+### 5.14d `reset_failed_collectors` is_cached fix (Sprint 38, 2026-05-07)
+
+- Returning `RETURNING dataset_id` from the perm_failed → error UPDATE, then a follow-up `UPDATE datasets SET is_cached=false WHERE id = ANY(CAST(:ids AS uuid[])) AND is_cached=true`.
+- Without that flip, `bulk_collect_all`'s `WHERE d.is_cached=false` clause silently filtered all reset rows back out and the task was a no-op for any dataset that had ever been `ready`.
+- Task return shape now `{reset, uncached}`.
+
 ### 5.14 Clean schema-rewrite reset path
 
 - `_to_sql_safe()` still retries schema mismatches by dropping and rebuilding the table, but the reset now happens on a fresh transaction boundary.
@@ -284,6 +311,21 @@ See `000-architecture/plan.md` section 6 for the complete list. Key tables owned
 - `infrastructure/celery/tasks/collector_tasks.py`
 - `infrastructure/celery/tasks/embedding_tasks.py`
 - `infrastructure/celery/tasks/s3_tasks.py`
+
+## 10a. Deployment tuning (Sprint 38, 2026-05-07)
+
+The collector worker docker-compose defaults were changed after a sustained OOM/ retry-loop incident in staging. Effective on staging, **pending in prod**:
+
+| Param | Old | New | Reason |
+|---|---|---|---|
+| `--concurrency` | `16` | `8` | 16 prefork × pandas heavy = >RAM cap on a 4 GB container |
+| `--soft-time-limit` | `600` | `1200` | 10 min soft-limit aborted legitimate large downloads / parses |
+| `--time-limit` | `720` | `1380` | Hard limit must trail soft limit by enough to flush state |
+| `--max-memory-per-child` | `400000` (≈400 MB) | *(removed)* | The cap interacted with prefork count to force premature SIGKILLs |
+
+Symptom of the bad config: 1,776 datasets in `cached_datasets` with `error_message='Exhausted retries while stuck in downloading'`, mis-tagged as `orchestration_recovery_loop` / `validation_failed` / `materialize_disk_full`. After the change + a `reset_failed_collectors` selective rerun, the population is recoverable end-to-end through the natural drain.
+
+Operator note: this lives in `/opt/docker/openarg/docker-compose.yaml` on the staging server, not under git in `openarg_backend/`. Until the compose file is committed somewhere first-class, treat the tuning as runbook-level. See feedback memory `feedback_deploy_default_staging.md` for the staging vs prod boundary.
 
 ## 11. Deviations from Constitution
 

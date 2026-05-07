@@ -1,11 +1,15 @@
 # Spec 014 — `cached_datasets` State Machine (WS0.5)
 
 **Type**: Forward-engineered (collector_plan.md WS0.5)
-**Status**: Deployed 2026-05-03, hardened 2026-05-06 (zombie cleanup + race condition guards).
+**Status**: Deployed 2026-05-03, hardened 2026-05-06 (zombie cleanup + race condition guards), extended 2026-05-07 (zero-retry zombie M2 rule).
 **Hexagonal scope**: Application (state machine + enforcer) + Infrastructure (sweep + DB trigger)
 **Related plan**: [./plan.md](./plan.md)
 **Implements**: WS0.5 of [collector_plan.md](../../../collector_plan.md)
 **Sister spec**: [013-ingestion-validation](../../013-ingestion-validation/spec.md) (shares `ingestion_findings` audit trail under `mode='state_invariant'`)
+
+**Recent updates (2026-05-07, Sprint 38)**:
+- **`cleanup_invariants.fixed_zero_retry_zombies` rule (M2)**: marks `permanently_failed` los rows con `status='error' AND retry_count = 0 AND error_message IS NOT NULL AND updated_at < NOW() - 24 hours`. Cubre los rows que nunca pasaron por `_apply_cached_outcome` (que siempre incrementa `retry_count`) — típicamente resultado de `UPDATE` ad-hoc del operador que re-etiquetan `error_message` sin tocar `retry_count`. M1 (`retry_count >= 5`) los ignoraba, así que se acumulaban. La ventana de 24h da lugar a que las paths de recycle naturales (`recover_stuck_tasks`, `reset_failed_collectors`) tengan primero su chance. Vive en `ops_fixes.py:938-951`. Suma a la respuesta de `cleanup_invariants` bajo la clave `fixed_zero_retry_zombies`.
+- **`error_category` mis-classification observed in scale**: el mismo `error_message='Exhausted retries while stuck in downloading'` aparece bajo `orchestration_recovery_loop`, `validation_failed`, y `materialize_disk_full` según qué transición lo escribió. 1,794 rows recuperados durante Sprint 38 vinieron de las tres etiquetas. Ver DEBT-014-004.
 
 **Recent updates (2026-05-06)**:
 - **`cleanup_invariants.fixed_zombie_errors` rule (M1)**: marca `permanently_failed` los rows con `status='error'` AND `retry_count >= 5` AND `updated_at < NOW() - 6 hours`. Antes el clamp solo bajaba `retry_count > 5` a 5 pero no movía a perm_failed → algunos quedaban en zombie state. Sweep horario ahora cierra ese loop.
@@ -48,6 +52,7 @@ plus terminal `permanently_failed` and exception lanes `error`, `schema_mismatch
 - **I2** — `status='ready' ⇒ table referenced exists`. Sweep registers violations as `invariant_ready_missing_table` (auto_fixable=False; root cause uninvestigated, so we don't auto-flip).
 - **I3** — `status='pending' AND updated_at < now() - 7 days ⇒ permanently_failed` (timeout).
 - **I4** — `status='schema_mismatch' AND retry_count >= MAX_TOTAL_ATTEMPTS ⇒ permanently_failed`.
+- **I5** *(2026-05-07)* — `status='error' AND retry_count = 0 AND error_message IS NOT NULL AND updated_at < now() - 24 hours ⇒ permanently_failed`. Catches "zero-retry zombies" that never went through `_apply_cached_outcome` (typically operator UPDATEs that overwrote `error_message` without bumping `retry_count`). Implemented as M2 rule inside `cleanup_invariants` (`ops_fixes.py:938-951`), not as a DB trigger.
 
 ## 3. `error_category` Taxonomy (closed)
 
@@ -68,6 +73,7 @@ Backfill in migration 0034 reclassifies the ~1034 existing messages using a firs
 - **FR-007**: Every violation MUST also be persisted as a finding under `mode='state_invariant'` so dashboards line up with WS0.
 - **FR-008**: Migration 0034 historical healing MUST run in bounded batches rather than one unbounded `UPDATE`, to keep deploy-time lock duration bounded if the violation population grows beyond the current ~250 rows.
 - **FR-009**: Every transition to a terminal status (`permanently_failed`, `error`, `schema_mismatch`) MUST classify `error_message` via `_classify_error_category` and set `error_category` in the same statement that sets `status`. No code path may write `status` to a terminal value without simultaneously writing the corresponding `error_category`. Buckets are the closed taxonomy in §3; if no rule matches, the result is the explicit `unknown` bucket (not the column being left at its previous value).
+- **FR-010** *(2026-05-07, Sprint 38)*: `cleanup_invariants` MUST scan for `status='error' AND retry_count=0 AND error_message IS NOT NULL AND updated_at < NOW() - 24 hours` and flip those rows to `permanently_failed`. The 24h grace window is intentional: it lets `recover_stuck_tasks` and `reset_failed_collectors` get first crack so recoverable rows are not pre-empted. The count MUST be returned under `fixed_zero_retry_zombies` in the task's response dict.
 
 ## 5. Success Criteria
 
@@ -86,3 +92,4 @@ Backfill in migration 0034 reclassifies the ~1034 existing messages using a firs
 - **DEBT-014-001**: `MAX_TOTAL_ATTEMPTS=5` is duplicated in `collector_tasks.py`, `cached_dataset_enforcer.py` and migration 0034 trigger. A change requires touching all three.
 - **DEBT-014-002**: The trigger encodes `retry_count >= 5` as a magic number — no `pg_settings` lookup.
 - **DEBT-014-003**: `_record_cache_drop` is wrapped in a broad `except Exception` and only `logger.warning`s on failure, so a silent insert failure is indistinguishable from a no-op-because-no-drops case. Add a counter / health check so absence of rows is observable.
+- **DEBT-014-004** *(2026-05-07)*: The closed `error_category` taxonomy in §3 is not enforced by `_apply_cached_outcome`'s actual writers. The same upstream error (`'Exhausted retries while stuck in downloading'`) ended up split across `orchestration_recovery_loop`, `validation_failed`, and `materialize_disk_full` in production. Burned-portal aggregates and operator dashboards lose signal. Fix: a single canonical `_classify_error_category(error_message)` helper called by every transition that sets `status` to a terminal value (FR-009).

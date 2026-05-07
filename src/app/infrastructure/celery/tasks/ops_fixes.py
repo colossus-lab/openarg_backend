@@ -26,6 +26,64 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 
 
+def _mart_dependency_guards(engine) -> tuple[set[str], list[str], set[str]]:
+    """Return mart-protected identities/patterns/raw tables.
+
+    `mart_definitions.sql_definition` stores rendered SQL, not the original
+    YAML with macros. That means we need two protection modes:
+      - macro-level guards for older rows that still store macro text
+      - raw physical table guards extracted from the resolved SQL
+      - raw physical table guards extracted from the ACTUAL materialized
+        views currently installed in Postgres (`pg_matviews.definition`)
+
+    The last source matters because `mart_definitions` can describe the
+    *target* SQL after a YAML edit while the live matview still points at an
+    older raw version if refresh/build hasn't happened yet or failed.
+    """
+    import re
+
+    mart_definitions_select = text(
+        "SELECT mart_id, sql_definition FROM mart_definitions "
+        "WHERE sql_definition IS NOT NULL"
+    )
+    live_matviews_select = text(
+        "SELECT definition FROM pg_matviews WHERE schemaname = 'mart'"
+    )
+    protected_identities: set[str] = set()
+    protected_raw_tables: set[str] = set()
+
+    def _collect_from_sql(sql_definition: str) -> None:
+        if not sql_definition:
+            return
+        for match in re.finditer(
+            r"""live_table\(\s*['"]([^'"]+)['"]""",
+            sql_definition,
+        ):
+            protected_identities.add(match.group(1))
+        for match in re.finditer(
+            r"""live_tables_by_pattern\(\s*['"]([^'"]+)['"]""",
+            sql_definition,
+        ):
+            protected_identities.add(f"__pattern__:{match.group(1)}")
+        for match in re.finditer(
+            r"""raw\."([^"]+)"|raw\.([a-z_][a-z0-9_]*)""",
+            sql_definition,
+            re.IGNORECASE,
+        ):
+            protected_raw_tables.add(match.group(1) or match.group(2))
+
+    with engine.connect() as conn:
+        for row in conn.execute(mart_definitions_select):
+            _collect_from_sql(row.sql_definition or "")
+        for row in conn.execute(live_matviews_select):
+            _collect_from_sql(getattr(row, "definition", "") or "")
+    pattern_prefixes = [
+        p[len("__pattern__:") :] for p in protected_identities if p.startswith("__pattern__:")
+    ]
+    exact_protected = {p for p in protected_identities if not p.startswith("__pattern__:")}
+    return exact_protected, pattern_prefixes, protected_raw_tables
+
+
 # ---------- temp dir cleanup ----------
 
 
@@ -280,7 +338,7 @@ def backfill_error_categories(self, *, batch_size: int = 200) -> dict:
         WHERE error_category = 'unknown'
           AND status IN ('error', 'permanently_failed')
         ORDER BY updated_at DESC NULLS LAST
-        LIMIT :limit OFFSET :offset
+        LIMIT :limit
         """
     )
     update_sql = text(
@@ -291,13 +349,12 @@ def backfill_error_categories(self, *, batch_size: int = 200) -> dict:
           AND error_category = 'unknown'
         """
     )
-    offset = 0
     seen = 0
     updated = 0
     by_category: dict[str, int] = {}
     while True:
         with engine.connect() as conn:
-            rows = conn.execute(select_sql, {"limit": batch_size, "offset": offset}).fetchall()
+            rows = conn.execute(select_sql, {"limit": batch_size}).fetchall()
         if not rows:
             break
         seen += len(rows)
@@ -309,7 +366,6 @@ def backfill_error_categories(self, *, batch_size: int = 200) -> dict:
                 conn.execute(update_sql, {"cat": cat, "id": r.id})
             updated += 1
             by_category[cat] = by_category.get(cat, 0) + 1
-        offset += batch_size
     summary = {"seen": seen, "updated": updated, "by_category": by_category}
     logger.info("backfill_error_categories: %s", summary)
     return summary
@@ -515,6 +571,7 @@ def retain_raw_versions(
         raise ValueError("keep_last must be >= 1")
 
     engine = get_sync_engine()
+    _exact_protected, _pattern_prefixes, protected_raw_tables = _mart_dependency_guards(engine)
     select_sql = text(
         """
         WITH ranked AS (
@@ -531,11 +588,19 @@ def retain_raw_versions(
         SELECT resource_identity, version, schema_name, table_name
         FROM ranked
         WHERE rn > :keep
+          AND (:no_tables OR table_name NOT IN :protected_tables)
         ORDER BY resource_identity, version
         """
     )
     with engine.connect() as conn:
-        rows = conn.execute(select_sql, {"keep": keep_last}).fetchall()
+        rows = conn.execute(
+            select_sql.bindparams(bindparam("protected_tables", expanding=True)),
+            {
+                "keep": keep_last,
+                "no_tables": len(protected_raw_tables) == 0,
+                "protected_tables": list(protected_raw_tables) or [""],
+            },
+        ).fetchall()
     candidates = [
         {
             "resource_identity": r.resource_identity,
@@ -651,40 +716,13 @@ def cleanup_raw_orphans(
     # macros expanded to physical names at refresh time. If we drop a raw
     # table whose `resource_identity` is referenced by any mart's SQL,
     # the mart's next refresh fails with `column ... does not exist`.
-    # The earlier version of this task (sprint RLM, 2026-05-06 morning)
-    # broke `escuelas_argentina` exactly this way — protected identities
-    # are now excluded from the dispatch SELECT.
-    import re
-
-    mart_protected_select = text(
-        "SELECT mart_id, sql_definition FROM mart_definitions "
-        "WHERE sql_definition IS NOT NULL"
-    )
-    protected_identities: set[str] = set()
-    with engine.connect() as conn:
-        for row in conn.execute(mart_protected_select):
-            for match in re.finditer(
-                r"""live_table\(\s*['"]([^'"]+)['"]""",
-                row.sql_definition or "",
-            ):
-                protected_identities.add(match.group(1))
-            for match in re.finditer(
-                r"""live_tables_by_pattern\(\s*['"]([^'"]+)['"]""",
-                row.sql_definition or "",
-            ):
-                # pattern-based references protect every identity that
-                # could match the glob; conservatively skip cleanup for
-                # rtv rows whose resource_identity matches the prefix.
-                protected_identities.add(f"__pattern__:{match.group(1)}")
-    pattern_prefixes = [
-        p[len("__pattern__:") :] for p in protected_identities if p.startswith("__pattern__:")
-    ]
-    exact_protected = {p for p in protected_identities if not p.startswith("__pattern__:")}
-    if exact_protected or pattern_prefixes:
+    exact_protected, pattern_prefixes, protected_raw_tables = _mart_dependency_guards(engine)
+    if exact_protected or pattern_prefixes or protected_raw_tables:
         logger.info(
-            "cleanup_raw_orphans: %d exact + %d pattern mart-protected identities",
+            "cleanup_raw_orphans: %d exact + %d pattern mart-protected identities, %d raw tables",
             len(exact_protected),
             len(pattern_prefixes),
+            len(protected_raw_tables),
         )
 
     select_sql = text(
@@ -701,6 +739,7 @@ def cleanup_raw_orphans(
               WHERE t.table_schema = 'raw' AND t.table_name = rtv.table_name
           )
           AND (:no_exact OR rtv.resource_identity NOT IN :exact)
+          AND (:no_tables OR rtv.table_name NOT IN :protected_tables)
         ORDER BY rtv.created_at ASC
         LIMIT :limit
         """
@@ -709,12 +748,15 @@ def cleanup_raw_orphans(
         rows = conn.execute(
             select_sql.bindparams(
                 bindparam("exact", expanding=True),
+                bindparam("protected_tables", expanding=True),
             ),
             {
                 "age_hours": str(min_age_hours),
                 "limit": max_drops + 1,
                 "no_exact": len(exact_protected) == 0,
                 "exact": list(exact_protected) or [""],
+                "no_tables": len(protected_raw_tables) == 0,
+                "protected_tables": list(protected_raw_tables) or [""],
             },
         ).fetchall()
     # Pattern-based filter applied in Python (small set, simple glob match)
@@ -884,6 +926,29 @@ def cleanup_invariants(self) -> dict[str, int]:
             )
         )
         fixed_zombies = result_zombies.rowcount or 0
+
+        # M2 (Sprint 38): rows stuck in `error` with retry_count=0 and a
+        # populated error_message older than 24h. These never came through
+        # the `_apply_cached_outcome` path (which always increments
+        # retry_count) — typically the result of ad-hoc operator UPDATEs
+        # that re-labelled error_message without touching retry_count.
+        # M1's `retry_count >= 5` filter leaves them invisible, so they
+        # accumulate. The 24h grace window lets the natural recycle paths
+        # (downloading sweep, reset_failed_collectors) get first crack.
+        result_zero_retry_zombies = conn.execute(
+            text(
+                """
+                UPDATE cached_datasets
+                SET status = 'permanently_failed',
+                    updated_at = NOW()
+                WHERE status = 'error'
+                  AND retry_count = 0
+                  AND error_message IS NOT NULL
+                  AND updated_at < NOW() - INTERVAL '24 hours'
+                """
+            )
+        )
+        fixed_zero_retry_zombies = result_zero_retry_zombies.rowcount or 0
 
         # Two-pass orphan registration. First pass tries to recover the
         # canonical `<portal>::<source_id>` identity by joining through
@@ -1123,6 +1188,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         "fixed_unknown_category": fixed_unknown,
         "clamped_retry_count": fixed_retry,
         "fixed_zombie_errors": fixed_zombies,
+        "fixed_zero_retry_zombies": fixed_zero_retry_zombies,
         "registered_orphan_tables": fixed_orphans,
         "canonical_orphans_registered": canonical_registered,
         "fixed_is_cached_drift": fixed_is_cached_drift,

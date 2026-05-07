@@ -215,19 +215,6 @@ def ingest_presupuesto(self):
             for year in YEARS:
                 table_name = _sanitize_table_name(endpoint, year)
 
-                # Skip if already cached
-                with engine.begin() as conn:
-                    cached = conn.execute(
-                        text(
-                            "SELECT id FROM cached_datasets "
-                            "WHERE table_name = :tn AND status = 'ready'"
-                        ),
-                        {"tn": table_name},
-                    ).fetchone()
-                if cached:
-                    results["skipped"] += 1
-                    continue
-
                 try:
                     body = {
                         "title": f"OpenArg — {endpoint} {year}",
@@ -425,19 +412,6 @@ def ingest_presupuesto_dimensiones(self):
             for year in DIMENSION_YEARS:
                 table_name = _dimension_table_name(dim_key, year)
 
-                # Skip if already cached
-                with engine.begin() as conn:
-                    cached = conn.execute(
-                        text(
-                            "SELECT id FROM cached_datasets "
-                            "WHERE table_name = :tn AND status = 'ready'"
-                        ),
-                        {"tn": table_name},
-                    ).fetchone()
-                if cached:
-                    results["skipped"] += 1
-                    continue
-
                 url = f"{DGSIAF_URL}/{year}/d-{dim_info['slug']}-{year}.zip"
                 try:
                     with httpx.Client(timeout=60.0) as client:
@@ -536,5 +510,3 @@ def ingest_presupuesto_dimensiones(self):
     except Exception as exc:
         logger.exception("Dimension ingestion failed")
         raise self.retry(exc=exc, countdown=120)
-    finally:
-        engine.dispose()

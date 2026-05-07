@@ -33,6 +33,7 @@ from app.domain.entities.serving import (
 )
 from app.domain.ports.serving.serving_port import (
     IServingPort,
+    QueryResourceMismatchError,
     QueryTimeoutError,
     ResourceNotFoundError,
     WriteAttemptedError,
@@ -42,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 _WRITE_KEYWORDS = re.compile(
     r"\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy)\b",
+    re.IGNORECASE,
+)
+_RELATION_REF_RE = re.compile(
+    r'\b(?:from|join)\s+(?:"?(\w+)"?\.)?"?(\w+)"?',
     re.IGNORECASE,
 )
 
@@ -74,6 +79,28 @@ def _layer_for_schema(schema_name: str) -> ServingLayer:
     }.get(schema_name, ServingLayer.CACHE_LEGACY)
 
 
+def _sql_references_relation(sql: str, *, schema_name: str, bare_name: str) -> bool:
+    """Return True when the SQL references the expected relation.
+
+    Legacy `public` resources may appear unqualified (`FROM cache_x`) or
+    qualified (`FROM public.cache_x`). Medallion layers must be schema-
+    qualified (`raw.foo`, `mart.bar`, `staging.baz`) to count as a match.
+    """
+    expected_schema = schema_name.lower()
+    expected_table = bare_name.lower()
+    for match in _RELATION_REF_RE.finditer(sql):
+        found_schema = (match.group(1) or "").strip('"').lower()
+        found_table = match.group(2).strip('"').lower()
+        if found_table != expected_table:
+            continue
+        if expected_schema == "public":
+            if found_schema in ("", "public"):
+                return True
+        elif found_schema == expected_schema:
+            return True
+    return False
+
+
 def _discover_marts_enabled() -> bool:
     """Default ON — marts are the preferred surface once they exist.
     Operators can disable with OPENARG_DISCOVER_MARTS=0 for debugging.
@@ -92,6 +119,42 @@ class LegacyServingAdapter(IServingPort):
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+
+    async def _expected_relation_for_resource(
+        self, resource_id: str
+    ) -> tuple[str, str]:
+        if resource_id.startswith("mart::"):
+            mart_id = resource_id[len("mart::") :]
+            async with self._engine.connect() as conn:
+                row = (
+                    await conn.execute(
+                        text(
+                            "SELECT mart_schema, mart_view_name "
+                            "FROM mart_definitions WHERE mart_id = :id"
+                        ),
+                        {"id": mart_id},
+                    )
+                ).fetchone()
+            if row is None:
+                raise ResourceNotFoundError(resource_id)
+            return str(row.mart_schema), str(row.mart_view_name)
+
+        if resource_id.startswith("raw::"):
+            return "raw", resource_id[len("raw::") :]
+
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT materialized_table_name "
+                        "FROM catalog_resources WHERE resource_identity = :rid"
+                    ),
+                    {"rid": resource_id},
+                )
+            ).fetchone()
+        if row is None or not row.materialized_table_name:
+            raise ResourceNotFoundError(resource_id)
+        return _parse_qualified_name(str(row.materialized_table_name))
 
     async def discover(
         self,
@@ -256,6 +319,12 @@ class LegacyServingAdapter(IServingPort):
         # `_discover_marts`. Resolve to `mart.<view_name>` directly.
         if resource_id.startswith("mart::"):
             return await self._get_mart_schema(resource_id[len("mart::"):])
+        # Raw resources coming from the NL2SQL serving path are currently
+        # addressed as `raw::<bare_table_name>`. Resolve them directly from
+        # `information_schema` so execution can stay on the serving path
+        # without requiring a prior catalog identity lookup.
+        if resource_id.startswith("raw::"):
+            return await self._get_raw_schema(resource_id[len("raw::"):])
 
         async with self._engine.connect() as conn:
             cat = await conn.execute(
@@ -338,6 +407,27 @@ class LegacyServingAdapter(IServingPort):
             layer=ServingLayer.MART,
         )
 
+    async def _get_raw_schema(self, bare_name: str) -> Schema:
+        """Resolve a raw-layer table addressed as `raw::<table_name>`."""
+        async with self._engine.connect() as conn:
+            cols = await conn.execute(
+                text(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'raw' AND table_name = :tn "
+                    "ORDER BY ordinal_position"
+                ),
+                {"tn": bare_name},
+            )
+            col_rows = cols.fetchall()
+            if not col_rows:
+                raise ResourceNotFoundError(f"raw::{bare_name}")
+
+        return Schema(
+            columns=[r.column_name for r in col_rows],
+            column_types={r.column_name: r.data_type for r in col_rows},
+            layer=ServingLayer.RAW,
+        )
+
     async def query(
         self,
         resource_id: str,
@@ -348,11 +438,17 @@ class LegacyServingAdapter(IServingPort):
     ) -> Rows:
         if _WRITE_KEYWORDS.search(sql):
             raise WriteAttemptedError(sql[:200])
+        expected_schema, expected_table = await self._expected_relation_for_resource(
+            resource_id
+        )
+        if not _sql_references_relation(
+            sql, schema_name=expected_schema, bare_name=expected_table
+        ):
+            raise QueryResourceMismatchError(
+                f"{resource_id} expects {expected_schema}.{expected_table}"
+            )
         schema = await self.get_schema(resource_id)
 
-        # Phase 0 contract: SQL is assumed to already reference the canonical
-        # name. Resolution-by-resource_id is a Phase 2+ enhancement; today we
-        # accept SQL as-is, mirroring the current sandbox behaviour.
         async with self._engine.connect() as conn:
             try:
                 await conn.execute(

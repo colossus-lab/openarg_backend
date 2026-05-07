@@ -7,6 +7,7 @@
 | Application | `src/app/application/state_machine/cached_dataset_enforcer.py` | `Status`, `Transition`, `ALLOWED_TRANSITIONS`, `StateMachineEnforcer` |
 | Migration | `alembic/versions/2026_04_25_0034_add_error_category_to_cached_datasets.py` | `error_category` column + CHECK + backfill + trigger + batched heal historical |
 | Worker | `src/app/infrastructure/celery/tasks/state_invariants_sweep.py` | Periodic sweep + finding persistence |
+| Worker (M1+M2) | `src/app/infrastructure/celery/tasks/ops_fixes.py:cleanup_invariants` | M1 (`retry>=5 + age>6h`) + M2 (`retry=0 + msg + age>24h`) zombie sweeps. Returns `fixed_zombies` and `fixed_zero_retry_zombies`. |
 | Tests | `tests/unit/test_state_machine_enforcer.py` | Transition table + invariant scan |
 
 ## Beat schedule

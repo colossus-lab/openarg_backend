@@ -52,8 +52,8 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from sqlalchemy import text
 
@@ -94,6 +94,13 @@ class _LiveRow:
     table_name: str
 
 
+@dataclass(frozen=True)
+class _MacroCall:
+    name: str
+    arg: str
+    kwargs: dict
+
+
 def _query_lives(engine) -> list[_LiveRow]:
     """Read every (resource_identity, schema, table) where superseded_at IS NULL."""
     with engine.connect() as conn:
@@ -104,6 +111,118 @@ def _query_lives(engine) -> list[_LiveRow]:
                 "WHERE superseded_at IS NULL"
             )
         ).fetchall()
+    return [
+        _LiveRow(
+            resource_identity=str(r.resource_identity),
+            schema_name=str(r.schema_name),
+            table_name=str(r.table_name),
+        )
+        for r in rows
+    ]
+
+
+def _query_live_identities(engine, identities: list[str]) -> dict[str, _LiveRow]:
+    """Load only the requested live identities.
+
+    This is the fast path for SQLs that use only `live_table(...)`, where
+    a full scan of every live raw table is unnecessary.
+    """
+    if not identities:
+        return {}
+    unique_identities = list(dict.fromkeys(identities))
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT resource_identity, schema_name, table_name "
+                "FROM raw_table_versions "
+                "WHERE superseded_at IS NULL AND resource_identity = ANY(:ids)"
+            ),
+            {"ids": unique_identities},
+        ).fetchall()
+    return {
+        str(r.resource_identity): _LiveRow(
+            resource_identity=str(r.resource_identity),
+            schema_name=str(r.schema_name),
+            table_name=str(r.table_name),
+        )
+        for r in rows
+    }
+
+
+def _query_live_by_portals(engine, portals: list[str]) -> list[_LiveRow]:
+    """Load live raws matching any `portal::` prefix."""
+    if not portals:
+        return []
+    unique_portals = list(dict.fromkeys(portals))
+    clauses = []
+    params: dict[str, str] = {}
+    for idx, portal in enumerate(unique_portals):
+        key = f"p{idx}"
+        clauses.append(f"resource_identity LIKE :{key}")
+        params[key] = f"{portal}::%"
+    sql = (
+        "SELECT resource_identity, schema_name, table_name "
+        "FROM raw_table_versions "
+        "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [
+        _LiveRow(
+            resource_identity=str(r.resource_identity),
+            schema_name=str(r.schema_name),
+            table_name=str(r.table_name),
+        )
+        for r in rows
+    ]
+
+
+def _query_live_by_identity_patterns(engine, patterns: list[str]) -> list[_LiveRow]:
+    """Load live raws whose resource_identity matches any glob pattern."""
+    if not patterns:
+        return []
+    unique_patterns = list(dict.fromkeys(patterns))
+    clauses = []
+    params: dict[str, str] = {}
+    for idx, pattern in enumerate(unique_patterns):
+        key = f"ip{idx}"
+        clauses.append(f"resource_identity LIKE :{key} ESCAPE '\\'")
+        params[key] = _glob_to_like(pattern)
+    sql = (
+        "SELECT resource_identity, schema_name, table_name "
+        "FROM raw_table_versions "
+        "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [
+        _LiveRow(
+            resource_identity=str(r.resource_identity),
+            schema_name=str(r.schema_name),
+            table_name=str(r.table_name),
+        )
+        for r in rows
+    ]
+
+
+def _query_live_by_table_patterns(engine, patterns: list[str]) -> list[_LiveRow]:
+    """Load live raws whose table_name matches any glob pattern."""
+    if not patterns:
+        return []
+    unique_patterns = list(dict.fromkeys(patterns))
+    clauses = []
+    params: dict[str, str] = {}
+    for idx, pattern in enumerate(unique_patterns):
+        key = f"tp{idx}"
+        clauses.append(f"table_name LIKE :{key} ESCAPE '\\'")
+        params[key] = _glob_to_like(pattern)
+    sql = (
+        "SELECT resource_identity, schema_name, table_name "
+        "FROM raw_table_versions "
+        "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
     return [
         _LiveRow(
             resource_identity=str(r.resource_identity),
@@ -293,6 +412,17 @@ def _parse_macro_call(call_text: str) -> tuple[str, str, dict]:
     return name, positional, kwargs
 
 
+def _collect_macro_calls(sql: str) -> list[_MacroCall]:
+    """Parse all macro calls in `sql` once so resolution can choose
+    a cheaper loading strategy before replacement begins.
+    """
+    calls: list[_MacroCall] = []
+    for match in _MACRO_RE.finditer(sql):
+        name, arg, kwargs = _parse_macro_call(match.group("call"))
+        calls.append(_MacroCall(name=name, arg=arg, kwargs=kwargs))
+    return calls
+
+
 def resolve_macros(sql: str, engine) -> str:
     """Replace every `{{ macro(...) }}` in `sql` with its concrete SQL.
 
@@ -300,8 +430,36 @@ def resolve_macros(sql: str, engine) -> str:
     Unknown macros or bad args raise `MacroResolutionError` so build_mart
     can record the failure in `mart_definitions.last_refresh_error`.
     """
-    lives = _query_lives(engine)
+    macro_calls = _collect_macro_calls(sql)
+    direct_identity_rows = _query_live_identities(
+        engine,
+        [call.arg for call in macro_calls if call.name == "live_table"],
+    )
+    portal_rows = _query_live_by_portals(
+        engine,
+        [call.arg for call in macro_calls if call.name == "live_tables_by_portal"],
+    )
+    identity_pattern_rows = _query_live_by_identity_patterns(
+        engine,
+        [call.arg for call in macro_calls if call.name == "live_tables_by_pattern"],
+    )
+    table_pattern_rows = _query_live_by_table_patterns(
+        engine,
+        [call.arg for call in macro_calls if call.name == "live_tables_by_table_pattern"],
+    )
+
+    all_rows: dict[tuple[str, str, str], _LiveRow] = {}
+    for row in [
+        *direct_identity_rows.values(),
+        *portal_rows,
+        *identity_pattern_rows,
+        *table_pattern_rows,
+    ]:
+        all_rows[(row.resource_identity, row.schema_name, row.table_name)] = row
+
+    lives: list[_LiveRow] = list(all_rows.values())
     by_identity: dict[str, _LiveRow] = {row.resource_identity: row for row in lives}
+    columns_cache: dict[tuple[str, str], set[str]] = {}
 
     def _replace(match: re.Match[str]) -> str:
         call_text = match.group("call")
@@ -334,9 +492,13 @@ def resolve_macros(sql: str, engine) -> str:
             if expected_columns:
                 # Project only the requested columns (NULL-fallback for
                 # ones that don't exist in this specific table).
-                actual_cols = _query_columns(
-                    engine, [(row.schema_name, row.table_name)]
-                ).get((row.schema_name, row.table_name), set())
+                cache_key = (row.schema_name, row.table_name)
+                actual_cols = columns_cache.get(cache_key)
+                if actual_cols is None:
+                    actual_cols = _query_columns(
+                        engine, [cache_key]
+                    ).get(cache_key, set())
+                    columns_cache[cache_key] = actual_cols
                 projected = [
                     (
                         f'"{c}"::text AS "{c}"'

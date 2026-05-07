@@ -426,6 +426,44 @@ async def test_explicit_mart_query_uses_serving_port() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_raw_query_uses_serving_port() -> None:
+    llm = FakeLLM(['SELECT * FROM raw."caba__padron__abcd1234__v1" LIMIT 1'])
+    sandbox = FakeSandbox([])
+    serving_port = AsyncMock()
+    serving_port.query.return_value.columns = ["nombre"]
+    serving_port.query.return_value.data = [["Ana"]]
+    serving_port.query.return_value.truncated = False
+
+    subgraph = build_nl2sql_subgraph()
+    final = await _invoke_subgraph(
+        subgraph,
+        _base_state(
+            llm,
+            sandbox,
+            tables=[
+                FakeTable(
+                    table_name="raw.caba__padron__abcd1234__v1",
+                    columns=["nombre"],
+                )
+            ],
+            tables_context='Table: raw.caba__padron__abcd1234__v1\n  Columns: nombre',
+        ),
+        llm=llm,
+        sandbox=sandbox,
+        serving_port=serving_port,
+    )
+
+    serving_port.query.assert_awaited_once_with(
+        "raw::caba__padron__abcd1234__v1",
+        'SELECT * FROM raw."caba__padron__abcd1234__v1" LIMIT 1',
+        max_rows=1000,
+        timeout_seconds=30,
+    )
+    assert sandbox.calls == []
+    assert final["data_results"][0].records == [{"nombre": "Ana"}]
+
+
+@pytest.mark.asyncio
 async def test_serving_failure_falls_back_to_sandbox() -> None:
     llm = FakeLLM(["SELECT * FROM mart.series_economicas LIMIT 1"])
     sandbox = FakeSandbox([FakeSandboxResult(rows=[{"valor": 77}], row_count=1, columns=["valor"])])

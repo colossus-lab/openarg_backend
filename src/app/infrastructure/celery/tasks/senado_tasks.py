@@ -360,5 +360,3 @@ def scrape_senado(self):
     except Exception as exc:
         logger.exception("Senado scrape failed")
         raise self.retry(exc=exc, countdown=120)
-    finally:
-        engine.dispose()

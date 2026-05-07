@@ -124,36 +124,31 @@ def register_via_b_table(
     """
     if not resource_identity or not table_name:
         return
-    changed = False
+    registered = False
     try:
         with engine.begin() as conn:
-            changed = bool(
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO raw_table_versions (
-                            resource_identity, version, schema_name, table_name,
-                            row_count
-                        ) VALUES (:rid, :v, :sch, :tn, :rc)
-                        ON CONFLICT (resource_identity, version) DO UPDATE SET
-                            row_count = COALESCE(EXCLUDED.row_count, raw_table_versions.row_count),
-                            schema_name = EXCLUDED.schema_name,
-                            table_name = EXCLUDED.table_name
-                        WHERE raw_table_versions.row_count IS DISTINCT FROM EXCLUDED.row_count
-                           OR raw_table_versions.schema_name IS DISTINCT FROM EXCLUDED.schema_name
-                           OR raw_table_versions.table_name IS DISTINCT FROM EXCLUDED.table_name
-                        RETURNING 1
-                        """
-                    ),
-                    {
-                        "rid": resource_identity,
-                        "v": version,
-                        "sch": schema_name,
-                        "tn": table_name,
-                        "rc": row_count,
-                    },
-                ).fetchone()
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO raw_table_versions (
+                        resource_identity, version, schema_name, table_name,
+                        row_count
+                    ) VALUES (:rid, :v, :sch, :tn, :rc)
+                    ON CONFLICT (resource_identity, version) DO UPDATE SET
+                        row_count = COALESCE(EXCLUDED.row_count, raw_table_versions.row_count),
+                        schema_name = EXCLUDED.schema_name,
+                        table_name = EXCLUDED.table_name
+                    """
+                ),
+                {
+                    "rid": resource_identity,
+                    "v": version,
+                    "sch": schema_name,
+                    "tn": table_name,
+                    "rc": row_count,
+                },
             )
+            registered = True
     except Exception:
         # The auxiliary connector's main job is the data write; the
         # registry update is best-effort. Log but do not raise.
@@ -165,7 +160,7 @@ def register_via_b_table(
             exc_info=True,
         )
 
-    if changed:
+    if registered:
         # Reconcile the canonical `catalog_resources` row.
         #
         # Vía-B writers (BCRA, presupuesto, senado) register the rtv under

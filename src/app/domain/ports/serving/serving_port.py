@@ -94,3 +94,7 @@ class WriteAttemptedError(Exception):
 
 class QueryTimeoutError(Exception):
     """Raised when a query exceeded its timeout budget."""
+
+
+class QueryResourceMismatchError(Exception):
+    """Raised when a query does not reference the resource bound by resource_id."""
