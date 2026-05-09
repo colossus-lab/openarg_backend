@@ -17,6 +17,7 @@ today, just typed".
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -190,6 +191,14 @@ class LegacyServingAdapter(IServingPort):
         if query_embedding is not None:
             vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
             vec_params: dict[str, Any] = {"vec": vec_str, "lim": remaining}
+            # Same threshold rationale as `_discover_marts` — eliminates
+            # raw catalog entries with cosine similarity below the noise
+            # floor. Without it, off-topic queries like "recetas de cocina"
+            # surfaced top-5 raws unrelated to the question, polluting the
+            # planner's hint set. Calibrated 2026-05-09.
+            min_sim_raws = float(
+                os.getenv("OPENARG_RAW_DISCOVER_MIN_SIM", "0.45")
+            )
             vec_sql = (
                 "SELECT resource_identity, "
                 "       COALESCE(canonical_title, raw_title) AS title, "
@@ -197,7 +206,9 @@ class LegacyServingAdapter(IServingPort):
                 "       1 - (embedding <=> CAST(:vec AS vector)) AS sim "
                 "FROM catalog_resources "
                 "WHERE embedding IS NOT NULL "
+                "  AND 1 - (embedding <=> CAST(:vec AS vector)) >= :min_sim_raws "
             )
+            vec_params["min_sim_raws"] = min_sim_raws
             if portal:
                 vec_sql += "AND portal = :portal "
                 vec_params["portal"] = portal
@@ -236,6 +247,20 @@ class LegacyServingAdapter(IServingPort):
                     "discover: vector path degraded to lexical: %s", exc
                 )
             remaining = limit - len(results)
+
+            # When the caller provided an embedding and BOTH the marts vector
+            # path AND the raws vector path returned zero matches above the
+            # similarity threshold, do NOT fall through to lexical ILIKE.
+            # The embedding is the stronger signal — if nothing crossed the
+            # noise floor, the query is genuinely off-topic and the planner
+            # should answer "no data" rather than receive substring-matched
+            # noise (e.g. "capital de Francia" lexically matching a budget
+            # mart's description because the word "capital" appears in
+            # "gastos de capital"). Calibrated 2026-05-09.
+            if not results and os.getenv(
+                "OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0"
+            ) != "1":
+                return []
 
         # Lexical fallback: ILIKE sobre canonical_title/raw_title cuando el
         # vector path no nos dio suficientes resultados (o no hubo embedding).
@@ -299,6 +324,15 @@ class LegacyServingAdapter(IServingPort):
         if query_embedding is not None:
             vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
             vec_params: dict[str, Any] = {"vec": vec_str, "lim": limit}
+            # Similarity threshold (0.45) eliminates structural misroute on
+            # negative / off-topic queries. Calibrated 2026-05-09 against
+            # `tests/evaluation/mart_routing_cases.json` (56 cases): at this
+            # cutoff the false-positive rate on irrelevant queries (e.g.
+            # "recetas de cocina", "capital de Francia") drops from 100%
+            # to 0% with no loss in p@1 (92% → 92%); precision@3 only drops
+            # from 100% to 98% (one boundary-case loss, "DNU Milei" at 0.41,
+            # falls back to raw chunks). Override via env if a future eval
+            # justifies a different cutoff.
             vec_sql = (
                 "SELECT mart_id, description, domain, mart_schema, "
                 "       mart_view_name, "
@@ -306,6 +340,10 @@ class LegacyServingAdapter(IServingPort):
                 "FROM mart_definitions "
                 "WHERE embedding IS NOT NULL "
                 "  AND COALESCE(last_row_count, 0) > 0 "
+                "  AND 1 - (embedding <=> CAST(:vec AS vector)) >= :min_sim "
+            )
+            vec_params["min_sim"] = float(
+                os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45")
             )
             if domain:
                 vec_sql += "AND domain = :domain "
@@ -337,6 +375,17 @@ class LegacyServingAdapter(IServingPort):
                     "_discover_marts vector path degraded to lexical: %s",
                     exc,
                 )
+            # When the caller provided an embedding and the vector path
+            # returned zero matches above the similarity threshold, do NOT
+            # fall through to lexical ILIKE on mart_id/description. The
+            # embedding is the stronger signal — substring-matching on
+            # "capital" against "gastos de capital" in a budget mart's
+            # description re-introduces the misroute the threshold was
+            # added to prevent. Calibrated 2026-05-09 / spec 016.
+            if os.getenv(
+                "OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0"
+            ) != "1":
+                return []
             # If vector returned 0 rows, fall through to lexical.
 
         # ---------- Lexical fallback ----------

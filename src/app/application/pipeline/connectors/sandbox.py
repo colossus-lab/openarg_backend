@@ -414,7 +414,7 @@ async def discover_catalog_hints_for_planner(
     # puede pasarnos el embedding ya computed para reutilizarlo en su
     # propio fast-path mart_sample_sim check sin doble compute.
     q_embedding: list[float] | None = precomputed_embedding
-    if sandbox or serving_port is not None:
+    if q_embedding is None and (sandbox or serving_port is not None):
         try:
             q_embedding = await embedding.embed(query)
         except Exception:
@@ -521,11 +521,18 @@ async def discover_catalog_hints_for_planner(
                 # propagates to PlannerCandidate.base_score and lets the
                 # downstream skip-rerank heuristic detect high-confidence
                 # mart matches.
+                # Threshold filter — same calibration as
+                # `LegacyServingAdapter._discover_marts` (eval set
+                # 2026-05-09: cuts off-topic queries at sim < 0.45 from
+                # disturbing the rerank input). Default 0.45, env-overridable.
+                min_sim = float(os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45"))
                 resources: list[Resource] = []
                 for r in rs:
                     base = float(r.base_sim or 0)
                     sample = float(r.sample_max_sim or 0)
                     boosted = base + 0.17 if sample >= 0.70 else base
+                    if boosted < min_sim:
+                        continue
                     resources.append(Resource(
                         resource_id=f"mart::{r.mart_id}",
                         title=str(r.mart_id or ""),

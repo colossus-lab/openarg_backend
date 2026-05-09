@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -276,6 +277,18 @@ class TestCollectLargeGroupP1:
 
 
 class TestBulkCollectAllP4:
+    def setup_method(self) -> None:
+        # The mart-rebuild backpressure check (added 2026-05-09) issues a
+        # SELECT against `pg_stat_activity` at the start of `bulk_collect_all`.
+        # Test mocks for the engine return truthy results indiscriminately,
+        # so without disabling the check every test in this class would
+        # short-circuit with `skipped_mart_rebuild_in_progress`. Disable
+        # via env for the duration of the class.
+        os.environ["OPENARG_BULK_COLLECT_RESPECT_MART_REBUILD"] = "0"
+
+    def teardown_method(self) -> None:
+        os.environ.pop("OPENARG_BULK_COLLECT_RESPECT_MART_REBUILD", None)
+
     @patch("app.infrastructure.celery.tasks.collector_tasks.bulk_collect_all.apply_async")
     @patch("app.infrastructure.celery.tasks.collector_tasks._count_bulk_collect_remaining")
     @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")

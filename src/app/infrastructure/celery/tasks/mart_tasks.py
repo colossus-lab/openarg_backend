@@ -33,6 +33,7 @@ from app.application.marts.sql_macros import (
     MacroResolutionError,
     resolve_macros,
 )
+from app.application.pipeline.plan_cache import invalidate_query_plan_cache
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
@@ -387,6 +388,10 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
                 status="built",
                 last_row_count=row_count,
                 resolved_sql=resolved_sql,
+            )
+            invalidate_query_plan_cache(
+                engine,
+                reason=f"build_mart:{mart_id}",
             )
         except Exception as exc:
             logger.exception("build_mart failed for %s", mart_id)

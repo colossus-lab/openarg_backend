@@ -7003,6 +7003,33 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             _release_advisory_lock(engine, lock_key)
 
 
+def _mart_rebuild_in_progress(engine) -> bool:
+    """True when ANY `CREATE MATERIALIZED VIEW` or `REFRESH MATERIALIZED VIEW`
+    is currently active on the DB. Used by `bulk_collect_all` to defer its
+    150+-task dispatch wave until the rebuild finishes — RDS-instance
+    self-protection (see incident 2026-05-09).
+
+    Disabled when `OPENARG_BULK_COLLECT_RESPECT_MART_REBUILD=0`.
+    Defensive on errors: any failure (mock engine, RDS hiccup, missing
+    perms on `pg_stat_activity`) is logged and treated as "no rebuild" so
+    the task can proceed.
+    """
+    if os.getenv("OPENARG_BULK_COLLECT_RESPECT_MART_REBUILD", "1") != "1":
+        return False
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT 1 FROM pg_stat_activity "
+                "WHERE state = 'active' "
+                "  AND query ~* 'CREATE MATERIALIZED VIEW|REFRESH MATERIALIZED VIEW' "
+                "LIMIT 1"
+            )).fetchall()
+        return bool(rows)
+    except Exception:
+        logger.debug("mart-rebuild backpressure check failed", exc_info=True)
+        return False
+
+
 @celery_app.task(
     name="openarg.bulk_collect_all",
     bind=True,
@@ -7024,6 +7051,20 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         if not lock_acquired:
             logger.info("bulk_collect_all skipped because another run already holds the lock")
             return {"status": "skipped_already_running"}
+
+        # Mart-rebuild backpressure (added 2026-05-09 after RDS instance
+        # rebooted under combined load: 152 collect tasks inflight + a
+        # 52M-row CREATE MATERIALIZED VIEW for `mediaciones_prejudiciales`).
+        # If any mart matview is being (re)created or refreshed RIGHT NOW,
+        # skip this cycle — the next bulk-collect tick (6h later) will pick
+        # up the work. Saves the DB from peak combined load. Toggle off
+        # via env if a future operator wants to override.
+        if _mart_rebuild_in_progress(engine):
+            logger.info(
+                "bulk_collect_all skipped: a mart matview is being "
+                "built/refreshed; deferring to next cycle"
+            )
+            return {"status": "skipped_mart_rebuild_in_progress"}
 
         reconciled = _reconcile_cache_coverage(
             engine,

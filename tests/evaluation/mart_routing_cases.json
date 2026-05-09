@@ -1,0 +1,77 @@
+{
+  "version": "1.0",
+  "description": "Mart routing eval set — natural-language queries with the mart_id the planner SHOULD route to (or null if no mart is appropriate). Used to tune the similarity threshold in `LegacyServingAdapter._discover_marts` and calibrate the +0.17 sample boost. 50 cases across the 64-mart catalog covering: positive cases (clear single mart match), ambiguous (multiple candidates), and negative (no mart should match — query falls through to raw chunks).",
+  "rubric": {
+    "pass_topk": "expected_mart_id appears in the top-3 of `discover()` results",
+    "fail_topk": "expected_mart_id NOT in top-3, OR for negative cases ANY mart is returned with sim >= threshold",
+    "metrics": ["precision@1", "precision@3", "recall@5", "false_positive_rate (negative cases)"]
+  },
+  "entries": [
+    { "id": "route_001", "query": "robos en Palermo", "expected_mart_id": "delitos_caba", "category": "seguridad", "difficulty": "easy" },
+    { "id": "route_002", "query": "homicidios por provincia argentina", "expected_mart_id": "delitos_argentina_snic", "category": "seguridad", "difficulty": "medium" },
+    { "id": "route_003", "query": "uso de armas en delitos CABA", "expected_mart_id": "delitos_caba", "category": "seguridad", "difficulty": "medium" },
+    { "id": "route_004", "query": "tasa de delitos por departamento Argentina", "expected_mart_id": "delitos_argentina_snic", "category": "seguridad", "difficulty": "medium" },
+    { "id": "route_005", "query": "delitos por barrio Buenos Aires", "expected_mart_id": "delitos_caba", "category": "seguridad", "difficulty": "easy" },
+
+    { "id": "route_010", "query": "audiencias del jefe de gabinete", "expected_mart_id": "audiencias_gestion_intereses", "category": "accountability", "difficulty": "easy" },
+    { "id": "route_011", "query": "qué empresas se reunieron con Caputo", "expected_mart_id": "audiencias_gestion_intereses", "category": "accountability", "difficulty": "medium" },
+    { "id": "route_012", "query": "lobby al gobierno argentino", "expected_mart_id": "audiencias_gestion_intereses", "category": "accountability", "difficulty": "medium" },
+    { "id": "route_013", "query": "registro de gestión de intereses RUAGI", "expected_mart_id": "audiencias_gestion_intereses", "category": "accountability", "difficulty": "easy" },
+    { "id": "route_014", "query": "DDJJ funcionarios públicos", "expected_mart_id": "ddjj_funcionarios_federales", "category": "accountability", "difficulty": "easy" },
+    { "id": "route_015", "query": "patrimonio declarado funcionario nacional", "expected_mart_id": "ddjj_funcionarios_federales", "category": "accountability", "difficulty": "medium" },
+
+    { "id": "route_020", "query": "empresas contaminantes Riachuelo", "expected_mart_id": "acumar_agentes_contaminantes", "category": "ambiente", "difficulty": "easy" },
+    { "id": "route_021", "query": "agentes contaminantes Lanús La Matanza", "expected_mart_id": "acumar_agentes_contaminantes", "category": "ambiente", "difficulty": "medium" },
+    { "id": "route_022", "query": "calidad ambiental Cuenca Matanza", "expected_mart_id": "acumar_agentes_contaminantes", "category": "ambiente", "difficulty": "hard" },
+
+    { "id": "route_030", "query": "viajes en colectivo Buenos Aires", "expected_mart_id": "sube_uso_transporte_publico", "category": "transporte", "difficulty": "easy" },
+    { "id": "route_031", "query": "uso del SUBE por mes", "expected_mart_id": "sube_uso_transporte_publico", "category": "transporte", "difficulty": "easy" },
+    { "id": "route_032", "query": "cuántas personas viajan en tren AMBA", "expected_mart_id": "sube_uso_transporte_publico", "category": "transporte", "difficulty": "medium" },
+    { "id": "route_033", "query": "subsidios al transporte público", "expected_mart_id": "subsidios_transporte_publico", "category": "transporte", "difficulty": "easy" },
+    { "id": "route_034", "query": "FCT Fondo Compensación Tarifaria", "expected_mart_id": "subsidios_transporte_publico", "category": "transporte", "difficulty": "medium" },
+    { "id": "route_035", "query": "viajes en subte Buenos Aires", "expected_mart_id": "subte_viajes_molinetes", "category": "transporte", "difficulty": "easy" },
+    { "id": "route_036", "query": "molinetes del subte por estación", "expected_mart_id": "subte_viajes_molinetes", "category": "transporte", "difficulty": "medium" },
+    { "id": "route_037", "query": "tránsito en peajes AUSA", "expected_mart_id": "flujo_vehicular_peajes_caba", "category": "transporte", "difficulty": "medium" },
+
+    { "id": "route_040", "query": "evolución del IPC", "expected_mart_id": "inflacion_argentina", "category": "economia", "difficulty": "easy" },
+    { "id": "route_041", "query": "inflación mensual Argentina", "expected_mart_id": "inflacion_argentina", "category": "economia", "difficulty": "easy" },
+    { "id": "route_042", "query": "índice de precios al consumidor", "expected_mart_id": "inflacion_argentina", "category": "economia", "difficulty": "medium" },
+    { "id": "route_043", "query": "cotización del dólar BCRA", "expected_mart_id": "series_economicas", "category": "economia", "difficulty": "medium" },
+    { "id": "route_044", "query": "tipo de cambio peso argentino", "expected_mart_id": "series_economicas", "category": "economia", "difficulty": "medium" },
+    { "id": "route_045", "query": "reservas internacionales BCRA", "expected_mart_id": "bcra_principales_indicadores", "category": "economia", "difficulty": "easy" },
+    { "id": "route_046", "query": "tasa de política monetaria Argentina", "expected_mart_id": "bcra_principales_indicadores", "category": "economia", "difficulty": "medium" },
+    { "id": "route_047", "query": "exportaciones argentinas por país destino", "expected_mart_id": "exportaciones_argentina", "category": "economia", "difficulty": "easy" },
+    { "id": "route_048", "query": "comercio exterior Argentina", "expected_mart_id": "comercio_exterior_argentina", "category": "economia", "difficulty": "medium" },
+
+    { "id": "route_050", "query": "empleo registrado Argentina por sector", "expected_mart_id": "empleo_registrado_argentina", "category": "empleo", "difficulty": "easy" },
+    { "id": "route_051", "query": "salarios por departamento y actividad", "expected_mart_id": "salarios_departamento_clae2", "category": "empleo", "difficulty": "medium" },
+    { "id": "route_052", "query": "remuneraciones por industria", "expected_mart_id": "salarios_por_sector_argentina", "category": "empleo", "difficulty": "medium" },
+    { "id": "route_053", "query": "trabajadores formales por provincia", "expected_mart_id": "empleo_formal_argentina", "category": "empleo", "difficulty": "easy" },
+
+    { "id": "route_060", "query": "presupuesto nacional ejecutado", "expected_mart_id": "presupuesto_nacional_ejecutado", "category": "presupuesto", "difficulty": "easy" },
+    { "id": "route_061", "query": "gasto del Estado por finalidad", "expected_mart_id": "presupuesto_finalidad_funcion", "category": "presupuesto", "difficulty": "medium" },
+    { "id": "route_062", "query": "presupuesto consolidado Argentina", "expected_mart_id": "presupuesto_consolidado", "category": "presupuesto", "difficulty": "easy" },
+    { "id": "route_063", "query": "decretos presidenciales", "expected_mart_id": "decretos_presidenciales", "category": "gobierno", "difficulty": "easy" },
+    { "id": "route_064", "query": "DNU Milei", "expected_mart_id": "decretos_presidenciales", "category": "gobierno", "difficulty": "medium" },
+
+    { "id": "route_070", "query": "establecimientos de salud por provincia", "expected_mart_id": "salud_establecimientos", "category": "salud", "difficulty": "easy" },
+    { "id": "route_071", "query": "hospitales públicos Argentina", "expected_mart_id": "salud_establecimientos", "category": "salud", "difficulty": "medium" },
+
+    { "id": "route_080", "query": "centros de atención a la mujer", "expected_mart_id": "mujer_centros_atencion", "category": "social", "difficulty": "easy" },
+    { "id": "route_081", "query": "violencia de género dónde denunciar CABA", "expected_mart_id": "mujer_centros_atencion", "category": "social", "difficulty": "medium" },
+    { "id": "route_082", "query": "patentamientos de autos cero kilómetro", "expected_mart_id": "inscripciones_iniciales_autos", "category": "automotor", "difficulty": "easy" },
+    { "id": "route_083", "query": "transferencias de autos usados", "expected_mart_id": "registro_automotor_transferencias", "category": "automotor", "difficulty": "medium" },
+
+    { "id": "route_090", "query": "cobertura vegetal CABA", "expected_mart_id": "caba_cobertura_vegetal", "category": "caba", "difficulty": "easy" },
+    { "id": "route_091", "query": "publicidad oficial Ciudad de Buenos Aires", "expected_mart_id": "caba_pauta_publicitaria", "category": "caba", "difficulty": "easy" },
+    { "id": "route_092", "query": "departamentos en venta CABA", "expected_mart_id": "caba_departamentos_en_venta", "category": "caba", "difficulty": "easy" },
+    { "id": "route_093", "query": "demografía Ciudad de Buenos Aires", "expected_mart_id": "demografia_caba", "category": "caba", "difficulty": "easy" },
+    { "id": "route_094", "query": "compras públicas BAC", "expected_mart_id": "compras_publicas_bac", "category": "caba", "difficulty": "easy" },
+
+    { "id": "route_100_neg", "query": "recetas de cocina italianas", "expected_mart_id": null, "category": "negative", "difficulty": "easy", "rationale": "irrelevant — should NOT route to any mart" },
+    { "id": "route_101_neg", "query": "clima en Tokio mañana", "expected_mart_id": null, "category": "negative", "difficulty": "easy" },
+    { "id": "route_102_neg", "query": "resultados de la final de Champions League", "expected_mart_id": null, "category": "negative", "difficulty": "easy" },
+    { "id": "route_103_neg", "query": "cómo aprender python", "expected_mart_id": null, "category": "negative", "difficulty": "easy" },
+    { "id": "route_104_neg", "query": "cuál es la capital de Francia", "expected_mart_id": null, "category": "negative", "difficulty": "easy" }
+  ]
+}

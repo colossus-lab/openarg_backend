@@ -21,6 +21,9 @@ from urllib.parse import urlparse
 import httpx
 from sqlalchemy import bindparam, text
 
+from app.application.pipeline.connectors.sandbox import (
+    discover_catalog_hints_for_planner,
+)
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
@@ -1626,6 +1629,89 @@ def cleanup_garbage_cols_in_raw(
 # ---------- prewarm_query_plan_cache (Latency optimization, 2026-05-10) ----------
 
 
+async def _warm_query_plan_candidate(
+    *,
+    question: str,
+    engine,
+    embedder,
+    llm,
+    sandbox,
+    serving_port,
+    ttl_seconds: int = 604800,
+) -> str:
+    """Warm one plan-cache candidate using the same planner inputs as runtime."""
+    import hashlib
+    import json
+    from dataclasses import asdict, is_dataclass
+
+    emb = await embedder.embed(question)
+    emb_str = "[" + ",".join(str(x) for x in emb) + "]"
+    qhash = hashlib.sha256(question.encode("utf-8")).hexdigest()
+    with engine.connect() as conn:
+        hit = conn.execute(
+            text(
+                "SELECT 1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                "FROM query_plan_cache "
+                "WHERE embedding IS NOT NULL AND expires_at > now() "
+                "ORDER BY embedding <=> CAST(:e AS vector) "
+                "LIMIT 1"
+            ),
+            {"e": emb_str},
+        ).fetchone()
+        conn.rollback()
+    if hit and float(hit[0] or 0) >= 0.95:
+        return "hit"
+
+    catalog_hints = await discover_catalog_hints_for_planner(
+        question,
+        sandbox=sandbox,
+        embedding=embedder,
+        serving_port=serving_port,
+        llm=llm,
+        precomputed_embedding=emb,
+    )
+    from app.infrastructure.adapters.connectors.query_planner import generate_plan
+
+    plan = await generate_plan(
+        llm,
+        question,
+        memory_context="",
+        catalog_hints=catalog_hints,
+        skip_classifier=False,
+    )
+    if plan is None or plan.intent == "clarification":
+        return "error"
+    if is_dataclass(plan) and not isinstance(plan, type):
+        plan_dict = asdict(plan)
+    elif hasattr(plan, "model_dump"):
+        plan_dict = plan.model_dump()
+    else:
+        plan_dict = dict(plan.__dict__)
+    plan_json = json.dumps(plan_dict, default=str)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO query_plan_cache "
+                "(question_hash, question, embedding, plan_json, "
+                " ttl_seconds, expires_at) "
+                "VALUES (:h, :q, CAST(:e AS vector), CAST(:p AS jsonb), "
+                "        :ttl, now() + (:ttl || ' seconds')::interval) "
+                "ON CONFLICT (question_hash) DO UPDATE SET "
+                "  plan_json = EXCLUDED.plan_json, "
+                "  embedding = EXCLUDED.embedding, "
+                "  expires_at = EXCLUDED.expires_at"
+            ),
+            {
+                "h": qhash,
+                "q": question,
+                "e": emb_str,
+                "p": plan_json,
+                "ttl": ttl_seconds,
+            },
+        )
+    return "warmed"
+
+
 @celery_app.task(
     name="openarg.prewarm_query_plan_cache",
     bind=True,
@@ -1640,38 +1726,34 @@ def prewarm_query_plan_cache(
     """Pre-populate `query_plan_cache` with plans for common queries so
     real user requests hit the cache and skip the planner LLM (~3-4s).
 
-    Strategy (cheap, no SQL execute or analyst LLM):
+    Strategy:
       1. Source candidate queries from:
          a. `query_analytics` last 30d by frequency (real user signal)
          b. `mart_sample_queries` (curated authors' samples) — fallback
             when analytics is sparse.
       2. For each candidate, embed + check `query_plan_cache` for a hit
          at threshold 0.95. If a hit exists, skip (already warm).
-      3. On miss, run `generate_plan` against an empty catalog_hints
-         block (planner LLM call only — no discover, no execute, no
-         analyst). Store the result.
+      3. On miss, build the SAME planner inputs used online
+         (`catalog_hints`, classifier behaviour) and store the result.
 
     Designed to run weekly Sunday 02:45 ART (between row_count reconcile
     at 02:00 and garbage-col cleanup at 02:30 — plan cache warmup is
     cheap so it slots between).
-
-    The plan stored here may not match what `discover_catalog_hints`
-    would have produced at request time, but it's still a useful
-    starting point — the real user request will (a) hit the cache and
-    (b) run discover anyway for `catalog_hints` text.
     """
     import asyncio
-    import hashlib
-    import json
 
     from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-    from app.infrastructure.adapters.connectors.query_planner import generate_plan
     from app.infrastructure.adapters.llm.bedrock_embedding_adapter import (
         BedrockEmbeddingAdapter,
     )
     from app.infrastructure.adapters.llm.bedrock_llm_adapter import (
         BedrockLLMAdapter,
+    )
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+    from app.infrastructure.adapters.serving.legacy_serving_adapter import (
+        LegacyServingAdapter,
     )
     from app.infrastructure.celery.tasks._db import get_sync_engine
 
@@ -1725,69 +1807,25 @@ def prewarm_query_plan_cache(
     embedder = BedrockEmbeddingAdapter()
     llm = BedrockLLMAdapter()
 
-    async def _warm(question: str) -> str:
-        """Returns 'hit', 'warmed', or 'error' for telemetry."""
+    async_engine: AsyncEngine | None = None
+    db_url = os.getenv("DATABASE_URL", "").strip()
+    if db_url:
         try:
-            emb = await embedder.embed(question)
-            emb_str = "[" + ",".join(str(x) for x in emb) + "]"
-            qhash = hashlib.sha256(question.encode("utf-8")).hexdigest()
-            with engine.connect() as conn:
-                hit = conn.execute(
-                    text(
-                        "SELECT 1 - (embedding <=> CAST(:e AS vector)) AS sim "
-                        "FROM query_plan_cache "
-                        "WHERE embedding IS NOT NULL AND expires_at > now() "
-                        "ORDER BY embedding <=> CAST(:e AS vector) "
-                        "LIMIT 1"
-                    ),
-                    {"e": emb_str},
-                ).fetchone()
-                conn.rollback()
-            if hit and float(hit[0] or 0) >= 0.95:
-                return "hit"
-            # Generate plan
-            plan = await generate_plan(
-                llm,
-                question,
-                memory_context="",
-                catalog_hints="",
-                skip_classifier=True,
+            async_engine = create_async_engine(
+                db_url,
+                pool_size=1,
+                max_overflow=0,
+                pool_pre_ping=True,
             )
-            if plan is None or plan.intent == "clarification":
-                return "error"
-            from dataclasses import asdict, is_dataclass
-            if is_dataclass(plan) and not isinstance(plan, type):
-                plan_dict = asdict(plan)
-            elif hasattr(plan, "model_dump"):
-                plan_dict = plan.model_dump()
-            else:
-                plan_dict = dict(plan.__dict__)
-            plan_json = json.dumps(plan_dict, default=str)
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        "INSERT INTO query_plan_cache "
-                        "(question_hash, question, embedding, plan_json, "
-                        " ttl_seconds, expires_at) "
-                        "VALUES (:h, :q, CAST(:e AS vector), CAST(:p AS jsonb), "
-                        "        :ttl, now() + (:ttl || ' seconds')::interval) "
-                        "ON CONFLICT (question_hash) DO UPDATE SET "
-                        "  plan_json = EXCLUDED.plan_json, "
-                        "  embedding = EXCLUDED.embedding, "
-                        "  expires_at = EXCLUDED.expires_at"
-                    ),
-                    {
-                        "h": qhash,
-                        "q": question,
-                        "e": emb_str,
-                        "p": plan_json,
-                        "ttl": 604800,
-                    },
-                )
-            return "warmed"
         except Exception:
-            logger.exception("prewarm_query_plan_cache failed for %s", question[:80])
-            return "error"
+            logger.warning(
+                "Could not initialize async engine for plan-cache prewarm serving discovery",
+                exc_info=True,
+            )
+            async_engine = None
+
+    sandbox = PgSandboxAdapter()
+    serving_port = LegacyServingAdapter(async_engine) if async_engine is not None else None
 
     async def _run() -> None:
         # Concurrency 4 to avoid hammering Bedrock with 100 calls at once
@@ -1795,7 +1833,18 @@ def prewarm_query_plan_cache(
 
         async def _bound(q: str) -> str:
             async with sem:
-                return await _warm(q)
+                try:
+                    return await _warm_query_plan_candidate(
+                        question=q,
+                        engine=engine,
+                        embedder=embedder,
+                        llm=llm,
+                        sandbox=sandbox,
+                        serving_port=serving_port,
+                    )
+                except Exception:
+                    logger.exception("prewarm_query_plan_cache failed for %s", q[:80])
+                    return "error"
 
         results = await asyncio.gather(
             *[_bound(q) for q in candidates], return_exceptions=False
@@ -1808,6 +1857,13 @@ def prewarm_query_plan_cache(
             else:
                 stats["errors"] += 1
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    finally:
+        if async_engine is not None:
+            try:
+                asyncio.run(async_engine.dispose())
+            except Exception:
+                logger.debug("Could not dispose async prewarm engine", exc_info=True)
     logger.info("prewarm_query_plan_cache: %s", stats)
     return stats
