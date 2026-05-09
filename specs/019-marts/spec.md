@@ -1,9 +1,25 @@
 # Spec 019 — Marts (medallion L2, post-rebuild)
 
 **Type**: Forward-engineered
-**Status**: Implemented 2026-05-04, hardened 2026-05-06 (Sprint Marts Overhaul).
+**Status**: Implemented 2026-05-04, hardened 2026-05-06 (Sprint Marts Overhaul), expanded 2026-05-09 (analytics-driven sprint). **47 marts healthy in staging, 40.9M rows total.**
 **Hexagonal scope**: Application (mart loader + builder + sql_macros) + Infrastructure (Celery tasks + adapter integration)
 **Sister specs**: [015-catalog-resources](../015-catalog-resources/spec.md), [016-serving-port](../016-serving-port/spec.md), [017-raw-layer](../017-raw-layer/spec.md). [018-contracts-staging](../018-contracts-staging/spec.md) is **deprecated**.
+
+**Recent updates (2026-05-09, analytics-driven sprint)**:
+- **+11 marts shipped**, total 47 healthy. Selection driven by 2,667 successful_queries from prod (47 days, 38 unique users) cross-referenced with raw availability:
+  1. `pobreza_indec_aglomerados` (1,224 rows) — 19 semestres × 17 sub-cuadros, UNPIVOT manual de time-pivoted INDEC
+  2. `mendoza_ejecucion_acumulada_fondo` (21,888 rows) — votado/devengado/pagado × 13 meses UNPIVOT
+  3. `presupuesto_servicios_administrativos` (3,712 rows) — sub-shape 5-col del cluster
+  4. `presupuesto_finalidad_funcion` (865 rows) — sub-shape 7-col
+  5. `presupuesto_clasificador_economico` (21,662 rows) — sub-shape 11-col (4-niveles del clasificador)
+  6. `pami_compras_publicas` (409 rows) — post-repair `title_as_columns` de 13 tablas raw (ver spec 021)
+  7. `bcra_principales_indicadores` (99,198 rows) — UNPIVOT reservas+tasas (responde a "Mostrame la evolución de las reservas del BCRA" repetida 7+ veces en prod)
+  8. `comercio_exterior_argentina` (691,159 rows) — exportaciones+importaciones × 4 niveles (clae2/clae3/clae6/letra) UNION ALL
+  9. `empleo_formal_argentina` (625,824 rows) — distribución por departamento × género × remuneración media/mediana
+  10. `magyp_cultivos_principales` (169,706 rows) — UNION 17 cultivos `*_siembra_cosecha_produccion_rendimi*`
+  11. `magyp_senasa_movimientos_pecuarios` (10,789,965 rows) — UNPIVOT 5 especies (bovinos/porcinos/avicolas/equinos/ovinos) × 31 categorías de animal
+- **Macros now accept `require_all_columns=True` kwarg**: filtra tablas que NO tienen TODAS las `expected_columns` antes del cap check. Resuelve el bug donde patterns muy amplios (`presupuesto_de_la_administracion_pu*` matchea 597 tablas) excedían el cap de 200, cuando en realidad solo ~32 tablas tienen el shape canónico FULL. Validación al parser: `require_all_columns=True` requiere `expected_columns` non-empty.
+- **`SELECT DISTINCT` recommended for catalog/dimension marts**: descubrimos durante el sprint que las 3 marts dimensionales del cluster presupuesto (~600M rows post-build sin DISTINCT) tienen catálogos repetidos en cada raw. Post `SELECT DISTINCT` o `ROW_NUMBER() OVER (PARTITION BY <business_key>) WHERE rn=1` los row counts caen 99%+. La segunda forma es preferible cuando hay una col `ultima_actualizacion_fecha` para tomar el snapshot más reciente y evitar fanout en joins.
 
 **Recent updates (2026-05-06)**:
 - 7 marts in production: `escuelas_argentina` (4,596), `presupuesto_consolidado` (4,959), `legislatura_actividad` (328), `series_economicas` (39), `staff_estado` (4,536), `salud_establecimientos` (113,133, NEW), `demo_energia_pozos` (0, awaits raw). Total ~127K rows in `mart.*`.
@@ -100,6 +116,11 @@ predictable and easy to validate.
 | `{{ live_table('portal::source_id') }}` | `raw."<live_table_name>"` for that exact resource_identity (`MAX(version)` row with `superseded_at IS NULL`). |
 | `{{ live_tables_by_portal('bcra') }}` | `(SELECT * FROM raw."t1" UNION ALL SELECT * FROM raw."t2" ...)` — every live in that portal. |
 | `{{ live_tables_by_pattern('bcra::*tasa*') }}` | Same as above but filtered by SQL-LIKE on `resource_identity`. The `*` is the glob wildcard. |
+| `{{ live_tables_by_table_pattern('caba__*establecimientos*') }}` | Same as above but matching on `table_name` (slug-stable) instead of `resource_identity` (often a volatile UUID). Use cuando upstream regenera UUIDs. |
+
+**Optional kwargs supported (2026-05-04 / 2026-05-09)**:
+- `expected_columns=['c1','c2',...]` — Schema-intersection projection. With 0 matches → typed-empty `(SELECT NULL::text AS c1, ... WHERE FALSE)`. With N matches and heterogeneous schemas → emits `SELECT "c1"::text AS "c1", ... FROM <each>` with NULL fallback for cols not in that table. Prevents `each UNION query must have the same number of columns` errors.
+- `require_all_columns=True` (2026-05-09) — Filters out tables that do NOT have ALL `expected_columns` before the cap check. Useful when a pattern matches many sub-shapes (e.g. fact + dimension tables in the same slug cluster) and only the FULL shape is desired. Requires `expected_columns` non-empty.
 
 When a macro resolves to **zero rows**, the placeholder is
 `(SELECT NULL::text AS dummy WHERE FALSE)` — a deterministic empty
@@ -188,7 +209,7 @@ when no curated mart has data. `_get_mart_schema` resolves
 
 ## 9. Success Criteria
 
-- **SC-001**: `build_mart('demo_energia_pozos')` produces `mart.demo_energia_pozos` with `last_row_count` matching `SELECT COUNT(*)` of the materialized view (validated 2026-05-04: 499,670 rows).
+- **SC-001**: `build_mart('demo_energia_pozos')` produces `mart.demo_energia_pozos` with `last_row_count` matching `SELECT COUNT(*)` of the materialized view (validated 2026-05-09: 15,302 rows after v0.3.0 fix that re-pointed pattern to `*produccion_de_petroleo_y_gas*` post UUID regen by datos.gob.ar; original v0.1 had 499,670 rows but pinned to a UUID that was retired upstream).
 - **SC-002**: With `OPENARG_DISCOVER_MARTS=1`, `IServingPort.discover('petroleo')` returns `mart::demo_energia_pozos` and skips the empty mart skeletons.
 - **SC-003**: When a new raw version of any resource in `source_portals` lands, `refresh_mart` runs at most once per 120s window per mart.
 - **SC-004**: `served_from_layer` metric in `connector_call:sandbox:served_from:*` increases for `mart` whenever a query lands on a mart table.
@@ -210,7 +231,11 @@ when no curated mart has data. `_get_mart_schema` resolves
   - ✅ `mujer_centros_atencion` (built 2026-05-08): solo las 4 versiones del padrón `caba__centros_integrales_de_la_mujer` (schema cohesivo: `nombre, dirreccion, barrio, comuna, email, destinatar`). 64 rows. **Reduced scope**: el cluster `caba__mapa_de_violencia_de_genero*` (17 tablas) quedó fuera porque tiene schema heterogéneo extremo (cada tabla es de un mes/categoría con cols únicos como `Cantidad`, `Casos`, meses literales). Tracked como gap menor — NL2SQL puede acceder a esas tablas raw directamente.
   - ✅ `demografia_caba` (built 2026-05-08): `caba__estructura_demografica*` con `expected_columns=[anio, grupo_edad, nacionalidad, POBLACION, porc_poblacion]`. 4 de 12 versiones matchean schema canónico (4,106 rows). Las otras 8 traen subsets distintos (por sexo/origen/año parcial) — quedan en raw.
   - ❌ `afiliados_obras_sociales` (NOT VIABLE 2026-05-08): tablas `pami__padron_de_afiliados*` y `datos_gob_ar__padron_de_afiliados*` están MUY rotas — son PDFs mal scrapeados, las cols son URLs literales y placeholders como `Páginas:`, `Páginas:_2`, `Páginas:_3`. Solo 2/8 tablas tienen cols reales (`Grupo Etario`, `UGL Beneficiario N°`). NO mart-eable hasta arreglar el scraper PAMI/datos_gob_ar (PDF parser). Movido a DEBT-019-007 como subitem (otro tipo de bug de parser).
-- **DEBT-019-006 (Open, 2026-05-08)**: 6 de los 7 marts shipped en 2026-05-08 (`autoridades_pen`, `compras_publicas_bac`, `decretos_presidenciales`, `legisladores_argentina`, `geografia_administrativa`, `indicadores_provinciales`) referencian `public.cache_*` legacy directamente porque el connector source no migró a `raw.*` aún. Resultado: cuando `cache_orphan_cleanup` corra contra una de esas tablas (no debería, hay protección por `cached_datasets` ref), el mart se rompe. Mitigación correcta: migrar los 6 connectors source (Mapa del Estado, BAC, Senado, Diputados, GeoRef, datos_gob_ar afiliados) a usar el collector_tasks pipeline → raw schema → reescribir los marts con `live_tables_by_table_pattern`. Effort: 2-3 hs por connector.
+- **DEBT-019-006 (PARTIAL 2026-05-09)**: 7 marts referenciaban `public.cache_*` legacy. Estado actualizado:
+  - ✅ `legisladores_argentina` v0.2.0 (2026-05-09): parte diputados migrada a `live_tables_by_table_pattern('diputados__bloques*', expected_columns=[BLOQUE, APELLIDO, NOMBRES, DISTRITO, PERIODO], require_all_columns=True)`. Rows pasaron de 116 → 584 (más versiones disponibles en raw). Senadores sigue en `cache_senado_listado_senadores` porque el connector senado todavía no escribe a raw — bloqueante de connector, no de mart.
+  - 🔴 6 marts pendientes: `autoridades_pen` (mapa_estado), `compras_publicas_bac` (bac), `decretos_presidenciales` (senado), `geografia_administrativa` (georef), `indicadores_provinciales` (datos_gob_ar parcial), `inflacion_argentina` (indec). Verificación 2026-05-09: ninguno de esos connectors escribe a raw todavía (`SELECT split_part(resource_identity,':',1) FROM raw_table_versions` no devuelve mapa_estado, bac, georef ni filas de senado/INDEC para esos slugs).
+  - Riesgo real: bajo. `cleanup_orphan_cache_tables` tiene safety net que parsea `mart_definitions.sql_definition` con regex y excluye las tablas referenciadas (`_mart_dependency_guards` en ops_fixes.py). Frágil contra cambios de macro signature, pero no se ha roto.
+  - Trade-offs vs migración: cache_* no tiene versionado (single-snapshot, sobrescritura on re-ingest), no tiene lineage cols (`_source_url`/`_source_file_hash`/`_parser_version`/`_collector_version`/`_ingested_at`), no permite rollback ni reproducir bugs históricos. Migración correcta requiere reescribir 6 connectors (2-3 hs c/u, total 12-18 hs). Backlog técnico racional, no urgente.
 - **DEBT-019-007 (Open, 2026-05-08)**: INDEC unpivot fix cubre time-pivoted layout (~14 tablas IPC/PIB/IPI), pero quedan ~9 tablas INDEC con otros bugs de parser:
   - DuplicateColumnError en `cache_indec_balance_pagos_fob_cif`, `cache_indec_turismo_*`, `cache_indec_pobreza_*`: cuadros con headers idénticos (3 cols todas se llaman "Total mensual" o "Período"). Necesita dedup post-parse antes del `to_sql`.
   - Headers degradados a `col_1`, `col_2`, `col_3` ... en ~6 tablas: la fila de headers reales no se detecta. Necesita mejorar `_detect_data_header_row` para cuadros INDEC con cell-merging extremo.

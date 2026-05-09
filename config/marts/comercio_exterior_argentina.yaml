@@ -1,0 +1,140 @@
+id: comercio_exterior_argentina
+version: 0.2.0
+description: |
+  Series mensuales de exportaciones FOB e importaciones CIF de bienes de
+  Argentina, desagregadas por clasificador de actividad. Cubre la
+  demanda recurrente del usuario en queries del tipo "exportaciones a
+  Rusia", "alícuotas de derechos de exportación a la soja", "balance
+  comercial".
+
+  Sources (Secretaría de Producción / datos.gob.ar):
+  - `produccion__exportaciones_de_bienes_valores_y_can*` (~610K filas,
+    cols: fecha, clae3, total_fob)
+  - `produccion__importaciones_de_bienes_valores_y_can*` (~757K filas,
+    cols: fecha, letra, total_cif)
+
+  El cluster upstream se publica en 4 niveles de granularidad para cada
+  flujo (`clae2`, `clae3`, `clae6`, `letra` — sección/rama/clase/letra
+  arancelaria). Este mart unifica todos bajo `(flujo, tipo_clasificador,
+  clasificador, fecha, monto)` para que el consumer filtre por el nivel
+  que necesite.
+
+  Para queries por destino/origen geográfico el dataset upstream NO
+  incluye país — eso requiere joinear contra `cache_*_exportaciones_fob_por_pais_y_region`
+  (no incluido acá; tracked como mart separado si demand sostiene).
+domain: economía
+
+sources:
+  portals: [produccion, datos_gob_ar]
+  resource_patterns:
+    - "produccion::*exportaciones_de_bienes_valores*"
+    - "produccion::*importaciones_de_bienes_valores*"
+    - "datos_gob_ar::*exportaciones_de_bienes_valores*"
+    - "datos_gob_ar::*importaciones_de_bienes_valores*"
+
+canonical_columns:
+  - name: flujo
+    type: text
+    description: '`exportacion` o `importacion`'
+  - name: tipo_clasificador
+    type: text
+    description: 'Nivel de granularidad: `clae2` / `clae3` / `clae6` / `letra`'
+  - name: clasificador
+    type: text
+    description: Código del clasificador (e.g. `011` clae3 = agricultura, `01` letra = animales vivos)
+  - name: fecha
+    type: text
+    description: Fecha de la observación (mensual)
+  - name: monto
+    type: text
+    description: Monto FOB (exportaciones) o CIF (importaciones) en millones de USD. Texto por compatibilidad con decimales argentinos.
+
+sql: |
+  -- Cubre los 4 niveles de granularidad del cluster, para cada flujo.
+  -- Cada UNION ALL sub-query usa `require_all_columns=True` para
+  -- matchear sólo las tablas con esa shape específica.
+  -- ============ EXPORTACIONES ============
+  SELECT 'exportacion'::text AS flujo, 'clae2'::text AS tipo_clasificador,
+         NULLIF(TRIM(clae2::text), '') AS clasificador,
+         NULLIF(TRIM(fecha::text), '') AS fecha,
+         NULLIF(TRIM(total_fob::text), '') AS monto
+  FROM {{ live_tables_by_table_pattern(
+      '*exportaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'clae2', 'total_fob'], require_all_columns=True
+  ) }} ex2
+  WHERE fecha IS NOT NULL AND clae2 IS NOT NULL
+  UNION ALL
+  SELECT 'exportacion', 'clae3',
+         NULLIF(TRIM(clae3::text), ''),
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(total_fob::text), '')
+  FROM {{ live_tables_by_table_pattern(
+      '*exportaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'clae3', 'total_fob'], require_all_columns=True
+  ) }} ex3
+  WHERE fecha IS NOT NULL AND clae3 IS NOT NULL
+  UNION ALL
+  SELECT 'exportacion', 'clae6',
+         NULLIF(TRIM(clae6::text), ''),
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(total_fob::text), '')
+  FROM {{ live_tables_by_table_pattern(
+      '*exportaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'clae6', 'total_fob'], require_all_columns=True
+  ) }} ex6
+  WHERE fecha IS NOT NULL AND clae6 IS NOT NULL
+  UNION ALL
+  SELECT 'exportacion', 'letra',
+         NULLIF(TRIM(letra::text), ''),
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(total_fob::text), '')
+  FROM {{ live_tables_by_table_pattern(
+      '*exportaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'letra', 'total_fob'], require_all_columns=True
+  ) }} exl
+  WHERE fecha IS NOT NULL AND letra IS NOT NULL
+  UNION ALL
+  -- ============ IMPORTACIONES ============
+  SELECT 'importacion', 'clae2',
+         NULLIF(TRIM(clae2::text), ''),
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(total_cif::text), '')
+  FROM {{ live_tables_by_table_pattern(
+      '*importaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'clae2', 'total_cif'], require_all_columns=True
+  ) }} im2
+  WHERE fecha IS NOT NULL AND clae2 IS NOT NULL
+  UNION ALL
+  SELECT 'importacion', 'clae3',
+         NULLIF(TRIM(clae3::text), ''),
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(total_cif::text), '')
+  FROM {{ live_tables_by_table_pattern(
+      '*importaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'clae3', 'total_cif'], require_all_columns=True
+  ) }} im3
+  WHERE fecha IS NOT NULL AND clae3 IS NOT NULL
+  UNION ALL
+  SELECT 'importacion', 'clae6',
+         NULLIF(TRIM(clae6::text), ''),
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(total_cif::text), '')
+  FROM {{ live_tables_by_table_pattern(
+      '*importaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'clae6', 'total_cif'], require_all_columns=True
+  ) }} im6
+  WHERE fecha IS NOT NULL AND clae6 IS NOT NULL
+  UNION ALL
+  SELECT 'importacion', 'letra',
+         NULLIF(TRIM(letra::text), ''),
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(total_cif::text), '')
+  FROM {{ live_tables_by_table_pattern(
+      '*importaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'letra', 'total_cif'], require_all_columns=True
+  ) }} iml
+  WHERE fecha IS NOT NULL AND letra IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

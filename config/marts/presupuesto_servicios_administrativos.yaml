@@ -1,0 +1,71 @@
+id: presupuesto_servicios_administrativos
+version: 0.1.0
+description: |
+  Catálogo de servicios administrativos del Presupuesto de la
+  Administración Pública Nacional, por ejercicio. Dimensión de
+  lookup que acompaña al mart `presupuesto_nacional_ejecutado`
+  (subshape de 5 cols del cluster: ejercicio, servicio_id,
+  servicio_desc, fecha_actualizacion).
+
+  Usar para joinear codigo→descripción de los servicios que
+  aparecen en queries de presupuesto, y para listar qué servicios
+  estuvieron operativos en cada ejercicio.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::*presupuesto_de_la_administracion_pu*"
+
+canonical_columns:
+  - name: ejercicio_presupuestario
+    type: text
+    description: Ejercicio fiscal (año)
+  - name: servicio_id
+    type: text
+    description: ID del servicio administrativo
+  - name: servicio_desc
+    type: text
+    description: Nombre del servicio
+  - name: ultima_actualizacion_fecha
+    type: text
+    description: Fecha de última actualización del registro upstream
+
+sql: |
+  -- Elegimos el snapshot más reciente por clave de negocio para evitar
+  -- fanout al joinear contra el fact si el mismo servicio reaparece con
+  -- distinta `ultima_actualizacion_fecha`.
+  WITH ranked AS (
+    SELECT
+      NULLIF(TRIM(ejercicio_presupuestario::text), '')   AS ejercicio_presupuestario,
+      NULLIF(TRIM(servicio_id::text), '')                AS servicio_id,
+      NULLIF(TRIM(servicio_desc), '')                    AS servicio_desc,
+      NULLIF(TRIM(ultima_actualizacion_fecha::text), '') AS ultima_actualizacion_fecha,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          NULLIF(TRIM(ejercicio_presupuestario::text), ''),
+          NULLIF(TRIM(servicio_id::text), '')
+        ORDER BY NULLIF(TRIM(ultima_actualizacion_fecha::text), '') DESC NULLS LAST
+      ) AS rn
+    FROM {{ live_tables_by_table_pattern(
+        'datos_gob_ar__presupuesto_de_la_administracion_pu*',
+        expected_columns=[
+          'ejercicio_presupuestario',
+          'servicio_id', 'servicio_desc',
+          'ultima_actualizacion_fecha'
+        ],
+        require_all_columns=True
+    ) }} sub
+    WHERE NULLIF(TRIM(servicio_id::text), '') IS NOT NULL
+  )
+  SELECT
+    ejercicio_presupuestario,
+    servicio_id,
+    servicio_desc,
+    ultima_actualizacion_fecha
+  FROM ranked
+  WHERE rn = 1
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

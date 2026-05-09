@@ -1,0 +1,93 @@
+id: pobreza_indec_aglomerados
+version: 0.1.0
+description: |
+  Indicadores semestrales de pobreza e indigencia en los 31 aglomerados
+  urbanos de Argentina, publicados por INDEC en su Informe Técnico
+  Pobreza. Cubre desde 2do semestre 2016 hasta 1er semestre 2025
+  (~19 períodos × 15 indicadores × 17 sub-cuadros).
+
+  Las tablas raw vienen TIME-PIVOTED (un período por columna). Este
+  mart hace UNPIVOT en SQL via `CROSS JOIN LATERAL VALUES` para
+  exponer formato long: (indicador, periodo, valor). Phase 5 del
+  parser hardening (DEBT-021-001) generaliza el unpivot pero solo
+  aplica a NUEVOS collects — las 17 versiones existentes mantienen el
+  shape pivoteado hasta su próximo refresh.
+
+  Indicadores típicos: hogares por debajo de la línea de pobreza /
+  indigencia, personas por debajo, tasa, brecha, severidad. Los nombres
+  exactos vienen de `Indicador` en cada fila.
+domain: economía
+
+sources:
+  portals: [indec]
+  resource_patterns:
+    - "indec::*pobreza_31_aglomerados*"
+
+canonical_columns:
+  - name: indicador
+    type: text
+    description: Nombre del indicador de pobreza/indigencia (`Indicador` en raw)
+  - name: periodo
+    type: text
+    description: Semestre del registro (e.g. `2do. semestre 2016`, `1er. semestre 2025`)
+  - name: valor
+    type: text
+    description: Valor publicado por INDEC para ese (indicador, período). Texto porque el upstream mezcla números y notas como `(1)` o `s/d`.
+
+sql: |
+  -- UNPIVOT explícito de los 19 períodos columna → fila.
+  -- `require_all_columns=True` filtra las tablas que no tienen el
+  -- shape full (algunas son sub-cuadros con menos períodos).
+  -- Los nombres tienen variantes ortográficas (`1er semestre 2020`
+  -- sin punto) que reflejan los headers del Excel original — los
+  -- preservamos AS-IS para auditabilidad.
+  WITH src AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        '*indec_informe_de_pobreza_31_aglomerados_ur*',
+        expected_columns=[
+          'Indicador',
+          '2do. semestre 2016',
+          '1er. semestre 2017', '2do. semestre 2017',
+          '1er. semestre 2018', '2do. semestre 2018',
+          '1er. semestre 2019', '2do. semestre 2019 (1)',
+          '1er semestre 2020', '2do. semestre 2020 (2)',
+          '1er. semestre 2021', '2do. semestre 2021',
+          '1er. semestre 2022', '2do. semestre 2022',
+          '1er. semestre 2023', '2do. semestre 2023',
+          '1er. semestre 2024', '2do semestre 2024',
+          '1er. semestre 2025'
+        ],
+        require_all_columns=True
+    ) }} sub
+  )
+  SELECT
+    NULLIF(TRIM("Indicador"), '')        AS indicador,
+    v.periodo                            AS periodo,
+    NULLIF(TRIM(v.valor::text), '')      AS valor
+  FROM src
+  CROSS JOIN LATERAL (VALUES
+    ('2do. semestre 2016',     src."2do. semestre 2016"),
+    ('1er. semestre 2017',     src."1er. semestre 2017"),
+    ('2do. semestre 2017',     src."2do. semestre 2017"),
+    ('1er. semestre 2018',     src."1er. semestre 2018"),
+    ('2do. semestre 2018',     src."2do. semestre 2018"),
+    ('1er. semestre 2019',     src."1er. semestre 2019"),
+    ('2do. semestre 2019',     src."2do. semestre 2019 (1)"),
+    ('1er. semestre 2020',     src."1er semestre 2020"),
+    ('2do. semestre 2020',     src."2do. semestre 2020 (2)"),
+    ('1er. semestre 2021',     src."1er. semestre 2021"),
+    ('2do. semestre 2021',     src."2do. semestre 2021"),
+    ('1er. semestre 2022',     src."1er. semestre 2022"),
+    ('2do. semestre 2022',     src."2do. semestre 2022"),
+    ('1er. semestre 2023',     src."1er. semestre 2023"),
+    ('2do. semestre 2023',     src."2do. semestre 2023"),
+    ('1er. semestre 2024',     src."1er. semestre 2024"),
+    ('2do. semestre 2024',     src."2do semestre 2024"),
+    ('1er. semestre 2025',     src."1er. semestre 2025")
+  ) AS v(periodo, valor)
+  WHERE NULLIF(TRIM("Indicador"), '') IS NOT NULL
+    AND NULLIF(TRIM(v.valor::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

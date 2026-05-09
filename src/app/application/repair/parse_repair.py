@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -518,10 +520,280 @@ def repair_col_n_table(
     return outcome
 
 
+# ---------- title_as_columns ----------
+#
+# Distinct from `col_N`: when the source Excel had a merged-cell TITLE row
+# (e.g. "LISTADO DE LLAMADOS DE LICITACIONES PUBLICAS - AÑO 2017"), pandas
+# took it as the header and dedupeed across columns with `_2.._N` suffixes.
+# The real headers (`N° L.P`, `EXPEDIENTE`, ...) sit in data row 1, with
+# row 0 typically all-NULL (separator).
+#
+# `propose_col_n_rename` does NOT detect this — it rejects on
+# `garbage_ratio_below_threshold` because the cols carry text (the title).
+# Hence this dedicated detector.
+
+
+_DIGIT_PREFIX_RE = re.compile(r"^\d")
+_ARROW_BAD_TOKENS_RE = re.compile(r"[°ª]")
+_ASCII_ALPHA_RE = re.compile(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]")
+
+
+def _normalize_header_to_identifier(raw: object) -> str:
+    """Turn a header value (any string-coercible) into a snake_case ident.
+
+    Strips accents, drops non-alphanumeric, collapses runs of `_`. Caps at
+    50 chars. Prefixes with `col_` if the result starts with a digit
+    (Postgres allows leading-digit identifiers only when quoted, and we
+    don't want to force every consumer to quote).
+    """
+    if raw is None:
+        return ""
+    s = str(raw).strip().lower()
+    s = _ARROW_BAD_TOKENS_RE.sub("", s)
+    table = str.maketrans("áàäéèëíìïóòöúùüñ", "aaaeeeiiioooouun")
+    s = s.translate(table)
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = s.strip("_")
+    if s and _DIGIT_PREFIX_RE.match(s):
+        s = "col_" + s
+    return s[:50]
+
+
+def _dedupe_identifiers(names: Iterable[str]) -> list[str]:
+    """Append `_2`, `_3`, ... to repeated names, preserving order. Empty
+    names become `col` (which then gets the dedup suffix if there are
+    multiple)."""
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for n in names:
+        base = n if n else "col"
+        if base in seen:
+            seen[base] += 1
+            out.append(f"{base}_{seen[base]}")
+        else:
+            seen[base] = 1
+            out.append(base)
+    return out
+
+
+def _common_prefix(strings: list[str]) -> str:
+    """Return the longest common prefix across `strings`, then trimmed of
+    trailing space/punctuation/digits. Used to detect the dedup-suffix
+    fingerprint of a title-as-columns table."""
+    if not strings:
+        return ""
+    pref = strings[0]
+    for s in strings[1:]:
+        common = 0
+        for a, b in zip(pref, s):
+            if a == b:
+                common += 1
+            else:
+                break
+        pref = pref[:common]
+        if not pref:
+            return ""
+    return pref.rstrip(" /-_0123456789")
+
+
+def propose_title_as_columns_rename(
+    old_cols: list[str],
+    sample_rows_data: list[list[Any]],
+    *,
+    min_cols: int = 30,
+    min_common_prefix_len: int = 20,
+    min_alpha_cells_in_header_row: int = 5,
+    null_ratio_separator: float = 0.7,
+) -> tuple[list[str], int, str]:
+    """Pure-function detector + proposer for the title-as-columns bug.
+
+    Returns `(new_cols, rows_to_delete, reason)`. `reason='applied'` means
+    the proposal is ready to apply; any other reason means skip with no
+    change.
+
+    Heuristic:
+      1. ≥80 % of the first 80 % of cols share a common prefix of length
+         ≥`min_common_prefix_len` (tail cols often hold URLs/UUIDs without
+         the prefix).
+      2. Sample row 0 is ≥`null_ratio_separator` NULL/empty.
+      3. Sample row 1 has ≥`min_alpha_cells_in_header_row` alpha-bearing
+         cells (the real headers).
+
+    All three must hold. The repair takes row 1 as the header source and
+    deletes 2 rows (separator + header).
+    """
+    n_cols = len(old_cols)
+    if n_cols < min_cols:
+        return old_cols, 0, "too_few_cols"
+    if not sample_rows_data or len(sample_rows_data) < 2:
+        return old_cols, 0, "not_enough_sample_rows"
+
+    business_cols = old_cols[: max(1, int(n_cols * 0.8))]
+    prefix = _common_prefix(business_cols)
+    if len(prefix) < min_common_prefix_len:
+        return old_cols, 0, "no_common_prefix"
+
+    row0 = sample_rows_data[0]
+    null_count = sum(1 for v in row0 if v is None or not str(v).strip())
+    if null_count < n_cols * null_ratio_separator:
+        return old_cols, 0, "row0_not_separator"
+
+    row1 = sample_rows_data[1]
+    alpha_count = sum(
+        1 for v in row1 if v is not None and _ASCII_ALPHA_RE.search(str(v))
+    )
+    if alpha_count < min_alpha_cells_in_header_row:
+        return old_cols, 0, "row1_not_header_like"
+
+    # Build the proposal: row 1 → header. Tail cols whose row 1 cell is
+    # empty fall back to `metadata_<i>` if the original looked like a URL
+    # or UUID, else `col_<i>`.
+    new_cols: list[str] = []
+    for i, (old, hdr_val) in enumerate(zip(old_cols, row1)):
+        new = _normalize_header_to_identifier(hdr_val) if hdr_val is not None else ""
+        if not new:
+            if "://" in old or (len(old) > 20 and "-" in old):
+                new = f"metadata_{i + 1}"
+            else:
+                new = f"col_{i + 1}"
+        new_cols.append(new)
+    new_cols = _dedupe_identifiers(new_cols)
+
+    if new_cols == old_cols:
+        return old_cols, 0, "no_renames_needed"
+
+    return new_cols, 2, "applied"
+
+
+def repair_title_as_columns_table(
+    engine: Engine,
+    *,
+    table_schema: str,
+    table_name: str,
+    run_id: uuid.UUID | None = None,
+    dry_run: bool = False,
+    sample_rows: int = 5,
+    min_cols: int = 30,
+    min_common_prefix_len: int = 20,
+) -> RepairOutcome:
+    """Repair a table that landed with the title-as-columns bug.
+
+    Strategy mirrors `repair_col_n_table` but uses
+    `propose_title_as_columns_rename` so the detector matches the
+    distinct fingerprint (long common prefix + NULL row 0 + header row 1).
+    Audited under `phase='title_as_columns'`.
+
+    `dry_run=True` records the proposal without DDL/DML.
+    """
+    run_id = run_id or uuid.uuid4()
+    outcome = RepairOutcome(
+        table_schema=table_schema,
+        table_name=table_name,
+        ok=False,
+        dry_run=dry_run,
+    )
+
+    with engine.connect() as conn:
+        cols_rows = conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = :s AND table_name = :t "
+                "ORDER BY ordinal_position"
+            ),
+            {"s": table_schema, "t": table_name},
+        ).fetchall()
+    old_cols = [r[0] for r in cols_rows]
+    outcome.old_columns = old_cols
+
+    if not old_cols:
+        outcome.reason = "table_not_found_or_no_columns"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="title_as_columns")
+        return outcome
+
+    qident_table = f"{_quote_ident(table_schema)}.{_quote_ident(table_name)}"
+    select_cols = ", ".join(_quote_ident(c) for c in old_cols)
+    with engine.connect() as conn:
+        sample = [
+            list(r)
+            for r in conn.execute(
+                text(f"SELECT {select_cols} FROM {qident_table} LIMIT :n"),
+                {"n": sample_rows},
+            ).fetchall()
+        ]
+
+    proposed_cols, rows_to_delete, reason = propose_title_as_columns_rename(
+        old_cols,
+        sample,
+        min_cols=min_cols,
+        min_common_prefix_len=min_common_prefix_len,
+    )
+    outcome.new_columns = proposed_cols
+    outcome.rows_deleted = rows_to_delete
+
+    if reason != "applied":
+        outcome.reason = reason
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="title_as_columns")
+        return outcome
+
+    if dry_run:
+        outcome.ok = True
+        outcome.reason = "dry_run_proposal"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="title_as_columns")
+        return outcome
+
+    rename_pairs = [
+        (old, new) for old, new in zip(old_cols, proposed_cols) if old != new
+    ]
+    try:
+        with engine.begin() as conn:
+            for old, new in rename_pairs:
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {qident_table} "
+                        f"RENAME COLUMN {_quote_ident(old)} TO {_quote_ident(new)}"
+                    )
+                )
+            if rows_to_delete > 0:
+                conn.execute(
+                    text(
+                        f"DELETE FROM {qident_table} WHERE ctid IN ("
+                        f"SELECT ctid FROM {qident_table} "
+                        f"ORDER BY ctid LIMIT :n)"
+                    ),
+                    {"n": rows_to_delete},
+                )
+        outcome.ok = True
+        outcome.reason = "applied"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="title_as_columns")
+        logger.info(
+            "parse_repair (title_as_columns): %s.%s renamed %d cols, "
+            "deleted %d rows",
+            table_schema,
+            table_name,
+            len(rename_pairs),
+            rows_to_delete,
+        )
+    except Exception as exc:
+        outcome.ok = False
+        outcome.error_message = f"{type(exc).__name__}: {exc!s}"[:500]
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="title_as_columns")
+        logger.exception(
+            "parse_repair (title_as_columns) failed for %s.%s",
+            table_schema,
+            table_name,
+        )
+
+    return outcome
+
+
 # Re-exported for callers (admin endpoint, future Celery task).
 __all__ = [
     "RepairOutcome",
     "list_col_n_candidates",
     "repair_col_n_table",
+    "repair_trailing_garbage_cols",
+    "repair_title_as_columns_table",
+    "propose_col_n_rename",
+    "propose_title_as_columns_rename",
     "is_garbage_column",
 ]

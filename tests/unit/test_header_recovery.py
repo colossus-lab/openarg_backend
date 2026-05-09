@@ -52,6 +52,23 @@ def test_find_data_start_row_text_only_returns_none():
     assert find_data_start_row(df) is None
 
 
+def test_find_data_start_row_skips_flat_year_axis():
+    """Femicidios pattern — row 0 is a flat list of distinct years that
+    should be treated as the column headers, not as data. The shape-2 path
+    in `_looks_like_year_header_row` must catch this even though distinct
+    count is high.
+    """
+    df = pd.DataFrame(
+        [
+            ["Año", "2023", "2022", "2021", "2020", "2019", "2018", "2017", "2016"],
+            ["femicidios", "13", "7", "15", "15", "5", "9", "7", "14"],
+        ]
+    )
+    # Row 0 is 8/9 years (89 %) — should be classified as header, not data.
+    # Data starts at row 1 (mixed text + numeric).
+    assert find_data_start_row(df) == 1
+
+
 def test_find_data_start_row_skips_year_header_row():
     """Year-only row (merged-cell propagation) must NOT count as data start.
 

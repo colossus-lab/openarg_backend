@@ -166,3 +166,92 @@ async def test_query_rejects_relation_mismatch() -> None:
 
     with pytest.raises(QueryResourceMismatchError):
         await adapter.query("raw::caba__padron__abcd1234__v1", "SELECT * FROM raw.otra_tabla")
+
+
+# ---------- DEBT-016-003 regression coverage ----------
+# Closing the three "dormant bugs" documented in spec 016 §8 DEBT-016-003.
+# Each test below pins the post-fix behaviour so a regression in the
+# adapter or the NL2SQL routing trips a unit failure.
+
+
+@pytest.mark.asyncio
+async def test_debt_016_003_bug1_legacy_layer_propagated() -> None:
+    """`query()` for a public/legacy resource MUST report `CACHE_LEGACY`,
+    NOT a hardcoded value. Pinned counterpart of the MART case in
+    `test_query_uses_resource_schema_layer`."""
+    row_cursor = SimpleNamespace(
+        fetchmany=lambda _n: [(42,)],
+        keys=lambda: ["valor"],
+    )
+    conn = AsyncMock()
+    conn.execute.side_effect = [None, row_cursor]
+    engine = MagicMock()
+    engine.connect.return_value.__aenter__.return_value = conn
+
+    adapter = LegacyServingAdapter(engine)
+    adapter._expected_relation_for_resource = AsyncMock(  # type: ignore[attr-defined]
+        return_value=("public", "cache_indec_ipc")
+    )
+    adapter.get_schema = AsyncMock(  # type: ignore[method-assign]
+        return_value=Schema(
+            columns=["valor"],
+            column_types={"valor": "integer"},
+            layer=ServingLayer.CACHE_LEGACY,
+        )
+    )
+
+    rows = await adapter.query(
+        "indec::ipc-aperturas",
+        "SELECT * FROM cache_indec_ipc",
+    )
+
+    assert rows.layer == ServingLayer.CACHE_LEGACY
+    assert rows.data == [[42]]
+
+
+@pytest.mark.asyncio
+async def test_debt_016_003_bug2_explain_mart_short_circuits() -> None:
+    """`explain('mart::<id>')` MUST branch to `mart_definitions` BEFORE
+    touching `catalog_resources`. Spec 016 originally raised
+    `ResourceNotFoundError` because it always queried catalog_resources
+    first — this test pins the fix.
+
+    Asserts the SQL fired against the engine references `mart_definitions`,
+    NOT `catalog_resources`.
+    """
+    captured_sqls: list[str] = []
+
+    async def _execute(stmt, *args, **kwargs):
+        captured_sqls.append(str(stmt))
+        return SimpleNamespace(
+            fetchone=lambda: SimpleNamespace(
+                mart_id="bcra_principales_indicadores",
+                description="BCRA",
+                domain="economia",
+                yaml_version="v0.1",
+                updated_at="2026-05-09",
+            )
+        )
+
+    conn = AsyncMock()
+    conn.execute = _execute
+    engine = MagicMock()
+    engine.connect.return_value.__aenter__.return_value = conn
+
+    adapter = LegacyServingAdapter(engine)
+    adapter.get_schema = AsyncMock(  # type: ignore[method-assign]
+        return_value=Schema(
+            columns=["valor"],
+            column_types={"valor": "integer"},
+            layer=ServingLayer.MART,
+        )
+    )
+
+    entry = await adapter.explain("mart::bcra_principales_indicadores")
+
+    assert entry.resource.layer == ServingLayer.MART
+    assert any("mart_definitions" in s for s in captured_sqls), captured_sqls
+    assert not any("catalog_resources" in s for s in captured_sqls), (
+        "explain(mart::*) leaked into catalog_resources — DEBT-016-003 "
+        "regression"
+    )

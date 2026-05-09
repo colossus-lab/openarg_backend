@@ -1,5 +1,5 @@
 id: legisladores_argentina
-version: 0.1.0
+version: 0.2.0
 description: |
   Legisladores del Congreso Nacional argentino — diputados y senadores
   con su bloque, distrito/provincia y partido. Sources: Cámara de
@@ -20,10 +20,9 @@ domain: gobierno
 
 sources:
   portals: [diputados, senado]
-  resource_patterns: [
-    "public.cache_diputados_bloques_ra29b60683e",
-    "public.cache_senado_listado_senadores"
-  ]
+  resource_patterns:
+    - "diputados::*bloques*"
+    - "public.cache_senado_listado_senadores"
 
 canonical_columns:
   - name: camara
@@ -49,19 +48,26 @@ canonical_columns:
     description: Período legislativo (sólo populated para diputados)
 
 # UNION ALL canonicaliza nombres distintos entre las 2 fuentes.
-# Senadores no tiene PERIODO (su mandato es de 6 años), diputados no
-# tiene PARTIDO_O_ALIANZA explícito (BLOQUE cubre ambos).
+# v0.2.0: diputados migrado de `cache_*` a `raw.*` via macro
+# (DEBT-019-006). El raw usa col `NOMBRES` (plural) y carece de
+# `INTERBLOQUE` — partido_o_alianza queda NULL para diputados.
+# Senadores sigue en cache_* (no hay equivalente raw aún —
+# requiere migración del connector).
 sql: |
   SELECT
     'diputados'::text                            AS camara,
-    NULLIF(TRIM("APELLIDO"), '')                 AS apellido,
-    NULLIF(TRIM("NOMBRE"), '')                   AS nombre,
-    NULLIF(TRIM("DISTRITO"), '')                 AS distrito_provincia,
-    NULLIF(TRIM("BLOQUE"), '')                   AS bloque,
-    NULLIF(TRIM("INTERBLOQUE"), '')              AS partido_o_alianza,
-    NULLIF(TRIM("PERIODO"), '')                  AS periodo
-  FROM public.cache_diputados_bloques_ra29b60683e
-  WHERE NULLIF(TRIM("APELLIDO"), '') IS NOT NULL
+    NULLIF(TRIM("APELLIDO"::text), '')           AS apellido,
+    NULLIF(TRIM("NOMBRES"::text), '')            AS nombre,
+    NULLIF(TRIM("DISTRITO"::text), '')           AS distrito_provincia,
+    NULLIF(TRIM("BLOQUE"::text), '')             AS bloque,
+    NULL::text                                   AS partido_o_alianza,
+    NULLIF(TRIM("PERIODO"::text), '')            AS periodo
+  FROM {{ live_tables_by_table_pattern(
+      'diputados__bloques*',
+      expected_columns=['BLOQUE', 'APELLIDO', 'NOMBRES', 'DISTRITO', 'PERIODO'],
+      require_all_columns=True
+  ) }} sub_dip
+  WHERE NULLIF(TRIM("APELLIDO"::text), '') IS NOT NULL
 
   UNION ALL
 

@@ -1851,7 +1851,21 @@ def _parse_zip_archive(
                             df = pd.json_normalize(raw_j[k])
                             break
                     else:
-                        df = pd.json_normalize([raw_j])
+                        best_key = None
+                        best_len = 0
+                        for k, v in raw_j.items():
+                            if (
+                                isinstance(v, list)
+                                and v
+                                and isinstance(v[0], dict)
+                                and len(v) > best_len
+                            ):
+                                best_key = k
+                                best_len = len(v)
+                        if best_key is not None:
+                            df = pd.json_normalize(raw_j[best_key])
+                        else:
+                            df = pd.json_normalize([raw_j])
                 else:
                     continue
             if len(df) > MAX_TABLE_ROWS:
@@ -6168,7 +6182,26 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                         df = pd.json_normalize(raw[key])
                                         break
                                 else:
-                                    df = pd.json_normalize([raw])
+                                    # Fallback: pick the largest list-of-dicts
+                                    # value (georef API: provincias / municipios
+                                    # / localidades / asentamientos; INDEC and
+                                    # other portals use ad-hoc wrapper keys
+                                    # outside the standard list above).
+                                    best_key = None
+                                    best_len = 0
+                                    for k, v in raw.items():
+                                        if (
+                                            isinstance(v, list)
+                                            and v
+                                            and isinstance(v[0], dict)
+                                            and len(v) > best_len
+                                        ):
+                                            best_key = k
+                                            best_len = len(v)
+                                    if best_key is not None:
+                                        df = pd.json_normalize(raw[best_key])
+                                    else:
+                                        df = pd.json_normalize([raw])
                             else:
                                 raise
                     if len(df) > MAX_TABLE_ROWS:

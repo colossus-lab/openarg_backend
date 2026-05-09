@@ -87,7 +87,7 @@ Current implementation. Lives at `app.infrastructure.adapters.serving.legacy_ser
 
 ## 8. Tech Debt
 
-- **DEBT-016-001**: `LegacyServingAdapter.discover()` and `_get_mart_schema()` use lexical ILIKE. Vector search should be wired once `catalog_resources.embedding` and `mart_definitions.embedding` reach >50% coverage in production. **Update 2026-05-05**: `mart_definitions.embedding` is now 6/6 populated (Sprint 0.2 backfill); `catalog_resources.embedding` ≈7%. Vector discovery for marts is the next natural step.
+- **DEBT-016-001**: `LegacyServingAdapter.discover()` and `_get_mart_schema()` use lexical ILIKE. Vector search should be wired once `catalog_resources.embedding` and `mart_definitions.embedding` reach >50% coverage in production. **Update 2026-05-09**: `mart_definitions.embedding` is now 47/47 marts populated (every successful build re-computes via `_upsert_mart_definition`); `catalog_resources.embedding` ≈50.5% (12,995 / 25,755). Both layers are over the 50% threshold — wiring HNSW into `discover()` is unblocked and the next natural step.
 - **DEBT-016-002**: `query()` enforces read-only via regex. A more principled implementation would use a parsing-grade SQL validator (sqlglot is already a dep). Today's regex is good enough for the cases the pipeline produces, but a future user with raw SQL access should not rely on it.
 - **DEBT-016-003** (CLOSED 2026-05-09 audit): the three dormant bugs are no longer present in the implementation. Verified line-by-line:
   1. `query()` returns `Rows(..., layer=schema.layer)` (adapter:468), where `schema` comes from `get_schema(resource_id)` whose prefix branches return the correct `Schema(layer=...)` for `mart::*` (`MART`) and `raw::*` (`RAW`). `_layer_for_schema` (adapter:72-79) maps every Postgres schema correctly.
@@ -95,5 +95,10 @@ Current implementation. Lives at `app.infrastructure.adapters.serving.legacy_ser
   3. `nl2sql._execute_sql_with_best_backend` (nl2sql.py:307-346) detects `mart.*` / `raw.*` qualified SQL via `_resource_id_for_query` and routes through `ServingResolver(serving_port).query()`. The `sandbox.execute_readonly()` fall-through only fires for legacy unqualified `cache_*` SQL — by design, since those resources have no medallion equivalent yet.
 
   The original audit was correct at the time it was written; the cleanup happened during the medallion rollout sprints. Kept here as a record.
+
+  **Regression tests added 2026-05-09** (`tests/unit/test_serving_adapter_qualified_names.py`):
+  - `test_debt_016_003_bug1_legacy_layer_propagated` — pins `query()` returning `CACHE_LEGACY` for legacy resources (counterpart of the existing `test_query_uses_resource_schema_layer` MART case).
+  - `test_debt_016_003_bug2_explain_mart_short_circuits` — captures the SQLs fired against the engine and asserts `mart_definitions` is queried but `catalog_resources` is NOT touched for `mart::*` resources.
+  - Bug 3 is already covered by `test_explicit_mart_query_uses_serving_port` and `test_explicit_raw_query_uses_serving_port` in `test_nl2sql_subgraph.py`.
 
 - **DEBT-016-004** (Sprint 0.5): `_mart_semantic_block` heuristic now accepts three planner-emitted forms — bare `mart_id`, `mart::<id>`, and qualified `mart.<view>`. The earlier `if "." not in tn` shortcut silently skipped the qualified form. Mentioned here so the next refactor of the planner emission contract is aware that all three shapes must keep resolving.

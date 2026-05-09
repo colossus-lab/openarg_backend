@@ -1,0 +1,92 @@
+id: magyp_cultivos_principales
+version: 0.1.0
+description: |
+  Estadísticas de siembra, cosecha, producción y rendimiento por
+  campaña agrícola para los principales cultivos de Argentina (soja,
+  maíz, trigo, cebada, girasol, sorgo, avena, centeno, mijo, maní,
+  arroz, lino, té, poroto). Datos del Ministerio de Agricultura,
+  Ganadería y Pesca (MAGyP) publicados en datos.gob.ar.
+
+  Source: `magyp::*_siembra_cosecha_produccion_rendimiento*` (17 tablas
+  con shape canónico de 12 cols, una tabla por cultivo). El campo
+  `cultivo` ya viene en el raw — el mart simplemente UNIFICA todos
+  los cultivos bajo una vista común con la misma granularidad
+  (campaña × provincia × departamento).
+
+  Cubre la demanda recurrente del usuario "estimaciones agrícolas",
+  "soja por provincia", "rendimiento del maíz", etc.
+domain: economía
+
+sources:
+  portals: [magyp]
+  resource_patterns:
+    - "magyp::*siembra_cosecha_produccion_rendimi*"
+
+canonical_columns:
+  - name: cultivo
+    type: text
+    description: Nombre del cultivo (`soja`, `maiz`, `trigo`, `girasol`, etc.)
+  - name: anio
+    type: text
+    description: Año de la observación
+  - name: campania
+    type: text
+    description: Identificador de la campaña agrícola (e.g. `2023/24`)
+  - name: provincia
+    type: text
+    description: Provincia
+  - name: provincia_id
+    type: text
+    description: ID provincia (estándar GeoRef)
+  - name: departamento
+    type: text
+    description: Departamento dentro de la provincia
+  - name: departamento_id
+    type: text
+    description: ID departamento
+  - name: superficie_sembrada_ha
+    type: text
+    description: Superficie sembrada en hectáreas
+  - name: superficie_cosechada_ha
+    type: text
+    description: Superficie cosechada en hectáreas
+  - name: produccion_tm
+    type: text
+    description: Producción en toneladas métricas
+  - name: rendimiento_kgxha
+    type: text
+    description: Rendimiento en kg por hectárea
+
+sql: |
+  -- `require_all_columns=True` filtra a las 17 tablas con shape FULL
+  -- (12 cols). Las otras del cluster con menos cols son sub-shapes
+  -- regionales sin departamento.
+  SELECT
+    NULLIF(TRIM(cultivo::text), '')              AS cultivo,
+    NULLIF(TRIM(anio::text), '')                 AS anio,
+    NULLIF(TRIM(campania::text), '')             AS campania,
+    NULLIF(TRIM(provincia::text), '')            AS provincia,
+    NULLIF(TRIM(provincia_id::text), '')         AS provincia_id,
+    NULLIF(TRIM(departamento::text), '')         AS departamento,
+    NULLIF(TRIM(departamento_id::text), '')      AS departamento_id,
+    NULLIF(TRIM(superficie_sembrada_ha::text), '')   AS superficie_sembrada_ha,
+    NULLIF(TRIM(superficie_cosechada_ha::text), '')  AS superficie_cosechada_ha,
+    NULLIF(TRIM(produccion_tm::text), '')        AS produccion_tm,
+    NULLIF(TRIM(rendimiento_kgxha::text), '')    AS rendimiento_kgxha
+  FROM {{ live_tables_by_table_pattern(
+      'magyp__*_siembra_cosecha_produccion_rendimi*',
+      expected_columns=[
+        'cultivo', 'anio', 'campania',
+        'provincia', 'provincia_id',
+        'departamento', 'departamento_id',
+        'superficie_sembrada_ha', 'superficie_cosechada_ha',
+        'produccion_tm', 'rendimiento_kgxha'
+      ],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(cultivo::text), '') IS NOT NULL
+    AND NULLIF(TRIM(anio::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

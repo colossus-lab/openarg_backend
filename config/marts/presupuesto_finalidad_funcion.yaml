@@ -1,0 +1,83 @@
+id: presupuesto_finalidad_funcion
+version: 0.1.0
+description: |
+  Catálogo de Finalidad / Función del Presupuesto de la Administración
+  Pública Nacional, por ejercicio. Dimensión de lookup que clasifica
+  el gasto por finalidad (Educación, Salud, Defensa, etc.) y función
+  (subnivel temático). Subshape de 7 cols del cluster:
+  ejercicio + finalidad_id/desc + funcion_id/desc + meta.
+
+  Usar para queries como "qué finalidades se presupuestaron en 2023",
+  "función X en el ejercicio Y", y para joinear finalidad/función
+  contra el fact `presupuesto_nacional_ejecutado`.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::*presupuesto_de_la_administracion_pu*"
+
+canonical_columns:
+  - name: ejercicio_presupuestario
+    type: text
+    description: Ejercicio fiscal (año)
+  - name: finalidad_id
+    type: text
+    description: ID de la finalidad (Educación=3, Salud=2, etc.)
+  - name: finalidad_desc
+    type: text
+    description: Nombre de la finalidad
+  - name: funcion_id
+    type: text
+    description: ID de la función dentro de la finalidad
+  - name: funcion_desc
+    type: text
+    description: Nombre de la función
+  - name: ultima_actualizacion_fecha
+    type: text
+    description: Fecha de última actualización del registro upstream
+
+sql: |
+  -- Elegimos el snapshot más reciente por clave de negocio para evitar
+  -- fanout al joinear contra el fact si la misma finalidad/función
+  -- reaparece con distinta `ultima_actualizacion_fecha`.
+  WITH ranked AS (
+    SELECT
+      NULLIF(TRIM(ejercicio_presupuestario::text), '')   AS ejercicio_presupuestario,
+      NULLIF(TRIM(finalidad_id::text), '')               AS finalidad_id,
+      NULLIF(TRIM(finalidad_desc), '')                   AS finalidad_desc,
+      NULLIF(TRIM(funcion_id::text), '')                 AS funcion_id,
+      NULLIF(TRIM(funcion_desc), '')                     AS funcion_desc,
+      NULLIF(TRIM(ultima_actualizacion_fecha::text), '') AS ultima_actualizacion_fecha,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          NULLIF(TRIM(ejercicio_presupuestario::text), ''),
+          NULLIF(TRIM(finalidad_id::text), ''),
+          NULLIF(TRIM(funcion_id::text), '')
+        ORDER BY NULLIF(TRIM(ultima_actualizacion_fecha::text), '') DESC NULLS LAST
+      ) AS rn
+    FROM {{ live_tables_by_table_pattern(
+        'datos_gob_ar__presupuesto_de_la_administracion_pu*',
+        expected_columns=[
+          'ejercicio_presupuestario',
+          'finalidad_id', 'finalidad_desc',
+          'funcion_id', 'funcion_desc',
+          'ultima_actualizacion_fecha'
+        ],
+        require_all_columns=True
+    ) }} sub
+    WHERE NULLIF(TRIM(finalidad_id::text), '') IS NOT NULL
+  )
+  SELECT
+    ejercicio_presupuestario,
+    finalidad_id,
+    finalidad_desc,
+    funcion_id,
+    funcion_desc,
+    ultima_actualizacion_fecha
+  FROM ranked
+  WHERE rn = 1
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

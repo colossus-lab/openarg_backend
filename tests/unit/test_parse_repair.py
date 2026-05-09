@@ -10,7 +10,10 @@ Specs/021-parser-hardening Phase 2.
 
 from __future__ import annotations
 
-from app.application.repair.parse_repair import propose_col_n_rename
+from app.application.repair.parse_repair import (
+    propose_col_n_rename,
+    propose_title_as_columns_rename,
+)
 
 
 def test_propose_simple_buried_header():
@@ -106,3 +109,102 @@ def test_propose_threshold_below_skips():
     new_cols, _, reason = propose_col_n_rename(old_cols, sample_rows)
     assert reason == "garbage_ratio_below_threshold"
     assert new_cols == old_cols
+
+
+# ---------- title_as_columns ----------
+
+
+def _pami_like_cols(n: int = 36) -> list[str]:
+    """Reproduce the PAMI fingerprint: long shared title + dedup suffix.
+    The last few cols differ (URL/UUID/date) — same as real-world."""
+    base = "LISTADO DE LLAMADOS DE LICITACIONES PUBLICAS - AÑO 2017 / Gcia"
+    business = [base if i == 0 else f"{base[:55]}_{i + 1}" for i in range(n - 5)]
+    tail = [
+        "095f8efe-1400-44a2-9bf4-4e025f094027",
+        "http://datos.pami.org.ar/dataset/abc",
+        "http://datos.pami.org.ar/dataset/def_2",
+        "http://datos.pami.org.ar/dataset/ghi_3",
+        "2026-05-04",
+    ]
+    return business + tail
+
+
+def test_propose_title_as_columns_pami_pattern():
+    """Real-world PAMI fingerprint → applies, deletes 2 rows, semantic names."""
+    old_cols = _pami_like_cols(36)
+    sample = [
+        [None] * 36,  # row 0: separator
+        # row 1: real headers
+        [
+            "N° L.P", "EXPEDIENTE", "OBJETO", "DESTINO", "FECHA DE APERTURA",
+            "ESTADO", "RUBRO", "PLAZO DE CONTRATO",
+        ] + ["headercol"] * 23 + [None, None, None, None, None],
+        ["1", "EX-001", "Servicio X", "GESP", "2020-01-01", "ADJUDICADO",
+         "BIENES", "30 días"] + ["x"] * 23 + ["data1", "data2", "data3", "data4", "data5"],
+    ]
+    new_cols, rows_to_delete, reason = propose_title_as_columns_rename(
+        old_cols, sample
+    )
+    assert reason == "applied"
+    assert rows_to_delete == 2
+    # First col 'N° L.P' becomes a normalized identifier
+    assert new_cols[0] == "n_l_p"
+    assert new_cols[1] == "expediente"
+    assert new_cols[2] == "objeto"
+    # Tail cells with NULL row1 + URL-looking original → metadata_<i>
+    assert new_cols[-5].startswith("metadata_") or new_cols[-5].startswith("col_")
+    # Date string starting with digit gets `col_` prefix
+    assert all(not c[0].isdigit() for c in new_cols)
+
+
+def test_propose_title_skips_too_few_cols():
+    """Below `min_cols` threshold (default 30) → skip."""
+    old_cols = ["a"] * 10
+    sample = [[None] * 10, ["x"] * 10]
+    _, _, reason = propose_title_as_columns_rename(old_cols, sample)
+    assert reason == "too_few_cols"
+
+
+def test_propose_title_skips_no_common_prefix():
+    """Cols without shared prefix → skip (not the pattern)."""
+    old_cols = ["alpha", "beta", "gamma", "delta", "epsilon"] * 7
+    sample = [[None] * 35, ["x"] * 35]
+    _, _, reason = propose_title_as_columns_rename(old_cols, sample)
+    assert reason == "no_common_prefix"
+
+
+def test_propose_title_skips_when_row0_has_data():
+    """Row 0 not mostly NULL → not the title-as-columns pattern."""
+    old_cols = _pami_like_cols(36)
+    sample = [
+        ["data"] * 36,  # row 0 has data — not a separator
+        ["EXPEDIENTE", "OBJETO"] + ["x"] * 34,
+    ]
+    _, _, reason = propose_title_as_columns_rename(old_cols, sample)
+    assert reason == "row0_not_separator"
+
+
+def test_propose_title_skips_when_row1_has_no_alpha():
+    """Row 1 mostly numeric → not headers."""
+    old_cols = _pami_like_cols(36)
+    sample = [
+        [None] * 36,
+        ["1", "2", "3", "4"] + [None] * 32,  # only 4 cells, no alpha
+    ]
+    _, _, reason = propose_title_as_columns_rename(old_cols, sample)
+    assert reason == "row1_not_header_like"
+
+
+def test_propose_title_dedupes_repeated_headers():
+    """If row 1 has duplicate header values, emit `_2, _3, ...`."""
+    old_cols = _pami_like_cols(36)
+    sample = [
+        [None] * 36,
+        ["estado", "estado", "estado"] + ["filler"] * 28 + [None] * 5,
+        ["adj", "adj", "adj"] + ["x"] * 28 + ["d"] * 5,
+    ]
+    new_cols, _, reason = propose_title_as_columns_rename(old_cols, sample)
+    assert reason == "applied"
+    assert new_cols[0] == "estado"
+    assert new_cols[1] == "estado_2"
+    assert new_cols[2] == "estado_3"

@@ -73,6 +73,23 @@ def _candidate_debug_summary(candidates: list[Any], *, limit: int = 5) -> list[s
     return summary
 
 
+def _planner_hint_label(candidate: Any) -> str:
+    """Render a planner-facing identifier.
+
+    Marts already expose a canonical title (`mart_id`) that the planner can
+    reuse directly. For raw/staging hits from the Serving Port, prefer the
+    exact resource identifier and keep the human title only as extra context.
+    """
+    title = str(getattr(candidate, "title", "") or "")
+    resource_id = str(getattr(candidate, "resource_id", "") or "")
+    layer = str(getattr(candidate, "layer", "") or "")
+    if layer == "mart":
+        return title or resource_id
+    if resource_id and title and title != resource_id:
+        return f"{resource_id} ({title})"
+    return resource_id or title
+
+
 async def _maybe_rerank_planner_candidates(
     *,
     query: str,
@@ -613,7 +630,7 @@ async def _serving_port_planner_hints(
     if "mart" in by_layer:
         lines.append("MARTS DISPONIBLES (vistas semánticas curadas, preferí estas):")
         for c in by_layer["mart"]:
-            lines.append(f"  - {c.title}")
+            lines.append(f"  - {_planner_hint_label(c)}")
         lines.append(
             "Para una mart, usá query_sandbox con el nombre canónico de la vista."
         )
@@ -622,13 +639,19 @@ async def _serving_port_planner_hints(
         lines.append("")
         lines.append("STAGING (datasets validados por contracts):")
         for c in by_layer["staging"]:
-            lines.append(f"  - {c.title}")
+            lines.append(f"  - {_planner_hint_label(c)}")
+        lines.append(
+            "Para staging, preservá el identificador exacto mostrado si necesitás referenciar el recurso."
+        )
 
     if "raw" in by_layer:
         lines.append("")
         lines.append("RAW DISPONIBLE (tablas materializadas crudas, usar si no hay mart):")
         for c in by_layer["raw"]:
-            lines.append(f"  - {c.title}")
+            lines.append(f"  - {_planner_hint_label(c)}")
+        lines.append(
+            "Para raw, preservá el identificador exacto mostrado si necesitás referenciar el recurso."
+        )
 
     return "\n".join(lines)
 

@@ -1,0 +1,119 @@
+id: bcra_principales_indicadores
+version: 0.1.0
+description: |
+  Series temporales de los principales indicadores monetarios del Banco
+  Central de la República Argentina (BCRA): reservas internacionales,
+  pasivos monetarios y un subconjunto curado de tasas de interés
+  minoristas/activas (cajas de ahorro, plazo fijo, BADLAR y tasas
+  activas para préstamos).
+
+  Cubre la demanda recurrente del usuario "Mostrame la evolución de las
+  reservas del BCRA" (7+ veces en producción) y "como se ha emitido
+  dinero". UNPIVOT manual de los wide-format raws a long-format
+  `(categoria, indicador, fecha, valor)` para que cada serie sea una
+  curva independiente.
+
+  Sources:
+  - `datos_gob_ar::*reservas_internacionales_y_pasivos*` (12 cols útiles,
+    11 series: reservas_dolares + 10 sub-categorías de
+    pasivos/posiciones)
+  - `datos_gob_ar::*principales_tasas_de_interes*` (11 cols útiles,
+    10 tasas: cajas de ahorro, plazo fijo, call, BADLAR y tasas activas)
+domain: economía
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::*reservas_internacionales_y_pasivos*"
+    - "datos_gob_ar::*principales_tasas_de_interes*"
+
+canonical_columns:
+  - name: categoria
+    type: text
+    description: '`reservas_y_pasivos` o `tasas_de_interes` — agrupa la serie'
+  - name: indicador
+    type: text
+    description: Nombre canónico de la serie (e.g. `reservas_internacionales_dolares`, `badlar`, `activas_personales`)
+  - name: fecha
+    type: text
+    description: Fecha de la observación (`indice_tiempo` en raw)
+  - name: valor
+    type: text
+    description: Valor publicado por BCRA. Texto porque mezcla decimales argentinos y nulos.
+
+sql: |
+  -- UNPIVOT explícito de reservas (11 series) + tasas (10 series) a long.
+  -- Cada serie se proyecta como una row por fecha. El consumer suele
+  -- WHERE indicador='reservas_internacionales_dolares' AND fecha BETWEEN ...
+  WITH reservas AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'datos_gob_ar__reservas_internacionales_y_pasivos*',
+        expected_columns=[
+          'indice_tiempo', 'reservas_internacionales_dolares', 'pasivos_monetarios',
+          'pasivos_monetarios_letras_pesos', 'pasivos_monetarios_letras_dolares',
+          'letras_liquidez_saldo_pesos', 'posicion_neta_pases',
+          'otros_depositos_gobierno', 'redescuentos_adelantos_iliquidez',
+          'tipo_cambio_valuacion', 'pos_neta_det_des_pases_pasivos',
+          'pos_neta_det_des_pases_activos'
+        ],
+        require_all_columns=True
+    ) }} sub_r
+  ), tasas AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'datos_gob_ar__principales_tasas_de_interes*',
+        expected_columns=[
+          'indice_tiempo', 'tasas_interes_cajas_ahorro',
+          'tasas_interes_plazo_fijo_30_59_dias', 'tasas_interes_plazo_fijo_mas_60_dias',
+          'tasas_interes_call', 'tasas_interes_badlar',
+          'tasas_interes_activas_adelantos', 'tasas_interes_activas_documentos',
+          'tasas_interes_activas_hipotecarios', 'tasas_interes_activas_prendarios',
+          'tasas_interes_activas_personales'
+        ],
+        require_all_columns=True
+    ) }} sub_t
+  )
+  SELECT * FROM (
+    SELECT
+      'reservas_y_pasivos'::text       AS categoria,
+      v.indicador                      AS indicador,
+      NULLIF(TRIM(indice_tiempo::text), '') AS fecha,
+      NULLIF(TRIM(v.valor::text), '')       AS valor
+    FROM reservas
+    CROSS JOIN LATERAL (VALUES
+      ('reservas_internacionales_dolares',   reservas_internacionales_dolares),
+      ('pasivos_monetarios',                 pasivos_monetarios),
+      ('pasivos_monetarios_letras_pesos',    pasivos_monetarios_letras_pesos),
+      ('pasivos_monetarios_letras_dolares',  pasivos_monetarios_letras_dolares),
+      ('letras_liquidez_saldo_pesos',        letras_liquidez_saldo_pesos),
+      ('posicion_neta_pases',                posicion_neta_pases),
+      ('otros_depositos_gobierno',           otros_depositos_gobierno),
+      ('redescuentos_adelantos_iliquidez',   redescuentos_adelantos_iliquidez),
+      ('tipo_cambio_valuacion',              tipo_cambio_valuacion),
+      ('pos_neta_det_des_pases_pasivos',     pos_neta_det_des_pases_pasivos),
+      ('pos_neta_det_des_pases_activos',     pos_neta_det_des_pases_activos)
+    ) AS v(indicador, valor)
+    UNION ALL
+    SELECT
+      'tasas_de_interes'::text         AS categoria,
+      v.indicador                      AS indicador,
+      NULLIF(TRIM(indice_tiempo::text), '') AS fecha,
+      NULLIF(TRIM(v.valor::text), '')       AS valor
+    FROM tasas
+    CROSS JOIN LATERAL (VALUES
+      ('cajas_ahorro',                       tasas_interes_cajas_ahorro),
+      ('plazo_fijo_30_59_dias',              tasas_interes_plazo_fijo_30_59_dias),
+      ('plazo_fijo_mas_60_dias',             tasas_interes_plazo_fijo_mas_60_dias),
+      ('call',                               tasas_interes_call),
+      ('badlar',                             tasas_interes_badlar),
+      ('activas_adelantos',                  tasas_interes_activas_adelantos),
+      ('activas_documentos',                 tasas_interes_activas_documentos),
+      ('activas_hipotecarios',               tasas_interes_activas_hipotecarios),
+      ('activas_prendarios',                 tasas_interes_activas_prendarios),
+      ('activas_personales',                 tasas_interes_activas_personales)
+    ) AS v(indicador, valor)
+  ) combined
+  WHERE valor IS NOT NULL AND fecha IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

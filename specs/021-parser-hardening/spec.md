@@ -1,6 +1,6 @@
 # 021 — Parser Hardening & Schema Recovery
 
-**Status**: In progress (started 2026-05-08)
+**Status**: In progress (started 2026-05-08, expanded 2026-05-09 with title_as_columns repair)
 **Depends on**: 002-connectors, 006b-ingestion, 010-collector-tasks, 015-catalog-resources
 
 ## 1. Problem
@@ -206,6 +206,32 @@ All operations are recorded in `parse_repair_audit` for reversibility.
     AND whose contents are >99 % empty over a 5k-row sample.
   - **99 trailing_garbage applies** on staging, ~3,400 columns dropped.
 
+**Phase 2.d — title-as-columns repair (2026-05-09)**
+  - New repair function `repair_title_as_columns_table` +
+    `propose_title_as_columns_rename` (pure) in
+    `src/app/application/repair/parse_repair.py`.
+  - Detects a distinct fingerprint from `col_N`: when ≥30 cols share a
+    common prefix ≥20 chars (dedup of a merged-cell title row), row 0
+    is mostly NULL (separator), row 1 has ≥5 alpha-bearing cells (real
+    headers). Heuristic captures the case where pandas read the merged
+    Excel title row as the header.
+  - `propose_col_n_rename` rejects this fingerprint with
+    `garbage_ratio_below_threshold` (the cols carry text, not
+    `col_N` placeholders), so it needed a dedicated detector.
+  - Helpers reused across both repairs: `_normalize_header_to_identifier`
+    (snake_case + accent strip + leading-digit `col_` prefix),
+    `_dedupe_identifiers` (`_2, _3, ...` suffixes), `_common_prefix`
+    (longest common prefix trimmed of digits/whitespace).
+  - Audited under `phase='title_as_columns'`, same `parse_repair_audit`
+    table.
+  - **13 PAMI tables repaired** (`pami__compras_y_contrataciones_de_nivel_central_2*`):
+    cols `LISTADO DE LLAMADOS DE LICITACIONES PUBLICAS - AÑO XXXX / Gc_2..._31`
+    → `n_l_p / expediente / objeto / destino / ...`. Unblocked
+    `mart.pami_compras_publicas` (409 rows shipped 2026-05-09).
+  - 6 unit tests in `tests/unit/test_parse_repair.py`: pami pattern,
+    too_few_cols, no_common_prefix, row0_not_separator,
+    row1_not_header_like, dedupe collision.
+
 **Phase 3 — PDF parser (same commit)**
   - `pdfplumber>=0.11.0` added. New `parsers/pdf.py`.
   - `%PDF-` magic-byte detection + `.pdf` URL ext → `fmt == "pdf"`
@@ -242,11 +268,18 @@ same window)**
   `OPENARG_GENERIC_UNPIVOT` env flag (default ON) gives ops a kill
   switch without redeploy. Verified active on worker-collector via
   smoke test.
-- **DEBT-021-002 — Long tail not recoverable by heuristic**: ~76 % of
+- **DEBT-021-002 — Long tail not recoverable by `col_N` heuristic** (PARTIAL 2026-05-09): ~76 % of
   candidate tables ship with `no_improvement` from
   `propose_col_n_rename`. Their structures are genuinely heterogeneous
-  (data transposed, multi-level NaN-hierarchical, sparse text). Either
-  per-portal custom rules or LLM-assisted recovery is the next angle.
+  (data transposed, multi-level NaN-hierarchical, sparse text). One
+  sub-pattern was extracted in Phase 2.d (title-as-columns: long
+  shared prefix + NULL separator + buried real header) and now has its
+  own detector + repair. Remaining patterns identified for future
+  sprints: (a) transposed tables (rows-as-cols), (b) hierarchical NaN
+  parents (Excel grouped headers with merged cells across rows AND
+  cols), (c) sparse text without a header row at all (PDFs scraped to
+  random cell positions). Either per-portal custom rules or
+  LLM-assisted recovery is the next angle for those.
 - **DEBT-021-003 — Legacy `cache_*` migration**: 5,611 `cache_*` tables
   are still in `public` and not registered in `raw_table_versions`.
   Many are in active use (`cached_datasets.status='ready'`). Migrating
@@ -269,4 +302,10 @@ same window)**
 - Plan triggered by user feedback (2026-05-08): "los marts que no pudiste crear muchos fue porque la data estaba desordenada".
 - Baseline measurement: `scripts/parse_quality_diag.sql` run against staging 2026-05-08.
 - Devil's advocate against auto-typing as alternative: documented above (§3 non-goals).
-- Audit trail: `SELECT phase, COUNT(*) FROM parse_repair_audit WHERE dry_run=false AND ok=true GROUP BY 1` (post-rollout: 56 col_n + 99 trailing_garbage + 1,899 cleanup_superseded + 785 cleanup_orphan = 2,839 ops).
+- Audit trail: `SELECT phase, COUNT(*) FROM parse_repair_audit GROUP BY 1` (snapshot 2026-05-09):
+  - `cleanup_superseded`: 1,899
+  - `col_n`: 1,647 (after subsequent batches)
+  - `trailing_garbage`: 1,501 (after subsequent batches)
+  - `cleanup_orphan`: 785
+  - `title_as_columns`: 26 (13 dry_run + 13 apply, all PAMI)
+  - **Total**: 5,858 audit ops.

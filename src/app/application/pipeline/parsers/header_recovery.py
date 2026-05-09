@@ -48,16 +48,28 @@ def _is_numeric_str(v: str) -> bool:
 
 
 def _looks_like_year_header_row(values: list[str]) -> bool:
-    """True iff most numeric cells in the row look like years (4-digit, 1900-2100)
-    AND the row has very few unique numeric values (because year headers are
-    repeated across merged sub-columns).
+    """True iff the row is essentially a list of year-labels — either
+    repeated across merged-cell sub-columns or a flat row of distinct years.
 
-    Concretely, INDEC/CABA tables emit rows like
-    `["", "2003", "2003", "2003", "", "2004", "2004", "2004", ""]` between
-    the title and the data — this looks numeric but it's actually a header
-    level. The data-start detector has to skip past it.
+    Two shapes covered:
+
+    1. Merged-cell sub-headers (INDEC / CABA cuadros) emit
+       `["", "2003", "2003", "2003", "", "2004", "2004", "2004", ""]`
+       between the title and the data. Many numeric cells, all years,
+       repeated — distinct count low.
+
+    2. Flat year-axis (caba__femicidios pattern) emits
+       `["Año", "2023", "2022", "2021", ..., "2015"]` — all distinct
+       years, one row of column headers. Distinct count equals
+       numeric_count, but year_ratio over populated cells is ~100 %.
+
+    Both look "numeric" to the data-start detector and need to be
+    classified as headers, not data.
     """
-    numeric_vals = [v for v in values if _is_numeric_str(v)]
+    populated = [v for v in values if v]
+    if len(populated) < 3:
+        return False
+    numeric_vals = [v for v in populated if _is_numeric_str(v)]
     if len(numeric_vals) < 3:
         return False
     year_count = 0
@@ -70,7 +82,12 @@ def _looks_like_year_header_row(values: list[str]) -> bool:
             continue
     if year_count < len(numeric_vals) * 0.7:
         return False
-    # Year-headers repeat across merged columns; real data won't.
+    # Shape 2: row dominated by years end-to-end (year_count >= 80 % of
+    # populated cells) — a flat year axis. Doesn't matter if distinct.
+    if year_count >= len(populated) * 0.8:
+        return True
+    # Shape 1: years repeated across merged sub-columns (distinct count
+    # very low relative to numeric count).
     distinct = len(set(numeric_vals))
     return distinct <= max(3, len(numeric_vals) // 4)
 
@@ -87,23 +104,32 @@ def find_data_start_row(
     populated cells parse as numbers (with a floor of 2 numeric cells, so a
     title row containing one stray year like "2024" doesn't trip the
     detector). Year-only header rows (lots of repeated 4-digit values from
-    merged-cell propagation) are explicitly skipped via
-    `_looks_like_year_header_row`.
+    merged-cell propagation, or a flat row of distinct years) are explicitly
+    skipped via `_looks_like_year_header_row`.
+
+    Metadata columns whose name starts with `_` (collector-injected:
+    `_source_dataset_id`, `_source_url`, `_parser_version`, ...) are
+    excluded from the row-shape analysis. Their values reflect ingest
+    bookkeeping, not the dataset's natural structure, and would dilute the
+    ratios that drive year-header detection.
 
     Returns None if no row in the window crosses the threshold (e.g. a pure
     text-only sheet) — caller should leave the dataframe alone.
     """
+    data_col_idx = [
+        idx for idx, c in enumerate(df.columns) if not str(c).startswith("_")
+    ]
+    if not data_col_idx:
+        return None
     for i in range(min(max_search, len(df))):
         row = df.iloc[i]
         populated = [
-            str(v).strip()
-            for v in row.tolist()
-            if pd.notna(v) and str(v).strip() != ""
+            str(row.iloc[idx]).strip()
+            for idx in data_col_idx
+            if pd.notna(row.iloc[idx]) and str(row.iloc[idx]).strip() != ""
         ]
         if not populated:
             continue
-        # A row of nothing but repeated years (between title and data) is a
-        # header level, not data — keep walking.
         if _looks_like_year_header_row(populated):
             continue
         numeric_count = sum(1 for v in populated if _is_numeric_str(v))

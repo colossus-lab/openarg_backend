@@ -1,0 +1,119 @@
+id: mendoza_ejecucion_acumulada_fondo
+version: 0.1.0
+description: |
+  Ejecución presupuestaria acumulada del Fondo de la Provincia de
+  Mendoza, mensualizada por categoría (votado / devengado / pagado).
+  Cubre los snapshots con shape FULL de 42 columnas: Concepto +
+  votado_<mes> + devengado_<mes> + pagado_<mes> + ejercicios_anteriores.
+
+  Las tablas raw vienen TIME-PIVOTED (un mes-categoría por columna).
+  Este mart hace UNPIVOT en SQL via `CROSS JOIN LATERAL VALUES` para
+  exponer formato long: (concepto, categoria, mes, valor). Phase 5 del
+  parser hardening (DEBT-021-001) generaliza el unpivot pero solo
+  aplica a NUEVOS collects. `require_all_columns=True` filtra las
+  versiones con schemas alternativos (concepto en minúscula,
+  `presupuesto_partidas`, etc.) que aparecen en el cluster pero no
+  tienen el shape canónico.
+
+  Nota: la columna devengado del mes 9 viene como `devengado_setiembre`
+  en upstream (variante ortográfica) — preservada AS-IS para no
+  invertir la decisión del publicador.
+domain: gobierno
+
+sources:
+  portals: [mendoza]
+  resource_patterns:
+    - "mendoza::*ejecucion_presupuestaria_acumulada_fondo*"
+
+canonical_columns:
+  - name: concepto
+    type: text
+    description: Concepto presupuestario (línea del clasificador)
+  - name: categoria
+    type: text
+    description: Una de `votado` / `devengado` / `pagado` / `pagado_ejercicios_anteriores`
+  - name: mes
+    type: text
+    description: Mes acumulado (`anual`, `enero`..`diciembre`) o `ejercicios_anteriores`
+  - name: valor
+    type: text
+    description: Monto en pesos. Texto porque el upstream mezcla números, decimales argentinos y notas.
+
+sql: |
+  WITH src AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        '*ejecucion_presupuestaria_acumulada_fondo*',
+        expected_columns=[
+          'Concepto',
+          'votado_anual', 'votado_enero', 'votado_febrero', 'votado_marzo',
+          'votado_abril', 'votado_mayo', 'votado_junio', 'votado_julio',
+          'votado_agosto', 'votado_septiembre', 'votado_octubre',
+          'votado_noviembre', 'votado_diciembre',
+          'devengado_anual', 'devengado_enero', 'devengado_febrero',
+          'devengado_marzo', 'devengado_abril', 'devengado_mayo',
+          'devengado_junio', 'devengado_julio', 'devengado_agosto',
+          'devengado_setiembre', 'devengado_octubre', 'devengado_noviembre',
+          'devengado_diciembre',
+          'pagado_anual', 'pagado_enero', 'pagado_febrero', 'pagado_marzo',
+          'pagado_abril', 'pagado_mayo', 'pagado_junio', 'pagado_julio',
+          'pagado_agosto', 'pagado_septiembre', 'pagado_octubre',
+          'pagado_noviembre', 'pagado_diciembre',
+          'pagado_ejercicios_anteriores'
+        ],
+        require_all_columns=True
+    ) }} sub
+  )
+  SELECT
+    NULLIF(TRIM("Concepto"), '')           AS concepto,
+    v.categoria                            AS categoria,
+    v.mes                                  AS mes,
+    NULLIF(TRIM(v.valor::text), '')        AS valor
+  FROM src
+  CROSS JOIN LATERAL (VALUES
+    ('votado',    'anual',     src.votado_anual),
+    ('votado',    'enero',     src.votado_enero),
+    ('votado',    'febrero',   src.votado_febrero),
+    ('votado',    'marzo',     src.votado_marzo),
+    ('votado',    'abril',     src.votado_abril),
+    ('votado',    'mayo',      src.votado_mayo),
+    ('votado',    'junio',     src.votado_junio),
+    ('votado',    'julio',     src.votado_julio),
+    ('votado',    'agosto',    src.votado_agosto),
+    ('votado',    'septiembre',src.votado_septiembre),
+    ('votado',    'octubre',   src.votado_octubre),
+    ('votado',    'noviembre', src.votado_noviembre),
+    ('votado',    'diciembre', src.votado_diciembre),
+    ('devengado', 'anual',     src.devengado_anual),
+    ('devengado', 'enero',     src.devengado_enero),
+    ('devengado', 'febrero',   src.devengado_febrero),
+    ('devengado', 'marzo',     src.devengado_marzo),
+    ('devengado', 'abril',     src.devengado_abril),
+    ('devengado', 'mayo',      src.devengado_mayo),
+    ('devengado', 'junio',     src.devengado_junio),
+    ('devengado', 'julio',     src.devengado_julio),
+    ('devengado', 'agosto',    src.devengado_agosto),
+    ('devengado', 'septiembre',src.devengado_setiembre),
+    ('devengado', 'octubre',   src.devengado_octubre),
+    ('devengado', 'noviembre', src.devengado_noviembre),
+    ('devengado', 'diciembre', src.devengado_diciembre),
+    ('pagado',    'anual',     src.pagado_anual),
+    ('pagado',    'enero',     src.pagado_enero),
+    ('pagado',    'febrero',   src.pagado_febrero),
+    ('pagado',    'marzo',     src.pagado_marzo),
+    ('pagado',    'abril',     src.pagado_abril),
+    ('pagado',    'mayo',      src.pagado_mayo),
+    ('pagado',    'junio',     src.pagado_junio),
+    ('pagado',    'julio',     src.pagado_julio),
+    ('pagado',    'agosto',    src.pagado_agosto),
+    ('pagado',    'septiembre',src.pagado_septiembre),
+    ('pagado',    'octubre',   src.pagado_octubre),
+    ('pagado',    'noviembre', src.pagado_noviembre),
+    ('pagado',    'diciembre', src.pagado_diciembre),
+    ('pagado',    'ejercicios_anteriores', src.pagado_ejercicios_anteriores)
+  ) AS v(categoria, mes, valor)
+  WHERE NULLIF(TRIM("Concepto"), '') IS NOT NULL
+    AND NULLIF(TRIM(v.valor::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

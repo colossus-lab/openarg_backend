@@ -143,6 +143,21 @@ async def test_raw_only_renders_raw_section(
     assert "STAGING" not in block
 
 
+@pytest.mark.asyncio
+async def test_raw_and_staging_render_exact_resource_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENARG_PIPELINE_USE_SERVING_PORT", "1")
+    port = AsyncMock()
+    port.discover.return_value = [
+        _r("staging.dataset_x", ServingLayer.STAGING, "Dataset X"),
+        _r("raw.portal__dataset_y", ServingLayer.RAW, "Dataset Y"),
+    ]
+    block = await _serving_port_planner_hints("query", port, limit=5)
+    assert "staging.dataset_x (Dataset X)" in block
+    assert "raw.portal__dataset_y (Dataset Y)" in block
+
+
 # ── discover_catalog_hints_for_planner integration ────────────────────────
 
 

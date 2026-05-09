@@ -93,6 +93,32 @@ The flag is the single rollback knob. Switching it back to `0` restarts producin
 
 `dry_run=True` reports candidates without executing. Recommended schedule: weekly via Celery beat once the raw layer is stable.
 
+### 5.b — Empty-bloat cleanup (2026-05-09)
+
+Sister task `openarg.cleanup_empty_raw_tables` (Sprint Disk Bloat) targets a
+distinct failure mode: tables that landed with `row_count=0` but received many
+`ALTER TABLE ADD COLUMN` calls during `_to_sql_safe schema_mismatch_recreate`,
+producing tens of MB of page bloat with zero data. These are **in**
+`raw_table_versions` (not orphans, so `cleanup_raw_orphans` skips them) but are
+useless and waste disk.
+
+Selection criteria (all must hold):
+- `schema_name='raw'` AND `COALESCE(row_count, 0) = 0`
+- `created_at < NOW() - min_age_hours` (default 24h, avoids in-flight races)
+- `pg_total_relation_size > min_size_mb` (default 100MB — only meaningful disk wins)
+- A newer version with rows exists for the same `resource_identity`, OR
+  `superseded_at IS NOT NULL`
+
+Beat schedule: weekly Sunday 04:00 with `dry_run=False, max_drops=50, min_size_mb=100`.
+Default `dry_run=True` for ad-hoc invocation.
+
+Lessons learned during introduction (2026-05-09): an initial audit using
+`pg_stat_user_tables.n_live_tup` falsely identified ~10 GB of "empty" tables
+that actually had 6M rows each. `n_live_tup` is the optimizer's stale estimate,
+not the row count. **Always use `raw_table_versions.row_count`** as the source
+of truth — that's what `_register_raw_version` writes in the same critical
+section as the table creation.
+
 ## 6. Functional Requirements
 
 - **FR-001**: Every materialization to `raw.*` MUST come with an entry in `raw_table_versions`. The two writes happen in the same critical section.
