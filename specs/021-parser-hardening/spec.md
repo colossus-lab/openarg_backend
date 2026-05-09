@@ -235,10 +235,13 @@ same window)**
 
 ## 7. Tech debt opened
 
-- **DEBT-021-001 — Phase 5 generalised**: `unpivot_if_time_pivoted` is
-  wired only in INDEC tasks and the PDF branch. Generalising to
-  `_read_excel_frame` + `_read_csv_preview` is risky (changes shape) but
-  desirable. ~286 staging tables still time-pivoted in raw.
+- **DEBT-021-001 — Phase 5 generalised** (CLOSED 2026-05-09, commit 6ff1b4a):
+  `unpivot_if_time_pivoted` wired into `_post_parse_normalize` after the
+  standard recover/dedup pass. Threshold gate (≥50 % time cols + ≥1 id
+  col + ≥5 total cols) keeps small/non-pivoted tables untouched.
+  `OPENARG_GENERIC_UNPIVOT` env flag (default ON) gives ops a kill
+  switch without redeploy. Verified active on worker-collector via
+  smoke test.
 - **DEBT-021-002 — Long tail not recoverable by heuristic**: ~76 % of
   candidate tables ship with `no_improvement` from
   `propose_col_n_rename`. Their structures are genuinely heterogeneous
