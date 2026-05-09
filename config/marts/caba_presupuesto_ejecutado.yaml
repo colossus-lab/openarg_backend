@@ -1,0 +1,100 @@
+id: caba_presupuesto_ejecutado
+version: 0.1.0
+description: |
+  Ejecución presupuestaria del Gobierno de la Ciudad de Buenos Aires —
+  detalle por jurisdicción × clasificador económico × programa con
+  monto sancionado, vigente, definitivo y devengado.
+
+  Source: 58 versiones de `caba__presupuesto_ejecutado` con schema
+  cohesivo de 44 cols (algunos versions concat tienen `.1` duplicates
+  + Unnamed: del multi-sheet, ignoradas en el mart).
+
+  Cada par `(<codigo>, <codigo>_desc)` es un nivel del clasificador
+  presupuestario (jurisdicción, subjurisdicción, entidad, organismo,
+  unidad ejecutora, programa, subprograma, proyecto, actividad,
+  obra, finalidad, función, inciso, principal, parcial, subparcial,
+  económico, fuente de financiamiento, geográfica).
+
+  Topic de alta relevancia política y periodística: gasto público
+  CABA con trazabilidad completa.
+
+  Use cases típicos: "gasto en salud CABA", "presupuesto ejecutado
+  por jurisdicción", "evolución del gasto educativo", "qué dirección
+  ejecuta más presupuesto", "porcentaje de ejecución por programa".
+domain: gobierno
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__presupuesto_ejecutado*"]
+
+canonical_columns:
+  - name: jurisdiccion
+    type: text
+    description: Jurisdicción (ministerio, secretaría, etc.)
+  - name: jurisdiccion_desc
+    type: text
+    description: Descripción de la jurisdicción
+  - name: programa
+    type: text
+    description: Código de programa presupuestario
+  - name: programa_desc
+    type: text
+    description: Descripción del programa
+  - name: actividad
+    type: text
+    description: Código de actividad
+  - name: actividad_desc
+    type: text
+    description: Descripción de la actividad
+  - name: finalidad_desc
+    type: text
+    description: Finalidad del gasto (educación, salud, etc.)
+  - name: funcion_desc
+    type: text
+    description: Función específica
+  - name: inciso_desc
+    type: text
+    description: Inciso económico (personal, bienes, servicios, etc.)
+  - name: fuente_financiamiento
+    type: text
+    description: Fuente de financiamiento (tesoro, recursos propios, etc.)
+  - name: sancion
+    type: text
+    description: Monto sancionado por la legislatura
+  - name: vigente
+    type: text
+    description: Monto vigente (post modificaciones presupuestarias)
+  - name: definitivo
+    type: text
+    description: Monto definitivo
+  - name: devengado
+    type: text
+    description: Monto devengado (efectivamente ejecutado)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(jur::text), '')           AS jurisdiccion,
+    NULLIF(TRIM(jur_desc), '')            AS jurisdiccion_desc,
+    NULLIF(TRIM(prog::text), '')          AS programa,
+    NULLIF(TRIM(prog_desc), '')           AS programa_desc,
+    NULLIF(TRIM(act::text), '')           AS actividad,
+    NULLIF(TRIM(act_desc), '')            AS actividad_desc,
+    NULLIF(TRIM(fin_desc), '')            AS finalidad_desc,
+    NULLIF(TRIM(fun_desc), '')            AS funcion_desc,
+    NULLIF(TRIM(inc_desc), '')            AS inciso_desc,
+    NULLIF(TRIM(fte_desc), '')            AS fuente_financiamiento,
+    NULLIF(TRIM("sanción"::text), '')     AS sancion,
+    NULLIF(TRIM(vigente::text), '')       AS vigente,
+    NULLIF(TRIM(definitivo::text), '')    AS definitivo,
+    NULLIF(TRIM(devengado::text), '')     AS devengado
+  FROM {{ live_tables_by_table_pattern(
+      'caba__presupuesto_ejecutado*',
+      expected_columns=['jur', 'jur_desc', 'prog', 'prog_desc', 'act', 'act_desc',
+                        'fin_desc', 'fun_desc', 'inc_desc', 'fte_desc',
+                        'sanción', 'vigente', 'definitivo', 'devengado']
+  ) }} sub
+  WHERE NULLIF(TRIM(jur_desc), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []
