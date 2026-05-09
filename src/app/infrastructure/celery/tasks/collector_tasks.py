@@ -791,7 +791,7 @@ def _reconcile_cache_coverage(
                 SET status = 'ready',
                     retry_count = 0,
                     error_message = NULL,
-                    error_category = 'unknown',
+                    error_category = 'success',
                     updated_at = NOW()
                 WHERE cd.status = 'error'
                   AND cd.error_message = 'Table missing: marked for re-download'
@@ -2941,17 +2941,34 @@ def _normalize_string_nan(df: pd.DataFrame) -> pd.DataFrame:
     obj_cols = df.select_dtypes(include=["object"]).columns
     if len(obj_cols) == 0:
         return df
-    return df.replace(
-        {
-            c: {
-                v: pd.NA
-                for v in df[c].dropna().unique()
-                if isinstance(v, str)
-                and v.strip().lower() in _STRING_NAN_TOKENS
-            }
-            for c in obj_cols
+    # Dedupe to avoid `df[c]` returning a DataFrame when col names repeat
+    # (pre-dedupe phase of multi-sheet Excel concat). DataFrame has no
+    # `.unique()` and the call below raises AttributeError. After parser
+    # hardening we still hit this in 9 staging rows because some legacy
+    # paths leave duplicated cols at this point in the pipeline.
+    unique_obj_cols: list[str] = []
+    seen: set[str] = set()
+    for c in obj_cols:
+        if c not in seen:
+            seen.add(c)
+            unique_obj_cols.append(c)
+    replacements: dict[str, dict] = {}
+    for c in unique_obj_cols:
+        col = df[c]
+        # If after the dedup we still got a DataFrame (extremely rare —
+        # would require pandas internal weirdness), fall back to iloc by
+        # the first matching position.
+        if isinstance(col, pd.DataFrame):
+            col = col.iloc[:, 0]
+        sentinels = {
+            v: pd.NA
+            for v in col.dropna().unique()
+            if isinstance(v, str)
+            and v.strip().lower() in _STRING_NAN_TOKENS
         }
-    )
+        if sentinels:
+            replacements[c] = sentinels
+    return df.replace(replacements) if replacements else df
 
 
 # Phase 5 (021-parser-hardening DEBT-021-001) feature flag. Default ON
@@ -3729,6 +3746,7 @@ def _mark_dataset_rerouted_pending(
                         UPDATE cached_datasets
                         SET status = 'pending',
                             error_message = :msg,
+                            error_category = 'orchestration_rerouted',
                             updated_at = NOW()
                         WHERE id = :id
                         """
@@ -3757,6 +3775,7 @@ def _mark_dataset_rerouted_pending(
                             SET table_name = :tn,
                                 status = 'pending',
                                 error_message = :msg,
+                                error_category = 'orchestration_rerouted',
                                 updated_at = NOW()
                             WHERE id = :id
                             """
@@ -3772,12 +3791,17 @@ def _mark_dataset_rerouted_pending(
                         text(
                             """
                             INSERT INTO cached_datasets (
-                                dataset_id, table_name, status, error_message, updated_at
+                                dataset_id, table_name, status, error_message,
+                                error_category, updated_at
                             )
-                            VALUES (CAST(:did AS uuid), :tn, 'pending', :msg, NOW())
+                            VALUES (
+                                CAST(:did AS uuid), :tn, 'pending', :msg,
+                                'orchestration_rerouted', NOW()
+                            )
                             ON CONFLICT (table_name) DO UPDATE SET
                                 status = 'pending',
                                 error_message = :msg,
+                                error_category = 'orchestration_rerouted',
                                 updated_at = NOW()
                             """
                         ),
