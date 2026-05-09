@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import io
 import zipfile
 from pathlib import Path
 
-import pytest
-
-from app.application.expander import EntryDecision, MultiFileExpander, expand_zip
+from app.application.expander import EntryDecision, expand_zip
 
 
 def _build_zip(tmp_path: Path, members: dict[str, bytes]) -> str:

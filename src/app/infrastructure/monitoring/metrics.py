@@ -31,6 +31,7 @@ class MetricsCollector:
         self._cache_hits = 0
         self._cache_misses = 0
         self._tokens_used = 0
+        self._cache_drops_by_reason: dict[str, int] = {}
         self._lock_data = threading.Lock()
 
     def record_request(self, error: bool = False) -> None:
@@ -63,6 +64,18 @@ class MetricsCollector:
     def record_tokens_used(self, tokens: int) -> None:
         with self._lock_data:
             self._tokens_used += tokens
+
+    def record_cache_drop(self, reason: str) -> None:
+        """Bump the in-memory counter for a `_record_cache_drop` audit row.
+
+        Surfaced in `/api/v1/metrics` as `cache_drops_by_reason`. Lets ops
+        spot a sudden spike of `raw_orphan_cleanup` or `empty_raw_bloat`
+        without having to run a SQL query against `cache_drop_audit`.
+        DEBT-014-003.
+        """
+        key = (reason or "unknown")[:60]
+        with self._lock_data:
+            self._cache_drops_by_reason[key] = self._cache_drops_by_reason.get(key, 0) + 1
 
     def get_metrics(self) -> dict[str, Any]:
         with self._lock_data:
@@ -98,4 +111,5 @@ class MetricsCollector:
                 "tokens": {
                     "total_used": self._tokens_used,
                 },
+                "cache_drops_by_reason": dict(self._cache_drops_by_reason),
             }

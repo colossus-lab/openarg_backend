@@ -62,7 +62,7 @@ sql: |
     NULL::text                               AS provincia_nombre,
     centroide_lat                            AS centroide_lat,
     centroide_lon                            AS centroide_lon
-  FROM public.cache_georef_provincias
+  FROM {{ live_table('georef::provincias') }}
   WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
 
   UNION ALL
@@ -75,7 +75,7 @@ sql: |
     NULLIF(TRIM(provincia_nombre), '')       AS provincia_nombre,
     centroide_lat                            AS centroide_lat,
     centroide_lon                            AS centroide_lon
-  FROM public.cache_georef_departamentos
+  FROM {{ live_table('georef::departamentos') }}
   WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
 
   UNION ALL
@@ -88,7 +88,7 @@ sql: |
     NULLIF(TRIM(provincia_nombre), '')       AS provincia_nombre,
     centroide_lat                            AS centroide_lat,
     centroide_lon                            AS centroide_lon
-  FROM public.cache_georef_municipios
+  FROM {{ live_table('georef::municipios') }}
   WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
 
   UNION ALL
@@ -101,7 +101,7 @@ sql: |
     NULLIF(TRIM(provincia_nombre), '')       AS provincia_nombre,
     centroide_lat                            AS centroide_lat,
     centroide_lon                            AS centroide_lon
-  FROM public.cache_georef_localidades
+  FROM {{ live_table('georef::localidades') }}
   WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
 
 refresh:

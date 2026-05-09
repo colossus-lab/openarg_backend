@@ -50,7 +50,13 @@ async def test_search_datasets_hybrid_returns_results(
     assert results[0].dataset_id == "123"
     assert results[0].title == "Test Dataset"
     assert results[0].score == 0.06
-    assert mock_session.execute.await_count == 2
+    # `inflación argentina` has 2 meaningful terms → HYBRID_FULL on the first
+    # pass. The 1 result the mock returns is at/above `_retry_result_threshold`
+    # (which is min(limit, 1) = 1), so the VECTOR_ONLY→HYBRID_FULL retry path
+    # does not fire and execute is awaited exactly once. The earlier
+    # `await_count == 2` was a stale assertion left over when the retry was
+    # unconditional.
+    mock_session.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio

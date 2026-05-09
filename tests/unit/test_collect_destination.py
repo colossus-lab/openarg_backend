@@ -8,7 +8,7 @@ shape of the destination DTO so downstream callers don't get surprised.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

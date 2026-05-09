@@ -156,6 +156,7 @@ def create_celery() -> Celery:
         "openarg.cleanup_orphan_cache_tables": {"queue": "ingest"},
         "openarg.cleanup_raw_orphans": {"queue": "ingest"},
         "openarg.cleanup_empty_raw_tables": {"queue": "ingest"},
+        "openarg.cleanup_garbage_cols_in_raw": {"queue": "ingest"},
         # Medallion mart tasks (raw → mart, no staging layer).
         "openarg.build_mart": {"queue": "ingest"},
         "openarg.refresh_mart": {"queue": "ingest"},
@@ -320,6 +321,20 @@ def create_celery() -> Celery:
                 },
                 "options": {"queue": "ingest"},
             },
+            "force-recollect-separator-mismatches-weekly": {
+                # 2026-05-09: closes the loop on the WS0 separator_mismatch
+                # detector (DEBT-013-003). Retrospective sweep registra los
+                # findings pero NO flipea status — esta task marca como
+                # `pending` los `cached_datasets.status='ready'` que tengan
+                # un finding `severity='critical' AND resolved_at IS NULL`,
+                # forzando re-collect que el detector post-parse abortará
+                # como `parser_invalid` si la data sigue rota. Domingos
+                # 5:00 ART (después de cleanup-orphan / cleanup-empty).
+                "task": "openarg.force_recollect_separator_mismatches",
+                "schedule": crontab(day_of_week=0, hour=5, minute=0),
+                "kwargs": {"dry_run": False},
+                "options": {"queue": "ingest"},
+            },
             "retain-raw-versions": {
                 # Drop superseded raw tables beyond the configured retention
                 # window per resource. Without this, every re-collection of
@@ -357,6 +372,33 @@ def create_celery() -> Celery:
                 "task": "openarg.snapshot_staff",
                 "schedule": crontab(hour=2, minute=30, day_of_week=1),  # Monday 2:30 AM ART
                 "options": {"queue": "scraper"},
+            },
+            "reconcile-row-counts-weekly": {
+                # Reconciles `raw_table_versions.row_count` against actual
+                # `pg_class.reltuples` (and exact `COUNT(*)` for the top 50
+                # extreme drifters). The (resource_identity, version) tuple
+                # is immutable by design but the underlying physical table
+                # can drift due to parse_repair / cleanup_invariants /
+                # manual ALTER/DELETE. Weekly Sunday 02:00 ART (off-peak,
+                # before bulk-collect). Idempotent: zero updates when
+                # no drift exists.
+                "task": "openarg.reconcile_row_counts",
+                "schedule": crontab(day_of_week=0, hour=2, minute=0),
+                "options": {"queue": "ingest"},
+            },
+            "cleanup-garbage-cols-in-raw-weekly": {
+                # Two-pass schema cleanup of `raw.*` tables:
+                #  1. Drop UUID-shaped col names (parser bug leaks the
+                #     dataset_id metadata into the header — observed at
+                #     ~1.4k tables on first staging audit).
+                #  2. Drop `col_N` / `Unnamed:N` cols whose contents are
+                #     ≥99% empty (trailing garbage cols pandas creates
+                #     from stray commas past the last real column).
+                # Idempotent. Weekly Sunday 02:30 ART (after row-count
+                # reconcile, before bulk-collect at 01:45/07:45/...).
+                "task": "openarg.cleanup_garbage_cols_in_raw",
+                "schedule": crontab(day_of_week=0, hour=2, minute=30),
+                "options": {"queue": "ingest"},
             },
             # --- New data sources ---
             "ingest-presupuesto": {

@@ -65,9 +65,10 @@ def persist_findings(
     if not rows:
         return 0
     try:
+        # Single executemany — SQLAlchemy batches the parameter list into
+        # one INSERT ... VALUES roundtrip rather than N. DEBT-013-002.
         with engine.begin() as conn:
-            for row in rows:
-                conn.execute(_UPSERT_SQL, row)
+            conn.execute(_UPSERT_SQL, rows)
     except Exception:
         logger.exception(
             "Failed to persist %d findings for resource %s", len(rows), ctx.resource_id

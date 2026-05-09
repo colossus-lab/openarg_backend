@@ -25,10 +25,10 @@ from enum import StrEnum
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.setup.config.constants import MAX_TOTAL_ATTEMPTS
+
 logger = logging.getLogger(__name__)
 
-# Mirror of `collector_tasks.MAX_TOTAL_ATTEMPTS`. If you bump that, bump this.
-MAX_TOTAL_ATTEMPTS = 5
 PENDING_TIMEOUT_DAYS = 7
 
 

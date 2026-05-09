@@ -243,7 +243,7 @@ def ingest_bac(self):
 
                         # First chunk replaces the table; subsequent chunks append
                         if_exists = "replace" if chunk_num == 0 else "append"
-                        chunk.to_sql(table_name, engine, if_exists=if_exists, index=False)
+                        chunk.to_sql(table_name, engine, schema="raw", if_exists=if_exists, index=False)
 
                         if columns is None:
                             columns = list(chunk.columns)
@@ -277,6 +277,18 @@ def ingest_bac(self):
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so marts find this table
+                # via `live_table('bac::<file_type>')` macro (DEBT-019-006).
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"bac::{file_type}",
+                    table_name=table_name,
+                    schema_name="raw",
+                    row_count=total_rows,
+                )
 
                 results["ingested"] += 1
                 logger.info("BAC %s: %d rows cached", file_type, total_rows)

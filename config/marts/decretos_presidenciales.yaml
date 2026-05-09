@@ -14,7 +14,8 @@ domain: gobierno
 
 sources:
   portals: [senado]
-  resource_patterns: ["public.cache_senado_decretos_presidenciales"]
+  resource_patterns:
+    - "senado::decretos_presidenciales"
 
 canonical_columns:
   - name: numero_decreto
@@ -32,7 +33,7 @@ sql: |
     NULLIF(TRIM("DECRETO"), '')   AS numero_decreto,
     NULLIF(TRIM("FECHA"), '')     AS fecha,
     NULLIF(TRIM("EXTRACTO"), '')  AS extracto
-  FROM public.cache_senado_decretos_presidenciales
+  FROM {{ live_table('senado::decretos_presidenciales') }}
   WHERE NULLIF(TRIM("DECRETO"), '') IS NOT NULL
 
 refresh:

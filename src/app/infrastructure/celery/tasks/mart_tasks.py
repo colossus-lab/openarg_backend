@@ -277,6 +277,29 @@ def _upsert_mart_definition(
         )
 
 
+def dispatch_build_mart(mart_id: str, *, expires_seconds: int = 120) -> str:
+    """Enqueue `build_mart` with a per-mart task_id so duplicate dispatches
+    inside `expires_seconds` are debounced by Celery.
+
+    DEBT-019-008 fix (2026-05-09): when callers (operators, scripts) called
+    `build_mart.delay(mid)` repeatedly during retries, Celery accepted each
+    as a fresh task. Multiple workers picked them up in parallel; the
+    in-task `pg_try_advisory_lock` did NOT serialize them because pgbouncer
+    in transaction-pooling mode doesn't preserve session-level state across
+    queries. Result: 3+ concurrent `CREATE MATERIALIZED VIEW` over the
+    same mart → Postgres livelock.
+
+    Mirrors the debounce that `refresh_mart` already uses via
+    `task_id=f"refresh_mart:{mid}"`. Use this helper instead of
+    `build_mart.delay(mid)` from any place that might fire a retry.
+    """
+    return build_mart.apply_async(
+        args=[mart_id],
+        task_id=f"build_mart:{mart_id}",
+        expires=expires_seconds,
+    ).id
+
+
 @celery_app.task(
     name="openarg.build_mart",
     bind=True,

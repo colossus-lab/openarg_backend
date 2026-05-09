@@ -124,7 +124,7 @@ def snapshot_bcra(self):
                 # depends on this table, DROP+CREATE fails. TRUNCATE
                 # + append preserves the dependency graph.
                 try:
-                    df.to_sql(table_name, engine, if_exists="replace", index=False)
+                    df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
                 except Exception as exc:
                     if "DependentObjectsStillExist" not in type(exc).__name__ \
                             and "depend on it" not in str(exc):
@@ -134,7 +134,7 @@ def snapshot_bcra(self):
                     )
                     from app.infrastructure.celery.tasks._db import safe_truncate_table
                     safe_truncate_table(engine, table_name)
-                    df.to_sql(table_name, engine, if_exists="append", index=False)
+                    df.to_sql(table_name, engine, schema="raw", if_exists="append", index=False)
                 dataset_id = _register_dataset(
                     engine,
                     "bcra-cotizaciones",

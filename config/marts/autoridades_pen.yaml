@@ -67,7 +67,7 @@ sql: |
     NULLIF(TRIM(autoridad_apellido), '')            AS autoridad_apellido,
     NULLIF(TRIM(autoridad_dni), '')                 AS autoridad_dni,
     NULLIF(TRIM(norma_competencias_objetivos), '')  AS norma_competencias_objetivos
-  FROM public.cache_autoridades_pen
+  FROM {{ live_table('mapa_estado::autoridades_pen') }}
   WHERE COALESCE(NULLIF(TRIM(autoridad_apellido), ''), NULLIF(TRIM(cargo), '')) IS NOT NULL
 
 refresh:

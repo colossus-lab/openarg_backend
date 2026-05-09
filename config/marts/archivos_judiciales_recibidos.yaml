@@ -1,0 +1,52 @@
+id: archivos_judiciales_recibidos
+version: 0.1.0
+description: |
+  Archivos transferidos por los Poderes Judiciales y Ministerios Públicos
+  Provinciales al Sistema Nacional de Información Criminal — Ministerio
+  de Justicia. Cada fila es un caso con su unidad fiscal interviniente,
+  código de delito y flag de tentativa.
+
+  El cluster `archivos_recibidos_*` agrupa MÚLTIPLES tipos de archivo
+  (decisiones, personas, causas civiles, etc.) con shape distinto cada
+  uno. Esta vista cubre el subset de tablas con las 4 cols core comunes
+  a las versiones de Ministerios Públicos Provinciales — captura ~10M
+  filas en ~12 tablas. Los archivos de Poderes Judiciales civiles (con
+  cols `id_causa`, `materia`, etc.) y los de personas (`persona_*`)
+  quedan fuera; son candidatos a sub-marts separados.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::archivos_recibidos*ministerios_publicos*"
+
+canonical_columns:
+  - name: id_caso
+    type: text
+    description: Identificador del caso
+  - name: id_unidad_mp
+    type: text
+    description: Identificador de la unidad de Ministerio Público
+  - name: codigo_delito
+    type: text
+    description: Código del delito asociado
+  - name: tentativa
+    type: text
+    description: Flag o descripción de tentativa
+
+sql: |
+  SELECT
+    NULLIF(TRIM(id_caso::text), '')       AS id_caso,
+    NULLIF(TRIM(id_unidad_mp::text), '')  AS id_unidad_mp,
+    NULLIF(TRIM(codigo_delito::text), '') AS codigo_delito,
+    NULLIF(TRIM(tentativa::text), '')     AS tentativa
+  FROM {{ live_tables_by_table_pattern(
+      '*__archivos_recibidos*ministerios_p*',
+      expected_columns=['id_caso', 'id_unidad_mp', 'codigo_delito', 'tentativa'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(id_caso::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

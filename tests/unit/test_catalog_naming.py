@@ -11,7 +11,6 @@ from app.application.catalog import (
     physical_table_name,
 )
 
-
 # ---------- physical naming ----------
 
 

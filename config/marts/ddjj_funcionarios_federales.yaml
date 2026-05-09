@@ -1,0 +1,91 @@
+id: ddjj_funcionarios_federales
+version: 0.1.0
+description: |
+  Declaraciones juradas patrimoniales integrales de funcionarios públicos
+  del Estado nacional — Ministerio de Justicia, Oficina Anticorrupción.
+  Cada fila es una línea de patrimonio (deuda, activo, propiedad) declarada
+  en el período correspondiente.
+
+  Combina los portales `datos_gob_ar` (publicación principal) y `justicia`
+  (espejo). ~28 tablas live con shape canónico de 14 cols (~26M filas).
+
+  Complementa `legisladores_argentina` (que cubre solo diputados) ampliando
+  a todos los poderes.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::declaraciones_juradas_patrimoniales*"
+
+canonical_columns:
+  - name: dj_id
+    type: text
+    description: Identificador único de la declaración jurada
+  - name: cuit
+    type: text
+    description: CUIT del funcionario
+  - name: anio
+    type: text
+    description: Año declarado
+  - name: tipo_dj_id
+    type: text
+    description: Identificador del tipo de DJ
+  - name: tipo_dj
+    type: text
+    description: Tipo de declaración (anual, inicial, baja, ...)
+  - name: rectificativa
+    type: text
+    description: Indicador de DJ rectificativa
+  - name: funcionario
+    type: text
+    description: Apellido y nombre del funcionario
+  - name: periodo_inicio_cierre
+    type: text
+    description: Período cubierto por la DJ
+  - name: deuda_tipo
+    type: text
+    description: Tipo de deuda
+  - name: deuda_descripcion
+    type: text
+    description: Descripción de la deuda
+  - name: deuda_localizacion
+    type: text
+    description: Radicación / localización de la deuda
+  - name: deuda_clasificacion
+    type: text
+    description: Clasificación de la deuda
+  - name: deuda_importe
+    type: numeric
+    description: Importe declarado de la deuda
+
+sql: |
+  SELECT
+    NULLIF(TRIM(dj_id::text), '')                                AS dj_id,
+    NULLIF(TRIM(cuit::text), '')                                 AS cuit,
+    NULLIF(TRIM(anio::text), '')                                 AS anio,
+    NULLIF(TRIM(tipo_declaracion_jurada_id::text), '')           AS tipo_dj_id,
+    NULLIF(TRIM(tipo_declaracion_jurada_descripcion::text), '')  AS tipo_dj,
+    NULLIF(TRIM(rectificativa::text), '')                        AS rectificativa,
+    NULLIF(TRIM(funcionario_apellido_nombre::text), '')          AS funcionario,
+    NULLIF(TRIM(periodo_inicio_cierre::text), '')                AS periodo_inicio_cierre,
+    NULLIF(TRIM(deuda_tipo::text), '')                           AS deuda_tipo,
+    NULLIF(TRIM(deuda_descripcion::text), '')                    AS deuda_descripcion,
+    NULLIF(TRIM(deuda_radicacion_localizacion::text), '')        AS deuda_localizacion,
+    NULLIF(TRIM(deuda_clasificacion::text), '')                  AS deuda_clasificacion,
+    deuda_importe::numeric                                       AS deuda_importe
+  FROM {{ live_tables_by_table_pattern(
+      '*__declaraciones_juradas_patrimoniales*',
+      expected_columns=['dj_id', 'cuit', 'anio', 'tipo_declaracion_jurada_id',
+                        'tipo_declaracion_jurada_descripcion', 'rectificativa',
+                        'funcionario_apellido_nombre', 'periodo_inicio_cierre',
+                        'deuda_tipo', 'deuda_descripcion',
+                        'deuda_radicacion_localizacion', 'deuda_clasificacion',
+                        'deuda_importe'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(dj_id::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

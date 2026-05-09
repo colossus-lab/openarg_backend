@@ -306,14 +306,14 @@ def snapshot_staff(self):
         engine,
         resource_identity="staff_hcdn::snapshots",
         table_name="staff_snapshots",
-        schema_name="public",
+        schema_name="raw",
         row_count=len(current),
     )
     register_via_b_table(
         engine,
         resource_identity="staff_hcdn::changes",
         table_name="staff_changes",
-        schema_name="public",
+        schema_name="raw",
     )
 
     logger.info(

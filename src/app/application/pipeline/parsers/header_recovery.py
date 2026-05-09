@@ -47,6 +47,41 @@ def _is_numeric_str(v: str) -> bool:
         return False
 
 
+_MONTHS_AR_FULL = {
+    "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
+    "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+}
+_MONTHS_AR_SHORT = {
+    "ENE", "FEB", "MAR", "ABR", "MAY", "JUN",
+    "JUL", "AGO", "SEP", "OCT", "NOV", "DIC",
+}
+
+
+def _looks_like_month_header_row(values: list[str]) -> bool:
+    """True iff the row is essentially a list of month-name labels.
+
+    Real-world: `ciudad_mendoza__pauta_publicitaria` puts months as
+    column sub-headers right under the title row:
+      `["ENERO", "", "FEBRERO", "", "MARZO", "", ...]`
+    Same shape as the year-axis pattern (year_header_row) but with
+    Spanish month names. The detector should treat these rows as
+    sub-headers, not data, so `find_data_start_row` keeps walking.
+    """
+    populated = [v for v in values if v]
+    if len(populated) < 3:
+        return False
+    upper = [v.strip().upper() for v in populated]
+    month_count = sum(
+        1
+        for v in upper
+        if v in _MONTHS_AR_FULL or v in _MONTHS_AR_SHORT
+    )
+    if month_count < 3:
+        return False
+    # >=70% of populated cells are month names → header, not data.
+    return month_count >= len(populated) * 0.7
+
+
 def _looks_like_year_header_row(values: list[str]) -> bool:
     """True iff the row is essentially a list of year-labels — either
     repeated across merged-cell sub-columns or a flat row of distinct years.
@@ -131,6 +166,8 @@ def find_data_start_row(
         if not populated:
             continue
         if _looks_like_year_header_row(populated):
+            continue
+        if _looks_like_month_header_row(populated):
             continue
         numeric_count = sum(1 for v in populated if _is_numeric_str(v))
         if numeric_count >= max(2, int(len(populated) * numeric_threshold)):

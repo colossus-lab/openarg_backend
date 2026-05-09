@@ -86,11 +86,16 @@ class ServingResolver:
         limit: int = 10,
         portal: str | None = None,
         domain: str | None = None,
+        query_embedding: list[float] | None = None,
     ) -> list[Resource]:
         if not serving_port_enabled():
             raise RuntimeError("OPENARG_PIPELINE_USE_SERVING_PORT=0; resolver bypassed")
         return await self._port.discover(
-            query_text, limit=limit, portal=portal, domain=domain
+            query_text,
+            limit=limit,
+            portal=portal,
+            domain=domain,
+            query_embedding=query_embedding,
         )
 
     async def get_schema(self, resource_id: str) -> Schema:
@@ -128,12 +133,18 @@ class ServingResolver:
         *,
         limit: int = 10,
         domain: str | None = None,
+        query_embedding: list[float] | None = None,
     ) -> tuple[list[Resource], dict[str, int]]:
         """Discovery + tracking. Returns `(resources, layer_counts)` so the
         planner / metrics can report how many hits came from each layer.
         Useful for measuring mart coverage without scraping logs.
         """
-        resources = await self.discover(query_text, limit=limit, domain=domain)
+        resources = await self.discover(
+            query_text,
+            limit=limit,
+            domain=domain,
+            query_embedding=query_embedding,
+        )
         layer_counts: dict[str, int] = {}
         for r in resources:
             key = r.layer.value if isinstance(r.layer, ServingLayer) else str(r.layer)

@@ -16,11 +16,10 @@ domain: social
 
 sources:
   portals: [datos_gob_ar]
-  resource_patterns: [
-    "public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r22b47636e2",
-    "public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r61a39ace0e",
-    "public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r42120c60b2"
-  ]
+  resource_patterns:
+    - "datos_gob_ar::actividad_econ_mica_empleo_y_pob_idh"
+    - "datos_gob_ar::actividad_econ_mica_empleo_y_pob_empleo"
+    - "datos_gob_ar::actividad_econ_mica_empleo_y_pob_pobreza"
 
 canonical_columns:
   - name: indicador
@@ -45,7 +44,7 @@ sql: |
     NULLIF(TRIM(provincia_nombre), '')  AS provincia_nombre,
     NULLIF(TRIM(indice::text), '')      AS indice,
     NULLIF(TRIM(ranking::text), '')     AS ranking
-  FROM public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r22b47636e2
+  FROM {{ live_table('datos_gob_ar::actividad_econ_mica_empleo_y_pob_idh') }}
   WHERE NULLIF(TRIM(indicador), '') IS NOT NULL
 
   UNION ALL
@@ -55,7 +54,7 @@ sql: |
     NULLIF(TRIM(provincia_nombre), '')  AS provincia_nombre,
     NULLIF(TRIM(indice::text), '')      AS indice,
     NULLIF(TRIM(ranking::text), '')     AS ranking
-  FROM public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r61a39ace0e
+  FROM {{ live_table('datos_gob_ar::actividad_econ_mica_empleo_y_pob_empleo') }}
   WHERE NULLIF(TRIM(indicador), '') IS NOT NULL
 
   UNION ALL
@@ -65,7 +64,7 @@ sql: |
     NULLIF(TRIM(provincia_nombre), '')  AS provincia_nombre,
     NULLIF(TRIM(indice::text), '')      AS indice,
     NULLIF(TRIM(ranking::text), '')     AS ranking
-  FROM public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r42120c60b2
+  FROM {{ live_table('datos_gob_ar::actividad_econ_mica_empleo_y_pob_pobreza') }}
   WHERE NULLIF(TRIM(indicador), '') IS NOT NULL
 
 refresh:

@@ -182,7 +182,7 @@ def ingest_series_tiempo(self):
                 df = pd.DataFrame(data_rows, columns=col_names)
                 df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
 
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
                 dataset_id = _register_dataset(engine, key, table_name, df)
                 if dataset_id:
@@ -191,6 +191,19 @@ def ingest_series_tiempo(self):
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so marts find this
+                # table via `live_table('series_tiempo::<key>')` macro
+                # (DEBT-019-006).
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"series_tiempo::{key}",
+                    table_name=table_name,
+                    schema_name="raw",
+                    row_count=len(df),
+                )
 
                 results["ingested"] += 1
                 logger.info("Series %s: %d rows cached", key, len(df))

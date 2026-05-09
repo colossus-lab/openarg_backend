@@ -87,7 +87,13 @@ Current implementation. Lives at `app.infrastructure.adapters.serving.legacy_ser
 
 ## 8. Tech Debt
 
-- **DEBT-016-001**: `LegacyServingAdapter.discover()` and `_get_mart_schema()` use lexical ILIKE. Vector search should be wired once `catalog_resources.embedding` and `mart_definitions.embedding` reach >50% coverage in production. **Update 2026-05-09**: `mart_definitions.embedding` is now 47/47 marts populated (every successful build re-computes via `_upsert_mart_definition`); `catalog_resources.embedding` ≈50.5% (12,995 / 25,755). Both layers are over the 50% threshold — wiring HNSW into `discover()` is unblocked and the next natural step.
+- **DEBT-016-001 (CLOSED 2026-05-09)**: HNSW vector search wired into `LegacyServingAdapter.discover()` and `_discover_marts()`. Both methods now accept an optional `query_embedding: list[float] | None` (Cohere multilingual v3, 1024-dim, computed by `BedrockEmbeddingAdapter.embed()`). Behavior:
+  - With `query_embedding` provided → HNSW cosine `embedding <=> CAST(:vec AS vector)` ordered by `1 - (embedding <=> ...)` desc; falls back to lexical ILIKE only if vector returns < `limit` rows or `pgvector` not available.
+  - Without `query_embedding` → existing word-level ILIKE path unchanged (backward compat for callers that don't embed).
+  - `IServingPort.discover()` interface extended (backward-compat: kwarg defaults to `None`).
+  - `ServingResolver.discover()` and `discover_for_planner()` propagate the kwarg.
+  - **Coverage**: `mart_definitions.embedding` 47/47 (100 %), `catalog_resources.embedding` 13,219/25,755 (51.3 %).
+  - **Tests**: `test_discover_marts_uses_hnsw_when_embedding_provided` + `test_discover_marts_falls_back_to_ilike_without_embedding` pin the behavior.
 - **DEBT-016-002**: `query()` enforces read-only via regex. A more principled implementation would use a parsing-grade SQL validator (sqlglot is already a dep). Today's regex is good enough for the cases the pipeline produces, but a future user with raw SQL access should not rely on it.
 - **DEBT-016-003** (CLOSED 2026-05-09 audit): the three dormant bugs are no longer present in the implementation. Verified line-by-line:
   1. `query()` returns `Rows(..., layer=schema.layer)` (adapter:468), where `schema` comes from `get_schema(resource_id)` whose prefix branches return the correct `Schema(layer=...)` for `mart::*` (`MART`) and `raw::*` (`RAW`). `_layer_for_schema` (adapter:72-79) maps every Postgres schema correctly.

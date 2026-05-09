@@ -1,5 +1,5 @@
 id: legisladores_argentina
-version: 0.2.0
+version: 0.3.0
 description: |
   Legisladores del Congreso Nacional argentino — diputados y senadores
   con su bloque, distrito/provincia y partido. Sources: Cámara de
@@ -22,7 +22,7 @@ sources:
   portals: [diputados, senado]
   resource_patterns:
     - "diputados::*bloques*"
-    - "public.cache_senado_listado_senadores"
+    - "senado::listado_senadores"
 
 canonical_columns:
   - name: camara
@@ -79,7 +79,7 @@ sql: |
     NULLIF(TRIM("BLOQUE"), '')                   AS bloque,
     NULLIF(TRIM("PARTIDO O ALIANZA"), '')        AS partido_o_alianza,
     NULL::text                                   AS periodo
-  FROM public.cache_senado_listado_senadores
+  FROM {{ live_table('senado::listado_senadores') }}
   WHERE NULLIF(TRIM("APELLIDO"), '') IS NOT NULL
 
 refresh:

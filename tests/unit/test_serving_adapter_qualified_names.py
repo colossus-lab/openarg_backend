@@ -255,3 +255,85 @@ async def test_debt_016_003_bug2_explain_mart_short_circuits() -> None:
         "explain(mart::*) leaked into catalog_resources — DEBT-016-003 "
         "regression"
     )
+
+
+# ---------- DEBT-016-001 — HNSW vector search wiring (2026-05-09) ----------
+
+
+@pytest.mark.asyncio
+async def test_discover_marts_uses_hnsw_when_embedding_provided() -> None:
+    """When `query_embedding` is passed, `_discover_marts` MUST use HNSW
+    cosine similarity over `mart_definitions.embedding` and bypass the
+    lexical word-level ILIKE path.
+    """
+    captured_sqls: list[str] = []
+
+    async def _execute(stmt, *args, **kwargs):
+        captured_sqls.append(str(stmt))
+        return SimpleNamespace(
+            fetchall=lambda: [
+                SimpleNamespace(
+                    mart_id="bcra_principales_indicadores",
+                    description="BCRA",
+                    domain="economia",
+                    mart_schema="mart",
+                    mart_view_name="bcra_principales_indicadores",
+                    sim=0.85,
+                )
+            ]
+        )
+
+    conn = AsyncMock()
+    conn.execute = _execute
+    engine = MagicMock()
+    engine.connect.return_value.__aenter__.return_value = conn
+
+    adapter = LegacyServingAdapter(engine)
+    fake_embedding = [0.1] * 1024
+
+    results = await adapter._discover_marts(
+        "evolución reservas BCRA",
+        limit=5,
+        domain=None,
+        portal=None,
+        query_embedding=fake_embedding,
+    )
+
+    assert len(results) == 1
+    assert results[0].resource_id == "mart::bcra_principales_indicadores"
+    # The vector path SQL must reference embedding HNSW operator `<=>`
+    assert any("embedding <=> CAST" in s for s in captured_sqls), captured_sqls
+    # And MUST NOT fall back to ILIKE when vector returned rows
+    assert not any("ILIKE" in s for s in captured_sqls), (
+        "vector path returned rows but ILIKE fired anyway — wasteful fallback"
+    )
+
+
+@pytest.mark.asyncio
+async def test_discover_marts_falls_back_to_ilike_without_embedding() -> None:
+    """Without `query_embedding`, _discover_marts uses the lexical path
+    (word-level ILIKE) — preserves backward compat.
+    """
+    captured_sqls: list[str] = []
+
+    async def _execute(stmt, *args, **kwargs):
+        captured_sqls.append(str(stmt))
+        return SimpleNamespace(fetchall=lambda: [])
+
+    conn = AsyncMock()
+    conn.execute = _execute
+    engine = MagicMock()
+    engine.connect.return_value.__aenter__.return_value = conn
+
+    adapter = LegacyServingAdapter(engine)
+    await adapter._discover_marts(
+        "compras y contrataciones",
+        limit=5,
+        domain=None,
+        portal=None,
+        query_embedding=None,
+    )
+    # No vector SQL fired
+    assert not any("embedding <=>" in s for s in captured_sqls)
+    # Lexical path fired
+    assert any("ILIKE" in s for s in captured_sqls), captured_sqls

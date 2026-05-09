@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.application.common.sql_safety import is_pure_select
 from app.domain.entities.serving import (
     CatalogEntry,
     Resource,
@@ -41,10 +42,6 @@ from app.domain.ports.serving.serving_port import (
 
 logger = logging.getLogger(__name__)
 
-_WRITE_KEYWORDS = re.compile(
-    r"\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|copy)\b",
-    re.IGNORECASE,
-)
 _RELATION_REF_RE = re.compile(
     r'\b(?:from|join)\s+(?:"?(\w+)"?\.)?"?(\w+)"?',
     re.IGNORECASE,
@@ -163,28 +160,86 @@ class LegacyServingAdapter(IServingPort):
         limit: int = 10,
         portal: str | None = None,
         domain: str | None = None,
+        query_embedding: list[float] | None = None,
     ) -> list[Resource]:
-        # Phase 0: lexical-only discovery against catalog_resources.title /
-        # raw_title. Vector path will be wired in Phase 2 when embeddings are
-        # populated; until then a simple ILIKE keeps the adapter honest about
-        # current capabilities rather than claiming functionality it does not
-        # yet have.
-        #
-        # Phase 3: marts join the discovery sweep when
-        # OPENARG_DISCOVER_MARTS=1 (default ON). They appear *first* in the
-        # result list — the planner should prefer a curated mart over a raw
-        # resource whenever both match.
+        # Phase 4 (2026-05-09): when caller passes `query_embedding`, prefer
+        # HNSW cosine similarity over `catalog_resources.embedding` /
+        # `mart_definitions.embedding`; fall back to lexical ILIKE when the
+        # vector path returns < `limit` rows or no embedding is provided.
+        # Marts always come first when OPENARG_DISCOVER_MARTS=1 (default ON).
         results: list[Resource] = []
 
         if _discover_marts_enabled():
             mart_results = await self._discover_marts(
-                query_text, limit=limit, domain=domain, portal=portal
+                query_text,
+                limit=limit,
+                domain=domain,
+                portal=portal,
+                query_embedding=query_embedding,
             )
             results.extend(mart_results)
             if len(results) >= limit:
                 return results[:limit]
 
-        params: dict[str, Any] = {"q": f"%{query_text}%", "lim": limit - len(results)}
+        remaining = limit - len(results)
+
+        # Vector path: HNSW cosine over catalog_resources.embedding when
+        # caller provides a query embedding. Falls through to ILIKE when
+        # query_embedding is None or yields too few rows.
+        seen_ids = {r.resource_id for r in results}
+        if query_embedding is not None:
+            vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+            vec_params: dict[str, Any] = {"vec": vec_str, "lim": remaining}
+            vec_sql = (
+                "SELECT resource_identity, "
+                "       COALESCE(canonical_title, raw_title) AS title, "
+                "       domain, subdomain, portal, materialized_table_name, "
+                "       1 - (embedding <=> CAST(:vec AS vector)) AS sim "
+                "FROM catalog_resources "
+                "WHERE embedding IS NOT NULL "
+            )
+            if portal:
+                vec_sql += "AND portal = :portal "
+                vec_params["portal"] = portal
+            if domain:
+                vec_sql += "AND domain = :domain "
+                vec_params["domain"] = domain
+            vec_sql += "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
+            try:
+                async with self._engine.connect() as conn:
+                    rs = await conn.execute(text(vec_sql), vec_params)
+                    vrows = rs.fetchall()
+                for row in vrows:
+                    rid = str(row.resource_identity)
+                    if rid in seen_ids:
+                        continue
+                    seen_ids.add(rid)
+                    schema_name, _ = _parse_qualified_name(
+                        row.materialized_table_name or ""
+                    )
+                    results.append(
+                        Resource(
+                            resource_id=rid,
+                            title=str(row.title or ""),
+                            domain=row.domain,
+                            subdomain=row.subdomain,
+                            portal=row.portal,
+                            layer=_layer_for_schema(schema_name),
+                        )
+                    )
+                if len(results) >= limit:
+                    return results[:limit]
+            except (ProgrammingError, OperationalError) as exc:
+                # Tabla sin columna `embedding` o pgvector no instalado
+                # (defensive). Caemos al lexical path.
+                logger.warning(
+                    "discover: vector path degraded to lexical: %s", exc
+                )
+            remaining = limit - len(results)
+
+        # Lexical fallback: ILIKE sobre canonical_title/raw_title cuando el
+        # vector path no nos dio suficientes resultados (o no hubo embedding).
+        params: dict[str, Any] = {"q": f"%{query_text}%", "lim": remaining}
         sql = (
             "SELECT resource_identity, COALESCE(canonical_title, raw_title) AS title, "
             "       domain, subdomain, portal, materialized_table_name "
@@ -204,10 +259,14 @@ class LegacyServingAdapter(IServingPort):
             rows = result.fetchall()
 
         for row in rows:
+            rid = str(row.resource_identity)
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
             schema_name, _ = _parse_qualified_name(row.materialized_table_name or "")
             results.append(
                 Resource(
-                    resource_id=str(row.resource_identity),
+                    resource_id=rid,
                     title=str(row.title or ""),
                     domain=row.domain,
                     subdomain=row.subdomain,
@@ -224,17 +283,63 @@ class LegacyServingAdapter(IServingPort):
         limit: int,
         domain: str | None,
         portal: str | None = None,
+        query_embedding: list[float] | None = None,
     ) -> list[Resource]:
-        """Return marts whose `mart_id`, description, or canonical column
-        names contain ANY of the query words. Lexical only — vector
-        wiring is deferred until `mart_definitions.embedding` is populated
-        (DEBT-019-001).
+        """Return marts ranked by relevance. With `query_embedding` uses HNSW
+        cosine similarity over `mart_definitions.embedding` (Phase 4); without
+        embedding falls back to lexical word-level ILIKE on `mart_id`,
+        `description`, and `canonical_columns_json`.
 
         Word-level matching (vs substring of the whole query) is what
         makes a long natural-language question like
         "produccion de petroleo argentina" match a mart whose description
         contains "petroleo" but not the whole phrase.
         """
+        # ---------- Vector path ----------
+        if query_embedding is not None:
+            vec_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+            vec_params: dict[str, Any] = {"vec": vec_str, "lim": limit}
+            vec_sql = (
+                "SELECT mart_id, description, domain, mart_schema, "
+                "       mart_view_name, "
+                "       1 - (embedding <=> CAST(:vec AS vector)) AS sim "
+                "FROM mart_definitions "
+                "WHERE embedding IS NOT NULL "
+                "  AND COALESCE(last_row_count, 0) > 0 "
+            )
+            if domain:
+                vec_sql += "AND domain = :domain "
+                vec_params["domain"] = domain
+            if portal:
+                vec_sql += "AND :portal = ANY(source_portals) "
+                vec_params["portal"] = portal
+            vec_sql += (
+                "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
+            )
+            try:
+                async with self._engine.connect() as conn:
+                    rs = await conn.execute(text(vec_sql), vec_params)
+                    vrows = rs.fetchall()
+                if vrows:
+                    return [
+                        Resource(
+                            resource_id=f"mart::{row.mart_id}",
+                            title=str(row.mart_id or ""),
+                            domain=row.domain,
+                            subdomain=None,
+                            portal=None,
+                            layer=ServingLayer.MART,
+                        )
+                        for row in vrows
+                    ]
+            except (ProgrammingError, OperationalError) as exc:
+                logger.warning(
+                    "_discover_marts vector path degraded to lexical: %s",
+                    exc,
+                )
+            # If vector returned 0 rows, fall through to lexical.
+
+        # ---------- Lexical fallback ----------
         # Tokenize the query; drop very short noise words. Each token >=3
         # chars becomes its own ILIKE clause OR-joined. 3 (not 4) so
         # short domain words like "gas", "ipc", "pbi" still match.
@@ -436,8 +541,9 @@ class LegacyServingAdapter(IServingPort):
         max_rows: int = 1000,
         timeout_seconds: int = 30,
     ) -> Rows:
-        if _WRITE_KEYWORDS.search(sql):
-            raise WriteAttemptedError(sql[:200])
+        ok, reason = is_pure_select(sql)
+        if not ok:
+            raise WriteAttemptedError(f"{reason}: {sql[:200]}")
         expected_schema, expected_table = await self._expected_relation_for_resource(
             resource_id
         )

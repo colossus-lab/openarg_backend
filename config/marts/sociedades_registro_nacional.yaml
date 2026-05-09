@@ -1,0 +1,107 @@
+id: sociedades_registro_nacional
+version: 0.1.0
+description: |
+  Registro Nacional de Sociedades — sociedades comerciales (S.A., S.R.L.,
+  S.A.S., etc.) registradas en la AFIP / IGJ. Cada fila es una sociedad
+  con su CUIT, razón social, tipo, fecha de contrato, número de
+  inscripción, y domicilio fiscal + legal.
+
+  Combina los portales `justicia` (datos.jus.gob.ar) y `datos_gob_ar`
+  (mismo origen). ~17 tablas live con schema canónico de 16 cols (~5M
+  filas reales). Complementa `registro_igj_entidades` (que cubre
+  entidades sin fines de lucro inscriptas en IGJ).
+
+  Las 2 tablas con shape de "title-as-columns" (24 filas cada una,
+  versión muy vieja del dataset) quedan fuera por incompatibilidad de
+  schema.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::registro_nacional_de_sociedades*"
+
+canonical_columns:
+  - name: cuit
+    type: text
+    description: CUIT de la sociedad
+  - name: razon_social
+    type: text
+    description: Razón social
+  - name: tipo_societario
+    type: text
+    description: Tipo (S.A., S.R.L., S.A.S., ...)
+  - name: numero_inscripcion
+    type: text
+    description: Número de inscripción
+  - name: fecha_contrato_social
+    type: text
+    description: Fecha del contrato social (timestamp)
+  - name: fecha_actualizacion
+    type: text
+    description: Fecha de la última actualización
+  - name: dom_fiscal_provincia
+    type: text
+    description: Provincia del domicilio fiscal
+  - name: dom_fiscal_localidad
+    type: text
+    description: Localidad del domicilio fiscal
+  - name: dom_fiscal_calle
+    type: text
+    description: Calle del domicilio fiscal
+  - name: dom_fiscal_numero
+    type: text
+    description: Numeración del domicilio fiscal
+  - name: dom_fiscal_cp
+    type: text
+    description: Código postal del domicilio fiscal
+  - name: dom_legal_provincia
+    type: text
+    description: Provincia del domicilio legal
+  - name: dom_legal_localidad
+    type: text
+    description: Localidad del domicilio legal
+  - name: dom_legal_calle
+    type: text
+    description: Calle del domicilio legal
+  - name: dom_legal_numero
+    type: text
+    description: Numeración del domicilio legal
+  - name: dom_legal_cp
+    type: text
+    description: Código postal del domicilio legal
+
+sql: |
+  SELECT
+    NULLIF(TRIM(cuit::text), '')                       AS cuit,
+    NULLIF(TRIM(razon_social::text), '')               AS razon_social,
+    NULLIF(TRIM(tipo_societario::text), '')            AS tipo_societario,
+    NULLIF(TRIM(numero_inscripcion::text), '')         AS numero_inscripcion,
+    NULLIF(TRIM(fecha_hora_contrato_social::text), '') AS fecha_contrato_social,
+    NULLIF(TRIM(fecha_hora_actualizacion::text), '')   AS fecha_actualizacion,
+    NULLIF(TRIM(dom_fiscal_provincia::text), '')       AS dom_fiscal_provincia,
+    NULLIF(TRIM(dom_fiscal_localidad::text), '')       AS dom_fiscal_localidad,
+    NULLIF(TRIM(dom_fiscal_calle::text), '')           AS dom_fiscal_calle,
+    NULLIF(TRIM(dom_fiscal_numero::text), '')          AS dom_fiscal_numero,
+    NULLIF(TRIM(dom_fiscal_cp::text), '')              AS dom_fiscal_cp,
+    NULLIF(TRIM(dom_legal_provincia::text), '')        AS dom_legal_provincia,
+    NULLIF(TRIM(dom_legal_localidad::text), '')        AS dom_legal_localidad,
+    NULLIF(TRIM(dom_legal_calle::text), '')            AS dom_legal_calle,
+    NULLIF(TRIM(dom_legal_numero::text), '')           AS dom_legal_numero,
+    NULLIF(TRIM(dom_legal_cp::text), '')               AS dom_legal_cp
+  FROM {{ live_tables_by_table_pattern(
+      '*__registro_nacional_de_sociedades*',
+      expected_columns=['cuit', 'razon_social', 'tipo_societario',
+                        'numero_inscripcion', 'fecha_hora_contrato_social',
+                        'fecha_hora_actualizacion', 'dom_fiscal_provincia',
+                        'dom_fiscal_localidad', 'dom_fiscal_calle',
+                        'dom_fiscal_numero', 'dom_fiscal_cp',
+                        'dom_legal_provincia', 'dom_legal_localidad',
+                        'dom_legal_calle', 'dom_legal_numero', 'dom_legal_cp'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(cuit::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

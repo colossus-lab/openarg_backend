@@ -19,7 +19,6 @@ from app.application.marts import (
 from app.application.marts.builder import build_refresh_sql
 from app.application.marts.mart import MartParseError
 
-
 # ── YAML loading ──────────────────────────────────────────────────────────
 
 

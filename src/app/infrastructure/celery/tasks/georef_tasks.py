@@ -151,7 +151,7 @@ def ingest_georef(self):
                         nested.index = df.index
                         df = df.drop(columns=[col]).join(nested)
 
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
                 dataset_id = _register_dataset(engine, endpoint, table_name, df)
                 if dataset_id:
@@ -160,6 +160,18 @@ def ingest_georef(self):
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so marts find this table
+                # via `live_table('georef::<endpoint>')` macro (DEBT-019-006).
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"georef::{endpoint}",
+                    table_name=table_name,
+                    schema_name="raw",
+                    row_count=len(df),
+                )
 
                 results["ingested"] += 1
                 logger.info("Georef %s: %d rows cached", endpoint, len(df))

@@ -611,7 +611,11 @@ def cleanup_orphan_cache_tables(self, *, dry_run: bool = True, max_drops: int = 
     time_limit=720,
 )
 def retain_raw_versions(
-    self, *, keep_last: int | None = None, dry_run: bool = False
+    self,
+    *,
+    keep_last: int | None = None,
+    soak_days: int | None = None,
+    dry_run: bool = False,
 ) -> dict:
     """Drop superseded raw-schema tables beyond the per-resource retention window.
 
@@ -621,6 +625,12 @@ def retain_raw_versions(
     1. `DROP TABLE raw."<table_name>"` (recorded via `_record_cache_drop` for
        audit consistency).
     2. `DELETE FROM raw_table_versions` for that row.
+
+    Soak window (DEBT-017-002): a candidate is only eligible to be dropped
+    when its `superseded_at` is older than `NOW() - soak_days` (default
+    `OPENARG_RAW_RETENTION_SOAK_DAYS=7`). Rows whose `superseded_at IS NULL`
+    are also eligible — this preserves the previous behaviour for any rows
+    that pre-date the soak guarantee, so they don't accumulate forever.
 
     The default for `keep_last` comes from the env var
     `OPENARG_RAW_RETENTION_KEEP_LAST` (default 2). That keeps one rollback
@@ -638,6 +648,13 @@ def retain_raw_versions(
     if keep_last < 1:
         raise ValueError("keep_last must be >= 1")
 
+    if soak_days is None:
+        from app.setup.config.constants import RAW_RETENTION_SOAK_DAYS
+
+        soak_days = RAW_RETENTION_SOAK_DAYS
+    if soak_days < 0:
+        raise ValueError("soak_days must be >= 0")
+
     engine = get_sync_engine()
     _exact_protected, _pattern_prefixes, protected_raw_tables = _mart_dependency_guards(engine)
     select_sql = text(
@@ -648,6 +665,7 @@ def retain_raw_versions(
                 version,
                 schema_name,
                 table_name,
+                superseded_at,
                 ROW_NUMBER() OVER (
                     PARTITION BY resource_identity ORDER BY version DESC
                 ) AS rn
@@ -657,6 +675,10 @@ def retain_raw_versions(
         FROM ranked
         WHERE rn > :keep
           AND (:no_tables OR table_name NOT IN :protected_tables)
+          AND (
+              superseded_at IS NULL
+              OR superseded_at < NOW() - make_interval(days => :soak_days)
+          )
         ORDER BY resource_identity, version
         """
     )
@@ -665,6 +687,7 @@ def retain_raw_versions(
             select_sql.bindparams(bindparam("protected_tables", expanding=True)),
             {
                 "keep": keep_last,
+                "soak_days": soak_days,
                 "no_tables": len(protected_raw_tables) == 0,
                 "protected_tables": list(protected_raw_tables) or [""],
             },
@@ -680,15 +703,17 @@ def retain_raw_versions(
     ]
     if dry_run:
         logger.info(
-            "retain_raw_versions dry-run: %d candidates (keep_last=%d)",
+            "retain_raw_versions dry-run: %d candidates (keep_last=%d, soak_days=%d)",
             len(candidates),
             keep_last,
+            soak_days,
         )
         return {
             "found": len(candidates),
             "samples": candidates[:10],
             "dry_run": True,
             "keep_last": keep_last,
+            "soak_days": soak_days,
         }
 
     dropped = 0
@@ -729,6 +754,7 @@ def retain_raw_versions(
         "dropped": dropped,
         "failed": failed,
         "keep_last": keep_last,
+        "soak_days": soak_days,
     }
     logger.info("retain_raw_versions: %s", summary)
     return summary
@@ -1449,3 +1475,147 @@ def cleanup_empty_raw_tables(
     }
     logger.info("cleanup_empty_raw_tables: %s", summary)
     return summary
+
+
+# ---------- cleanup_garbage_cols_in_raw (Schema cleanup, 2026-05-10) ----------
+
+
+@celery_app.task(
+    name="openarg.cleanup_garbage_cols_in_raw",
+    bind=True,
+    soft_time_limit=2400,
+    time_limit=2700,
+)
+def cleanup_garbage_cols_in_raw(
+    self,
+    *,
+    dry_run: bool = False,
+    sample_size: int = 5000,
+    max_populated_ratio: float = 0.01,
+):
+    """Drop garbage cols left behind by parser fallbacks in `raw.*` tables.
+
+    Two cleanup passes (idempotent — re-runs are no-ops on clean schemas):
+
+    1. **UUID-shaped col names**: when the source dataset's metadata UUID
+       leaks into the column header (parser bug, ~1.4k tables observed).
+       Always safe to drop — the col never carries useful data.
+
+    2. **`col_N` / `Unnamed:N` cols that are ≥99% empty**: trailing
+       garbage cols pandas creates when the source CSV had stray commas
+       past the last real col. Drop only when populated ratio over
+       `sample_size` rows is at most `max_populated_ratio`.
+
+    Both pass results audited via structured log (see
+    `parse_repair_audit` for the per-(table,col) trail when the helper
+    `_audit` from `parse_repair` runs them — this task uses lighter
+    inline logging since it operates at scale).
+
+    Runs Sunday 02:30 ART (overlaps the row_count reconcile, both bounded).
+    """
+    import re
+    from sqlalchemy import text
+    from app.infrastructure.celery.tasks._db import get_sync_engine
+
+    engine = get_sync_engine()
+    stats = {
+        "uuid_dropped": 0,
+        "uuid_tables_touched": 0,
+        "empty_garbage_dropped": 0,
+        "empty_garbage_kept": 0,
+        "errors": 0,
+        "dry_run": dry_run,
+    }
+
+    UUID_RE = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    )
+
+    # --- Pass 1: UUID col drop ---
+    try:
+        with engine.connect() as conn:
+            uuid_cols = conn.execute(
+                text(
+                    """
+                    SELECT table_name, column_name
+                    FROM information_schema.columns
+                    WHERE table_schema='raw'
+                      AND column_name ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    """
+                )
+            ).fetchall()
+        seen_tables: set[str] = set()
+        for tbl, col in uuid_cols:
+            if not UUID_RE.match(col):
+                continue
+            if dry_run:
+                stats["uuid_dropped"] += 1
+                seen_tables.add(tbl)
+                continue
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(f'ALTER TABLE raw."{tbl}" DROP COLUMN "{col}"')
+                    )
+                stats["uuid_dropped"] += 1
+                seen_tables.add(tbl)
+            except Exception:
+                stats["errors"] += 1
+        stats["uuid_tables_touched"] = len(seen_tables)
+    except Exception:
+        stats["errors"] += 1
+        logger.exception("cleanup_garbage_cols_in_raw: pass 1 (UUID) failed")
+
+    # --- Pass 2: col_N / Unnamed empty drop ---
+    try:
+        with engine.connect() as conn:
+            candidates = conn.execute(
+                text(
+                    """
+                    SELECT table_name, column_name
+                    FROM information_schema.columns
+                    WHERE table_schema='raw'
+                      AND (column_name ~ '^col_[0-9]+$'
+                           OR column_name ILIKE 'unnamed:%')
+                    """
+                )
+            ).fetchall()
+        for tbl, col in candidates:
+            try:
+                # Sample populated count (excluding string-NaN sentinels)
+                with engine.connect() as conn:
+                    res = conn.execute(
+                        text(
+                            f'SELECT count(*), '
+                            f'SUM(CASE WHEN "{col}" IS NOT NULL '
+                            f'AND LOWER(COALESCE(TRIM("{col}"::text), \'\')) '
+                            f"NOT IN ('', 'none', 'nan', 'null', 'n/a', 'na', '<na>', "
+                            f"'-', '--', 's/d', 's.d.', '.') "
+                            f'THEN 1 ELSE 0 END) FROM '
+                            f'(SELECT "{col}" FROM raw."{tbl}" LIMIT :n) sub'
+                        ),
+                        {"n": sample_size},
+                    ).fetchone()
+                total_rows = (res[0] if res else 0) or 0
+                populated = (res[1] if res else 0) or 0
+                if total_rows == 0:
+                    continue
+                if populated / total_rows > max_populated_ratio:
+                    stats["empty_garbage_kept"] += 1
+                    continue
+                if dry_run:
+                    stats["empty_garbage_dropped"] += 1
+                    continue
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(f'ALTER TABLE raw."{tbl}" DROP COLUMN "{col}"')
+                    )
+                stats["empty_garbage_dropped"] += 1
+            except Exception:
+                stats["errors"] += 1
+    except Exception:
+        stats["errors"] += 1
+        logger.exception("cleanup_garbage_cols_in_raw: pass 2 (empty garbage) failed")
+
+    logger.info("cleanup_garbage_cols_in_raw: %s", stats)
+    return stats

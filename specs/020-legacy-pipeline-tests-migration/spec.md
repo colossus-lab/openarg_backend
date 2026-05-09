@@ -1,8 +1,28 @@
 # Spec 020 — Migrar tests del SmartQueryService al pipeline LangGraph
 
-**Estado**: Draft / pendiente de ejecución
+**Estado**: ✅ **CLOSED 2026-05-09**
 **Fecha de creación**: 2026-05-05
+**Fecha de cierre**: 2026-05-09
 **Origen**: cleanup tras borrar `SmartQueryService` y endpoints legacy `/api/v1/query/*`
+
+## Cierre 2026-05-09
+
+**Borrados** (4 archivos, ~1,944 LOC):
+- `tests/unit/test_smart_query_service.py` (870 LOC) — código muerto, testeaba el monolito ya borrado
+- `tests/integration/test_smart_pipeline.py` (180) — duplicado de `test_pipeline_p1_tasks.py`
+- `tests/integration/test_query_pipeline.py` (394) — idem duplicado
+- `tests/integration/conftest.py` (305) — fixtures de SmartQueryService
+- `tests/evaluation/run_eval.py` (195) — eval harness obsoleto
+
+**Migrados** (4 archivos, total 79 tests):
+- `tests/unit/test_cache_key.py` → 6 tests, importa `app.application.pipeline.cache_manager.cache_key` (prefijo `openarg:smart:` actual, no `openarg:query:` viejo)
+- `tests/unit/test_casual_detection.py` → 38 tests, importa patrones + `get_casual_response/get_meta_response` de `app.application.pipeline.classifiers`
+- `tests/unit/test_data_context.py` → 14 tests, importa `app.application.pipeline.context_builder.build_data_context`
+- `tests/unit/test_error_scenarios.py` → 21 tests, ya no referencia `SmartQueryService` (migrado en sprint anterior, solo se quitó comentario residual)
+
+Todos pasando.
+
+---
 
 ## Contexto
 

@@ -203,7 +203,7 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
                 if len(df) > MAX_ROWS:
                     df = df.head(MAX_ROWS)
 
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
                 dataset_id = _register_dataset(
                     engine, portal, ds_id, title, table_name, df, download_url
@@ -214,6 +214,20 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so marts find this table
+                # via `live_table('<portal_key>::<ds_id>')` macro
+                # (DEBT-019-006). Portal name comes from connector config
+                # (e.g. `rosario_dkan`).
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"{portal.portal_key}::{ds_id}",
+                    table_name=table_name,
+                    schema_name="raw",
+                    row_count=len(df),
+                )
 
                 results["ingested"] += 1
                 logger.info("DKAN %s %s: %d rows", portal.portal_key, ds_id, len(df))

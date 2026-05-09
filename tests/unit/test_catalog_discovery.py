@@ -6,7 +6,6 @@ mapper. The DB-touching paths are exercised in integration suites.
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import pytest

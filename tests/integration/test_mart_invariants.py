@@ -318,7 +318,7 @@ def test_mart_definitions_metadata_in_sync(engine):
         ).fetchall()
     assert rows, "no marts with last_row_count > 0 — sweep regression?"
     for r in rows:
-        actual = conn = engine.connect()
+        conn = engine.connect()
         try:
             actual_count = conn.execute(
                 text(

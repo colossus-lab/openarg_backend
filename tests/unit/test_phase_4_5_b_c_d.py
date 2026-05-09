@@ -23,7 +23,6 @@ from app.application.pipeline.connectors.sandbox import (
 )
 from app.domain.entities.serving import Schema, ServingLayer
 
-
 # ── 4.5b: mart semantics block ───────────────────────────────────────────
 
 

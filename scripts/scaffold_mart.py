@@ -50,14 +50,12 @@ REQUIRES
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from textwrap import indent
 from typing import Any
 
 from sqlalchemy import create_engine, text
@@ -126,7 +124,7 @@ def _fetch_target_tables(engine, *, domain: str | None, subdomain: str | None,
             "WHERE cd.table_name = tc.table_name AND d.portal = :portal)"
         )
         params["portal"] = portal
-    where = " AND ".join(clauses)
+    _ = " AND ".join(clauses)  # placeholder — see body below for actual WHERE assembly
 
     # `table_catalog.table_name` is stored fully-qualified ("raw.<name>" or
     # bare "<name>" for legacy public.cache_*). For raw tables, the portal is

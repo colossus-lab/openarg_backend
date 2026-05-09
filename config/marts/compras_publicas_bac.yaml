@@ -65,7 +65,7 @@ sql: |
     NULLIF(TRIM("awards/0/value/currency"), '')        AS moneda,
     NULLIF(TRIM("awards/0/contractPeriod/startDate"), '') AS fecha_inicio_contrato,
     NULLIF(TRIM("awards/0/contractPeriod/endDate"), '')   AS fecha_fin_contrato
-  FROM public.cache_bac_awards
+  FROM {{ live_table('bac::awards') }}
   WHERE NULLIF(TRIM("awards/0/title"), '') IS NOT NULL
 
 refresh:

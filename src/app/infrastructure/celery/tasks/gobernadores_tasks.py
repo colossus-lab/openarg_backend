@@ -159,7 +159,7 @@ def scrape_gobernadores(self):
         df = df.drop_duplicates(subset=["provincia", "gobernador"], keep="first")
 
         table_name = "cache_gobernadores"
-        df.to_sql(table_name, engine, if_exists="replace", index=False)
+        df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
         dataset_id = _register_dataset(engine, table_name, df)
         logger.info("Gobernadores: %d provinces cached → %s", len(df), table_name)
@@ -168,6 +168,18 @@ def scrape_gobernadores(self):
             from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
 
             index_dataset_embedding.delay(dataset_id)
+
+        # Register in `raw_table_versions` so marts find this table via
+        # `live_table('gobernadores::actuales')` macro (DEBT-019-006).
+        from app.infrastructure.celery.tasks._db import register_via_b_table
+
+        register_via_b_table(
+            engine,
+            resource_identity="gobernadores::actuales",
+            table_name=table_name,
+            schema_name="raw",
+            row_count=len(df),
+        )
 
         return {"table": table_name, "rows": len(df)}
 

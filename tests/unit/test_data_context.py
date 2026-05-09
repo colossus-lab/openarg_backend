@@ -1,4 +1,10 @@
-"""Tests for _build_data_context in SmartQueryService."""
+"""Tests for `app.application.pipeline.context_builder.build_data_context`.
+
+Migrated 2026-05-09 from skip-marked legacy tests (spec 020). The
+original lived inside `SmartQueryService._build_data_context`; the
+function is now a free helper in `pipeline.context_builder` and the
+tests are unmodified except for unskipping.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +12,6 @@ import json
 
 from app.application.pipeline.context_builder import build_data_context
 from app.domain.entities.connectors.data_result import DataResult
-
-import pytest
-
-pytestmark = pytest.mark.skip(
-    reason="Legacy SmartQueryService removed; tests TODO — see specs/020-legacy-pipeline-tests-migration/spec.md"
-)
-
 
 _build_data_context = build_data_context
 

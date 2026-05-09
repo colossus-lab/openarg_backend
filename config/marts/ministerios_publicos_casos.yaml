@@ -1,0 +1,69 @@
+id: ministerios_publicos_casos
+version: 0.1.0
+description: |
+  Casos registrados por los Ministerios Públicos provinciales — Sistema
+  Nacional de Información Criminal del Ministerio de Justicia. Cada fila
+  es un caso penal con su tipo de delito, ubicación, fecha y unidad
+  fiscal interviniente.
+
+  Combina los portales `justicia` (datos.jus.gob.ar) y `datos_gob_ar`
+  (mismo origen, doble publicación). Esta vista usa el set de 8 cols
+  core presentes en todas las tablas con datos (~9 tablas live, ~8M
+  filas). Las cols extra (autores, tentativa, estadístico) varían
+  entre versiones y quedan fuera del shape canónico.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::ministerios_publicos_casos*"
+
+canonical_columns:
+  - name: caso_id
+    type: text
+    description: Identificador del caso
+  - name: provincia_nombre
+    type: text
+    description: Provincia
+  - name: circunscripcion
+    type: text
+    description: Descripción de la circunscripción judicial
+  - name: unidad
+    type: text
+    description: Descripción de la unidad fiscal
+  - name: caso_fecha_inicio
+    type: text
+    description: Fecha de inicio del caso
+  - name: caso_fecha_hecho
+    type: text
+    description: Fecha del hecho reportado
+  - name: caso_hora_hecho
+    type: text
+    description: Hora del hecho
+  - name: delito_descripcion
+    type: text
+    description: Descripción del delito
+
+sql: |
+  SELECT
+    NULLIF(TRIM(caso_id::text), '')                     AS caso_id,
+    NULLIF(TRIM(provincia_nombre::text), '')            AS provincia_nombre,
+    NULLIF(TRIM(circunscripcion_descripcion::text), '') AS circunscripcion,
+    NULLIF(TRIM(unidad_descripcion::text), '')          AS unidad,
+    NULLIF(TRIM(caso_fecha_inicio::text), '')           AS caso_fecha_inicio,
+    NULLIF(TRIM(caso_fecha_hecho::text), '')            AS caso_fecha_hecho,
+    NULLIF(TRIM(caso_hora_hecho::text), '')             AS caso_hora_hecho,
+    NULLIF(TRIM(delito_descripcion::text), '')          AS delito_descripcion
+  FROM {{ live_tables_by_table_pattern(
+      '*__ministerios_publicos_casos*',
+      expected_columns=['caso_id', 'provincia_nombre',
+                        'circunscripcion_descripcion', 'unidad_descripcion',
+                        'caso_fecha_inicio', 'caso_fecha_hecho',
+                        'caso_hora_hecho', 'delito_descripcion'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(caso_id::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

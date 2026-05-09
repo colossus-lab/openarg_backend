@@ -280,11 +280,10 @@ same window)**
   cols), (c) sparse text without a header row at all (PDFs scraped to
   random cell positions). Either per-portal custom rules or
   LLM-assisted recovery is the next angle for those.
-- **DEBT-021-003 — Legacy `cache_*` migration**: 5,611 `cache_*` tables
-  are still in `public` and not registered in `raw_table_versions`.
-  Many are in active use (`cached_datasets.status='ready'`). Migrating
-  them to `raw.*` would unify the storage model and simplify routing,
-  but the connectors that own them must move first.
+- **DEBT-021-003 — Legacy `cache_*` storage convention** (CLOSED 2026-05-09):
+  Current policy: ALL cached tables (data persisted by either the standard collector path or any vía-B connector) live in the `raw` schema. The 11 vía-B connector tasks (`bcra`, `bac`, `cordoba_leg`, `dkan`, `georef`, `gobernadores`, `indec`, `mapa_estado`, `presupuesto`, `senado`, `series_tiempo`) write with `to_sql(..., schema='raw')` + `register_via_b_table(schema_name='raw')`. The Postgres role's `search_path = raw, public, "$user"` so unqualified SQL (e.g. examples in `nl2sql.txt`) resolves to the right schema automatically. Marts reference tables via the `live_table('<portal>::<sid>')` macro that expands to `raw."<table>"` at build time. **A fresh database is born in this shape** — there is no "legacy migration" step on a clean deploy.
+  - 2 connectors intentionally NOT migrated: `staff_tasks.py` and `senado_staff_tasks.py` keep `schema_name="public"` for `senado_staff`, `staff_changes`, `staff_snapshots`. Those are operational metadata tables (not cached datasets) and legitimately live in public.
+  - One-shot procedure for an existing DB that accumulated cache_* legacy in public (only applies to a DB that evolved incrementally): mass `ALTER TABLE … SET SCHEMA raw` + UPDATE `raw_table_versions.schema_name` + UPDATE `catalog_resources.materialized_table_name` to qualify with `raw."<table>"` + `ALTER ROLE … SET search_path` + mass rebuild of marts. Documented in `MEMORY.md` for operational reproducibility. NOT permanent code.
 - **DEBT-021-004 — Unnamed cols metric grew during re-collect** (CLOSED 2026-05-09, commit 59dfd8b):
   root cause was string-form NaN sentinels (`"None"`, `"nan"`, `"s/d"`, ...)
   emitted AS-IS by pandas when reading CSVs that use them as missing-value

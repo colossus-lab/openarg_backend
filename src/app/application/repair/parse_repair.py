@@ -404,6 +404,7 @@ def repair_col_n_table(
     run_id: uuid.UUID | None = None,
     dry_run: bool = False,
     sample_rows: int = 5,
+    min_garbage_ratio: float = 0.40,
 ) -> RepairOutcome:
     """Repair a single table whose columns include `col_N` placeholders.
 
@@ -454,7 +455,8 @@ def repair_col_n_table(
         ).fetchall()
 
     proposed_cols, rows_to_delete, reason = propose_col_n_rename(
-        old_cols, [list(r) for r in sample]
+        old_cols, [list(r) for r in sample],
+        min_garbage_ratio=min_garbage_ratio,
     )
 
     if reason != "applied":
@@ -786,6 +788,246 @@ def repair_title_as_columns_table(
     return outcome
 
 
+# ---------- LLM-assisted repair (DEBT-021-002) ----------
+#
+# The heuristic-based repairs above (`propose_col_n_rename`,
+# `propose_title_as_columns_rename`) cover the common patterns: pandas
+# misread a header row, deduped a title across cols, etc. ~76 % of
+# candidates that fail those heuristics ship with `no_improvement`.
+# Their structures are genuinely heterogeneous: data transposed
+# (rows-as-cols), multi-level NaN-hierarchical headers, sparse text
+# without an identifiable header row at all.
+#
+# This LLM-assisted path is a fallback ONLY for tables where:
+#   - A heuristic detector returned `no_improvement` or
+#     `garbage_ratio_below_threshold`
+#   - The cols still look semantically suspicious
+#
+# We send a few sample rows + the current col names to a cheap LLM and
+# ask it to propose semantic identifiers. The LLM response is treated as
+# a *proposal*, NOT as ground truth: we still validate length, reject
+# duplicates, normalize via `_normalize_header_to_identifier`, and audit.
+#
+# COST: one LLM call per table. Default to dry_run=True so operators
+# can review proposals before applying. Hard-coded `max_tokens=512` and
+# truncated samples keep per-call cost to ~$0.001 on Claude Haiku.
+
+
+_LLM_REPAIR_PROMPT_SYSTEM = (
+    "Eres un experto en datos abiertos argentinos. Recibirás los nombres "
+    "actuales de las columnas de una tabla de Postgres (que probablemente "
+    "estén corruptos: `col_0`, `Unnamed: 1`, títulos repetidos, fechas, "
+    "URLs, UUIDs, etc.) y 3-5 filas de datos reales. Tu tarea: proponer "
+    "nombres semánticos en snake_case para cada columna basándote en el "
+    "CONTENIDO de las filas, no en los nombres viejos.\n\n"
+    "REGLAS:\n"
+    "1. Devuelve EXACTAMENTE la misma cantidad de nombres que columnas "
+    "originales.\n"
+    "2. Solo a-z, 0-9 y _. No empieces con dígito.\n"
+    "3. Cada nombre debe ser único.\n"
+    "4. Si una columna parece metadata sin valor semántico (URL, UUID, "
+    "fecha de scrape), llamala `metadata_<i>`.\n"
+    "5. Si no puedes inferir un nombre con razonable confianza, dejá el "
+    "nombre original (la heurística aplicará dedup).\n"
+    "6. Responde SOLO el JSON. Nada más."
+)
+
+
+async def propose_llm_assisted_rename(
+    old_cols: list[str],
+    sample_rows_data: list[list[Any]],
+    *,
+    llm: Any,
+    max_sample_rows: int = 5,
+    max_cell_chars: int = 80,
+) -> tuple[list[str], int, str]:
+    """LLM-backed proposer. Returns `(new_cols, rows_to_delete, reason)`.
+
+    Conservative on `rows_to_delete`: we don't ask the LLM to identify a
+    "buried header row" because that's higher-stakes (deleting data). The
+    LLM only renames cols. The heuristic handles row deletion.
+
+    `reason='applied'` → use new_cols. Anything else → keep old_cols.
+    """
+    if not old_cols:
+        return old_cols, 0, "no_columns"
+    if len(old_cols) > 100:
+        # LLM context cost grows with col count; cap at a reasonable
+        # ceiling. Tables with 100+ cols are usually mega-wide pivots
+        # that need a different strategy (unpivot) anyway.
+        return old_cols, 0, "too_many_cols"
+
+    # Build a compact prompt: cols list + sample rows truncated to
+    # max_cell_chars per cell. JSON-encoded for the LLM.
+    samples = []
+    for row in sample_rows_data[:max_sample_rows]:
+        truncated = [
+            (str(v)[:max_cell_chars] if v is not None else None) for v in row
+        ]
+        samples.append(truncated)
+
+    user_prompt = json.dumps(
+        {"current_columns": old_cols, "sample_rows": samples},
+        ensure_ascii=False,
+    )
+
+    from app.domain.ports.llm.llm_provider import LLMMessage
+
+    messages = [
+        LLMMessage(role="system", content=_LLM_REPAIR_PROMPT_SYSTEM),
+        LLMMessage(role="user", content=user_prompt),
+    ]
+    schema = {
+        "type": "object",
+        "properties": {
+            "proposed_columns": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["proposed_columns"],
+    }
+
+    try:
+        response = await llm.chat_json(
+            messages=messages, json_schema=schema, temperature=0.0, max_tokens=2048
+        )
+    except Exception as exc:
+        logger.warning("llm-assisted repair: chat failed: %s", exc)
+        return old_cols, 0, f"llm_error:{type(exc).__name__}"
+
+    # Extract JSON robustly: some Bedrock responses prepend code fences
+    # or explanation text despite the system prompt. Slice to the first
+    # `{` / `[` and the matching last `}` / `]`.
+    raw_text = (response.content or "").strip()
+    if raw_text.startswith("```"):
+        # Strip ```json fences if present
+        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+        raw_text = re.sub(r"\s*```$", "", raw_text)
+    first_brace = raw_text.find("{")
+    last_brace = raw_text.rfind("}")
+    if first_brace >= 0 and last_brace > first_brace:
+        raw_text = raw_text[first_brace : last_brace + 1]
+    try:
+        parsed = json.loads(raw_text)
+        proposed_raw = parsed.get("proposed_columns", [])
+    except (json.JSONDecodeError, AttributeError) as exc:
+        logger.warning("llm-assisted repair: bad JSON: %s | content=%s", exc, raw_text[:200])
+        return old_cols, 0, "llm_bad_json"
+
+    if not isinstance(proposed_raw, list) or len(proposed_raw) != len(old_cols):
+        return old_cols, 0, (
+            f"length_mismatch:{len(proposed_raw)}_vs_{len(old_cols)}"
+        )
+
+    # Defense-in-depth: re-normalize what the LLM returned and dedupe.
+    proposed_normalized = [
+        _normalize_header_to_identifier(name) or f"col_{i + 1}"
+        for i, name in enumerate(proposed_raw)
+    ]
+    proposed_final = _dedupe_identifiers(proposed_normalized)
+
+    if proposed_final == old_cols:
+        return old_cols, 0, "llm_no_change"
+
+    return proposed_final, 0, "applied"
+
+
+async def repair_with_llm_assist(
+    engine: Engine,
+    *,
+    llm: Any,
+    table_schema: str,
+    table_name: str,
+    run_id: uuid.UUID | None = None,
+    dry_run: bool = True,
+    sample_rows: int = 5,
+) -> RepairOutcome:
+    """Repair a table using LLM proposal when heuristics couldn't.
+
+    Default `dry_run=True` because LLM proposals are best reviewed before
+    being applied. Audited under `phase='llm_assisted'`.
+    """
+    run_id = run_id or uuid.uuid4()
+    outcome = RepairOutcome(
+        table_schema=table_schema,
+        table_name=table_name,
+        ok=False,
+        dry_run=dry_run,
+    )
+
+    with engine.connect() as conn:
+        cols_rows = conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = :s AND table_name = :t "
+                "ORDER BY ordinal_position"
+            ),
+            {"s": table_schema, "t": table_name},
+        ).fetchall()
+    old_cols = [r[0] for r in cols_rows]
+    outcome.old_columns = old_cols
+
+    if not old_cols:
+        outcome.reason = "table_not_found_or_no_columns"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
+        return outcome
+
+    qident_table = f"{_quote_ident(table_schema)}.{_quote_ident(table_name)}"
+    select_cols = ", ".join(_quote_ident(c) for c in old_cols)
+    with engine.connect() as conn:
+        sample = [
+            list(r)
+            for r in conn.execute(
+                text(f"SELECT {select_cols} FROM {qident_table} LIMIT :n"),
+                {"n": sample_rows},
+            ).fetchall()
+        ]
+
+    proposed_cols, _rows_to_delete, reason = await propose_llm_assisted_rename(
+        old_cols, sample, llm=llm
+    )
+    outcome.new_columns = proposed_cols
+
+    if reason != "applied":
+        outcome.reason = reason
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
+        return outcome
+
+    if dry_run:
+        outcome.ok = True
+        outcome.reason = "dry_run_proposal"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="llm_assisted")
+        return outcome
+
+    rename_pairs = [
+        (old, new) for old, new in zip(old_cols, proposed_cols) if old != new
+    ]
+    try:
+        with engine.begin() as conn:
+            for old, new in rename_pairs:
+                conn.execute(
+                    text(
+                        f"ALTER TABLE {qident_table} "
+                        f"RENAME COLUMN {_quote_ident(old)} TO {_quote_ident(new)}"
+                    )
+                )
+        outcome.ok = True
+        outcome.reason = "applied"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="llm_assisted")
+        logger.info(
+            "parse_repair (llm_assisted): %s.%s renamed %d cols",
+            table_schema, table_name, len(rename_pairs),
+        )
+    except Exception as exc:
+        outcome.ok = False
+        outcome.error_message = f"{type(exc).__name__}: {exc!s}"[:500]
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="llm_assisted")
+        logger.exception(
+            "parse_repair (llm_assisted) failed for %s.%s",
+            table_schema, table_name,
+        )
+
+    return outcome
+
+
 # Re-exported for callers (admin endpoint, future Celery task).
 __all__ = [
     "RepairOutcome",
@@ -793,7 +1035,9 @@ __all__ = [
     "repair_col_n_table",
     "repair_trailing_garbage_cols",
     "repair_title_as_columns_table",
+    "repair_with_llm_assist",
     "propose_col_n_rename",
     "propose_title_as_columns_rename",
+    "propose_llm_assisted_rename",
     "is_garbage_column",
 ]

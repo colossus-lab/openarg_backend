@@ -94,6 +94,15 @@ DB_STATEMENT_TIMEOUT_SECONDS: int = _int_env(
 # still raise/lower via env without code changes.
 RAW_RETENTION_KEEP_LAST: int = _int_env("OPENARG_RAW_RETENTION_KEEP_LAST", 2)
 
+# Soak window before `retain_raw_versions` is allowed to drop a superseded
+# raw table. A version becomes a candidate only when both:
+#   * it is older than `RAW_RETENTION_KEEP_LAST` per resource (rn > keep), AND
+#   * its `superseded_at` is older than NOW() - this many days.
+# Versions whose `superseded_at IS NULL` (rare — only via a manual fix or
+# pre-soak rows) are also eligible regardless of soak so we don't pile up
+# orphans forever. DEBT-017-002.
+RAW_RETENTION_SOAK_DAYS: int = _int_env("OPENARG_RAW_RETENTION_SOAK_DAYS", 7)
+
 
 __all__ = [
     "MAX_TABLE_ROWS",
@@ -102,4 +111,5 @@ __all__ = [
     "MART_REFRESH_DEBOUNCE_SECONDS",
     "DB_STATEMENT_TIMEOUT_SECONDS",
     "RAW_RETENTION_KEEP_LAST",
+    "RAW_RETENTION_SOAK_DAYS",
 ]

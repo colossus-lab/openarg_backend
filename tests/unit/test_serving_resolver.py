@@ -44,7 +44,7 @@ async def test_discover_proxies_to_port() -> None:
     resolver = ServingResolver(port)
     result = await resolver.discover("query", limit=5)
     port.discover.assert_awaited_once_with(
-        "query", limit=5, portal=None, domain=None
+        "query", limit=5, portal=None, domain=None, query_embedding=None
     )
     assert len(result) == 1
     assert result[0].resource_id == "mart::x"

@@ -1,0 +1,82 @@
+id: mediaciones_prejudiciales
+version: 0.1.0
+description: |
+  Listado nacional de mediaciones prejudiciales y judiciales — Ministerio
+  de Justicia de la Nación. Cada registro es una mediación (alternativa al
+  litigio) registrada por mediadores matriculados.
+
+  Combina el portal `justicia` (datos.jus.gob.ar) y `datos_gob_ar` (mismo
+  origen, doble publicación). ~22 tablas live con shape canónico de 13 cols
+  (~99M filas totales).
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::listado_de_mediaciones*"
+
+canonical_columns:
+  - name: fuero
+    type: text
+    description: Fuero (civil, comercial, laboral, etc.)
+  - name: mediacion_id
+    type: text
+    description: Identificador de la mediación
+  - name: tipo_de_mediacion
+    type: text
+    description: Tipo (prejudicial, judicial)
+  - name: estado
+    type: text
+    description: Estado del proceso de mediación
+  - name: reapertura
+    type: text
+    description: Indicador de reapertura del expediente
+  - name: fecha_de_inicio
+    type: text
+    description: Fecha de inicio de la mediación (texto, formato heterogéneo)
+  - name: objeto
+    type: text
+    description: Objeto / motivo de la mediación
+  - name: honorarios_pagos
+    type: text
+    description: Indicador de pago de honorarios
+  - name: mediador_id
+    type: text
+    description: Identificador del mediador
+  - name: resultado_mediacion
+    type: text
+    description: Resultado (acuerdo, sin acuerdo, etc.)
+  - name: cantidad_de_audiencias
+    type: text
+    description: Cantidad de audiencias realizadas
+  - name: fecha_ultima_audiencia
+    type: text
+    description: Fecha de la última audiencia
+
+sql: |
+  SELECT
+    NULLIF(TRIM(fuero::text), '')                  AS fuero,
+    NULLIF(TRIM(mediacion::text), '')              AS mediacion_id,
+    NULLIF(TRIM(tipo_de_mediacion::text), '')      AS tipo_de_mediacion,
+    NULLIF(TRIM(estado::text), '')                 AS estado,
+    NULLIF(TRIM(reapertura::text), '')             AS reapertura,
+    NULLIF(TRIM(fecha_de_inicio::text), '')        AS fecha_de_inicio,
+    NULLIF(TRIM(objeto::text), '')                 AS objeto,
+    NULLIF(TRIM(honorarios_pagos::text), '')       AS honorarios_pagos,
+    NULLIF(TRIM(mediador::text), '')               AS mediador_id,
+    NULLIF(TRIM(resultado_mediacion::text), '')    AS resultado_mediacion,
+    NULLIF(TRIM(cantidad_de_audiencias::text), '') AS cantidad_de_audiencias,
+    NULLIF(TRIM(fecha_ultima_audiencia::text), '') AS fecha_ultima_audiencia
+  FROM {{ live_tables_by_table_pattern(
+      '*__listado_de_mediaciones*',
+      expected_columns=['fuero', 'mediacion', 'tipo_de_mediacion', 'estado',
+                        'reapertura', 'fecha_de_inicio', 'objeto',
+                        'honorarios_pagos', 'mediador', 'resultado_mediacion',
+                        'cantidad_de_audiencias', 'fecha_ultima_audiencia'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(mediacion::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

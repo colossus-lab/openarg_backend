@@ -1,27 +1,29 @@
-"""Tests for casual/meta message detection in SmartQueryService."""
+"""Tests for casual/meta message detection (post-SmartQueryService cleanup).
+
+Migrated 2026-05-09 from skip-marked legacy tests (spec 020). The old
+imports referenced `app.application.smart_query_service` (deleted); the
+canonical home is now `app.application.pipeline.classifiers` which
+exposes both `get_*_response` API functions and the regex patterns
+underneath.
+"""
 
 import pytest
 
-from app.application.pipeline.classifiers import get_casual_response, get_meta_response
-
-pytestmark = pytest.mark.skip(
-    reason="Legacy SmartQueryService removed; tests TODO — see specs/020-legacy-pipeline-tests-migration/spec.md"
+from app.application.pipeline.classifiers import (
+    _FAREWELL_PATTERN,
+    _GREETING_PATTERN,
+    _THANKS_PATTERN,
+    get_casual_response,
+    get_meta_response,
 )
 
-
-# Bind static methods for convenience
 _get_casual_response = get_casual_response
 _get_meta_response = get_meta_response
 
 
 def _classify_casual_subtype(text: str) -> str | None:
-    """Helper that mirrors the old router function using the service's static method."""
-    from app.application.smart_query_service import (
-        _FAREWELL_PATTERN,
-        _GREETING_PATTERN,
-        _THANKS_PATTERN,
-    )
-
+    """Mirror of the old router subtype-routing using the regex patterns
+    that classifiers.py exposes."""
     t = text.strip()
     if _GREETING_PATTERN.match(t):
         return "greeting"

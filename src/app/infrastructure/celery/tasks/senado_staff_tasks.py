@@ -168,7 +168,7 @@ def scrape_senado_staff(self):
             engine,
             resource_identity="senado::staff",
             table_name="senado_staff",
-            schema_name="public",
+            schema_name="raw",
             row_count=inserted,
         )
 

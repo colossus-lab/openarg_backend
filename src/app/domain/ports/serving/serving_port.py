@@ -31,12 +31,16 @@ class IServingPort(ABC):
         limit: int = 10,
         portal: str | None = None,
         domain: str | None = None,
+        query_embedding: list[float] | None = None,
     ) -> list[Resource]:
         """Find resources relevant to a free-text query.
 
         Implementations should combine vector search over `catalog_resources`
-        with optional lexical fallback. `portal` and `domain` are filters; if
-        omitted, search is unrestricted.
+        with optional lexical fallback. When `query_embedding` is provided,
+        adapters SHOULD prefer HNSW cosine similarity over `*.embedding`
+        columns and fall back to lexical ILIKE when no resource has an
+        embedding or the vector path returns < limit rows. `portal` and
+        `domain` are filters; if omitted, search is unrestricted.
 
         Returns up to `limit` resources sorted by relevance.
         """

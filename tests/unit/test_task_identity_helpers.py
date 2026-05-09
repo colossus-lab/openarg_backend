@@ -70,12 +70,37 @@ def test_register_via_b_error_marks_internal_failures_as_materialization(mock_ap
 
 
 @patch("app.infrastructure.celery.tasks._db._trigger_marts_for_portal")
-def test_register_via_b_table_skips_refresh_when_upsert_is_noop(mock_trigger) -> None:
+def test_register_via_b_table_triggers_marts_on_successful_upsert(mock_trigger) -> None:
+    """After a successful UPSERT into raw_table_versions, the function MUST
+    fan out a `refresh_mart` to every mart that consumes this portal. The
+    upstream UPSERT updates `row_count` even on conflict, so every call
+    represents a fresh write that downstream marts care about — there is
+    no "noop" branch by design.
+    """
     conn = MagicMock()
     conn.execute.return_value.fetchone.return_value = None
     engine = MagicMock()
     engine.begin.return_value.__enter__.return_value = conn
     engine.begin.return_value.__exit__.return_value = False
+
+    register_via_b_table(
+        engine,
+        resource_identity="bcra::cotizaciones",
+        table_name="cache_bcra_cotizaciones",
+        row_count=100,
+    )
+
+    mock_trigger.assert_called_once_with(engine, "bcra::cotizaciones")
+
+
+@patch("app.infrastructure.celery.tasks._db._trigger_marts_for_portal")
+def test_register_via_b_table_skips_refresh_when_upsert_fails(mock_trigger) -> None:
+    """If the UPSERT raises (e.g. DB connection lost mid-tx), the registry
+    is NOT updated and `_trigger_marts_for_portal` MUST NOT fire — the
+    function is best-effort and swallows the exception (logs a warning).
+    """
+    engine = MagicMock()
+    engine.begin.side_effect = RuntimeError("DB unreachable")
 
     register_via_b_table(
         engine,

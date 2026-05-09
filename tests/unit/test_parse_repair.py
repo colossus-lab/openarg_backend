@@ -10,8 +10,14 @@ Specs/021-parser-hardening Phase 2.
 
 from __future__ import annotations
 
+import json
+from unittest.mock import AsyncMock
+
+import pytest
+
 from app.application.repair.parse_repair import (
     propose_col_n_rename,
+    propose_llm_assisted_rename,
     propose_title_as_columns_rename,
 )
 
@@ -205,6 +211,89 @@ def test_propose_title_dedupes_repeated_headers():
     ]
     new_cols, _, reason = propose_title_as_columns_rename(old_cols, sample)
     assert reason == "applied"
+    assert new_cols[0] == "estado"
+    assert new_cols[1] == "estado_2"
+    assert new_cols[2] == "estado_3"
+
+
+# ---------- LLM-assisted (DEBT-021-002) ----------
+
+
+@pytest.mark.asyncio
+async def test_propose_llm_applied_when_llm_returns_valid_proposal():
+    old_cols = ["col_0", "col_1", "col_2"]
+    sample = [["BA", "2024", "12345"], ["Cordoba", "2024", "67890"]]
+    llm = AsyncMock()
+    llm.chat_json.return_value.content = json.dumps(
+        {"proposed_columns": ["provincia", "anio", "monto"]}
+    )
+
+    new_cols, rows, reason = await propose_llm_assisted_rename(
+        old_cols, sample, llm=llm
+    )
+
+    assert reason == "applied"
+    assert new_cols == ["provincia", "anio", "monto"]
+    assert rows == 0  # LLM doesn't propose row deletions
+
+
+@pytest.mark.asyncio
+async def test_propose_llm_skips_when_length_mismatch():
+    old_cols = ["col_0", "col_1", "col_2"]
+    sample = [["a", "b", "c"]]
+    llm = AsyncMock()
+    llm.chat_json.return_value.content = json.dumps(
+        {"proposed_columns": ["only_one"]}  # wrong length
+    )
+
+    new_cols, _, reason = await propose_llm_assisted_rename(
+        old_cols, sample, llm=llm
+    )
+
+    assert reason.startswith("length_mismatch")
+    assert new_cols == old_cols
+
+
+@pytest.mark.asyncio
+async def test_propose_llm_skips_when_too_many_cols():
+    """200 cols → skip without LLM call (cost guard)."""
+    old_cols = [f"c_{i}" for i in range(200)]
+    llm = AsyncMock()
+
+    _, _, reason = await propose_llm_assisted_rename(old_cols, [], llm=llm)
+
+    assert reason == "too_many_cols"
+    llm.chat_json.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_propose_llm_handles_bad_json_gracefully():
+    old_cols = ["col_0", "col_1"]
+    llm = AsyncMock()
+    llm.chat_json.return_value.content = "not valid json {{"
+
+    _, _, reason = await propose_llm_assisted_rename(
+        old_cols, [["a", "b"]], llm=llm
+    )
+
+    assert reason == "llm_bad_json"
+
+
+@pytest.mark.asyncio
+async def test_propose_llm_normalizes_and_dedupes_response():
+    """LLM returns names with caps/duplicates → we still apply normalize+dedupe."""
+    old_cols = ["col_0", "col_1", "col_2"]
+    llm = AsyncMock()
+    llm.chat_json.return_value.content = json.dumps(
+        {"proposed_columns": ["Estado", "Estado", "ESTADO"]}
+    )
+
+    new_cols, _, reason = await propose_llm_assisted_rename(
+        old_cols, [["a", "b", "c"]], llm=llm
+    )
+
+    assert reason == "applied"
+    # All three normalize to `estado`, dedup to estado / estado_2 / estado_3
     assert new_cols[0] == "estado"
     assert new_cols[1] == "estado_2"
     assert new_cols[2] == "estado_3"

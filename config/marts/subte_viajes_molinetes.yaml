@@ -1,0 +1,76 @@
+id: subte_viajes_molinetes
+version: 0.1.0
+description: |
+  Cantidad de pasajeros por molinete del subte de la Ciudad de Buenos
+  Aires, agregado a intervalos de 15 minutos. Cada fila es un (fecha,
+  rango horario, línea, molinete, estación) con la cantidad de pasajeros
+  pagos / con pase / franquiciados.
+
+  El cluster tiene shape heterogéneo a lo largo de los años: la mayoría
+  de las tablas viejas se rompieron al parsear (delimiter `;` interpretado
+  como col-name). Esta vista cubre la shape canónica reciente con cols
+  `FECHA, DESDE, HASTA, LINEA, MOLINETE, ESTACION, pax_pagos,
+  pax_pases_pagos, pax_franq, pax_TOTAL` (~10M filas en 2 tablas).
+domain: transporte
+
+sources:
+  portals: [caba]
+  resource_patterns:
+    - "caba::subte_viajes_molinetes*"
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha del viaje
+  - name: desde
+    type: text
+    description: Hora de inicio del intervalo
+  - name: hasta
+    type: text
+    description: Hora de fin del intervalo
+  - name: linea
+    type: text
+    description: Línea del subte (A/B/C/D/E/H)
+  - name: molinete
+    type: text
+    description: Identificador del molinete
+  - name: estacion
+    type: text
+    description: Estación del subte
+  - name: pax_pagos
+    type: numeric
+    description: Cantidad de pasajeros que pagaron
+  - name: pax_pases_pagos
+    type: numeric
+    description: Cantidad de pasajeros con pase pago
+  - name: pax_franq
+    type: numeric
+    description: Cantidad de pasajeros con franquicia
+  - name: pax_total
+    type: numeric
+    description: Cantidad total de pasajeros
+
+sql: |
+  SELECT
+    NULLIF(TRIM("FECHA"::text), '')    AS fecha,
+    NULLIF(TRIM("DESDE"::text), '')    AS desde,
+    NULLIF(TRIM("HASTA"::text), '')    AS hasta,
+    NULLIF(TRIM("LINEA"::text), '')    AS linea,
+    NULLIF(TRIM("MOLINETE"::text), '') AS molinete,
+    NULLIF(TRIM("ESTACION"::text), '') AS estacion,
+    "pax_pagos"::numeric               AS pax_pagos,
+    "pax_pases_pagos"::numeric         AS pax_pases_pagos,
+    "pax_franq"::numeric               AS pax_franq,
+    "pax_TOTAL"::numeric               AS pax_total
+  FROM {{ live_tables_by_table_pattern(
+      'caba__subte_viajes_molinetes*',
+      expected_columns=['FECHA', 'DESDE', 'HASTA', 'LINEA', 'MOLINETE',
+                        'ESTACION', 'pax_pagos', 'pax_pases_pagos',
+                        'pax_franq', 'pax_TOTAL'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM("FECHA"::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

@@ -379,11 +379,23 @@ async def discover_catalog_hints_for_planner(
     Serving Port are prepended to the legacy block. Marts are the curated
     surface — the planner should prefer them over raw `cache_*` tables.
     """
+    # Calculamos el embedding una sola vez y lo reutilizamos en serving
+    # port (HNSW vectorial) y legacy hybrid (vector hints). Antes solo se
+    # usaba para legacy → DEBT-016-001 quedaba inactiva en runtime aunque
+    # el adapter ya soportara `query_embedding`.
+    q_embedding: list[float] | None = None
+    if sandbox or serving_port is not None:
+        try:
+            q_embedding = await embedding.embed(query)
+        except Exception:
+            logger.debug("embedding failed for planner discover", exc_info=True)
+            q_embedding = None
+
     serving_block = ""
     if serving_port is not None:
         try:
             serving_block = await _serving_port_planner_hints(
-                query, serving_port, limit=limit
+                query, serving_port, limit=limit, query_embedding=q_embedding
             )
         except Exception:
             logger.debug("serving port planner hints failed", exc_info=True)
@@ -392,7 +404,8 @@ async def discover_catalog_hints_for_planner(
     if not sandbox:
         return serving_block
     try:
-        q_embedding = await embedding.embed(query)
+        if q_embedding is None:
+            q_embedding = await embedding.embed(query)
         # In `OPENARG_CATALOG_ONLY` cutover mode, skip the legacy
         # `table_catalog` query entirely and let `_hybrid_logical_hints`
         # drive discovery from `catalog_resources` alone.
@@ -588,12 +601,16 @@ async def _serving_port_planner_hints(
     serving_port: Any,
     *,
     limit: int,
+    query_embedding: list[float] | None = None,
 ) -> str:
     """MASTERPLAN Fase 4.5 — surface mart/staging resources to the planner.
 
     Calls `IServingPort.discover()` and formats the top hits as a planner
     block. Marts come first; staging next; cache_legacy is suppressed here
     because the legacy `table_catalog` block already covers it.
+
+    `query_embedding` activa el HNSW path en el adapter (DEBT-016-001 closed
+    2026-05-09). Cuando es None, el adapter cae al lexical ILIKE.
     """
     from app.application.pipeline.connectors.serving_resolver import (
         ServingResolver,
@@ -606,7 +623,7 @@ async def _serving_port_planner_hints(
     resolver = ServingResolver(serving_port)
     try:
         resources, layer_counts = await resolver.discover_for_planner(
-            query, limit=limit
+            query, limit=limit, query_embedding=query_embedding
         )
     except Exception:
         logger.debug("ServingResolver.discover_for_planner failed", exc_info=True)

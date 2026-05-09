@@ -132,7 +132,7 @@ def scrape_mapa_estado(self):
 
         # Full dataset
         table_full = "cache_autoridades_pen"
-        df.to_sql(table_full, engine, if_exists="replace", index=False)
+        df.to_sql(table_full, engine, schema="raw", if_exists="replace", index=False)
         did_full = _register_dataset(
             engine,
             "mapa-estado-pen",
@@ -159,7 +159,7 @@ def scrape_mapa_estado(self):
         ].copy()
 
         table_top = "cache_autoridades_pen_principales"
-        df_top.to_sql(table_top, engine, if_exists="replace", index=False)
+        df_top.to_sql(table_top, engine, schema="raw", if_exists="replace", index=False)
         did_top = _register_dataset(
             engine,
             "mapa-estado-pen-principales",
@@ -176,6 +176,25 @@ def scrape_mapa_estado(self):
             index_dataset_embedding.delay(did_full)
         if did_top:
             index_dataset_embedding.delay(did_top)
+
+        # Register both tables in `raw_table_versions` so marts find them via
+        # `live_table('mapa_estado::<source_id>')` macro (DEBT-019-006).
+        from app.infrastructure.celery.tasks._db import register_via_b_table
+
+        register_via_b_table(
+            engine,
+            resource_identity="mapa_estado::autoridades_pen",
+            table_name=table_full,
+            schema_name="raw",
+            row_count=len(df),
+        )
+        register_via_b_table(
+            engine,
+            resource_identity="mapa_estado::autoridades_pen_principales",
+            table_name=table_top,
+            schema_name="raw",
+            row_count=len(df_top),
+        )
 
         return {
             "tables": [

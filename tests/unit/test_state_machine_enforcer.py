@@ -9,8 +9,8 @@ from __future__ import annotations
 from app.application.state_machine import (
     MAX_TOTAL_ATTEMPTS,
     PENDING_TIMEOUT_DAYS,
-    Status,
     StateMachineEnforcer,
+    Status,
 )
 from app.application.state_machine.cached_dataset_enforcer import (
     ALLOWED_TRANSITIONS,

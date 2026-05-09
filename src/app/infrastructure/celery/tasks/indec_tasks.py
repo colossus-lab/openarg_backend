@@ -467,7 +467,7 @@ def ingest_indec(self):
                     if len(df) > MAX_ROWS:
                         df = df.head(MAX_ROWS)
 
-                    df.to_sql(table_name, engine, if_exists="replace", index=False)
+                    df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
                     sheet_info = {
                         **ds_info,
@@ -484,6 +484,20 @@ def ingest_indec(self):
                         )
 
                         index_dataset_embedding.delay(dataset_id)
+
+                    # Register in `raw_table_versions` so marts find this
+                    # table via `live_table('indec::<source_id>')` macro,
+                    # decoupling them from the physical `cache_*` name
+                    # (DEBT-019-006).
+                    from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                    register_via_b_table(
+                        engine,
+                        resource_identity=f"indec::{suffix}",
+                        table_name=table_name,
+                        schema_name="raw",
+                        row_count=len(df),
+                    )
 
                     results["ingested"] += 1
                     logger.info(

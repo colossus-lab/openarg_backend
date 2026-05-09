@@ -208,9 +208,9 @@ def _should_verify_ssl(url: str) -> bool:
         return True
 
 
-# After this many total attempts (across Celery retries AND external
-# re-dispatches) the task is marked permanently_failed and never retried.
-MAX_TOTAL_ATTEMPTS = 5
+# Re-exported for backwards compat with task modules that imported it from
+# here. Source of truth: `app.setup.config.constants.MAX_TOTAL_ATTEMPTS`.
+from app.setup.config.constants import MAX_TOTAL_ATTEMPTS  # noqa: E402,F401
 
 # Maximum rows to store per dataset table.  Datasets exceeding this limit
 # are truncated to the first MAX_TABLE_ROWS rows.
@@ -1717,7 +1717,39 @@ def _parse_zip_archive(
     current_append_mode = append_mode
     sampled_note: str | None = None
     parsed_members: list[dict[str, object]] = []
-    member_names = list(member_names_override or zf.namelist())
+    raw_member_names = list(member_names_override or zf.namelist())
+    # Filter out members with compression types Python's stdlib zipfile
+    # doesn't support — opening them raises NotImplementedError("That
+    # compression method is not supported"). Type 9 (Deflate64) is
+    # produced by some Argentine portals (datos.jus.gob.ar DDJJ ZIPs).
+    # Stdlib supports 0 (STORE), 8 (DEFLATE), 12 (BZIP2 if bz2 available),
+    # 14 (LZMA if lzma available); everything else gets logged + skipped
+    # so the rest of the archive can still be processed.
+    _SUPPORTED_COMPRESS_TYPES = {0, 8, 12, 14}
+    skipped_compress_types: dict[int, int] = {}
+    member_names = []
+    try:
+        for nm in raw_member_names:
+            try:
+                ctype = zf.getinfo(nm).compress_type
+            except KeyError:
+                member_names.append(nm)
+                continue
+            if ctype in _SUPPORTED_COMPRESS_TYPES:
+                member_names.append(nm)
+            else:
+                skipped_compress_types[ctype] = (
+                    skipped_compress_types.get(ctype, 0) + 1
+                )
+    except Exception:
+        member_names = raw_member_names
+    if skipped_compress_types:
+        logger.warning(
+            "ZIP dataset=%s skipping %d members with unsupported compress types %s",
+            dataset_id,
+            sum(skipped_compress_types.values()),
+            skipped_compress_types,
+        )
     summary = _zip_structure_summary(member_names)
 
     logger.info(
@@ -1851,19 +1883,33 @@ def _parse_zip_archive(
                             df = pd.json_normalize(raw_j[k])
                             break
                     else:
-                        best_key = None
+                        # Pick largest list-of-dicts value, recursing one
+                        # nested dict level (entre_rios election shape:
+                        # `{"eleccion": {"partidos_politicos": [...]}}`).
+                        best_path: tuple[str, ...] | None = None
                         best_len = 0
                         for k, v in raw_j.items():
                             if (
-                                isinstance(v, list)
-                                and v
+                                isinstance(v, list) and v
                                 and isinstance(v[0], dict)
                                 and len(v) > best_len
                             ):
-                                best_key = k
+                                best_path = (k,)
                                 best_len = len(v)
-                        if best_key is not None:
-                            df = pd.json_normalize(raw_j[best_key])
+                            elif isinstance(v, dict):
+                                for kk, vv in v.items():
+                                    if (
+                                        isinstance(vv, list) and vv
+                                        and isinstance(vv[0], dict)
+                                        and len(vv) > best_len
+                                    ):
+                                        best_path = (k, kk)
+                                        best_len = len(vv)
+                        if best_path is not None:
+                            target = raw_j
+                            for p in best_path:
+                                target = target[p]
+                            df = pd.json_normalize(target)
                         else:
                             df = pd.json_normalize([raw_j])
                 else:
@@ -2138,6 +2184,21 @@ def _detect_csv_params(file_path: str) -> dict:
     best_sep, best_count = max(candidate_counts.items(), key=lambda item: item[1])
     if best_count > 0:
         params["sep"] = best_sep
+        # Outer-quoted-line shape: every line is wrapped in a single pair
+        # of `"..."` with the real separator inside. Pandas's default
+        # quoting eats the whole line as one field and we end up with one
+        # giant col whose name is the full first row. Real-world:
+        # `caba__subte_viajes_molinetes` ZIPs from CABA serve files where
+        # the producer accidentally double-quoted each record. Detect by:
+        # header starts and ends with `"`, and no inter-field `";"` /
+        # `","` pattern (which would indicate properly-quoted fields).
+        stripped = header.rstrip("\r\n").strip()
+        if (
+            stripped.startswith('"')
+            and stripped.endswith('"')
+            and ('";"' not in stripped and '","' not in stripped)
+        ):
+            params["_outer_quoted_lines"] = True
         return params
 
     # Header has no recognizable separator. Try csv.Sniffer with a
@@ -2157,8 +2218,32 @@ def _detect_csv_params(file_path: str) -> dict:
     return params
 
 
+def _sanitize_outer_quoted_lines(file_path: str, encoding: str) -> str:
+    """Pre-process a CSV where each line is wrapped as `"a;b;c"` and write
+    a copy with the outer quotes stripped to a temp file. Returns the path
+    of the sanitized file. Only the *first and last* `"` per line are
+    removed; embedded quotes (rare in this shape) pass through.
+    """
+    import tempfile
+    sanitized = tempfile.NamedTemporaryFile(
+        delete=False, suffix=".csv", mode="w", encoding="utf-8", newline=""
+    )
+    with open(file_path, encoding=encoding, errors="replace") as fin:
+        for line in fin:
+            line = line.rstrip("\r\n")
+            if line.startswith('"') and line.endswith('"') and len(line) >= 2:
+                line = line[1:-1]
+            sanitized.write(line + "\n")
+    sanitized.close()
+    return sanitized.name
+
+
 def _read_csv_preview(file_path: str, *, nrows: int, csv_params: dict | None = None) -> pd.DataFrame:
     params = dict(csv_params) if csv_params is not None else _detect_csv_params(file_path)
+    if params.pop("_outer_quoted_lines", False):
+        file_path = _sanitize_outer_quoted_lines(
+            file_path, encoding=params.get("encoding", "utf-8")
+        )
     try:
         df = pd.read_csv(file_path, nrows=nrows, **params)
     except UnicodeDecodeError:
@@ -3467,6 +3552,10 @@ def _load_csv_chunked(
     `write_schema` selects medallion layer; defaults to legacy `public`.
     """
     csv_params = dict(csv_params_override) if csv_params_override is not None else _detect_csv_params(file_path)
+    if csv_params.pop("_outer_quoted_lines", False):
+        file_path = _sanitize_outer_quoted_lines(
+            file_path, encoding=csv_params.get("encoding", "utf-8")
+        )
     effective_chunk_size = chunk_size or _CSV_MAX_CHUNK_SIZE
     try:
         return _csv_load_inner(
@@ -4352,6 +4441,15 @@ def _record_cache_drop(
             reason[:60],
             exc_info=True,
         )
+        return
+
+    # In-memory aggregation surfaced via /api/v1/metrics. DEBT-014-003.
+    try:
+        from app.infrastructure.monitoring.metrics import MetricsCollector
+
+        MetricsCollector().record_cache_drop(reason)
+    except Exception:
+        logger.debug("metrics.record_cache_drop failed", exc_info=True)
 
 
 # ─── Phase 1/1.5 (MASTERPLAN) — raw schema helpers ──────────────────────────
@@ -5908,6 +6006,25 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             member_tables: list[dict[str, object]] = []
             parse_started_at = time.monotonic()
 
+            # Pre-dispatch magic-byte check: some portals
+            # (datos.jus.gob.ar `/download/<id>` endpoints) declare CSV in
+            # metadata but the URL has no extension and the actual content
+            # is a ZIP archive. The CSV sniffer then fails with "Could
+            # not determine delimiter" because the file is binary. By
+            # checking bytes BEFORE the format dispatch we re-route to
+            # the right branch and recover the data. Only triggers when
+            # the declared format is plain text (csv/txt) AND the bytes
+            # signature is ZIP-based — real CSV/TXT files don't start
+            # with `PK\x03\x04`.
+            if fmt in ("csv", "txt"):
+                _actual_fmt = _detect_format_from_bytes(tmp_path)
+                if _actual_fmt == "xlsx":
+                    logger.info(
+                        "Dataset %s declared as %s but bytes are ZIP — re-routing to zip branch",
+                        dataset_id, fmt,
+                    )
+                    fmt = "zip"
+
             if fmt in ("csv", "txt"):
                 # Chunked CSV loading — never loads full file into memory
                 # For append mode, do a quick schema check using first chunk
@@ -6186,20 +6303,34 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     # value (georef API: provincias / municipios
                                     # / localidades / asentamientos; INDEC and
                                     # other portals use ad-hoc wrapper keys
-                                    # outside the standard list above).
-                                    best_key = None
+                                    # outside the standard list above). Also
+                                    # recurses one level into nested dict values
+                                    # — entre_rios elections wrap their data as
+                                    # `{"eleccion": {"partidos_politicos": [...]}}`.
+                                    best_path: tuple[str, ...] | None = None
                                     best_len = 0
                                     for k, v in raw.items():
                                         if (
-                                            isinstance(v, list)
-                                            and v
+                                            isinstance(v, list) and v
                                             and isinstance(v[0], dict)
                                             and len(v) > best_len
                                         ):
-                                            best_key = k
+                                            best_path = (k,)
                                             best_len = len(v)
-                                    if best_key is not None:
-                                        df = pd.json_normalize(raw[best_key])
+                                        elif isinstance(v, dict):
+                                            for kk, vv in v.items():
+                                                if (
+                                                    isinstance(vv, list) and vv
+                                                    and isinstance(vv[0], dict)
+                                                    and len(vv) > best_len
+                                                ):
+                                                    best_path = (k, kk)
+                                                    best_len = len(vv)
+                                    if best_path is not None:
+                                        target = raw
+                                        for p in best_path:
+                                            target = target[p]
+                                        df = pd.json_normalize(target)
                                     else:
                                         df = pd.json_normalize([raw])
                             else:
@@ -7650,6 +7781,134 @@ def consolidate_group_tables(self, title: str, portal: str):
             "consolidated_tables": consolidated_tables,
             "consolidated_sources": consolidated_sources,
         }
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.reconcile_row_counts",
+    bind=True,
+    soft_time_limit=2400,
+    time_limit=2700,
+)
+def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: int = 50):
+    """Reconcile `raw_table_versions.row_count` against the actual row count
+    of every live table.
+
+    The (resource_identity, version) tuple is by design immutable, but the
+    underlying physical table can drift due to:
+      - `parse_repair` (drops cols, deletes header rows)
+      - `cleanup_invariants` registering orphans with placeholder counts
+      - Manual ALTER/DELETE during ops
+      - Truncation paths that don't propagate to rtv
+
+    Strategy (two-pass):
+      1. ANALYZE every live table to refresh `pg_class.reltuples`.
+      2. UPDATE `rtv.row_count` from `reltuples` where drift > `drift_threshold`.
+      3. For the top `max_count_star` tables with extreme drift (>50%), use
+         exact `COUNT(*)` for accurate reconciliation.
+
+    Runs Sunday 02:00 ART (off-peak). ~30 min for ~25k tables on staging.
+    """
+    engine = get_sync_engine()
+    stats = {"analyzed": 0, "updated_estimate": 0, "updated_exact": 0, "errors": 0}
+
+    try:
+        with engine.connect() as conn:
+            live = conn.execute(
+                text(
+                    """
+                    SELECT rtv.schema_name, rtv.table_name
+                    FROM raw_table_versions rtv
+                    JOIN pg_class c ON c.relname = rtv.table_name
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                                       AND n.nspname = rtv.schema_name
+                    WHERE rtv.superseded_at IS NULL
+                    """
+                )
+            ).fetchall()
+
+        # Phase 1: ANALYZE all live tables (refresh planner stats)
+        for schema, table in live:
+            try:
+                with engine.connect().execution_options(
+                    isolation_level="AUTOCOMMIT"
+                ) as conn:
+                    conn.execute(text(f'ANALYZE "{schema}"."{table}"'))
+                stats["analyzed"] += 1
+            except Exception:
+                stats["errors"] += 1
+
+        # Phase 2: bulk UPDATE from reltuples for moderate drift
+        with engine.begin() as conn:
+            res = conn.execute(
+                text(
+                    """
+                    UPDATE raw_table_versions rtv
+                    SET row_count = GREATEST(0, c.reltuples::bigint)
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                                       AND n.nspname = rtv.schema_name
+                    WHERE c.relname = rtv.table_name
+                      AND rtv.superseded_at IS NULL
+                      AND c.reltuples >= 0
+                      AND rtv.row_count IS DISTINCT FROM c.reltuples::bigint
+                      AND abs(COALESCE(rtv.row_count, 0) - c.reltuples::bigint)::float
+                          / GREATEST(COALESCE(rtv.row_count, 0), c.reltuples::bigint, 1)
+                          > :threshold
+                    """
+                ),
+                {"threshold": drift_threshold},
+            )
+            stats["updated_estimate"] = res.rowcount
+
+        # Phase 3: exact COUNT(*) for the top `max_count_star` extreme drifters
+        # (reltuples can be off by 30-50% on freshly loaded tables; for tables
+        # where the planner estimate disagrees with rtv by >50% AND >100k rows,
+        # spend the IO on an exact count to avoid overcorrecting wildly).
+        with engine.connect() as conn:
+            extreme = conn.execute(
+                text(
+                    """
+                    SELECT rtv.schema_name, rtv.table_name, rtv.row_count AS reported,
+                           GREATEST(0, c.reltuples::bigint) AS estimated
+                    FROM raw_table_versions rtv
+                    JOIN pg_class c ON c.relname = rtv.table_name
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                                       AND n.nspname = rtv.schema_name
+                    WHERE rtv.superseded_at IS NULL
+                      AND c.reltuples >= 0
+                      AND abs(COALESCE(rtv.row_count, 0) - c.reltuples::bigint) > 100000
+                      AND abs(COALESCE(rtv.row_count, 0) - c.reltuples::bigint)::float
+                          / GREATEST(COALESCE(rtv.row_count, 0), c.reltuples::bigint, 1)
+                          > 0.50
+                    ORDER BY abs(COALESCE(rtv.row_count, 0) - c.reltuples::bigint) DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": max_count_star},
+            ).fetchall()
+
+        for schema, table, _reported, _estimated in extreme:
+            try:
+                with engine.begin() as conn:
+                    exact = conn.execute(
+                        text(f'SELECT count(*) FROM "{schema}"."{table}"')
+                    ).scalar()
+                    conn.execute(
+                        text(
+                            "UPDATE raw_table_versions SET row_count = :rc "
+                            "WHERE schema_name = :s AND table_name = :t "
+                            "AND superseded_at IS NULL"
+                        ),
+                        {"rc": int(exact or 0), "s": schema, "t": table},
+                    )
+                stats["updated_exact"] += 1
+            except Exception:
+                stats["errors"] += 1
+
+        logger.info("reconcile_row_counts: %s", stats)
+        return stats
     finally:
         engine.dispose()
 

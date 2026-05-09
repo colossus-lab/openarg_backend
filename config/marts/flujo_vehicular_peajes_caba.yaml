@@ -1,0 +1,65 @@
+id: flujo_vehicular_peajes_caba
+version: 0.1.0
+description: |
+  Flujo vehicular registrado en los peajes de AUSA (autopistas urbanas
+  CABA). Cada fila es un paso de un vehículo por una estación de peaje
+  con su forma de pago, tipo, sentido y horario.
+
+  Cluster heterogéneo de ~22 tablas con varios shapes históricos:
+   - Shape A (~7 tablas): cols con `hora` (rango horario unificado), sin sentido.
+   - Shape B (~10 tablas): cols con `hora_fin` (rango cerrado) + sentido.
+   - 5 tablas residuales con headers crudos ("Mes, Día, Año…") quedan fuera.
+
+  Esta vista UNION saca el set de cols compartidas (fecha / estacion /
+  cantidad_pasos / periodo / dia / tipo_vehiculo / forma_pago) y deja
+  hora / hora_fin / sentido como nullable.
+domain: transporte
+
+sources:
+  portals: [caba]
+  resource_patterns:
+    - "caba::flujo_vehicular_por_unidades_de_peaje_ausa*"
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha de la operación
+  - name: dia
+    type: text
+    description: Día (numérico o nombre)
+  - name: periodo
+    type: text
+    description: Período / mes
+  - name: estacion
+    type: text
+    description: Estación de peaje (código o nombre)
+  - name: tipo_vehiculo
+    type: text
+    description: Tipo de vehículo
+  - name: forma_pago
+    type: text
+    description: Forma de pago (efectivo, telepase, etc.)
+  - name: cantidad_pasos
+    type: numeric
+    description: Cantidad de pasos en ese rango
+
+sql: |
+  SELECT
+    NULLIF(TRIM(fecha::text), '')         AS fecha,
+    NULLIF(TRIM(dia::text), '')           AS dia,
+    NULLIF(TRIM(periodo::text), '')       AS periodo,
+    NULLIF(TRIM(estacion::text), '')      AS estacion,
+    NULLIF(TRIM(tipo_vehiculo::text), '') AS tipo_vehiculo,
+    NULLIF(TRIM(forma_pago::text), '')    AS forma_pago,
+    cantidad_pasos::numeric               AS cantidad_pasos
+  FROM {{ live_tables_by_table_pattern(
+      'caba__flujo_vehicular_por_unidades_de_peaje_ausa*',
+      expected_columns=['fecha', 'dia', 'periodo', 'estacion',
+                        'tipo_vehiculo', 'forma_pago', 'cantidad_pasos'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(fecha::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

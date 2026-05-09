@@ -45,7 +45,6 @@ from dataclasses import dataclass
 
 from sqlalchemy import create_engine, text
 
-
 # ---------------------------------------------------------------- queries
 # Each query is one a curious user could plausibly ask. The expectation
 # column is the mart_id we EXPECT the system to choose. If the actual
@@ -251,16 +250,16 @@ async def main() -> int:
             expected_total += 1
             if winner and winner.is_mart and expected_mart in winner.table_name:
                 expected_match += 1
-                print(f"   ✓ Routed correctly to expected mart")
+                print("   ✓ Routed correctly to expected mart")
             elif winner and winner.is_mart:
-                print(f"   ⚠ Routed to a mart but NOT the expected one")
+                print("   ⚠ Routed to a mart but NOT the expected one")
             else:
                 print(f"   ✗ Did NOT route to a mart (expected {expected_mart})")
         else:
             if winner and winner.is_mart:
-                print(f"   ⚠ Routed to mart but NO mart was expected (potential false positive)")
+                print("   ⚠ Routed to mart but NO mart was expected (potential false positive)")
             else:
-                print(f"   ✓ Stayed on raw (correct, no mart expected)")
+                print("   ✓ Stayed on raw (correct, no mart expected)")
         print()
 
     # Final summary.
@@ -276,8 +275,8 @@ async def main() -> int:
     if (mart_wins + raw_wins) > 0:
         avg_margin = margin_sum / (mart_wins + raw_wins)
         print(f"Avg margin (mart-raw):{avg_margin:+.3f}")
-        print(f"  Negative margin = raw scores higher than mart on average.")
-        print(f"  A boost of +|margin| would flip the average winner.")
+        print("  Negative margin = raw scores higher than mart on average.")
+        print("  A boost of +|margin| would flip the average winner.")
 
     return 0
 

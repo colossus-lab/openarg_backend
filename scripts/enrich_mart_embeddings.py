@@ -25,7 +25,6 @@ import sys
 
 from sqlalchemy import create_engine, text
 
-
 # Hand-curated sample queries per mart. 5-7 per mart. These are a
 # best-effort representation of how a real user would ask for the data
 # the mart serves — same lexical/semantic shape as production queries.
