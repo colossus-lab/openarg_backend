@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # parser package keeps loading even on hosts without the dep installed.
 # The first call raises a clear error.
 try:
-    import pdfplumber  # type: ignore[import-untyped]
+    import pdfplumber
 
     _HAS_PDFPLUMBER = True
 except ImportError:
