@@ -102,6 +102,81 @@ async def save_history(
             await session.rollback()
 
 
+async def save_query_attempt(
+    *,
+    question: str,
+    served_table: str | None,
+    row_count: int,
+    success: bool,
+    duration_ms: int | None,
+    error_message: str | None,
+    embedding_provider: IEmbeddingProvider,
+    semantic_cache: SemanticCache,
+) -> None:
+    """Persist EVERY query attempt for analytics — successful or not.
+
+    Separate from `save_successful_query` (which feeds few-shot) so that
+    failed/empty queries can be tracked without polluting the few-shot
+    example set. Created in Fase 3 of the marts plan: without seeing the
+    full distribution of user questions (including the ones that fail
+    or land on the wrong table), we can't decide which marts to build
+    next. The table is created lazily on first call so this drops into
+    a running staging without an alembic migration.
+    """
+    try:
+        # Lazy table create — idempotent. Production migration to be
+        # backfilled in the next PR.
+        async with semantic_cache._session_factory() as session:
+            await session.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS query_analytics (
+                    id BIGSERIAL PRIMARY KEY,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    question TEXT NOT NULL,
+                    served_table TEXT,
+                    mart_used BOOLEAN NOT NULL DEFAULT FALSE,
+                    row_count INTEGER,
+                    success BOOLEAN NOT NULL,
+                    duration_ms INTEGER,
+                    error_message TEXT,
+                    embedding vector(1024)
+                )
+                """
+            ))
+            await session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_query_analytics_ts ON query_analytics(ts DESC)"
+            ))
+            await session.commit()
+
+        embedding = await embedding_provider.embed(question)
+        emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
+        served = (served_table or "").strip()
+        mart_used = served.startswith("mart.")
+
+        async with semantic_cache._session_factory() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO query_analytics "
+                    "(question, served_table, mart_used, row_count, success, "
+                    " duration_ms, error_message, embedding) "
+                    "VALUES (:q, :t, :mu, :r, :ok, :d, :err, CAST(:e AS vector))"
+                ),
+                {
+                    "q": question[:500],
+                    "t": served[:200] if served else None,
+                    "mu": mart_used,
+                    "r": row_count if row_count is not None else None,
+                    "ok": success,
+                    "d": duration_ms,
+                    "err": (error_message or "")[:500] if error_message else None,
+                    "e": emb_str,
+                },
+            )
+            await session.commit()
+    except Exception:
+        logger.debug("Failed to save query_analytics row", exc_info=True)
+
+
 async def save_successful_query(
     question: str,
     sql: str,

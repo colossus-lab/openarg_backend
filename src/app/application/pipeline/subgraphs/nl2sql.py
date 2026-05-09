@@ -577,29 +577,64 @@ async def save_success_node(state: NL2SQLState) -> dict:
     note on missing dependencies).
     """
     result = state.get("result")
+    runtime = _get_runtime_optional()
+    tables = state.get("tables") or []
+    nl_query = state["nl_query"]
+    generated_sql = state.get("generated_sql", "")
+    embedder_for_history = runtime["embedding"] if runtime else state.get("embedding")
+    semantic_cache_for_history = runtime["semantic_cache"] if runtime else state.get("semantic_cache")
+
+    # Lazy import to avoid the cycle with connectors/sandbox.py which
+    # re-exports history helpers through its module.
+    from app.application.pipeline.history import (
+        save_query_attempt,
+        save_successful_query,
+    )
+
+    # Fase 3: persist EVERY query attempt for analytics, regardless of
+    # success. Without this we only see successful queries that landed
+    # rows — we never see what the user actually asked when the planner
+    # picked the wrong table or the result came back empty. That hides
+    # the demand signal needed to decide which marts to build next.
+    served = tables[0].table_name if tables else ""
+    if result is not None:
+        success = (not result.error) and bool(result.rows)
+        row_count = int(result.row_count or 0)
+        err_message = str(result.error) if result.error else None
+    else:
+        success = False
+        row_count = 0
+        err_message = "no_result"
+    if embedder_for_history is not None and semantic_cache_for_history is not None:
+        spawn_background(
+            save_query_attempt(
+                question=nl_query,
+                served_table=served,
+                row_count=row_count,
+                success=success,
+                duration_ms=None,
+                error_message=err_message,
+                embedding_provider=embedder_for_history,
+                semantic_cache=semantic_cache_for_history,
+            ),
+            name="nl2sql.save_query_attempt",
+        )
+
+    # Few-shot eligibility: only successful, non-fallback queries with rows.
     if result is None or result.error or not result.rows:
         return {}
     if state.get("used_fallback"):
         # FR-018 — don't save last-resort SELECT * as a few-shot example.
         return {}
 
-    # Lazy import to avoid the cycle with connectors/sandbox.py which
-    # re-exports history helpers through its module.
-    from app.application.pipeline.history import save_successful_query
-
-    runtime = _get_runtime_optional()
-    tables = state.get("tables") or []
-    nl_query = state["nl_query"]
-    generated_sql = state.get("generated_sql", "")
-
     spawn_background(
         save_successful_query(
             nl_query,
             generated_sql,
-            tables[0].table_name if tables else "",
+            served,
             result.row_count,
-            runtime["embedding"] if runtime else state.get("embedding"),
-            runtime["semantic_cache"] if runtime else state.get("semantic_cache"),
+            embedder_for_history,
+            semantic_cache_for_history,
         ),
         name="nl2sql.save_success",
     )
