@@ -1,0 +1,73 @@
+id: compras_publicas_bac
+version: 0.1.0
+description: |
+  Adjudicaciones (awards) del sistema BAC — Buenos Aires Compra,
+  plataforma de compras públicas del GCBA. Cada row es una adjudicación
+  con su valor, plazo y entidad adjudicataria. Source: portal CABA,
+  dataset BAC awards (formato OCDS). Cubre 500K registros históricos.
+
+  Build basado en analytics de prod (47 días, 57 hits): preguntas
+  como "compras del estado", "contrataciones del gobierno",
+  "adjudicaciones BAC", "presupuesto en compras", "proveedores
+  contratados" caen sobre este universo.
+
+  El schema source es OCDS (Open Contracting Data Standard) con paths
+  tipo `awards/0/value/amount`. Este mart proyecta nombres canónicos
+  amigables y filtra rows sin adjudicación efectiva.
+
+  NOTE: referencia tabla legacy `public.cache_bac_awards` directamente
+  (no migrada a raw layer todavía).
+domain: gobierno
+
+sources:
+  portals: [bac]
+  resource_patterns: ["public.cache_bac_awards"]
+
+canonical_columns:
+  - name: ocid
+    type: text
+    description: Identificador único OCID del proceso de compra
+  - name: titulo
+    type: text
+    description: Título de la adjudicación
+  - name: descripcion
+    type: text
+    description: Descripción del bien/servicio adjudicado
+  - name: estado
+    type: text
+    description: Estado de la adjudicación (active, cancelled, etc)
+  - name: fecha
+    type: text
+    description: Fecha de adjudicación
+  - name: monto
+    type: text
+    description: Monto adjudicado (numérico como text por origen)
+  - name: moneda
+    type: text
+    description: Moneda del monto
+  - name: fecha_inicio_contrato
+    type: text
+    description: Fecha inicio del período del contrato
+  - name: fecha_fin_contrato
+    type: text
+    description: Fecha fin del período del contrato
+
+# SQL directo a tabla legacy. La fuente es OCDS con names tipo
+# `awards/0/X` que no son SQL-friendly — los renombramos a snake_case.
+sql: |
+  SELECT
+    ocid,
+    NULLIF(TRIM("awards/0/title"), '')                 AS titulo,
+    NULLIF(TRIM("awards/0/description"), '')           AS descripcion,
+    NULLIF(TRIM("awards/0/status"), '')                AS estado,
+    NULLIF(TRIM("awards/0/date"), '')                  AS fecha,
+    NULLIF(TRIM("awards/0/value/amount"), '')          AS monto,
+    NULLIF(TRIM("awards/0/value/currency"), '')        AS moneda,
+    NULLIF(TRIM("awards/0/contractPeriod/startDate"), '') AS fecha_inicio_contrato,
+    NULLIF(TRIM("awards/0/contractPeriod/endDate"), '')   AS fecha_fin_contrato
+  FROM public.cache_bac_awards
+  WHERE NULLIF(TRIM("awards/0/title"), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

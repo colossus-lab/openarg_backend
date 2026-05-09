@@ -1,0 +1,73 @@
+id: indicadores_provinciales
+version: 0.1.0
+description: |
+  Indicadores socioeconómicos por provincia argentina con su ranking
+  nacional. Sources: 3 datasets de actividad económica, empleo y
+  pobreza publicados en datos.gob.ar (IDH 2016, EPH provincial, otros
+  estimadores) que comparten el schema canónico (indicador,
+  provincia, índice, ranking).
+
+  Build basado en analytics de prod (47 días, 19 hits sobre estas 3
+  tablas + ~30 hits sobre queries similares mal-routeadas):
+  preguntas como "ranking de provincias por IDH", "qué provincia
+  tiene mejor empleo", "provincias con mayor pobreza", "índice de
+  desarrollo humano por provincia" caen sobre este universo.
+domain: social
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns: [
+    "public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r22b47636e2",
+    "public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r61a39ace0e",
+    "public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r42120c60b2"
+  ]
+
+canonical_columns:
+  - name: indicador
+    type: text
+    description: Nombre del indicador (ej. idh_2016_prov, empleo_2024)
+  - name: provincia_nombre
+    type: text
+    description: Nombre de la provincia
+  - name: indice
+    type: text
+    description: Valor del índice (text porque cada indicador usa unidades distintas)
+  - name: ranking
+    type: text
+    description: Ranking nacional (1 = mejor en la métrica)
+
+# UNION ALL de las 3 tablas que comparten el mismo schema canónico de
+# rankings provinciales. Los outer casts son TEXT-tolerantes porque
+# `indice` puede ser número (0.84), porcentaje (15%), o string.
+sql: |
+  SELECT
+    NULLIF(TRIM(indicador), '')         AS indicador,
+    NULLIF(TRIM(provincia_nombre), '')  AS provincia_nombre,
+    NULLIF(TRIM(indice::text), '')      AS indice,
+    NULLIF(TRIM(ranking::text), '')     AS ranking
+  FROM public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r22b47636e2
+  WHERE NULLIF(TRIM(indicador), '') IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    NULLIF(TRIM(indicador), '')         AS indicador,
+    NULLIF(TRIM(provincia_nombre), '')  AS provincia_nombre,
+    NULLIF(TRIM(indice::text), '')      AS indice,
+    NULLIF(TRIM(ranking::text), '')     AS ranking
+  FROM public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r61a39ace0e
+  WHERE NULLIF(TRIM(indicador), '') IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    NULLIF(TRIM(indicador), '')         AS indicador,
+    NULLIF(TRIM(provincia_nombre), '')  AS provincia_nombre,
+    NULLIF(TRIM(indice::text), '')      AS indice,
+    NULLIF(TRIM(ranking::text), '')     AS ranking
+  FROM public.cache_datos_gob_ar_actividad_econ_mica_empleo_y_pob_r42120c60b2
+  WHERE NULLIF(TRIM(indicador), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

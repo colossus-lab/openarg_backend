@@ -1,0 +1,109 @@
+id: geografia_administrativa
+version: 0.1.0
+description: |
+  División administrativa de Argentina — provincias, departamentos,
+  municipios y localidades — con sus IDs oficiales, nombres y
+  centroides geográficos. Source: Servicio de Normalización de Datos
+  Geográficos (GeoRef Argentina), API mantenida por Modernización del
+  Estado.
+
+  ~6,672 entidades en total (24 provincias, 529 departamentos, 2,082
+  municipios, 4,037 localidades). Es el dataset de referencia para
+  cruzar cualquier otro dataset por jurisdicción.
+
+  Build basado en analytics de prod (47 días, 67 hits): preguntas como
+  "lista de departamentos de Buenos Aires", "municipios de Córdoba",
+  "qué localidades hay en Salta", "centroide de Tucumán",
+  "ID GeoRef de provincia X" caen sobre este universo.
+domain: geografía
+
+sources:
+  portals: [georef]
+  resource_patterns: [
+    "public.cache_georef_provincias",
+    "public.cache_georef_departamentos",
+    "public.cache_georef_municipios",
+    "public.cache_georef_localidades"
+  ]
+
+canonical_columns:
+  - name: nivel
+    type: text
+    description: "provincia | departamento | municipio | localidad"
+  - name: id
+    type: text
+    description: ID oficial GeoRef
+  - name: nombre
+    type: text
+    description: Nombre oficial
+  - name: provincia_id
+    type: text
+    description: ID GeoRef de la provincia (NULL para provincias)
+  - name: provincia_nombre
+    type: text
+    description: Nombre de la provincia (NULL para provincias)
+  - name: centroide_lat
+    type: numeric
+    description: Latitud del centroide
+  - name: centroide_lon
+    type: numeric
+    description: Longitud del centroide
+
+# UNION ALL de los 4 niveles. Provincias no tienen provincia_id/nombre
+# (son ellas mismas la jurisdicción más alta). Municipios y localidades
+# pueden tener departamento_id pero el dataset upstream no es uniforme,
+# así que ese nivel se omite del schema canónico.
+sql: |
+  SELECT
+    'provincia'::text                        AS nivel,
+    NULLIF(TRIM(id), '')                     AS id,
+    NULLIF(TRIM(nombre), '')                 AS nombre,
+    NULL::text                               AS provincia_id,
+    NULL::text                               AS provincia_nombre,
+    centroide_lat                            AS centroide_lat,
+    centroide_lon                            AS centroide_lon
+  FROM public.cache_georef_provincias
+  WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    'departamento'::text                     AS nivel,
+    NULLIF(TRIM(id), '')                     AS id,
+    NULLIF(TRIM(nombre), '')                 AS nombre,
+    NULLIF(TRIM(provincia_id), '')           AS provincia_id,
+    NULLIF(TRIM(provincia_nombre), '')       AS provincia_nombre,
+    centroide_lat                            AS centroide_lat,
+    centroide_lon                            AS centroide_lon
+  FROM public.cache_georef_departamentos
+  WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    'municipio'::text                        AS nivel,
+    NULLIF(TRIM(id), '')                     AS id,
+    NULLIF(TRIM(nombre), '')                 AS nombre,
+    NULLIF(TRIM(provincia_id), '')           AS provincia_id,
+    NULLIF(TRIM(provincia_nombre), '')       AS provincia_nombre,
+    centroide_lat                            AS centroide_lat,
+    centroide_lon                            AS centroide_lon
+  FROM public.cache_georef_municipios
+  WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    'localidad'::text                        AS nivel,
+    NULLIF(TRIM(id), '')                     AS id,
+    NULLIF(TRIM(nombre), '')                 AS nombre,
+    NULLIF(TRIM(provincia_id), '')           AS provincia_id,
+    NULLIF(TRIM(provincia_nombre), '')       AS provincia_nombre,
+    centroide_lat                            AS centroide_lat,
+    centroide_lon                            AS centroide_lon
+  FROM public.cache_georef_localidades
+  WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

@@ -1,0 +1,40 @@
+id: decretos_presidenciales
+version: 0.1.0
+description: |
+  Decretos del Presidente de la Nación Argentina — número, fecha y
+  extracto (sumilla del contenido). Source: Senado de la Nación, dataset
+  "Decretos presidenciales" (~19.9K registros históricos). Cubre desde
+  los publicados en el Boletín Oficial hasta DNUs y decretos
+  reglamentarios.
+
+  Build basado en analytics de prod (47 días, 21 hits): preguntas tipo
+  "decretos de Milei", "DNU del gobierno", "decreto número X",
+  "qué decretó el ejecutivo en marzo".
+domain: gobierno
+
+sources:
+  portals: [senado]
+  resource_patterns: ["public.cache_senado_decretos_presidenciales"]
+
+canonical_columns:
+  - name: numero_decreto
+    type: text
+    description: Número del decreto (formato YYYY/N)
+  - name: fecha
+    type: text
+    description: Fecha de publicación
+  - name: extracto
+    type: text
+    description: Extracto / sumilla del decreto
+
+sql: |
+  SELECT
+    NULLIF(TRIM("DECRETO"), '')   AS numero_decreto,
+    NULLIF(TRIM("FECHA"), '')     AS fecha,
+    NULLIF(TRIM("EXTRACTO"), '')  AS extracto
+  FROM public.cache_senado_decretos_presidenciales
+  WHERE NULLIF(TRIM("DECRETO"), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

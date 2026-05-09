@@ -40,6 +40,10 @@
 | FIX-021 | Medium | `006b-ingestion` + collector | Auto-typing post-parse: convert TEXT → date/int/float when ≥80% of column rows parse cleanly | 🔵 Open |
 | FIX-022 | Medium | `015-catalog-resources` + collector | Wire `application/expander/multi_file_expander.py` into the collector path so multi-sheet Excel and ZIP children produce N rows in `catalog_resources` with `parent_resource_id` (closes DEBT-015-004) | 🔵 Open |
 | FIX-023 | Low | ops | Periodic sweep that DROPs `cache_*` physical tables that are not referenced by `cached_datasets.table_name` (orphans), recording each via `_record_cache_drop` | 🔵 Open |
+| FIX-024 | Medium | `019-marts` | Build 4 pending marts: `inflacion_argentina` ✅, `mujer_centros_atencion` ✅ (reduced scope, sin violencia_de_genero — schema heterogéneo), `demografia_caba` ✅, `afiliados_obras_sociales` ❌ no viable (PDFs PAMI/datos_gob_ar mal scrapeados — bloqueado por mejor PDF parser). 3/4 built 2026-05-08 | 🟡 Partial |
+| FIX-025 | Medium | `002k-indec` (new) + `019-marts` | INDEC parser hardening — dedupe duplicate column names post-parse (DuplicateColumnError on `cache_indec_balance_pagos_fob_cif`, turismo, pobreza); detect header-row in cuadros with extreme cell-merging (~6 tablas con `col_1`, `col_2` placeholders) | 🔵 Open |
+| FIX-026 | Medium | `019-marts` | Migrate 6 connectors that 2026-05-08 marts reference directly via legacy `public.cache_*` (Mapa del Estado, BAC, Senado decretos, Diputados bloques, GeoRef, datos_gob_ar afiliados) to use `raw.*` schema; rewrite mart YAMLs with `live_tables_by_table_pattern` macros | 🔵 Open |
+| FIX-027 | Medium | `001-query-pipeline` + `019-marts` | LLM re-ranker over top-30 candidates (raws + marts) for the long-tail queries that don't match any sample_query — replaces curating one mart per question pattern. Cost ~$0.0005/query at Haiku rates, expected to handle 50%+ of the long-tail traffic without manual curation. | 🔵 Open |
 
 ---
 

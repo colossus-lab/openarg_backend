@@ -1,0 +1,81 @@
+id: legisladores_argentina
+version: 0.1.0
+description: |
+  Legisladores del Congreso Nacional argentino — diputados y senadores
+  con su bloque, distrito/provincia y partido. Sources: Cámara de
+  Diputados (bloques publicados) + Senado de la Nación (listado oficial).
+  ~116 legisladores nominales (44 dip + 72 sen — la lista de diputados
+  parece estar parcial en el dataset upstream).
+
+  Build basado en analytics de prod (47 días, 42 hits): preguntas como
+  "qué bloques hay en Diputados", "senadores por provincia",
+  "legisladores del partido X", "quién representa a Tucumán", caen en
+  ambos datasets. El mart unifica el universo legislativo en un solo
+  surface.
+
+  Diferencia con `mart.legislatura_actividad`: ese cubre la ACTIVIDAD
+  (sesiones, votaciones, proyectos). Este cubre LA GENTE (quiénes son,
+  por dónde, en qué bloque).
+domain: gobierno
+
+sources:
+  portals: [diputados, senado]
+  resource_patterns: [
+    "public.cache_diputados_bloques_ra29b60683e",
+    "public.cache_senado_listado_senadores"
+  ]
+
+canonical_columns:
+  - name: camara
+    type: text
+    description: "diputados | senadores"
+  - name: apellido
+    type: text
+    description: Apellido
+  - name: nombre
+    type: text
+    description: Nombre
+  - name: distrito_provincia
+    type: text
+    description: Distrito (diputados) o Provincia (senadores)
+  - name: bloque
+    type: text
+    description: Bloque parlamentario
+  - name: partido_o_alianza
+    type: text
+    description: Partido / alianza (sólo populated para senadores)
+  - name: periodo
+    type: text
+    description: Período legislativo (sólo populated para diputados)
+
+# UNION ALL canonicaliza nombres distintos entre las 2 fuentes.
+# Senadores no tiene PERIODO (su mandato es de 6 años), diputados no
+# tiene PARTIDO_O_ALIANZA explícito (BLOQUE cubre ambos).
+sql: |
+  SELECT
+    'diputados'::text                            AS camara,
+    NULLIF(TRIM("APELLIDO"), '')                 AS apellido,
+    NULLIF(TRIM("NOMBRE"), '')                   AS nombre,
+    NULLIF(TRIM("DISTRITO"), '')                 AS distrito_provincia,
+    NULLIF(TRIM("BLOQUE"), '')                   AS bloque,
+    NULLIF(TRIM("INTERBLOQUE"), '')              AS partido_o_alianza,
+    NULLIF(TRIM("PERIODO"), '')                  AS periodo
+  FROM public.cache_diputados_bloques_ra29b60683e
+  WHERE NULLIF(TRIM("APELLIDO"), '') IS NOT NULL
+
+  UNION ALL
+
+  SELECT
+    'senadores'::text                            AS camara,
+    NULLIF(TRIM("APELLIDO"), '')                 AS apellido,
+    NULLIF(TRIM("NOMBRE"), '')                   AS nombre,
+    NULLIF(TRIM("PROVINCIA"), '')                AS distrito_provincia,
+    NULLIF(TRIM("BLOQUE"), '')                   AS bloque,
+    NULLIF(TRIM("PARTIDO O ALIANZA"), '')        AS partido_o_alianza,
+    NULL::text                                   AS periodo
+  FROM public.cache_senado_listado_senadores
+  WHERE NULLIF(TRIM("APELLIDO"), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []
