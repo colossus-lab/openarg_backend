@@ -1,0 +1,108 @@
+"""Tests for `application/repair/parse_repair.py`.
+
+The pure proposal logic (`propose_col_n_rename`) is unit-tested here against
+in-memory data. The DDL-applying orchestrator (`repair_col_n_table`) is
+exercised in integration tests against staging Postgres because SQLite
+doesn't expose `information_schema.columns`.
+
+Specs/021-parser-hardening Phase 2.
+"""
+
+from __future__ import annotations
+
+from app.application.repair.parse_repair import propose_col_n_rename
+
+
+def test_propose_simple_buried_header():
+    """col_0..col_2 + first row = real header → proposes rename + 1 row delete."""
+    old_cols = ["col_0", "col_1", "col_2"]
+    sample_rows = [
+        ["provincia", "anio", "valor"],  # the real header
+        ["BA", 2020, 1.5],
+        ["Córdoba", 2021, 2.0],
+    ]
+    new_cols, rows_to_delete, reason = propose_col_n_rename(old_cols, sample_rows)
+    assert reason == "applied"
+    assert "provincia" in new_cols
+    assert "anio" in new_cols
+    assert "valor" in new_cols
+    assert rows_to_delete == 1
+
+
+def test_propose_skip_clean_input():
+    """Real-named cols → garbage ratio below threshold → skip."""
+    old_cols = ["provincia", "anio", "valor"]
+    sample_rows = [["BA", 2020, 1.5]]
+    new_cols, rows_to_delete, reason = propose_col_n_rename(old_cols, sample_rows)
+    assert reason == "garbage_ratio_below_threshold"
+    assert new_cols == old_cols
+    assert rows_to_delete == 0
+
+
+def test_propose_skip_empty_table():
+    """Garbage cols but no data rows → can't infer header → skip."""
+    old_cols = ["col_0", "col_1", "col_2"]
+    sample_rows: list[list] = []
+    new_cols, rows_to_delete, reason = propose_col_n_rename(old_cols, sample_rows)
+    assert reason == "table_empty"
+    assert new_cols == old_cols
+
+
+def test_propose_skip_no_buried_header():
+    """Garbage cols but data is purely numeric (no buried header) → skip."""
+    old_cols = ["col_0", "col_1", "col_2"]
+    sample_rows = [
+        [1, 2, 3],
+        [4, 5, 6],
+        [7, 8, 9],
+    ]
+    new_cols, rows_to_delete, reason = propose_col_n_rename(old_cols, sample_rows)
+    # promote_buried_headers needs a header row above a data row to fire.
+    # Pure-numeric data → reason will be "no_improvement" or "no_renames_needed"
+    # depending on the exact pathway; either way, no rename is applied.
+    assert reason in {"no_improvement", "no_renames_needed"}
+    assert new_cols == old_cols
+
+
+def test_propose_dedupes_collisions():
+    """Two cols whose recovered names collide (long byte-equivalent) get
+    different names in the proposal."""
+    old_cols = ["col_0", "col_1", "col_2", "col_3"]
+    long_a = "Cuadro 3.1 Población — A_" + "x" * 80
+    long_b = "Cuadro 3.1 Población — A_" + "y" * 80
+    sample_rows = [
+        ["provincia", long_a, long_b, "valor"],
+        ["BA", "1", "2", "3.5"],
+    ]
+    new_cols, _, reason = propose_col_n_rename(old_cols, sample_rows)
+    assert reason == "applied"
+    # all distinct
+    assert len(set(new_cols)) == len(new_cols)
+    # all fit Postgres byte budget
+    assert all(len(c.encode("utf-8")) <= 63 for c in new_cols)
+
+
+def test_propose_threshold_50pct_col_n():
+    """50% col_N + 50% real → still triggers because matches default 0.40 threshold."""
+    old_cols = ["provincia", "col_0", "anio", "col_2"]
+    sample_rows = [
+        ["BA_label", "anio_label", "valor_label", "categoria_label"],
+        ["BA", "2020", "1.5", "A"],
+        ["Córdoba", "2021", "2.0", "B"],
+    ]
+    new_cols, rows_to_delete, reason = propose_col_n_rename(old_cols, sample_rows)
+    # 2/4 = 0.5 > 0.40 default threshold → should fire if buried header present
+    assert reason == "applied"
+    assert rows_to_delete == 1
+
+
+def test_propose_threshold_below_skips():
+    """25% col_N → below threshold → skip even if buried header present."""
+    old_cols = ["provincia", "anio", "valor", "col_3"]
+    sample_rows = [
+        ["a_label", "b_label", "c_label", "d_label"],
+        ["BA", "2020", "1.5", "X"],
+    ]
+    new_cols, _, reason = propose_col_n_rename(old_cols, sample_rows)
+    assert reason == "garbage_ratio_below_threshold"
+    assert new_cols == old_cols

@@ -1,0 +1,107 @@
+"""Wire-level tests for `_post_parse_normalize` invocation inside the
+collector parser (specs/021-parser-hardening Phase 2).
+
+These exercise that the post-parse pass runs at the end of `_read_excel_frame`
+and `_read_csv_preview` regardless of which retry path was taken, without
+recreating the full collector environment (no DB, no Celery).
+"""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+
+import pandas as pd
+
+from app.infrastructure.celery.tasks.collector_tasks import (
+    _post_parse_normalize,
+    _read_csv_preview,
+    _read_excel_frame,
+)
+
+
+def test_post_parse_normalize_idempotent_on_clean():
+    df = pd.DataFrame(
+        {"provincia": ["BA", "Córdoba"], "anio": [2020, 2021], "valor": [1.0, 2.0]}
+    )
+    out = _post_parse_normalize(df)
+    assert list(out.columns) == ["provincia", "anio", "valor"]
+    assert len(out) == 2
+
+
+def test_post_parse_normalize_dedupes_byte_collision():
+    """Two long names sharing first 63 bytes collide at Postgres CREATE TABLE.
+    The dedup must split them in byte space."""
+    long_a = "Cuadro 3.1 Población por condición — A_" + "x" * 80
+    long_b = "Cuadro 3.1 Población por condición — A_" + "y" * 80
+    df = pd.DataFrame({long_a: [1.0], long_b: [2.0]})
+    out = _post_parse_normalize(df)
+    assert len(set(out.columns)) == 2
+    assert all(len(c.encode("utf-8")) <= 63 for c in out.columns)
+
+
+def test_post_parse_normalize_recovers_col_n_with_buried_header():
+    """`col_0..col_2` placeholder cols + real header in row 0 → cols recovered."""
+    df = pd.DataFrame(
+        {
+            "col_0": ["provincia", "BA", "Córdoba"],
+            "col_1": ["anio", "2020", "2021"],
+            "col_2": ["valor", "1.5", "2.0"],
+        }
+    )
+    out = _post_parse_normalize(df)
+    assert "provincia" in out.columns
+    assert "anio" in out.columns
+    assert "valor" in out.columns
+    assert len(out) == 2  # header row consumed
+
+
+def test_read_csv_preview_applies_post_parse(tmp_path: Path):
+    """End-to-end: a CSV file with a TITLE row promoted as header gets
+    recovered.
+
+    Realistic shape: row 0 has only the title in the first cell, pandas
+    fills the rest with empties → on read with default header=0 we get
+    `["title", "Unnamed:1", "Unnamed:2", "Unnamed:3", "Unnamed:4"]`. The
+    auto-detect retry inside `_read_csv_preview` should kick in here, so we
+    just assert the final columns are clean (no `Unnamed:`, no `Cuadro`).
+    """
+    csv_path = tmp_path / "input.csv"
+    csv_path.write_text(
+        "Cuadro 3.1 Población,,,,\n"
+        "provincia,anio,valor,categoria,fuente\n"
+        "BA,2020,1.5,A,X\n"
+        "Córdoba,2021,2.0,B,Y\n",
+        encoding="utf-8",
+    )
+    df = _read_csv_preview(str(csv_path), nrows=10)
+    cols_lower = [str(c).lower() for c in df.columns]
+    # The retry path should have found the real header at row 1.
+    assert any("provincia" in c for c in cols_lower)
+    assert any("anio" in c for c in cols_lower)
+    # No leftover Unnamed: nor Cuadro titles.
+    assert not any("unnamed" in c.lower() for c in df.columns)
+    assert not any("cuadro" in c.lower() for c in df.columns)
+
+
+def test_read_excel_frame_applies_post_parse(tmp_path: Path):
+    """Same idea but for Excel — write an XLSX with title row + real header."""
+    xlsx_path = tmp_path / "input.xlsx"
+    df_in = pd.DataFrame(
+        [
+            ["Cuadro 3.1 Población", None, None],
+            ["provincia", "anio", "valor"],
+            ["BA", 2020, 1.5],
+            ["Córdoba", 2021, 2.0],
+        ]
+    )
+    df_in.to_excel(xlsx_path, index=False, header=False)
+
+    df = _read_excel_frame(io.BytesIO(xlsx_path.read_bytes()), nrows=10)
+    cols_str = [str(c) for c in df.columns]
+    # No leftover "Cuadro" titles in cols
+    assert not any("cuadro" in c.lower() for c in cols_str)
+    # The real headers should be there one way or another
+    assert any("provincia" in c.lower() for c in cols_str) or any(
+        "anio" in c.lower() for c in cols_str
+    )

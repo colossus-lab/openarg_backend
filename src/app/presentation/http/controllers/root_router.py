@@ -5,6 +5,12 @@ from fastapi import APIRouter
 from app.presentation.http.controllers.admin.monitoring_router import (
     router as admin_monitoring_router,
 )
+from app.presentation.http.controllers.admin.parse_repair_router import (
+    router as admin_parse_repair_router,
+)
+from app.presentation.http.controllers.admin.query_analytics_router import (
+    router as admin_query_analytics_router,
+)
 from app.presentation.http.controllers.admin.tasks_router import (
     router as admin_tasks_router,
 )
@@ -72,6 +78,8 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(data_router)
     api_v1.include_router(admin_tasks_router)
     api_v1.include_router(admin_monitoring_router)
+    api_v1.include_router(admin_query_analytics_router)
+    api_v1.include_router(admin_parse_repair_router)
 
     root.include_router(api_v1)
 

@@ -40,6 +40,7 @@ dependencies = [
     "fiona>=1.10.0",
     "httpx>=0.28.0",
     "aiofiles>=24.1.0",
+    "pdfplumber>=0.11.0",  # PDF table extraction (specs/021-parser-hardening Phase 3)
 
     # YAML config (used by marts).
     "pyyaml>=6.0",

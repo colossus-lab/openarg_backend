@@ -20,6 +20,12 @@ from app.application.pipeline.parsers.hierarchical_headers import (
     HierarchicalHeaderParser,
     parse_hierarchical_headers,
 )
+from app.application.pipeline.parsers.pdf import (
+    PdfParserError,
+    extract_tables_from_pdf,
+    merge_consecutive_tables,
+    parse_pdf_file,
+)
 from app.application.pipeline.parsers.time_pivot import (
     is_time_column,
     time_column_ratio,
@@ -31,7 +37,9 @@ __all__ = [
     "PARSER_VERSION",
     "PG_NAME_LIMIT_BYTES",
     "HierarchicalHeaderParser",
+    "PdfParserError",
     "dedupe_column_names",
+    "extract_tables_from_pdf",
     "find_data_start_row",
     "garbage_column_ratio",
     "is_garbage_column",
@@ -39,7 +47,9 @@ __all__ = [
     "is_time_column",
     "is_title_row_column",
     "is_url_column",
+    "merge_consecutive_tables",
     "parse_hierarchical_headers",
+    "parse_pdf_file",
     "promote_buried_headers",
     "time_column_ratio",
     "truncate_utf8_bytes",

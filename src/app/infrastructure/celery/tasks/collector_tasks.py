@@ -32,6 +32,10 @@ from sqlalchemy.exc import DBAPIError
 
 from app.application.catalog.physical_namer import RawPhysicalName, RawPhysicalNamer
 from app.application.expander import MultiFileExpander
+from app.application.pipeline.parsers import (
+    dedupe_column_names,
+    promote_buried_headers,
+)
 from app.application.validation.collector_hooks import (
     is_critical as _ws0_is_critical,
 )
@@ -91,6 +95,8 @@ def _detect_format_from_bytes(path: str) -> str | None:
     sample = _read_byte_sample(path, n=512)
     if not sample:
         return None
+    if sample.startswith(b"%PDF-"):
+        return "pdf"
     if sample.startswith(b"PK\x03\x04"):
         return "xlsx"
     if sample.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
@@ -1212,6 +1218,7 @@ def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
         ".json": "json",
         ".xlsx": "xlsx",
         ".xls": "xls",
+        ".pdf": "pdf",
     }
     return _ext_map.get(ext, metadata_fmt)
 
@@ -2020,7 +2027,7 @@ def _stream_download(
     total = 0
     # connect=30s, read=60s per chunk (not total). Celery soft_time_limit handles total.
     dl_timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0)
-    with httpx.Client(timeout=dl_timeout, verify=verify_ssl, headers=_HTTP_HEADERS) as client:
+    with httpx.Client(timeout=dl_timeout, verify=verify_ssl, headers=_HTTP_HEADERS, max_redirects=10) as client:
         with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
             content_length = int(resp.headers.get("content-length", 0) or 0)
@@ -2033,6 +2040,35 @@ def _stream_download(
                         raise ValueError(f"file_too_large: {total}+ bytes (limit {max_bytes})")
                     f.write(chunk)
     return total
+
+
+def _detect_encoding_robust(file_path: str) -> str:
+    """Detect file encoding using charset_normalizer.
+
+    More reliable than the previous UnicodeDecodeError-fallback chain: catches
+    Latin-1/Windows-1252 files whose bytes are valid UTF-8 (no decode error
+    raised) but produce mojibake when read as UTF-8, which silently breaks
+    downstream sniffers. Returns a pandas/Python-friendly encoding name.
+    """
+    try:
+        from charset_normalizer import from_path
+
+        result = from_path(file_path, steps=2, chunk_size=4096).best()
+        if result is not None:
+            enc = (result.encoding or "").lower().replace("_", "-")
+            # Normalize to pandas-friendly aliases.
+            if enc in ("ascii", "utf-8"):
+                return "utf-8-sig"
+            if enc in ("iso-8859-1", "latin-1", "latin1"):
+                return "latin-1"
+            if enc in ("windows-1252", "cp1252"):
+                return "windows-1252"
+            if enc.startswith("iso-8859"):
+                return enc
+            return enc
+    except Exception:
+        pass
+    return "utf-8-sig"
 
 
 def _detect_csv_params(file_path: str) -> dict:
@@ -2051,17 +2087,31 @@ def _detect_csv_params(file_path: str) -> dict:
     import csv
 
     params: dict = {"on_bad_lines": "skip"}
+    detected_enc = _detect_encoding_robust(file_path)
 
-    try:
-        with open(file_path, encoding="utf-8-sig") as f:
+    encoding_chain = [detected_enc]
+    for fallback in ("utf-8-sig", "latin-1", "windows-1252"):
+        if fallback not in encoding_chain:
+            encoding_chain.append(fallback)
+
+    header = ""
+    sample = ""
+    chosen_enc: str | None = None
+    for enc in encoding_chain:
+        try:
+            with open(file_path, encoding=enc) as f:
+                header = f.readline()
+                sample = header + "".join(f.readline() for _ in range(9))
+            chosen_enc = enc
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if chosen_enc is None:
+        with open(file_path, encoding="latin-1", errors="replace") as f:
             header = f.readline()
             sample = header + "".join(f.readline() for _ in range(9))
-        params["encoding"] = "utf-8-sig"
-    except UnicodeDecodeError:
-        params["encoding"] = "latin-1"
-        with open(file_path, encoding="latin-1") as f:
-            header = f.readline()
-            sample = header + "".join(f.readline() for _ in range(9))
+        chosen_enc = "latin-1"
+    params["encoding"] = chosen_enc
 
     candidate_counts = {
         ",": header.count(","),
@@ -2109,9 +2159,9 @@ def _read_csv_preview(file_path: str, *, nrows: int, csv_params: dict | None = N
         else:
             raise
     if "header" in params or "skiprows" in params:
-        return df
+        return _post_parse_normalize(df)
     if _header_quality_label(df.columns) != _HEADER_INVALID:
-        return df
+        return _post_parse_normalize(df)
     try:
         df_raw = pd.read_csv(
             file_path,
@@ -2120,22 +2170,22 @@ def _read_csv_preview(file_path: str, *, nrows: int, csv_params: dict | None = N
             **{k: v for k, v in params.items() if k not in ("header", "skiprows")},
         )
     except Exception:
-        return df
+        return _post_parse_normalize(df)
     header_idx = _detect_data_header_row(df_raw)
     if header_idx <= 0:
-        return df
+        return _post_parse_normalize(df)
     try:
         retry = pd.read_csv(file_path, nrows=nrows, skiprows=header_idx, **params)
     except Exception:
-        return df
+        return _post_parse_normalize(df)
     if _header_quality_label(retry.columns) == _HEADER_INVALID:
-        return df
+        return _post_parse_normalize(df)
     logger.info(
         "CSV header auto-detected at row %d (was invalid at row 0) in %s",
         header_idx,
         file_path,
     )
-    return retry
+    return _post_parse_normalize(retry)
 
 
 def _csv_load_inner(
@@ -2224,15 +2274,29 @@ def _drop_table_if_exists(engine, table_name: str):
 _PG_NAME_LIMIT = 63
 
 
+def _truncate_utf8_bytes(s: str, byte_limit: int) -> str:
+    """Truncate string to fit within byte_limit when UTF-8 encoded.
+
+    Postgres truncates identifiers at 63 bytes (NAMEDATALEN-1), not chars.
+    Multi-byte chars (e.g. acentos: 'á' = 2 bytes) caused two distinct
+    Python strings to collide in byte-space, raising DuplicateColumn.
+    """
+    encoded = s.encode("utf-8")
+    if len(encoded) <= byte_limit:
+        return s
+    return encoded[:byte_limit].decode("utf-8", errors="ignore")
+
+
 def _make_unique_columns(columns) -> list[str]:
     """Normalize column names and guarantee uniqueness after cleanup.
 
     Names are truncated to Postgres' 63-byte identifier limit *before*
-    dedup. Without this, two long names that share their first 63 chars
-    look distinct in Python but collide once Postgres truncates them at
-    CREATE TABLE, raising DuplicateColumn. When truncation creates a
-    collision, the candidate is suffixed `_N` while reserving space so
-    the final name still fits in 63 bytes.
+    dedup, using UTF-8 byte length (not char length) to match what
+    Postgres actually does. Without this, two long names that share their
+    first 63 chars look distinct in Python but collide once Postgres
+    truncates them at CREATE TABLE, raising DuplicateColumn. When
+    truncation creates a collision, the candidate is suffixed `_N` while
+    reserving space so the final name still fits in 63 bytes.
     """
     used: set[str] = set()
     counters: dict[str, int] = {}
@@ -2246,20 +2310,20 @@ def _make_unique_columns(columns) -> list[str]:
             if not base or base.lower() == "nan":
                 base = f"col_{idx}"
 
-        if len(base) > _PG_NAME_LIMIT:
-            base = base[:_PG_NAME_LIMIT]
+        if len(base.encode("utf-8")) > _PG_NAME_LIMIT:
+            base = _truncate_utf8_bytes(base, _PG_NAME_LIMIT)
 
         counters[base] = counters.get(base, 0) + 1
         if counters[base] == 1:
             candidate = base
         else:
             suffix = f"_{counters[base]}"
-            trunc = base[: max(1, _PG_NAME_LIMIT - len(suffix))]
+            trunc = _truncate_utf8_bytes(base, max(1, _PG_NAME_LIMIT - len(suffix)))
             candidate = f"{trunc}{suffix}"
         while candidate in used:
             counters[base] += 1
             suffix = f"_{counters[base]}"
-            trunc = base[: max(1, _PG_NAME_LIMIT - len(suffix))]
+            trunc = _truncate_utf8_bytes(base, max(1, _PG_NAME_LIMIT - len(suffix)))
             candidate = f"{trunc}{suffix}"
 
         used.add(candidate)
@@ -2852,6 +2916,38 @@ def _combine_multirow_header(
     return combined
 
 
+def _post_parse_normalize(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply share-able post-parse passes that fix common upstream parser bugs.
+
+    Runs in this order, all idempotent:
+      1. `promote_buried_headers` — recover real headers when ≥50 % of cols are
+         placeholders like `col_N` (a TITLE row was promoted by mistake).
+      2. Drop trailing all-NaN columns introduced by the forward-fill in step 1.
+      3. `dedupe_column_names` — byte-aware dedup that prevents
+         `DuplicateColumnError` on `df.to_sql` when two distinct unicode names
+         share their first 63 bytes.
+
+    Time-pivot detection is intentionally NOT applied here: it changes the
+    shape of the dataframe and is too risky for the generic path. See
+    specs/021-parser-hardening Phase 5 for the per-portal rollout.
+
+    Idempotent: a clean dataframe passes through unchanged.
+    """
+    if df.empty:
+        return df
+    before_cols = list(df.columns)
+    df = promote_buried_headers(df)
+    df = df.dropna(axis=1, how="all")
+    df.columns = dedupe_column_names(list(df.columns))
+    if before_cols != list(df.columns):
+        logger.info(
+            "post_parse_normalize: %d cols → %d cols (rename/recover applied)",
+            len(before_cols),
+            len(df.columns),
+        )
+    return df
+
+
 def _read_excel_frame(source, *, nrows: int, **kwargs) -> pd.DataFrame:
     """Read an Excel workbook and normalize empty/invalid-sheet errors.
 
@@ -2860,6 +2956,10 @@ def _read_excel_frame(source, *, nrows: int, **kwargs) -> pd.DataFrame:
     auto-detecting the real header row. The retry only kicks in when the
     caller didn't pass an explicit `header` or `skiprows`, so existing
     tuned callsites keep their behavior.
+
+    On every successful path the dataframe is also pushed through
+    `_post_parse_normalize` so downstream consumers see deduped, recovered
+    columns even when the legacy retry didn't fire.
     """
     try:
         df = pd.read_excel(source, nrows=nrows, **kwargs)
@@ -2870,18 +2970,18 @@ def _read_excel_frame(source, *, nrows: int, **kwargs) -> pd.DataFrame:
         raise
 
     if "header" in kwargs or "skiprows" in kwargs:
-        return df
+        return _post_parse_normalize(df)
     if _header_quality_label(df.columns) != _HEADER_INVALID:
-        return df
+        return _post_parse_normalize(df)
     try:
         if hasattr(source, "seek"):
             source.seek(0)
         df_raw = pd.read_excel(source, header=None, nrows=max(nrows, 30), **kwargs)
     except Exception:
-        return df
+        return _post_parse_normalize(df)
     start, end = _detect_data_header_range(df_raw)
     if start <= 0 and end - start == 1:
-        return df
+        return _post_parse_normalize(df)
     if end - start > 1:
         # Multi-row header: read raw, attach combined columns, slice off
         # the header rows. Reading with `header=[start, end-1]` would let
@@ -2892,33 +2992,33 @@ def _read_excel_frame(source, *, nrows: int, **kwargs) -> pd.DataFrame:
                 source.seek(0)
             full = pd.read_excel(source, header=None, nrows=nrows, **kwargs)
         except Exception:
-            return df
+            return _post_parse_normalize(df)
         if full.empty or len(full) <= end:
-            return df
+            return _post_parse_normalize(df)
         composite_cols = _combine_multirow_header(full, start, end)
         retry = full.iloc[end:].reset_index(drop=True).copy()
         retry.columns = composite_cols
         if _header_quality_label(retry.columns) == _HEADER_INVALID:
-            return df
+            return _post_parse_normalize(df)
         logger.info(
             "Excel multi-row header detected rows [%d..%d), %d composite columns",
             start,
             end,
             len(composite_cols),
         )
-        return retry
+        return _post_parse_normalize(retry)
     try:
         if hasattr(source, "seek"):
             source.seek(0)
         retry = pd.read_excel(source, nrows=nrows, skiprows=start, **kwargs)
     except Exception:
-        return df
+        return _post_parse_normalize(df)
     if _header_quality_label(retry.columns) == _HEADER_INVALID:
-        return df
+        return _post_parse_normalize(df)
     logger.info(
         "Excel header auto-detected at row %d (was invalid at row 0)", start
     )
-    return retry
+    return _post_parse_normalize(retry)
 
 
 def _compact_wide_dataframe(df: pd.DataFrame, max_columns: int = _MAX_SQL_COLUMNS) -> pd.DataFrame:
@@ -3084,6 +3184,14 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                     "undefined column",
                     "schema",
                     "relation",
+                    # pandas-side INSERT failures normally indicate a column
+                    # count/order mismatch between the staged DataFrame and
+                    # the existing table (most commonly when an upstream feed
+                    # added/removed a column between collects). Force the
+                    # DROP+REPLACE retry path so the next write succeeds.
+                    "execution failed on sql 'insert",
+                    "duplicatecolumn",
+                    "specified more than once",
                 )
                 if any(kw in exc_str for kw in schema_keywords):
                     logger.warning(
@@ -3967,6 +4075,15 @@ def _classify_error_category(
     if not msg:
         return "unknown"
 
+    # Phase 6 additions — these are NOT errors but informational notes
+    # that historically got captured in the error_message field.
+    if msg.startswith("header_quality:degraded"):
+        return "header_degraded"
+    if msg.startswith("rerouted_heavy:"):
+        return "orchestration_rerouted"
+    if msg.startswith("sampled:"):
+        return "truncation_sampled"
+
     # Validation outputs (WS0)
     if "ingestion_validation_failed:html_as_data" in msg:
         return "validation_failed"
@@ -4010,6 +4127,8 @@ def _classify_error_category(
         return "materialize_disk_full"
     if "resource_table_full" in msg:
         return "materialize_disk_full"
+    if "insufficient_temp_space" in msg:
+        return "materialize_disk_full"
 
     # Archive
     if "bad_zip_file" in msg or "zip_no_parseable_file" in msg:
@@ -4021,7 +4140,35 @@ def _classify_error_category(
     if "file_too_large" in msg or "zip_entry_too_large" in msg:
         return "policy_too_large"
 
-    # Network / HTTP
+    # Pandas internal parse errors that surface as engine messages
+    if "low_memory" in msg and "not supported" in msg:
+        return "parse_format"
+    if "truth value of an array" in msg and "ambiguous" in msg:
+        return "parse_format"
+    if "could not determine delimiter" in msg:
+        return "parse_format"
+    if "unmatched" in msg and "when decoding" in msg:
+        return "parse_format"
+    if "expecting value: line 1 column" in msg:
+        return "parse_format"
+    if "unexpected end of data" in msg:
+        return "parse_format"
+    if "list index out of range" in msg:
+        return "parse_format"
+    if "excel_no_worksheets" in msg:
+        return "parse_format"
+    if "xml_parse_failed" in msg:
+        return "parse_format"
+    if "numericvalueoutofrange" in msg or "integer out of range" in msg:
+        return "parse_schema_mismatch"
+
+    # Network / HTTP (extended: SSL failures are network-level)
+    if "ssl" in msg and (
+        "record layer failure" in msg
+        or "verification" in msg
+        or "handshake" in msg
+    ):
+        return "download_network"
     if "403 forbidden" in msg or "401 unauthorized" in msg:
         return "download_http_error"
     if "404 not found" in msg or "410 gone" in msg:
@@ -4034,6 +4181,8 @@ def _classify_error_category(
         return "download_network"
     if "connection refused" in msg or "connection reset" in msg:
         return "download_network"
+    if "server disconnected" in msg or "remote end closed connection" in msg:
+        return "download_network"
     if "timed out" in msg or "read operation timed out" in msg or "timeout" in msg:
         return "download_timeout"
 
@@ -4043,6 +4192,8 @@ def _classify_error_category(
 
     # Orchestration recovery
     if "exhausted retries" in msg or "stuck in" in msg:
+        return "orchestration_recovery_loop"
+    if msg.startswith("recovered:"):
         return "orchestration_recovery_loop"
     if "table missing" in msg or "marked for re-download" in msg:
         return "orchestration_table_missing"
@@ -5254,7 +5405,7 @@ def _probe_download_size(url: str, *, timeout: float = 10.0) -> int | None:
         return None
     try:
         import httpx
-        with httpx.Client(follow_redirects=True, timeout=timeout, headers=_HTTP_HEADERS) as client:
+        with httpx.Client(follow_redirects=True, timeout=timeout, headers=_HTTP_HEADERS, max_redirects=10) as client:
             resp = client.head(url)
             if resp.status_code >= 400:
                 return None
@@ -6054,6 +6205,74 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         dataset_id,
                         MAX_TABLE_ROWS,
                     )
+                df["_source_dataset_id"] = dataset_id
+                table_name, append_mode, routed_status = _route_table_for_schema(
+                    engine,
+                    dataset_id,
+                    table_name,
+                    df.columns,
+                    append_mode=append_mode,
+                )
+                if routed_status:
+                    if routed_status == "resource_table_full":
+                        return {"dataset_id": dataset_id, "error": routed_status}
+                    return {"dataset_id": dataset_id, "status": routed_status}
+                if append_mode:
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
+                else:
+                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
+                row_count, columns = len(df), list(df.columns)
+
+            elif fmt == "pdf":
+                # PDF table extraction (specs/021-parser-hardening Phase 3).
+                # Uses pdfplumber to pull tabular content; if the PDF has no
+                # detectable tables (text/graphics-only) we route to
+                # `policy_non_tabular`. Multi-page tables with the same
+                # column shape are auto-concatenated.
+                from app.application.pipeline.parsers import (
+                    PdfParserError,
+                    parse_pdf_file,
+                    unpivot_if_time_pivoted,
+                )
+                try:
+                    pdf_df = parse_pdf_file(tmp_path)
+                except PdfParserError as exc:
+                    logger.warning(
+                        "Dataset %s: PDF parse failed: %s", dataset_id, exc
+                    )
+                    _set_error_status(
+                        engine, dataset_id,
+                        "ingestion_pdf_parse_failed",
+                        table_name=table_name,
+                    )
+                    return {"error": "pdf_parse_failed"}
+                if pdf_df is None or pdf_df.empty:
+                    logger.info(
+                        "Dataset %s: PDF has no extractable tables", dataset_id
+                    )
+                    _set_error_status(
+                        engine, dataset_id,
+                        "policy_non_tabular",
+                        table_name=table_name,
+                    )
+                    return {"dataset_id": dataset_id, "status": "policy_non_tabular"}
+                # PDFs commonly emit time-pivoted layouts (months/years as
+                # columns). Unpivot before downstream validation so the
+                # `placeholder_headers` check doesn't trip on `[label, 2016,
+                # 2017, ..., 2022]` shapes. Idempotent on long-format input.
+                pdf_df = unpivot_if_time_pivoted(pdf_df)
+                pdf_df = _post_parse_normalize(pdf_df)
+                df = pdf_df
+                if len(df) >= MAX_TABLE_ROWS:
+                    sampled_note = (
+                        f"sampled: first {MAX_TABLE_ROWS} rows kept (PDF may have more)"
+                    )
+                    logger.warning(
+                        "Dataset %s (pdf) truncated at %d rows",
+                        dataset_id,
+                        MAX_TABLE_ROWS,
+                    )
+                    df = df.head(MAX_TABLE_ROWS)
                 df["_source_dataset_id"] = dataset_id
                 table_name, append_mode, routed_status = _route_table_for_schema(
                     engine,
