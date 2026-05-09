@@ -1,0 +1,85 @@
+id: caba_presupuesto_sancionado
+version: 0.1.0
+description: |
+  Presupuesto sancionado del Gobierno de la Ciudad de Buenos Aires —
+  monto inicialmente aprobado por la legislatura, antes de
+  modificaciones presupuestarias. Complementa el mart
+  `caba_presupuesto_ejecutado` (que tiene el flujo completo
+  sancionado → vigente → definitivo → devengado).
+
+  Source: 14 versiones de `caba__presupuesto_sancionado` con schema
+  drift entre case (Car/car, Desc_*/jur_desc) y naming (Sanción/sancion).
+  Mart unifica con COALESCE.
+
+  Use cases típicos: "presupuesto sancionado por la legislatura
+  porteña", "monto aprobado para Salud CABA", "qué jurisdicciones
+  tienen mayor presupuesto sancionado", "comparar presupuesto
+  sancionado vs ejecutado CABA".
+domain: gobierno
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__presupuesto_sancionado*"]
+
+canonical_columns:
+  - name: jurisdiccion
+    type: text
+    description: Jurisdicción (ministerio, secretaría)
+  - name: jurisdiccion_desc
+    type: text
+    description: Descripción de la jurisdicción
+  - name: programa
+    type: text
+    description: Código de programa presupuestario
+  - name: programa_desc
+    type: text
+    description: Descripción del programa
+  - name: actividad
+    type: text
+    description: Código de actividad
+  - name: actividad_desc
+    type: text
+    description: Descripción de la actividad
+  - name: finalidad_desc
+    type: text
+    description: Finalidad del gasto
+  - name: funcion_desc
+    type: text
+    description: Función específica
+  - name: inciso_desc
+    type: text
+    description: Inciso económico
+  - name: fuente_financiamiento
+    type: text
+    description: Fuente de financiamiento
+  - name: sancion
+    type: text
+    description: Monto sancionado por la legislatura
+
+sql: |
+  SELECT
+    NULLIF(TRIM(COALESCE(jur::text, "Jur"::text)), '')                       AS jurisdiccion,
+    NULLIF(TRIM(COALESCE(jur_desc, "Desc_Jur")), '')                         AS jurisdiccion_desc,
+    NULLIF(TRIM(COALESCE(prog::text, "Prog"::text)), '')                     AS programa,
+    NULLIF(TRIM(COALESCE(prog_desc, "Desc_Prog")), '')                       AS programa_desc,
+    NULLIF(TRIM(COALESCE(act::text, "Act"::text)), '')                       AS actividad,
+    NULLIF(TRIM(COALESCE(act_desc, "Desc_Act")), '')                         AS actividad_desc,
+    NULLIF(TRIM(COALESCE(fin_desc, "Desc_Fin")), '')                         AS finalidad_desc,
+    NULLIF(TRIM(COALESCE(fun_desc, "Desc_Fun")), '')                         AS funcion_desc,
+    NULLIF(TRIM(COALESCE(inc_desc, "Desc_Inc")), '')                         AS inciso_desc,
+    NULLIF(TRIM(COALESCE(fte_desc, "Desc_Fte")), '')                         AS fuente_financiamiento,
+    NULLIF(TRIM(COALESCE(sancion::text, "Sanción"::text)), '')               AS sancion
+  FROM {{ live_tables_by_table_pattern(
+      'caba__presupuesto_sancionado*',
+      expected_columns=['jur', 'Jur', 'jur_desc', 'Desc_Jur',
+                        'prog', 'Prog', 'prog_desc', 'Desc_Prog',
+                        'act', 'Act', 'act_desc', 'Desc_Act',
+                        'fin_desc', 'Desc_Fin', 'fun_desc', 'Desc_Fun',
+                        'inc_desc', 'Desc_Inc', 'fte_desc', 'Desc_Fte',
+                        'sancion', 'Sanción']
+  ) }} sub
+  WHERE NULLIF(TRIM(COALESCE(jur_desc, "Desc_Jur")), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

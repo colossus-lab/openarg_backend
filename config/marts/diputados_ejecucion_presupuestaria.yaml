@@ -1,0 +1,69 @@
+id: diputados_ejecucion_presupuestaria
+version: 0.1.0
+description: |
+  Ejecución presupuestaria de la Honorable Cámara de Diputados de la
+  Nación — detalle por programa × inciso × partida con crédito
+  vigente, compromiso preventivo, compromiso consumido y devengado
+  consumido.
+
+  Source: 42 versiones de `diputados__ejecucion_presupuestaria_de_la_camara`
+  con schema cohesivo de 8 cols.
+
+  Use cases típicos: "presupuesto ejecutado por la Cámara de
+  Diputados", "gasto en personal de Diputados", "ejecución
+  presupuestaria del legislativo nacional", "saldo de crédito
+  vigente Diputados", "qué porcentaje del presupuesto consumió
+  la cámara baja".
+domain: gobierno
+
+sources:
+  portals: [diputados]
+  resource_patterns: ["diputados__ejecucion_presupuestaria_de_la_camara*"]
+
+canonical_columns:
+  - name: pg
+    type: text
+    description: Programa presupuestario
+  - name: inciso
+    type: text
+    description: Inciso (clasificación económica del gasto — personal, bienes, servicios, etc.)
+  - name: pp
+    type: text
+    description: Partida principal
+  - name: leyenda
+    type: text
+    description: Descripción del concepto / partida
+  - name: credito_vigente
+    type: text
+    description: Crédito presupuestario vigente
+  - name: compromiso_preventivo
+    type: text
+    description: Compromiso preventivo (reservado)
+  - name: compromiso_consumido
+    type: text
+    description: Compromiso consumido (efectivo)
+  - name: devengado_consumido
+    type: text
+    description: Devengado consumido (gastado)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(pg::text), '')                          AS pg,
+    NULLIF(TRIM("in"::text), '')                        AS inciso,
+    NULLIF(TRIM(pp::text), '')                          AS pp,
+    NULLIF(TRIM(leyenda), '')                           AS leyenda,
+    NULLIF(TRIM(credito_vigente::text), '')             AS credito_vigente,
+    NULLIF(TRIM(compromiso_preventivo::text), '')       AS compromiso_preventivo,
+    NULLIF(TRIM(compromiso_consumido::text), '')        AS compromiso_consumido,
+    NULLIF(TRIM(devengado_consumido::text), '')         AS devengado_consumido
+  FROM {{ live_tables_by_table_pattern(
+      'diputados__ejecucion_presupuestaria_de_la_camara*',
+      expected_columns=['pg', 'in', 'pp', 'leyenda',
+                        'credito_vigente', 'compromiso_preventivo',
+                        'compromiso_consumido', 'devengado_consumido']
+  ) }} sub
+  WHERE NULLIF(TRIM(leyenda), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []
