@@ -155,6 +155,7 @@ def create_celery() -> Celery:
         "openarg.force_recollect_separator_mismatches": {"queue": "ingest"},
         "openarg.cleanup_orphan_cache_tables": {"queue": "ingest"},
         "openarg.cleanup_raw_orphans": {"queue": "ingest"},
+        "openarg.cleanup_empty_raw_tables": {"queue": "ingest"},
         # Medallion mart tasks (raw → mart, no staging layer).
         "openarg.build_mart": {"queue": "ingest"},
         "openarg.refresh_mart": {"queue": "ingest"},
@@ -298,6 +299,25 @@ def create_celery() -> Celery:
                 "task": "openarg.cleanup_raw_orphans",
                 "schedule": crontab(minute=30, hour="*/6"),
                 "kwargs": {"dry_run": False, "max_drops": 100, "min_age_hours": 24},
+                "options": {"queue": "ingest"},
+            },
+            "cleanup-empty-raw-tables": {
+                # Sprint Disk Bloat 2026-05-09: drops `raw.*` tables that
+                # were created by failed re-collects and left behind with
+                # 0 rows but ALTER-driven page bloat (>100MB). These are
+                # in `raw_table_versions` (not orphans) so the orphan
+                # cleanup skips them. Conservative defaults: weekly,
+                # `min_size_mb=100` (only meaningful disk wins),
+                # `min_age_hours=24` (avoid in-flight races),
+                # `dry_run=False` (audit trail in cache_drop_audit).
+                "task": "openarg.cleanup_empty_raw_tables",
+                "schedule": crontab(day_of_week=0, hour=4, minute=0),
+                "kwargs": {
+                    "dry_run": False,
+                    "max_drops": 50,
+                    "min_age_hours": 24,
+                    "min_size_mb": 100,
+                },
                 "options": {"queue": "ingest"},
             },
             "retain-raw-versions": {

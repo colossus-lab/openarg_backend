@@ -1271,3 +1271,181 @@ def cleanup_invariants(self) -> dict[str, int]:
     else:
         logger.info("cleanup_invariants: nothing to fix")
     return summary
+
+
+# ---------- cleanup_empty_raw_tables (Sprint Disk Bloat 2026-05-09) ----------
+
+
+@celery_app.task(
+    name="openarg.cleanup_empty_raw_tables",
+    bind=True,
+    soft_time_limit=900,
+    time_limit=1080,
+)
+def cleanup_empty_raw_tables(
+    self,
+    *,
+    dry_run: bool = True,
+    max_drops: int = 50,
+    min_age_hours: int = 24,
+    min_size_mb: int = 100,
+) -> dict:
+    """Drop large raw tables that landed with zero rows and were left behind.
+
+    Failed re-collects sometimes leave a fresh `raw.<...>__vN` table that
+    received hundreds of `ALTER TABLE ADD COLUMN` calls (each producing
+    page bloat) but no INSERT. The version row in `raw_table_versions`
+    has `row_count=0`, the table sits at >100MB on disk, and macros never
+    pick it up because newer versions superseded it. `cleanup_raw_orphans`
+    skips them because the row IS in the registry.
+
+    Selection criteria (all must hold):
+      - schema_name = 'raw'
+      - row_count = 0 (or NULL — never updated post-create)
+      - created_at < NOW() - `min_age_hours` (default 24h)
+      - pg_total_relation_size > `min_size_mb` MB (default 100MB)
+      - a newer version (`version` > current AND row_count > 0) exists,
+        OR `superseded_at` is already set (would be dropped by retention
+        anyway but disk-pressure version)
+
+    Each drop:
+      1. `_record_cache_drop(reason='empty_raw_bloat')`
+      2. `DROP TABLE raw."<n>" CASCADE`
+      3. `DELETE FROM raw_table_versions` row
+
+    `dry_run` (default True) reports candidates without touching DB.
+    """
+    from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
+
+    if max_drops < 1:
+        raise ValueError("max_drops must be >= 1")
+    if min_age_hours < 0:
+        raise ValueError("min_age_hours must be >= 0")
+    if min_size_mb < 1:
+        raise ValueError("min_size_mb must be >= 1")
+
+    engine = get_sync_engine()
+
+    select_sql = text(
+        """
+        WITH live_versions AS (
+            SELECT resource_identity, MAX(version) AS max_version
+            FROM raw_table_versions
+            WHERE schema_name = 'raw'
+              AND COALESCE(row_count, 0) > 0
+            GROUP BY resource_identity
+        )
+        SELECT rtv.resource_identity,
+               rtv.version,
+               rtv.schema_name,
+               rtv.table_name,
+               rtv.superseded_at IS NOT NULL AS already_superseded,
+               pg_total_relation_size(format('%I.%I', rtv.schema_name, rtv.table_name)::regclass) AS bytes
+        FROM raw_table_versions rtv
+        LEFT JOIN live_versions lv USING (resource_identity)
+        WHERE rtv.schema_name = 'raw'
+          AND COALESCE(rtv.row_count, 0) = 0
+          AND rtv.created_at < NOW() - (:age_hours || ' hours')::interval
+          AND EXISTS (
+              SELECT 1 FROM information_schema.tables t
+              WHERE t.table_schema = 'raw' AND t.table_name = rtv.table_name
+          )
+          AND (
+              lv.max_version IS NOT NULL AND rtv.version < lv.max_version
+              OR rtv.superseded_at IS NOT NULL
+          )
+          AND pg_total_relation_size(format('%I.%I', rtv.schema_name, rtv.table_name)::regclass) > :min_bytes
+        ORDER BY pg_total_relation_size(format('%I.%I', rtv.schema_name, rtv.table_name)::regclass) DESC
+        LIMIT :limit
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select_sql,
+            {
+                "age_hours": str(min_age_hours),
+                "min_bytes": min_size_mb * 1024 * 1024,
+                "limit": max_drops + 1,
+            },
+        ).fetchall()
+    candidates = [
+        {
+            "resource_identity": r.resource_identity,
+            "version": int(r.version),
+            "schema_name": r.schema_name,
+            "table_name": r.table_name,
+            "bytes": int(r.bytes),
+            "already_superseded": bool(r.already_superseded),
+        }
+        for r in rows
+    ]
+    truncated = len(candidates) > max_drops
+    candidates = candidates[:max_drops]
+    total_bytes = sum(c["bytes"] for c in candidates)
+
+    if dry_run:
+        logger.info(
+            "cleanup_empty_raw_tables dry-run: %d candidates, %d MB to free (truncated=%s)",
+            len(candidates),
+            total_bytes // (1024 * 1024),
+            truncated,
+        )
+        return {
+            "found": len(candidates),
+            "bytes_to_free": total_bytes,
+            "samples": [
+                {"table": c["table_name"], "mb": c["bytes"] // (1024 * 1024)}
+                for c in candidates[:10]
+            ],
+            "dry_run": True,
+            "truncated_to_max_drops": truncated,
+        }
+
+    dropped = 0
+    failed = 0
+    bytes_freed = 0
+    for c in candidates:
+        qualified = f"{c['schema_name']}.{c['table_name']}"
+        try:
+            _record_cache_drop(
+                engine,
+                table_name=qualified,
+                reason="empty_raw_bloat",
+                actor="ops_fixes.cleanup_empty_raw_tables",
+                extra={
+                    "resource_identity": c["resource_identity"],
+                    "version": c["version"],
+                    "bytes": c["bytes"],
+                    "already_superseded": c["already_superseded"],
+                },
+            )
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE'
+                    )
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM raw_table_versions "
+                        "WHERE resource_identity = :rid AND version = :v"
+                    ),
+                    {"rid": c["resource_identity"], "v": c["version"]},
+                )
+            dropped += 1
+            bytes_freed += c["bytes"]
+        except Exception:
+            logger.exception("Failed to drop empty raw table %s", qualified)
+            failed += 1
+    summary = {
+        "candidates": len(candidates),
+        "dropped": dropped,
+        "failed": failed,
+        "bytes_freed": bytes_freed,
+        "mb_freed": bytes_freed // (1024 * 1024),
+        "truncated_to_max_drops": truncated,
+        "min_age_hours": min_age_hours,
+        "min_size_mb": min_size_mb,
+    }
+    logger.info("cleanup_empty_raw_tables: %s", summary)
+    return summary

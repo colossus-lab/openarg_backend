@@ -246,6 +246,7 @@ def _build_union(
     *,
     macro_name: str = "",
     expected_columns: list[str] | None = None,
+    require_all_columns: bool = False,
     engine=None,
 ) -> str:
     """Build a UNION ALL subquery from N live rows.
@@ -257,11 +258,36 @@ def _build_union(
         columns common to ALL matched tables AND in `expected_columns`.
         Drops the rest so UNION ALL never trips on heterogeneous schemas.
 
+    With `require_all_columns=True` (only valid alongside expected_columns):
+      Tables missing ANY of the expected columns are filtered out BEFORE
+      the cap check. Useful when the pattern matches many sub-shapes
+      and only the FULL shape is desired (e.g. fact tables vs. dimension
+      tables in the same cluster).
+
     Without `expected_columns`:
       - Empty list → `SELECT NULL::text AS dummy WHERE FALSE` (legacy).
       - N matches → `SELECT * FROM <each>` UNION ALL (legacy).
     """
     lives_list = list(lives)
+
+    if require_all_columns and expected_columns:
+        if engine is None:
+            raise MacroResolutionError(
+                "require_all_columns requires engine for schema introspection"
+            )
+        actual_cols = _query_columns(
+            engine,
+            [(r.schema_name, r.table_name) for r in lives_list],
+        )
+        expected_set = set(expected_columns)
+        lives_list = [
+            r
+            for r in lives_list
+            if expected_set.issubset(
+                actual_cols.get((r.schema_name, r.table_name), set())
+            )
+        ]
+
     if len(lives_list) > _MAX_UNION_TABLES:
         raise MacroExpansionTooLarge(
             f"Macro {macro_name or 'live_tables_by_*'} would expand to "
@@ -475,6 +501,15 @@ def resolve_macros(sql: str, engine) -> str:
                 raise MacroResolutionError(
                     f"Macro {name}(): expected_columns must be a list of strings"
                 )
+        require_all_columns = kwargs.get("require_all_columns", False)
+        if not isinstance(require_all_columns, bool):
+            raise MacroResolutionError(
+                f"Macro {name}(): require_all_columns must be a bool"
+            )
+        if require_all_columns and not expected_columns:
+            raise MacroResolutionError(
+                f"Macro {name}(): require_all_columns=True requires expected_columns"
+            )
 
         if not _RESOURCE_IDENTITY_RE.match(arg):
             raise MacroResolutionError(
@@ -502,6 +537,10 @@ def resolve_macros(sql: str, engine) -> str:
                         engine, [cache_key]
                     ).get(cache_key, set())
                     columns_cache[cache_key] = actual_cols
+                if require_all_columns and not set(expected_columns).issubset(
+                    actual_cols
+                ):
+                    return _typed_empty_select(expected_columns)
                 projected = [
                     (
                         f'"{c}"::text AS "{c}"'
@@ -522,6 +561,7 @@ def resolve_macros(sql: str, engine) -> str:
                 matched,
                 macro_name=f"live_tables_by_portal({arg!r})",
                 expected_columns=expected_columns,
+                require_all_columns=require_all_columns,
                 engine=engine,
             )
 
@@ -534,6 +574,7 @@ def resolve_macros(sql: str, engine) -> str:
                 matched,
                 macro_name=f"live_tables_by_pattern({arg!r})",
                 expected_columns=expected_columns,
+                require_all_columns=require_all_columns,
                 engine=engine,
             )
 
@@ -546,6 +587,7 @@ def resolve_macros(sql: str, engine) -> str:
                 matched,
                 macro_name=f"live_tables_by_table_pattern({arg!r})",
                 expected_columns=expected_columns,
+                require_all_columns=require_all_columns,
                 engine=engine,
             )
 

@@ -1,27 +1,27 @@
 id: demo_energia_pozos
-version: 0.2.0
+version: 0.3.0
 description: |
-  Producción mensual de pozos de petróleo, gas e hidrocarburos por
-  empresa y provincia. Datos de la Secretaría de Energía argentina.
-  Cubre el snapshot pinneado al `resource_identity` listado en
-  `sources` (~500K filas, año 2018).
+  Producción mensual de pozos de petróleo y gas por empresa, provincia
+  y cuenca. Datos de la Secretaría de Energía publicados en
+  `datos.gob.ar`, particionados en ~100 snapshots históricos (~500K
+  filas cada uno).
 
-  COBERTURA LIMITADA — La Secretaría de Energía publica la producción
-  particionada en ~30 datasets (uno por snapshot/período), cada uno
-  con su propio `resource_identity` y CSVs de schemas no totalmente
-  alineados (39-52 columnas según la versión). Hacer UNION ALL via
-  `live_tables_by_table_pattern` falla con
-  `each UNION query must have the same number of columns`. La
-  solución estructural es extender el macro para que acepte un
-  proyector de columnas (`live_tables_by_table_pattern(pattern,
-  columns=[...])`) y emita `SELECT col1, col2 ... FROM tN` en cada
-  miembro del UNION en vez de `SELECT *`. Hasta entonces este mart
-  documenta solo el snapshot 2018 como demo del flujo end-to-end.
+  v0.3.0 (2026-05-09): el pin original a `energia::333fd72a-...` quedó
+  obsoleto cuando datos.gob.ar regeneró UUIDs y el slug pasó de
+  `produccion_de_petroleo_y_gas_por_pozo` a las variantes
+  `produccion_de_petroleo_y_gas_por_po*` y
+  `produccion_de_petroleo_y_gas_sesco*`. Ahora apuntamos por
+  `live_tables_by_table_pattern` con `require_all_columns=True` para
+  incluir solo los snapshots con shape FULL (anio, mes, empresa,
+  provincia, prod_pet, prod_gas) — el resto son metadata/dimensiones
+  que no aportan filas válidas.
 domain: energia
 
 sources:
-  portals: [energia]
-  resource_patterns: ["energia::333fd72a-9b83-4bc1-bc94-0f5940b52331"]
+  portals: [datos_gob_ar, energia]
+  resource_patterns:
+    - "datos_gob_ar::*produccion_de_petroleo_y_gas*"
+    - "energia::*produccion_de_petroleo_y_gas*"
 
 canonical_columns:
   - name: anio
@@ -44,42 +44,34 @@ canonical_columns:
     description: Producción mensual de gas en miles de m³ (dam³)
 
 sql: |
-  -- Aggregate producción mensual a través de TODOS los snapshots de
-  -- producción de pozos que aterrizaron en raw. La versión 0.1 del
-  -- mart apuntaba a un solo resource_identity (una sola partición de
-  -- ~500K rows truncadas, año 2018 únicamente). La versión 0.2 amplía
-  -- vía pattern matching para cubrir todos los años disponibles.
-  --
-  -- `prod_pet` y `prod_gas` aterrizan como TEXT cuando el CSV upstream
-  -- incluye valores no-numéricos (e.g. "N/A", coma decimal ARG-locale,
-  -- espacios). El CASE con regex valida formato antes del cast: tokens
+  -- Aggregate producción mensual a través de los snapshots de producción
+  -- de pozos en raw. `prod_pet` y `prod_gas` aterrizan como TEXT cuando
+  -- el CSV upstream tiene valores no numéricos (e.g. "N/A", coma decimal
+  -- ARG-locale). El CASE con regex valida formato antes del cast: tokens
   -- parseables → float, resto → NULL (excluidos del SUM).
-  -- v0.1.3 fix: el GROUP BY antes incluía `empresa, sigla, formprod`
-  -- pero el SELECT proyectaba `COALESCE(empresa, sigla)`. Cuando
-  -- `empresa` tenía valor, el COALESCE lo elegía pero el GROUP BY
-  -- igual discriminaba por `sigla`, así que cada (anio, mes, empresa)
-  -- producía múltiples rows con la misma proyección visible. La
-  -- matview pasaba de 927 grupos lógicos a 499,670 rows. Ahora
-  -- agrupamos por la EXPRESIÓN proyectada (positional) para que
-  -- la matview tenga 1 fila por (anio, mes, empresa, provincia).
+  --
+  -- `require_all_columns=True` filtra los ~100 candidatos a las ~30 que
+  -- realmente tienen el shape FULL de producción (las demás son
+  -- dimensiones / sub-formatos sin prod_pet/prod_gas).
   SELECT
-    anio::int                                            AS anio,
-    mes::int                                             AS mes,
-    COALESCE(NULLIF(empresa, ''), NULLIF(sigla, ''), '') AS empresa,
-    COALESCE(formprod, '')::text                         AS provincia,
+    anio::int                            AS anio,
+    mes::int                             AS mes,
+    COALESCE(NULLIF(empresa, ''), '')    AS empresa,
+    COALESCE(NULLIF(provincia, ''), '')  AS provincia,
     SUM(CASE
       WHEN replace(prod_pet::text, ',', '.') ~ '^-?[0-9]+(\.[0-9]+)?$'
       THEN replace(prod_pet::text, ',', '.')::float
       ELSE NULL
-    END)                                                 AS prod_petroleo_m3,
+    END)                                 AS prod_petroleo_m3,
     SUM(CASE
       WHEN replace(prod_gas::text, ',', '.') ~ '^-?[0-9]+(\.[0-9]+)?$'
       THEN replace(prod_gas::text, ',', '.')::float
       ELSE NULL
-    END)                                                 AS prod_gas_dam3
+    END)                                 AS prod_gas_dam3
   FROM {{ live_tables_by_table_pattern(
-      'energia__produccion_de_petroleo_y_gas_por_pozo*',
-      expected_columns=['anio', 'mes', 'idempresa', 'empresa', 'sigla', 'formprod', 'prod_pet', 'prod_gas']
+      '*produccion_de_petroleo_y_gas*',
+      expected_columns=['anio', 'mes', 'empresa', 'provincia', 'prod_pet', 'prod_gas'],
+      require_all_columns=True
   ) }} energia_pozos
   WHERE anio IS NOT NULL AND mes IS NOT NULL
   GROUP BY 1, 2, 3, 4

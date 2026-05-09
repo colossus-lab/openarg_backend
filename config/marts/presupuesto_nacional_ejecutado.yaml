@@ -97,10 +97,11 @@ canonical_columns:
     type: text
     description: Crédito devengado (efectivamente ejecutado)
 
-# Filtra a las 32 tablas con la shape FULL de 33 cols.
-# `live_tables_by_table_pattern` con expected_columns descarta otras
-# sub-shapes (dimensiones) automáticamente — sólo emite SELECT por
-# tablas que tienen TODAS las cols listadas.
+# Filtra a las ~32 tablas con la shape FULL de 33 cols.
+# `require_all_columns=True` descarta las sub-shapes (dimensiones /
+# clasificadores) que comparten el slug pero no tienen TODAS las cols
+# de hecho. Sin este flag, el macro intentaba unir las 597 tablas del
+# cluster y chocaba con el cap de 200.
 sql: |
   SELECT
     NULLIF(TRIM(impacto_presupuestario_anio::text), '')              AS anio,
@@ -143,7 +144,8 @@ sql: |
         'parcial_id', 'parcial_desc',
         'subparcial_id', 'subparcial_desc',
         'credito_presupuestado', 'credito_vigente', 'credito_devengado'
-      ]
+      ],
+      require_all_columns=True
   ) }} sub
   WHERE NULLIF(TRIM(jurisdiccion_desc), '') IS NOT NULL
 
