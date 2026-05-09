@@ -1,0 +1,71 @@
+id: caba_cobertura_vegetal
+version: 0.1.0
+description: |
+  Cobertura vegetal de la Ciudad de Buenos Aires — espacios verdes
+  identificados por categoría (parque, plaza, espacio público), con
+  índice de área verde por barrio y comuna. Incluye geometría
+  espacial de cada espacio verde.
+
+  Source: 48 versiones de `caba__cobertura_vegetal` con schema
+  consistente (8 cols totales). Gestionado por la Dirección General
+  de Espacios Verdes del GCBA.
+
+  Use cases típicos: "espacios verdes en Palermo", "índice de cobertura
+  vegetal por barrio CABA", "qué comuna tiene más parques", "lista de
+  plazas en la Comuna 4".
+
+  Nota: el campo `Shape_Area` aparece en algunas versiones como
+  `shape_area` (case difference). El mart unifica ambas.
+domain: urbanismo
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__cobertura_vegetal*"]
+
+canonical_columns:
+  - name: id
+    type: text
+    description: Identificador único del espacio verde
+  - name: comuna
+    type: text
+    description: Comuna (1-15)
+  - name: indice
+    type: text
+    description: Índice de cobertura vegetal
+  - name: clase
+    type: text
+    description: Categoría del espacio (parque, plaza, etc.)
+  - name: barrio
+    type: text
+    description: Barrio CABA
+  - name: espacio_ti
+    type: text
+    description: Tipo de espacio verde
+  - name: shape_area
+    type: text
+    description: Área del espacio (m² aprox.)
+  - name: geometry_type
+    type: text
+    description: Tipo geométrico (Polygon, MultiPolygon, etc.)
+
+sql: |
+  SELECT
+    NULLIF(TRIM("Id"::text), '')                                    AS id,
+    NULLIF(TRIM("Comuna"::text), '')                                AS comuna,
+    NULLIF(TRIM("Indice"::text), '')                                AS indice,
+    NULLIF(TRIM("Clase"), '')                                       AS clase,
+    NULLIF(TRIM("Barrio"), '')                                      AS barrio,
+    NULLIF(TRIM("Espacio_ti"), '')                                  AS espacio_ti,
+    NULLIF(TRIM(COALESCE("Shape_Area"::text, "shape_area"::text)), '') AS shape_area,
+    NULLIF(TRIM(geometry_type), '')                                 AS geometry_type
+  FROM {{ live_tables_by_table_pattern(
+      'caba__cobertura_vegetal*',
+      expected_columns=['Id', 'Comuna', 'Indice', 'Clase', 'Barrio',
+                        'Espacio_ti', 'Shape_Area', 'shape_area',
+                        'geometry_type']
+  ) }} sub
+  WHERE NULLIF(TRIM("Comuna"::text), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

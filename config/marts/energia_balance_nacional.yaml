@@ -1,0 +1,135 @@
+id: energia_balance_nacional
+version: 0.1.0
+description: |
+  Balance energético nacional argentino — matriz de oferta y demanda de
+  cada forma de energía (gas natural, electricidad, petróleo, biomasa,
+  nuclear, etc.). Cada row representa un balance anual completo:
+  producción + importación − exportación − pérdidas = oferta interna,
+  consumida por residencial / comercial / transporte / agropecuario /
+  industria.
+
+  Source: 63 versiones de `datos_gob_ar__balances_energeticos`
+  publicadas por la Secretaría de Energía. Schema consistente de 23
+  cols numéricas + 1 col categórica (`formas_de_energia`).
+
+  Use cases típicos: "matriz energética de Argentina", "qué porcentaje
+  de la energía proviene del gas natural", "consumo industrial de
+  electricidad", "exportaciones netas de petróleo", "pérdidas en el
+  sector energético".
+domain: economia
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns: ["datos_gob_ar__balances_energeticos*"]
+
+canonical_columns:
+  - name: formas_de_energia
+    type: text
+    description: Tipo de energía (gas natural, electricidad, etc.)
+  - name: produccion
+    type: text
+    description: Producción interna
+  - name: importacion
+    type: text
+    description: Volumen importado
+  - name: var_stock
+    type: text
+    description: Variación de stock
+  - name: exportacion
+    type: text
+    description: Volumen exportado
+  - name: no_aprovechado
+    type: text
+    description: Energía no aprovechada
+  - name: perdidas
+    type: text
+    description: Pérdidas de transmisión/distribución
+  - name: ajuste
+    type: text
+    description: Ajuste estadístico
+  - name: centrales
+    type: text
+    description: Consumo en centrales eléctricas
+  - name: autoproduccion
+    type: text
+    description: Autoproducción
+  - name: plant_trat_gas
+    type: text
+    description: Plantas de tratamiento de gas
+  - name: refinerias
+    type: text
+    description: Refinerías
+  - name: aceiteras_y_dest
+    type: text
+    description: Aceiteras y destilerías
+  - name: coquerias
+    type: text
+    description: Coquerías
+  - name: carboneras
+    type: text
+    description: Carboneras
+  - name: altos_hornos
+    type: text
+    description: Altos hornos
+  - name: cons_prop
+    type: text
+    description: Consumo propio del sector energético
+  - name: no_energetico
+    type: text
+    description: Uso no energético
+  - name: residencial
+    type: text
+    description: Consumo residencial
+  - name: comercial_y_pub
+    type: text
+    description: Consumo comercial y público
+  - name: transporte
+    type: text
+    description: Consumo en transporte
+  - name: agrop
+    type: text
+    description: Consumo agropecuario
+  - name: industria
+    type: text
+    description: Consumo industrial
+
+sql: |
+  SELECT
+    NULLIF(TRIM(formas_de_energia), '')              AS formas_de_energia,
+    NULLIF(TRIM(produccion::text), '')               AS produccion,
+    NULLIF(TRIM(importacion::text), '')              AS importacion,
+    NULLIF(TRIM(var_stock::text), '')                AS var_stock,
+    NULLIF(TRIM(exportacion::text), '')              AS exportacion,
+    NULLIF(TRIM(no_aprovechado::text), '')           AS no_aprovechado,
+    NULLIF(TRIM(perdidas::text), '')                 AS perdidas,
+    NULLIF(TRIM(ajuste::text), '')                   AS ajuste,
+    NULLIF(TRIM(centrales::text), '')                AS centrales,
+    NULLIF(TRIM(autoproduccion::text), '')           AS autoproduccion,
+    NULLIF(TRIM(plant_trat_gas::text), '')           AS plant_trat_gas,
+    NULLIF(TRIM(refinerias::text), '')               AS refinerias,
+    NULLIF(TRIM(aceiteras_y_dest::text), '')         AS aceiteras_y_dest,
+    NULLIF(TRIM(coquerias::text), '')                AS coquerias,
+    NULLIF(TRIM(carboneras::text), '')               AS carboneras,
+    NULLIF(TRIM(altos_hornos::text), '')             AS altos_hornos,
+    NULLIF(TRIM(cons_prop::text), '')                AS cons_prop,
+    NULLIF(TRIM(no_energetico::text), '')            AS no_energetico,
+    NULLIF(TRIM(residencial::text), '')              AS residencial,
+    NULLIF(TRIM(comercial_y_pub::text), '')          AS comercial_y_pub,
+    NULLIF(TRIM(transporte::text), '')               AS transporte,
+    NULLIF(TRIM(agrop::text), '')                    AS agrop,
+    NULLIF(TRIM(industria::text), '')                AS industria
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__balances_energeticos*',
+      expected_columns=['formas_de_energia', 'produccion', 'importacion',
+                        'var_stock', 'exportacion', 'no_aprovechado',
+                        'perdidas', 'ajuste', 'centrales', 'autoproduccion',
+                        'plant_trat_gas', 'refinerias', 'aceiteras_y_dest',
+                        'coquerias', 'carboneras', 'altos_hornos',
+                        'cons_prop', 'no_energetico', 'residencial',
+                        'comercial_y_pub', 'transporte', 'agrop', 'industria']
+  ) }} sub
+  WHERE NULLIF(TRIM(formas_de_energia), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

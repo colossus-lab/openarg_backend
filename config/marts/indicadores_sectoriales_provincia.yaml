@@ -1,0 +1,95 @@
+id: indicadores_sectoriales_provincia
+version: 0.1.0
+description: |
+  Indicadores económicos sectoriales y provinciales de Argentina,
+  publicados por la Secretaría de Política Económica (datos.gob.ar).
+  Cubre series por (sector productivo × variable × provincia × tiempo)
+  con metadatos de fuente, frecuencia y cobertura geográfica.
+
+  Source: 40 versiones de `datos_gob_ar__indicadores_sectoriales_y_provincia`
+  con SCHEMA IDÉNTICO en formato long-format (1 row por observación).
+  Cada row es `(sector, variable, alcance, indice_tiempo, valor)` —
+  ideal para `WHERE alcance_nombre = 'Buenos Aires' AND indice_tiempo > '2020-01' AND indicador LIKE '%empleo%'`.
+
+  Use cases típicos: "PBG de Córdoba en 2023", "industria manufacturera en
+  Buenos Aires por trimestre", "indicadores de empleo provincial",
+  "comparar sectores productivos entre provincias".
+domain: economia
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns: ["datos_gob_ar__indicadores_sectoriales_y_provincia*"]
+
+canonical_columns:
+  - name: sector_id
+    type: text
+    description: ID del sector productivo
+  - name: sector_nombre
+    type: text
+    description: Nombre del sector (ej. "Industria manufacturera", "Comercio")
+  - name: variable_id
+    type: text
+    description: ID de la variable medida
+  - name: actividad_producto_nombre
+    type: text
+    description: Actividad o producto específico
+  - name: indicador
+    type: text
+    description: Indicador económico (ej. "PBG", "Empleo registrado")
+  - name: unidad_de_medida
+    type: text
+    description: Unidad (ej. "Miles de pesos", "Personas", "%")
+  - name: fuente
+    type: text
+    description: Fuente original del dato
+  - name: frecuencia_nombre
+    type: text
+    description: Periodicidad (mensual, trimestral, anual)
+  - name: cobertura_nombre
+    type: text
+    description: Cobertura geográfica (Nacional, Provincial, etc.)
+  - name: alcance_tipo
+    type: text
+    description: Tipo de alcance (provincia, nación, agregado)
+  - name: alcance_id
+    type: text
+    description: ID del alcance geográfico
+  - name: alcance_nombre
+    type: text
+    description: Nombre del alcance (ej. "Buenos Aires", "Mendoza")
+  - name: indice_tiempo
+    type: text
+    description: Período de la observación (formato fecha o año)
+  - name: valor
+    type: text
+    description: Valor numérico del indicador (texto para tolerar formatos)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(sector_id::text), '')                 AS sector_id,
+    NULLIF(TRIM(sector_nombre), '')                   AS sector_nombre,
+    NULLIF(TRIM(variable_id::text), '')               AS variable_id,
+    NULLIF(TRIM(actividad_producto_nombre), '')       AS actividad_producto_nombre,
+    NULLIF(TRIM(indicador), '')                       AS indicador,
+    NULLIF(TRIM(unidad_de_medida), '')                AS unidad_de_medida,
+    NULLIF(TRIM(fuente), '')                          AS fuente,
+    NULLIF(TRIM(frecuencia_nombre), '')               AS frecuencia_nombre,
+    NULLIF(TRIM(cobertura_nombre), '')                AS cobertura_nombre,
+    NULLIF(TRIM(alcance_tipo), '')                    AS alcance_tipo,
+    NULLIF(TRIM(alcance_id::text), '')                AS alcance_id,
+    NULLIF(TRIM(alcance_nombre), '')                  AS alcance_nombre,
+    NULLIF(TRIM(indice_tiempo::text), '')             AS indice_tiempo,
+    NULLIF(TRIM(valor::text), '')                     AS valor
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__indicadores_sectoriales_y_provincia*',
+      expected_columns=['sector_id', 'sector_nombre', 'variable_id',
+                        'actividad_producto_nombre', 'indicador',
+                        'unidad_de_medida', 'fuente', 'frecuencia_nombre',
+                        'cobertura_nombre', 'alcance_tipo', 'alcance_id',
+                        'alcance_nombre', 'indice_tiempo', 'valor']
+  ) }} sub
+  WHERE NULLIF(TRIM(indicador), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []
