@@ -51,6 +51,7 @@ are allowed. If we need more, dbt is the upgrade path.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -72,9 +73,11 @@ _RESOURCE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.\-:* ]+$")
 # Without this, a permissive pattern like `*` would generate one
 # `SELECT * FROM raw."<table>"` per live resource — potentially thousands.
 # The resulting MATERIALIZED VIEW would compile but be operationally awful.
-# 200 is a safety upper bound; marts that legitimately need more should
-# pre-aggregate upstream or use `live_tables_by_portal('specific_portal')`.
-_MAX_UNION_TABLES = 200
+# 200 is the safety default; specific marts that legitimately need more
+# (e.g. presupuesto_nacional_ejecutado spans 32 fact-shape tables out of
+# 533 in the cluster — pattern matches the whole cluster, post-filter is
+# fine) can override via `OPENARG_MART_MAX_UNION_TABLES`.
+_MAX_UNION_TABLES = int(os.getenv("OPENARG_MART_MAX_UNION_TABLES", "200"))
 
 
 class MacroResolutionError(ValueError):
