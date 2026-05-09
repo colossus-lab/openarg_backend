@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -208,6 +209,29 @@ def register_via_b_table(
 
 
 _BCRA_PROD_DEBOUNCE_SECONDS = 110
+_RECENT_MART_REFRESH_SUCCESS_SECONDS = 110
+
+
+def _mart_refresh_recently_succeeded(
+    *,
+    last_refresh_status: str | None,
+    last_refreshed_at,
+    recent_window_seconds: int = _RECENT_MART_REFRESH_SUCCESS_SECONDS,
+) -> bool:
+    """Return True when a mart was refreshed successfully very recently.
+
+    Used as a second guard on top of the task-id bucket debounce: if the
+    previous build/refresh already landed within the current short window,
+    re-enqueuing another refresh is usually redundant churn.
+    """
+    if last_refresh_status not in {"built", "refreshed"}:
+        return False
+    if last_refreshed_at is None:
+        return False
+    refreshed_at = last_refreshed_at
+    if refreshed_at.tzinfo is None:
+        refreshed_at = refreshed_at.replace(tzinfo=UTC)
+    return refreshed_at >= datetime.now(UTC) - timedelta(seconds=recent_window_seconds)
 
 
 def _trigger_marts_for_portal(engine: Engine, resource_identity: str) -> None:
@@ -228,7 +252,8 @@ def _trigger_marts_for_portal(engine: Engine, resource_identity: str) -> None:
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT mart_id FROM mart_definitions "
+                    "SELECT mart_id, last_refresh_status, last_refreshed_at "
+                    "FROM mart_definitions "
                     "WHERE :portal = ANY(source_portals)"
                 ),
                 {"portal": portal},
@@ -261,6 +286,15 @@ def _trigger_marts_for_portal(engine: Engine, resource_identity: str) -> None:
     bucket = int(_time.time() / _BCRA_PROD_DEBOUNCE_SECONDS)
     for r in rows:
         mart_id = str(r.mart_id)
+        if _mart_refresh_recently_succeeded(
+            last_refresh_status=getattr(r, "last_refresh_status", None),
+            last_refreshed_at=getattr(r, "last_refreshed_at", None),
+        ):
+            _logger.debug(
+                "Skipped refresh_mart dispatch for %s (recent successful refresh)",
+                mart_id,
+            )
+            continue
         try:
             refresh_mart.apply_async(
                 args=[mart_id],

@@ -89,9 +89,10 @@ DB_STATEMENT_TIMEOUT_SECONDS: int = _int_env(
 # ── Raw retention ───────────────────────────────────────────────────────────
 
 # How many raw versions per `resource_identity` to keep before
-# `retain_raw_versions` drops the older ones. Lowering this from 3 to 2
-# trims ~13 GB of staging disk; from 3 to 1 trims ~32 GB.
-RAW_RETENTION_KEEP_LAST: int = _int_env("OPENARG_RAW_RETENTION_KEEP_LAST", 3)
+# `retain_raw_versions` drops the older ones. Defaulting to 2 keeps one
+# rollback step while materially reducing raw-schema growth. Operators can
+# still raise/lower via env without code changes.
+RAW_RETENTION_KEEP_LAST: int = _int_env("OPENARG_RAW_RETENTION_KEEP_LAST", 2)
 
 
 __all__ = [

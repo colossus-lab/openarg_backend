@@ -21,6 +21,7 @@ from app.application.pipeline.connectors.sandbox import (
     _serving_port_planner_hints,
 )
 from app.domain.entities.serving import Resource, ServingLayer
+from app.infrastructure.monitoring.metrics import MetricsCollector
 
 
 def _r(rid: str, layer: ServingLayer, title: str = "") -> Resource:
@@ -185,3 +186,162 @@ async def test_discover_catalog_hints_no_serving_port_falls_through(
     )
     # Without sandbox AND without serving_port, the function returns "".
     assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_discover_catalog_hints_reranks_legacy_block_when_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.application.pipeline.connectors.sandbox import (
+        discover_catalog_hints_for_planner,
+    )
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    MetricsCollector._instance = None
+    monkeypatch.setenv("OPENARG_ENABLE_LLM_RERANKER", "1")
+    monkeypatch.setenv("OPENARG_PIPELINE_USE_SERVING_PORT", "0")
+
+    sandbox = PgSandboxAdapter()
+    # Use a sync mock connection because sandbox._get_engine() is sync.
+    from unittest.mock import MagicMock
+
+    sync_conn = MagicMock()
+    sync_conn.execute.side_effect = [
+        type(
+            "_Rows",
+            (),
+            {
+                "fetchall": lambda self: [
+                    type(
+                        "_R",
+                        (),
+                        {
+                            "table_name": "cache_ipc",
+                            "display_name": "IPC",
+                            "description": "Inflación mensual",
+                            "row_count": 100,
+                            "score": 0.90,
+                        },
+                    )(),
+                    type(
+                        "_R",
+                        (),
+                        {
+                            "table_name": "cache_dolar_blue",
+                            "display_name": "Dólar Blue",
+                            "description": "Cotización diaria",
+                            "row_count": 50,
+                            "score": 0.70,
+                        },
+                    )(),
+                ]
+            },
+        )()
+    ]
+    sync_conn.rollback.return_value = None
+    engine = MagicMock()
+    engine.connect.return_value.__enter__.return_value = sync_conn
+    engine.connect.return_value.__exit__.return_value = False
+    sandbox._engine = engine
+
+    embedding = AsyncMock()
+    embedding.embed.return_value = [0.0] * 1024
+    llm = AsyncMock()
+    llm.chat.return_value = type("Resp", (), {"content": "[1, 0]"})()
+
+    result = await discover_catalog_hints_for_planner(
+        "dólar blue",
+        sandbox=sandbox,
+        embedding=embedding,
+        serving_port=None,
+        llm=llm,
+        limit=5,
+    )
+
+    first_data_line = next(
+        line for line in result.splitlines() if line.startswith("  - ")
+    )
+    assert "cache_dolar_blue" in first_data_line
+
+    metrics = MetricsCollector().get_metrics()
+    assert metrics["connectors"]["planner_reranker"]["calls"] >= 1
+    assert metrics["connectors"]["planner_reranker"]["errors"] == 0
+
+
+@pytest.mark.asyncio
+async def test_discover_catalog_hints_shadow_mode_preserves_base_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.application.pipeline.connectors.sandbox import (
+        discover_catalog_hints_for_planner,
+    )
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    MetricsCollector._instance = None
+    monkeypatch.setenv("OPENARG_ENABLE_LLM_RERANKER", "1")
+    monkeypatch.setenv("OPENARG_LLM_RERANKER_SHADOW_MODE", "1")
+    monkeypatch.setenv("OPENARG_PIPELINE_USE_SERVING_PORT", "0")
+
+    sandbox = PgSandboxAdapter()
+    from unittest.mock import MagicMock
+
+    sync_conn = MagicMock()
+    sync_conn.execute.side_effect = [
+        type(
+            "_Rows",
+            (),
+            {
+                "fetchall": lambda self: [
+                    type(
+                        "_R",
+                        (),
+                        {
+                            "table_name": "cache_ipc",
+                            "display_name": "IPC",
+                            "description": "Inflación mensual",
+                            "row_count": 100,
+                            "score": 0.90,
+                        },
+                    )(),
+                    type(
+                        "_R",
+                        (),
+                        {
+                            "table_name": "cache_dolar_blue",
+                            "display_name": "Dólar Blue",
+                            "description": "Cotización diaria",
+                            "row_count": 50,
+                            "score": 0.70,
+                        },
+                    )(),
+                ]
+            },
+        )()
+    ]
+    sync_conn.rollback.return_value = None
+    engine = MagicMock()
+    engine.connect.return_value.__enter__.return_value = sync_conn
+    engine.connect.return_value.__exit__.return_value = False
+    sandbox._engine = engine
+
+    embedding = AsyncMock()
+    embedding.embed.return_value = [0.0] * 1024
+    llm = AsyncMock()
+    llm.chat.return_value = type("Resp", (), {"content": "[1, 0]"})()
+
+    result = await discover_catalog_hints_for_planner(
+        "dólar blue",
+        sandbox=sandbox,
+        embedding=embedding,
+        serving_port=None,
+        llm=llm,
+        limit=5,
+    )
+
+    first_data_line = next(
+        line for line in result.splitlines() if line.startswith("  - ")
+    )
+    assert "cache_ipc" in first_data_line
+
+    metrics = MetricsCollector().get_metrics()
+    assert metrics["connectors"]["planner_reranker"]["calls"] >= 1

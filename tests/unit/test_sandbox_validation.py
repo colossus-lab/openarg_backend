@@ -79,11 +79,11 @@ class _FetchAllResult:
 
 
 class TestSandboxTableDiscovery:
-    def test_list_tables_includes_physical_cache_tables_without_cached_dataset_rows(self):
+    def test_list_tables_includes_live_raw_tables_without_cached_dataset_rows(self):
         adapter = PgSandboxAdapter()
         conn = MagicMock()
         conn.execute.side_effect = [
-            # 1) cached_datasets SELECT — registered legacy public.cache_*
+            # 1) cached_datasets SELECT — registered legacy/public row
             _FetchAllResult(
                 [
                     MagicMock(
@@ -94,14 +94,17 @@ class TestSandboxTableDiscovery:
                     )
                 ]
             ),
-            # 2) physical public.cache_* SELECT
+            # 2) raw_table_versions SELECT — one extra live raw table
             _FetchAllResult(
                 [
-                    MagicMock(table_name="cache_budget_sample", row_count=42),
-                    MagicMock(table_name="cache_budget_sample_gaaaaaaaa", row_count=100),
+                    MagicMock(
+                        schema_name="raw",
+                        table_name="energia_pozos_v2",
+                        row_count=100,
+                    ),
                 ]
             ),
-            # 3) columns SELECT for the unregistered physical cache table
+            # 3) columns SELECT for the unregistered live raw table
             _FetchAllResult(
                 [
                     MagicMock(column_name="a"),
@@ -109,10 +112,6 @@ class TestSandboxTableDiscovery:
                     MagicMock(column_name="_source_dataset_id"),
                 ]
             ),
-            # 4) NEW: raw_table_versions live SELECT — empty in this test
-            #    (no raw landings configured). Without this stub the adapter
-            #    would raise StopIteration when it tries to enumerate raw.
-            _FetchAllResult([]),
         ]
         engine = MagicMock()
         engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
@@ -123,8 +122,65 @@ class TestSandboxTableDiscovery:
 
         assert [t.table_name for t in tables] == [
             "cache_budget_sample",
-            "cache_budget_sample_gaaaaaaaa",
+            "raw.energia_pozos_v2",
         ]
         assert tables[1].dataset_id == ""
         assert tables[1].row_count == 100
         assert tables[1].columns == ["a", "b", "_source_dataset_id"]
+
+
+class TestSandboxColumnTypes:
+    def test_get_column_types_supports_qualified_raw_and_mart_names(self):
+        adapter = PgSandboxAdapter()
+        conn = MagicMock()
+        conn.execute.side_effect = [
+            _FetchAllResult(
+                [
+                    MagicMock(
+                        table_schema="public",
+                        table_name="cache_budget_sample",
+                        column_name="monto",
+                        data_type="numeric",
+                    ),
+                    MagicMock(
+                        table_schema="raw",
+                        table_name="energia_pozos_v2",
+                        column_name="anio",
+                        data_type="text",
+                    ),
+                    MagicMock(
+                        table_schema="mart",
+                        table_name="series_economicas",
+                        column_name="valor",
+                        data_type="double precision",
+                    ),
+                ]
+            )
+        ]
+        engine = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        adapter._engine = engine
+
+        types = adapter._get_column_types_sync(
+            [
+                "cache_budget_sample",
+                "raw.energia_pozos_v2",
+                "mart.series_economicas",
+            ]
+        )
+
+        execute_call = conn.execute.call_args
+        assert execute_call is not None
+        params = execute_call.args[1]
+        assert set(params["schemas"]) == {"public", "raw", "mart"}
+        assert set(params["tables"]) == {
+            "cache_budget_sample",
+            "energia_pozos_v2",
+            "series_economicas",
+        }
+        assert types == {
+            "cache_budget_sample": [("monto", "numeric")],
+            "raw.energia_pozos_v2": [("anio", "text")],
+            "mart.series_economicas": [("valor", "double precision")],
+        }

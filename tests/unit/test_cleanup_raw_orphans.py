@@ -36,8 +36,10 @@ class _FakeResult:
 def _build_engine_with_select(
     rows: list, mart_rows: list | None = None
 ) -> MagicMock:
-    """Engine that returns mart_rows first (for the protection lookup), then
-    the orphan SELECT rows.
+    """Engine that returns:
+      1. mart_definitions rows
+      2. pg_matviews rows
+      3. orphan SELECT rows
 
     Supports both `engine.connect()` (read) and `engine.begin()` (write) as
     separate context managers.
@@ -45,9 +47,11 @@ def _build_engine_with_select(
     mart_rows = mart_rows or []
     read_conn = MagicMock()
     # First execute returns mart sql_definitions (empty by default → no
-    # protected identities), second returns orphan candidates.
+    # protected identities), second returns live matview definitions,
+    # third returns orphan candidates.
     read_conn.execute.side_effect = [
         _FakeResult(rows=mart_rows),
+        _FakeResult(rows=[]),
         _FakeResult(rows=rows),
     ]
 

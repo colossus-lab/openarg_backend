@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 from collections.abc import Iterable
 from urllib.parse import urlparse
@@ -52,6 +53,17 @@ def _mart_dependency_guards(engine) -> tuple[set[str], list[str], set[str]]:
     protected_identities: set[str] = set()
     protected_raw_tables: set[str] = set()
 
+    def _result_rows(result) -> list:
+        if result is None:
+            return []
+        fetchall = getattr(result, "fetchall", None)
+        if callable(fetchall):
+            return list(fetchall())
+        try:
+            return list(result)
+        except TypeError:
+            return []
+
     def _collect_from_sql(sql_definition: str) -> None:
         if not sql_definition:
             return
@@ -72,11 +84,22 @@ def _mart_dependency_guards(engine) -> tuple[set[str], list[str], set[str]]:
         ):
             protected_raw_tables.add(match.group(1) or match.group(2))
 
-    with engine.connect() as conn:
-        for row in conn.execute(mart_definitions_select):
-            _collect_from_sql(row.sql_definition or "")
-        for row in conn.execute(live_matviews_select):
-            _collect_from_sql(getattr(row, "definition", "") or "")
+    try:
+        with engine.connect() as conn:
+            try:
+                mart_rows = _result_rows(conn.execute(mart_definitions_select))
+                for row in mart_rows:
+                    _collect_from_sql(getattr(row, "sql_definition", "") or "")
+            except Exception:
+                logger.debug("Could not load mart_definitions dependency guards", exc_info=True)
+            try:
+                live_rows = _result_rows(conn.execute(live_matviews_select))
+                for row in live_rows:
+                    _collect_from_sql(getattr(row, "definition", "") or "")
+            except Exception:
+                logger.debug("Could not load pg_matviews dependency guards", exc_info=True)
+    except Exception:
+        logger.debug("Could not connect to load mart dependency guards", exc_info=True)
     pattern_prefixes = [
         p[len("__pattern__:") :] for p in protected_identities if p.startswith("__pattern__:")
     ]
@@ -96,6 +119,61 @@ def _cleanup_threshold_seconds() -> int:
         return int(os.getenv("OPENARG_TEMP_CLEANUP_AGE_SECONDS", "3600"))
     except ValueError:
         return 3600
+
+
+def _path_size_bytes(path: str) -> int:
+    """Best-effort recursive size for audit logging.
+
+    Symlinks are ignored so cleanup stays scoped to the temp tree itself.
+    """
+    try:
+        if os.path.islink(path):
+            return 0
+        if os.path.isfile(path):
+            return int(os.path.getsize(path))
+        total = 0
+        for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+            for name in files:
+                fp = os.path.join(root, name)
+                if os.path.islink(fp):
+                    continue
+                try:
+                    total += int(os.path.getsize(fp))
+                except OSError:
+                    continue
+        return total
+    except OSError:
+        return 0
+
+
+def _remove_stale_tmp_path(path: str, *, base: str) -> tuple[bool, int]:
+    """Remove one stale tmp path safely.
+
+    Only removes paths that still resolve under `base`. Directories are
+    deleted recursively because crash leftovers are typically non-empty
+    extraction trees.
+    """
+    try:
+        real_base = os.path.realpath(base)
+        real_path = os.path.realpath(path)
+        if os.path.commonpath([real_base, real_path]) != real_base:
+            return False, 0
+    except Exception:
+        return False, 0
+
+    size_bytes = _path_size_bytes(path)
+    try:
+        if os.path.islink(path) or os.path.isfile(path):
+            os.unlink(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            return False, 0
+        return True, size_bytes
+    except Exception:
+        logger.debug("Could not remove %s", path, exc_info=True)
+        return False, 0
 
 
 @celery_app.task(
@@ -125,20 +203,11 @@ def temp_dir_cleanup(self) -> dict:
         if stat.st_mtime > cutoff:
             skipped += 1
             continue
-        try:
-            if os.path.isdir(path):
-                # Conservative: only remove empty dirs to avoid eating live work.
-                try:
-                    os.rmdir(path)
-                    removed += 1
-                except OSError:
-                    skipped += 1
-            else:
-                bytes_freed += stat.st_size
-                os.unlink(path)
-                removed += 1
-        except Exception:
-            logger.debug("Could not remove %s", path, exc_info=True)
+        deleted, reclaimed = _remove_stale_tmp_path(path, base=base)
+        if deleted:
+            removed += 1
+            bytes_freed += reclaimed
+        else:
             skipped += 1
     summary = {
         "removed": removed,
@@ -554,9 +623,8 @@ def retain_raw_versions(
     2. `DELETE FROM raw_table_versions` for that row.
 
     The default for `keep_last` comes from the env var
-    `OPENARG_RAW_RETENTION_KEEP_LAST` (fallback 3). Lowering this from 3 to 2
-    typically frees ~30% of the raw schema disk usage at the cost of one
-    less rollback step per resource.
+    `OPENARG_RAW_RETENTION_KEEP_LAST` (default 2). That keeps one rollback
+    step per resource while materially reducing raw-schema growth versus 3.
 
     Idempotent: re-running with the same args is a no-op once the trim has
     been applied. `dry_run=True` reports candidates without touching anything.

@@ -293,10 +293,11 @@ def create_celery() -> Celery:
                 # trims within a single resource_identity — orphans across
                 # identities are this task's responsibility.
                 # `min_age_hours=24` avoids racing with in-flight collects.
-                # `max_drops=50` caps RDS IO per run.
+                # `max_drops=100` raises cleanup throughput while keeping
+                # bounded RDS IO per run.
                 "task": "openarg.cleanup_raw_orphans",
                 "schedule": crontab(minute=30, hour="*/6"),
-                "kwargs": {"dry_run": False, "max_drops": 50, "min_age_hours": 24},
+                "kwargs": {"dry_run": False, "max_drops": 100, "min_age_hours": 24},
                 "options": {"queue": "ingest"},
             },
             "retain-raw-versions": {
@@ -305,7 +306,7 @@ def create_celery() -> Celery:
                 # a dataset accumulates a __vN+1 table and the old __vN
                 # sticks around forever (each can be hundreds of MB).
                 # `keep_last=None` defers to env `OPENARG_RAW_RETENTION_KEEP_LAST`
-                # (fallback 3) so ops can change retention without redeploy.
+                # (default 2) so ops can change retention without redeploy.
                 # Runs every 6h.
                 "task": "openarg.retain_raw_versions",
                 "schedule": crontab(minute=0, hour="*/6"),

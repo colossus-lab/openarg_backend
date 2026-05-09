@@ -48,6 +48,24 @@ _TABLE_REF_PATTERN = re.compile(
 )
 
 
+def _split_table_reference(table_name: str) -> tuple[str, str]:
+    """Normalize a surfaced table reference to `(schema, bare_name)`.
+
+    `list_cached_tables()` returns a mix of shapes:
+      - `cache_*` legacy public names (unqualified)
+      - `raw.<table>`
+      - `mart.<view>`
+
+    `/sandbox/ask` later feeds those names into `get_column_types()`, which
+    must resolve the actual schema instead of assuming `public`.
+    """
+    value = (table_name or "").strip()
+    if "." not in value:
+        return "public", value.strip('"')
+    schema, bare = value.split(".", 1)
+    return schema.strip('"'), bare.strip('"')
+
+
 def _validate_sql(sql: str) -> str | None:
     """Return an error message if the SQL is not allowed, else None."""
     stripped = sql.strip().rstrip(";").strip()
@@ -393,22 +411,34 @@ class PgSandboxAdapter(ISQLSandbox):
         engine = self._get_engine()
         if not table_names:
             return {}
+        requested_pairs = [
+            (_split_table_reference(name), name) for name in table_names
+        ]
+        target_pairs = list(dict.fromkeys(pair for pair, _original in requested_pairs))
+        schemas = list(dict.fromkeys(schema for schema, _table in target_pairs))
+        tables = list(dict.fromkeys(table for _schema, table in target_pairs))
         with engine.connect() as conn:
             result = conn.execute(
                 text(
-                    "SELECT table_name, column_name, data_type "
+                    "SELECT table_schema, table_name, column_name, data_type "
                     "FROM information_schema.columns "
-                    "WHERE table_schema = 'public' "
+                    "WHERE table_schema = ANY(:schemas) "
                     "AND table_name = ANY(:tables) "
-                    "ORDER BY table_name, ordinal_position"
+                    "ORDER BY table_schema, table_name, ordinal_position"
                 ),
-                {"tables": table_names},
+                {"schemas": schemas, "tables": tables},
             )
-            types: dict[str, list[tuple[str, str]]] = {}
+            by_pair: dict[tuple[str, str], list[tuple[str, str]]] = {}
             for row in result.fetchall():
-                types.setdefault(row.table_name, []).append((row.column_name, row.data_type))
+                pair = (str(row.table_schema), str(row.table_name))
+                if pair not in target_pairs:
+                    continue
+                by_pair.setdefault(pair, []).append((row.column_name, row.data_type))
             conn.rollback()
-            return types
+            return {
+                original_name: list(by_pair.get(pair, []))
+                for pair, original_name in requested_pairs
+            }
 
     async def get_column_types(
         self,
