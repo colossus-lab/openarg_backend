@@ -1,0 +1,97 @@
+id: energia_precios_combustibles
+version: 0.1.0
+description: |
+  Precios y volúmenes de combustibles en estaciones de servicio
+  argentinas — datos publicados bajo Resolución 1104 de la
+  Secretaría de Energía. Cada row es una observación de
+  (período × provincia × bandera × producto) con precio con/sin
+  impuestos y volumen comercializado.
+
+  Source: 28 versiones de
+  `energia__precios_y_volumenes_eess_resolucion_1104` con 3 schema
+  variants:
+    - aggregated (anio, mes, bandera, producto, provincia, vol_m3,
+      indice_tiempo, canal_de_comercializacion)
+    - detail-with-prices (anio, mes, operador, bandera, cuit,
+      provincia, producto, precio_sin_impuestos, precio_con_impuestos,
+      volumen, ...)
+    - detail-alt (periodo, razonsocial, provincia, bandera, cuit,
+      producto, precio_con_impuestos, volumen, ...)
+
+  Mart unifica las 3 con COALESCE sobre los campos comunes.
+
+  Use cases típicos: "precio de la nafta súper en CABA",
+  "cuánto está el gasoil en provincia", "precio combustible YPF",
+  "estaciones de servicio Shell", "diésel premium por bandera",
+  "evolución del precio del combustible argentino".
+domain: economia
+
+sources:
+  portals: [energia]
+  resource_patterns: ["energia__precios_y_volumenes_eess_resolucion_1104*"]
+
+canonical_columns:
+  - name: periodo
+    type: text
+    description: Período (anio-mes o fecha)
+  - name: provincia
+    type: text
+    description: Provincia argentina
+  - name: bandera
+    type: text
+    description: Bandera de la estación (YPF, Shell, Axion, Puma, etc.)
+  - name: producto
+    type: text
+    description: Tipo de combustible (nafta súper, premium, gasoil, diésel premium, GNC)
+  - name: precio_con_impuestos
+    type: text
+    description: Precio al público con impuestos
+  - name: precio_sin_impuestos
+    type: text
+    description: Precio sin impuestos (cuando disponible)
+  - name: volumen
+    type: text
+    description: Volumen comercializado (m³ o litros)
+  - name: localidad
+    type: text
+    description: Localidad de la estación (cuando disponible)
+  - name: razon_social
+    type: text
+    description: Razón social del operador
+  - name: canal_de_comercializacion
+    type: text
+    description: Canal de comercialización
+
+sql: |
+  SELECT
+    NULLIF(TRIM(COALESCE(
+        periodo::text,
+        indice_tiempo::text,
+        (anio::text || '-' || LPAD(NULLIF(TRIM(mes::text), ''), 2, '0'))
+    )), '')                                                        AS periodo,
+    NULLIF(TRIM(provincia), '')                                    AS provincia,
+    NULLIF(TRIM(bandera), '')                                      AS bandera,
+    NULLIF(TRIM(producto), '')                                     AS producto,
+    NULLIF(TRIM(precio_con_impuestos::text), '')                   AS precio_con_impuestos,
+    NULLIF(TRIM(precio_sin_impuestos::text), '')                   AS precio_sin_impuestos,
+    NULLIF(TRIM(COALESCE(
+        volumen::text,
+        vol_m3::text
+    )), '')                                                        AS volumen,
+    NULLIF(TRIM(localidad), '')                                    AS localidad,
+    NULLIF(TRIM(COALESCE(razonsocial, operador)), '')              AS razon_social,
+    NULLIF(TRIM(canal_de_comercializacion), '')                    AS canal_de_comercializacion
+  FROM {{ live_tables_by_table_pattern(
+      'energia__precios_y_volumenes_eess_resolucion_1104*',
+      expected_columns=['periodo', 'indice_tiempo', 'anio', 'mes',
+                        'provincia', 'bandera', 'producto',
+                        'precio_con_impuestos', 'precio_sin_impuestos',
+                        'volumen', 'vol_m3', 'localidad',
+                        'razonsocial', 'operador',
+                        'canal_de_comercializacion']
+  ) }} sub
+  WHERE NULLIF(TRIM(producto), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

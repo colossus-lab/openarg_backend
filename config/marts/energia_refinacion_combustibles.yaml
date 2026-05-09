@@ -1,0 +1,79 @@
+id: energia_refinacion_combustibles
+version: 0.1.0
+description: |
+  Refinación y comercialización de petróleo en Argentina — volúmenes
+  mensuales por empresa refinadora, producto y tipo de comercialización.
+  Permite ver qué refinerías producen qué productos y cómo se
+  distribuyen.
+
+  Source: 28 versiones de
+  `energia__refinacion_y_comercializacion_de_petroleo` con 2 schemas
+  variantes:
+    - schema A: anio, mes, empresa, tipodecomercializacion, producto,
+      unidad, cantidad
+    - schema B: anio, mes, empresa, producto, unidad, sector, total,
+      indice_tiempo
+
+  Mart unifica los 2 con COALESCE.
+
+  Use cases típicos: "qué refinerías producen nafta súper en
+  Argentina", "comercialización de gasoil por empresa",
+  "producción de YPF refinería", "volúmenes de refinación de
+  petróleo argentino".
+domain: economia
+
+sources:
+  portals: [energia]
+  resource_patterns: ["energia__refinacion_y_comercializacion_de_petrole*"]
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año
+  - name: mes
+    type: text
+    description: Mes
+  - name: indice_tiempo
+    type: text
+    description: Período (anio-mes formato fecha) cuando disponible
+  - name: empresa
+    type: text
+    description: Empresa refinadora (YPF, Axion, Shell, Trafigura, etc.)
+  - name: producto
+    type: text
+    description: Producto (nafta, gasoil, fueloil, GNC, GLP, etc.)
+  - name: tipo_comercializacion
+    type: text
+    description: Tipo de comercialización (cuando disponible)
+  - name: sector
+    type: text
+    description: Sector de destino (cuando disponible)
+  - name: unidad
+    type: text
+    description: Unidad de medida (m³, ton, etc.)
+  - name: cantidad
+    type: text
+    description: Volumen comercializado o total
+
+sql: |
+  SELECT
+    NULLIF(TRIM(anio::text), '')                                    AS anio,
+    NULLIF(TRIM(mes::text), '')                                     AS mes,
+    NULLIF(TRIM(indice_tiempo::text), '')                           AS indice_tiempo,
+    NULLIF(TRIM(empresa), '')                                       AS empresa,
+    NULLIF(TRIM(producto), '')                                      AS producto,
+    NULLIF(TRIM(tipodecomercializacion), '')                        AS tipo_comercializacion,
+    NULLIF(TRIM(sector), '')                                        AS sector,
+    NULLIF(TRIM(unidad), '')                                        AS unidad,
+    NULLIF(TRIM(COALESCE(cantidad::text, total::text)), '')         AS cantidad
+  FROM {{ live_tables_by_table_pattern(
+      'energia__refinacion_y_comercializacion_de_petrole*',
+      expected_columns=['anio', 'mes', 'indice_tiempo', 'empresa',
+                        'producto', 'tipodecomercializacion',
+                        'sector', 'unidad', 'cantidad', 'total']
+  ) }} sub
+  WHERE NULLIF(TRIM(empresa), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []
