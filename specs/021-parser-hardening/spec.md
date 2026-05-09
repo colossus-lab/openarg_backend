@@ -249,12 +249,17 @@ same window)**
   Many are in active use (`cached_datasets.status='ready'`). Migrating
   them to `raw.*` would unify the storage model and simplify routing,
   but the connectors that own them must move first.
-- **DEBT-021-004 — Unnamed cols metric grew during re-collect**: the
-  bulk re-collect in Phase 3 created new versions (`v9, v13, ...`) of
-  138 datasets, some of which still emitted `Unnamed:` columns. Either
-  the parser path didn't hit `_post_parse_normalize` (a secondary
-  reader path?) or those CSVs are intrinsically structured with empty
-  headers. Worth a focused investigation in a future spec.
+- **DEBT-021-004 — Unnamed cols metric grew during re-collect** (CLOSED 2026-05-09, commit 59dfd8b):
+  root cause was string-form NaN sentinels (`"None"`, `"nan"`, `"s/d"`, ...)
+  emitted AS-IS by pandas when reading CSVs that use them as missing-value
+  markers. The sentinel cells are non-NaN in pandas terms, so
+  `df.dropna(axis=1, how='all')` left those cols intact, and the same
+  blind spot existed in `repair_trailing_garbage_cols`'s populated-ratio
+  SQL. Fixed by `_normalize_string_nan` (replace sentinels with real NaN
+  before dropna) and an extended sentinel list in the repair function's
+  CASE WHEN. Verified end-to-end on the egregious case
+  `innovacion_sector_manufacturero` (1,400 → 9 cols). Global
+  `Unnamed:` cols 20,296 → 4,935 (−76 %).
 
 ## 8. References
 
