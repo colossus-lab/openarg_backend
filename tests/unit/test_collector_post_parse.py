@@ -61,6 +61,55 @@ def test_post_parse_normalize_drops_string_nan_columns():
     assert "ghost_mix" not in out.columns
 
 
+def test_post_parse_normalize_unpivots_time_pivoted_layout():
+    """DEBT-021-001 / Phase 5: a wide year-pivoted table gets melted to
+    long format `(id, periodo, valor)`."""
+    df = pd.DataFrame(
+        {
+            "Provincia": ["BA", "Córdoba", "Santa Fe"],
+            "2020": [1.0, 2.0, 3.0],
+            "2021": [1.1, 2.1, 3.1],
+            "2022": [1.2, 2.2, 3.2],
+            "2023": [1.3, 2.3, 3.3],
+        }
+    )
+    out = _post_parse_normalize(df)
+    # 4 of 5 cols are years (>= 0.5 threshold), 1 id col (Provincia)
+    assert "periodo" in out.columns
+    assert "valor" in out.columns
+    assert "Provincia" in out.columns
+    # 3 provinces × 4 periods = 12 long rows
+    assert len(out) == 12
+
+
+def test_post_parse_normalize_does_not_unpivot_long_input():
+    """Already-long input passes through unchanged."""
+    df = pd.DataFrame(
+        {
+            "provincia": ["BA", "Córdoba", "BA"],
+            "periodo": ["2020", "2020", "2021"],
+            "valor": [1.5, 2.5, 1.6],
+        }
+    )
+    out = _post_parse_normalize(df)
+    assert list(out.columns) == ["provincia", "periodo", "valor"]
+    assert len(out) == 3
+
+
+def test_post_parse_normalize_skips_unpivot_below_min_cols():
+    """Tiny table with 3 cols including 2 years: no unpivot (cols < 5)."""
+    df = pd.DataFrame(
+        {
+            "x": ["a", "b"],
+            "2020": [1, 2],
+            "2021": [3, 4],
+        }
+    )
+    out = _post_parse_normalize(df)
+    # Should pass through (cols < 5)
+    assert list(out.columns) == ["x", "2020", "2021"]
+
+
 def test_post_parse_normalize_keeps_partial_nan_cols():
     """Cols with SOME real values survive even if other cells are sentinels."""
     df = pd.DataFrame(

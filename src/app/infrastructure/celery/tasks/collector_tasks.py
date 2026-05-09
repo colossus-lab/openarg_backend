@@ -35,6 +35,8 @@ from app.application.expander import MultiFileExpander
 from app.application.pipeline.parsers import (
     dedupe_column_names,
     promote_buried_headers,
+    time_column_ratio,
+    unpivot_if_time_pivoted,
 )
 from app.application.validation.collector_hooks import (
     is_critical as _ws0_is_critical,
@@ -2952,6 +2954,18 @@ def _normalize_string_nan(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+# Phase 5 (021-parser-hardening DEBT-021-001) feature flag. Default ON
+# because `unpivot_if_time_pivoted` is idempotent and threshold-gated
+# (≥50 % time-cols + ≥1 id col + ≥5 total cols). Set
+# `OPENARG_GENERIC_UNPIVOT=0` to disable globally.
+def _generic_unpivot_enabled() -> bool:
+    return os.getenv("OPENARG_GENERIC_UNPIVOT", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def _post_parse_normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Apply share-able post-parse passes that fix common upstream parser bugs.
 
@@ -2967,20 +2981,35 @@ def _post_parse_normalize(df: pd.DataFrame) -> pd.DataFrame:
       4. `dedupe_column_names` — byte-aware dedup that prevents
          `DuplicateColumnError` on `df.to_sql` when two distinct unicode names
          share their first 63 bytes.
-
-    Time-pivot detection is intentionally NOT applied here: it changes the
-    shape of the dataframe and is too risky for the generic path. See
-    specs/021-parser-hardening Phase 5 for the per-portal rollout.
+      5. `unpivot_if_time_pivoted` — if ≥50 % of cols are period tokens
+         (years/months) AND ≥1 col is not, melt the wide layout to long
+         `(id_cols..., periodo, valor)`. Idempotent on long-format input.
+         Toggle off via `OPENARG_GENERIC_UNPIVOT=0` for safety; defaults
+         to on. Skipped on tables with fewer than 5 cols total (the
+         threshold check inside the helper guards the rest).
 
     Idempotent: a clean dataframe passes through unchanged.
     """
     if df.empty:
         return df
     before_cols = list(df.columns)
+    before_shape = df.shape
     df = _normalize_string_nan(df)
     df = promote_buried_headers(df)
     df = df.dropna(axis=1, how="all")
     df.columns = dedupe_column_names(list(df.columns))
+    if _generic_unpivot_enabled() and len(df.columns) >= 5:
+        ratio_before = time_column_ratio([str(c) for c in df.columns])
+        if ratio_before >= 0.5:
+            new_df = unpivot_if_time_pivoted(df)
+            if new_df is not df:
+                logger.info(
+                    "post_parse_normalize: unpivoted %s → %s (time_ratio=%.2f)",
+                    before_shape,
+                    new_df.shape,
+                    ratio_before,
+                )
+                df = new_df
     if before_cols != list(df.columns):
         logger.info(
             "post_parse_normalize: %d cols → %d cols (rename/recover applied)",
