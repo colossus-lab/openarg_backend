@@ -1,0 +1,88 @@
+id: caba_terrenos_oferta
+version: 0.1.0
+description: |
+  Terrenos en oferta en la Ciudad de Buenos Aires — valor de oferta de
+  terrenos publicados con superficie, precio en dólares, FOT (factor
+  de ocupación total), barrio, comuna y distrito de codificación
+  urbana. Datos publicados periódicamente por el Sistema de
+  Información Catastral del GCBA.
+
+  Source: 56 versiones de `caba__terrenos_valor_de_oferta` con
+  schema cohesivo (`comuna, calle, m2, numero, u_s_m2, dolares,
+  fecha, barrio, cotiz, fot, pesos, distrito_c`).
+
+  Use cases típicos: "precio del terreno en Palermo",
+  "terrenos en venta CABA por comuna", "FOT permitido por
+  distrito", "evolución del precio del m² de terrenos porteños",
+  "terrenos en zona R2".
+domain: economia
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__terrenos_valor_de_oferta*"]
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha de la oferta
+  - name: calle
+    type: text
+    description: Calle del terreno
+  - name: numero
+    type: text
+    description: Número
+  - name: barrio
+    type: text
+    description: Barrio CABA
+  - name: comuna
+    type: text
+    description: Comuna (1-15)
+  - name: distrito_c
+    type: text
+    description: Distrito de Código de Planeamiento Urbano
+  - name: m2
+    type: text
+    description: Metros cuadrados del terreno
+  - name: precio_dolares
+    type: text
+    description: Precio en dólares
+  - name: precio_m2_dolares
+    type: text
+    description: Precio dólar por m²
+  - name: precio_pesos
+    type: text
+    description: Precio en pesos
+  - name: cotizacion
+    type: text
+    description: Cotización del dólar al momento de la oferta
+  - name: fot
+    type: text
+    description: Factor de Ocupación Total
+
+sql: |
+  SELECT
+    NULLIF(TRIM(COALESCE("FECHA"::text, fecha::text)), '')                AS fecha,
+    NULLIF(TRIM(COALESCE("CALLE", calle)), '')                            AS calle,
+    NULLIF(TRIM(COALESCE("NUMERO"::text, numero::text)), '')              AS numero,
+    NULLIF(TRIM(COALESCE("BARRIO", barrio)), '')                          AS barrio,
+    NULLIF(TRIM(COALESCE("COMUNA"::text, comuna::text)), '')              AS comuna,
+    NULLIF(TRIM(COALESCE("DISTRITO_C", distrito_c)), '')                  AS distrito_c,
+    NULLIF(TRIM(COALESCE("M2"::text, m2::text)), '')                      AS m2,
+    NULLIF(TRIM(COALESCE("DOLARES"::text, dolares::text)), '')            AS precio_dolares,
+    NULLIF(TRIM(COALESCE("U_S_M2"::text, u_s_m2::text)), '')              AS precio_m2_dolares,
+    NULLIF(TRIM(COALESCE("PESOS"::text, pesos::text)), '')                AS precio_pesos,
+    NULLIF(TRIM(COALESCE("COTIZ"::text, cotiz::text)), '')                AS cotizacion,
+    NULLIF(TRIM(COALESCE("FOT"::text, fot::text)), '')                    AS fot
+  FROM {{ live_tables_by_table_pattern(
+      'caba__terrenos_valor_de_oferta*',
+      expected_columns=[
+        'FECHA','fecha','CALLE','calle','NUMERO','numero','BARRIO','barrio',
+        'COMUNA','comuna','DISTRITO_C','distrito_c','M2','m2','DOLARES','dolares',
+        'U_S_M2','u_s_m2','PESOS','pesos','COTIZ','cotiz','FOT','fot'
+      ]
+  ) }} sub
+  WHERE NULLIF(TRIM(COALESCE("CALLE", calle)), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []
