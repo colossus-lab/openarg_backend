@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
+from app.application.pipeline.connectors.planner_candidates import PlannerCandidate
 from app.domain.ports.llm.llm_provider import ILLMProvider, LLMMessage
 from app.domain.ports.search.vector_search import SearchResult
 from app.prompts import load_prompt
@@ -62,3 +63,72 @@ class LLMReranker:
         except Exception:
             logger.debug("LLM reranking failed, using original order", exc_info=True)
             return results[:top_k]
+
+
+class PlannerCandidateReranker:
+    def __init__(self, llm: ILLMProvider) -> None:
+        self._llm = llm
+
+    async def rerank(
+        self,
+        question: str,
+        candidates: list[PlannerCandidate],
+        top_k: int = 5,
+    ) -> list[PlannerCandidate]:
+        """Re-rank planner candidates using the same JSON-index contract.
+
+        Conservative by design:
+        - does not invent candidates
+        - falls back to original order on any failure
+        - leaves candidate semantics untouched
+        """
+        if len(candidates) <= 1:
+            return candidates[:top_k]
+
+        try:
+            results_text = "\n".join(
+                (
+                    f"[{i}] "
+                    f"title={c.title}; "
+                    f"kind={c.kind}; "
+                    f"layer={c.layer}; "
+                    f"queryability={c.queryability}; "
+                    f"portal={c.portal or ''}; "
+                    f"table={c.table_name or ''}; "
+                    f"resource={c.resource_id or ''}; "
+                    f"description={c.description[:160]}"
+                )
+                for i, c in enumerate(candidates)
+            )
+
+            prompt = load_prompt("reranker", question=question, results_text=results_text)
+            response = await self._llm.chat(
+                messages=[LLMMessage(role="user", content=prompt)],
+                temperature=0.0,
+                max_tokens=160,
+            )
+
+            text = response.content.strip()
+            indices = json.loads(text)
+            if not isinstance(indices, list):
+                return candidates[:top_k]
+
+            reranked: list[PlannerCandidate] = []
+            seen: set[int] = set()
+            for idx in indices:
+                idx = int(idx)
+                if 0 <= idx < len(candidates) and idx not in seen:
+                    reranked.append(candidates[idx])
+                    seen.add(idx)
+
+            for i, candidate in enumerate(candidates):
+                if i not in seen:
+                    reranked.append(candidate)
+
+            return reranked[:top_k]
+        except Exception:
+            logger.debug(
+                "Planner candidate LLM reranking failed, using original order",
+                exc_info=True,
+            )
+            return candidates[:top_k]

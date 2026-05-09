@@ -91,6 +91,7 @@ async def replan_node(state: OpenArgState) -> dict:
             deps.sandbox,
             deps.embedding,
             serving_port=deps.serving_port,
+            llm=deps.llm,
         )
 
         # Generate a new plan with the enriched context

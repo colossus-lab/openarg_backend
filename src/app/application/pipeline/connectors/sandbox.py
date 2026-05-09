@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import unicodedata
 from datetime import UTC, datetime
@@ -25,6 +26,10 @@ from app.application.pipeline.connectors.cache_table_selection import (
     expand_table_hints_compat,
     prefer_consolidated_table,
 )
+from app.application.pipeline.connectors.planner_candidates import (
+    TableCatalogMatch,
+    collect_planner_candidates,
+)
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 
 if TYPE_CHECKING:
@@ -34,6 +39,85 @@ if TYPE_CHECKING:
     from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 
 logger = logging.getLogger(__name__)
+
+
+def _llm_reranker_enabled() -> bool:
+    return os.getenv("OPENARG_ENABLE_LLM_RERANKER", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _llm_reranker_shadow_mode() -> bool:
+    return os.getenv("OPENARG_LLM_RERANKER_SHADOW_MODE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _llm_reranker_max_candidates() -> int:
+    try:
+        return max(1, int(os.getenv("OPENARG_RERANKER_MAX_CANDIDATES", "8")))
+    except Exception:
+        return 8
+
+
+def _candidate_debug_summary(candidates: list[Any], *, limit: int = 5) -> list[str]:
+    summary: list[str] = []
+    for candidate in candidates[:limit]:
+        summary.append(
+            f"{candidate.kind}:{candidate.title}[{candidate.layer}/{candidate.queryability}]"
+        )
+    return summary
+
+
+async def _maybe_rerank_planner_candidates(
+    *,
+    query: str,
+    candidates: list,
+    llm: ILLMProvider | None,
+    top_k: int,
+):
+    if not llm or not _llm_reranker_enabled() or len(candidates) <= 1:
+        return candidates[:top_k]
+    shadow_mode = _llm_reranker_shadow_mode()
+    started_at = datetime.now(UTC)
+    try:
+        from app.infrastructure.adapters.search.reranker import PlannerCandidateReranker
+        from app.infrastructure.monitoring.metrics import MetricsCollector
+
+        reranker = PlannerCandidateReranker(llm)
+        rerank_limit = min(len(candidates), _llm_reranker_max_candidates(), top_k)
+        original_head = list(candidates[:rerank_limit])
+        head = await reranker.rerank(query, original_head, top_k=rerank_limit)
+        latency_ms = (datetime.now(UTC) - started_at).total_seconds() * 1000.0
+        MetricsCollector().record_connector_call("planner_reranker", latency_ms)
+        changed = [c.candidate_id for c in head] != [c.candidate_id for c in original_head]
+        logger.info(
+            "planner_reranker mode=%s changed=%s query=%r before=%s after=%s",
+            "shadow" if shadow_mode else "apply",
+            changed,
+            query[:120],
+            _candidate_debug_summary(original_head),
+            _candidate_debug_summary(head),
+        )
+        if shadow_mode:
+            return candidates[:top_k]
+        return head + candidates[rerank_limit:top_k]
+    except Exception:
+        try:
+            from app.infrastructure.monitoring.metrics import MetricsCollector
+
+            latency_ms = (datetime.now(UTC) - started_at).total_seconds() * 1000.0
+            MetricsCollector().record_connector_call(
+                "planner_reranker", latency_ms, error=True
+            )
+        except Exception:
+            logger.debug("planner reranker metrics recording failed", exc_info=True)
+        logger.debug("planner candidate rerank failed; preserving base order", exc_info=True)
+        return candidates[:top_k]
 
 
 def _normalize_text(value: str) -> str:
@@ -164,10 +248,21 @@ async def discover_tables_by_catalog_search(
     limit: int = 5,
     min_score: float = 0.45,
 ) -> list[tuple[str, float]]:
-    """Search table_catalog embeddings for relevant tables.
+    """Search table_catalog AND mart_definitions for relevant tables.
 
-    Returns a list of (table_name, similarity_score) tuples filtered by
-    *min_score* and ordered by descending similarity.
+    Returns a unified ranked list of (table_name, similarity_score) tuples.
+    Marts get a +0.12 boost on their similarity score because their
+    embeddings are necessarily more abstract than per-table raw embeddings
+    (they describe a curated cross-source view, not the literal column
+    list of one CSV) — without the boost, vector search systematically
+    prefers concrete raw tables over the curated mart even when the mart
+    is the right answer. The boost is calibrated against the routing
+    diagnostic (Fase 1): observed average mart-vs-raw margin was -0.058,
+    with the worst miss at -0.146; +0.12 flips ~70% of the miss cases
+    while leaving negative-control queries (no relevant mart) untouched.
+
+    Mart top-1 is ALWAYS included in the result set (even below
+    min_score) so the planner sees it; raws still respect min_score.
     """
     if not sandbox:
         return []
@@ -179,7 +274,8 @@ async def discover_tables_by_catalog_search(
         def _search() -> list[tuple[str, float]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
-                result = conn.execute(
+                # Raw catalog: filtered by min_score, top-`limit` by similarity.
+                raw_result = conn.execute(
                     text(
                         "SELECT table_name, "
                         "1 - (catalog_embedding <=> CAST(:emb AS vector)) AS score "
@@ -191,9 +287,54 @@ async def discover_tables_by_catalog_search(
                     ),
                     {"emb": embedding_str, "lim": limit, "min_score": min_score},
                 )
-                rows = [(r.table_name, round(r.score, 3)) for r in result.fetchall()]
+                raw_rows = [(r.table_name, float(r.score)) for r in raw_result.fetchall()]
+
+                # Marts: top-3 always (regardless of score floor) with a
+                # GATED +0.17 boost. The gate looks at `mart_sample_queries`
+                # (one row per (mart, query) curated by the mart author):
+                # the boost applies only when the user's query has cosine
+                # similarity >= 0.45 to AT LEAST ONE of the mart's samples.
+                # Added in Fase 2.5 because a flat boost lifted ALL marts
+                # above the raw floor whenever the query had any vague
+                # gov-domain overlap (e.g. "elecciones PASO" hit
+                # `mart.legislatura_actividad` even though no mart covers
+                # elections). With the gate, marts whose samples don't
+                # overlap the query stay un-boosted and raw correctly wins.
+                # 0.45 mirrors the same min_score used for raws — below
+                # that, a sample isn't really a semantic match.
+                mart_result = conn.execute(
+                    text(
+                        "WITH ranked AS ("
+                        "  SELECT md.mart_schema, md.mart_view_name, md.mart_id, "
+                        "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_score "
+                        "  FROM mart_definitions md "
+                        "  WHERE md.embedding IS NOT NULL "
+                        "    AND COALESCE(md.last_row_count, 0) > 0 "
+                        "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
+                        "  LIMIT 3"
+                        ") "
+                        "SELECT r.mart_schema, r.mart_view_name, r.base_score, "
+                        "       COALESCE(("
+                        "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
+                        "         FROM mart_sample_queries msq "
+                        "         WHERE msq.mart_id = r.mart_id"
+                        "       ), 0) AS sample_max_sim "
+                        "FROM ranked r"
+                    ),
+                    {"emb": embedding_str},
+                )
+                mart_rows = []
+                for r in mart_result.fetchall():
+                    base = float(r.base_score)
+                    sample_sim = float(r.sample_max_sim or 0)
+                    boosted = base + 0.17 if sample_sim >= 0.70 else base
+                    mart_rows.append((f"{r.mart_schema}.{r.mart_view_name}", boosted))
                 conn.rollback()
-                return rows
+
+            # Merge and re-rank by boosted score. Round AFTER boost so the
+            # comparison is stable.
+            combined = sorted(raw_rows + mart_rows, key=lambda x: -x[1])[:limit]
+            return [(name, round(score, 3)) for name, score in combined]
 
         return await loop.run_in_executor(None, _search)
     except Exception:
@@ -208,6 +349,7 @@ async def discover_catalog_hints_for_planner(
     limit: int = 5,
     *,
     serving_port: Any | None = None,
+    llm: ILLMProvider | None = None,
 ) -> str:
     """Search table_catalog for relevant tables and format as planner hints.
 
@@ -243,7 +385,7 @@ async def discover_catalog_hints_for_planner(
         embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
         loop = asyncio.get_running_loop()
 
-        def _search() -> list[tuple[str, str, str, int, float]]:
+        def _search() -> list[TableCatalogMatch]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
                 result = conn.execute(
@@ -260,28 +402,51 @@ async def discover_catalog_hints_for_planner(
                     {"emb": embedding_str, "lim": limit},
                 )
                 rows = [
-                    (
-                        r.table_name,
-                        r.display_name or "",
-                        r.description or "",
-                        r.row_count,
-                        round(r.score, 2),
+                    TableCatalogMatch(
+                        table_name=r.table_name,
+                        display_name=r.display_name or "",
+                        description=r.description or "",
+                        row_count=int(r.row_count or 0),
+                        score=round(float(r.score), 2),
                     )
                     for r in result.fetchall()
                 ]
                 conn.rollback()
                 return rows
 
-        rows = await loop.run_in_executor(None, _search)
-        if not rows:
+        matches = await loop.run_in_executor(None, _search)
+        if not matches:
             # WS3 hybrid discovery — when no materialized table matches, try
             # the logical catalog so the planner can still see resources that
             # exist conceptually (or live-API connectors).
             legacy = await _hybrid_logical_hints(query, q_embedding, limit=limit)
             return _join_hint_blocks(serving_block, legacy)
 
+        candidates = collect_planner_candidates(
+            table_catalog_matches=matches,
+            limit=limit,
+        )
+        if not candidates:
+            legacy = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            return _join_hint_blocks(serving_block, legacy)
+        candidates = await _maybe_rerank_planner_candidates(
+            query=query,
+            candidates=candidates,
+            llm=llm,
+            top_k=limit,
+        )
+
         lines = ["TABLAS CACHEADAS RELEVANTES (datos reales descargados, usar query_sandbox):"]
-        for table_name, display_name, description, row_count, score in rows:
+        for candidate in candidates:
+            table_name = candidate.table_name or candidate.title
+            display_name = candidate.title if candidate.title != table_name else ""
+            description = candidate.description
+            base_match = next(
+                (m for m in matches if m.table_name == table_name),
+                None,
+            )
+            row_count = base_match.row_count if base_match else 0
+            score = round(candidate.base_score, 2)
             line = f"  - {table_name}"
             if display_name:
                 line += f" ({display_name})"
@@ -417,7 +582,6 @@ async def _serving_port_planner_hints(
         ServingResolver,
         serving_port_enabled,
     )
-    from app.domain.entities.serving import ServingLayer
 
     if not serving_port_enabled():
         return ""
@@ -431,38 +595,40 @@ async def _serving_port_planner_hints(
         logger.debug("ServingResolver.discover_for_planner failed", exc_info=True)
         return ""
 
-    # Filter out the cache_legacy hits — those are already covered by the
-    # legacy table_catalog block downstream. We surface marts and staging
-    # explicitly so the planner sees them first.
-    preferred_layers = (ServingLayer.MART, ServingLayer.STAGING, ServingLayer.RAW)
-    preferred = [r for r in resources if r.layer in preferred_layers]
+    candidates = collect_planner_candidates(
+        serving_resources=resources,
+        limit=limit,
+    )
+    preferred = [
+        c for c in candidates if c.layer in {"mart", "staging", "raw"}
+    ]
     if not preferred:
         return ""
 
     lines: list[str] = []
-    by_layer: dict[ServingLayer, list] = {}
-    for r in preferred:
-        by_layer.setdefault(r.layer, []).append(r)
+    by_layer: dict[str, list] = {}
+    for candidate in preferred:
+        by_layer.setdefault(candidate.layer, []).append(candidate)
 
-    if ServingLayer.MART in by_layer:
+    if "mart" in by_layer:
         lines.append("MARTS DISPONIBLES (vistas semánticas curadas, preferí estas):")
-        for r in by_layer[ServingLayer.MART]:
-            lines.append(f"  - {r.title}" + (f" — {r.domain}" if r.domain else ""))
+        for c in by_layer["mart"]:
+            lines.append(f"  - {c.title}")
         lines.append(
             "Para una mart, usá query_sandbox con el nombre canónico de la vista."
         )
 
-    if ServingLayer.STAGING in by_layer:
+    if "staging" in by_layer:
         lines.append("")
         lines.append("STAGING (datasets validados por contracts):")
-        for r in by_layer[ServingLayer.STAGING]:
-            lines.append(f"  - {r.title}")
+        for c in by_layer["staging"]:
+            lines.append(f"  - {c.title}")
 
-    if ServingLayer.RAW in by_layer:
+    if "raw" in by_layer:
         lines.append("")
         lines.append("RAW DISPONIBLE (tablas materializadas crudas, usar si no hay mart):")
-        for r in by_layer[ServingLayer.RAW]:
-            lines.append(f"  - {r.title}" + (f" — {r.domain}" if r.domain else ""))
+        for c in by_layer["raw"]:
+            lines.append(f"  - {c.title}")
 
     return "\n".join(lines)
 

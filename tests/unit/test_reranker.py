@@ -7,8 +7,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.application.pipeline.connectors.planner_candidates import PlannerCandidate
 from app.domain.ports.search.vector_search import SearchResult
-from app.infrastructure.adapters.search.reranker import LLMReranker
+from app.infrastructure.adapters.search.reranker import (
+    LLMReranker,
+    PlannerCandidateReranker,
+)
 
 
 @dataclass
@@ -26,6 +30,11 @@ def llm_mock():
 @pytest.fixture
 def reranker(llm_mock):
     return LLMReranker(llm=llm_mock)
+
+
+@pytest.fixture
+def planner_reranker(llm_mock):
+    return PlannerCandidateReranker(llm=llm_mock)
 
 
 @pytest.fixture
@@ -57,6 +66,51 @@ def sample_results():
             download_url="",
             columns="",
             score=0.6,
+        ),
+    ]
+
+
+@pytest.fixture
+def sample_candidates():
+    return [
+        PlannerCandidate(
+            candidate_id="table:cache_a",
+            kind="legacy_table",
+            layer="cache_legacy",
+            title="IPC",
+            description="IPC mensual",
+            portal="nacional",
+            resource_id=None,
+            table_name="cache_a",
+            queryability="direct_sql",
+            base_score=0.8,
+            source="table_catalog",
+        ),
+        PlannerCandidate(
+            candidate_id="table:cache_b",
+            kind="legacy_table",
+            layer="cache_legacy",
+            title="PBI",
+            description="PBI trimestral",
+            portal="nacional",
+            resource_id=None,
+            table_name="cache_b",
+            queryability="direct_sql",
+            base_score=0.7,
+            source="table_catalog",
+        ),
+        PlannerCandidate(
+            candidate_id="table:cache_c",
+            kind="legacy_table",
+            layer="cache_legacy",
+            title="Dólar Blue",
+            description="Cotización diaria",
+            portal="nacional",
+            resource_id=None,
+            table_name="cache_c",
+            queryability="direct_sql",
+            base_score=0.6,
+            source="table_catalog",
         ),
     ]
 
@@ -112,3 +166,36 @@ class TestRerankFallback:
         result = await reranker.rerank("test", sample_results)
         # 99 is skipped, 0 and 1 are valid, 2 is appended
         assert len(result) == 3
+
+
+class TestPlannerCandidateRerank:
+    async def test_rerank_reorders_candidates(
+        self, planner_reranker, llm_mock, sample_candidates
+    ):
+        llm_mock.chat.return_value = FakeLLMResponse(content="[2, 0, 1]")
+        result = await planner_reranker.rerank("dólar blue", sample_candidates)
+        assert result[0].table_name == "cache_c"
+        assert result[1].table_name == "cache_a"
+        assert result[2].table_name == "cache_b"
+
+    async def test_llm_failure_returns_original_candidates(
+        self, planner_reranker, llm_mock, sample_candidates
+    ):
+        llm_mock.chat.side_effect = Exception("LLM error")
+        result = await planner_reranker.rerank("test", sample_candidates)
+        assert [c.table_name for c in result] == ["cache_a", "cache_b", "cache_c"]
+
+    async def test_rerank_prompt_includes_operational_fields(
+        self, planner_reranker, llm_mock, sample_candidates
+    ):
+        llm_mock.chat.return_value = FakeLLMResponse(content="[0, 1, 2]")
+
+        await planner_reranker.rerank("inflación", sample_candidates)
+
+        call = llm_mock.chat.await_args
+        assert call is not None
+        prompt = call.kwargs["messages"][0].content
+        assert "kind=legacy_table" in prompt
+        assert "layer=cache_legacy" in prompt
+        assert "queryability=direct_sql" in prompt
+        assert "Candidatos:" in prompt

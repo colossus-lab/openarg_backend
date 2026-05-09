@@ -38,6 +38,7 @@ async def planner_node(state: OpenArgState) -> dict:
             deps.sandbox,
             deps.embedding,
             serving_port=deps.serving_port,
+            llm=deps.llm,
         )
 
         # Generate the plan (1 LLM call)
