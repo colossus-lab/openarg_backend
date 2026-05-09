@@ -2916,14 +2916,55 @@ def _combine_multirow_header(
     return combined
 
 
+# String tokens that pandas read AS-IS into cells but which represent
+# missing values upstream. Without this list, `dropna(axis=1, how='all')`
+# treats them as populated and trailing-empty cols survive into Postgres.
+# `pd.read_csv` recognises some of these by default (`na_values`) but
+# `pd.read_excel` is more conservative; centralising here covers both.
+_STRING_NAN_TOKENS = frozenset(
+    {"none", "nan", "null", "n/a", "na", "<na>", "-", "--", "s/d", "s.d.", "."}
+)
+
+
+def _normalize_string_nan(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace cells whose stripped lowercase value is in `_STRING_NAN_TOKENS`
+    with actual NaN, so a subsequent `dropna(axis=1, how='all')` collapses
+    columns that look populated but only carry NaN sentinel strings.
+
+    Operates on object-dtype cols only (numeric cols already use real NaN).
+    Idempotent: a frame with no sentinels passes through unchanged.
+    """
+    if df.empty:
+        return df
+    obj_cols = df.select_dtypes(include=["object"]).columns
+    if len(obj_cols) == 0:
+        return df
+    return df.replace(
+        {
+            c: {
+                v: pd.NA
+                for v in df[c].dropna().unique()
+                if isinstance(v, str)
+                and v.strip().lower() in _STRING_NAN_TOKENS
+            }
+            for c in obj_cols
+        }
+    )
+
+
 def _post_parse_normalize(df: pd.DataFrame) -> pd.DataFrame:
     """Apply share-able post-parse passes that fix common upstream parser bugs.
 
     Runs in this order, all idempotent:
-      1. `promote_buried_headers` — recover real headers when ≥50 % of cols are
-         placeholders like `col_N` (a TITLE row was promoted by mistake).
-      2. Drop trailing all-NaN columns introduced by the forward-fill in step 1.
-      3. `dedupe_column_names` — byte-aware dedup that prevents
+      1. `_normalize_string_nan` — convert string sentinels (`"None"`,
+         `"nan"`, `"s/d"`, ...) to actual NaN so step 3 can collapse
+         all-empty columns. Without this, CSVs that emit `"None"` as a
+         literal cell value (datos.gob.ar pattern) leave 1k+ ghost cols.
+      2. `promote_buried_headers` — recover real headers when ≥50 % of cols
+         are placeholders like `col_N` (a TITLE row was promoted by mistake).
+      3. Drop columns that are all-NaN (originally + after step 1's
+         sentinel conversion).
+      4. `dedupe_column_names` — byte-aware dedup that prevents
          `DuplicateColumnError` on `df.to_sql` when two distinct unicode names
          share their first 63 bytes.
 
@@ -2936,6 +2977,7 @@ def _post_parse_normalize(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     before_cols = list(df.columns)
+    df = _normalize_string_nan(df)
     df = promote_buried_headers(df)
     df = df.dropna(axis=1, how="all")
     df.columns = dedupe_column_names(list(df.columns))

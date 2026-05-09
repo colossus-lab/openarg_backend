@@ -40,6 +40,40 @@ def test_post_parse_normalize_dedupes_byte_collision():
     assert all(len(c.encode("utf-8")) <= 63 for c in out.columns)
 
 
+def test_post_parse_normalize_drops_string_nan_columns():
+    """DEBT-021-004 root cause: pandas reads string sentinels like `'None'`
+    AS-IS, so `dropna(how='all')` doesn't collapse cols that look
+    populated but carry only NaN markers. The normalize pass converts
+    sentinels to real NaN BEFORE the dropna call.
+    """
+    df = pd.DataFrame(
+        {
+            "real_col": ["a", "b", "c"],
+            "ghost_None": ["None", "None", "None"],
+            "ghost_mix": ["s/d", "n/a", "NaN"],
+            "another_real": [1, 2, 3],
+        }
+    )
+    out = _post_parse_normalize(df)
+    assert "real_col" in out.columns
+    assert "another_real" in out.columns
+    assert "ghost_None" not in out.columns
+    assert "ghost_mix" not in out.columns
+
+
+def test_post_parse_normalize_keeps_partial_nan_cols():
+    """Cols with SOME real values survive even if other cells are sentinels."""
+    df = pd.DataFrame(
+        {
+            "partial": ["real", "None", "data"],
+            "real": ["a", "b", "c"],
+        }
+    )
+    out = _post_parse_normalize(df)
+    assert "partial" in out.columns
+    assert "real" in out.columns
+
+
 def test_post_parse_normalize_recovers_col_n_with_buried_header():
     """`col_0..col_2` placeholder cols + real header in row 0 → cols recovered."""
     df = pd.DataFrame(

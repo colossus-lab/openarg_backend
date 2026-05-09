@@ -270,10 +270,16 @@ def repair_trailing_garbage_cols(
     # bounded sample. For very wide tables this query is large but bounded
     # (one SUM per garbage col).
     qident_table = f"{_quote_ident(table_schema)}.{_quote_ident(table_name)}"
+    # Population check excludes string-form NaN sentinels (`'None'`,
+    # `'nan'`, `'NULL'`, etc.) that pandas reads AS-IS from CSV/Excel
+    # without converting to actual NULL. Without this list, repair
+    # treats those cols as populated and skips them.
     agg_parts = [
         (
             f"SUM(CASE WHEN {_quote_ident(c)} IS NOT NULL "
-            f"AND COALESCE(TRIM({_quote_ident(c)}::text), '') <> '' "
+            f"AND LOWER(COALESCE(TRIM({_quote_ident(c)}::text), '')) "
+            f"NOT IN ('', 'none', 'nan', 'null', 'n/a', 'na', '<na>', "
+            f"'-', '--', 's/d', 's.d.', '.') "
             f"THEN 1 ELSE 0 END) AS pop_{idx}"
         )
         for idx, c in enumerate(garbage_cols)
