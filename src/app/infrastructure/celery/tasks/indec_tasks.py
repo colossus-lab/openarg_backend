@@ -18,7 +18,12 @@ import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
-from app.application.pipeline.parsers import parse_hierarchical_headers
+from app.application.pipeline.parsers import (
+    dedupe_column_names,
+    parse_hierarchical_headers,
+    promote_buried_headers,
+    unpivot_if_time_pivoted,
+)
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.infrastructure.celery.tasks.collector_tasks import (
@@ -238,6 +243,11 @@ def _detect_header_row(df_raw: pd.DataFrame) -> int:
     return _detect_data_header_row(df_raw)
 
 
+# Time-pivot detection, header recovery and dedup primitives now live in
+# `app.application.pipeline.parsers.{time_pivot,header_recovery,column_normalization}`.
+# This module imports them at the top; the inline copies that used to sit
+# here were extracted in 2026-05-08 (specs/021-parser-hardening Phase 1) so
+# the generic collector path can use the same logic.
 def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     """Parse a single Excel sheet, auto-detecting the header row."""
     try:
@@ -316,6 +326,31 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
         ]
     else:
         df.columns = [re.sub(r"\s+", " ", str(c)).strip()[:120] for c in df.columns]
+
+    # Recover headers buried in data rows when pandas mistook a TITLE
+    # for the header (most cols ended up as `col_N`). No-op when headers
+    # look real. Runs before dedup so the composite names it creates
+    # also get deduped if they collide.
+    df = promote_buried_headers(df)
+
+    # Drop trailing all-NaN columns introduced by forward-fill in
+    # `promote_buried_headers` — when the merged-cell parent label
+    # spans wider than the actual data, the fill propagates the last
+    # populated header into columns that have no data underneath. The
+    # original `dropna(axis=1)` above runs BEFORE the recovery, so this
+    # second pass catches what the recovery introduced.
+    df = df.dropna(axis=1, how="all")
+
+    # Dedupe BEFORE unpivot. Once melted into long format the column-name
+    # collision goes away, but the wide-sheet path (and the unmelted
+    # branch) still has to feed `df.to_sql` which rejects duplicate names.
+    df.columns = dedupe_column_names(list(df.columns))
+
+    # Unpivot the time-pivoted INDEC layout into long format `(concepto,
+    # periodo, valor)` so the downstream query pipeline can filter and
+    # aggregate naturally. Idempotent: long-formatted sheets are returned
+    # unchanged.
+    df = unpivot_if_time_pivoted(df)
 
     return df
 
