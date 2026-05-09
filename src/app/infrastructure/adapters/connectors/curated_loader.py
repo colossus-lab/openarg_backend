@@ -96,7 +96,7 @@ def _existing_dataset_is_broken(engine: Engine, source_id: str) -> bool:
     sql = text(
         "SELECT cd.error_message "
         "FROM datasets d "
-        "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id "
+        "LEFT JOIN raw.cached_datasets cd ON cd.dataset_id = d.id "
         "WHERE d.source_id = :sid "
         "ORDER BY cd.updated_at DESC NULLS LAST "
         "LIMIT 1"

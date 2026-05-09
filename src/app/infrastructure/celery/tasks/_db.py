@@ -91,6 +91,28 @@ def get_sync_engine() -> Engine:
                 raise
             finally:
                 cursor.close()
+
+        @event.listens_for(_engine, "connect")
+        def _set_default_search_path(dbapi_conn, _connection_record):
+            # The DB-level `ALTER DATABASE openarg_staging SET search_path
+            # = raw, public, "$user"` workaround was fragile — under
+            # pool checkout / DISCARD ALL semantics SQLAlchemy can clear
+            # session settings, leaving `cached_datasets` and other
+            # raw-only tables unresolvable. Set it explicitly on every
+            # new pool connection. Order `public, raw` keeps tables
+            # that exist in BOTH schemas (mart_sample_queries 484 vs
+            # 225, langgraph checkpoints 205 vs 78) resolving to public
+            # canonical, with raw-only tables found via fallback.
+            cursor = dbapi_conn.cursor()
+            try:
+                cursor.execute("SET search_path = public, raw")
+            except Exception:
+                _logger.warning(
+                    "Failed to set search_path on new connection",
+                    exc_info=True,
+                )
+            finally:
+                cursor.close()
     return _engine
 
 
@@ -185,7 +207,7 @@ def register_via_b_table(
                         SET materialized_table_name = :qn,
                             materialization_status = 'ready',
                             updated_at = NOW()
-                        FROM cached_datasets cd
+                        FROM raw.cached_datasets cd
                         JOIN datasets d ON d.id = cd.dataset_id
                         WHERE cd.table_name = :tn
                           AND cr.resource_identity = d.portal || '::' || d.source_id

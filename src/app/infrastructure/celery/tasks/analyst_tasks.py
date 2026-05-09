@@ -211,7 +211,7 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
             with engine.begin() as conn:
                 cached = conn.execute(
                     text(
-                        "SELECT table_name FROM cached_datasets "
+                        "SELECT table_name FROM raw.cached_datasets "
                         "WHERE dataset_id = CAST(:did AS uuid) AND status = 'ready'"
                     ),
                     {"did": ds["id"]},

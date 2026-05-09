@@ -21,6 +21,7 @@ from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -329,7 +330,7 @@ def _lock_key(*parts: str) -> int:
 # This dict keeps the acquiring connection alive until release. Worker
 # crashes drop the connection; Postgres then releases the lock on its
 # side, which is the correct semantic.
-_HELD_ADVISORY_LOCKS: dict[int, object] = {}
+_HELD_ADVISORY_LOCKS: dict[int, Any] = {}
 
 
 def _try_advisory_lock(engine, key: int) -> bool:
@@ -509,7 +510,7 @@ def _get_inflight_counts(engine) -> tuple[int, dict[str, int]]:
         rows = conn.execute(
             text(
                 "SELECT d.portal, COUNT(*) "
-                "FROM cached_datasets cd "
+                "FROM raw.cached_datasets cd "
                 "JOIN datasets d ON d.id = cd.dataset_id "
                 "WHERE cd.status = 'downloading' "
                 "GROUP BY d.portal"
@@ -561,7 +562,7 @@ def _count_bulk_collect_remaining(engine, portal: str | None = None) -> dict[str
     eligible_filter = (
         "d.is_cached = false "
         "AND NOT EXISTS ("
-        "  SELECT 1 FROM cached_datasets cd "
+        "  SELECT 1 FROM raw.cached_datasets cd "
         "  WHERE cd.dataset_id = d.id "
         "    AND cd.status IN ('ready', 'permanently_failed')"
         ")"
@@ -634,7 +635,7 @@ def _recycle_stuck_downloads(
         exhausted = conn.execute(
             text(
                 """
-                UPDATE cached_datasets
+                UPDATE raw.cached_datasets
                 SET status = 'permanently_failed',
                     error_message = 'Exhausted retries while stuck in downloading',
                     error_category = 'orchestration_recovery_loop',
@@ -654,7 +655,7 @@ def _recycle_stuck_downloads(
                 SELECT CAST(dataset_id AS text) AS dataset_id,
                        table_name,
                        retry_count
-                FROM cached_datasets
+                FROM raw.cached_datasets
                 WHERE status = 'downloading'
                   AND updated_at < NOW() - (:age_minutes * INTERVAL '1 minute')
                   AND retry_count < :max
@@ -693,7 +694,7 @@ def _recycle_stuck_downloads(
                     conn.execute(
                         text(
                             """
-                            UPDATE cached_datasets
+                            UPDATE raw.cached_datasets
                             SET status = 'ready',
                                 row_count = :rows,
                                 columns_json = :cols,
@@ -729,7 +730,7 @@ def _recycle_stuck_downloads(
             conn.execute(
                 text(
                     """
-                    UPDATE cached_datasets
+                    UPDATE raw.cached_datasets
                     SET status = :status,
                         retry_count = :cnt,
                         error_message = :msg,
@@ -787,7 +788,7 @@ def _reconcile_cache_coverage(
         revived = conn.execute(
             text(
                 """
-                UPDATE cached_datasets cd
+                UPDATE raw.cached_datasets cd
                 SET status = 'ready',
                     retry_count = 0,
                     error_message = NULL,
@@ -819,7 +820,7 @@ def _reconcile_cache_coverage(
             text(
                 """
                 SELECT CAST(cd.dataset_id AS text) AS dataset_id, cd.table_name
-                FROM cached_datasets cd
+                FROM raw.cached_datasets cd
                 WHERE cd.status = 'ready'
                   AND cd.table_name IS NOT NULL
                   AND NOT EXISTS (
@@ -865,7 +866,7 @@ def _reconcile_cache_coverage(
             conn.execute(
                 text(
                     """
-                    UPDATE cached_datasets
+                    UPDATE raw.cached_datasets
                     SET status = 'error',
                         retry_count = 0,
                         error_message = 'Table missing: marked for re-download',
@@ -899,7 +900,7 @@ def _reconcile_cache_coverage(
                 WHERE d.is_cached = true
                   AND NOT EXISTS (
                       SELECT 1
-                      FROM cached_datasets cd
+                      FROM raw.cached_datasets cd
                       WHERE cd.dataset_id = d.id
                         AND cd.status = 'ready'
                   )
@@ -921,7 +922,7 @@ def _reconcile_cache_coverage(
                 WHERE d.is_cached = true
                   AND EXISTS (
                       SELECT 1
-                      FROM cached_datasets cd
+                      FROM raw.cached_datasets cd
                       WHERE cd.dataset_id = d.id
                         AND cd.status = 'ready'
                   )
@@ -963,7 +964,7 @@ def _revive_schema_mismatch(engine, *, redispatch: bool = False) -> dict[str, in
             text(
                 """
                 SELECT CAST(dataset_id AS text) AS dataset_id
-                FROM cached_datasets
+                FROM raw.cached_datasets
                 WHERE status = 'schema_mismatch'
                   AND retry_count < :max
                 """
@@ -975,7 +976,7 @@ def _revive_schema_mismatch(engine, *, redispatch: bool = False) -> dict[str, in
             conn.execute(
                 text(
                     """
-                    UPDATE cached_datasets
+                    UPDATE raw.cached_datasets
                     SET status = 'error',
                         error_message = 'Recovered from schema_mismatch for retry',
                         updated_at = NOW()
@@ -1108,7 +1109,7 @@ def _materialize_format_duplicate_aliases(
                 text(
                     """
                     SELECT row_count, columns_json, size_bytes, s3_key
-                    FROM cached_datasets
+                    FROM raw.cached_datasets
                     WHERE dataset_id = CAST(:did AS uuid)
                     ORDER BY updated_at DESC
                     LIMIT 1
@@ -1144,7 +1145,7 @@ def _materialize_format_duplicate_aliases(
             conn.execute(
                 text(
                     """
-                    INSERT INTO cached_datasets
+                    INSERT INTO raw.cached_datasets
                         (dataset_id, table_name, status, row_count, columns_json, size_bytes, s3_key, error_message, updated_at)
                     VALUES
                         (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :size, :s3, :msg, NOW())
@@ -1476,7 +1477,7 @@ def _zip_member_suffix(name: str) -> str:
     return os.path.splitext(basename)[1].lower()
 
 
-def _zip_structure_summary(member_names: list[str]) -> dict[str, object]:
+def _zip_structure_summary(member_names: list[str]) -> dict[str, Any]:
     file_members = [name for name in member_names if not name.endswith("/")]
     suffix_counter = Counter(_zip_member_suffix(name) or "<noext>" for name in file_members)
     parseable_count = sum(1 for name in file_members if _zip_member_suffix(name) in _ZIP_PARSEABLE_SUFFIXES)
@@ -1497,7 +1498,7 @@ def _zip_structure_summary(member_names: list[str]) -> dict[str, object]:
     }
 
 
-def _zip_only_documents(summary: dict[str, object]) -> bool:
+def _zip_only_documents(summary: dict[str, Any]) -> bool:
     file_count = int(summary.get("file_count", 0) or 0)
     parseable_count = int(summary.get("parseable_count", 0) or 0)
     document_count = int(summary.get("document_count", 0) or 0)
@@ -1511,7 +1512,7 @@ def _zip_only_documents(summary: dict[str, object]) -> bool:
     return all(ext in _ZIP_DOCUMENT_SUFFIXES for ext in extensions if ext != "<noext>")
 
 
-def _append_parsed_zip_member(parsed_members: list[dict[str, object]], member_result: dict) -> None:
+def _append_parsed_zip_member(parsed_members: list[dict[str, Any]], member_result: dict) -> None:
     """Accumulate parsed ZIP-member results by target table."""
     table_name = str(member_result["table_name"])
     row_count = int(member_result.get("row_count", 0) or 0)
@@ -1537,7 +1538,7 @@ def _append_parsed_zip_member(parsed_members: list[dict[str, object]], member_re
     )
 
 
-def _snapshot_member_tables(parsed_members: list[dict[str, object]]) -> list[dict[str, object]]:
+def _snapshot_member_tables(parsed_members: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return a detached copy of parsed-member progress for callbacks/results."""
     return [
         {
@@ -1590,6 +1591,13 @@ def _parse_zip_archive(
         return (9, lower_name)
 
     known_member_tables = set(existing_member_tables or set())
+    # Bind `current_append_mode` BEFORE the inner closures so `nonlocal`
+    # resolves it correctly (nonlocal needs the name visible at the
+    # enclosing scope at definition time, not at call time). Was
+    # previously assigned ~120 lines below where the closures were
+    # defined, which Python's name resolution treats as an unbound
+    # nonlocal — mypy flags as `[misc] No binding for nonlocal found`.
+    current_append_mode: bool = append_mode
 
     def _record_dataframe(df: pd.DataFrame, *, sampled: str | None = None) -> dict:
         nonlocal table_name, current_append_mode
@@ -1714,9 +1722,9 @@ def _parse_zip_archive(
         current_append_mode = True
         return member_result
 
-    current_append_mode = append_mode
+    # `current_append_mode` was bound above the closures (see comment).
     sampled_note: str | None = None
-    parsed_members: list[dict[str, object]] = []
+    parsed_members: list[dict[str, Any]] = []
     raw_member_names = list(member_names_override or zf.namelist())
     # Filter out members with compression types Python's stdlib zipfile
     # doesn't support — opening them raises NotImplementedError("That
@@ -3804,7 +3812,7 @@ def _prune_open_cached_entries(engine, dataset_id: str, *, keep_table_name: str 
         with engine.begin() as conn:
             params: dict[str, object] = {"did": dataset_id}
             sql = (
-                "DELETE FROM cached_datasets "
+                "DELETE FROM raw.cached_datasets "
                 "WHERE dataset_id = CAST(:did AS uuid) "
                 "  AND status IN ('downloading', 'pending', 'error')"
             )
@@ -3822,7 +3830,7 @@ def _prune_open_cached_entries(engine, dataset_id: str, *, keep_table_name: str 
 def _mark_dataset_rerouted_pending(
     engine,
     dataset_id: str,
-    table_name: str,
+    table_name: str | None,
     *,
     reason: str,
 ) -> None:
@@ -3833,7 +3841,7 @@ def _mark_dataset_rerouted_pending(
                 text(
                     """
                     SELECT id
-                    FROM cached_datasets
+                    FROM raw.cached_datasets
                     WHERE dataset_id = CAST(:did AS uuid)
                       AND table_name = :tn
                     ORDER BY updated_at DESC NULLS LAST, id DESC
@@ -3846,7 +3854,7 @@ def _mark_dataset_rerouted_pending(
                 conn.execute(
                     text(
                         """
-                        UPDATE cached_datasets
+                        UPDATE raw.cached_datasets
                         SET status = 'pending',
                             error_message = :msg,
                             error_category = 'orchestration_rerouted',
@@ -3861,7 +3869,7 @@ def _mark_dataset_rerouted_pending(
                     text(
                         """
                         SELECT id
-                        FROM cached_datasets
+                        FROM raw.cached_datasets
                         WHERE dataset_id = CAST(:did AS uuid)
                           AND status IN ('downloading', 'pending', 'error')
                         ORDER BY updated_at DESC NULLS LAST, id DESC
@@ -3874,7 +3882,7 @@ def _mark_dataset_rerouted_pending(
                     conn.execute(
                         text(
                             """
-                            UPDATE cached_datasets
+                            UPDATE raw.cached_datasets
                             SET table_name = :tn,
                                 status = 'pending',
                                 error_message = :msg,
@@ -3893,7 +3901,7 @@ def _mark_dataset_rerouted_pending(
                     conn.execute(
                         text(
                             """
-                            INSERT INTO cached_datasets (
+                            INSERT INTO raw.cached_datasets (
                                 dataset_id, table_name, status, error_message,
                                 error_category, updated_at
                             )
@@ -3927,7 +3935,7 @@ def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
                 text(
                     """
                     SELECT id
-                    FROM cached_datasets
+                    FROM raw.cached_datasets
                     WHERE dataset_id = CAST(:did AS uuid)
                       AND table_name = :tn
                     ORDER BY updated_at DESC NULLS LAST, id DESC
@@ -3940,7 +3948,7 @@ def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
                 conn.execute(
                     text(
                         """
-                        UPDATE cached_datasets
+                        UPDATE raw.cached_datasets
                         SET status = 'downloading',
                             error_message = NULL,
                             updated_at = NOW()
@@ -3954,7 +3962,7 @@ def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
                     text(
                         """
                         SELECT id
-                        FROM cached_datasets
+                        FROM raw.cached_datasets
                         WHERE dataset_id = CAST(:did AS uuid)
                           AND status IN ('downloading', 'pending', 'error')
                         ORDER BY updated_at DESC NULLS LAST, id DESC
@@ -3967,7 +3975,7 @@ def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
                     conn.execute(
                         text(
                             """
-                            UPDATE cached_datasets
+                            UPDATE raw.cached_datasets
                             SET table_name = :tn,
                                 status = 'downloading',
                                 error_message = NULL,
@@ -3980,7 +3988,7 @@ def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
                 else:
                     conn.execute(
                         text(
-                            "INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at) "
+                            "INSERT INTO raw.cached_datasets (dataset_id, table_name, status, updated_at) "
                             "VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW()) "
                             "ON CONFLICT (table_name) DO NOTHING"
                         ),
@@ -3989,7 +3997,7 @@ def _ensure_cached_entry(engine, dataset_id: str, table_name: str):
             conn.execute(
                 text(
                     """
-                    DELETE FROM cached_datasets
+                    DELETE FROM raw.cached_datasets
                     WHERE dataset_id = CAST(:did AS uuid)
                       AND table_name <> :tn
                       AND status IN ('downloading', 'pending', 'error')
@@ -4152,7 +4160,7 @@ def _materialization_outcome_for_ready(
     )
 
 
-def _classify_collect_exception(exc: Exception, *, heavy_execution: bool, current_queue: str) -> _CollectorRunOutcome:
+def _classify_collect_exception(exc: Exception, *, heavy_execution: bool, current_queue: str | None) -> _CollectorRunOutcome:
     exc_str = str(exc)
     lowered = exc_str.lower()
 
@@ -4422,7 +4430,7 @@ def _record_cache_drop(
             conn.execute(
                 text(
                     """
-                    INSERT INTO cache_drop_audit (object_name, reason, actor, extra)
+                    INSERT INTO raw.cache_drop_audit (object_name, reason, actor, extra)
                     VALUES (:obj, :reason, :actor, CAST(:extra AS jsonb))
                     """
                 ),
@@ -4976,7 +4984,7 @@ def _apply_cached_outcome(
             conn.execute(
                 text(
                     """
-                    INSERT INTO cached_datasets (
+                    INSERT INTO raw.cached_datasets (
                         dataset_id, table_name, status, row_count,
                         columns_json, size_bytes, s3_key, error_message,
                         error_category, layout_profile, header_quality, updated_at
@@ -5018,7 +5026,7 @@ def _apply_cached_outcome(
             conn.execute(
                 text(
                     """
-                    INSERT INTO cached_datasets (
+                    INSERT INTO raw.cached_datasets (
                         dataset_id, table_name, status, row_count, columns_json,
                         size_bytes, s3_key, error_message, error_category,
                         retry_count, layout_profile, header_quality, updated_at
@@ -5064,7 +5072,7 @@ def _apply_cached_outcome(
                 },
             )
             current = conn.execute(
-                text("SELECT retry_count FROM cached_datasets WHERE table_name = :tn"),
+                text("SELECT retry_count FROM raw.cached_datasets WHERE table_name = :tn"),
                 {"tn": table_name},
             ).fetchone()
             retry_count = int(current.retry_count) if current else 0
@@ -5072,7 +5080,7 @@ def _apply_cached_outcome(
             conn.execute(
                 text(
                     """
-                    UPDATE cached_datasets
+                    UPDATE raw.cached_datasets
                     SET status = CASE
                             WHEN :status = 'permanently_failed' THEN 'permanently_failed'
                             WHEN retry_count + :retry >= :max THEN 'permanently_failed'
@@ -5100,7 +5108,7 @@ def _apply_cached_outcome(
                 },
             )
             current = conn.execute(
-                text("SELECT COALESCE(MAX(retry_count), 0) AS retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"),
+                text("SELECT COALESCE(MAX(retry_count), 0) AS retry_count FROM raw.cached_datasets WHERE dataset_id = CAST(:did AS uuid)"),
                 {"did": dataset_id},
             ).fetchone()
             retry_count = int(current.retry_count) if current else 0
@@ -5127,7 +5135,7 @@ def _apply_cached_outcome(
                 conn.execute(
                     text(
                         """
-                        DELETE FROM cached_datasets cd
+                        DELETE FROM raw.cached_datasets cd
                         USING raw_table_versions rtv
                         WHERE cd.dataset_id = CAST(:did AS uuid)
                           AND cd.status = 'ready'
@@ -5180,7 +5188,7 @@ def _apply_cached_outcome(
                 # The previous bucket-based approach had a boundary-race
                 # bug where landings on either side of `now / 120s` ended
                 # up in different buckets and ran back-to-back.
-                portal_for_dispatch = resource_identity.split("::", 1)[0]
+                portal_for_dispatch = (resource_identity or "").split("::", 1)[0]
                 for mart_id in find_marts_for_portal(portal_for_dispatch):
                     refresh_mart.apply_async(
                         args=[mart_id],
@@ -5482,7 +5490,7 @@ def _route_table_for_schema(
                 conn.execute(
                     text(
                         """
-                        UPDATE cached_datasets
+                        UPDATE raw.cached_datasets
                         SET status = 'error',
                             error_message = 'resource_table_full',
                             updated_at = NOW()
@@ -5530,7 +5538,7 @@ def _update_row_count_after_append(engine, table_name: str):
             new_count = conn.execute(text(f'SELECT COUNT(*) FROM "{table_name}"')).scalar()  # noqa: S608
             conn.execute(
                 text(
-                    "UPDATE cached_datasets SET row_count = :cnt, updated_at = NOW() "
+                    "UPDATE raw.cached_datasets SET row_count = :cnt, updated_at = NOW() "
                     "WHERE table_name = :tn"
                 ),
                 {"cnt": new_count, "tn": table_name},
@@ -5689,7 +5697,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             table_name,
             reason=reason,
         )
-        apply_kwargs = {
+        apply_kwargs: dict[str, Any] = {
             "args": [dataset_id],
             "kwargs": {"force_heavy": True},
             "queue": queue,
@@ -5781,7 +5789,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
         with engine.begin() as conn:
             cd_row = conn.execute(
                 text(
-                    "SELECT retry_count FROM cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
+                    "SELECT retry_count FROM raw.cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
                 ),
                 {"did": dataset_id},
             ).fetchone()
@@ -5821,7 +5829,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     conn.execute(
                         text(
                             """
-                            UPDATE cached_datasets
+                            UPDATE raw.cached_datasets
                             SET status='permanently_failed',
                                 error_message=:msg,
                                 error_category='policy_too_large',
@@ -5859,7 +5867,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
         with engine.begin() as conn:
             cached = conn.execute(
                 text(
-                    "SELECT id, dataset_id FROM cached_datasets "
+                    "SELECT id, dataset_id FROM raw.cached_datasets "
                     "WHERE table_name = :tn AND status = 'ready'"
                 ),
                 {"tn": table_name},
@@ -5874,7 +5882,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                            cd.s3_key,
                            cd.error_message
                     FROM datasets d
-                    LEFT JOIN cached_datasets cd
+                    LEFT JOIN raw.cached_datasets cd
                       ON cd.dataset_id = d.id
                     WHERE d.id = CAST(:id AS uuid)
                     ORDER BY CASE WHEN cd.status = 'ready' THEN 0 ELSE 1 END,
@@ -5906,7 +5914,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             with engine.begin() as conn:
                 conn.execute(
                     text("""
-                        INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
+                        INSERT INTO raw.cached_datasets (dataset_id, table_name, status, updated_at)
                         VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
                         ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
                     """),
@@ -6003,7 +6011,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             row_count = 0
             columns: list[str] = []
             sampled_note: str | None = None  # set when dataset is truncated
-            member_tables: list[dict[str, object]] = []
+            member_tables: list[dict[str, Any]] = []
             parse_started_at = time.monotonic()
 
             # Pre-dispatch magic-byte check: some portals
@@ -6186,13 +6194,13 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         countdown=int(backoff + random.uniform(0, backoff * 0.3)),
                     )
 
-                def _update_partial_member_progress(member_snapshot: list[dict[str, object]]) -> None:
+                def _update_partial_member_progress(member_snapshot: list[dict[str, Any]]) -> None:
                     with engine.begin() as conn:
                         for member in member_snapshot:
                             conn.execute(
                                 text(
                                     """
-                                    UPDATE cached_datasets SET
+                                    UPDATE raw.cached_datasets SET
                                         status = 'downloading',
                                         row_count = :rows,
                                         columns_json = :cols,
@@ -6363,8 +6371,8 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     row_count, columns = len(df), list(df.columns)
 
             elif fmt == "geojson":
-                with open(tmp_path, "rb") as f:
-                    raw = json.load(f)
+                with open(tmp_path, "rb") as fb:
+                    raw = json.load(fb)
                 features = raw.get("features", []) if isinstance(raw, dict) else []
                 if features:
                     df = _geojson_features_to_df(features)
@@ -6664,7 +6672,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                             if member_table_name in rejected_members:
                                 conn.execute(
                                     text(
-                                        "UPDATE cached_datasets "
+                                        "UPDATE raw.cached_datasets "
                                         "SET status = 'permanently_failed', "
                                         "    error_message = :msg, "
                                         "    error_category = 'validation_failed', "
@@ -6684,7 +6692,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                             conn.execute(
                                 text(
                                     """
-                                    UPDATE cached_datasets SET
+                                    UPDATE raw.cached_datasets SET
                                         status = 'ready',
                                         row_count = :rows,
                                         columns_json = :cols,
@@ -7100,7 +7108,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             "WITH burned_portals AS ( "
             "  SELECT d2.portal "
             "  FROM datasets d2 "
-            "  JOIN cached_datasets cd2 ON cd2.dataset_id = d2.id "
+            "  JOIN raw.cached_datasets cd2 ON cd2.dataset_id = d2.id "
             "  WHERE cd2.updated_at > now() - interval '24 hour' "
             "  GROUP BY d2.portal "
             "  HAVING COUNT(*) >= 20 "
@@ -7116,7 +7124,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             "  WHERE d.is_cached = false "
             "    AND d.portal NOT IN (SELECT portal FROM burned_portals) "
             "    AND NOT EXISTS ( "
-            "      SELECT 1 FROM cached_datasets cd "
+            "      SELECT 1 FROM raw.cached_datasets cd "
             "      WHERE cd.dataset_id = d.id "
             "        AND cd.status IN ('ready', 'permanently_failed', 'downloading') "
             "    ) "
@@ -7205,7 +7213,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             "WITH burned_portals AS ( "
             "  SELECT d2.portal "
             "  FROM datasets d2 "
-            "  JOIN cached_datasets cd2 ON cd2.dataset_id = d2.id "
+            "  JOIN raw.cached_datasets cd2 ON cd2.dataset_id = d2.id "
             "  WHERE cd2.updated_at > now() - interval '24 hour' "
             "  GROUP BY d2.portal "
             "  HAVING COUNT(*) >= 20 "
@@ -7216,7 +7224,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
             "  WHERE d.is_cached = false "
             "    AND d.portal NOT IN (SELECT portal FROM burned_portals) "
             "    AND NOT EXISTS ( "
-            "      SELECT 1 FROM cached_datasets cd "
+            "      SELECT 1 FROM raw.cached_datasets cd "
             "      WHERE cd.dataset_id = d.id "
             "        AND cd.status IN ('ready', 'permanently_failed', 'downloading') "
             "    ) "
@@ -7411,7 +7419,7 @@ def collect_large_group(self, title: str, portal: str):
                     "FROM datasets d "
                     "WHERE d.title = :title AND d.portal = :portal AND d.is_cached = false "
                     "AND NOT EXISTS ("
-                    "  SELECT 1 FROM cached_datasets cd "
+                    "  SELECT 1 FROM raw.cached_datasets cd "
                     "  WHERE cd.dataset_id = d.id "
                     "    AND cd.status IN ('ready', 'permanently_failed', 'downloading')"
                     ") "
@@ -7612,7 +7620,7 @@ def recover_stuck_tasks(self):
             ready_datasets = conn.execute(
                 text("""
                     SELECT CAST(dataset_id AS text) AS dataset_id, table_name
-                    FROM cached_datasets
+                    FROM raw.cached_datasets
                     WHERE status = 'ready' AND table_name IS NOT NULL
                 """),
             ).fetchall()
@@ -7648,7 +7656,7 @@ def recover_stuck_tasks(self):
                         continue
                     conn.execute(
                         text("""
-                            UPDATE cached_datasets
+                            UPDATE raw.cached_datasets
                             SET status = 'error',
                                 retry_count = 0,
                                 error_message = 'Table missing: marked for re-download',
@@ -7709,7 +7717,7 @@ def consolidate_group_tables(self, title: str, portal: str):
                            cd.table_name,
                            cd.columns_json
                     FROM datasets d
-                    JOIN cached_datasets cd ON cd.dataset_id = d.id
+                    JOIN raw.cached_datasets cd ON cd.dataset_id = d.id
                     WHERE d.title = :title
                       AND d.portal = :portal
                       AND cd.status = 'ready'
@@ -7927,7 +7935,7 @@ def audit_cache_coverage():
             stale_downloading = (
                 conn.execute(
                     text(
-                        "SELECT COUNT(*) FROM cached_datasets "
+                        "SELECT COUNT(*) FROM raw.cached_datasets "
                         "WHERE status = 'downloading' "
                         "AND updated_at < NOW() - INTERVAL '30 minutes'"
                     )
@@ -7937,7 +7945,7 @@ def audit_cache_coverage():
             recoverable_errors = (
                 conn.execute(
                     text(
-                        "SELECT COUNT(*) FROM cached_datasets "
+                        "SELECT COUNT(*) FROM raw.cached_datasets "
                         "WHERE status IN ('error', 'schema_mismatch')"
                     )
                 ).scalar()
@@ -7945,7 +7953,7 @@ def audit_cache_coverage():
             )
             permanently_failed = (
                 conn.execute(
-                    text("SELECT COUNT(*) FROM cached_datasets WHERE status = 'permanently_failed'")
+                    text("SELECT COUNT(*) FROM raw.cached_datasets WHERE status = 'permanently_failed'")
                 ).scalar()
                 or 0
             )
@@ -7954,7 +7962,7 @@ def audit_cache_coverage():
                     text(
                         """
                         SELECT COUNT(*)
-                        FROM cached_datasets cd
+                        FROM raw.cached_datasets cd
                         WHERE cd.status = 'ready'
                           AND cd.table_name IS NOT NULL
                           AND NOT EXISTS (
@@ -7977,7 +7985,7 @@ def audit_cache_coverage():
                         WHERE d.is_cached = true
                           AND NOT EXISTS (
                               SELECT 1
-                              FROM cached_datasets cd
+                              FROM raw.cached_datasets cd
                               WHERE cd.dataset_id = d.id
                                 AND cd.status = 'ready'
                           )
@@ -7995,7 +8003,7 @@ def audit_cache_coverage():
                         WHERE d.is_cached = true
                           AND EXISTS (
                               SELECT 1
-                              FROM cached_datasets cd
+                              FROM raw.cached_datasets cd
                               WHERE cd.dataset_id = d.id
                                 AND cd.status = 'ready'
                           )
@@ -8072,7 +8080,7 @@ def reset_failed_collectors():
         with engine.begin() as conn:
             result = conn.execute(
                 text("""
-                    UPDATE cached_datasets
+                    UPDATE raw.cached_datasets
                     SET status  = 'error',
                         retry_count = 0,
                         updated_at  = NOW()
@@ -8124,7 +8132,7 @@ def retry_failed_shapefiles(self):
             rows = conn.execute(
                 text(
                     "SELECT cd.dataset_id, cd.table_name, d.download_url, d.portal "
-                    "FROM cached_datasets cd "
+                    "FROM raw.cached_datasets cd "
                     "JOIN datasets d ON d.id = cd.dataset_id "
                     "WHERE cd.status = 'permanently_failed' "
                     "AND cd.error_message = 'zip_no_parseable_file' "
@@ -8141,7 +8149,7 @@ def retry_failed_shapefiles(self):
             for r in rows:
                 conn.execute(
                     text(
-                        "UPDATE cached_datasets "
+                        "UPDATE raw.cached_datasets "
                         "SET status = 'pending', retry_count = 0, "
                         "    error_message = NULL, updated_at = NOW() "
                         "WHERE dataset_id = CAST(:did AS uuid)"

@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import sys
+from typing import Any
 
 import boto3
 from celery.exceptions import SoftTimeLimitExceeded
@@ -102,7 +103,7 @@ def _embed_texts(texts: list[str]) -> list[list[float]]:
 # Same pattern as collector_tasks._HELD_ADVISORY_LOCKS — keep the
 # acquiring connection open between acquire and release so the session
 # lock survives.
-_HELD_BACKFILL_LOCK: dict[int, object] = {}
+_HELD_BACKFILL_LOCK: dict[int, Any] = {}
 
 
 def _try_backfill_lock(engine: Engine) -> bool:
@@ -220,7 +221,7 @@ _QUERY_SQL = text(
         SELECT cd.table_name, cd.s3_key, cd.status, cd.error_message, cd.updated_at,
                cd.layout_profile, cd.header_quality,
                rtv.schema_name AS materialized_schema
-        FROM cached_datasets cd
+        FROM raw.cached_datasets cd
         LEFT JOIN raw_table_versions rtv
           ON rtv.table_name = cd.table_name
          AND rtv.superseded_at IS NULL

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -175,7 +176,7 @@ class StaffAdapter(IStaffConnector):
                         matched_pattern = pattern
                         break
 
-                metadata = {}
+                metadata: dict[str, Any] = {}
                 if not records:
                     similar = await self._suggest_similar_areas(session, snap, name)
                     if similar:

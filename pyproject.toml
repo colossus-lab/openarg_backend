@@ -79,6 +79,9 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
+    # Type stubs (required by mypy for `import yaml` and `dateutil`)
+    "types-PyYAML>=6.0.0",
+    "types-python-dateutil>=2.9.0",
 ]
 test = [
     "pytest>=8.3.0",

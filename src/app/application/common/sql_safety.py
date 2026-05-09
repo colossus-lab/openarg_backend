@@ -56,7 +56,11 @@ def is_pure_select(sql: str) -> tuple[bool, str | None]:
     stmt = statements[0]
     if stmt is None:
         return False, "could not parse SQL"
-    if not isinstance(stmt, exp.Select):
+
+    # Accept SELECT and set operations (UNION / INTERSECT / EXCEPT) at the
+    # top level — they are all pure reads. Reject everything else.
+    read_only_top = (exp.Select, exp.Union, exp.Intersect, exp.Except)
+    if not isinstance(stmt, read_only_top):
         return False, "only SELECT queries are allowed"
 
     forbidden = (

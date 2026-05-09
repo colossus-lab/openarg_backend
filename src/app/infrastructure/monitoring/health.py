@@ -36,7 +36,7 @@ class HealthCheckService:
             return_exceptions=True,
         )
 
-        components = {}
+        components: dict[str, Any] = {}
         names = ["postgres", "redis", "ddjj_loaded", "sesion_chunks", "pipeline_health"]
         for name, result in zip(names, checks, strict=False):
             if isinstance(result, Exception):
@@ -111,7 +111,7 @@ class HealthCheckService:
                 # Stuck downloads (>30 min in 'downloading')
                 result = await session.execute(
                     text(
-                        "SELECT COUNT(*) FROM cached_datasets "
+                        "SELECT COUNT(*) FROM raw.cached_datasets "
                         "WHERE status = 'downloading' "
                         "AND updated_at < NOW() - INTERVAL '30 minutes'"
                     )
@@ -131,7 +131,7 @@ class HealthCheckService:
                 # Recent errors (last 24h)
                 result = await session.execute(
                     text(
-                        "SELECT COUNT(*) FROM cached_datasets "
+                        "SELECT COUNT(*) FROM raw.cached_datasets "
                         "WHERE status = 'error' "
                         "AND updated_at > NOW() - INTERVAL '24 hours'"
                     )

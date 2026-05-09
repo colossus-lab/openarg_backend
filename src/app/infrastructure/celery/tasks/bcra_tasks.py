@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -114,7 +115,7 @@ def snapshot_bcra(self):
     try:
         cotizaciones = _fetch_bcra_data()
 
-        results = {"tables": []}
+        results: dict[str, list[dict[str, Any]]] = {"tables": []}
 
         if cotizaciones.records:
             df = pd.DataFrame(cotizaciones.records)

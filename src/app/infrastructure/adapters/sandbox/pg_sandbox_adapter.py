@@ -169,6 +169,8 @@ def _validate_sql_ast(sql: str) -> str | None:
         logger.warning("sqlglot validation failed — rejecting query for safety", exc_info=True)
         return "Could not validate SQL safely. Please simplify your query."
 
+    return None
+
 
 class PgSandboxAdapter(ISQLSandbox):
     """Read-only SQL sandbox that executes queries against cached dataset tables."""
@@ -194,6 +196,40 @@ class PgSandboxAdapter(ISQLSandbox):
                 max_overflow=1,
                 pool_pre_ping=True,
             )
+
+            # The sandbox connects directly to RDS (bypasses PgBouncer to
+            # keep the read-only enforcement local). The DB-level
+            # `ALTER DATABASE openarg_staging SET search_path = raw,
+            # public, "$user"` config gets applied to NEW connections,
+            # but only when they are made through certain login paths.
+            # In practice the sandbox engine ends up with the Postgres
+            # default `"$user", public`, which means bare references to
+            # tables that live ONLY in `raw` (e.g. `cached_datasets`,
+            # `catalog_resources`, `raw_table_versions`) raise
+            # "relation does not exist".
+            #
+            # Force-set the search_path on every new connection so the
+            # 120+ unprefixed `cached_datasets` references in the
+            # codebase resolve correctly inside the sandbox path. Order
+            # `public, raw` keeps tables that exist in BOTH schemas
+            # resolving to `public` (canonical for `mart_definitions`,
+            # `mart_sample_queries`, `query_cache`, `query_plan_cache`,
+            # langgraph `checkpoints`, etc.) while still finding the
+            # raw-only tables as a fallback.
+            from sqlalchemy import event
+
+            @event.listens_for(self._engine, "connect")
+            def _set_default_search_path(dbapi_conn, _connection_record):
+                cursor = dbapi_conn.cursor()
+                try:
+                    cursor.execute("SET search_path = public, raw")
+                except Exception:
+                    logger.warning(
+                        "Failed to set search_path on sandbox connection",
+                        exc_info=True,
+                    )
+                finally:
+                    cursor.close()
         return self._engine
 
     def _execute_sync(self, sql: str, timeout_seconds: int) -> SandboxResult:
@@ -307,7 +343,7 @@ class PgSandboxAdapter(ISQLSandbox):
                            END AS table_name,
                            cd.row_count,
                            cd.columns_json
-                    FROM cached_datasets cd
+                    FROM raw.cached_datasets cd
                     LEFT JOIN raw_table_versions rtv
                       ON rtv.table_name = cd.table_name
                      AND rtv.superseded_at IS NULL

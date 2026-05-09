@@ -99,7 +99,7 @@ async def download_dataset(
         text(
             "SELECT d.title, d.download_url, d.format, d.source_id, cd.s3_key "
             "FROM datasets d "
-            "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id AND cd.status = 'ready' "
+            "LEFT JOIN raw.cached_datasets cd ON cd.dataset_id = d.id AND cd.status = 'ready' "
             "WHERE d.id = CAST(:did AS uuid)"
         ),
         {"did": dataset_id},

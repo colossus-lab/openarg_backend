@@ -403,7 +403,7 @@ def backfill_error_categories(self, *, batch_size: int = 200) -> dict:
     select_sql = text(
         """
         SELECT id::text AS id, error_message
-        FROM cached_datasets
+        FROM raw.cached_datasets
         WHERE error_category = 'unknown'
           AND status IN ('error', 'permanently_failed')
         ORDER BY updated_at DESC NULLS LAST
@@ -412,7 +412,7 @@ def backfill_error_categories(self, *, batch_size: int = 200) -> dict:
     )
     update_sql = text(
         """
-        UPDATE cached_datasets
+        UPDATE raw.cached_datasets
         SET error_category = :cat
         WHERE id = CAST(:id AS uuid)
           AND error_category = 'unknown'
@@ -465,7 +465,7 @@ def force_recollect_separator_mismatches(self, *, dry_run: bool = False) -> dict
         SELECT cd.id::text AS cached_id,
                cd.dataset_id::text AS dataset_id,
                cd.table_name
-        FROM cached_datasets cd
+        FROM raw.cached_datasets cd
         WHERE cd.status = 'ready'
           AND EXISTS (
               SELECT 1 FROM ingestion_findings f
@@ -493,7 +493,7 @@ def force_recollect_separator_mismatches(self, *, dry_run: bool = False) -> dict
 
     update_sql = text(
         """
-        UPDATE cached_datasets
+        UPDATE raw.cached_datasets
         SET status = 'pending',
             retry_count = 0,
             error_message = 'force_recollect:separator_mismatch',
@@ -551,7 +551,7 @@ def cleanup_orphan_cache_tables(self, *, dry_run: bool = True, max_drops: int = 
               OR t.tablename ~ '_g[0-9a-f]{6,10}$'
           )
           AND NOT EXISTS (
-              SELECT 1 FROM cached_datasets cd WHERE cd.table_name = t.tablename
+              SELECT 1 FROM raw.cached_datasets cd WHERE cd.table_name = t.tablename
           )
         ORDER BY t.tablename
         LIMIT :limit
@@ -826,7 +826,7 @@ def cleanup_raw_orphans(
         WHERE rtv.schema_name = 'raw'
           AND rtv.created_at < NOW() - (:age_hours || ' hours')::interval
           AND NOT EXISTS (
-              SELECT 1 FROM cached_datasets cd WHERE cd.table_name = rtv.table_name
+              SELECT 1 FROM raw.cached_datasets cd WHERE cd.table_name = rtv.table_name
           )
           AND EXISTS (
               SELECT 1 FROM information_schema.tables t
@@ -972,7 +972,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         result = conn.execute(
             text(
                 """
-                UPDATE cached_datasets
+                UPDATE raw.cached_datasets
                 SET error_category = CASE
                     WHEN error_message ILIKE '%redirect%' THEN 'download_http_error'
                     WHEN error_message ILIKE '%zip_entry%' THEN 'policy_too_large'
@@ -992,7 +992,7 @@ def cleanup_invariants(self) -> dict[str, int]:
 
         result = conn.execute(
             text(
-                "UPDATE cached_datasets SET retry_count = 5 "
+                "UPDATE raw.cached_datasets SET retry_count = 5 "
                 "WHERE retry_count > 5"
             )
         )
@@ -1010,7 +1010,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         result_zombies = conn.execute(
             text(
                 """
-                UPDATE cached_datasets
+                UPDATE raw.cached_datasets
                 SET status = 'permanently_failed',
                     updated_at = NOW()
                 WHERE status = 'error'
@@ -1032,7 +1032,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         result_zero_retry_zombies = conn.execute(
             text(
                 """
-                UPDATE cached_datasets
+                UPDATE raw.cached_datasets
                 SET status = 'permanently_failed',
                     updated_at = NOW()
                 WHERE status = 'error'
@@ -1068,7 +1068,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                     t.table_name,
                     cd.row_count
                 FROM information_schema.tables t
-                JOIN cached_datasets cd ON cd.table_name = t.table_name
+                JOIN raw.cached_datasets cd ON cd.table_name = t.table_name
                 JOIN datasets d ON d.id = cd.dataset_id
                 LEFT JOIN raw_table_versions rtv
                     ON rtv.schema_name = 'raw'
@@ -1118,7 +1118,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                 SET is_cached = false
                 WHERE d.is_cached = true
                   AND NOT EXISTS (
-                      SELECT 1 FROM cached_datasets cd
+                      SELECT 1 FROM raw.cached_datasets cd
                       WHERE cd.dataset_id = d.id AND cd.status = 'ready'
                   )
                 """
@@ -1164,7 +1164,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                 LEFT JOIN raw_table_versions rtv
                     ON rtv.schema_name = 'raw'
                     AND rtv.table_name = t.table_name
-                LEFT JOIN cached_datasets cd ON cd.table_name = t.table_name
+                LEFT JOIN raw.cached_datasets cd ON cd.table_name = t.table_name
                 LEFT JOIN pg_class c
                     ON c.relname = t.table_name
                     AND c.relnamespace = (
@@ -1203,7 +1203,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         result_double_ready = conn.execute(
             text(
                 """
-                DELETE FROM cached_datasets cd_legacy
+                DELETE FROM raw.cached_datasets cd_legacy
                 USING cached_datasets cd_raw,
                       raw_table_versions rtv
                 WHERE cd_legacy.dataset_id = cd_raw.dataset_id
@@ -1264,7 +1264,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                            cd.dataset_id,
                            cd.row_count,
                            cd.updated_at
-                    FROM cached_datasets cd
+                    FROM raw.cached_datasets cd
                     WHERE cd.status = 'ready'
                       AND cd.row_count IS NOT NULL
                       AND cd.row_count > 0
@@ -1514,7 +1514,9 @@ def cleanup_garbage_cols_in_raw(
     Runs Sunday 02:30 ART (overlaps the row_count reconcile, both bounded).
     """
     import re
+
     from sqlalchemy import text
+
     from app.infrastructure.celery.tasks._db import get_sync_engine
 
     engine = get_sync_engine()
@@ -1618,4 +1620,194 @@ def cleanup_garbage_cols_in_raw(
         logger.exception("cleanup_garbage_cols_in_raw: pass 2 (empty garbage) failed")
 
     logger.info("cleanup_garbage_cols_in_raw: %s", stats)
+    return stats
+
+
+# ---------- prewarm_query_plan_cache (Latency optimization, 2026-05-10) ----------
+
+
+@celery_app.task(
+    name="openarg.prewarm_query_plan_cache",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=2100,
+)
+def prewarm_query_plan_cache(
+    self,
+    *,
+    max_queries: int = 100,
+):
+    """Pre-populate `query_plan_cache` with plans for common queries so
+    real user requests hit the cache and skip the planner LLM (~3-4s).
+
+    Strategy (cheap, no SQL execute or analyst LLM):
+      1. Source candidate queries from:
+         a. `query_analytics` last 30d by frequency (real user signal)
+         b. `mart_sample_queries` (curated authors' samples) — fallback
+            when analytics is sparse.
+      2. For each candidate, embed + check `query_plan_cache` for a hit
+         at threshold 0.95. If a hit exists, skip (already warm).
+      3. On miss, run `generate_plan` against an empty catalog_hints
+         block (planner LLM call only — no discover, no execute, no
+         analyst). Store the result.
+
+    Designed to run weekly Sunday 02:45 ART (between row_count reconcile
+    at 02:00 and garbage-col cleanup at 02:30 — plan cache warmup is
+    cheap so it slots between).
+
+    The plan stored here may not match what `discover_catalog_hints`
+    would have produced at request time, but it's still a useful
+    starting point — the real user request will (a) hit the cache and
+    (b) run discover anyway for `catalog_hints` text.
+    """
+    import asyncio
+    import hashlib
+    import json
+
+    from sqlalchemy import text
+
+    from app.infrastructure.adapters.connectors.query_planner import generate_plan
+    from app.infrastructure.adapters.llm.bedrock_embedding_adapter import (
+        BedrockEmbeddingAdapter,
+    )
+    from app.infrastructure.adapters.llm.bedrock_llm_adapter import (
+        BedrockLLMAdapter,
+    )
+    from app.infrastructure.celery.tasks._db import get_sync_engine
+
+    engine = get_sync_engine()
+    stats = {
+        "candidates": 0,
+        "already_cached": 0,
+        "warmed": 0,
+        "errors": 0,
+    }
+
+    # 1. Source candidates
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT question, count(*) AS n
+                FROM query_analytics
+                WHERE ts > now() - INTERVAL '30 days'
+                  AND question IS NOT NULL
+                GROUP BY question
+                ORDER BY n DESC, max(ts) DESC
+                LIMIT :n
+                """
+            ),
+            {"n": max_queries},
+        ).fetchall()
+    candidates: list[str] = [r[0] for r in rows]
+    if len(candidates) < max_queries:
+        # Fall back to curated sample queries
+        with engine.connect() as conn:
+            extra_rows = conn.execute(
+                text(
+                    """
+                    SELECT DISTINCT sample_text
+                    FROM mart_sample_queries
+                    WHERE sample_text IS NOT NULL
+                    LIMIT :n
+                    """
+                ),
+                {"n": max_queries - len(candidates)},
+            ).fetchall()
+        seen = {q.lower() for q in candidates}
+        for r in extra_rows:
+            if r[0] and r[0].lower() not in seen:
+                candidates.append(r[0])
+
+    stats["candidates"] = len(candidates)
+
+    # 2-3. For each candidate, embed + check cache + warm on miss
+    embedder = BedrockEmbeddingAdapter()
+    llm = BedrockLLMAdapter()
+
+    async def _warm(question: str) -> str:
+        """Returns 'hit', 'warmed', or 'error' for telemetry."""
+        try:
+            emb = await embedder.embed(question)
+            emb_str = "[" + ",".join(str(x) for x in emb) + "]"
+            qhash = hashlib.sha256(question.encode("utf-8")).hexdigest()
+            with engine.connect() as conn:
+                hit = conn.execute(
+                    text(
+                        "SELECT 1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                        "FROM query_plan_cache "
+                        "WHERE embedding IS NOT NULL AND expires_at > now() "
+                        "ORDER BY embedding <=> CAST(:e AS vector) "
+                        "LIMIT 1"
+                    ),
+                    {"e": emb_str},
+                ).fetchone()
+                conn.rollback()
+            if hit and float(hit[0] or 0) >= 0.95:
+                return "hit"
+            # Generate plan
+            plan = await generate_plan(
+                llm,
+                question,
+                memory_context="",
+                catalog_hints="",
+                skip_classifier=True,
+            )
+            if plan is None or plan.intent == "clarification":
+                return "error"
+            from dataclasses import asdict, is_dataclass
+            if is_dataclass(plan) and not isinstance(plan, type):
+                plan_dict = asdict(plan)
+            elif hasattr(plan, "model_dump"):
+                plan_dict = plan.model_dump()
+            else:
+                plan_dict = dict(plan.__dict__)
+            plan_json = json.dumps(plan_dict, default=str)
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO query_plan_cache "
+                        "(question_hash, question, embedding, plan_json, "
+                        " ttl_seconds, expires_at) "
+                        "VALUES (:h, :q, CAST(:e AS vector), CAST(:p AS jsonb), "
+                        "        :ttl, now() + (:ttl || ' seconds')::interval) "
+                        "ON CONFLICT (question_hash) DO UPDATE SET "
+                        "  plan_json = EXCLUDED.plan_json, "
+                        "  embedding = EXCLUDED.embedding, "
+                        "  expires_at = EXCLUDED.expires_at"
+                    ),
+                    {
+                        "h": qhash,
+                        "q": question,
+                        "e": emb_str,
+                        "p": plan_json,
+                        "ttl": 604800,
+                    },
+                )
+            return "warmed"
+        except Exception:
+            logger.exception("prewarm_query_plan_cache failed for %s", question[:80])
+            return "error"
+
+    async def _run() -> None:
+        # Concurrency 4 to avoid hammering Bedrock with 100 calls at once
+        sem = asyncio.Semaphore(4)
+
+        async def _bound(q: str) -> str:
+            async with sem:
+                return await _warm(q)
+
+        results = await asyncio.gather(
+            *[_bound(q) for q in candidates], return_exceptions=False
+        )
+        for r in results:
+            if r == "hit":
+                stats["already_cached"] += 1
+            elif r == "warmed":
+                stats["warmed"] += 1
+            else:
+                stats["errors"] += 1
+
+    asyncio.run(_run())
+    logger.info("prewarm_query_plan_cache: %s", stats)
     return stats

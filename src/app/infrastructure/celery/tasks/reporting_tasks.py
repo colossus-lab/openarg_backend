@@ -37,7 +37,7 @@ def report_failed_tasks():
             status_rows = conn.execute(
                 text("""
                     SELECT status, COUNT(*) AS cnt
-                    FROM cached_datasets
+                    FROM raw.cached_datasets
                     WHERE status IN ('error', 'permanently_failed')
                     GROUP BY status
                     ORDER BY status
@@ -63,7 +63,7 @@ def report_failed_tasks():
             portal_rows = conn.execute(
                 text("""
                     SELECT d.portal, cd.status, COUNT(*) AS cnt
-                    FROM cached_datasets cd
+                    FROM raw.cached_datasets cd
                     JOIN datasets d ON d.id = cd.dataset_id
                     WHERE cd.status IN ('error', 'permanently_failed')
                     GROUP BY d.portal, cd.status
@@ -92,7 +92,7 @@ def report_failed_tasks():
                            d.portal,
                            d.title,
                            cd.updated_at
-                    FROM cached_datasets cd
+                    FROM raw.cached_datasets cd
                     JOIN datasets d ON d.id = cd.dataset_id
                     WHERE cd.status IN ('error', 'permanently_failed')
                     ORDER BY cd.updated_at DESC
@@ -119,7 +119,7 @@ def report_failed_tasks():
             stuck_count = (
                 conn.execute(
                     text("""
-                    SELECT COUNT(*) FROM cached_datasets
+                    SELECT COUNT(*) FROM raw.cached_datasets
                     WHERE status = 'downloading'
                       AND updated_at < NOW() - INTERVAL '30 minutes'
                 """)

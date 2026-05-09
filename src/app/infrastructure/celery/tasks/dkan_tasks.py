@@ -12,6 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -136,7 +137,7 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
     import httpx
 
     engine = get_sync_engine()
-    results = {"portal": portal.portal_key, "ingested": 0, "skipped": 0, "errors": 0}
+    results: dict[str, Any] = {"portal": portal.portal_key, "ingested": 0, "skipped": 0, "errors": 0}
 
     try:
         with httpx.Client(timeout=60.0) as client:

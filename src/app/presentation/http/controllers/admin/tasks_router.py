@@ -482,7 +482,7 @@ async def get_sources_status():
             cache_stats = conn.execute(
                 text("""
                 SELECT status, COUNT(*) AS count
-                FROM cached_datasets
+                FROM raw.cached_datasets
                 GROUP BY status
             """)
             ).fetchall()
@@ -490,7 +490,7 @@ async def get_sources_status():
             # Total rows in cache
             total_cached_rows = conn.execute(
                 text(
-                    "SELECT COALESCE(SUM(row_count), 0) FROM cached_datasets WHERE status = 'ready'"
+                    "SELECT COALESCE(SUM(row_count), 0) FROM raw.cached_datasets WHERE status = 'ready'"
                 )
             ).scalar()
 

@@ -173,7 +173,9 @@ def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]
     for result in results:
         accessed_at = _safe_str(result.metadata.get("fetched_at", ""))
         unit_scale = _unit_scale_factor(_safe_str(result.metadata.get("units", "")))
-        for path, raw, normalized in _iter_temporal_evidence_values(result.dataset_title, "dataset_title"):
+        normalized: float | None = None
+        for path, raw, temporal_normalized in _iter_temporal_evidence_values(result.dataset_title, "dataset_title"):
+            normalized = temporal_normalized
             evidence.append(
                 NumericEvidence(
                     source_name=result.dataset_title,

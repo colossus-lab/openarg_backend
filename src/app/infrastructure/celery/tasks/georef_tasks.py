@@ -118,7 +118,7 @@ def ingest_georef(self):
             with engine.begin() as conn:
                 cached = conn.execute(
                     text(
-                        "SELECT id FROM cached_datasets WHERE table_name = :tn AND status = 'ready'"
+                        "SELECT id FROM raw.cached_datasets WHERE table_name = :tn AND status = 'ready'"
                     ),
                     {"tn": table_name},
                 ).fetchone()

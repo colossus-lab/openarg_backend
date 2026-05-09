@@ -157,6 +157,7 @@ def create_celery() -> Celery:
         "openarg.cleanup_raw_orphans": {"queue": "ingest"},
         "openarg.cleanup_empty_raw_tables": {"queue": "ingest"},
         "openarg.cleanup_garbage_cols_in_raw": {"queue": "ingest"},
+        "openarg.prewarm_query_plan_cache": {"queue": "ingest"},
         # Medallion mart tasks (raw → mart, no staging layer).
         "openarg.build_mart": {"queue": "ingest"},
         "openarg.refresh_mart": {"queue": "ingest"},
@@ -398,6 +399,20 @@ def create_celery() -> Celery:
                 # reconcile, before bulk-collect at 01:45/07:45/...).
                 "task": "openarg.cleanup_garbage_cols_in_raw",
                 "schedule": crontab(day_of_week=0, hour=2, minute=30),
+                "options": {"queue": "ingest"},
+            },
+            "prewarm-query-plan-cache-weekly": {
+                # Pre-populate `query_plan_cache` so the first user
+                # query of the week hits the cache and skips the
+                # planner LLM call (~3-4s save). Pulls top-100 queries
+                # from `query_analytics` last 30d, falls back to
+                # `mart_sample_queries` when analytics is sparse. Cheap:
+                # only runs the planner LLM, no SQL execute / analyst.
+                # Sunday 02:45 ART — between row-count reconcile and
+                # garbage-col cleanup.
+                "task": "openarg.prewarm_query_plan_cache",
+                "schedule": crontab(day_of_week=0, hour=2, minute=45),
+                "kwargs": {"max_queries": 100},
                 "options": {"queue": "ingest"},
             },
             # --- New data sources ---

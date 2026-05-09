@@ -431,7 +431,7 @@ def _get_data_statistics(engine, dataset_id: str) -> str | None:
             cache_row = conn.execute(
                 text(
                     "SELECT table_name, row_count, columns_json "
-                    "FROM cached_datasets "
+                    "FROM raw.cached_datasets "
                     "WHERE dataset_id = CAST(:did AS uuid) AND status = 'ready'"
                 ),
                 {"did": dataset_id},
@@ -551,7 +551,7 @@ def _get_sample_rows_text(engine, dataset_id: str, title: str, portal_name: str)
         with engine.begin() as conn:
             cache_row = conn.execute(
                 text(
-                    "SELECT table_name, columns_json FROM cached_datasets "
+                    "SELECT table_name, columns_json FROM raw.cached_datasets "
                     "WHERE dataset_id = CAST(:did AS uuid) AND status = 'ready'"
                 ),
                 {"did": dataset_id},

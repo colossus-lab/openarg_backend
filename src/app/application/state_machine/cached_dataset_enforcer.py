@@ -124,7 +124,7 @@ class StateMachineEnforcer:
     def _scan_retry_invariant(self, engine: Engine) -> Iterable[Violation]:
         sql = text(
             "SELECT dataset_id::text AS dataset_id, table_name, retry_count, status, error_message "
-            "FROM cached_datasets "
+            "FROM raw.cached_datasets "
             "WHERE retry_count >= :max AND status = 'error'"
         )
         with engine.connect() as conn:
@@ -144,7 +144,7 @@ class StateMachineEnforcer:
     def _scan_pending_timeout(self, engine: Engine) -> Iterable[Violation]:
         sql = text(
             "SELECT dataset_id::text AS dataset_id, table_name, retry_count, updated_at "
-            "FROM cached_datasets "
+            "FROM raw.cached_datasets "
             "WHERE status = 'pending' "
             "  AND updated_at < NOW() - (:days || ' days')::interval"
         )
@@ -172,7 +172,7 @@ class StateMachineEnforcer:
         """
         sql = text(
             "SELECT cd.dataset_id::text AS dataset_id, cd.table_name "
-            "FROM cached_datasets cd "
+            "FROM raw.cached_datasets cd "
             "LEFT JOIN information_schema.tables t "
             "  ON t.table_name = cd.table_name "
             " AND t.table_schema IN ('public', 'raw', 'staging', 'mart') "
@@ -193,7 +193,7 @@ class StateMachineEnforcer:
         """Bug 1: 79 schema_mismatch with retry_count>=MAX still in error/schema_mismatch."""
         sql = text(
             "SELECT dataset_id::text AS dataset_id, table_name, retry_count "
-            "FROM cached_datasets "
+            "FROM raw.cached_datasets "
             "WHERE retry_count >= :max "
             "  AND (status = 'schema_mismatch' OR error_message ILIKE '%schema_mismatch%')"
             "  AND status NOT IN ('permanently_failed','ready')"
@@ -226,7 +226,7 @@ class StateMachineEnforcer:
                 with engine.begin() as conn:
                     conn.execute(
                         text(
-                            "UPDATE cached_datasets "
+                            "UPDATE raw.cached_datasets "
                             "SET status = :st, "
                             "    error_message = COALESCE(error_message, '') || "
                             "      CASE WHEN POSITION(:tag IN COALESCE(error_message,'')) > 0 "

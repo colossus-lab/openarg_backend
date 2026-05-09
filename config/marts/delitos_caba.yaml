@@ -1,0 +1,104 @@
+id: delitos_caba
+version: 0.1.0
+description: |
+  Mapa del Delito de la Ciudad Autónoma de Buenos Aires — registro
+  georreferenciado de delitos denunciados, con tipo (robo, hurto, lesiones,
+  homicidio, etc.), subtipo, barrio, comuna, latitud/longitud, fecha y
+  franja horaria. Cada fila es un hecho denunciado.
+
+  Cluster grande: 16+ versiones en `caba::delitos*` (~2M filas combinadas
+  cuando viven todas), publicado por el Ministerio Público Fiscal CABA y
+  el GCBA. Cobertura desde 2016 hasta el último año fiscal.
+
+  Es el dataset de seguridad ciudadana más rico y vivo del catálogo. Si
+  bien hay heterogeneidad menor entre versiones (`fecha` puede ser
+  timestamp o text, `franja` puede ser bigint o double), las cols
+  semánticas son estables. La macro filtra versiones que no contienen el
+  set canónico.
+
+  Casos de uso típicos:
+    * "robos por barrio CABA"
+    * "delitos en Palermo/Caballito"
+    * "homicidios en Buenos Aires por año"
+    * "uso de armas de fuego CABA"
+    * "comparativa de delitos por comuna"
+    * "franja horaria con más robos en CABA"
+domain: seguridad
+
+sources:
+  portals: [caba]
+  resource_patterns:
+    - "caba::delitos*"
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año del hecho
+  - name: mes
+    type: text
+    description: Mes del hecho
+  - name: dia
+    type: text
+    description: Día del hecho
+  - name: fecha
+    type: text
+    description: Fecha completa
+  - name: franja
+    type: text
+    description: Franja horaria (0-23)
+  - name: tipo
+    type: text
+    description: Tipo de delito (Robo, Hurto, Lesiones, Homicidio, etc.)
+  - name: subtipo
+    type: text
+    description: Subtipo del delito (con violencia, automotor, etc.)
+  - name: uso_arma
+    type: text
+    description: Si se usó arma (sí/no)
+  - name: uso_moto
+    type: text
+    description: Si se usó moto (sí/no)
+  - name: barrio
+    type: text
+    description: Barrio donde ocurrió el hecho
+  - name: comuna
+    type: text
+    description: Comuna (1-15)
+  - name: latitud
+    type: numeric
+    description: Latitud geográfica
+  - name: longitud
+    type: numeric
+    description: Longitud geográfica
+  - name: cantidad
+    type: numeric
+    description: Cantidad de hechos (típicamente 1 por fila)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(anio::text), '')     AS anio,
+    NULLIF(TRIM(mes::text), '')      AS mes,
+    NULLIF(TRIM(dia::text), '')      AS dia,
+    NULLIF(TRIM(fecha::text), '')    AS fecha,
+    NULLIF(TRIM(franja::text), '')   AS franja,
+    NULLIF(TRIM(tipo::text), '')     AS tipo,
+    NULLIF(TRIM(subtipo::text), '')  AS subtipo,
+    NULLIF(TRIM(uso_arma::text), '') AS uso_arma,
+    NULLIF(TRIM(uso_moto::text), '') AS uso_moto,
+    NULLIF(TRIM(barrio::text), '')   AS barrio,
+    NULLIF(TRIM(comuna::text), '')   AS comuna,
+    latitud::numeric                 AS latitud,
+    longitud::numeric                AS longitud,
+    cantidad::numeric                AS cantidad
+  FROM {{ live_tables_by_table_pattern(
+      'caba__delitos*',
+      expected_columns=['anio', 'mes', 'dia', 'fecha', 'franja', 'tipo',
+                        'subtipo', 'uso_arma', 'uso_moto', 'barrio',
+                        'comuna', 'latitud', 'longitud', 'cantidad'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(tipo::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

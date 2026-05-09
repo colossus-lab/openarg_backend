@@ -123,7 +123,7 @@ def ingest_bac(self):
             # Skip if already cached or permanently failed
             with engine.begin() as conn:
                 cached = conn.execute(
-                    text("SELECT status, retry_count FROM cached_datasets WHERE table_name = :tn"),
+                    text("SELECT status, retry_count FROM raw.cached_datasets WHERE table_name = :tn"),
                     {"tn": table_name},
                 ).fetchone()
             if cached:
@@ -167,7 +167,7 @@ def ingest_bac(self):
                     with engine.begin() as conn:
                         conn.execute(
                             text("""
-                                INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
+                                INSERT INTO raw.cached_datasets (dataset_id, table_name, status, updated_at)
                                 VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
                                 ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
                             """),

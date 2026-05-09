@@ -251,7 +251,11 @@ async def test_discover_catalog_hints_reranks_legacy_block_when_flag_on(
                     )(),
                 ]
             },
-        )()
+        )(),
+        # 2nd execute = mart vector search (added to discover_catalog_hints
+        # to surface marts for the LLM reranker). Returning empty rows keeps
+        # this test focused on the legacy table_catalog → reranker path.
+        type("_NoMarts", (), {"fetchall": lambda self: []})(),
     ]
     sync_conn.rollback.return_value = None
     engine = MagicMock()
@@ -331,7 +335,9 @@ async def test_discover_catalog_hints_shadow_mode_preserves_base_order(
                     )(),
                 ]
             },
-        )()
+        )(),
+        # 2nd execute = mart vector search; empty for this shadow-mode test.
+        type("_NoMarts", (), {"fetchall": lambda self: []})(),
     ]
     sync_conn.rollback.return_value = None
     engine = MagicMock()

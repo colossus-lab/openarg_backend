@@ -170,7 +170,7 @@ def _resolve_resource_identity_for_table(engine, table_name: str) -> str | None:
                 text(
                     """
                     SELECT d.portal, d.source_id
-                    FROM cached_datasets cd
+                    FROM raw.cached_datasets cd
                     JOIN datasets d ON d.id = cd.dataset_id
                     WHERE cd.table_name = :tn
                     ORDER BY cd.updated_at DESC NULLS LAST
@@ -451,7 +451,7 @@ def enrich_all_tables(self, batch_size: int = 50):
             rows = conn.execute(
                 text("""
                     SELECT cd.table_name
-                    FROM cached_datasets cd
+                    FROM raw.cached_datasets cd
                     LEFT JOIN table_catalog tc ON tc.table_name = cd.table_name
                     WHERE cd.status = 'ready'
                       AND tc.id IS NULL

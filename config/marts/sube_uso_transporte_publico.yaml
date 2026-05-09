@@ -1,0 +1,84 @@
+id: sube_uso_transporte_publico
+version: 0.1.0
+description: |
+  Cantidad diaria de transacciones (boletos pagos) del Sistema Único de
+  Boleto Electrónico (SUBE) en Argentina, segmentada por día, modo
+  (colectivo/tren/subte/ferry), empresa, línea, jurisdicción, provincia
+  y municipio.
+
+  Cluster homogéneo de 6+ tablas anuales en `transporte::sube_cantidad_de_transacciones_*`
+  (~2.85M filas combinadas, cap 500K por tabla = una por año aproximadamente).
+  Schema canónico estable desde ~2018. La columna `AMBA` es flag (1/0)
+  para operaciones del Área Metropolitana Buenos Aires (~10M usuarios/día,
+  ~70% del total país). `DATO_PRELIMINAR` marca filas sujetas a
+  reconciliación posterior.
+
+  Casos de uso típicos:
+    * Demanda agregada por modo de transporte (colectivo vs tren vs subte)
+    * Distribución jurisdiccional del uso (AMBA vs interior, CABA vs PBA)
+    * Ranking de empresas por volumen transportado
+    * Series temporales mensuales/anuales de la actividad
+    * Crucze con `subsidios_transporte_publico` por jurisdicción/empresa
+domain: transporte
+
+sources:
+  portals: [transporte]
+  resource_patterns:
+    - "transporte::sube_cantidad_de_transacciones*"
+
+canonical_columns:
+  - name: dia_transporte
+    type: text
+    description: Fecha del viaje (YYYY-MM-DD)
+  - name: nombre_empresa
+    type: text
+    description: Razón social de la empresa operadora
+  - name: linea
+    type: text
+    description: Línea de transporte (código o nombre)
+  - name: amba
+    type: text
+    description: Indicador AMBA (Área Metropolitana Buenos Aires)
+  - name: tipo_transporte
+    type: text
+    description: Modo de transporte (COLECTIVO, TREN, SUBTE, FERRY)
+  - name: jurisdiccion
+    type: text
+    description: Jurisdicción (NACIONAL, PROVINCIAL, MUNICIPAL)
+  - name: provincia
+    type: text
+    description: Provincia donde opera el servicio
+  - name: municipio
+    type: text
+    description: Municipio donde opera el servicio
+  - name: cantidad
+    type: numeric
+    description: Cantidad de transacciones (boletos pagos) en el día
+  - name: dato_preliminar
+    type: text
+    description: Marca dato preliminar (sujeto a reconciliación)
+
+sql: |
+  SELECT
+    NULLIF(TRIM("DIA_TRANSPORTE"::text), '')  AS dia_transporte,
+    NULLIF(TRIM("NOMBRE_EMPRESA"::text), '')  AS nombre_empresa,
+    NULLIF(TRIM("LINEA"::text), '')           AS linea,
+    NULLIF(TRIM("AMBA"::text), '')            AS amba,
+    NULLIF(TRIM("TIPO_TRANSPORTE"::text), '') AS tipo_transporte,
+    NULLIF(TRIM("JURISDICCION"::text), '')    AS jurisdiccion,
+    NULLIF(TRIM("PROVINCIA"::text), '')       AS provincia,
+    NULLIF(TRIM("MUNICIPIO"::text), '')       AS municipio,
+    "CANTIDAD"::numeric                       AS cantidad,
+    NULLIF(TRIM("DATO_PRELIMINAR"::text), '') AS dato_preliminar
+  FROM {{ live_tables_by_table_pattern(
+      'transporte__sube_cantidad_de_transacciones*',
+      expected_columns=['DIA_TRANSPORTE', 'NOMBRE_EMPRESA', 'LINEA', 'AMBA',
+                        'TIPO_TRANSPORTE', 'JURISDICCION', 'PROVINCIA',
+                        'MUNICIPIO', 'CANTIDAD', 'DATO_PRELIMINAR'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM("DIA_TRANSPORTE"::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

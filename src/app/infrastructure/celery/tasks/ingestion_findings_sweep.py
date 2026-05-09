@@ -68,7 +68,7 @@ def _load_batch(engine, *, offset: int, limit: int, portals: list[str] | None) -
         "         d.download_url, "
         "         d.format, "
         "         cd.updated_at "
-        "  FROM cached_datasets cd "
+        "  FROM raw.cached_datasets cd "
         "  JOIN datasets d ON d.id = cd.dataset_id "
         "  WHERE cd.status IN ('ready','error') "
         "), from_rtv AS ( "
@@ -88,7 +88,7 @@ def _load_batch(engine, *, offset: int, limit: int, portals: list[str] | None) -
         "         NULL::text AS format, "
         "         rtv.created_at AS updated_at "
         "  FROM raw_table_versions rtv "
-        "  LEFT JOIN cached_datasets cd ON cd.table_name = rtv.table_name "
+        "  LEFT JOIN raw.cached_datasets cd ON cd.table_name = rtv.table_name "
         "  WHERE rtv.superseded_at IS NULL "
         "    AND rtv.schema_name = 'raw' "
         "    AND cd.table_name IS NULL "
@@ -185,7 +185,7 @@ def _maybe_flip_status(engine, dataset_id: str, table_name: str, has_critical: b
         with engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE cached_datasets "
+                    "UPDATE raw.cached_datasets "
                     "SET error_message = COALESCE(error_message,'') || "
                     "    CASE WHEN POSITION('materialization_corrupted' IN COALESCE(error_message,'')) > 0 "
                     "         THEN '' ELSE ' | materialization_corrupted' END, "
@@ -219,7 +219,7 @@ def _close_resolved_findings_query(engine) -> int:
                     SET resolved_at = NOW()
                     WHERE f.resolved_at IS NULL
                       AND EXISTS (
-                          SELECT 1 FROM cached_datasets cd
+                          SELECT 1 FROM raw.cached_datasets cd
                           WHERE cd.dataset_id::text = f.resource_id
                             AND cd.status = 'ready'
                             AND cd.updated_at > f.found_at

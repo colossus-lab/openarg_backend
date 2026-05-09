@@ -74,12 +74,14 @@ SAMPLE_QUERIES: dict[str, list[str]] = {
         "diarios de sesiones",
     ],
     "series_economicas": [
-        "inflación mensual del IPC",
-        "tipo de cambio BCRA histórico",
-        "tasa de política monetaria",
-        "reservas internacionales",
-        "agregados monetarios M2 M3",
-        "tasas de interés históricas",
+        # FX-only: el mart cubre solo cotizaciones cambiarias BCRA.
+        # IPC → inflacion_argentina; reservas/tasas → bcra_principales_indicadores.
+        "tipo de cambio BCRA",
+        "cotización del dólar oficial",
+        "cotización del euro en Argentina",
+        "cotización del real brasilero",
+        "cotización de monedas extranjeras BCRA",
+        "tipo de cambio peso argentino",
     ],
     # demo_energia_pozos: skipped — mart is broken (0 rows, upstream
     # pattern mismatch). Re-enrich would mask the underlying problem.

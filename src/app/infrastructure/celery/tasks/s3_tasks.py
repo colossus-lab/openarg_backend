@@ -71,7 +71,7 @@ def retry_s3_uploads(self: Any) -> dict[str, int]:
                     "SELECT cd.id, cd.dataset_id, cd.table_name, "
                     "       d.portal, d.source_id, d.format, "
                     "       d.download_url "
-                    "FROM cached_datasets cd "
+                    "FROM raw.cached_datasets cd "
                     "JOIN datasets d ON d.id = cd.dataset_id "
                     "WHERE cd.status = 'ready' "
                     "AND (cd.s3_key IS NULL OR cd.s3_key = '') "
@@ -111,7 +111,7 @@ def upload_dataset_to_s3(
                     "SELECT d.download_url, d.portal, "
                     "d.source_id, d.format, cd.s3_key "
                     "FROM datasets d "
-                    "JOIN cached_datasets cd "
+                    "JOIN raw.cached_datasets cd "
                     "ON cd.dataset_id = d.id "
                     "WHERE d.id = CAST(:did AS uuid) "
                     "AND cd.status = 'ready'"
@@ -164,7 +164,7 @@ def upload_dataset_to_s3(
         with engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE cached_datasets SET s3_key = :s3key "
+                    "UPDATE raw.cached_datasets SET s3_key = :s3key "
                     "WHERE dataset_id = CAST(:did AS uuid)"
                 ),
                 {"s3key": s3_key, "did": dataset_id},

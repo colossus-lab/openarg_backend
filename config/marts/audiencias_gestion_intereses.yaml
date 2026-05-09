@@ -1,0 +1,130 @@
+id: audiencias_gestion_intereses
+version: 0.1.0
+description: |
+  Registro Único de Audiencias de Gestión de Intereses (RUAGI), bajo el
+  Decreto 1172/2003. Cada fila es una reunión entre un funcionario del
+  Estado nacional (sujeto obligado) y un solicitante (lobbyista, empresario,
+  representante de organización) — con apellido, cargo, dependencia, fecha,
+  lugar, objeto, síntesis y a quién representa el solicitante.
+
+  Cluster homogéneo de ~12 versiones del dataset (`mininterior::registro_unico_de_audiencias*`),
+  ~50K filas combinadas. **Único mart de accountability del catálogo**:
+  no existe otra fuente estructurada de quién-lobby-a-quién en el Estado
+  argentino.
+
+  Casos de uso típicos:
+    * "qué empresas se reunieron con el ministro X"
+    * "audiencias del jefe de gabinete en 2024"
+    * "lobby de Vicentín al gobierno"
+    * "reuniones de altos funcionarios por dependencia"
+    * "objeto de las audiencias de Caputo en 2024"
+domain: gobierno
+
+sources:
+  portals: [mininterior]
+  resource_patterns:
+    - "mininterior::registro_unico_de_audiencias*"
+
+canonical_columns:
+  - name: id_audiencia
+    type: text
+    description: Identificador único de la audiencia
+  - name: apellido_sujeto_obligado
+    type: text
+    description: Apellido del funcionario que recibió la audiencia
+  - name: nombre_sujeto_obligado
+    type: text
+    description: Nombre del funcionario
+  - name: cargo_sujeto_obligado
+    type: text
+    description: Cargo del funcionario receptor
+  - name: dependencia_sujeto_obligado
+    type: text
+    description: Dependencia/organismo del funcionario
+  - name: super_dependencia
+    type: text
+    description: Super-dependencia (ministerio o secretaría madre)
+  - name: fecha_solicitud_audiencia
+    type: text
+    description: Fecha en que se solicitó la audiencia
+  - name: fecha_hora_audiencia
+    type: text
+    description: Fecha y hora pactadas de la audiencia
+  - name: apellido_solicitante
+    type: text
+    description: Apellido del solicitante (lobbyista o representante)
+  - name: nombre_solicitante
+    type: text
+    description: Nombre del solicitante
+  - name: cargo_solicitante
+    type: text
+    description: Cargo del solicitante
+  - name: caracter_en_que_participa
+    type: text
+    description: Carácter en que participa (a título personal, representante, etc.)
+  - name: nombre_representado
+    type: text
+    description: A quién representa el solicitante (empresa/organización)
+  - name: cargo_representado
+    type: text
+    description: Cargo dentro del representado
+  - name: interes_invocado
+    type: text
+    description: Interés invocado para la solicitud
+  - name: lugar_audiencia
+    type: text
+    description: Lugar físico de la audiencia
+  - name: objeto_audiencia
+    type: text
+    description: Objeto / tema declarado de la audiencia
+  - name: sintesis_audiencia
+    type: text
+    description: Síntesis de los puntos tratados
+  - name: estado_audiencia
+    type: text
+    description: Estado (realizada, cancelada, pendiente)
+  - name: es_persona_juridica
+    type: text
+    description: Indicador si el solicitante es persona jurídica
+
+sql: |
+  SELECT
+    NULLIF(TRIM(id_audiencia::text), '')                AS id_audiencia,
+    NULLIF(TRIM(apellido_sujeto_obligado::text), '')    AS apellido_sujeto_obligado,
+    NULLIF(TRIM(nombre_sujeto_obligado::text), '')      AS nombre_sujeto_obligado,
+    NULLIF(TRIM(cargo_sujeto_obligado::text), '')       AS cargo_sujeto_obligado,
+    NULLIF(TRIM(dependencia_sujeto_obligado::text), '') AS dependencia_sujeto_obligado,
+    NULLIF(TRIM(super_dependencia::text), '')           AS super_dependencia,
+    NULLIF(TRIM(fecha_solicitud_audiencia::text), '')   AS fecha_solicitud_audiencia,
+    NULLIF(TRIM(fecha_hora_audiencia::text), '')        AS fecha_hora_audiencia,
+    NULLIF(TRIM(apellido_solicitante::text), '')        AS apellido_solicitante,
+    NULLIF(TRIM(nombre_solicitante::text), '')          AS nombre_solicitante,
+    NULLIF(TRIM(cargo_solicitante::text), '')           AS cargo_solicitante,
+    NULLIF(TRIM(caracter_en_que_participa::text), '')   AS caracter_en_que_participa,
+    NULLIF(TRIM(nombre_representado::text), '')         AS nombre_representado,
+    NULLIF(TRIM(cargo_representado::text), '')          AS cargo_representado,
+    NULLIF(TRIM(interes_invocado::text), '')            AS interes_invocado,
+    NULLIF(TRIM(lugar_audiencia::text), '')             AS lugar_audiencia,
+    NULLIF(TRIM(objeto_audiencia::text), '')            AS objeto_audiencia,
+    NULLIF(TRIM(sintesis_audiencia::text), '')          AS sintesis_audiencia,
+    NULLIF(TRIM(estado_audiencia::text), '')            AS estado_audiencia,
+    NULLIF(TRIM(es_persona_juridica::text), '')         AS es_persona_juridica
+  FROM {{ live_tables_by_table_pattern(
+      'mininterior__registro_unico_de_audiencias*',
+      expected_columns=['id_audiencia', 'apellido_sujeto_obligado',
+                        'nombre_sujeto_obligado', 'cargo_sujeto_obligado',
+                        'dependencia_sujeto_obligado', 'super_dependencia',
+                        'fecha_solicitud_audiencia', 'fecha_hora_audiencia',
+                        'apellido_solicitante', 'nombre_solicitante',
+                        'cargo_solicitante', 'caracter_en_que_participa',
+                        'nombre_representado', 'cargo_representado',
+                        'interes_invocado', 'lugar_audiencia',
+                        'objeto_audiencia', 'sintesis_audiencia',
+                        'estado_audiencia', 'es_persona_juridica'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(id_audiencia::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

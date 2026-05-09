@@ -280,17 +280,26 @@ async def generate_plan(
     question: str,
     memory_context: str = "",
     catalog_hints: str = "",
+    *,
+    skip_classifier: bool = False,
 ) -> ExecutionPlan:
-    """Generate an execution plan from a user query using the LLM."""
+    """Generate an execution plan from a user query using the LLM.
+
+    `skip_classifier=True` bypasses the in-function ambiguity classifier
+    call. Used by `planner_node` after it ran the classifier in parallel
+    with `discover_catalog_hints` to avoid double-running the same LLM
+    call sequentially.
+    """
     # Correct common typos so that downstream regex checks, keyword routing,
     # and the LLM all see the canonical spelling (e.g. "imflacion" → "inflacion").
     corrected = normalize_query(question)
     if corrected != question.lower().strip():
         logger.info("Typo/normalization: '%s' → '%s'", question, corrected)
 
-    # Classify ambiguity with a lightweight LLM call (skip if history)
+    # Classify ambiguity with a lightweight LLM call (skip if history or
+    # caller already ran it in parallel)
     has_history = bool(memory_context and memory_context.strip())
-    if not has_history:
+    if not has_history and not skip_classifier:
         clar = await _classify_ambiguity(llm, question)
         if clar:
             logger.info(

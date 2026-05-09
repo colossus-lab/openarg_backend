@@ -115,7 +115,7 @@ async def get_cache_drops(limit: int = 50):
                            application_name,
                            query,
                            dropped_at
-                    FROM cache_drop_audit
+                    FROM raw.cache_drop_audit
                     ORDER BY dropped_at DESC
                     LIMIT :limit
                     """
@@ -189,7 +189,7 @@ async def get_throughput(hours: int = 14):
                     SELECT date_trunc('hour', updated_at) AS hour,
                            COUNT(*) FILTER (WHERE status='ready')               AS ready,
                            COUNT(*) FILTER (WHERE status='permanently_failed')  AS failed
-                    FROM cached_datasets
+                    FROM raw.cached_datasets
                     WHERE updated_at > now() - make_interval(hours => :hours)
                     GROUP BY 1
                     ORDER BY 1 DESC
@@ -201,16 +201,16 @@ async def get_throughput(hours: int = 14):
                 text(
                     """
                     SELECT
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='ready' AND updated_at > now() - interval '5 min')  AS rate_5min,
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='ready' AND updated_at > now() - interval '15 min') AS rate_15min,
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='ready' AND updated_at > now() - interval '60 min') AS rate_1h,
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='ready' AND updated_at > now() - interval '24 hour') AS rate_24h,
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='ready')                                            AS cd_ready,
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='downloading')                                      AS cd_dling,
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='permanently_failed')                               AS cd_perm_failed,
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='ready' AND updated_at > now() - interval '5 min')  AS rate_5min,
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='ready' AND updated_at > now() - interval '15 min') AS rate_15min,
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='ready' AND updated_at > now() - interval '60 min') AS rate_1h,
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='ready' AND updated_at > now() - interval '24 hour') AS rate_24h,
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='ready')                                            AS cd_ready,
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='downloading')                                      AS cd_dling,
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='permanently_failed')                               AS cd_perm_failed,
                       (SELECT COUNT(*) FROM datasets d
                          WHERE d.is_cached=false AND NOT EXISTS (
-                             SELECT 1 FROM cached_datasets cd
+                             SELECT 1 FROM raw.cached_datasets cd
                              WHERE cd.dataset_id=d.id AND cd.status IN ('ready','permanently_failed','downloading')
                          ))                                                                                                  AS eligible_pending
                     """
@@ -243,8 +243,8 @@ async def get_throughput_health():
                 text(
                     """
                     SELECT
-                      (SELECT COUNT(*) FROM cached_datasets WHERE status='ready' AND updated_at > now() - interval '15 min') AS rate_15min,
-                      (SELECT EXTRACT(epoch FROM (now() - MAX(updated_at))) FROM cached_datasets WHERE status='ready') AS seconds_since_last
+                      (SELECT COUNT(*) FROM raw.cached_datasets WHERE status='ready' AND updated_at > now() - interval '15 min') AS rate_15min,
+                      (SELECT EXTRACT(epoch FROM (now() - MAX(updated_at))) FROM raw.cached_datasets WHERE status='ready') AS seconds_since_last
                     """
                 )
             ).first()

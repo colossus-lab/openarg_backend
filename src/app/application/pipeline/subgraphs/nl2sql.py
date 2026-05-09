@@ -151,7 +151,9 @@ def _resolve_runtime_dep(state: NL2SQLState, key: str, runtime_dep: Any) -> Any:
     if key not in state:
         msg = f"NL2SQL runtime dependency '{key}' not initialised"
         raise RuntimeError(msg)
-    return state[key]
+    # `state[key]` requires literal-key access in TypedDict; we know
+    # `key` came from a known-set list at the caller, so cast to Any.
+    return state[key]  # type: ignore[literal-required]
 
 
 # ---------------------------------------------------------------------------

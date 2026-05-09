@@ -99,6 +99,33 @@ async def _maybe_rerank_planner_candidates(
 ):
     if not llm or not _llm_reranker_enabled() or len(candidates) <= 1:
         return candidates[:top_k]
+    # Fast-path (OPT-IN): when the top candidate is a mart with a
+    # strongly-matching curated sample query (boosted base_score >= the
+    # configured threshold, achievable only when sample_max_sim >= 0.70
+    # triggered the +0.17 boost), skip the reranker for 3-5s saving.
+    # Disabled by default — set `OPENARG_SKIP_RERANK_MART_SCORE` to a
+    # numeric threshold (e.g. 0.85) to enable.
+    skip_raw = os.getenv("OPENARG_SKIP_RERANK_MART_SCORE", "")
+    if skip_raw:
+        try:
+            skip_threshold = float(skip_raw)
+        except ValueError:
+            skip_threshold = 0.0
+        if (
+            skip_threshold > 0
+            and candidates
+            and candidates[0].layer == "mart"
+            and candidates[0].base_score >= skip_threshold
+        ):
+            logger.info(
+                "planner_reranker skipped query=%r reason=mart_high_confidence "
+                "top=%s score=%.3f threshold=%.2f",
+                query[:100],
+                candidates[0].title,
+                candidates[0].base_score,
+                skip_threshold,
+            )
+            return candidates[:top_k]
     shadow_mode = _llm_reranker_shadow_mode()
     started_at = datetime.now(UTC)
     try:
@@ -367,6 +394,7 @@ async def discover_catalog_hints_for_planner(
     *,
     serving_port: Any | None = None,
     llm: ILLMProvider | None = None,
+    precomputed_embedding: list[float] | None = None,
 ) -> str:
     """Search table_catalog for relevant tables and format as planner hints.
 
@@ -382,8 +410,10 @@ async def discover_catalog_hints_for_planner(
     # Calculamos el embedding una sola vez y lo reutilizamos en serving
     # port (HNSW vectorial) y legacy hybrid (vector hints). Antes solo se
     # usaba para legacy → DEBT-016-001 quedaba inactiva en runtime aunque
-    # el adapter ya soportara `query_embedding`.
-    q_embedding: list[float] | None = None
+    # el adapter ya soportara `query_embedding`. El caller (planner_node)
+    # puede pasarnos el embedding ya computed para reutilizarlo en su
+    # propio fast-path mart_sample_sim check sin doble compute.
+    q_embedding: list[float] | None = precomputed_embedding
     if sandbox or serving_port is not None:
         try:
             q_embedding = await embedding.embed(query)
@@ -445,7 +475,75 @@ async def discover_catalog_hints_for_planner(
                 return rows
 
         matches = await loop.run_in_executor(None, _search)
-        if not matches:
+
+        # Mart resources discovered via the serving port are formatted into
+        # `serving_block` for the planner prompt, but they never enter the
+        # reranker — only `table_catalog` raws do. When the user query
+        # matches a mart's curated `mart_sample_queries` strongly (the
+        # `inflacion_argentina` case for "como viene la inflación"), the
+        # mart should be eligible for the LLM reranker reorder against the
+        # raws so it can win head-to-head. We surface the top-3 marts as
+        # `Resource` records that `collect_planner_candidates` lifts to
+        # `PlannerCandidate(layer='mart')` — the rerank then sees the
+        # full set.
+        from app.domain.entities.serving.serving_dtos import (
+            Resource,
+            ServingLayer,
+        )
+
+        def _search_marts() -> list[Resource]:
+            engine = sandbox._get_engine()  # type: ignore[union-attr]
+            with engine.connect() as conn:
+                rs = conn.execute(
+                    text(
+                        "WITH ranked AS ("
+                        "  SELECT md.mart_id, md.domain, "
+                        "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_sim "
+                        "  FROM mart_definitions md "
+                        "  WHERE md.embedding IS NOT NULL "
+                        "    AND COALESCE(md.last_row_count, 0) > 0 "
+                        "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
+                        "  LIMIT 3"
+                        ") "
+                        "SELECT r.mart_id, r.domain, r.base_sim, "
+                        "       COALESCE(("
+                        "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
+                        "         FROM mart_sample_queries msq "
+                        "         WHERE msq.mart_id = r.mart_id"
+                        "       ), 0) AS sample_max_sim "
+                        "FROM ranked r"
+                    ),
+                    {"emb": embedding_str},
+                ).fetchall()
+                conn.rollback()
+                # Use sample_max_sim with +0.17 boost when >= 0.70 (matches
+                # the gating logic in _catalog_vector_search). The score
+                # propagates to PlannerCandidate.base_score and lets the
+                # downstream skip-rerank heuristic detect high-confidence
+                # mart matches.
+                resources: list[Resource] = []
+                for r in rs:
+                    base = float(r.base_sim or 0)
+                    sample = float(r.sample_max_sim or 0)
+                    boosted = base + 0.17 if sample >= 0.70 else base
+                    resources.append(Resource(
+                        resource_id=f"mart::{r.mart_id}",
+                        title=str(r.mart_id or ""),
+                        domain=r.domain,
+                        subdomain=None,
+                        portal=None,
+                        layer=ServingLayer.MART,
+                        score=boosted,
+                    ))
+                return resources
+
+        try:
+            mart_resources = await loop.run_in_executor(None, _search_marts)
+        except Exception:
+            logger.debug("mart vector search for rerank candidates failed", exc_info=True)
+            mart_resources = []
+
+        if not matches and not mart_resources:
             # WS3 hybrid discovery — when no materialized table matches, try
             # the logical catalog so the planner can still see resources that
             # exist conceptually (or live-API connectors).
@@ -453,6 +551,7 @@ async def discover_catalog_hints_for_planner(
             return _join_hint_blocks(serving_block, legacy)
 
         candidates = collect_planner_candidates(
+            serving_resources=mart_resources,
             table_catalog_matches=matches,
             limit=limit,
         )

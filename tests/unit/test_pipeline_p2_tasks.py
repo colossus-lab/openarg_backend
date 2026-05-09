@@ -1241,7 +1241,7 @@ class TestCollectorP2:
             query = str(stmt)
             if "SELECT title, download_url, format, portal, source_id" in query:
                 return _FetchOneResult(dataset_row)
-            if "SELECT retry_count FROM cached_datasets" in query:
+            if "SELECT retry_count FROM raw.cached_datasets" in query:
                 return _FetchOneResult(retry_row)
             if "WHERE table_name = :tn AND status = 'ready'" in query:
                 return _FetchOneResult(None)
@@ -1290,7 +1290,7 @@ class TestCollectorP2:
             query = str(stmt)
             if "SELECT title, download_url, format, portal, source_id" in query:
                 return _FetchOneResult(dataset_row)
-            if "SELECT retry_count FROM cached_datasets" in query:
+            if "SELECT retry_count FROM raw.cached_datasets" in query:
                 return _FetchOneResult(retry_row)
             if "WHERE table_name = :tn AND status = 'ready'" in query:
                 return _FetchOneResult(None)
@@ -1355,7 +1355,7 @@ class TestCollectorP2:
             query = str(stmt)
             if "SELECT title, download_url, format, portal, source_id" in query:
                 return _FetchOneResult(dataset_row)
-            if "SELECT retry_count FROM cached_datasets" in query:
+            if "SELECT retry_count FROM raw.cached_datasets" in query:
                 return _FetchOneResult(retry_row)
             if "WHERE table_name = :tn AND status = 'ready'" in query:
                 return _FetchOneResult(None)
@@ -1478,7 +1478,7 @@ class TestCollectorP2:
             query = str(stmt)
             if "SELECT title, download_url, format, portal, source_id" in query:
                 return _FetchOneResult(dataset_row)
-            if "SELECT retry_count FROM cached_datasets" in query:
+            if "SELECT retry_count FROM raw.cached_datasets" in query:
                 return _FetchOneResult(retry_row)
             if "WHERE table_name = :tn AND status = 'ready'" in query:
                 return _FetchOneResult(None)
@@ -1555,7 +1555,7 @@ class TestCollectorP2:
             query = str(stmt)
             if "SELECT title, download_url, format, portal, source_id" in query:
                 return _FetchOneResult(dataset_row)
-            if "SELECT retry_count FROM cached_datasets" in query:
+            if "SELECT retry_count FROM raw.cached_datasets" in query:
                 idx = min(retry_select_calls["count"], len(retry_rows) - 1)
                 retry_select_calls["count"] += 1
                 return _FetchOneResult(retry_rows[idx])
@@ -1653,7 +1653,7 @@ class TestCollectorP2:
             query = str(stmt)
             if "SELECT title, download_url, format, portal, source_id" in query:
                 return _FetchOneResult(dataset_row)
-            if "SELECT retry_count FROM cached_datasets" in query:
+            if "SELECT retry_count FROM raw.cached_datasets" in query:
                 return _FetchOneResult(retry_row)
             if "WHERE table_name = :tn AND status = 'ready'" in query:
                 return _FetchOneResult(cached_row)
@@ -1735,7 +1735,7 @@ class TestCollectorP2:
             query = str(stmt)
             if "SELECT title, download_url, format, portal, source_id" in query:
                 return _FetchOneResult(dataset_row)
-            if "SELECT retry_count FROM cached_datasets" in query:
+            if "SELECT retry_count FROM raw.cached_datasets" in query:
                 return _FetchOneResult(retry_row)
             if "WHERE table_name = :tn AND status = 'ready'" in query:
                 return _FetchOneResult(None)
