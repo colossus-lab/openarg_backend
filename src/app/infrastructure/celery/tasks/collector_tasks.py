@@ -7021,6 +7021,7 @@ def _mart_rebuild_in_progress(engine) -> bool:
             rows = conn.execute(text(
                 "SELECT 1 FROM pg_stat_activity "
                 "WHERE state = 'active' "
+                "  AND pid <> pg_backend_pid() "
                 "  AND query ~* 'CREATE MATERIALIZED VIEW|REFRESH MATERIALIZED VIEW' "
                 "LIMIT 1"
             )).fetchall()
