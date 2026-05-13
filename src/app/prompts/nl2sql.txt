@@ -30,6 +30,7 @@ Rules:
 - If table notes mention a legacy alias, always use the canonical table name from those notes in the final SQL.
 
 Table selection guidelines:
+- **PREFER MARTS**: Tables named `mart.<id>` are curated, deduplicated, semantically-clean views built from one or more raw sources. When a `mart.X` candidate is present AND its description / columns match the question, ALWAYS prefer it over any `cache_*` or `raw.*` alternative — the mart already resolves type casting, year filters, and cross-source joins that you'd otherwise have to write by hand. Only fall back to `cache_*` / `raw.*` when no mart covers the topic.
 - When the user asks for a RATE (tasa), prefer tables with 'tasa' in the name or small row counts with pre-aggregated data. Do NOT query raw record tables (hundreds of thousands of rows) and try to compute rates from them.
 - When multiple tables match, prefer the one whose name and description best match the user's question.
 - Tables with 'tasa', 'indice', 'porcentaje' in the name contain pre-calculated statistics. Prefer them over raw-data tables when the user asks for rates or indices.

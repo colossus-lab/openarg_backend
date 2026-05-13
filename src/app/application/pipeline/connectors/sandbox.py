@@ -1157,67 +1157,6 @@ async def execute_sandbox_step(
                             len(filtered),
                             [t.table_name for t in filtered],
                         )
-                # BUG-001 fix (2026-05-13): when the planner emits cache_*
-                # glob patterns, fnmatch drops every `mart.X` table from
-                # `filtered`. Marts then never reach the NL2SQL context and
-                # the model picks a raw cache_* table even when a curated
-                # mart for the same domain exists. Re-inject the top
-                # semantic mart matches so the curated surface always
-                # competes with cache_* in NL2SQL ranking. Threshold 0.45
-                # mirrors `_discover_marts.min_sim` to avoid noise.
-                try:
-                    existing_mart_names = {
-                        t.table_name for t in filtered
-                        if t.table_name.startswith("mart.")
-                    }
-                    candidate_marts_in_universe = [
-                        t for t in tables
-                        if t.table_name.startswith("mart.")
-                        and t.table_name not in existing_mart_names
-                    ]
-                    if candidate_marts_in_universe:
-                        from sqlalchemy import text as _stxt
-                        q_emb = await embedding.embed(nl_query)
-                        emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
-
-                        def _top_marts_for_query() -> set[str]:
-                            eng = getattr(sandbox, "_engine", None) or (
-                                sandbox._get_engine()  # type: ignore[union-attr]
-                                if hasattr(sandbox, "_get_engine") else None
-                            )
-                            if eng is None:
-                                return set()
-                            with eng.connect() as conn:
-                                rs = conn.execute(_stxt(
-                                    "SELECT mart_schema, mart_view_name, "
-                                    "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
-                                    "FROM mart_definitions "
-                                    "WHERE embedding IS NOT NULL "
-                                    "  AND COALESCE(last_row_count, 0) > 0 "
-                                    "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
-                                    "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
-                                ), {"e": emb_str}).fetchall()
-                            return {f"{r.mart_schema}.{r.mart_view_name}" for r in rs}
-
-                        relevant = await asyncio.to_thread(_top_marts_for_query)
-                        injected = [
-                            t for t in candidate_marts_in_universe
-                            if t.table_name in relevant
-                        ]
-                        if injected:
-                            filtered = filtered + injected
-                            logger.info(
-                                "BUG-001: re-injected %d mart(s) after fnmatch "
-                                "filtering (hints=%s): %s",
-                                len(injected),
-                                table_hints,
-                                [t.table_name for t in injected],
-                            )
-                except Exception:
-                    logger.debug(
-                        "mart re-injection after fnmatch failed",
-                        exc_info=True,
-                    )
                 tables = filtered
             elif any("indec" in h for h in table_hints):
                 indec_tables = [t.table_name for t in tables if "indec" in t.table_name]
@@ -1260,6 +1199,85 @@ async def execute_sandbox_step(
                         table_hints,
                     )
                     return []
+
+        # BUG-001 fix (2026-05-13): planner table_hints don't necessarily
+        # include `mart.*` names — they emit `cache_*` globs, bare cache
+        # table names, or mart-id-without-schema. All three paths drop
+        # `mart.X` rows during filtering even when a curated mart for the
+        # domain is the better surface. After ALL planner-driven filtering
+        # runs, re-inject the top semantic mart matches so NL2SQL competes
+        # marts against cache_* on equal footing. The 0.45 threshold
+        # mirrors `_discover_marts.min_sim` (calibrated 2026-05-09 against
+        # the routing eval set). Defensive try/except — failure preserves
+        # the prior filtered universe.
+        try:
+            current_mart_names = {
+                t.table_name for t in tables if t.table_name.startswith("mart.")
+            }
+
+            from sqlalchemy import text as _stxt
+            q_emb = await embedding.embed(nl_query)
+            emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
+
+            def _top_marts_for_query() -> list[tuple[str, list[str]]]:
+                eng = getattr(sandbox, "_engine", None) or (
+                    sandbox._get_engine()  # type: ignore[union-attr]
+                    if hasattr(sandbox, "_get_engine") else None
+                )
+                if eng is None:
+                    return []
+                with eng.connect() as conn:
+                    rs = conn.execute(_stxt(
+                        "SELECT mart_schema, mart_view_name, "
+                        "  canonical_columns_json, "
+                        "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                        "FROM mart_definitions "
+                        "WHERE embedding IS NOT NULL "
+                        "  AND COALESCE(last_row_count, 0) > 0 "
+                        "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
+                        "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
+                    ), {"e": emb_str}).fetchall()
+                out: list[tuple[str, list[str]]] = []
+                for r in rs:
+                    cols: list[str] = []
+                    try:
+                        cc = r.canonical_columns_json
+                        if isinstance(cc, list):
+                            cols = [str(c.get("name", "")) for c in cc if c.get("name")]
+                    except Exception:
+                        cols = []
+                    out.append((f"{r.mart_schema}.{r.mart_view_name}", cols))
+                return out
+
+            top_marts = await asyncio.to_thread(_top_marts_for_query)
+            from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+            injected = []
+            for mart_name, cols in top_marts:
+                if mart_name in current_mart_names:
+                    continue
+                injected.append(CachedTableInfo(
+                    table_name=mart_name,
+                    dataset_id="",
+                    row_count=0,
+                    columns=cols,
+                ))
+            if injected:
+                # Prepend so the NL2SQL LLM sees marts at the TOP of the
+                # `tables_context` listing. LLMs systematically favor
+                # earlier candidates when the scoring signal is weak;
+                # putting marts last (append) means the prompt's existing
+                # cache_*-heavy examples dominate. Prepending plus the
+                # explicit "PREFER MARTS" rule in nl2sql.txt is the dual
+                # signal that finally flips routing.
+                tables = injected + tables
+                logger.info(
+                    "BUG-001: injected %d semantically-relevant mart(s) "
+                    "at top of universe: %s",
+                    len(injected),
+                    [t.table_name for t in injected],
+                )
+        except Exception:
+            logger.debug("mart semantic injection failed", exc_info=True)
 
         # Smart table ordering: when the query asks for rates/indices,
         # put pre-aggregated tables (with "tasa", "indice", "porcentaje" in name)
