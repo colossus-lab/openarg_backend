@@ -15,6 +15,7 @@ import os
 import random
 import re
 import shutil
+import stat
 import tempfile
 import time
 from collections import Counter
@@ -28,6 +29,7 @@ import httpx
 import pandas as pd
 import psycopg
 from celery.exceptions import SoftTimeLimitExceeded
+from celery.signals import worker_process_init
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -8212,3 +8214,88 @@ def retry_failed_shapefiles(self):
         return {"dispatched": len(rows)}
     finally:
         engine.dispose()
+
+
+@celery_app.task(
+    name="openarg.cleanup_orphan_temp_files",
+    soft_time_limit=120,
+    time_limit=180,
+)
+def cleanup_orphan_temp_files(max_age_seconds: int = 3600) -> dict:
+    """Reap leaked temp files in the collector temp dir.
+
+    The collector streams downloads to `tempfile.NamedTemporaryFile(delete=False)`
+    and unlinks them in a `finally` block. But Celery soft/hard time limits
+    and OOM kills bypass `finally`, leaking 100 MB-class files into
+    `OPENARG_TEMP_DIR` (default `/tmp`). On staging this accumulated to
+    89 GB over a few days and filled the EC2 root volume.
+
+    Architectural defenses:
+      - This task on a 30-min beat schedule (see app.py).
+      - Worker startup signal also fires it once (worker_process_init hook).
+      - We only reap files matching the `tmp*` glob produced by
+        `tempfile.NamedTemporaryFile` and older than `max_age_seconds` —
+        in-flight downloads aren't touched.
+
+    Returns counts for /api/v1/metrics so the leak can be tracked over time.
+    """
+    import glob
+
+    temp_dir = _temp_dir()
+    threshold = time.time() - max_age_seconds
+    reaped = 0
+    bytes_freed = 0
+    errors = 0
+
+    patterns = ["tmp*"]
+    for pat in patterns:
+        for path in glob.glob(os.path.join(temp_dir, pat)):
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if st.st_mtime > threshold:
+                continue
+            try:
+                size = st.st_size if not stat.S_ISDIR(st.st_mode) else 0
+                if stat.S_ISDIR(st.st_mode):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.unlink(path)
+                reaped += 1
+                bytes_freed += size
+            except OSError:
+                errors += 1
+
+    if reaped or errors:
+        logger.info(
+            "cleanup_orphan_temp_files: reaped=%d freed=%.1f MiB errors=%d dir=%s",
+            reaped,
+            bytes_freed / 1024 / 1024,
+            errors,
+            temp_dir,
+        )
+    return {
+        "reaped": reaped,
+        "bytes_freed": bytes_freed,
+        "errors": errors,
+        "temp_dir": temp_dir,
+    }
+
+
+@worker_process_init.connect  # type: ignore[misc]
+def _reap_orphan_temp_files_on_boot(**_kwargs) -> None:
+    """Run the orphan reaper synchronously at worker process init.
+
+    Catches files left over from the PREVIOUS run of this worker, before
+    the beat task gets a chance. The beat task remains the steady-state
+    defense; this hook just avoids waiting up to 30 min after a crash
+    recovery to start reclaiming disk.
+
+    Errors are swallowed — a stale-tmp leak should never block worker
+    startup. Soft cap at 30 s so a corrupt /tmp can't hang boot forever.
+    """
+    try:
+        cleanup_orphan_temp_files.apply(args=[3600]).get(timeout=30)
+    except Exception:
+        logger.debug("startup tmp cleanup failed (non-fatal)", exc_info=True)

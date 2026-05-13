@@ -171,6 +171,7 @@ def create_celery() -> Celery:
         "openarg.dbt_parse": {"queue": "ingest"},
         "openarg.ws0_5_state_invariants_sweep": {"queue": "default"},
         "openarg.ops_temp_dir_cleanup": {"queue": "default"},
+        "openarg.cleanup_orphan_temp_files": {"queue": "default"},
         "openarg.ops_portal_health": {"queue": "ingest"},
         "openarg.catalog_backfill": {"queue": "ingest"},
         "openarg.populate_catalog_embeddings": {"queue": "embedding"},
@@ -273,6 +274,18 @@ def create_celery() -> Celery:
             "recover-stuck-tasks": {
                 "task": "openarg.recover_stuck_tasks",
                 "schedule": crontab(minute="*/15"),
+                "options": {"queue": "default"},
+            },
+            "cleanup-orphan-temp-files": {
+                # Reaps leaked tempfile.NamedTemporaryFile(delete=False)
+                # downloads left behind when a Celery worker is killed
+                # mid-task (soft/hard time-limit, OOM). On staging this
+                # accumulated to 89GB in /tmp before becoming visible.
+                # 30-min cadence + worker_process_init hook means the
+                # steady-state ceiling is ~30 min × peak-in-flight bytes.
+                "task": "openarg.cleanup_orphan_temp_files",
+                "schedule": crontab(minute="*/30"),
+                "kwargs": {"max_age_seconds": 3600},
                 "options": {"queue": "default"},
             },
             "close-resolved-findings": {
