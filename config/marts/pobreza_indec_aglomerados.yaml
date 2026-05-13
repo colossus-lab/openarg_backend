@@ -16,7 +16,7 @@ description: |
   Indicadores típicos: hogares por debajo de la línea de pobreza /
   indigencia, personas por debajo, tasa, brecha, severidad. Los nombres
   exactos vienen de `Indicador` en cada fila.
-domain: economía
+domain: economia
 
 sources:
   portals: [indec]

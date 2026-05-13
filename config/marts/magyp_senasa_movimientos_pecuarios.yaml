@@ -19,7 +19,7 @@ description: |
 
   Total esperado: ~1.3M filas (bovinos solos pesan ~1M; porcinos,
   avicolas, equinos y ovinos suman ~300K).
-domain: economía
+domain: economia
 
 sources:
   portals: [magyp]

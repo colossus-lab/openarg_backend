@@ -20,7 +20,7 @@ description: |
   `(Región GBA, periodo, valor)`. Este mart agrega un campo
   `tipo_medida` para distinguir entre variación mensual %, variación
   interanual % e índice base 2017=100.
-domain: economía
+domain: economia
 
 sources:
   portals: [indec]

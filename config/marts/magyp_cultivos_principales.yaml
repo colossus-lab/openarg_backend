@@ -15,7 +15,7 @@ description: |
 
   Cubre la demanda recurrente del usuario "estimaciones agrícolas",
   "soja por provincia", "rendimiento del maíz", etc.
-domain: economía
+domain: economia
 
 sources:
   portals: [magyp]

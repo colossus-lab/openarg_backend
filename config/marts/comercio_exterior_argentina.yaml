@@ -22,7 +22,7 @@ description: |
   Para queries por destino/origen geográfico el dataset upstream NO
   incluye país — eso requiere joinear contra `cache_*_exportaciones_fob_por_pais_y_region`
   (no incluido acá; tracked como mart separado si demand sostiene).
-domain: economía
+domain: economia
 
 sources:
   portals: [produccion, datos_gob_ar]

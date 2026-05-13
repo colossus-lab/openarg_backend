@@ -19,7 +19,7 @@ description: |
     pasivos/posiciones)
   - `datos_gob_ar::*principales_tasas_de_interes*` (11 cols útiles,
     10 tasas: cajas de ahorro, plazo fijo, call, BADLAR y tasas activas)
-domain: economía
+domain: economia
 
 sources:
   portals: [datos_gob_ar]

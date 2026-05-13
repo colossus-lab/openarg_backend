@@ -41,11 +41,23 @@ can fetch column-level semantics from `information_schema` directly.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+def _normalize_domain(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    nfd = unicodedata.normalize("NFD", s)
+    stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    return stripped.lower()
 
 _VALID_REFRESH_POLICIES = frozenset({"manual", "daily", "hourly", "on_upstream_change"})
 
@@ -212,7 +224,7 @@ def load_mart(path: Path | str) -> Mart:
         id=id_,
         version=version,
         description=description,
-        domain=str(domain) if domain else None,
+        domain=_normalize_domain(domain),
         source_portals=portals,
         source_resource_patterns=patterns,
         canonical_columns=canonical_columns,

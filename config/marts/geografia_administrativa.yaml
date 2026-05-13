@@ -15,7 +15,7 @@ description: |
   "lista de departamentos de Buenos Aires", "municipios de Córdoba",
   "qué localidades hay en Salta", "centroide de Tucumán",
   "ID GeoRef de provincia X" caen sobre este universo.
-domain: geografía
+domain: geografia
 
 sources:
   portals: [georef]
