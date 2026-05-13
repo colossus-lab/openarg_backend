@@ -117,6 +117,16 @@ async def finalize_node(state: OpenArgState) -> dict:
         )
 
     duration_ms = int((time.monotonic() - state.get("_start_time", time.monotonic())) * 1000)
+    # BUG-010: empty answers reached the client silently. Log them as ERROR
+    # so monitoring can surface them; the response still ships so the user
+    # gets some signal instead of a hang.
+    if not clean_answer or not clean_answer.strip():
+        logger.error(
+            "finalize_node: empty answer for question=%r (results=%d, duration_ms=%d)",
+            question[:120],
+            len(results),
+            duration_ms,
+        )
     # FR-036a: LangGraph's ``updates`` stream forwards ONLY what this node
     # returns; fields left out are silently dropped from the ``complete``
     # event even if they were populated earlier in the pipeline. Keep

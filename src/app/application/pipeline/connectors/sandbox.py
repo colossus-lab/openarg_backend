@@ -1157,6 +1157,67 @@ async def execute_sandbox_step(
                             len(filtered),
                             [t.table_name for t in filtered],
                         )
+                # BUG-001 fix (2026-05-13): when the planner emits cache_*
+                # glob patterns, fnmatch drops every `mart.X` table from
+                # `filtered`. Marts then never reach the NL2SQL context and
+                # the model picks a raw cache_* table even when a curated
+                # mart for the same domain exists. Re-inject the top
+                # semantic mart matches so the curated surface always
+                # competes with cache_* in NL2SQL ranking. Threshold 0.45
+                # mirrors `_discover_marts.min_sim` to avoid noise.
+                try:
+                    existing_mart_names = {
+                        t.table_name for t in filtered
+                        if t.table_name.startswith("mart.")
+                    }
+                    candidate_marts_in_universe = [
+                        t for t in tables
+                        if t.table_name.startswith("mart.")
+                        and t.table_name not in existing_mart_names
+                    ]
+                    if candidate_marts_in_universe:
+                        from sqlalchemy import text as _stxt
+                        q_emb = await embedding.embed(nl_query)
+                        emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
+
+                        def _top_marts_for_query() -> set[str]:
+                            eng = getattr(sandbox, "_engine", None) or (
+                                sandbox._get_engine()  # type: ignore[union-attr]
+                                if hasattr(sandbox, "_get_engine") else None
+                            )
+                            if eng is None:
+                                return set()
+                            with eng.connect() as conn:
+                                rs = conn.execute(_stxt(
+                                    "SELECT mart_schema, mart_view_name, "
+                                    "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                                    "FROM mart_definitions "
+                                    "WHERE embedding IS NOT NULL "
+                                    "  AND COALESCE(last_row_count, 0) > 0 "
+                                    "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
+                                    "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
+                                ), {"e": emb_str}).fetchall()
+                            return {f"{r.mart_schema}.{r.mart_view_name}" for r in rs}
+
+                        relevant = await asyncio.to_thread(_top_marts_for_query)
+                        injected = [
+                            t for t in candidate_marts_in_universe
+                            if t.table_name in relevant
+                        ]
+                        if injected:
+                            filtered = filtered + injected
+                            logger.info(
+                                "BUG-001: re-injected %d mart(s) after fnmatch "
+                                "filtering (hints=%s): %s",
+                                len(injected),
+                                table_hints,
+                                [t.table_name for t in injected],
+                            )
+                except Exception:
+                    logger.debug(
+                        "mart re-injection after fnmatch failed",
+                        exc_info=True,
+                    )
                 tables = filtered
             elif any("indec" in h for h in table_hints):
                 indec_tables = [t.table_name for t in tables if "indec" in t.table_name]
@@ -1305,6 +1366,7 @@ async def execute_sandbox_step(
         )
 
         compiled_subgraph = await get_compiled_nl2sql_subgraph()
+        import time as _time
         initial_state: dict[str, Any] = {
             "nl_query": nl_query,
             "tables": tables,
@@ -1314,6 +1376,7 @@ async def execute_sandbox_step(
             "table_descriptions": table_descriptions,
             "few_shot_block": few_shot_block or "",
             "max_attempts": 2,
+            "started_at": _time.perf_counter(),
         }
         with nl2sql_runtime(
             llm=llm,

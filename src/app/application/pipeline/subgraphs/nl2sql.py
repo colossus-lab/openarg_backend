@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -140,6 +141,7 @@ class NL2SQLState(TypedDict, total=False):
     last_error: str
     used_fallback: bool
     indec_pattern_match: bool
+    started_at: float
     # --- output ---
     data_results: list
 
@@ -217,6 +219,7 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
     runtime = _get_runtime_optional()
     llm = _resolve_runtime_dep(state, "llm", runtime["llm"] if runtime else None)
     nl_query = state["nl_query"]
+    started_at = state.get("started_at") or time.perf_counter()
     tables_context = state["tables_context"]
     few_shot_block = state.get("few_shot_block", "")
 
@@ -245,6 +248,7 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
         "attempt": 0,
         "used_fallback": False,
         "indec_pattern_match": _compute_indec_match(nl_query),
+        "started_at": started_at,
     }
 
 
@@ -607,6 +611,12 @@ async def save_success_node(state: NL2SQLState) -> dict:
         success = False
         row_count = 0
         err_message = "no_result"
+    started_at = state.get("started_at")
+    duration_ms = (
+        int((time.perf_counter() - started_at) * 1000)
+        if started_at is not None
+        else None
+    )
     if embedder_for_history is not None and semantic_cache_for_history is not None:
         spawn_background(
             save_query_attempt(
@@ -614,7 +624,7 @@ async def save_success_node(state: NL2SQLState) -> dict:
                 served_table=served,
                 row_count=row_count,
                 success=success,
-                duration_ms=None,
+                duration_ms=duration_ms,
                 error_message=err_message,
                 embedding_provider=embedder_for_history,
                 semantic_cache=semantic_cache_for_history,
