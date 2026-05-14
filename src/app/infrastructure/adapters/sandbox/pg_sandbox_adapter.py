@@ -175,9 +175,19 @@ def _validate_sql_ast(sql: str) -> str | None:
 class PgSandboxAdapter(ISQLSandbox):
     """Read-only SQL sandbox that executes queries against cached dataset tables."""
 
+    # Per-process cache for list_cached_tables. The query returns 23k+ rows
+    # in staging and gets called on every pipeline run; loading those into
+    # python objects costs ~50 MB of heap and was contributing to OOM kills
+    # of the backend uvicorn worker (see 2026-05-14 incident). 60 s TTL
+    # bounds staleness — new cache_* / mart.* tables become visible within
+    # a minute, which is acceptable since the planner already has the
+    # mart embeddings (refreshed on build_mart) to suggest fresh targets.
+    _LIST_CACHE_TTL_S = 60.0
+
     def __init__(self) -> None:
         self._engine: Engine | None = None
         self._executor = ThreadPoolExecutor(max_workers=2)
+        self._list_cache: tuple[float, list[CachedTableInfo]] | None = None
 
     @property
     def _db_url(self) -> str:
@@ -437,8 +447,15 @@ class PgSandboxAdapter(ISQLSandbox):
             return tables
 
     async def list_cached_tables(self) -> list[CachedTableInfo]:
+        import time as _time
+        now = _time.monotonic()
+        cached = self._list_cache
+        if cached is not None and (now - cached[0]) < self._LIST_CACHE_TTL_S:
+            return cached[1]
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self._list_tables_sync)
+        tables = await loop.run_in_executor(self._executor, self._list_tables_sync)
+        self._list_cache = (now, tables)
+        return tables
 
     def _get_column_types_sync(
         self,

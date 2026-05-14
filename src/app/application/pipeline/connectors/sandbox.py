@@ -1192,13 +1192,24 @@ async def execute_sandbox_step(
                             [t.table_name for t in filtered[:5]],
                         )
                     else:
-                        return []
+                        # BUG-001 follow-up (2026-05-14): when fnmatch AND
+                        # vector_search both miss the planner hints, we used
+                        # to `return []` here. That short-circuited the mart
+                        # injection block below — queries like "pauta
+                        # publicitaria GCBA" (planner hint
+                        # `caba_pauta_publicitaria` matches NO cache_* row)
+                        # never got a chance to fall back to the curated mart.
+                        # Empty `tables` lets the injection run; if the mart
+                        # HNSW also returns 0, the post-injection guard
+                        # finally returns [].
+                        tables = []
                 else:
                     logger.warning(
-                        "Sandbox: none of the hinted tables %s found in cache, skipping",
+                        "Sandbox: none of the hinted tables %s found in cache, "
+                        "attempting mart injection before giving up",
                         table_hints,
                     )
-                    return []
+                    tables = []
 
         # BUG-001 fix (2026-05-13): planner table_hints don't necessarily
         # include `mart.*` names — they emit `cache_*` globs, bare cache
@@ -1278,6 +1289,16 @@ async def execute_sandbox_step(
                 )
         except Exception:
             logger.debug("mart semantic injection failed", exc_info=True)
+
+        # Post-injection guard: if the universe is still empty (planner
+        # hints failed AND no semantically-relevant mart cleared the 0.45
+        # threshold), there's genuinely no table to query — return early.
+        if not tables:
+            logger.info(
+                "Sandbox: no tables after fnmatch + vector_search + mart "
+                "injection; returning empty result"
+            )
+            return []
 
         # Smart table ordering: when the query asks for rates/indices,
         # put pre-aggregated tables (with "tasa", "indice", "porcentaje" in name)
