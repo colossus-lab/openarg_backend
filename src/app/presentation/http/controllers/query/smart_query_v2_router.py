@@ -89,6 +89,16 @@ _TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
         "finalize",
         "cache_reply",
         "fast_reply",
+        # 2026-05-14: `clarify_reply` also produces `clean_answer` and is
+        # a terminal node when the planner returns `intent="clarification"`.
+        # Without it, ambiguous queries (e.g. "Cuáles son los proveedores
+        # con más contratos en BAC?" — planner asks user to clarify what
+        # 'BAC' means) emitted only the custom `clarification` event and
+        # the WS closed without a `complete`. Frontends handle the
+        # clarification chips event; API/QA consumers that don't subscribe
+        # to it saw a graceful 1000 OK close with no payload and reported
+        # it as a transport error.
+        "clarify_reply",
     }
 )
 
