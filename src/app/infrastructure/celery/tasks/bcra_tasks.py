@@ -158,7 +158,11 @@ def snapshot_bcra(self):
                     engine,
                     resource_identity="bcra::cotizaciones",
                     table_name=table_name,
-                    schema_name="public",
+                    # The table is materialized in `raw` (see `to_sql` above).
+                    # Registering it as `public` made the `series_economicas`
+                    # mart resolve to `public.cache_bcra_cotizaciones`, which
+                    # does not exist → build_failed (BUG-004).
+                    schema_name="raw",
                     row_count=len(df),
                 )
                 results["tables"].append({"table": table_name, "rows": len(df)})
