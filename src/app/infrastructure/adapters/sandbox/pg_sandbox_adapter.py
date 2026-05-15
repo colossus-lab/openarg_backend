@@ -41,6 +41,38 @@ _ALLOWED_TABLE_PREFIXES = tuple(os.getenv("SANDBOX_TABLE_PREFIX", "cache_").spli
 _ALLOWED_SCHEMAS = ("public", "mart", "raw")
 _PREFIX_FREE_SCHEMAS = ("mart", "raw")
 
+# Internal metadata / PII tables that NL2SQL-generated queries must never
+# reach, regardless of schema. `raw` and `mart` are prefix-free above, so
+# without this blocklist a query could read `raw.catalog_resources`,
+# `raw.raw_table_versions`, `query_analytics`, etc. (BUG-014 — internal
+# schema discovery vector). Matched on the bare table name, case-insensitive.
+_FORBIDDEN_TABLES = frozenset(
+    {
+        "catalog_resources",
+        "raw_table_versions",
+        "cached_datasets",
+        "mart_definitions",
+        "mart_sample_queries",
+        "query_analytics",
+        "query_cache",
+        "table_catalog",
+        "dataset_chunks",
+        "datasets",
+        "parse_repair_audit",
+        "successful_queries",
+        "user_queries",
+        "query_dataset_links",
+        "agent_tasks",
+        "api_keys",
+        "api_usage",
+        "users",
+        "messages",
+        "conversations",
+        "sesion_chunks",
+        "alembic_version",
+    }
+)
+
 # Tables that sandbox queries are allowed to reference (regex for FROM/JOIN clauses)
 _TABLE_REF_PATTERN = re.compile(
     r'\b(?:FROM|JOIN)\s+"?(\w+)"?(?:\."?(\w+)"?)?',
@@ -96,12 +128,15 @@ def _validate_sql(sql: str) -> str | None:
         first, second = m.group(1), m.group(2)
         if second:
             schema, table = first.lower(), second
-            if schema not in _ALLOWED_SCHEMAS:
-                return f"Access to schema '{schema}' is not allowed."
-            if schema in _PREFIX_FREE_SCHEMAS:
-                continue
         else:
             schema, table = "public", first
+        # Internal-table blocklist applies regardless of schema (BUG-014).
+        if table.lower() in _FORBIDDEN_TABLES:
+            return f"Access to internal table '{table}' is not allowed."
+        if schema not in _ALLOWED_SCHEMAS:
+            return f"Access to schema '{schema}' is not allowed."
+        if schema in _PREFIX_FREE_SCHEMAS:
+            continue
         if not any(table.lower().startswith(p) for p in _ALLOWED_TABLE_PREFIXES):
             return f"Access to table '{table}' is not allowed. Only cached dataset tables are accessible."
 
@@ -156,6 +191,8 @@ def _validate_sql_ast(sql: str) -> str | None:
             if isinstance(node, exp.Table):
                 table_name = node.name
                 schema_name = node.db if hasattr(node, "db") else None
+                if table_name and table_name.lower() in _FORBIDDEN_TABLES:
+                    return f"Access to internal table '{table_name}' is not allowed."
                 if schema_name and schema_name.lower() not in _ALLOWED_SCHEMAS:
                     return f"Access to schema '{schema_name}' is not allowed."
                 if schema_name and schema_name.lower() in _PREFIX_FREE_SCHEMAS:

@@ -23,6 +23,8 @@ async def fast_reply_node(state: OpenArgState) -> dict:
         intent = "injection_blocked"
     elif classification == "off_topic":
         intent = "off_topic"
+    elif classification == "internal_table":
+        intent = "internal_table_blocked"
 
     return {
         "clean_answer": answer,

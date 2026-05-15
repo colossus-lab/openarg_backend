@@ -69,6 +69,33 @@ class TestSQLValidation:
         result = _validate_sql("VACUUM table1")
         assert result is not None
 
+    def test_internal_table_rejected_in_public(self):
+        result = _validate_sql("SELECT * FROM query_analytics")
+        assert result is not None
+        assert "internal table" in result
+
+    def test_internal_table_rejected_in_raw_schema(self):
+        # raw is prefix-free, so without the blocklist this would slip through.
+        result = _validate_sql("SELECT * FROM raw.catalog_resources")
+        assert result is not None
+        assert "internal table" in result
+
+    def test_internal_table_rejected_via_join(self):
+        result = _validate_sql(
+            "SELECT * FROM cache_datos d JOIN raw.raw_table_versions v ON d.id = v.id"
+        )
+        assert result is not None
+        assert "internal table" in result
+
+    def test_internal_table_rejected_ast_only(self):
+        # Comma-separated FROM lists are caught by the AST validator, not the regex.
+        result = _validate_sql("SELECT * FROM cache_datos, api_keys")
+        assert result is not None
+
+    def test_cache_data_table_still_allowed(self):
+        # Legitimate cache_* data tables must NOT be blocked by the new rule.
+        assert _validate_sql("SELECT * FROM cache_delitos_caba_v3") is None
+
 
 class _FetchAllResult:
     def __init__(self, rows):
