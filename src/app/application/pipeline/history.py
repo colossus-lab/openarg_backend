@@ -110,18 +110,20 @@ async def save_query_attempt(
     success: bool,
     duration_ms: int | None,
     error_message: str | None,
-    embedding_provider: IEmbeddingProvider,
     semantic_cache: SemanticCache,
 ) -> None:
     """Persist EVERY query attempt for analytics — successful or not.
 
     Separate from `save_successful_query` (which feeds few-shot) so that
     failed/empty queries can be tracked without polluting the few-shot
-    example set. Created in Fase 3 of the marts plan: without seeing the
-    full distribution of user questions (including the ones that fail
-    or land on the wrong table), we can't decide which marts to build
-    next. The table is created lazily on first call so this drops into
-    a running staging without an alembic migration.
+    example set. The table is created lazily on first call so this drops
+    into a running staging without an alembic migration.
+
+    The ``embedding`` column is intentionally left NULL: BUG-016/017
+    showed that computing it (a Bedrock round-trip) inside a
+    fire-and-forget background task raced request teardown and silently
+    lost ~2/3 of writes. This is now awaited inline by the terminal
+    nodes, so it must stay cheap — a bare INSERT, no embedding call.
     """
     try:
         # Lazy table create — idempotent. Production migration to be
@@ -148,8 +150,6 @@ async def save_query_attempt(
             ))
             await session.commit()
 
-        embedding = await embedding_provider.embed(question)
-        emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
         served = (served_table or "").strip()
         mart_used = served.startswith("mart.")
 
@@ -158,8 +158,8 @@ async def save_query_attempt(
                 text(
                     "INSERT INTO query_analytics "
                     "(question, served_table, mart_used, row_count, success, "
-                    " duration_ms, error_message, embedding) "
-                    "VALUES (:q, :t, :mu, :r, :ok, :d, :err, CAST(:e AS vector))"
+                    " duration_ms, error_message) "
+                    "VALUES (:q, :t, :mu, :r, :ok, :d, :err)"
                 ),
                 {
                     "q": question[:500],
@@ -169,12 +169,47 @@ async def save_query_attempt(
                     "ok": success,
                     "d": duration_ms,
                     "err": (error_message or "")[:500] if error_message else None,
-                    "e": emb_str,
                 },
             )
             await session.commit()
     except Exception:
-        logger.debug("Failed to save query_analytics row", exc_info=True)
+        logger.warning("Failed to save query_analytics row", exc_info=True)
+
+
+async def record_terminal_analytics(
+    *,
+    question: str,
+    served_table: str | None,
+    row_count: int,
+    success: bool,
+    duration_ms: int | None,
+    error_message: str | None,
+    semantic_cache: SemanticCache | None,
+) -> None:
+    """Write a ``query_analytics`` row from a terminal pipeline node.
+
+    BUG-016/017: previously only NL2SQL/sandbox queries were logged (via
+    ``save_success_node``). Cache hits, fast replies, clarification replies
+    and connector/mart flows never reached ``query_analytics`` — roughly
+    two thirds of calls went unrecorded. Each of the four terminal nodes
+    now awaits this so every query is logged exactly once.
+
+    Awaited inline (not fire-and-forget): the write is a single cheap
+    INSERT (~20ms) so the latency cost is negligible, and awaiting
+    guarantees it completes before the request scope tears down.
+    """
+    if semantic_cache is None:
+        logger.warning("record_terminal_analytics: semantic_cache is None — skipping")
+        return
+    await save_query_attempt(
+        question=question,
+        served_table=served_table,
+        row_count=row_count,
+        success=success,
+        duration_ms=duration_ms,
+        error_message=error_message,
+        semantic_cache=semantic_cache,
+    )
 
 
 async def save_successful_query(

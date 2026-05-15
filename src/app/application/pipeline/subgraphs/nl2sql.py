@@ -503,12 +503,16 @@ async def format_result_node(state: NL2SQLState) -> dict:
             ]
         }
 
+    _tables = state.get("tables") or []
     metadata: dict[str, Any] = {
         "total_records": result.row_count,
         "truncated": result.truncated,
         "columns": result.columns,
         "fetched_at": datetime.now(UTC).isoformat(),
         "table_descriptions": table_descriptions,
+        # BUG-016/017: finalize reads this to log the real served table
+        # (e.g. `mart.series_economicas`) into query_analytics.
+        "served_table": _tables[0].table_name if _tables else "",
     }
     # SEC-03: never leak the raw SQL to production responses — it enables
     # schema enumeration through error replay. Keep it in dev/local for
@@ -592,45 +596,15 @@ async def save_success_node(state: NL2SQLState) -> dict:
 
     # Lazy import to avoid the cycle with connectors/sandbox.py which
     # re-exports history helpers through its module.
-    from app.application.pipeline.history import (
-        save_query_attempt,
-        save_successful_query,
-    )
+    from app.application.pipeline.history import save_successful_query
 
-    # Fase 3: persist EVERY query attempt for analytics, regardless of
-    # success. Without this we only see successful queries that landed
-    # rows — we never see what the user actually asked when the planner
-    # picked the wrong table or the result came back empty. That hides
-    # the demand signal needed to decide which marts to build next.
+    # BUG-016/017: query_analytics is now written ONCE per query by the
+    # terminal pipeline nodes (finalize / cache_reply / fast_reply /
+    # clarify_reply). This subgraph used to log it here too, which both
+    # double-counted sandbox queries and missed every connector/cache/
+    # clarify flow. The served-table name is propagated to finalize via
+    # the DataResult metadata (`served_table`) in format_result_node.
     served = tables[0].table_name if tables else ""
-    if result is not None:
-        success = (not result.error) and bool(result.rows)
-        row_count = int(result.row_count or 0)
-        err_message = str(result.error) if result.error else None
-    else:
-        success = False
-        row_count = 0
-        err_message = "no_result"
-    started_at = state.get("started_at")
-    duration_ms = (
-        int((time.perf_counter() - started_at) * 1000)
-        if started_at is not None
-        else None
-    )
-    if embedder_for_history is not None and semantic_cache_for_history is not None:
-        spawn_background(
-            save_query_attempt(
-                question=nl_query,
-                served_table=served,
-                row_count=row_count,
-                success=success,
-                duration_ms=duration_ms,
-                error_message=err_message,
-                embedding_provider=embedder_for_history,
-                semantic_cache=semantic_cache_for_history,
-            ),
-            name="nl2sql.save_query_attempt",
-        )
 
     # Few-shot eligibility: only successful, non-fallback queries with rows.
     if result is None or result.error or not result.rows:

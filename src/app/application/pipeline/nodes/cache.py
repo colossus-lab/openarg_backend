@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from langgraph.config import get_stream_writer
 
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.cache_manager import check_cache
+from app.application.pipeline.history import record_terminal_analytics
 from app.application.pipeline.state import OpenArgState
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,36 @@ async def cache_reply_node(state: OpenArgState) -> dict:
     raw_answer = cached.get("answer", "")
     clean_answer = _scrub_internal_identifiers(raw_answer)
     clean_answer = _drop_apologetic_preface(clean_answer)
+
+    # BUG-016: a cache hit whose stored answer is empty (or scrubbed to
+    # nothing) used to ship "" silently. Substitute a usable message.
+    answer_ok = bool(clean_answer and clean_answer.strip())
+    if not answer_ok:
+        logger.error(
+            "cache_reply_node: empty cached answer for question=%r",
+            state.get("question", "")[:120],
+        )
+        clean_answer = (
+            "No tengo una respuesta guardada para esa consulta. "
+            "Probá reformulándola."
+        )
+
+    # BUG-016/017: log every terminal exit to query_analytics (best-effort —
+    # telemetry must never break the response path).
+    try:
+        deps = nodes_pkg.get_deps()
+        duration_ms = int((time.monotonic() - state.get("_start_time", time.monotonic())) * 1000)
+        await record_terminal_analytics(
+            question=state.get("question", ""),
+            served_table="cache",
+            row_count=0,
+            success=answer_ok,
+            duration_ms=duration_ms,
+            error_message=None if answer_ok else "empty_cached_answer",
+            semantic_cache=deps.semantic_cache,
+        )
+    except Exception:
+        logger.debug("cache_reply_node: analytics logging skipped", exc_info=True)
 
     return {
         "clean_answer": clean_answer,

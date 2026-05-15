@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 from langgraph.config import get_stream_writer
 
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.connectors.sandbox import discover_catalog_hints_for_planner
+from app.application.pipeline.history import record_terminal_analytics
 from app.application.pipeline.state import OpenArgState
 from app.domain.entities.connectors.data_result import ExecutionPlan, PlanStep
 from app.infrastructure.adapters.connectors.query_planner import (
@@ -458,8 +460,29 @@ async def clarify_reply_node(state: OpenArgState) -> dict:
     plan with ``intent="clarification"`` and a clarification step
     containing a question and clickable options.
     """
+    # BUG-016/017: log every terminal exit to query_analytics (best-effort —
+    # telemetry must never break the response path).
+    async def _log_analytics(ok: bool) -> None:
+        try:
+            deps = nodes_pkg.get_deps()
+            duration_ms = int(
+                (time.monotonic() - state.get("_start_time", time.monotonic())) * 1000
+            )
+            await record_terminal_analytics(
+                question=state.get("question", ""),
+                served_table="clarification",
+                row_count=0,
+                success=ok,
+                duration_ms=duration_ms,
+                error_message=None if ok else "planner_failed",
+                semantic_cache=deps.semantic_cache,
+            )
+        except Exception:
+            logger.debug("clarify_reply_node: analytics logging skipped", exc_info=True)
+
     plan = state.get("plan")
     if not plan:
+        await _log_analytics(ok=False)
         return {
             "clean_answer": "No pude procesar tu consulta. Probá reformulándola.",
             "sources": [],
@@ -495,6 +518,7 @@ async def clarify_reply_node(state: OpenArgState) -> dict:
     opts_text = "\n".join(f"- {o}" for o in clar_opts) if clar_opts else ""
     answer = f"**{clar_q}**\n\n{opts_text}" if opts_text else f"**{clar_q}**"
 
+    await _log_analytics(ok=True)
     return {
         "clean_answer": answer,
         "sources": [],
