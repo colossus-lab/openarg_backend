@@ -1,5 +1,5 @@
 id: delitos_caba
-version: 0.1.0
+version: 0.1.1
 description: |
   Mapa del Delito de la Ciudad Autónoma de Buenos Aires — registro
   georreferenciado de delitos denunciados, con tipo (robo, hurto, lesiones,
@@ -87,9 +87,35 @@ sql: |
     NULLIF(TRIM(uso_moto::text), '') AS uso_moto,
     NULLIF(TRIM(barrio::text), '')   AS barrio,
     NULLIF(TRIM(comuna::text), '')   AS comuna,
-    latitud::numeric                 AS latitud,
-    longitud::numeric                AS longitud,
-    cantidad::numeric                AS cantidad
+    -- BUG-020: the 20 `caba::delitos*` versions store lat/long in three
+    -- incompatible encodings — clean decimal (`-34.530394`), un-pointed
+    -- integer (`-34526608`), and Argentine thousands-dot grouping
+    -- (`-34.629.861`, `-3.461.534`). A bare `::numeric` cast on the last
+    -- one fails and aborts the whole mart build. Every Argentine
+    -- coordinate has a 2-digit integer part (lat -22..-55, lng -53..-73),
+    -- so strip all non-digits and re-insert the decimal point after the
+    -- second digit — this converges all three encodings to the same
+    -- value. Non-recoverable values (no leading '-', <3 digits) → NULL.
+    CASE
+      WHEN latitud::text LIKE '-%'
+       AND length(regexp_replace(latitud::text, '[^0-9]', '', 'g')) >= 3
+      THEN -1 * (
+        left(regexp_replace(latitud::text, '[^0-9]', '', 'g'), 2) || '.' ||
+        substr(regexp_replace(latitud::text, '[^0-9]', '', 'g'), 3)
+      )::numeric
+    END                              AS latitud,
+    CASE
+      WHEN longitud::text LIKE '-%'
+       AND length(regexp_replace(longitud::text, '[^0-9]', '', 'g')) >= 3
+      THEN -1 * (
+        left(regexp_replace(longitud::text, '[^0-9]', '', 'g'), 2) || '.' ||
+        substr(regexp_replace(longitud::text, '[^0-9]', '', 'g'), 3)
+      )::numeric
+    END                              AS longitud,
+    -- `cantidad` is a hecho count: digits-only is always safe and guards
+    -- against the same Argentine-format failure mode.
+    NULLIF(regexp_replace(cantidad::text, '[^0-9]', '', 'g'), '')::numeric
+                                     AS cantidad
   FROM {{ live_tables_by_table_pattern(
       'caba__delitos*',
       expected_columns=['anio', 'mes', 'dia', 'fecha', 'franja', 'tipo',
