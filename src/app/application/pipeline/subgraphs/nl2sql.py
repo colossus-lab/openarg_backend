@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -455,6 +456,44 @@ async def last_resort_node(state: NL2SQLState) -> dict:
     return updates
 
 
+_AGGREGATE_FN_RE = re.compile(r"\b(?:count|sum|avg|min|max)\s*\(", re.IGNORECASE)
+_GROUP_BY_RE = re.compile(r"\bgroup\s+by\b", re.IGNORECASE)
+_NONADDITIVE_COL_RE = re.compile(r"(?:tasa|indice|índice|porcentaje|promedio)", re.IGNORECASE)
+
+
+def _classify_result_kind(sql: str) -> str:
+    """Classify a generated query as ``aggregate`` or ``sample``.
+
+    LLM-001: a ``SELECT * ... LIMIT n`` row dump is a *sample* — its row
+    count is a query artefact (the LIMIT), not a real total. The analyst
+    needs this signal so it never narrates "N registros" as if N were the
+    universe. A query carrying COUNT/SUM/AVG/MIN/MAX or GROUP BY produced
+    a genuine aggregate and can be reported as such.
+    """
+    if not sql:
+        return "sample"
+    if _AGGREGATE_FN_RE.search(sql) or _GROUP_BY_RE.search(sql):
+        return "aggregate"
+    return "sample"
+
+
+def _has_nonadditive_aggregate(sql: str) -> bool:
+    """Detect SUM()/AVG() applied to a rate/index column (LLM-002).
+
+    Summing or averaging a ``tasa_*`` / ``indice_*`` / ``porcentaje_*``
+    column across rows of different granularity inflates a meaningless
+    number (e.g. summing every department's per-100k rate into a bogus
+    province total). Flag it so the analyst hedges instead of shipping it.
+    """
+    if not sql:
+        return False
+    for match in re.finditer(r"\b(?:sum|avg)\s*\(", sql, re.IGNORECASE):
+        window = sql[match.end() : match.end() + 60]
+        if _NONADDITIVE_COL_RE.search(window):
+            return True
+    return False
+
+
 async def format_result_node(state: NL2SQLState) -> dict:
     """Format the SQL execution result into a single ``DataResult``.
 
@@ -513,7 +552,14 @@ async def format_result_node(state: NL2SQLState) -> dict:
         # BUG-016/017: finalize reads this to log the real served table
         # (e.g. `mart.series_economicas`) into query_analytics.
         "served_table": _tables[0].table_name if _tables else "",
+        # LLM-001/LLM-002: tell the analyst whether the rows are a real
+        # aggregate or a capped sample, and whether a non-additive metric
+        # was summed — so it never reports a LIMIT artefact as a total or
+        # ships an inflated rate without hedging.
+        "result_kind": _classify_result_kind(generated_sql),
     }
+    if _has_nonadditive_aggregate(generated_sql):
+        metadata["nonadditive_warning"] = True
     # SEC-03: never leak the raw SQL to production responses — it enables
     # schema enumeration through error replay. Keep it in dev/local for
     # debugging.

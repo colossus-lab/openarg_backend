@@ -48,6 +48,23 @@ _TABULAR_CHART_INSTRUCTION = (
     "datos proporcionados."
 )
 _CONTEXT_TRUNCATED_SUFFIX = "\n[contexto recortado por espacio]"
+# LLM-001: a non-aggregated query (SELECT * ... LIMIT n) returns a capped
+# sample. The number of rows is a query artefact, not a real total.
+_SAMPLE_RESULT_NOTE = (
+    "⚠ DATOS DE MUESTRA: las filas de abajo son una muestra acotada por un LIMIT, "
+    "NO el universo completo. La cantidad de filas es un artefacto de la consulta — "
+    "NUNCA la reportes como un conteo o total (no digas 'hubo N registros de X'). "
+    "Si la pregunta pedía un conteo o cuántos, este resultado NO lo responde: "
+    "decilo con honestidad y ofrecé reformular para obtener el número exacto."
+)
+# LLM-002: SUM/AVG over a tasa/índice/porcentaje column inflates a
+# meaningless figure (rates are not additive across granularities).
+_NONADDITIVE_WARNING_NOTE = (
+    "⚠ MÉTRICA NO ADITIVA: la consulta sumó o promedió una columna de "
+    "tasa/índice/porcentaje. Esos valores no son aditivos — el número resultante "
+    "puede estar inflado y carecer de sentido. NO lo presentes como dato firme: "
+    "aclará la limitación o respondé con los valores absolutos (cantidades)."
+)
 
 
 @functools.cache
@@ -197,6 +214,10 @@ def build_data_context(results: list[DataResult]) -> str:
             lines.append(f"URL: {portal_url}")
             lines.append(f"Formato: {result.format}")
             lines.append(f"Total de registros: {metadata.get('total_records', total_rows)}")
+            if metadata.get("result_kind") == "sample":
+                lines.append(_SAMPLE_RESULT_NOTE)
+            if metadata.get("nonadditive_warning"):
+                lines.append(_NONADDITIVE_WARNING_NOTE)
             lines.append(f"Columnas: {display_columns_text}")
             if description:
                 lines.append(f"Descripción: {description}")
