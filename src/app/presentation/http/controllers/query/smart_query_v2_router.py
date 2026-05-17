@@ -78,7 +78,6 @@ _COMPLETE_EVENT_KEYS: tuple[str, ...] = (
     "sources",
     "chart_data",
     "map_data",
-    "confidence",
     "citations",
     "documents",
     "warnings",
@@ -117,7 +116,6 @@ def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
         "sources": update.get("sources", []),
         "chart_data": update.get("chart_data"),
         "map_data": update.get("map_data"),
-        "confidence": update.get("confidence", 1.0),
         "citations": update.get("citations", []),
         "documents": update.get("documents"),
         "warnings": update.get("warnings", []),
@@ -321,7 +319,6 @@ class SmartQueryV2Response(BaseModel):
     chart_data: list[dict[str, Any]] | None = None
     map_data: dict[str, Any] | None = None
     tokens_used: int = 0
-    confidence: float = 1.0
     citations: list[dict[str, Any]] = []
     documents: list[dict[str, Any]] | None = None
     warnings: list[str] = []
@@ -399,7 +396,6 @@ async def smart_query_v2(
         "chart_data": result.get("chart_data"),
         "map_data": result.get("map_data"),
         "tokens_used": result.get("tokens_used", 0),
-        "confidence": result.get("confidence", 1.0),
         "citations": result.get("citations", []),
         **({"documents": result.get("documents")} if result.get("documents") else {}),
         **({"warnings": result.get("warnings")} if result.get("warnings") else {}),
