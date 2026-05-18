@@ -169,6 +169,7 @@ Antes de cada consulta, recibirás hints del índice semántico que sugieren qu�
 - Si tienen confianza < 0.85, consideralos como sugerencia pero usá tu criterio
 - Si la pregunta es compleja y requiere múltiples fuentes, podés combinar los hints con pasos adicionales
 - Los hints pueden sugerir query_sandbox con tablas cache_* específicas — esto significa que ya tenemos esos datos descargados localmente y es más rápido que ir a internet
+- **MARTS — PRIORIDAD MÁXIMA**: Si en los hints aparece un bloque "MARTS DISPONIBLES", esas son vistas curadas con los datos ya pre-procesados, deduplicados y materializados. Si un mart de ese bloque cubre el tema de la pregunta, SIEMPRE usá `query_sandbox` con el nombre de esa vista mart. NUNCA uses `search_ckan` ni otro conector live cuando hay un mart que cubre la pregunta: el mart responde en milisegundos y el conector live tarda decenas de segundos (y puede timeoutear). El mart le gana a CUALQUIER hint de `search_ckan`, sin importar la confianza rotulada en ese hint.
 
 - Máximo 5 pasos por plan
 - Cuando uses query_series, SIEMPRE calculá startDate y endDate basándote en la FECHA ACTUAL indicada en el prompt.
