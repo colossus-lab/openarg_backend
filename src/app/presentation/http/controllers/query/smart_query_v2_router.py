@@ -44,6 +44,12 @@ _checkpointer_last_attempt_ts: float = 0.0  # epoch seconds of last attempt
 # this TTL lets the next request retry on its own.
 _CHECKPOINTER_RETRY_TTL_SECONDS = 30.0
 
+# BUG-022: how often the WebSocket emits a keepalive frame during a long
+# pipeline step. Must be well below the tightest consumer idle timeout
+# (the frontend bridge's per-message activity timer, proxies, and test
+# clients' per-receive timeouts all sit at 30s+).
+_WS_KEEPALIVE_INTERVAL_S = 15.0
+
 logger = logging.getLogger(__name__)
 
 # FR-038 / FR-038a: module-level allowlist of payload fields the streaming
@@ -138,6 +144,28 @@ async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
     """
     text = safe_dumps(to_json_safe(payload), ensure_ascii=False)
     await ws.send_text(text)
+
+
+async def _ws_keepalive(ws: WebSocket, send_lock: asyncio.Lock) -> None:
+    """Emit a lightweight keepalive frame while the pipeline runs.
+
+    BUG-022: a single long pipeline step (a slow connector, the analyst
+    LLM call) can leave the WebSocket with zero traffic for 30-45s — long
+    enough for an intermediary, the browser bridge, or a client's
+    per-receive timeout to drop the connection mid-stream. A periodic
+    keepalive keeps bytes flowing so the connection survives any idle
+    timeout. Consumers that don't recognise the ``keepalive`` type ignore
+    it harmlessly (the frontend bridge's event switch has no such case
+    and falls through; its 120s activity timer is reset by any frame).
+    """
+    try:
+        while True:
+            await asyncio.sleep(_WS_KEEPALIVE_INTERVAL_S)
+            async with send_lock:
+                with contextlib.suppress(Exception):
+                    await _safe_send_json(ws, {"type": "keepalive"})
+    except asyncio.CancelledError:
+        pass
 
 
 def _filter_stream_payload(payload: Any) -> Any:
@@ -530,29 +558,41 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 if checkpointer and conversation_id:
                     stream_config["configurable"] = {"thread_id": conversation_id}
 
-                # Stream the graph execution
-                async for mode, payload in graph.astream(
-                    initial_state,
-                    config=stream_config,
-                    stream_mode=["updates", "custom"],
-                ):
-                    if mode == "custom":
-                        # Custom events emitted by nodes via get_stream_writer().
-                        # _filter_stream_payload applies FR-038 (fail-closed
-                        # allowlist, SEC-07) AND FR-038b (WARNING log on any
-                        # dropped key — DEBT-017 fix 2026-04-11).
-                        await _safe_send_json(ws, _filter_stream_payload(payload))
-                    elif mode == "updates":
-                        # Node completed — check if it's a terminal node
-                        for node_name, update in payload.items():
-                            complete_event = _build_complete_event(node_name, update)
-                            if complete_event is None:
-                                logger.debug(
-                                    "Ignoring non-terminal stream update from node %s",
-                                    node_name,
-                                )
-                                continue
-                            await _safe_send_json(ws, complete_event)
+                # Stream the graph execution. BUG-022: a keepalive task
+                # runs alongside so a long pipeline step never leaves the
+                # socket idle long enough to be dropped mid-stream. A send
+                # lock serializes the two producers (stream + keepalive).
+                send_lock = asyncio.Lock()
+                keepalive_task = asyncio.create_task(_ws_keepalive(ws, send_lock))
+                try:
+                    async for mode, payload in graph.astream(
+                        initial_state,
+                        config=stream_config,
+                        stream_mode=["updates", "custom"],
+                    ):
+                        if mode == "custom":
+                            # Custom events emitted by nodes via get_stream_writer().
+                            # _filter_stream_payload applies FR-038 (fail-closed
+                            # allowlist, SEC-07) AND FR-038b (WARNING log on any
+                            # dropped key — DEBT-017 fix 2026-04-11).
+                            async with send_lock:
+                                await _safe_send_json(ws, _filter_stream_payload(payload))
+                        elif mode == "updates":
+                            # Node completed — check if it's a terminal node
+                            for node_name, update in payload.items():
+                                complete_event = _build_complete_event(node_name, update)
+                                if complete_event is None:
+                                    logger.debug(
+                                        "Ignoring non-terminal stream update from node %s",
+                                        node_name,
+                                    )
+                                    continue
+                                async with send_lock:
+                                    await _safe_send_json(ws, complete_event)
+                finally:
+                    keepalive_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await keepalive_task
 
     except WebSocketDisconnect:
         logger.debug("WebSocket v2 client disconnected")
