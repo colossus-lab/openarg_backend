@@ -137,7 +137,10 @@ REGLAS:
 - **FECHAS — NUNCA HARDCODEES FECHAS: Calculá startDate y endDate SIEMPRE relativo a la FECHA ACTUAL que te indica el sistema. Ejemplos: "últimos 12 meses" → startDate = FECHA ACTUAL - 12 meses, endDate = FECHA ACTUAL. "últimos 3 años" → startDate = FECHA ACTUAL - 3 años. endDate NUNCA debe ser posterior a FECHA ACTUAL.**
 - **Para consultas sobre el Congreso, Diputados, legisladores, leyes sancionadas, proyectos parlamentarios → usá search_ckan con portalId: "diputados"**
 - **CATÁLOGO NACIONAL: Cuando el usuario pregunte "qué datasets hay", "qué datos tienen" → usá search_ckan con portalId: "nacional" y query: "*" con rows: 20.**
-- **DDJJ — IMPORTANTE: Tenemos 195 declaraciones juradas patrimoniales COMPLETAS precargadas. Para CUALQUIER consulta sobre patrimonio, riqueza, bienes, declaraciones juradas, DDJJ → usá query_ddjj. NUNCA uses search_ckan para estos temas.**
+- **DDJJ — preferencia de fuente:**
+  - Si en los hints aparece `mart.ddjj_funcionarios_federales` (o cualquier `mart.ddjj_*`) en el bloque MARTS DISPONIBLES, **usá `query_sandbox` sobre ese mart** — cubre el universo completo de funcionarios federales (no solo diputados), está deduplicado y se consulta en milisegundos.
+  - Si NO hay mart de DDJJ disponible, o la pregunta apunta específicamente a los 195 diputados nacionales (ej: "compará patrimonio del diputado X y del diputado Y"), usá `query_ddjj` (action `ranking`/`search`/`detail`/`stats`). Sigue cubriendo bien ese caso.
+  - **NUNCA uses `search_ckan` para temas de DDJJ / patrimonio / bienes** — ese conector live es lento y no agrega valor sobre lo que ya tenemos en mart/connector.
 - **PERSONAS — ÁRBOL DE DECISIÓN:**
   - **"patrimonio de X" / "cuánto tiene X" / "bienes de X"** → query_ddjj (action: "search" o "detail", nombre: "X"). SOLO cubre diputados nacionales.
   - **"patrimonio de X VS Y" / "compará patrimonio de X y Y"** → DOS pasos query_ddjj en paralelo (uno por persona), cada uno con action: "search", nombre: "X" / "Y". IMPORTANTE: siempre crear un paso SEPARADO por cada persona mencionada.

@@ -70,6 +70,9 @@ SQL: SELECT COUNT(*) AS total_robos FROM mart.delitos_caba WHERE barrio ILIKE '%
 Question: ¿Cuántos delitos contra la propiedad hubo en CABA en 2023?
 SQL: SELECT tipo, COUNT(*) AS cantidad FROM mart.delitos_caba WHERE anio = '2023' AND (tipo ILIKE '%robo%' OR tipo ILIKE '%hurto%') GROUP BY tipo ORDER BY cantidad DESC
 
+Question: ¿Qué barrios de CABA tuvieron más robos en horario nocturno en 2023?
+SQL: SELECT barrio, COUNT(*) AS robos FROM mart.delitos_caba WHERE anio = '2023' AND tipo ILIKE '%robo%' AND franja ~ '^[0-9]+$' AND (CAST(franja AS NUMERIC) >= 20 OR CAST(franja AS NUMERIC) <= 5) AND barrio IS NOT NULL GROUP BY barrio ORDER BY robos DESC LIMIT 15
+
 Question: ¿Qué provincias tienen más homicidios en Argentina?
 SQL: SELECT provincia_nombre, SUM(cantidad_hechos) AS total_homicidios FROM mart.delitos_argentina_snic WHERE codigo_delito_snic_nombre ILIKE '%homicidio%' GROUP BY provincia_nombre ORDER BY total_homicidios DESC LIMIT 24
 

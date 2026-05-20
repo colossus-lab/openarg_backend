@@ -443,6 +443,16 @@ def _build_analysis_prompt(
 
     if no_data_fallback:
         caps = build_capabilities_block()
+        # P0: surface which real table was queried (if any) so the
+        # no-data prompt can be specific ("el dataset X cubre 2013-2020,
+        # no tengo 2023") instead of the generic "OpenArg cubre…"
+        # template. Driven by `queried_empty_mart` set in
+        # nl2sql.format_result_node.
+        attempted_table = ""
+        for r in results:
+            if r.metadata.get("queried_empty_mart") and r.metadata.get("served_table"):
+                attempted_table = str(r.metadata["served_table"])
+                break
         # Don't pass memory context in no-data mode — it causes the LLM to
         # hallucinate "we already discussed this" when no data was ever shown.
         return load_prompt(
@@ -451,6 +461,7 @@ def _build_analysis_prompt(
             today=today,
             memory_ctx_analyst="",
             caps=caps,
+            attempted_table=attempted_table or "(ninguna)",
         )
 
     skill_block = ""

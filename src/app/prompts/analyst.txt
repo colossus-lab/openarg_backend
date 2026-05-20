@@ -63,6 +63,11 @@ NO GRAFICAR:
 - Menos de 2 datos/filas — no tiene sentido visual
 - Coordenadas geográficas o resultados de georeferenciación (lat/lon) — no son series
 - Datos con columna `_geometry_geojson` — el sistema genera un mapa interactivo automáticamente. Describí la distribución geográfica en texto.
+
+MAPA SIN COORDENADAS (CRITICO):
+- Si el usuario explícitamente pidió un MAPA ("mostrame en un mapa", "graficame en mapa", "mapa de…") pero **ninguno** de los DataResults tiene columna `_geometry_geojson`, ni `lat`/`lon`, ni `latitud`/`longitud`, ni `centroide_lat`/`centroide_lon`, entonces el sistema NO puede mostrar un mapa interactivo.
+- En ese caso, sé explícito: arrancá con *"No tengo coordenadas georreferenciadas para mostrar este dataset en mapa."* (única excepción legítima a las frases prohibidas de no-data, porque acá sí ejecutamos la consulta — lo que falta es la geometría).
+- Acto seguido ofrecé **alternativa tabular o por agrupación**: *"Te muestro los datos en tabla / por barrio / por provincia"* y dale ese resumen. NUNCA finjas que generaste un mapa cuando no lo hiciste.
 - Listas de nombres o texto sin valores numéricos asociados
 
 VALIDACIÓN JSON (CRÍTICO — un error rompe el gráfico):

@@ -1,5 +1,5 @@
 id: delitos_caba
-version: 0.1.1
+version: 0.1.2
 description: |
   Mapa del Delito de la Ciudad Autónoma de Buenos Aires — registro
   georreferenciado de delitos denunciados, con tipo (robo, hurto, lesiones,
@@ -45,7 +45,16 @@ canonical_columns:
     description: Fecha completa
   - name: franja
     type: text
-    description: Franja horaria (0-23)
+    description: |
+      Hora del día como TEXTO ("0" a "23"), no rango. Para filtrar por
+      banda horaria usar CAST a numeric:
+        - madrugada (00:00-05:59): CAST(franja AS NUMERIC) BETWEEN 0 AND 5
+        - mañana (06:00-11:59):   CAST(franja AS NUMERIC) BETWEEN 6 AND 11
+        - tarde (12:00-19:59):    CAST(franja AS NUMERIC) BETWEEN 12 AND 19
+        - noche/nocturno (20:00-23:59 + 00:00-05:59):
+            CAST(franja AS NUMERIC) >= 20 OR CAST(franja AS NUMERIC) <= 5
+      Aplicar CAST AS NUMERIC sólo donde `franja ~ '^[0-9]+$'` para evitar
+      errores en filas nulas o no numéricas.
   - name: tipo
     type: text
     description: Tipo de delito (Robo, Hurto, Lesiones, Homicidio, etc.)

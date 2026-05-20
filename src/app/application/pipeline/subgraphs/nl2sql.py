@@ -543,6 +543,20 @@ async def format_result_node(state: NL2SQLState) -> dict:
         }
 
     _tables = state.get("tables") or []
+    # P0: served_table must reflect the actual table the SQL hit, not the
+    # table-discovery list — they can drift (e.g. the Fase 3 redirect
+    # populates a different state path that loses `tables`). Prefer the
+    # table parsed from the generated SQL when available, fall back to
+    # the discovery list. This guarantees analytics + the no-data prompt
+    # know which mart was actually queried.
+    sql_schema, sql_table = (
+        _first_relation_reference(generated_sql) if generated_sql else (None, None)
+    )
+    if sql_table:
+        served_from_sql = f"{sql_schema}.{sql_table}" if sql_schema else sql_table
+    else:
+        served_from_sql = ""
+    served_table = served_from_sql or (_tables[0].table_name if _tables else "")
     metadata: dict[str, Any] = {
         "total_records": result.row_count,
         "truncated": result.truncated,
@@ -551,7 +565,16 @@ async def format_result_node(state: NL2SQLState) -> dict:
         "table_descriptions": table_descriptions,
         # BUG-016/017: finalize reads this to log the real served table
         # (e.g. `mart.series_economicas`) into query_analytics.
-        "served_table": _tables[0].table_name if _tables else "",
+        "served_table": served_table,
+        # P0: when a real table was queried but returned 0 rows, the
+        # analyst's no-data fallback needs to know so it can deflect
+        # honestly ("the dataset doesn't cover that period") instead of
+        # the generic "OpenArg cubre…" boilerplate.
+        "queried_empty_mart": (
+            result.row_count == 0
+            and bool(served_table)
+            and bool(generated_sql)
+        ),
         # LLM-001/LLM-002: tell the analyst whether the rows are a real
         # aggregate or a capped sample, and whether a non-additive metric
         # was summed — so it never reports a LIMIT artefact as a total or
