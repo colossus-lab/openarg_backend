@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import secrets as _secrets_mod
+import time
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -143,7 +144,21 @@ async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
     See ``specs/FIX_BACKLOG.md#FIX-017``.
     """
     text = safe_dumps(to_json_safe(payload), ensure_ascii=False)
-    await ws.send_text(text)
+    try:
+        await ws.send_text(text)
+    except RuntimeError as exc:
+        # BUG-022 Capa 3: when a client closes the WS before the server
+        # finishes (Dante's runner has a hard per-receive timeout that
+        # fires around 45s), Starlette raises RuntimeError("Cannot call
+        # 'send' once a close message has been sent."). The pipeline
+        # keeps running and tries to send 'complete' or 'keepalive' — we
+        # swallow it instead of crashing with a stack trace. The
+        # production WebSocket logs still surface the abnormal close at
+        # the WebSocketDisconnect catch in the handler.
+        if "close message has been sent" in str(exc) or "WebSocket is not connected" in str(exc):
+            logger.debug("WS send after close — client disconnected mid-stream")
+            return
+        raise
 
 
 async def _ws_keepalive(ws: WebSocket, send_lock: asyncio.Lock) -> None:
@@ -157,13 +172,20 @@ async def _ws_keepalive(ws: WebSocket, send_lock: asyncio.Lock) -> None:
     timeout. Consumers that don't recognise the ``keepalive`` type ignore
     it harmlessly (the frontend bridge's event switch has no such case
     and falls through; its 120s activity timer is reset by any frame).
+
+    BUG-022 Capa 3: stop the loop on the first failed send. If the WS
+    closed mid-stream there's no point pinging a dead socket every 15s
+    until ``astream`` finishes; bail out quietly.
     """
     try:
         while True:
             await asyncio.sleep(_WS_KEEPALIVE_INTERVAL_S)
             async with send_lock:
-                with contextlib.suppress(Exception):
+                try:
                     await _safe_send_json(ws, {"type": "keepalive"})
+                except Exception:
+                    logger.debug("WS keepalive send failed — stopping task")
+                    return
     except asyncio.CancelledError:
         pass
 
@@ -564,6 +586,13 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 # lock serializes the two producers (stream + keepalive).
                 send_lock = asyncio.Lock()
                 keepalive_task = asyncio.create_task(_ws_keepalive(ws, send_lock))
+                # P1 last-resort logger: track whether a terminal `complete`
+                # ever flew. If the pipeline starts but never emits one
+                # (WS closed mid-stream, unhandled exception, etc.), the
+                # finally block writes a synthetic query_analytics row so
+                # the request stays visible in telemetry.
+                complete_sent = False
+                stream_started_at = time.monotonic()
                 try:
                     async for mode, payload in graph.astream(
                         initial_state,
@@ -589,10 +618,30 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                                     continue
                                 async with send_lock:
                                     await _safe_send_json(ws, complete_event)
+                                complete_sent = True
                 finally:
                     keepalive_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await keepalive_task
+                    # P1 last-resort logger: terminal-node analytics fires
+                    # inline within each terminal node (FR-036t). If the
+                    # request died before reaching any terminal, no row
+                    # lands. Write a synthetic one tagged ws_closed_mid_stream
+                    # so the call stays in coverage.
+                    if not complete_sent and question:
+                        with contextlib.suppress(Exception):
+                            from app.application.pipeline.history import save_query_attempt
+                            await save_query_attempt(
+                                question=question,
+                                served_table=None,
+                                row_count=0,
+                                success=False,
+                                duration_ms=int(
+                                    (time.monotonic() - stream_started_at) * 1000
+                                ),
+                                error_message="ws_closed_mid_stream",
+                                semantic_cache=deps.semantic_cache,
+                            )
 
     except WebSocketDisconnect:
         logger.debug("WebSocket v2 client disconnected")

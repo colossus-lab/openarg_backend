@@ -24,6 +24,16 @@ async def inject_fallbacks_node(state: OpenArgState) -> dict:
 
     Ensures every non-clarification query hits at least one data source
     (vector search) even if the planner omitted it.
+
+    Also enforces BUG-001 Capa 1: when the planner emitted both
+    ``query_sandbox`` and ``search_ckan`` AND a curated mart confidently
+    covers the question, the redundant ``search_ckan`` is dropped before
+    dispatch. Verified pattern: F4 ("Palermo 2023") consistently emitted
+    both steps, wall-clock dominated by the live CKAN step (30-63s); F3
+    ("horario nocturno") emits only ``query_sandbox`` and runs in 22-24s.
+    The LLM ignores planner.txt's anti-search_ckan rule in ~100% of cases
+    that include a specific year/entity filter, so a deterministic
+    pre-dispatch filter is the only reliable fix.
     """
     plan = state.get("plan")
     if not plan:
@@ -49,6 +59,39 @@ async def inject_fallbacks_node(state: OpenArgState) -> dict:
                     depends_on=[],
                 ),
             )
+
+        # BUG-001 Capa 1: strip redundant search_ckan when a mart covers it.
+        has_sandbox = any(s.action == "query_sandbox" for s in plan.steps)
+        has_ckan = any(s.action == "search_ckan" for s in plan.steps)
+        if has_sandbox and has_ckan:
+            try:
+                from types import SimpleNamespace
+
+                from app.application.pipeline.step_executor import (
+                    _MART_REDIRECT_THRESHOLD,
+                    _top_mart_similarity,
+                )
+
+                deps = nodes_pkg.get_deps()
+                probe_deps = SimpleNamespace(
+                    sandbox=deps.sandbox, embedding=deps.embedding
+                )
+                sim = await _top_mart_similarity(preprocessed_q, probe_deps)
+                if sim >= _MART_REDIRECT_THRESHOLD:
+                    dropped = [s for s in plan.steps if s.action == "search_ckan"]
+                    plan.steps = [s for s in plan.steps if s.action != "search_ckan"]
+                    logger.info(
+                        "BUG-001 Capa 1: dropped %d redundant search_ckan step(s) — "
+                        "mart sim=%.3f >= %.2f",
+                        len(dropped),
+                        sim,
+                        _MART_REDIRECT_THRESHOLD,
+                    )
+            except Exception:
+                logger.debug(
+                    "BUG-001 Capa 1 strip-ckan check failed", exc_info=True
+                )
+
         return {"plan": plan}
     except Exception:
         logger.exception("inject_fallbacks_node failed")
