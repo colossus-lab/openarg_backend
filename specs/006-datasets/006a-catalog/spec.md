@@ -38,7 +38,7 @@ Canonical catalog of datasets indexed by OpenArg. Exposes the `Dataset` domain e
 - **FR-001**: MUST expose `IDatasetRepository` with: `save`, `get_by_id`, `get_by_source_id`, `list_by_portal`, `upsert`.
 - **FR-002**: `upsert` MUST be idempotent by `(source_id, portal)` UNIQUE.
 - **FR-008**: Endpoints MUST expose listing, stats, and a scrape trigger.
-  - `GET /api/v1/datasets/` — list with pagination and `portal` filter.
+  - `GET /api/v1/datasets/` — list with pagination and `portal` filter. Response item shape: `{id, title, description, organization, portal, format, is_cached, row_count, columns}`. `columns` is the dataset's column-name list (parsed from `datasets.columns` JSON text); used by the `/datasets` frontend to build a column-aware "ask in chat" prompt.
   - `GET /api/v1/datasets/stats` — count per portal.
   - `GET /api/v1/datasets/{id}/download` — redirect to S3 or upstream.
   - (`POST /api/v1/datasets/scrape/{portal}` lives here at the HTTP level but dispatches a worker owned by `006b-ingestion`.)

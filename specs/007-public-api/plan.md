@@ -34,7 +34,6 @@ Content-Type: application/json
   "sources": [{"name": "...", "url": "...", "portal": "..."}],
   "chart_data": [...],
   "map_data": {...},
-  "confidence": 0.95,
   "citations": [...],
   "warnings": [],
   "tokens_used": 0,
