@@ -588,7 +588,13 @@ async def discover_catalog_hints_for_planner(
                 line += f" ({display_name})"
             line += f" — {row_count} filas"
             if description:
-                line += f" — {description[:120]}"
+                # Round v4.4 Fase 3: descriptions of mart-layer candidates
+                # may now include a "COBERTURA TEMPORAL: …" suffix appended
+                # by `_upsert_mart_definition`. Truncate budget extended
+                # from 120 → 320 chars so the data-range hint reaches the
+                # planner; non-mart candidates rarely have descriptions
+                # this long so the larger budget is benign.
+                line += f" — {description[:320]}"
             line += f" [relevancia: {score}]"
             lines.append(line)
 

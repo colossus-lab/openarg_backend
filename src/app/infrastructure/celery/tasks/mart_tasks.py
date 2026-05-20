@@ -208,6 +208,43 @@ def _upsert_mart_definition(
             for c in mart.canonical_columns
         ]
     )
+
+    # Fase 3 — data coverage suffix.
+    # Computed once at build time over temporal columns of the mart. Appended
+    # to the description so the planner / NL2SQL see it in catalog_hints.
+    # Round v4.4 verified that questions outside the mart's coverage (e.g.
+    # "peajes 2023" against `flujo_vehicular_peajes_caba` whose data ends
+    # 2020-03) wasted ~30s on a futile pipeline; surfacing the range lets
+    # the LLM deflect with a specific "data goes from X to Y" answer in
+    # milliseconds instead of running NL2SQL + analyst against an empty
+    # result.
+    description_with_coverage = mart.description or ""
+    if status == "built":
+        coverage_parts: list[str] = []
+        try:
+            from app.application.marts.builder import _TEMPORAL_COL_RE  # type: ignore
+            with engine.connect() as cov_conn:
+                for c in mart.canonical_columns:
+                    if not _TEMPORAL_COL_RE.search(c.name):
+                        continue
+                    qualified = f'{mart.schema_name}."{mart.view_name}"'
+                    col_q = f'"{c.name}"'
+                    row = cov_conn.execute(text(
+                        f"SELECT MIN({col_q}::text) AS lo, "
+                        f"       MAX({col_q}::text) AS hi "
+                        f"FROM {qualified} WHERE {col_q} IS NOT NULL"
+                    )).fetchone()
+                    if row and row.lo and row.hi:
+                        coverage_parts.append(f"{c.name} [{row.lo[:10]} .. {row.hi[:10]}]")
+        except Exception:
+            logger.debug("data_coverage compute failed for %s", mart.id, exc_info=True)
+        if coverage_parts:
+            description_with_coverage = (
+                f"{mart.description or ''}\n\n"
+                f"COBERTURA TEMPORAL: {'; '.join(coverage_parts)}. "
+                f"Si la pregunta filtra por valores fuera de este rango, "
+                f"deflectá explicando la cobertura disponible."
+            )
     portals_array = _pg_array(mart.source_portals)
     unique_index_array = _pg_array(mart.refresh.unique_index)
     # Compute the discovery embedding only when the build landed successfully.
@@ -262,7 +299,7 @@ def _upsert_mart_definition(
                 "id": mart.id,
                 "sch": mart.schema_name,
                 "vn": mart.view_name,
-                "desc": mart.description,
+                "desc": description_with_coverage,
                 "dom": mart.domain,
                 "portals": portals_array,
                 "sql": sql_to_persist,
