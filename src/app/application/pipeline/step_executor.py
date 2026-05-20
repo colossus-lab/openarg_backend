@@ -102,7 +102,12 @@ _LIVE_CONNECTOR_TIMEOUT_S = 60.0
 # redirects to the sandbox/mart path. This ONLY fires when a strong mart
 # exists — a topic with NO mart (or a weak match) yields a low score and
 # is left to `search_ckan` untouched, so live-only topics keep working.
-_MART_REDIRECT_THRESHOLD = 0.50
+# Round v4.4 verification (R002 peajes) showed mart sim 0.630 passing
+# easily, but other questions with weaker matches needed coverage. Lowered
+# from 0.50 → 0.45 to capture more cases. Tests on v4.3 baseline confirmed
+# no-mart questions (e.g. "receta de asado") stay at sim 0.43-0.44 → still
+# don't get redirected.
+_MART_REDIRECT_THRESHOLD = 0.45
 
 
 async def _top_mart_similarity(nl_query: str, deps: ConnectorDeps) -> float:
@@ -303,6 +308,38 @@ async def execute_steps(
     results: list[DataResult] = []
     warnings: list[str] = []
     steps = plan.steps[:5]
+
+    if not steps:
+        return results, warnings
+
+    # BUG-001 Capa 1: strip redundant search_ckan when a mart covers the
+    # question. This runs at every execute_steps invocation — including
+    # replan-emitted plans — because `inject_fallbacks_node` only sees the
+    # *initial* plan, not the one produced by `coordinator → replan`.
+    # Round v4.4 verification revealed the planner ignores the rule mainly
+    # on replan: a first-step SQL failure triggers replan, which emits
+    # search_ckan "by trying broader sources". The redirect at dispatch_step
+    # still catches it, but pays an extra NL2SQL round trip. Stripping
+    # here cuts that loop short.
+    has_sandbox = any(s.action == "query_sandbox" for s in steps)
+    has_ckan = any(s.action == "search_ckan" for s in steps)
+    if has_sandbox and has_ckan and nl_query.strip():
+        try:
+            sim = await _top_mart_similarity(nl_query, deps)
+            if sim >= _MART_REDIRECT_THRESHOLD:
+                dropped = [s for s in steps if s.action == "search_ckan"]
+                steps = [s for s in steps if s.action != "search_ckan"]
+                logger.info(
+                    "BUG-001 Capa 1: dropped %d redundant search_ckan step(s) "
+                    "in execute_steps — mart sim=%.3f >= %.2f",
+                    len(dropped),
+                    sim,
+                    _MART_REDIRECT_THRESHOLD,
+                )
+        except Exception:
+            logger.debug(
+                "BUG-001 Capa 1 (execute_steps) check failed", exc_info=True
+            )
 
     if not steps:
         return results, warnings

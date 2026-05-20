@@ -16,7 +16,7 @@ Rules:
 - Only reference the tables and columns listed above.
 - Always use double-quoted identifiers for column names that contain spaces, accents, or special characters.
 - CRITICAL: Most columns are stored as TEXT (even years, numbers, dates). ALWAYS compare with text literals: WHERE anio = '1980', NOT WHERE anio = 1980. Use CAST(col AS NUMERIC) only for aggregations or arithmetic, never for simple equality/filtering.
-- When casting to NUMERIC, filter NULLs and non-numeric values first: WHERE col IS NOT NULL AND col ~ '^\-?\d+\.?\d*$'
+- When casting to NUMERIC, filter NULLs and non-numeric values first: WHERE col IS NOT NULL AND col ~ '^\-?\d+\.?\d*$'. **This regex pre-check applies ONLY when the column is typed as TEXT in the schema.** If the column is already `numeric`/`integer`/`bigint`/`double precision` (check the "Columnas (tipo):" lines in tables_context), DO NOT use the `~` operator — it errors with `operator does not exist: numeric ~ unknown`. For already-numeric columns, just filter with `WHERE col IS NOT NULL`. Marts often expose pre-cast numeric columns (e.g. `cantidad_pasos`, `cantidad_hechos`, `monto`).
 - Use ILIKE for case-insensitive text matching (Argentine data often has inconsistent casing and accents).
 - Limit results to 1000 rows max (add LIMIT 1000 if appropriate).
 - Return ONLY the SQL query, nothing else. No markdown, no explanation.
