@@ -1,0 +1,83 @@
+id: inflacion_argentina
+version: 0.1.0
+description: |
+  Inflación de Argentina — IPC nacional/GBA por categoría con sus 3
+  representaciones canónicas: variación mensual, variación interanual
+  e índice base 100. Source: INDEC IPC, datasets bajo
+  `cache_indec_ipc_*` (formato long, post-unpivot fix 2026-05-08).
+
+  Cubre desde enero 2017 hasta el último mes publicado, por categoría
+  de canasta (Nivel general, Alimentos y bebidas, Vestimenta, Transporte,
+  Comunicación, etc.).
+
+  Build basado en analytics de prod (47 días, ~100 hits sobre IPC):
+  preguntas como "inflación últimos meses", "inflación de Milei",
+  "qué subió más el último mes", "variación interanual de alimentos"
+  caen sobre este universo.
+
+  NOTA: el dataset upstream estaba pivoteado (cada mes = columna). El
+  unpivot fix de `indec_tasks.py` lo dejó en formato long
+  `(Región GBA, periodo, valor)`. Este mart agrega un campo
+  `tipo_medida` para distinguir entre variación mensual %, variación
+  interanual % e índice base 2017=100.
+domain: economia
+
+sources:
+  portals: [indec]
+  resource_patterns: [
+    "public.cache_indec_ipc_variaci_n_mensual_aperturas",
+    "public.cache_indec_ipc_var_interanual_aperturas",
+    "public.cache_indec_ipc_ndices_aperturas"
+  ]
+
+canonical_columns:
+  - name: tipo_medida
+    type: text
+    description: "variacion_mensual | variacion_interanual | indice"
+  - name: categoria
+    type: text
+    description: Categoría de canasta IPC (Nivel general, Alimentos, etc.) o región GBA
+  - name: periodo
+    type: timestamp
+    description: Mes de la observación
+  - name: valor
+    type: numeric
+    description: Valor numérico de la medida (% para variaciones, índice base 100 para índice)
+
+# UNION ALL de las 3 representaciones IPC. Cada source tiene el mismo
+# schema canónico `(concepto, periodo, valor)` post-unpivot, así que
+# unir es sumar un literal `tipo_medida` que identifica el sentido del
+# valor. NULLIF + cast tolerante porque algunos rows traen "s/d" o
+# strings vacíos en el origen.
+sql: |
+  SELECT
+    'variacion_mensual'::text                     AS tipo_medida,
+    NULLIF(TRIM("Región GBA"), '')                AS categoria,
+    periodo::timestamp                            AS periodo,
+    NULLIF(TRIM(valor::text), '')::numeric        AS valor
+  FROM {{ live_table('indec::ipc_variaci_n_mensual_aperturas') }}
+  WHERE NULLIF(TRIM(valor::text), '') ~ '^-?[0-9]+(\.[0-9]+)?$'
+
+  UNION ALL
+
+  SELECT
+    'variacion_interanual'::text                  AS tipo_medida,
+    NULLIF(TRIM("Región GBA"), '')                AS categoria,
+    periodo::timestamp                            AS periodo,
+    NULLIF(TRIM(valor::text), '')::numeric        AS valor
+  FROM {{ live_table('indec::ipc_var_interanual_aperturas') }}
+  WHERE NULLIF(TRIM(valor::text), '') ~ '^-?[0-9]+(\.[0-9]+)?$'
+
+  UNION ALL
+
+  SELECT
+    'indice'::text                                AS tipo_medida,
+    NULLIF(TRIM("Región GBA"), '')                AS categoria,
+    periodo::timestamp                            AS periodo,
+    NULLIF(TRIM(valor::text), '')::numeric        AS valor
+  FROM {{ live_table('indec::ipc_ndices_aperturas') }}
+  WHERE NULLIF(TRIM(valor::text), '') ~ '^-?[0-9]+(\.[0-9]+)?$'
+
+refresh:
+  policy: manual
+  unique_index: []

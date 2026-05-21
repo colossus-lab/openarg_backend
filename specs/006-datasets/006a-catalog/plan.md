@@ -57,7 +57,7 @@ class CachedData:
 
 | Method | Path | Behavior |
 |---|---|---|
-| GET | `/api/v1/datasets/` | List indexed datasets (pagination, filter by portal) |
+| GET | `/api/v1/datasets/` | List indexed datasets (pagination, filter by portal). Returns `DatasetSummary` rows with `columns: list[str] \| None` parsed from the JSON-array text stored in `datasets.columns` (helper `_parse_columns`). Powers the frontend column-aware "ask in chat" prompt. |
 | GET | `/api/v1/datasets/stats` | Count per portal |
 | POST | `/api/v1/datasets/scrape/{portal}` | Trigger scrape (admin) — dispatches worker owned by `006b-ingestion` |
 | GET | `/api/v1/datasets/{id}/download` | Download file (redirect to S3 or upstream) |

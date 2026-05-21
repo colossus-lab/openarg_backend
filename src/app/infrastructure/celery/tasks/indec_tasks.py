@@ -18,8 +18,20 @@ import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
+from app.application.pipeline.parsers import (
+    dedupe_column_names,
+    parse_hierarchical_headers,
+    promote_buried_headers,
+    unpivot_if_time_pivoted,
+)
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks.collector_tasks import (
+    _combine_multirow_header,
+    _detect_data_header_range,
+    _detect_data_header_row,
+    _finalize_cached_dataset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +173,9 @@ def _register_dataset(engine, ds_info: dict, table_name: str, df: pd.DataFrame):
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
                     (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags,
-                     :now, true, :rows)
+                     :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
@@ -193,47 +205,49 @@ def _register_dataset(engine, ds_info: dict, table_name: str, df: pd.DataFrame):
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "now": now,
-                },
-            )
+    # Out of the begin() block: cached_datasets INSERT inside
+    # _finalize_cached_dataset opens its own tx and would otherwise race
+    # the uncommitted datasets row, hitting fk_cached_datasets_dataset_id.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format=ds_info["url"].rsplit(".", 1)[-1].lower()
+            if "." in ds_info["url"]
+            else "csv",
+            download_url=ds_info["url"],
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
 
 def _detect_header_row(df_raw: pd.DataFrame) -> int:
-    """Find the first row that looks like a data header (many non-NaN values).
+    """Find the first row that looks like a real INDEC header.
 
-    INDEC XLS files have 3-5 rows of presentation headers (title, period,
-    empty rows) before the actual column headers.  We look for the first row
-    where ≥30 % of cells are non-NaN — that's the header or the start of data.
-    Single-cell title rows are skipped.
+    Delegates to the shared `_detect_data_header_row`, which checks for
+    non-empty alphabetic tokens and rejects rows dominated by `Unnamed:N`
+    placeholders. The previous implementation only counted non-NaN cells,
+    so a row of `["title", "Unnamed:1", "Unnamed:2", ...]` passed (≥30 %
+    non-NaN) and the WS0 validator killed it later as `placeholder_headers`.
+    Pivoted layouts (`País, 2010, 2011, ...`) keep working — pure-digit
+    tokens are NOT counted as placeholders.
     """
-    ncols = df_raw.shape[1]
-    threshold = max(3, ncols * 0.3)
-
-    for idx in range(min(15, len(df_raw))):
-        row = df_raw.iloc[idx]
-        non_null_count = row.notna().sum()
-        if non_null_count >= threshold:
-            return idx
-    return 0
+    return _detect_data_header_row(df_raw)
 
 
+# Time-pivot detection, header recovery and dedup primitives now live in
+# `app.application.pipeline.parsers.{time_pivot,header_recovery,column_normalization}`.
+# This module imports them at the top; the inline copies that used to sit
+# here were extracted in 2026-05-08 (specs/021-parser-hardening Phase 1) so
+# the generic collector path can use the same logic.
 def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     """Parse a single Excel sheet, auto-detecting the header row."""
     try:
@@ -258,26 +272,41 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     if df_raw.empty:
         return None
 
-    header_idx = _detect_header_row(df_raw)
-
-    # Re-read with the correct header row
-    try:
-        df = pd.read_excel(
-            io.BytesIO(content),
-            sheet_name=sheet,
-            header=header_idx,
-            engine="xlrd",
-        )
-    except Exception:
-        try:
-            df = pd.read_excel(
-                io.BytesIO(content),
-                sheet_name=sheet,
-                header=header_idx,
-                engine="openpyxl",
-            )
-        except Exception:
+    parsed = parse_hierarchical_headers(df_raw)
+    if parsed.year_row_idx is not None or parsed.period_row_idx is not None:
+        df = df_raw.iloc[parsed.skipped_rows :].reset_index(drop=True).copy()
+        if df.empty:
             return None
+        df.columns = parsed.columns
+    else:
+        # Use the range detector so 2-row headers (parent merged cells +
+        # child sub-headers, common in INDEC `cuadros`) produce composite
+        # column names like `Exportaciones_Total_mensual` instead of
+        # `Unnamed: 2` from reading only the child row.
+        start, end = _detect_data_header_range(df_raw)
+        if end - start > 1:
+            df = df_raw.iloc[end:].reset_index(drop=True).copy()
+            if df.empty:
+                return None
+            df.columns = _combine_multirow_header(df_raw, start, end)
+        else:
+            try:
+                df = pd.read_excel(
+                    io.BytesIO(content),
+                    sheet_name=sheet,
+                    header=start,
+                    engine="xlrd",
+                )
+            except Exception:
+                try:
+                    df = pd.read_excel(
+                        io.BytesIO(content),
+                        sheet_name=sheet,
+                        header=start,
+                        engine="openpyxl",
+                    )
+                except Exception:
+                    return None
 
     # Drop rows that are entirely NaN (spacer rows after header)
     df = df.dropna(how="all").reset_index(drop=True)
@@ -287,13 +316,41 @@ def _parse_xls_sheet(content: bytes, sheet: str | int) -> pd.DataFrame | None:
     if df.empty or len(df) < 2:
         return None
 
-    # Clean column names
-    df.columns = [
-        re.sub(r"\s+", " ", str(c)).strip()[:120]
-        if not str(c).startswith("Unnamed")
-        else f"col_{i}"
-        for i, c in enumerate(df.columns)
-    ]
+    if parsed.year_row_idx is None and parsed.period_row_idx is None:
+        # Legacy fallback path: clean inferred header names from pandas.
+        df.columns = [
+            re.sub(r"\s+", " ", str(c)).strip()[:120]
+            if not str(c).startswith("Unnamed")
+            else f"col_{i}"
+            for i, c in enumerate(df.columns)
+        ]
+    else:
+        df.columns = [re.sub(r"\s+", " ", str(c)).strip()[:120] for c in df.columns]
+
+    # Recover headers buried in data rows when pandas mistook a TITLE
+    # for the header (most cols ended up as `col_N`). No-op when headers
+    # look real. Runs before dedup so the composite names it creates
+    # also get deduped if they collide.
+    df = promote_buried_headers(df)
+
+    # Drop trailing all-NaN columns introduced by forward-fill in
+    # `promote_buried_headers` — when the merged-cell parent label
+    # spans wider than the actual data, the fill propagates the last
+    # populated header into columns that have no data underneath. The
+    # original `dropna(axis=1)` above runs BEFORE the recovery, so this
+    # second pass catches what the recovery introduced.
+    df = df.dropna(axis=1, how="all")
+
+    # Dedupe BEFORE unpivot. Once melted into long format the column-name
+    # collision goes away, but the wide-sheet path (and the unmelted
+    # branch) still has to feed `df.to_sql` which rejects duplicate names.
+    df.columns = dedupe_column_names(list(df.columns))
+
+    # Unpivot the time-pivoted INDEC layout into long format `(concepto,
+    # periodo, valor)` so the downstream query pipeline can filter and
+    # aggregate naturally. Idempotent: long-formatted sheets are returned
+    # unchanged.
+    df = unpivot_if_time_pivoted(df)
 
     return df
 
@@ -410,7 +467,7 @@ def ingest_indec(self):
                     if len(df) > MAX_ROWS:
                         df = df.head(MAX_ROWS)
 
-                    df.to_sql(table_name, engine, if_exists="replace", index=False)
+                    df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
                     sheet_info = {
                         **ds_info,
@@ -427,6 +484,20 @@ def ingest_indec(self):
                         )
 
                         index_dataset_embedding.delay(dataset_id)
+
+                    # Register in `raw_table_versions` so marts find this
+                    # table via `live_table('indec::<source_id>')` macro,
+                    # decoupling them from the physical `cache_*` name
+                    # (DEBT-019-006).
+                    from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                    register_via_b_table(
+                        engine,
+                        resource_identity=f"indec::{suffix}",
+                        table_name=table_name,
+                        schema_name="raw",
+                        row_count=len(df),
+                    )
 
                     results["ingested"] += 1
                     logger.info(

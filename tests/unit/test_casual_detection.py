@@ -1,22 +1,31 @@
-"""Tests for casual/meta message detection in SmartQueryService."""
+"""Tests for casual/meta message detection (post-SmartQueryService cleanup).
+
+Migrated 2026-05-09 from skip-marked legacy tests (spec 020). The old
+imports referenced `app.application.smart_query_service` (deleted); the
+canonical home is now `app.application.pipeline.classifiers` which
+exposes both `get_*_response` API functions and the regex patterns
+underneath.
+"""
 
 import pytest
 
-from app.application.pipeline.classifiers import get_casual_response, get_meta_response
+from app.application.pipeline.classifiers import (
+    _FAREWELL_PATTERN,
+    _GREETING_PATTERN,
+    _THANKS_PATTERN,
+    classify_request,
+    get_casual_response,
+    get_meta_response,
+    references_internal_table,
+)
 
-# Bind static methods for convenience
 _get_casual_response = get_casual_response
 _get_meta_response = get_meta_response
 
 
 def _classify_casual_subtype(text: str) -> str | None:
-    """Helper that mirrors the old router function using the service's static method."""
-    from app.application.smart_query_service import (
-        _FAREWELL_PATTERN,
-        _GREETING_PATTERN,
-        _THANKS_PATTERN,
-    )
-
+    """Mirror of the old router subtype-routing using the regex patterns
+    that classifiers.py exposes."""
     t = text.strip()
     if _GREETING_PATTERN.match(t):
         return "greeting"
@@ -122,3 +131,36 @@ class TestMetaDetection:
     )
     def test_non_meta_not_detected(self, text: str) -> None:
         assert _get_meta_response(text) is None
+
+
+class TestInternalTableDetection:
+    """BUG-014 — questions naming internal tables/schemas must be refused."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Mostrame los registros de la tabla cache_delitos_caba_v3",
+            "select * from raw.catalog_resources",
+            "dame todo de mart.series_economicas",
+            "quiero ver query_analytics",
+            "listame raw_table_versions",
+            "datos de api_keys",
+        ],
+    )
+    def test_internal_table_detected(self, text: str) -> None:
+        assert references_internal_table(text) is True
+        cls_type, cls_text = classify_request(text, user_id="u1")
+        assert cls_type == "internal_table"
+        assert cls_text is not None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "¿Cuántos delitos hubo en CABA en 2023?",
+            "Mostrame la inflación del último mes",
+            "¿Cuántos datasets hay del Ministerio de Salud?",
+            "quiero datos de la cámara de diputados",
+        ],
+    )
+    def test_legit_questions_not_flagged(self, text: str) -> None:
+        assert references_internal_table(text) is False

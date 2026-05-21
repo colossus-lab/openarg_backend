@@ -56,6 +56,8 @@ The phase exits with either populated `data_results` and `step_warnings`, or emp
 - **FR-016**: The executor MUST retry failed steps with backoff (max 2 retries) on retryable errors (timeout, 5xx).
 - **FR-017**: The executor MUST emit per-connector streaming status ("Querying series...", "Querying BCRA...").
 - **FR-017a**: The sandbox connector MUST short-circuit pure dataset-discovery questions (for example, "qué datasets de educación hay...") into a structured listing `DataResult` instead of forcing them through NL2SQL. Listing available datasets is discovery, not SQL analysis.
+- **FR-018 (BUG-001 safety net, commit `2fe1a6b`)**: before dispatching a `search_ckan` step, the executor MUST query `mart_definitions` for the top-1 cosine similarity against the user's question (`_top_mart_similarity`). If it is **≥ 0.50**, the step MUST be redirected to `execute_sandbox_step` (which carries the BUG-001 mart-injection — marts are prepended to NL2SQL's table universe). A topic with no covering mart yields a low similarity and is left untouched — the live `search_ckan` path runs normally. This is the last line of defense after the planner-level hint suppression (FR-012a) and the planner prompt rule (FR-012b).
+- **FR-019 (BUG-002, commit `2fe1a6b`)**: live-connector steps (currently `search_ckan`) MUST be wrapped in an `asyncio.wait_for` with a **60 s wall-clock cap**. On timeout the step returns `[]` (graceful: the analyst answers "sin datos" instead of hanging the request). Without this, a pathologically slow CKAN fetch escalated to ~124s and killed the WebSocket mid-stream. Mart / sandbox steps are NOT capped — a big mart query legitimately takes 20–45 s.
 
 ## 5. Success Criteria
 

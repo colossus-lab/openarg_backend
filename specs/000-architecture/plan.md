@@ -2,8 +2,76 @@
 
 **Related spec**: [./spec.md](./spec.md)
 **Type**: Reverse-engineered
-**Status**: Draft
-**Last synced with code**: 2026-04-10
+**Status**: Draft — extended with WS0/WS0.5/WS2/WS3/WS4/WS5 modules (2026-04-25); medallion finalised raw → mart (2026-05-04); Sprint 0.1–0.7 polish (2026-05-05)
+**Last synced with code**: 2026-05-05
+
+## Medallion finalisation (2026-05-04)
+
+The original WS3/WS4 plan envisioned a 3-tier medallion (`raw → staging → mart`). Mig 0042 dropped the `staging` schema and `staging_contract_state` table — see [spec 018](../018-contracts-staging/spec.md) marked DEPRECATED. The system now goes directly from raw landings to mart materialised views via `live_table()` macro resolution. References to staging in this plan that pre-date the deprecation are kept only as historical breadcrumbs; the schema does not exist in production.
+
+## Sprint 0.1–0.7 polish (2026-05-05)
+
+Operational hardening and bug fixes that landed AFTER the 2026-04-25 collector rewrite. Full breakdown in [spec.md §0](./spec.md#0-recent-material-changes-sprint-01--07-2026-05-04--2026-05-05). Highlights:
+
+- **Atomic raw promotion** in `_apply_cached_outcome`: registry + catalog_resources update happens BEFORE the `cached_datasets='ready'` write; failure demotes outcome to `error`. Closes the dangling-ready window where the raw promotion could fail silently.
+- **`raw_table_versions.is_truncated`** (mig 0046) flags rows that hit `MAX_TABLE_ROWS=500_000` so dashboards can tell apart full landings from sampled prefixes.
+- **Mart embeddings** auto-generated on every build (Bedrock Cohere multilingual v3) and back-filled for all 6 existing marts.
+- **Sandbox schema allowlist** widened from `('public',)` to `('public', 'mart', 'raw')` with `_PREFIX_FREE_SCHEMAS` so SELECT against curated views and raw landings is no longer rejected. `openarg_sandbox_ro` granted USAGE+SELECT on those schemas.
+- **Advisory lock helpers** (`_try_advisory_lock`, `_try_backfill_lock`) now persist the acquiring connection in a module-level dict so the session-scoped lock survives between acquire and release. Previous version closed the connection between the two calls, releasing the lock instantly — the "mutex" was effectively a no-op.
+- **Honest defaults** in `catalog_backfill`: `parser_version` → `legacy:unknown` (was lying as `phase4-v1`), `layout_profile` and `header_quality` → `None` for unknown rows (were fabricating `simple_tabular`/`good`).
+- **Sweep retrospective** UNIONs `cached_datasets` with `raw_table_versions` so the ~7% of raw rows without a cd entry are still validated.
+- **`/data/tables` includes raw** via `sandbox.list_cached_tables` JOIN with rtv; `/data/search` includes marts via embedding similarity.
+
+## Collector rewrite addendum (2026-04-25)
+
+Six new application-layer modules were added per [collector_plan.md](../../../collector_plan.md):
+
+```
+src/app/application/
+├── validation/         # WS0  — IngestionValidator + 14 detectors + collector_hooks + findings_repository
+├── state_machine/      # WS0.5 — Status enum + transitions + StateMachineEnforcer
+├── catalog/            # WS4  — title_extractor (canonical) + physical_namer (deterministic table name)
+├── discovery/          # WS3  — CatalogDiscovery (hybrid + catalog-only modes)
+├── expander/           # WS5  — MultiFileExpander (per-file ZIP rules)
+└── pipeline/parsers/   # WS5  — HierarchicalHeaderParser (INDEC year+quarter+month)
+```
+
+New domain entity:
+- `app/domain/entities/dataset/catalog_resource.py` — `CatalogResource` (logical catalog row) with status/kind enum constants.
+
+New persistence:
+- `catalog_resources` (migration 0035) — vector(1024) HNSW + parent_resource_id + check constraints.
+- `ingestion_findings` (migration 0033) — audit trail for the validator.
+- `cached_datasets.error_category` (migration 0034) — closed taxonomy + retry-invariant trigger.
+- `cache_drop_audit` (migration 0036) — pg_event_trigger logs every `DROP TABLE cache_*`.
+
+New Celery tasks:
+- `openarg.ws0_retrospective_sweep` (every 6h) — validator Modo 3.
+- `openarg.ws0_5_state_invariants_sweep` (every 30 min) — state-machine enforcer.
+- `openarg.catalog_backfill` — populates `catalog_resources` from existing `datasets`+`cached_datasets`.
+- `openarg.seed_connector_endpoints` — inserts the logical `live_api` rows for connector-backed capabilities.
+- `openarg.bulk_collect_all` / `openarg.reconcile_cache_coverage` — materialization + recovery phase that must run after a destructive staging reset.
+- `openarg.refresh_curated_sources` (weekly) — loads `config/curated_sources.json` into `datasets`.
+- `openarg.ingest_censo2022` — Censo 2022 cuadro-by-cuadro seeder.
+- `openarg.ops_temp_dir_cleanup` (hourly) — `/tmp/tmp*` sweep.
+- `openarg.ops_portal_health` (every 30 min) — pings each portal, marks dead ones in `portals`.
+
+New scripts:
+- `scripts/diagnostics/factual_map.py` — WS1 read-only diagnostic.
+- `scripts/staging_reset.py` — destructive wipe + full rebuild dispatch chain (seed connectors, scrape, backfill, bulk collect, reconcile, final backfill; refuses in prod).
+- `scripts/ci/validate_curated_sources.py` — CI check for `config/curated_sources.json`.
+
+New specs:
+- [013-ingestion-validation](../013-ingestion-validation/) — WS0.
+- [014-state-machine](../014-state-machine/) — WS0.5.
+- [015-catalog-resources](../015-catalog-resources/) — WS2 + WS3 + WS4.
+
+Feature flags introduced:
+- `OPENARG_DISABLE_INGESTION_VALIDATOR=1` — disable WS0 hooks (Modos 1+2).
+- `OPENARG_SWEEP_AUTOFLIP=1` — let WS0 Modo 3 flip materialization_status.
+- `OPENARG_WS0_5_AUTO_ENFORCE=1` — let WS0.5 enforcer auto-correct (default dry-run).
+- `OPENARG_HYBRID_DISCOVERY=1` — append catalog_resources hits in the planner.
+- `OPENARG_CATALOG_ONLY=1` — replace `table_catalog` entirely (staging cutover).
 
 ---
 

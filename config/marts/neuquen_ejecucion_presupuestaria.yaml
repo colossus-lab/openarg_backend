@@ -1,0 +1,136 @@
+id: neuquen_ejecucion_presupuestaria
+version: 0.1.0
+description: |
+  Ejecución presupuestaria de la Legislatura de la Provincia del Neuquén.
+  Publicada periódicamente con detalle por jurisdicción × servicio
+  administrativo × unidad orgánica × clasificador económico, con
+  monto crédito inicial, definitivo, ejecutado del mes y total, y
+  saldo disponible.
+
+  Source: 118 versiones de `neuquen_legislatura__ejecucion_recursos_y_gastos`
+  con schema IDÉNTICO de 25 columnas (cohesion ratio 1.17 — best in
+  class). Cada row es una partida específica del presupuesto.
+
+  Use cases típicos: "presupuesto ejecutado por jurisdicción en
+  Neuquén", "saldo disponible por unidad orgánica", "porcentaje de
+  ejecución por clasificador", "cuánto se gastó en personal del poder
+  legislativo de Neuquén".
+domain: gobierno
+
+sources:
+  portals: [neuquen_legislatura]
+  resource_patterns: ["neuquen_legislatura__ejecucion_recursos_y_gastos*"]
+
+canonical_columns:
+  - name: juri
+    type: text
+    description: Jurisdicción
+  - name: sa
+    type: text
+    description: Servicio administrativo
+  - name: unor
+    type: text
+    description: Unidad orgánica
+  - name: cpn1
+    type: text
+    description: Clasificador por finalidad nivel 1
+  - name: cpn2
+    type: text
+    description: Clasificador por finalidad nivel 2
+  - name: cpn3
+    type: text
+    description: Clasificador por finalidad nivel 3
+  - name: atn1
+    type: text
+    description: Atributo nivel 1
+  - name: atn2
+    type: text
+    description: Atributo nivel 2
+  - name: atn3
+    type: text
+    description: Atributo nivel 3
+  - name: fina
+    type: text
+    description: Finalidad
+  - name: func
+    type: text
+    description: Función
+  - name: subf
+    type: text
+    description: Subfunción
+  - name: inci
+    type: text
+    description: Inciso (clasificación económica del gasto)
+  - name: ppal
+    type: text
+    description: Partida principal
+  - name: ppar
+    type: text
+    description: Partida parcial
+  - name: spar
+    type: text
+    description: Subpartida
+  - name: fufi
+    type: text
+    description: Fuente de financiamiento
+  - name: ubge
+    type: text
+    description: Ubicación geográfica
+  - name: imputacion
+    type: text
+    description: Imputación contable
+  - name: credito_inicial
+    type: text
+    description: Crédito inicial asignado
+  - name: credito_definitivo
+    type: text
+    description: Crédito definitivo (post modificaciones)
+  - name: ejecutado_del_mes
+    type: text
+    description: Monto ejecutado en el mes
+  - name: ejecutado_total
+    type: text
+    description: Monto ejecutado total acumulado
+  - name: saldo_disponible
+    type: text
+    description: Saldo disponible (crédito_definitivo − ejecutado_total)
+
+sql: |
+  SELECT
+    NULLIF(TRIM("JURI"::text), '')                AS juri,
+    NULLIF(TRIM("SA"::text), '')                  AS sa,
+    NULLIF(TRIM("UNOR"::text), '')                AS unor,
+    NULLIF(TRIM("CPN1"::text), '')                AS cpn1,
+    NULLIF(TRIM("CPN2"::text), '')                AS cpn2,
+    NULLIF(TRIM("CPN3"::text), '')                AS cpn3,
+    NULLIF(TRIM("ATN1"::text), '')                AS atn1,
+    NULLIF(TRIM("ATN2"::text), '')                AS atn2,
+    NULLIF(TRIM("ATN3"::text), '')                AS atn3,
+    NULLIF(TRIM("FINA"::text), '')                AS fina,
+    NULLIF(TRIM("FUNC"::text), '')                AS func,
+    NULLIF(TRIM("SUBF"::text), '')                AS subf,
+    NULLIF(TRIM("INCI"::text), '')                AS inci,
+    NULLIF(TRIM("PPAL"::text), '')                AS ppal,
+    NULLIF(TRIM("PPAR"::text), '')                AS ppar,
+    NULLIF(TRIM("SPAR"::text), '')                AS spar,
+    NULLIF(TRIM("FUFI"::text), '')                AS fufi,
+    NULLIF(TRIM("UBGE"::text), '')                AS ubge,
+    NULLIF(TRIM("IMPUTACION"), '')                AS imputacion,
+    NULLIF(TRIM("CREDITO INICIAL"::text), '')     AS credito_inicial,
+    NULLIF(TRIM("CREDITO DEFINITIVO"::text), '')  AS credito_definitivo,
+    NULLIF(TRIM("EJECUTADO DEL MES"::text), '')   AS ejecutado_del_mes,
+    NULLIF(TRIM("EJECUTADO TOTAL"::text), '')     AS ejecutado_total,
+    NULLIF(TRIM("SALDO DISPONIBLE"::text), '')    AS saldo_disponible
+  FROM {{ live_tables_by_table_pattern(
+      'neuquen_legislatura__ejecucion_recursos_y_gastos*',
+      expected_columns=['JURI', 'SA', 'UNOR', 'CPN1', 'CPN2', 'CPN3',
+                        'ATN1', 'ATN2', 'ATN3', 'FINA', 'FUNC', 'SUBF',
+                        'INCI', 'PPAL', 'PPAR', 'SPAR', 'FUFI', 'UBGE',
+                        'IMPUTACION', 'CREDITO INICIAL', 'CREDITO DEFINITIVO',
+                        'EJECUTADO DEL MES', 'EJECUTADO TOTAL', 'SALDO DISPONIBLE']
+  ) }} sub
+  WHERE NULLIF(TRIM("IMPUTACION"), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

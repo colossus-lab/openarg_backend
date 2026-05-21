@@ -1,0 +1,39 @@
+name: 'openarg'
+version: '0.1.0'
+config-version: 2
+
+# This profile is referenced from `profiles.yml` (see `profiles.yml.example`).
+# Operators put the real profile in `~/.dbt/profiles.yml` or set
+# `DBT_PROFILES_DIR` to a path containing the profile.
+profile: 'openarg'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# MASTERPLAN Fase 5 — medallion alignment.
+# `staging.*` and `mart.*` schemas exist in Postgres regardless of dbt;
+# dbt's `+schema` config below adds a suffix only when the operator wants
+# isolation between dbt-managed and Celery-managed tables. Default empty
+# so dbt models land in the same `staging` / `mart` schemas the rest of
+# the system uses.
+models:
+  openarg:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: mart
+
+# `vars` are referenced in models via `{{ var('name') }}`.
+vars:
+  # Threshold below which a contract row count triggers a warn finding.
+  min_rows_warn: 30

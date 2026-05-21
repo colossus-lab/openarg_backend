@@ -1,0 +1,71 @@
+id: caba_pauta_publicitaria
+version: 0.1.0
+description: |
+  Pauta publicitaria oficial del Gobierno de la Ciudad de Buenos Aires —
+  registro de gasto en publicidad oficial por medio y fecha de
+  publicación. Topic de alta relevancia política y periodística.
+
+  Source: 158 versiones de `caba__pauta_publicitaria` con 3 variantes
+  de schema upstream:
+    - 3 cols (Fecha, Medio, Importe) — formato más común
+    - 4 cols (FECHA_PUBLICACION, TIPO, MEDIO, IMPORTE) — formato extendido
+    - 4 cols (FECHA-PUBLICACION, TIPO, MEDIO, IMPORTE) — variante con guión
+
+  Mart unifica los 3 con `COALESCE` y normaliza a snake_case. La 4ta
+  variante upstream (parser-failed con todo en una col concatenada
+  `fecha,medio,importe`) NO se incluye — necesita re-parse.
+
+  Use cases típicos: "cuánto gastó CABA en pauta publicitaria",
+  "publicidad oficial por medio", "evolución del gasto en pauta GCBA",
+  "qué medios reciben más publicidad de la Ciudad".
+domain: politica
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__pauta_publicitaria*"]
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha de publicación de la pauta (varía formato)
+  - name: medio
+    type: text
+    description: Medio donde se publicó (TV, radio, web, gráfica, etc.)
+  - name: importe
+    type: text
+    description: Monto en pesos
+  - name: tipo
+    type: text
+    description: Tipo de pauta (cuando disponible — solo en versiones extendidas)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(COALESCE(
+        "Fecha"::text,
+        "FECHA_PUBLICACION"::text,
+        "FECHA-PUBLICACION"::text
+    )), '')                                          AS fecha,
+    NULLIF(TRIM(COALESCE(
+        "Medio",
+        "MEDIO"
+    )), '')                                          AS medio,
+    NULLIF(TRIM(COALESCE(
+        "Importe"::text,
+        "IMPORTE"::text
+    )), '')                                          AS importe,
+    NULLIF(TRIM("TIPO"), '')                         AS tipo
+  FROM {{ live_tables_by_table_pattern(
+      'caba__pauta_publicitaria*',
+      expected_columns=['Fecha', 'Medio', 'Importe',
+                        'FECHA_PUBLICACION', 'FECHA-PUBLICACION',
+                        'TIPO', 'MEDIO', 'IMPORTE']
+  ) }} sub
+  WHERE NULLIF(TRIM(COALESCE(
+        "Fecha"::text,
+        "FECHA_PUBLICACION"::text,
+        "FECHA-PUBLICACION"::text
+    )), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

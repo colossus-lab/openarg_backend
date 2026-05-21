@@ -1,0 +1,87 @@
+id: acumar_agentes_contaminantes
+version: 0.1.0
+description: |
+  Establecimientos identificados como Agentes Contaminantes Vigentes en
+  la Cuenca Matanza-Riachuelo (CMR), declarados por la Autoridad de Cuenca
+  Matanza-Riachuelo (ACUMAR) en cumplimiento del fallo CSJN 2008 "Mendoza,
+  Beatriz Silvia y otros c/ Estado Nacional".
+
+  Cada fila es un establecimiento contaminante individualizado con su
+  CURT (Código Único de Registro), razón social, dirección, departamento,
+  subcuenca y coordenadas geográficas. Cluster homogéneo de ~10+ versiones
+  en `acumar::cache_acumar_agentes_contaminantes_vigentes*` (~6K filas
+  combinadas vivas, plus históricos en versiones previas).
+
+  Es el único mart **ambiental** del catálogo. Cubre el caso emblemático
+  Mendoza Beatriz (saneamiento del Riachuelo) y permite ubicar fuentes
+  puntuales de contaminación industrial en una de las cuencas más
+  degradadas del país (residencia de ~5M de personas en AMBA Sur).
+
+  Casos de uso típicos:
+    * "empresas contaminantes en Lanús/La Matanza"
+    * "establecimientos del Riachuelo registrados por ACUMAR"
+    * "agentes contaminantes por subcuenca"
+    * "razones sociales contaminantes Cuenca Matanza"
+    * "ubicación de contaminantes industriales AMBA"
+domain: ambiente
+
+sources:
+  portals: [acumar]
+  resource_patterns:
+    - "acumar::agentes_contaminantes_vigentes*"
+
+canonical_columns:
+  - name: establecimiento_curt
+    type: text
+    description: Código Único de Registro de Tratamiento del establecimiento
+  - name: establecimiento_razon_social
+    type: text
+    description: Razón social de la empresa
+  - name: establecimiento_calle_nombre
+    type: text
+    description: Nombre de calle de la dirección
+  - name: establecimiento_calle_numero
+    type: text
+    description: Número de calle
+  - name: establecimiento_calle_referencia
+    type: text
+    description: Referencia adicional (piso, depto, manzana)
+  - name: establecimiento_departamento_nombre
+    type: text
+    description: Departamento/partido (Lanús, La Matanza, etc.)
+  - name: establecimiento_subcuenca
+    type: text
+    description: Subcuenca del Matanza-Riachuelo donde se localiza
+  - name: establecimiento_latitud
+    type: numeric
+    description: Latitud geográfica
+  - name: establecimiento_longitud
+    type: numeric
+    description: Longitud geográfica
+
+sql: |
+  SELECT
+    NULLIF(TRIM(establecimiento_curt::text), '')                AS establecimiento_curt,
+    NULLIF(TRIM(establecimiento_razon_social::text), '')        AS establecimiento_razon_social,
+    NULLIF(TRIM(establecimiento_calle_nombre::text), '')        AS establecimiento_calle_nombre,
+    NULLIF(TRIM(establecimiento_calle_numero::text), '')        AS establecimiento_calle_numero,
+    NULLIF(TRIM(establecimiento_calle_referencia::text), '')    AS establecimiento_calle_referencia,
+    NULLIF(TRIM(establecimiento_departamento_nombre::text), '') AS establecimiento_departamento_nombre,
+    NULLIF(TRIM(establecimiento_subcuenca::text), '')           AS establecimiento_subcuenca,
+    establecimiento_latitud::numeric                            AS establecimiento_latitud,
+    establecimiento_longitud::numeric                           AS establecimiento_longitud
+  FROM {{ live_tables_by_table_pattern(
+      'cache_acumar_agentes_contaminantes_vigentes*',
+      expected_columns=['establecimiento_curt', 'establecimiento_razon_social',
+                        'establecimiento_calle_nombre', 'establecimiento_calle_numero',
+                        'establecimiento_calle_referencia',
+                        'establecimiento_departamento_nombre',
+                        'establecimiento_subcuenca', 'establecimiento_latitud',
+                        'establecimiento_longitud'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(establecimiento_razon_social::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

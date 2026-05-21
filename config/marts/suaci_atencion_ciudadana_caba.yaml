@@ -1,0 +1,102 @@
+id: suaci_atencion_ciudadana_caba
+version: 0.1.0
+description: |
+  Sistema Único de Atención Ciudadana (SUACI) — Ciudad de Buenos Aires.
+  Cada fila es un reclamo / solicitud realizada por un ciudadano a través
+  de los canales del GCBA (147, web, presencial, app), categorizada por
+  prestación, comuna, barrio y geolocalización.
+
+  ~12 tablas live por trimestre (~5M filas totales). Útil para análisis
+  de demanda ciudadana, geografía urbana, performance del 147.
+domain: gobierno
+
+sources:
+  portals: [caba]
+  resource_patterns:
+    - "caba::sistema_unico_de_atencion_ciudadana*"
+
+canonical_columns:
+  - name: nro_solicitud
+    type: text
+    description: Número de la solicitud / reclamo
+  - name: periodo
+    type: text
+    description: Período (trimestre / mes)
+  - name: categoria
+    type: text
+    description: Categoría macro de la prestación
+  - name: prestacion
+    type: text
+    description: Prestación específica solicitada
+  - name: tipo
+    type: text
+    description: Tipo de reclamo / solicitud
+  - name: fecha_ingreso
+    type: text
+    description: Fecha de ingreso del reclamo
+  - name: hora_ingreso
+    type: text
+    description: Hora de ingreso del reclamo
+  - name: comuna
+    type: text
+    description: Comuna del reclamo
+  - name: barrio
+    type: text
+    description: Barrio del reclamo
+  - name: calle
+    type: text
+    description: Calle del reclamo
+  - name: altura
+    type: text
+    description: Altura
+  - name: esquina_proxima
+    type: text
+    description: Esquina próxima
+  - name: canal
+    type: text
+    description: Canal de ingreso (147, web, app, presencial...)
+  - name: genero
+    type: text
+    description: Género del solicitante
+  - name: estado_general
+    type: text
+    description: Estado del reclamo
+  - name: long
+    type: text
+    description: Longitud
+  - name: lat
+    type: text
+    description: Latitud
+
+sql: |
+  SELECT
+    NULLIF(TRIM(nro_solicitud::text), '')   AS nro_solicitud,
+    NULLIF(TRIM(periodo::text), '')         AS periodo,
+    NULLIF(TRIM(categoria::text), '')       AS categoria,
+    NULLIF(TRIM(prestacion::text), '')      AS prestacion,
+    NULLIF(TRIM(tipo::text), '')            AS tipo,
+    NULLIF(TRIM(fecha_ingreso::text), '')   AS fecha_ingreso,
+    NULLIF(TRIM(hora_ingreso::text), '')    AS hora_ingreso,
+    NULLIF(TRIM(comuna::text), '')          AS comuna,
+    NULLIF(TRIM(barrio::text), '')          AS barrio,
+    NULLIF(TRIM(calle::text), '')           AS calle,
+    NULLIF(TRIM(altura::text), '')          AS altura,
+    NULLIF(TRIM(esquina_proxima::text), '') AS esquina_proxima,
+    NULLIF(TRIM(canal::text), '')           AS canal,
+    NULLIF(TRIM(genero::text), '')          AS genero,
+    NULLIF(TRIM(estado_general::text), '')  AS estado_general,
+    NULLIF(TRIM(long::text), '')            AS long,
+    NULLIF(TRIM(lat::text), '')             AS lat
+  FROM {{ live_tables_by_table_pattern(
+      'caba__sistema_unico_de_atencion_ciudadana*',
+      expected_columns=['nro_solicitud', 'periodo', 'categoria', 'prestacion',
+                        'tipo', 'fecha_ingreso', 'hora_ingreso', 'comuna',
+                        'barrio', 'calle', 'altura', 'esquina_proxima',
+                        'canal', 'genero', 'estado_general', 'long', 'lat'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(nro_solicitud::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

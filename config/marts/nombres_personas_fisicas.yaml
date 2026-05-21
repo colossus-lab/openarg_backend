@@ -1,0 +1,44 @@
+id: nombres_personas_fisicas
+version: 0.1.0
+description: |
+  Frecuencia anual de nombres de personas físicas en Argentina. Cada fila
+  es un (nombre, año) con la cantidad de personas registradas con ese
+  nombre en el año. Dataset publicado por el Ministerio del Interior y
+  espejado en datos.gob.ar.
+
+  ~21 tablas live con shape canónico de 3 cols (nombre / cantidad / anio)
+  ~ 8M filas totales. Útil para análisis demográfico, antroponimia,
+  tendencias culturales.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::nombres_de_personas_fisicas*"
+
+canonical_columns:
+  - name: nombre
+    type: text
+    description: Nombre de la persona
+  - name: cantidad
+    type: numeric
+    description: Cantidad de personas registradas con ese nombre en el año
+  - name: anio
+    type: text
+    description: Año de registro
+
+sql: |
+  SELECT
+    NULLIF(TRIM(nombre::text), '') AS nombre,
+    cantidad::numeric              AS cantidad,
+    NULLIF(TRIM(anio::text), '')   AS anio
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__nombres_de_personas_fisicas*',
+      expected_columns=['nombre', 'cantidad', 'anio'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(nombre::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

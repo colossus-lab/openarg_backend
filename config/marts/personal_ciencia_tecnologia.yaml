@@ -1,0 +1,56 @@
+id: personal_ciencia_tecnologia
+version: 0.1.0
+description: |
+  Padrón de personas (investigadores, becarios, tecnólogos) registradas
+  en el Sistema de Información de Ciencia y Tecnología Argentino
+  (SICyTAR) — Ministerio de Ciencia, Tecnología e Innovación. Cada fila
+  identifica una persona con su género, edad y último acceso al CVar
+  (Currículum Vitae Argentino).
+
+  ~70 tablas live por snapshot semestral (~4.4M filas).
+domain: educacion
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::personal_de_ciencia_y_tecnologia*"
+
+canonical_columns:
+  - name: persona_id
+    type: text
+    description: Identificador de la persona en SICyTAR
+  - name: nombre
+    type: text
+    description: Nombre
+  - name: apellido
+    type: text
+    description: Apellido
+  - name: sexo_id
+    type: text
+    description: Identificador de sexo
+  - name: edad
+    type: text
+    description: Edad
+  - name: cvar_ultimo_acceso
+    type: text
+    description: Último acceso al CVar
+
+sql: |
+  SELECT
+    NULLIF(TRIM(persona_id::text), '')         AS persona_id,
+    NULLIF(TRIM(nombre::text), '')             AS nombre,
+    NULLIF(TRIM(apellido::text), '')           AS apellido,
+    NULLIF(TRIM(sexo_id::text), '')            AS sexo_id,
+    NULLIF(TRIM(edad::text), '')               AS edad,
+    NULLIF(TRIM(cvar_ultimo_acceso::text), '') AS cvar_ultimo_acceso
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__personal_de_ciencia_y_tecnologia*',
+      expected_columns=['persona_id', 'nombre', 'apellido', 'sexo_id',
+                        'edad', 'cvar_ultimo_acceso'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(persona_id::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

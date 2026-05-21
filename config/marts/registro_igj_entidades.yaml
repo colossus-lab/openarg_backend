@@ -1,0 +1,74 @@
+id: registro_igj_entidades
+version: 0.1.0
+description: |
+  Registro federal de entidades (sociedades anónimas, SRL, fundaciones,
+  asociaciones civiles) constituidas y registradas en la Inspección General
+  de Justicia (IGJ) — Ministerio de Justicia de la Nación.
+
+  El cluster combina el portal `justicia` (datos.jus.gob.ar) y
+  `datos_gob_ar` (mismo origen, doble publicación). Cada snapshot histórico
+  es una tabla — ~29 tablas live con shape canónico de 12 cols.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::entidades_constituidas_en_la_inspeccion_general_de_justicia*"
+
+canonical_columns:
+  - name: numero_correlativo
+    type: text
+    description: Número correlativo asignado por IGJ
+  - name: tipo_societario_id
+    type: text
+    description: Identificador del tipo societario
+  - name: tipo_societario
+    type: text
+    description: Descripción del tipo (S.A., S.R.L., fundación, asociación, ...)
+  - name: razon_social
+    type: text
+    description: Denominación / razón social registrada
+  - name: tipo_domicilio
+    type: text
+    description: Tipo de domicilio (legal, especial, real)
+  - name: calle
+    type: text
+    description: Calle del domicilio
+  - name: numero
+    type: text
+    description: Numeración del domicilio
+  - name: localidad
+    type: text
+    description: Localidad del domicilio
+  - name: provincia
+    type: text
+    description: Provincia del domicilio
+  - name: codigo_postal
+    type: text
+    description: Código postal
+
+sql: |
+  SELECT
+    NULLIF(TRIM(numero_correlativo::text), '')          AS numero_correlativo,
+    NULLIF(TRIM(tipo_societario::text), '')             AS tipo_societario_id,
+    NULLIF(TRIM(descripcion_tipo_societario::text), '') AS tipo_societario,
+    NULLIF(TRIM(razon_social::text), '')                AS razon_social,
+    NULLIF(TRIM(descripcion_tipo_domicilio::text), '')  AS tipo_domicilio,
+    NULLIF(TRIM(calle::text), '')                       AS calle,
+    NULLIF(TRIM(numero::text), '')                      AS numero,
+    NULLIF(TRIM(localidad::text), '')                   AS localidad,
+    NULLIF(TRIM(provincia::text), '')                   AS provincia,
+    NULLIF(TRIM(codigo_postal::text), '')               AS codigo_postal
+  FROM {{ live_tables_by_table_pattern(
+      '*__entidades_constituidas_en_la_inspeccion*',
+      expected_columns=['numero_correlativo', 'tipo_societario',
+                        'descripcion_tipo_societario', 'razon_social',
+                        'descripcion_tipo_domicilio', 'calle', 'numero',
+                        'localidad', 'provincia', 'codigo_postal'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(razon_social::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

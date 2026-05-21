@@ -22,6 +22,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,9 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
                     (:sid, :title, :desc, :org, :portal, :url, '', 'csv', :cols, :tags,
-                     :now, true, :rows)
+                     :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
@@ -71,24 +72,24 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "now": now,
-                },
-            )
+    # Out of the begin() block: cached_datasets INSERT inside
+    # _finalize_cached_dataset opens its own tx and would otherwise race
+    # the uncommitted datasets row, hitting fk_cached_datasets_dataset_id.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format="csv",
+            download_url=CSV_URL,
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -131,7 +132,7 @@ def scrape_mapa_estado(self):
 
         # Full dataset
         table_full = "cache_autoridades_pen"
-        df.to_sql(table_full, engine, if_exists="replace", index=False)
+        df.to_sql(table_full, engine, schema="raw", if_exists="replace", index=False)
         did_full = _register_dataset(
             engine,
             "mapa-estado-pen",
@@ -158,7 +159,7 @@ def scrape_mapa_estado(self):
         ].copy()
 
         table_top = "cache_autoridades_pen_principales"
-        df_top.to_sql(table_top, engine, if_exists="replace", index=False)
+        df_top.to_sql(table_top, engine, schema="raw", if_exists="replace", index=False)
         did_top = _register_dataset(
             engine,
             "mapa-estado-pen-principales",
@@ -175,6 +176,25 @@ def scrape_mapa_estado(self):
             index_dataset_embedding.delay(did_full)
         if did_top:
             index_dataset_embedding.delay(did_top)
+
+        # Register both tables in `raw_table_versions` so marts find them via
+        # `live_table('mapa_estado::<source_id>')` macro (DEBT-019-006).
+        from app.infrastructure.celery.tasks._db import register_via_b_table
+
+        register_via_b_table(
+            engine,
+            resource_identity="mapa_estado::autoridades_pen",
+            table_name=table_full,
+            schema_name="raw",
+            row_count=len(df),
+        )
+        register_via_b_table(
+            engine,
+            resource_identity="mapa_estado::autoridades_pen_principales",
+            table_name=table_top,
+            schema_name="raw",
+            row_count=len(df_top),
+        )
 
         return {
             "tables": [

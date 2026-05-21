@@ -5,7 +5,26 @@ from unittest.mock import patch
 
 import pytest
 
-from app.presentation.http.controllers.admin.tasks_router import get_task_status
+from app.presentation.http.controllers.admin.tasks_router import TASK_REGISTRY, get_task_status
+
+
+def test_task_registry_includes_new_operational_tasks():
+    expected = {
+        "catalog_backfill": ("openarg.catalog_backfill", "ingest"),
+        "populate_catalog_embeddings": ("openarg.populate_catalog_embeddings", "embedding"),
+        "seed_connector_endpoints": ("openarg.seed_connector_endpoints", "ingest"),
+        "ingest_censo2022": ("openarg.ingest_censo2022", "ingest"),
+        "refresh_curated_sources": ("openarg.refresh_curated_sources", "ingest"),
+        "ws0_retrospective_sweep": ("openarg.ws0_retrospective_sweep", "ingest"),
+        "ws0_5_state_invariants_sweep": ("openarg.ws0_5_state_invariants_sweep", "default"),
+        "ops_portal_health": ("openarg.ops_portal_health", "ingest"),
+        "report_failed_tasks": ("openarg.report_failed_tasks", "default"),
+    }
+
+    for task_id, (celery_name, queue) in expected.items():
+        assert task_id in TASK_REGISTRY
+        assert TASK_REGISTRY[task_id]["celery_name"] == celery_name
+        assert TASK_REGISTRY[task_id]["queue"] == queue
 
 
 @pytest.mark.asyncio

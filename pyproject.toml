@@ -40,6 +40,10 @@ dependencies = [
     "fiona>=1.10.0",
     "httpx>=0.28.0",
     "aiofiles>=24.1.0",
+    "pdfplumber>=0.11.0",  # PDF table extraction (specs/021-parser-hardening Phase 3)
+
+    # YAML config (used by marts).
+    "pyyaml>=6.0",
 
     # AWS
     "boto3>=1.28.0",
@@ -75,6 +79,9 @@ dev = [
     "ruff>=0.8.0",
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
+    # Type stubs (required by mypy for `import yaml` and `dateutil`)
+    "types-PyYAML>=6.0.0",
+    "types-python-dateutil>=2.9.0",
 ]
 test = [
     "pytest>=8.3.0",
@@ -84,6 +91,15 @@ test = [
     "pytest-rerunfailures>=14.0",
     "httpx>=0.28.0",
     "factory-boy>=3.3.0",
+]
+
+# MASTERPLAN Fase 5 — dbt is OPTIONAL. The medallion runs end-to-end
+# without dbt via the Celery tasks in `application.marts`. Install this
+# extra (`pip install openarg[dbt]`) only when you want lineage / tests /
+# docs from dbt on top.
+dbt = [
+    "dbt-core>=1.8.0",
+    "dbt-postgres>=1.8.0",
 ]
 
 [build-system]

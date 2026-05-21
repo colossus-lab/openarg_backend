@@ -1,0 +1,67 @@
+id: caba_transportes_autorizados
+version: 0.1.0
+description: |
+  Padrón de transportes autorizados de pasajeros en CABA — taxis,
+  remises y vehículos de transporte regular registrados ante el
+  Gobierno de la Ciudad. Cada raw table es un snapshot mensual del
+  registro; las dimensiones de identificación del titular (DNI),
+  ubicación (barrio/comuna/calle/CP/lat/long) y período persisten
+  versión a versión, mientras que los campos administrativos
+  específicos al trámite varían. Este mart consolida sólo las columnas
+  estables y las usa como surface para preguntas tipo "cuántos taxis
+  hay en Palermo" o "remises por barrio".
+
+  Source: portal CABA, datasets bajo
+  https://data.buenosaires.gob.ar/dataset/transportes-autorizados-de-pasajeros
+domain: infraestructura
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__transportes_autorizados_de_pasajeros*"]
+
+canonical_columns:
+  - name: barrio
+    type: text
+    description: Barrio CABA donde está registrado el vehículo
+  - name: comuna
+    type: text
+    description: Comuna CABA (15 comunas)
+  - name: codigo_postal
+    type: numeric
+    description: Código postal del registro
+  - name: long
+    type: text
+    description: Longitud (WGS84) — texto porque la fuente lo serializa así
+  - name: lat
+    type: text
+    description: Latitud (WGS84)
+  - name: periodo
+    type: text
+    description: Mes/año del snapshot (formato origen)
+  - name: numero_documento
+    type: text
+    description: DNI del titular del vehículo (text para tolerar valores no-numéricos en origen)
+
+# `live_tables_by_table_pattern` con `expected_columns` proyecta sólo la
+# intersección de cols presentes en TODAS las raws matcheadas como TEXT.
+# Mantenemos los outer casts en text/numeric tolerantes (NULLIF para
+# vacíos) porque las raws son CSVs sin tipado fuerte y ocasionalmente
+# cuelan strings vacíos / espacios donde se esperaría un número.
+sql: |
+  SELECT
+    barrio::text AS barrio,
+    comuna::text AS comuna,
+    NULLIF(TRIM(codigo_postal::text), '')::numeric AS codigo_postal,
+    long::text AS long,
+    lat::text AS lat,
+    periodo::text AS periodo,
+    NULLIF(TRIM(numero_documento::text), '') AS numero_documento
+  FROM {{ live_tables_by_table_pattern(
+      'caba__transportes_autorizados_de_pasajeros*',
+      expected_columns=['barrio', 'comuna', 'codigo_postal', 'long', 'lat', 'periodo', 'numero_documento']
+  ) }} sub
+  WHERE NULLIF(TRIM(numero_documento::text), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

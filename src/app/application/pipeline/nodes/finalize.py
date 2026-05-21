@@ -10,6 +10,7 @@ from typing import Any
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline._background_tasks import spawn_background
 from app.application.pipeline.cache_manager import write_cache
+from app.application.pipeline.history import record_terminal_analytics
 from app.application.pipeline.state import OpenArgState
 from app.infrastructure.adapters.connectors.memory_agent import (
     save_memory,
@@ -117,6 +118,39 @@ async def finalize_node(state: OpenArgState) -> dict:
         )
 
     duration_ms = int((time.monotonic() - state.get("_start_time", time.monotonic())) * 1000)
+    # BUG-010: empty answers reached the client silently. Log them as ERROR
+    # so monitoring can surface them; the response still ships so the user
+    # gets some signal instead of a hang.
+    answer_ok = bool(clean_answer and clean_answer.strip())
+    if not answer_ok:
+        logger.error(
+            "finalize_node: empty answer for question=%r (results=%d, duration_ms=%d)",
+            question[:120],
+            len(results),
+            duration_ms,
+        )
+
+    # BUG-016/017: finalize is the single terminal node for every data
+    # flow (sandbox, connectors, marts), so it logs query_analytics
+    # exactly once per query. The NL2SQL subgraph no longer logs here
+    # (that double-counted sandbox queries and missed connector/mart
+    # flows); the served table comes from the DataResult metadata.
+    served_table = next(
+        (r.metadata.get("served_table") or r.source for r in results if r.records),
+        None,
+    )
+    try:
+        await record_terminal_analytics(
+            question=question,
+            served_table=served_table,
+            row_count=sum(len(r.records) for r in results),
+            success=answer_ok,
+            duration_ms=duration_ms,
+            error_message=None if answer_ok else "empty_answer",
+            semantic_cache=deps.semantic_cache,
+        )
+    except Exception:
+        logger.debug("finalize_node: analytics logging skipped", exc_info=True)
     # FR-036a: LangGraph's ``updates`` stream forwards ONLY what this node
     # returns; fields left out are silently dropped from the ``complete``
     # event even if they were populated earlier in the pipeline. Keep

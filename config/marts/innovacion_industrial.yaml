@@ -1,0 +1,78 @@
+id: innovacion_industrial
+version: 0.1.0
+description: |
+  Innovación en el sector manufacturero argentino — encuesta nacional
+  publicada por la Secretaría de Industria y Trabajo. Cubre múltiples
+  dimensiones: perfil innovativo, productividad, capacidades TIC,
+  resultados de procesos, obstáculos a la innovación, fuentes de
+  información, tecnologías emergentes.
+
+  Source: 43 versiones de `datos_gob_ar__innovacion_sector_manufacturero`
+  POST-fix de string-NaN sentinels (DEBT-021-004 reduced cols 1,400 → 9
+  per version). Schema núcleo: `(NOMEN, ANIO|PERIODO, AGREG_INDUS|REGION,
+  TAM, [DIMENSION], U_MED, VALOR)` donde `[DIMENSION]` varía por sub-tema:
+  PERFIL_INN, RESUL, RESUL_PROCES, INNOV_PROD_DESARR, CAPAC_TIC, OBST,
+  TEC_EMERG, RANGO_FUENTE_INFO, etc.
+
+  Antes del fix DEBT-021-004 este dataset era inusable (1,400 cols
+  ghost). Ahora es uno de los datasets más ricos sobre innovación
+  industrial argentina.
+
+  Use cases típicos: "innovación industrial argentina", "perfil
+  innovativo manufacturero", "obstáculos a la innovación", "uso de
+  TIC en industria", "tecnologías emergentes en manufactura".
+domain: economia
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns: ["datos_gob_ar__innovacion_sector_manufacturero*"]
+
+canonical_columns:
+  - name: nomen
+    type: text
+    description: Nomenclador de la observación
+  - name: periodo
+    type: text
+    description: Período (año o trimestre, formato varía)
+  - name: agregacion
+    type: text
+    description: Agregación industrial o regional
+  - name: tam
+    type: text
+    description: Tamaño de empresa (Pequeña, Mediana, Grande)
+  - name: dimension
+    type: text
+    description: Dimensión analizada (perfil_inn, resul, capac_tic, obst, etc.)
+  - name: unidad_medida
+    type: text
+    description: Unidad (% empresas, cantidad, etc.)
+  - name: valor
+    type: text
+    description: Valor numérico del indicador
+
+sql: |
+  SELECT
+    NULLIF(TRIM("NOMEN"), '')                                    AS nomen,
+    NULLIF(TRIM(COALESCE("PERIODO"::text, "ANIO"::text)), '')    AS periodo,
+    NULLIF(TRIM(COALESCE("AGREG_INDUS", "REGION")), '')          AS agregacion,
+    NULLIF(TRIM("TAM"), '')                                      AS tam,
+    NULLIF(TRIM(COALESCE(
+        "PERFIL_INN", "RESUL", "RESUL_PROCES", "INNOV_PROD_DESARR",
+        "CAPAC_TIC", "OBST", "TEC_EMERG", "RANGO_FUENTE_INFO",
+        "VARIABLE"
+    )), '')                                                      AS dimension,
+    NULLIF(TRIM("U_MED"), '')                                    AS unidad_medida,
+    NULLIF(TRIM("VALOR"::text), '')                              AS valor
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__innovacion_sector_manufacturero*',
+      expected_columns=['NOMEN', 'PERIODO', 'ANIO', 'AGREG_INDUS', 'REGION',
+                        'TAM', 'PERFIL_INN', 'RESUL', 'RESUL_PROCES',
+                        'INNOV_PROD_DESARR', 'CAPAC_TIC', 'OBST',
+                        'TEC_EMERG', 'RANGO_FUENTE_INFO', 'VARIABLE',
+                        'U_MED', 'VALOR']
+  ) }} sub
+  WHERE NULLIF(TRIM("VALOR"::text), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

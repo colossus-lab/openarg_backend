@@ -1,7 +1,19 @@
 # Plan: SQL Sandbox + NL2SQL (Index)
 
 **Related spec**: [./spec.md](./spec.md)
-**Last synced with code**: 2026-04-13
+**Last synced with code**: 2026-04-25
+
+## WS3 hybrid discovery addendum (2026-04-25)
+
+`discover_catalog_hints_for_planner` (in `application/pipeline/connectors/sandbox.py`) is now hybrid-aware:
+
+- When `OPENARG_HYBRID_DISCOVERY=1`, it **appends** matches from `catalog_resources` to the existing `table_catalog` block (`_hybrid_logical_hints` helper).
+- When `OPENARG_CATALOG_ONLY=1`, it **bypasses** the legacy `table_catalog` SQL entirely and serves discovery from `catalog_resources` alone. Used in the staging cutover after `scripts/staging_reset.py`.
+- When neither flag is set, behaviour is unchanged from 2026-04-13.
+
+The new layer surfaces `materialization_status` (PENDING / READY / LIVE_API / NON_TABULAR) and `resource_kind` to the planner so it can route to a connector endpoint instead of demanding a materialized table that doesn't exist.
+
+See [015-catalog-resources](../015-catalog-resources/spec.md) for the full WS2/WS3/WS4 spec and [collector_plan.md](../../../collector_plan.md) WS3 for the original design.
 
 ---
 

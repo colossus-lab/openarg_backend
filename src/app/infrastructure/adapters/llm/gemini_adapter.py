@@ -101,12 +101,14 @@ class GeminiLLMAdapter(ILLMProvider):  # type: ignore[misc]
     ) -> LLMResponse:
         model, chat_messages = self._prepare_call(messages)
 
-        gen_config = genai.types.GenerationConfig(
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-            response_mime_type="application/json",
-            **({"response_schema": json_schema} if json_schema else {}),
-        )
+        gen_config_kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "response_mime_type": "application/json",
+        }
+        if json_schema:
+            gen_config_kwargs["response_schema"] = json_schema
+        gen_config = genai.types.GenerationConfig(**gen_config_kwargs)
 
         try:
             response = await asyncio.wait_for(

@@ -1,0 +1,255 @@
+id: magyp_senasa_movimientos_pecuarios
+version: 0.1.0
+description: |
+  Movimientos pecuarios registrados por SENASA (Servicio Nacional de
+  Sanidad y Calidad Agroalimentaria), unificando bovinos, porcinos,
+  aves, equinos y ovinos en formato long: una fila por categoría de
+  animal × movimiento. Cada movimiento describe origen y destino
+  (provincia + departamento).
+
+  Datos del Ministerio de Agricultura, Ganadería y Pesca (MAGyP).
+  Origen raw: 5 datasets `magyp::*senasa_movimientos_*` que comparten
+  las cols geográficas pero difieren en las categorías de animal por
+  especie. UNPIVOT en SQL via `CROSS JOIN LATERAL VALUES` expone
+  formato `(especie, categoria_animal, fecha, ..., cantidad)`.
+
+  La col `motivo` solo está poblada en porcinos y avicolas (NULL en
+  bovinos/equinos/ovinos). El consumer puede filtrar por
+  `WHERE motivo='faena'` (ejemplo) cuando aplica.
+
+  Total esperado: ~1.3M filas (bovinos solos pesan ~1M; porcinos,
+  avicolas, equinos y ovinos suman ~300K).
+domain: economia
+
+sources:
+  portals: [magyp]
+  resource_patterns:
+    - "magyp::*senasa_movimientos_*"
+
+canonical_columns:
+  - name: especie
+    type: text
+    description: '`bovinos` / `porcinos` / `avicolas` / `equinos` / `ovinos`'
+  - name: categoria_animal
+    type: text
+    description: 'Categoría dentro de la especie (e.g. `vaca`, `cerda`, `pollo_bb_parrillero`, `caballo`, `cordero_cordera`)'
+  - name: fecha
+    type: text
+    description: Fecha del movimiento
+  - name: motivo
+    type: text
+    description: 'Motivo del movimiento (sólo poblado para porcinos/avicolas; NULL para el resto)'
+  - name: salido_de
+    type: text
+    description: Tipo de establecimiento de origen (campo, frigorifico, etc.)
+  - name: ingresado_a
+    type: text
+    description: Tipo de establecimiento de destino
+  - name: provincia_origen
+    type: text
+    description: Provincia de origen del movimiento
+  - name: provincia_origen_id
+    type: text
+    description: ID GeoRef de la provincia de origen
+  - name: departamento_origen
+    type: text
+    description: Departamento de origen
+  - name: departamento_origen_id
+    type: text
+    description: ID del departamento de origen
+  - name: provincia_destino
+    type: text
+    description: Provincia de destino
+  - name: provincia_destino_id
+    type: text
+    description: ID GeoRef de la provincia de destino
+  - name: departamento_destino
+    type: text
+    description: Departamento de destino
+  - name: departamento_destino_id
+    type: text
+    description: ID del departamento de destino
+  - name: cantidad
+    type: text
+    description: Cantidad de animales movidos en esa categoría
+
+sql: |
+  WITH bovinos AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'magyp__senasa_movimientos_bovinos*',
+        expected_columns=['fecha', 'salido_de', 'ingresado_a',
+                          'provincia_origen', 'provincia_origen_id',
+                          'departamento_origen', 'departamento_origen_id',
+                          'provincia_destino', 'provincia_destino_id',
+                          'departamento_destino', 'departamento_destino_id',
+                          'vaca', 'vaquillona', 'novillo', 'novillito',
+                          'ternero', 'ternera', 'torito', 'toro', 'bueyes'],
+        require_all_columns=True
+    ) }} sub
+  ), porcinos AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'magyp__senasa_movimientos_porcinos*',
+        expected_columns=['fecha', 'motivo', 'salido_de', 'ingresado_a',
+                          'provincia_origen', 'provincia_origen_id',
+                          'departamento_origen', 'departamento_origen_id',
+                          'provincia_destino', 'provincia_destino_id',
+                          'departamento_destino', 'departamento_destino_id',
+                          'padrillo_porcino', 'cerda', 'lechon',
+                          'capon_porcino', 'cachorro', 'cachorra',
+                          'machos_enteros_inmunocastrados'],
+        require_all_columns=True
+    ) }} sub
+  ), avicolas AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'magyp__senasa_movimientos_avicolas*',
+        expected_columns=['fecha', 'motivo', 'salido_de', 'ingresado_a',
+                          'provincia_origen', 'provincia_origen_id',
+                          'departamento_origen', 'departamento_origen_id',
+                          'provincia_destino', 'provincia_destino_id',
+                          'departamento_destino', 'departamento_destino_id',
+                          'pollos_parrilleros', 'pollos_parrilleros_sin_lote',
+                          'pollo_bb_parrillero'],
+        require_all_columns=True
+    ) }} sub
+  ), equinos AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'magyp__senasa_movimientos_equinos*',
+        expected_columns=['fecha', 'salido_de', 'ingresado_a',
+                          'provincia_origen', 'provincia_origen_id',
+                          'departamento_origen', 'departamento_origen_id',
+                          'provincia_destino', 'provincia_destino_id',
+                          'departamento_destino', 'departamento_destino_id',
+                          'padrillo_equino', 'caballo', 'yegua',
+                          'potrillo_potrilla', 'mula', 'burro', 'asno'],
+        require_all_columns=True
+    ) }} sub
+  ), ovinos AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'magyp__senasa_movimientos_ovinos*',
+        expected_columns=['fecha', 'salido_de', 'ingresado_a',
+                          'provincia_origen', 'provincia_origen_id',
+                          'departamento_origen', 'departamento_origen_id',
+                          'provincia_destino', 'provincia_destino_id',
+                          'departamento_destino', 'departamento_destino_id',
+                          'carnero', 'oveja', 'borrego_borrega',
+                          'capon_ovino', 'cordero_cordera'],
+        require_all_columns=True
+    ) }} sub
+  )
+  -- Bovinos: 9 categorías
+  SELECT 'bovinos'::text AS especie, v.categoria_animal,
+         NULLIF(TRIM(fecha::text), '') AS fecha, NULL::text AS motivo,
+         NULLIF(TRIM(salido_de::text), '') AS salido_de,
+         NULLIF(TRIM(ingresado_a::text), '') AS ingresado_a,
+         NULLIF(TRIM(provincia_origen::text), '') AS provincia_origen,
+         NULLIF(TRIM(provincia_origen_id::text), '') AS provincia_origen_id,
+         NULLIF(TRIM(departamento_origen::text), '') AS departamento_origen,
+         NULLIF(TRIM(departamento_origen_id::text), '') AS departamento_origen_id,
+         NULLIF(TRIM(provincia_destino::text), '') AS provincia_destino,
+         NULLIF(TRIM(provincia_destino_id::text), '') AS provincia_destino_id,
+         NULLIF(TRIM(departamento_destino::text), '') AS departamento_destino,
+         NULLIF(TRIM(departamento_destino_id::text), '') AS departamento_destino_id,
+         NULLIF(TRIM(v.cantidad::text), '') AS cantidad
+  FROM bovinos
+  CROSS JOIN LATERAL (VALUES
+    ('vaca', vaca), ('vaquillona', vaquillona),
+    ('novillo', novillo), ('novillito', novillito),
+    ('ternero', ternero), ('ternera', ternera),
+    ('torito', torito), ('toro', toro), ('bueyes', bueyes)
+  ) AS v(categoria_animal, cantidad)
+  WHERE v.cantidad IS NOT NULL
+  UNION ALL
+  -- Porcinos: 7 categorías + motivo
+  SELECT 'porcinos', v.categoria_animal,
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(motivo::text), ''),
+         NULLIF(TRIM(salido_de::text), ''),
+         NULLIF(TRIM(ingresado_a::text), ''),
+         NULLIF(TRIM(provincia_origen::text), ''),
+         NULLIF(TRIM(provincia_origen_id::text), ''),
+         NULLIF(TRIM(departamento_origen::text), ''),
+         NULLIF(TRIM(departamento_origen_id::text), ''),
+         NULLIF(TRIM(provincia_destino::text), ''),
+         NULLIF(TRIM(provincia_destino_id::text), ''),
+         NULLIF(TRIM(departamento_destino::text), ''),
+         NULLIF(TRIM(departamento_destino_id::text), ''),
+         NULLIF(TRIM(v.cantidad::text), '')
+  FROM porcinos
+  CROSS JOIN LATERAL (VALUES
+    ('padrillo_porcino', padrillo_porcino), ('cerda', cerda),
+    ('lechon', lechon), ('capon_porcino', capon_porcino),
+    ('cachorro', cachorro), ('cachorra', cachorra),
+    ('machos_enteros_inmunocastrados', machos_enteros_inmunocastrados)
+  ) AS v(categoria_animal, cantidad)
+  WHERE v.cantidad IS NOT NULL
+  UNION ALL
+  -- Avicolas: 3 categorías + motivo
+  SELECT 'avicolas', v.categoria_animal,
+         NULLIF(TRIM(fecha::text), ''),
+         NULLIF(TRIM(motivo::text), ''),
+         NULLIF(TRIM(salido_de::text), ''),
+         NULLIF(TRIM(ingresado_a::text), ''),
+         NULLIF(TRIM(provincia_origen::text), ''),
+         NULLIF(TRIM(provincia_origen_id::text), ''),
+         NULLIF(TRIM(departamento_origen::text), ''),
+         NULLIF(TRIM(departamento_origen_id::text), ''),
+         NULLIF(TRIM(provincia_destino::text), ''),
+         NULLIF(TRIM(provincia_destino_id::text), ''),
+         NULLIF(TRIM(departamento_destino::text), ''),
+         NULLIF(TRIM(departamento_destino_id::text), ''),
+         NULLIF(TRIM(v.cantidad::text), '')
+  FROM avicolas
+  CROSS JOIN LATERAL (VALUES
+    ('pollos_parrilleros', pollos_parrilleros),
+    ('pollos_parrilleros_sin_lote', pollos_parrilleros_sin_lote),
+    ('pollo_bb_parrillero', pollo_bb_parrillero)
+  ) AS v(categoria_animal, cantidad)
+  WHERE v.cantidad IS NOT NULL
+  UNION ALL
+  -- Equinos: 7 categorías
+  SELECT 'equinos', v.categoria_animal,
+         NULLIF(TRIM(fecha::text), ''), NULL::text,
+         NULLIF(TRIM(salido_de::text), ''),
+         NULLIF(TRIM(ingresado_a::text), ''),
+         NULLIF(TRIM(provincia_origen::text), ''),
+         NULLIF(TRIM(provincia_origen_id::text), ''),
+         NULLIF(TRIM(departamento_origen::text), ''),
+         NULLIF(TRIM(departamento_origen_id::text), ''),
+         NULLIF(TRIM(provincia_destino::text), ''),
+         NULLIF(TRIM(provincia_destino_id::text), ''),
+         NULLIF(TRIM(departamento_destino::text), ''),
+         NULLIF(TRIM(departamento_destino_id::text), ''),
+         NULLIF(TRIM(v.cantidad::text), '')
+  FROM equinos
+  CROSS JOIN LATERAL (VALUES
+    ('padrillo_equino', padrillo_equino), ('caballo', caballo),
+    ('yegua', yegua), ('potrillo_potrilla', potrillo_potrilla),
+    ('mula', mula), ('burro', burro), ('asno', asno)
+  ) AS v(categoria_animal, cantidad)
+  WHERE v.cantidad IS NOT NULL
+  UNION ALL
+  -- Ovinos: 5 categorías
+  SELECT 'ovinos', v.categoria_animal,
+         NULLIF(TRIM(fecha::text), ''), NULL::text,
+         NULLIF(TRIM(salido_de::text), ''),
+         NULLIF(TRIM(ingresado_a::text), ''),
+         NULLIF(TRIM(provincia_origen::text), ''),
+         NULLIF(TRIM(provincia_origen_id::text), ''),
+         NULLIF(TRIM(departamento_origen::text), ''),
+         NULLIF(TRIM(departamento_origen_id::text), ''),
+         NULLIF(TRIM(provincia_destino::text), ''),
+         NULLIF(TRIM(provincia_destino_id::text), ''),
+         NULLIF(TRIM(departamento_destino::text), ''),
+         NULLIF(TRIM(departamento_destino_id::text), ''),
+         NULLIF(TRIM(v.cantidad::text), '')
+  FROM ovinos
+  CROSS JOIN LATERAL (VALUES
+    ('carnero', carnero), ('oveja', oveja),
+    ('borrego_borrega', borrego_borrega),
+    ('capon_ovino', capon_ovino), ('cordero_cordera', cordero_cordera)
+  ) AS v(categoria_animal, cantidad)
+  WHERE v.cantidad IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

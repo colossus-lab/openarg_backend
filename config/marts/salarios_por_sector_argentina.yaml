@@ -1,0 +1,65 @@
+id: salarios_por_sector_argentina
+version: 0.1.0
+description: |
+  Salarios promedio y mediano de trabajadores asalariados registrados
+  en Argentina, por sector económico (CLAE letra) y mes. Publicados
+  por la Secretaría de Producción.
+
+  Source: ~21 versiones de `produccion__salarios_promedio_y_mediano`
+  + variantes `datos_gob_ar__*`. Schema long-format
+  `(fecha, letra, w_mean, w_median)` donde `letra` es el código
+  CLAE 2-letras y `w_mean`/`w_median` son los salarios promedio
+  y mediano del sector.
+
+  Use cases típicos: "evolución de salarios argentinos",
+  "salario promedio en el sector industrial",
+  "mediana salarial por sector", "comparar salarios entre sectores",
+  "tendencia salarial".
+domain: economia
+
+sources:
+  portals: [produccion, datos_gob_ar]
+  resource_patterns:
+    - "produccion__salarios_promedio_y_mediano_por_sec*"
+    - "datos_gob_ar__salarios_promedio_y_mediano_por_sec*"
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha de la observación (formato YYYY-MM)
+  - name: letra
+    type: text
+    description: Letra CLAE del sector económico
+  - name: w_mean
+    type: text
+    description: Salario promedio (media)
+  - name: w_median
+    type: text
+    description: Salario mediano
+
+sql: |
+  SELECT
+    NULLIF(TRIM(fecha::text), '')             AS fecha,
+    NULLIF(TRIM(letra), '')                   AS letra,
+    NULLIF(TRIM(w_mean::text), '')            AS w_mean,
+    NULLIF(TRIM(w_median::text), '')          AS w_median
+  FROM {{ live_tables_by_table_pattern(
+      'produccion__salarios_promedio_y_mediano_por_sec*',
+      expected_columns=['fecha', 'letra', 'w_mean', 'w_median']
+  ) }} sub
+  WHERE NULLIF(TRIM(fecha::text), '') IS NOT NULL
+  UNION ALL
+  SELECT
+    NULLIF(TRIM(fecha::text), '')             AS fecha,
+    NULLIF(TRIM(letra), '')                   AS letra,
+    NULLIF(TRIM(w_mean::text), '')            AS w_mean,
+    NULLIF(TRIM(w_median::text), '')          AS w_median
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__salarios_promedio_y_mediano_por_sec*',
+      expected_columns=['fecha', 'letra', 'w_mean', 'w_median']
+  ) }} sub2
+  WHERE NULLIF(TRIM(fecha::text), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

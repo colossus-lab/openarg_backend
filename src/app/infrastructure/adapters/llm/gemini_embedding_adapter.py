@@ -34,4 +34,6 @@ class GeminiEmbeddingAdapter(IEmbeddingProvider):  # type: ignore[misc]
             content=texts,
             output_dimensionality=self._dimensions,
         )
-        return result["embedding"]  # type: ignore[no-any-return]
+        # Gemini returns `list[list[float]]` for batch input — the dict
+        # type stub is too generic; cast for mypy.
+        return result["embedding"]  # type: ignore[return-value,no-any-return]

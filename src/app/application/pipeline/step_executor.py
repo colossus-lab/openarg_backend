@@ -60,6 +60,10 @@ class ConnectorDeps:
     llm: ILLMProvider
     embedding: IEmbeddingProvider
     semantic_cache: SemanticCache
+    # MASTERPLAN Fase 4.5b/c — Serving Port for nodes that benefit from
+    # schemas + semantics or read marts directly. Optional; legacy paths
+    # still work when this is None.
+    serving_port: object | None = None
 
 
 # ── Retryable error detection ─────────────────────────────────
@@ -82,6 +86,67 @@ def is_retryable(exc: Exception) -> bool:
 _NOOP_ACTIONS = frozenset(("analyze", "compare", "synthesize"))
 
 
+# ── Live-connector wall-clock cap (BUG-002) ───────────────────
+# A `search_ckan` step that scrapes a large dataset live has been
+# observed at 99s, and a 124s step killed the WebSocket mid-stream.
+# Cap live-connector steps so a pathologically slow fetch fails fast and
+# gracefully (returns no rows → the analyst answers "sin datos") instead
+# of hanging the request. Mart/sandbox steps are NOT capped here — a big
+# mart query legitimately takes 20-45s.
+_LIVE_CONNECTOR_ACTIONS = frozenset(("search_ckan",))
+_LIVE_CONNECTOR_TIMEOUT_S = 60.0
+
+# ── Mart redirect safety net (BUG-001) ────────────────────────
+# Last line of defense: if the planner still emits a `search_ckan` step
+# but a curated mart confidently covers the question, the executor
+# redirects to the sandbox/mart path. This ONLY fires when a strong mart
+# exists — a topic with NO mart (or a weak match) yields a low score and
+# is left to `search_ckan` untouched, so live-only topics keep working.
+# Round v4.4 verification (R002 peajes) showed mart sim 0.630 passing
+# easily, but other questions with weaker matches needed coverage. Lowered
+# from 0.50 → 0.45 to capture more cases. Tests on v4.3 baseline confirmed
+# no-mart questions (e.g. "receta de asado") stay at sim 0.43-0.44 → still
+# don't get redirected.
+_MART_REDIRECT_THRESHOLD = 0.45
+
+
+async def _top_mart_similarity(nl_query: str, deps: ConnectorDeps) -> float:
+    """Cosine similarity of the best-matching mart for ``nl_query``.
+
+    Returns 0.0 on any failure, when there is no sandbox, or when no mart
+    exists — guaranteeing a no-mart topic is never redirected.
+    """
+    sandbox = deps.sandbox
+    if sandbox is None or not nl_query.strip():
+        return 0.0
+    try:
+        from sqlalchemy import text as _text
+
+        q_emb = await deps.embedding.embed(nl_query)
+        emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
+
+        def _query() -> float:
+            engine = sandbox._get_engine()  # type: ignore[union-attr]
+            with engine.connect() as conn:
+                row = conn.execute(
+                    _text(
+                        "SELECT 1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                        "FROM mart_definitions "
+                        "WHERE embedding IS NOT NULL "
+                        "  AND COALESCE(last_row_count, 0) > 0 "
+                        "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 1"
+                    ),
+                    {"e": emb_str},
+                ).fetchone()
+                conn.rollback()
+            return float(row.sim) if row else 0.0
+
+        return await asyncio.to_thread(_query)
+    except Exception:
+        logger.debug("top mart similarity check failed", exc_info=True)
+        return 0.0
+
+
 # ── Step dispatch ─────────────────────────────────────────────
 
 
@@ -94,10 +159,54 @@ async def dispatch_step(
 
     Uses a dispatch table for O(1) action lookup instead of if/elif chain.
     """
+    # BUG-001 safety net: the planner should already route mart-backed
+    # questions to `query_sandbox` (hint suppression + planner rule), but
+    # if a `search_ckan` step slips through AND a strong mart covers the
+    # question, redirect to the sandbox/mart path. No mart → low score →
+    # no redirect → `search_ckan` runs normally (live-only topics intact).
+    if (
+        step.action == "search_ckan"
+        and nl_query.strip()
+        and deps.sandbox is not None
+    ):
+        mart_sim = await _top_mart_similarity(nl_query, deps)
+        if mart_sim >= _MART_REDIRECT_THRESHOLD:
+            logger.info(
+                "BUG-001: redirecting search_ckan step → sandbox/mart "
+                "(top mart sim=%.3f >= %.2f)",
+                mart_sim,
+                _MART_REDIRECT_THRESHOLD,
+            )
+            return await execute_sandbox_step(
+                step,
+                deps.sandbox,
+                deps.llm,
+                deps.embedding,
+                deps.vector_search,
+                deps.semantic_cache,
+                user_query=nl_query,
+                serving_port=deps.serving_port,
+            )
+
     handler = _DISPATCH_TABLE.get(step.action)
     if handler is not None:
         result = handler(step, deps, nl_query)
-        return result if not asyncio.iscoroutine(result) else await result
+        if not asyncio.iscoroutine(result):
+            return result
+        # BUG-002: cap live-connector steps so a slow fetch fails fast
+        # instead of escalating to a 124s hang that kills the WebSocket.
+        if step.action in _LIVE_CONNECTOR_ACTIONS:
+            try:
+                return await asyncio.wait_for(result, timeout=_LIVE_CONNECTOR_TIMEOUT_S)
+            except TimeoutError:
+                logger.warning(
+                    "BUG-002: live connector step '%s' exceeded %.0fs cap — "
+                    "aborting to keep the request responsive",
+                    step.action,
+                    _LIVE_CONNECTOR_TIMEOUT_S,
+                )
+                return []
+        return await result
 
     if step.action in _NOOP_ACTIONS:
         return []
@@ -127,6 +236,7 @@ _DISPATCH_TABLE: dict[str, Callable[..., Any]] = {
         d.vector_search,
         d.semantic_cache,
         user_query=q,
+        serving_port=d.serving_port,
     ),
 }
 
@@ -198,6 +308,38 @@ async def execute_steps(
     results: list[DataResult] = []
     warnings: list[str] = []
     steps = plan.steps[:5]
+
+    if not steps:
+        return results, warnings
+
+    # BUG-001 Capa 1: strip redundant search_ckan when a mart covers the
+    # question. This runs at every execute_steps invocation — including
+    # replan-emitted plans — because `inject_fallbacks_node` only sees the
+    # *initial* plan, not the one produced by `coordinator → replan`.
+    # Round v4.4 verification revealed the planner ignores the rule mainly
+    # on replan: a first-step SQL failure triggers replan, which emits
+    # search_ckan "by trying broader sources". The redirect at dispatch_step
+    # still catches it, but pays an extra NL2SQL round trip. Stripping
+    # here cuts that loop short.
+    has_sandbox = any(s.action == "query_sandbox" for s in steps)
+    has_ckan = any(s.action == "search_ckan" for s in steps)
+    if has_sandbox and has_ckan and nl_query.strip():
+        try:
+            sim = await _top_mart_similarity(nl_query, deps)
+            if sim >= _MART_REDIRECT_THRESHOLD:
+                dropped = [s for s in steps if s.action == "search_ckan"]
+                steps = [s for s in steps if s.action != "search_ckan"]
+                logger.info(
+                    "BUG-001 Capa 1: dropped %d redundant search_ckan step(s) "
+                    "in execute_steps — mart sim=%.3f >= %.2f",
+                    len(dropped),
+                    sim,
+                    _MART_REDIRECT_THRESHOLD,
+                )
+        except Exception:
+            logger.debug(
+                "BUG-001 Capa 1 (execute_steps) check failed", exc_info=True
+            )
 
     if not steps:
         return results, warnings

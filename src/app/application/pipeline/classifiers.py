@@ -59,6 +59,24 @@ _OFF_TOPIC_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# ── Internal table / schema reference detection (BUG-014) ───
+# A user that names an internal table/schema directly is probing the
+# database layout. We refuse those up front so the planner never
+# generates SQL against an explicitly-named internal relation — the
+# user should describe the data they want in natural language instead.
+_INTERNAL_TABLE_PATTERN = re.compile(
+    r"(?:"
+    r"\bcache_[a-z0-9_]{2,}"  # cache_* data table names
+    r"|\b(?:raw|mart|public)\s*\.\s*[\"']?[a-z_]"  # schema-qualified refs
+    r"|\b(?:catalog_resources|raw_table_versions|cached_datasets"
+    r"|mart_definitions|mart_sample_queries|query_analytics|query_cache"
+    r"|table_catalog|sesion_chunks|dataset_chunks|parse_repair_audit"
+    r"|successful_queries|user_queries|query_dataset_links|agent_tasks"
+    r"|api_keys|api_usage)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 # ── Responses ───────────────────────────────────────────────
 
 _CASUAL_RESPONSES: dict[str, list[str]] = {
@@ -244,6 +262,11 @@ def is_off_topic(question: str) -> bool:
     return bool(_OFF_TOPIC_PATTERNS.search(question))
 
 
+def references_internal_table(question: str) -> bool:
+    """Return True if the question names an internal DB table or schema directly."""
+    return bool(_INTERNAL_TABLE_PATTERN.search(question))
+
+
 def classify_request(
     question: str,
     user_id: str,
@@ -260,6 +283,15 @@ def classify_request(
     meta = get_meta_response(question)
     if meta:
         return "meta", meta
+
+    if references_internal_table(question):
+        return "internal_table", (
+            "No puedo mostrar tablas internas de la base de datos por nombre — "
+            "eso expondría detalles del esquema interno.\n\n"
+            "Preguntame por el dato que buscás en lenguaje natural, por ejemplo:\n"
+            "- *¿Cuántos delitos contra la propiedad hubo en CABA en 2023?*\n"
+            "- *¿Cuál fue la inflación del último mes?*"
+        )
 
     suspicious, score = is_suspicious(question)
     if suspicious:

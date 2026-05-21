@@ -1,0 +1,110 @@
+id: inscripciones_iniciales_autos
+version: 0.1.0
+description: |
+  Inscripciones iniciales (altas) del Registro Nacional de la Propiedad
+  del Automotor (DNRPA) — primer registro de un automotor 0 km. Cada
+  fila es un alta con los datos del automotor (marca, modelo, año) y del
+  titular (provincia, género, edad).
+
+  Combina `justicia` y `datos_gob_ar` (mismo origen). ~21 tablas live
+  (~8M filas con duplicado). Complementa `registro_automotor_transferencias`
+  (movimientos posteriores) — juntos cubren el ciclo de vida vehicular.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::inscripciones_iniciales_de_autos*"
+
+canonical_columns:
+  - name: tramite_tipo
+    type: text
+    description: Tipo de trámite
+  - name: tramite_fecha
+    type: text
+    description: Fecha del trámite
+  - name: fecha_inscripcion_inicial
+    type: text
+    description: Fecha de la inscripción inicial
+  - name: registro_seccional
+    type: text
+    description: Descripción del registro seccional
+  - name: registro_seccional_provincia
+    type: text
+    description: Provincia del registro seccional
+  - name: automotor_origen
+    type: text
+    description: Origen del automotor (nacional / importado)
+  - name: automotor_anio_modelo
+    type: text
+    description: Año modelo
+  - name: automotor_tipo
+    type: text
+    description: Tipo de automotor
+  - name: automotor_marca
+    type: text
+    description: Marca
+  - name: automotor_modelo
+    type: text
+    description: Modelo
+  - name: automotor_uso
+    type: text
+    description: Uso declarado
+  - name: titular_tipo_persona
+    type: text
+    description: Persona física o jurídica
+  - name: titular_localidad
+    type: text
+    description: Localidad del titular
+  - name: titular_provincia
+    type: text
+    description: Provincia del titular
+  - name: titular_genero
+    type: text
+    description: Género del titular
+  - name: titular_anio_nacimiento
+    type: text
+    description: Año de nacimiento
+  - name: titular_pais_nacimiento
+    type: text
+    description: País de nacimiento
+
+sql: |
+  SELECT
+    NULLIF(TRIM(tramite_tipo::text), '')                  AS tramite_tipo,
+    NULLIF(TRIM(tramite_fecha::text), '')                 AS tramite_fecha,
+    NULLIF(TRIM(fecha_inscripcion_inicial::text), '')     AS fecha_inscripcion_inicial,
+    NULLIF(TRIM(registro_seccional_descripcion::text), '') AS registro_seccional,
+    NULLIF(TRIM(registro_seccional_provincia::text), '')  AS registro_seccional_provincia,
+    NULLIF(TRIM(automotor_origen::text), '')              AS automotor_origen,
+    NULLIF(TRIM(automotor_anio_modelo::text), '')         AS automotor_anio_modelo,
+    NULLIF(TRIM(automotor_tipo_descripcion::text), '')    AS automotor_tipo,
+    NULLIF(TRIM(automotor_marca_descripcion::text), '')   AS automotor_marca,
+    NULLIF(TRIM(automotor_modelo_descripcion::text), '')  AS automotor_modelo,
+    NULLIF(TRIM(automotor_uso_descripcion::text), '')     AS automotor_uso,
+    NULLIF(TRIM(titular_tipo_persona::text), '')          AS titular_tipo_persona,
+    NULLIF(TRIM(titular_domicilio_localidad::text), '')   AS titular_localidad,
+    NULLIF(TRIM(titular_domicilio_provincia::text), '')   AS titular_provincia,
+    NULLIF(TRIM(titular_genero::text), '')                AS titular_genero,
+    NULLIF(TRIM(titular_anio_nacimiento::text), '')       AS titular_anio_nacimiento,
+    NULLIF(TRIM(titular_pais_nacimiento::text), '')       AS titular_pais_nacimiento
+  FROM {{ live_tables_by_table_pattern(
+      '*__inscripciones_iniciales_de_autos*',
+      expected_columns=['tramite_tipo', 'tramite_fecha',
+                        'fecha_inscripcion_inicial',
+                        'registro_seccional_descripcion',
+                        'registro_seccional_provincia', 'automotor_origen',
+                        'automotor_anio_modelo', 'automotor_tipo_descripcion',
+                        'automotor_marca_descripcion',
+                        'automotor_modelo_descripcion',
+                        'automotor_uso_descripcion', 'titular_tipo_persona',
+                        'titular_domicilio_localidad',
+                        'titular_domicilio_provincia', 'titular_genero',
+                        'titular_anio_nacimiento', 'titular_pais_nacimiento'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(tramite_fecha::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

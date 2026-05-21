@@ -112,7 +112,12 @@ Runtime dependencies (`llm`, `sandbox`, `embedding`, `semantic_cache`) are inten
 
 ## 5. Prompts
 
-- **`nl2sql`** — system prompt for the first SQL generation. Loaded via `load_prompt("nl2sql", tables_context=..., few_shot_block=...)`. Body stays in the existing template file; no changes as part of FIX-004.
+- **`nl2sql`** — system prompt for the first SQL generation. Loaded via `load_prompt("nl2sql", tables_context=..., few_shot_block=...)`. Body in the template file. Key rules baked in:
+  - **AGGREGATE, DON'T SAMPLE** (LLM-001, commit `1411823`): count questions ("cuántos", "cantidad de", "total de") MUST use `COUNT(*)` / `SUM(...)` / `AVG(...)`, optionally with `GROUP BY`. Never `SELECT * ... LIMIT n` for a count question — the LIMIT artefact would be reported as if it were the universe.
+  - **NON-ADDITIVE METRICS** (LLM-002): never `SUM()`/`AVG()` a column whose name contains `tasa` / `indice` / `porcentaje` / `promedio` across rows of different granularity. A provincial homicide rate cannot be recovered from departmental per-100k rates without population — return absolute counts instead.
+  - **PRESERVE UNITS**: a column documented as "por 100.000 habitantes" stays per-100,000. Never silently rescale to "por mil" or percentage.
+  - **PREFER MARTS**: when a `mart.X` candidate is present and covers the question's topic, always pick it over `cache_*` / `raw.*`.
+  - **`franja`-style enum-as-text** (DEBT-019-009): an example shows the canonical pattern `franja ~ '^[0-9]+$' AND (CAST(franja AS NUMERIC) >= 20 OR CAST(franja AS NUMERIC) <= 5)` for "nocturno" so future enum-as-text columns are handled the same way.
 - **`sql_fixer`** — system prompt for the retry path. Loaded via `load_prompt("sql_fixer")`. Takes the failed SQL + error + top 2000 chars of tables context as user message. No changes.
 
 ## 6. Compile-once cache

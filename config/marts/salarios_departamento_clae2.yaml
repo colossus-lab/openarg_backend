@@ -1,0 +1,54 @@
+id: salarios_departamento_clae2
+version: 0.1.0
+description: |
+  Salario medio (w_mean) de trabajadores registrados del sector privado,
+  agregado por departamento (INDEC) × CLAE-2 (Clasificador Nacional de
+  Actividades Económicas, nivel 2 dígitos). Publicado por el Ministerio
+  de Producción de la Nación.
+
+  El cluster `produccion__salarios_por_departamento_partido_y_s*` tiene
+  4 sub-shapes (clae2/letra × w_mean/w_median). Esta vista cubre la
+  combinación clae2 + w_mean (~500K filas en 1 tabla canónica). Las
+  otras 3 sub-shapes son candidatas a marts hermanos.
+domain: economia
+
+sources:
+  portals: [produccion]
+  resource_patterns:
+    - "produccion::salarios_por_departamento*"
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha del registro (mensual)
+  - name: codigo_departamento_indec
+    type: text
+    description: Código de departamento INDEC
+  - name: id_provincia_indec
+    type: text
+    description: ID de provincia INDEC
+  - name: clae2
+    type: text
+    description: Clasificación CLAE 2-dígitos
+  - name: w_mean
+    type: numeric
+    description: Salario medio mensual
+
+sql: |
+  SELECT
+    NULLIF(TRIM(fecha::text), '')                     AS fecha,
+    NULLIF(TRIM(codigo_departamento_indec::text), '') AS codigo_departamento_indec,
+    NULLIF(TRIM(id_provincia_indec::text), '')        AS id_provincia_indec,
+    NULLIF(TRIM(clae2::text), '')                     AS clae2,
+    w_mean::numeric                                   AS w_mean
+  FROM {{ live_tables_by_table_pattern(
+      'produccion__salarios_por_departamento*',
+      expected_columns=['fecha', 'codigo_departamento_indec',
+                        'id_provincia_indec', 'clae2', 'w_mean'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(fecha::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

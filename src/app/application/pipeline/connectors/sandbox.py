@@ -8,16 +8,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
+from app.application.discovery import (
+    catalog_discovery,
+    catalog_only_mode,
+    discovery_enabled,
+)
 from app.application.pipeline.connectors.cache_table_selection import (
     build_table_compat_notes,
     expand_table_hints_compat,
     prefer_consolidated_table,
+)
+from app.application.pipeline.connectors.planner_candidates import (
+    TableCatalogMatch,
+    collect_planner_candidates,
 )
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 
@@ -28,6 +39,129 @@ if TYPE_CHECKING:
     from app.infrastructure.adapters.cache.semantic_cache import SemanticCache
 
 logger = logging.getLogger(__name__)
+
+
+def _llm_reranker_enabled() -> bool:
+    return os.getenv("OPENARG_ENABLE_LLM_RERANKER", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _llm_reranker_shadow_mode() -> bool:
+    return os.getenv("OPENARG_LLM_RERANKER_SHADOW_MODE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _llm_reranker_max_candidates() -> int:
+    try:
+        return max(1, int(os.getenv("OPENARG_RERANKER_MAX_CANDIDATES", "8")))
+    except Exception:
+        return 8
+
+
+def _candidate_debug_summary(candidates: list[Any], *, limit: int = 5) -> list[str]:
+    summary: list[str] = []
+    for candidate in candidates[:limit]:
+        summary.append(
+            f"{candidate.kind}:{candidate.title}[{candidate.layer}/{candidate.queryability}]"
+        )
+    return summary
+
+
+def _planner_hint_label(candidate: Any) -> str:
+    """Render a planner-facing identifier.
+
+    Marts already expose a canonical title (`mart_id`) that the planner can
+    reuse directly. For raw/staging hits from the Serving Port, prefer the
+    exact resource identifier and keep the human title only as extra context.
+    """
+    title = str(getattr(candidate, "title", "") or "")
+    resource_id = str(getattr(candidate, "resource_id", "") or "")
+    layer = str(getattr(candidate, "layer", "") or "")
+    if layer == "mart":
+        return title or resource_id
+    if resource_id and title and title != resource_id:
+        return f"{resource_id} ({title})"
+    return resource_id or title
+
+
+async def _maybe_rerank_planner_candidates(
+    *,
+    query: str,
+    candidates: list,
+    llm: ILLMProvider | None,
+    top_k: int,
+):
+    if not llm or not _llm_reranker_enabled() or len(candidates) <= 1:
+        return candidates[:top_k]
+    # Fast-path (OPT-IN): when the top candidate is a mart with a
+    # strongly-matching curated sample query (boosted base_score >= the
+    # configured threshold, achievable only when sample_max_sim >= 0.70
+    # triggered the +0.17 boost), skip the reranker for 3-5s saving.
+    # Disabled by default — set `OPENARG_SKIP_RERANK_MART_SCORE` to a
+    # numeric threshold (e.g. 0.85) to enable.
+    skip_raw = os.getenv("OPENARG_SKIP_RERANK_MART_SCORE", "")
+    if skip_raw:
+        try:
+            skip_threshold = float(skip_raw)
+        except ValueError:
+            skip_threshold = 0.0
+        if (
+            skip_threshold > 0
+            and candidates
+            and candidates[0].layer == "mart"
+            and candidates[0].base_score >= skip_threshold
+        ):
+            logger.info(
+                "planner_reranker skipped query=%r reason=mart_high_confidence "
+                "top=%s score=%.3f threshold=%.2f",
+                query[:100],
+                candidates[0].title,
+                candidates[0].base_score,
+                skip_threshold,
+            )
+            return candidates[:top_k]
+    shadow_mode = _llm_reranker_shadow_mode()
+    started_at = datetime.now(UTC)
+    try:
+        from app.infrastructure.adapters.search.reranker import PlannerCandidateReranker
+        from app.infrastructure.monitoring.metrics import MetricsCollector
+
+        reranker = PlannerCandidateReranker(llm)
+        rerank_limit = min(len(candidates), _llm_reranker_max_candidates(), top_k)
+        original_head = list(candidates[:rerank_limit])
+        head = await reranker.rerank(query, original_head, top_k=rerank_limit)
+        latency_ms = (datetime.now(UTC) - started_at).total_seconds() * 1000.0
+        MetricsCollector().record_connector_call("planner_reranker", latency_ms)
+        changed = [c.candidate_id for c in head] != [c.candidate_id for c in original_head]
+        logger.info(
+            "planner_reranker mode=%s changed=%s query=%r before=%s after=%s",
+            "shadow" if shadow_mode else "apply",
+            changed,
+            query[:120],
+            _candidate_debug_summary(original_head),
+            _candidate_debug_summary(head),
+        )
+        if shadow_mode:
+            return candidates[:top_k]
+        return head + candidates[rerank_limit:top_k]
+    except Exception:
+        try:
+            from app.infrastructure.monitoring.metrics import MetricsCollector
+
+            latency_ms = (datetime.now(UTC) - started_at).total_seconds() * 1000.0
+            MetricsCollector().record_connector_call(
+                "planner_reranker", latency_ms, error=True
+            )
+        except Exception:
+            logger.debug("planner reranker metrics recording failed", exc_info=True)
+        logger.debug("planner candidate rerank failed; preserving base order", exc_info=True)
+        return candidates[:top_k]
 
 
 def _normalize_text(value: str) -> str:
@@ -158,10 +292,21 @@ async def discover_tables_by_catalog_search(
     limit: int = 5,
     min_score: float = 0.45,
 ) -> list[tuple[str, float]]:
-    """Search table_catalog embeddings for relevant tables.
+    """Search table_catalog AND mart_definitions for relevant tables.
 
-    Returns a list of (table_name, similarity_score) tuples filtered by
-    *min_score* and ordered by descending similarity.
+    Returns a unified ranked list of (table_name, similarity_score) tuples.
+    Marts get a +0.12 boost on their similarity score because their
+    embeddings are necessarily more abstract than per-table raw embeddings
+    (they describe a curated cross-source view, not the literal column
+    list of one CSV) — without the boost, vector search systematically
+    prefers concrete raw tables over the curated mart even when the mart
+    is the right answer. The boost is calibrated against the routing
+    diagnostic (Fase 1): observed average mart-vs-raw margin was -0.058,
+    with the worst miss at -0.146; +0.12 flips ~70% of the miss cases
+    while leaving negative-control queries (no relevant mart) untouched.
+
+    Mart top-1 is ALWAYS included in the result set (even below
+    min_score) so the planner sees it; raws still respect min_score.
     """
     if not sandbox:
         return []
@@ -173,7 +318,8 @@ async def discover_tables_by_catalog_search(
         def _search() -> list[tuple[str, float]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
-                result = conn.execute(
+                # Raw catalog: filtered by min_score, top-`limit` by similarity.
+                raw_result = conn.execute(
                     text(
                         "SELECT table_name, "
                         "1 - (catalog_embedding <=> CAST(:emb AS vector)) AS score "
@@ -185,9 +331,54 @@ async def discover_tables_by_catalog_search(
                     ),
                     {"emb": embedding_str, "lim": limit, "min_score": min_score},
                 )
-                rows = [(r.table_name, round(r.score, 3)) for r in result.fetchall()]
+                raw_rows = [(r.table_name, float(r.score)) for r in raw_result.fetchall()]
+
+                # Marts: top-3 always (regardless of score floor) with a
+                # GATED +0.17 boost. The gate looks at `mart_sample_queries`
+                # (one row per (mart, query) curated by the mart author):
+                # the boost applies only when the user's query has cosine
+                # similarity >= 0.45 to AT LEAST ONE of the mart's samples.
+                # Added in Fase 2.5 because a flat boost lifted ALL marts
+                # above the raw floor whenever the query had any vague
+                # gov-domain overlap (e.g. "elecciones PASO" hit
+                # `mart.legislatura_actividad` even though no mart covers
+                # elections). With the gate, marts whose samples don't
+                # overlap the query stay un-boosted and raw correctly wins.
+                # 0.45 mirrors the same min_score used for raws — below
+                # that, a sample isn't really a semantic match.
+                mart_result = conn.execute(
+                    text(
+                        "WITH ranked AS ("
+                        "  SELECT md.mart_schema, md.mart_view_name, md.mart_id, "
+                        "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_score "
+                        "  FROM mart_definitions md "
+                        "  WHERE md.embedding IS NOT NULL "
+                        "    AND COALESCE(md.last_row_count, 0) > 0 "
+                        "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
+                        "  LIMIT 3"
+                        ") "
+                        "SELECT r.mart_schema, r.mart_view_name, r.base_score, "
+                        "       COALESCE(("
+                        "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
+                        "         FROM mart_sample_queries msq "
+                        "         WHERE msq.mart_id = r.mart_id"
+                        "       ), 0) AS sample_max_sim "
+                        "FROM ranked r"
+                    ),
+                    {"emb": embedding_str},
+                )
+                mart_rows = []
+                for r in mart_result.fetchall():
+                    base = float(r.base_score)
+                    sample_sim = float(r.sample_max_sim or 0)
+                    boosted = base + 0.17 if sample_sim >= 0.70 else base
+                    mart_rows.append((f"{r.mart_schema}.{r.mart_view_name}", boosted))
                 conn.rollback()
-                return rows
+
+            # Merge and re-rank by boosted score. Round AFTER boost so the
+            # comparison is stable.
+            combined = sorted(raw_rows + mart_rows, key=lambda x: -x[1])[:limit]
+            return [(name, round(score, 3)) for name, score in combined]
 
         return await loop.run_in_executor(None, _search)
     except Exception:
@@ -200,21 +391,61 @@ async def discover_catalog_hints_for_planner(
     sandbox: ISQLSandbox | None,
     embedding: IEmbeddingProvider,
     limit: int = 5,
+    *,
+    serving_port: Any | None = None,
+    llm: ILLMProvider | None = None,
+    precomputed_embedding: list[float] | None = None,
 ) -> str:
     """Search table_catalog for relevant tables and format as planner hints.
 
     This runs BEFORE the planner LLM so it knows which cached tables exist
     for the user's question. Without this, the planner only knows about
     tables matched by keyword routing in dataset_index.py.
+
+    MASTERPLAN Fase 4.5: when `serving_port` is provided AND
+    `OPENARG_PIPELINE_USE_SERVING_PORT=1`, mart/staging hits from the
+    Serving Port are prepended to the legacy block. Marts are the curated
+    surface — the planner should prefer them over raw `cache_*` tables.
     """
+    # Calculamos el embedding una sola vez y lo reutilizamos en serving
+    # port (HNSW vectorial) y legacy hybrid (vector hints). Antes solo se
+    # usaba para legacy → DEBT-016-001 quedaba inactiva en runtime aunque
+    # el adapter ya soportara `query_embedding`. El caller (planner_node)
+    # puede pasarnos el embedding ya computed para reutilizarlo en su
+    # propio fast-path mart_sample_sim check sin doble compute.
+    q_embedding: list[float] | None = precomputed_embedding
+    if q_embedding is None and (sandbox or serving_port is not None):
+        try:
+            q_embedding = await embedding.embed(query)
+        except Exception:
+            logger.debug("embedding failed for planner discover", exc_info=True)
+            q_embedding = None
+
+    serving_block = ""
+    if serving_port is not None:
+        try:
+            serving_block = await _serving_port_planner_hints(
+                query, serving_port, limit=limit, query_embedding=q_embedding
+            )
+        except Exception:
+            logger.debug("serving port planner hints failed", exc_info=True)
+            serving_block = ""
+
     if not sandbox:
-        return ""
+        return serving_block
     try:
-        q_embedding = await embedding.embed(query)
+        if q_embedding is None:
+            q_embedding = await embedding.embed(query)
+        # In `OPENARG_CATALOG_ONLY` cutover mode, skip the legacy
+        # `table_catalog` query entirely and let `_hybrid_logical_hints`
+        # drive discovery from `catalog_resources` alone.
+        if catalog_only_mode():
+            legacy = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            return _join_hint_blocks(serving_block, legacy)
         embedding_str = "[" + ",".join(str(x) for x in q_embedding) + "]"
         loop = asyncio.get_running_loop()
 
-        def _search() -> list[tuple[str, str, str, int, float]]:
+        def _search() -> list[TableCatalogMatch]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
                 result = conn.execute(
@@ -231,30 +462,139 @@ async def discover_catalog_hints_for_planner(
                     {"emb": embedding_str, "lim": limit},
                 )
                 rows = [
-                    (
-                        r.table_name,
-                        r.display_name or "",
-                        r.description or "",
-                        r.row_count,
-                        round(r.score, 2),
+                    TableCatalogMatch(
+                        table_name=r.table_name,
+                        display_name=r.display_name or "",
+                        description=r.description or "",
+                        row_count=int(r.row_count or 0),
+                        score=round(float(r.score), 2),
                     )
                     for r in result.fetchall()
                 ]
                 conn.rollback()
                 return rows
 
-        rows = await loop.run_in_executor(None, _search)
-        if not rows:
-            return ""
+        matches = await loop.run_in_executor(None, _search)
+
+        # Mart resources discovered via the serving port are formatted into
+        # `serving_block` for the planner prompt, but they never enter the
+        # reranker — only `table_catalog` raws do. When the user query
+        # matches a mart's curated `mart_sample_queries` strongly (the
+        # `inflacion_argentina` case for "como viene la inflación"), the
+        # mart should be eligible for the LLM reranker reorder against the
+        # raws so it can win head-to-head. We surface the top-3 marts as
+        # `Resource` records that `collect_planner_candidates` lifts to
+        # `PlannerCandidate(layer='mart')` — the rerank then sees the
+        # full set.
+        from app.domain.entities.serving.serving_dtos import (
+            Resource,
+            ServingLayer,
+        )
+
+        def _search_marts() -> list[Resource]:
+            engine = sandbox._get_engine()  # type: ignore[union-attr]
+            with engine.connect() as conn:
+                rs = conn.execute(
+                    text(
+                        "WITH ranked AS ("
+                        "  SELECT md.mart_id, md.domain, "
+                        "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_sim "
+                        "  FROM mart_definitions md "
+                        "  WHERE md.embedding IS NOT NULL "
+                        "    AND COALESCE(md.last_row_count, 0) > 0 "
+                        "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
+                        "  LIMIT 3"
+                        ") "
+                        "SELECT r.mart_id, r.domain, r.base_sim, "
+                        "       COALESCE(("
+                        "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
+                        "         FROM mart_sample_queries msq "
+                        "         WHERE msq.mart_id = r.mart_id"
+                        "       ), 0) AS sample_max_sim "
+                        "FROM ranked r"
+                    ),
+                    {"emb": embedding_str},
+                ).fetchall()
+                conn.rollback()
+                # Use sample_max_sim with +0.17 boost when >= 0.70 (matches
+                # the gating logic in _catalog_vector_search). The score
+                # propagates to PlannerCandidate.base_score and lets the
+                # downstream skip-rerank heuristic detect high-confidence
+                # mart matches.
+                # Threshold filter — same calibration as
+                # `LegacyServingAdapter._discover_marts` (eval set
+                # 2026-05-09: cuts off-topic queries at sim < 0.45 from
+                # disturbing the rerank input). Default 0.45, env-overridable.
+                min_sim = float(os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45"))
+                resources: list[Resource] = []
+                for r in rs:
+                    base = float(r.base_sim or 0)
+                    sample = float(r.sample_max_sim or 0)
+                    boosted = base + 0.17 if sample >= 0.70 else base
+                    if boosted < min_sim:
+                        continue
+                    resources.append(Resource(
+                        resource_id=f"mart::{r.mart_id}",
+                        title=str(r.mart_id or ""),
+                        domain=r.domain,
+                        subdomain=None,
+                        portal=None,
+                        layer=ServingLayer.MART,
+                        score=boosted,
+                    ))
+                return resources
+
+        try:
+            mart_resources = await loop.run_in_executor(None, _search_marts)
+        except Exception:
+            logger.debug("mart vector search for rerank candidates failed", exc_info=True)
+            mart_resources = []
+
+        if not matches and not mart_resources:
+            # WS3 hybrid discovery — when no materialized table matches, try
+            # the logical catalog so the planner can still see resources that
+            # exist conceptually (or live-API connectors).
+            legacy = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            return _join_hint_blocks(serving_block, legacy)
+
+        candidates = collect_planner_candidates(
+            serving_resources=mart_resources,
+            table_catalog_matches=matches,
+            limit=limit,
+        )
+        if not candidates:
+            legacy = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+            return _join_hint_blocks(serving_block, legacy)
+        candidates = await _maybe_rerank_planner_candidates(
+            query=query,
+            candidates=candidates,
+            llm=llm,
+            top_k=limit,
+        )
 
         lines = ["TABLAS CACHEADAS RELEVANTES (datos reales descargados, usar query_sandbox):"]
-        for table_name, display_name, description, row_count, score in rows:
+        for candidate in candidates:
+            table_name = candidate.table_name or candidate.title
+            display_name = candidate.title if candidate.title != table_name else ""
+            description = candidate.description
+            base_match = next(
+                (m for m in matches if m.table_name == table_name),
+                None,
+            )
+            row_count = base_match.row_count if base_match else 0
+            score = round(candidate.base_score, 2)
             line = f"  - {table_name}"
             if display_name:
                 line += f" ({display_name})"
             line += f" — {row_count} filas"
             if description:
-                line += f" — {description[:120]}"
+                # Round v4.4 Fase 3: descriptions of mart-layer candidates
+                # may now include a "COBERTURA TEMPORAL: …" suffix appended
+                # by `_upsert_mart_definition`. Truncate budget extended
+                # from 120 → 320 chars so the data-range hint reaches the
+                # planner; non-mart candidates rarely have descriptions
+                # this long so the larger budget is benign.
+                line += f" — {description[:320]}"
             line += f" [relevancia: {score}]"
             lines.append(line)
 
@@ -262,9 +602,229 @@ async def discover_catalog_hints_for_planner(
             "\nSi alguna de estas tablas es relevante para la pregunta, "
             "usá la acción query_sandbox con table_hints incluyendo el nombre exacto de la tabla."
         )
-        return "\n".join(lines)
+        # Append logical catalog hints when the feature flag is on. Optional,
+        # additive — doesn't break the existing planner path.
+        logical_hints = await _hybrid_logical_hints(query, q_embedding, limit=limit)
+        if logical_hints:
+            lines.append("")
+            lines.append(logical_hints)
+        legacy_block = "\n".join(lines)
+        return _join_hint_blocks(serving_block, legacy_block)
     except Exception:
         logger.debug("catalog hints for planner failed", exc_info=True)
+        return serving_block
+
+
+def _join_hint_blocks(*blocks: str) -> str:
+    """Concatenate non-empty hint blocks with a blank line separator."""
+    return "\n\n".join(b for b in blocks if b and b.strip())
+
+
+# Match `FROM <schema>.` and `JOIN <schema>.`. The previous regex only
+# caught FROM, so a query like `WITH x AS (SELECT ... FROM cache_legacy)
+# SELECT ... FROM x JOIN mart.foo` was tagged `cache_legacy` even though
+# it joined a mart. We now tag it `mart` (the highest layer is what
+# matters for the served_from coverage metric). A second pass over JOIN
+# keeps the simple-query path unchanged.
+_MART_SQL_RE = re.compile(r"\b(?:from|join)\s+mart\.", re.IGNORECASE)
+_STAGING_SQL_RE = re.compile(r"\b(?:from|join)\s+staging\.", re.IGNORECASE)
+_RAW_SQL_RE = re.compile(r"\b(?:from|join)\s+raw\.", re.IGNORECASE)
+
+
+def detect_serving_layer_in_sql(sql: str) -> str:
+    """Inspect a SQL statement and return the medallion layer it touches.
+
+    Used by the executor (Fase 4.5c) to emit a `served_from_layer` metric
+    so we can track mart-coverage over time without doing log scrapes.
+    Lookups are heuristic — multi-CTE queries that touch several layers
+    return the highest layer (mart > staging > raw > legacy). Both `FROM`
+    and `JOIN` are inspected so a CTE that joins a mart at the outer
+    SELECT is correctly tagged.
+    """
+    if _MART_SQL_RE.search(sql):
+        return "mart"
+    if _STAGING_SQL_RE.search(sql):
+        return "staging"
+    if _RAW_SQL_RE.search(sql):
+        return "raw"
+    return "cache_legacy"
+
+
+async def _mart_semantics_block(serving_port: Any, table_names: list[str]) -> str:
+    """MASTERPLAN Fase 4.5b — append per-column semantics for mart tables.
+
+    Looks up each table_name through the Serving Port; if the table is in
+    schema `mart` AND the schema carries a non-empty `semantics` map (built
+    from `COMMENT ON COLUMN`), formats it as an NL2SQL hint block.
+
+    Failures and non-mart tables are silently dropped — the legacy hints
+    remain intact.
+    """
+    from app.application.pipeline.connectors.serving_resolver import (
+        ServingResolver,
+        serving_port_enabled,
+    )
+    from app.domain.entities.serving import ServingLayer
+
+    if not serving_port_enabled():
+        return ""
+
+    resolver = ServingResolver(serving_port)
+    blocks: list[str] = []
+    for tn in table_names:
+        # Mart resources are addressed as `mart::<mart_id>` from
+        # `_discover_marts` (mart_id == mart_view_name in current YAMLs,
+        # but they are conceptually distinct: mart_id is the logical
+        # identifier, mart_view_name is the physical Postgres relation).
+        # Planners may reference marts in three forms:
+        #   - bare mart_id:        "demo_energia_pozos"
+        #   - canonical resource:  "mart::demo_energia_pozos"
+        #   - qualified relation:  "mart.demo_energia_pozos"
+        # We build candidates that cover all three so the resolver finds
+        # the schema regardless of which form the planner emitted.
+        candidates: list[str] = []
+        if tn.startswith("mart::"):
+            candidates.append(tn)
+        elif tn.startswith("mart."):
+            # Strip the schema prefix to recover the bare view_name and
+            # try it as a mart_id resource. Today mart_id == mart_view_name
+            # so this works; if they ever diverge, this still resolves
+            # via mart_view_name lookup downstream.
+            candidates.append(f"mart::{tn[len('mart.'):]}")
+        else:
+            candidates.append(f"mart::{tn}")
+        for resource_id in candidates:
+            try:
+                schema = await resolver.get_schema(resource_id)
+            except Exception:
+                continue
+            if schema.layer != ServingLayer.MART or not schema.semantics:
+                continue
+            lines = [f"SEMÁNTICA DE COLUMNAS — {tn}:"]
+            for col, desc in schema.semantics.items():
+                lines.append(f"  - {col}: {desc}")
+            blocks.append("\n".join(lines))
+            break
+    return "\n\n".join(blocks)
+
+
+async def _serving_port_planner_hints(
+    query: str,
+    serving_port: Any,
+    *,
+    limit: int,
+    query_embedding: list[float] | None = None,
+) -> str:
+    """MASTERPLAN Fase 4.5 — surface mart/staging resources to the planner.
+
+    Calls `IServingPort.discover()` and formats the top hits as a planner
+    block. Marts come first; staging next; cache_legacy is suppressed here
+    because the legacy `table_catalog` block already covers it.
+
+    `query_embedding` activa el HNSW path en el adapter (DEBT-016-001 closed
+    2026-05-09). Cuando es None, el adapter cae al lexical ILIKE.
+    """
+    from app.application.pipeline.connectors.serving_resolver import (
+        ServingResolver,
+        serving_port_enabled,
+    )
+
+    if not serving_port_enabled():
+        return ""
+
+    resolver = ServingResolver(serving_port)
+    try:
+        resources, layer_counts = await resolver.discover_for_planner(
+            query, limit=limit, query_embedding=query_embedding
+        )
+    except Exception:
+        logger.debug("ServingResolver.discover_for_planner failed", exc_info=True)
+        return ""
+
+    candidates = collect_planner_candidates(
+        serving_resources=resources,
+        limit=limit,
+    )
+    preferred = [
+        c for c in candidates if c.layer in {"mart", "staging", "raw"}
+    ]
+    if not preferred:
+        return ""
+
+    lines: list[str] = []
+    by_layer: dict[str, list] = {}
+    for candidate in preferred:
+        by_layer.setdefault(candidate.layer, []).append(candidate)
+
+    if "mart" in by_layer:
+        lines.append("MARTS DISPONIBLES (vistas semánticas curadas, preferí estas):")
+        for c in by_layer["mart"]:
+            lines.append(f"  - {_planner_hint_label(c)}")
+        lines.append(
+            "Para una mart, usá query_sandbox con el nombre canónico de la vista."
+        )
+
+    if "staging" in by_layer:
+        lines.append("")
+        lines.append("STAGING (datasets validados por contracts):")
+        for c in by_layer["staging"]:
+            lines.append(f"  - {_planner_hint_label(c)}")
+        lines.append(
+            "Para staging, preservá el identificador exacto mostrado si necesitás referenciar el recurso."
+        )
+
+    if "raw" in by_layer:
+        lines.append("")
+        lines.append("RAW DISPONIBLE (tablas materializadas crudas, usar si no hay mart):")
+        for c in by_layer["raw"]:
+            lines.append(f"  - {_planner_hint_label(c)}")
+        lines.append(
+            "Para raw, preservá el identificador exacto mostrado si necesitás referenciar el recurso."
+        )
+
+    return "\n".join(lines)
+
+
+async def _hybrid_logical_hints(
+    query: str, q_embedding: list[float] | None, *, limit: int
+) -> str:
+    """WS3 — surface `catalog_resources` to the planner when the flag is on.
+
+    Returns a planner-facing block describing logical resources that match
+    the query (whether materialized, pending or connector_endpoint).
+    """
+    if not discovery_enabled():
+        return ""
+    try:
+        loop = asyncio.get_running_loop()
+        discovery = catalog_discovery()
+
+        def _search() -> list:
+            if q_embedding:
+                return discovery.find_by_embedding(q_embedding, k=limit)
+            return discovery.find_by_text(query, k=limit)
+
+        results = await loop.run_in_executor(None, _search)
+        if not results:
+            return ""
+        lines = [
+            "RECURSOS LÓGICOS RELEVANTES (catalog_resources, pueden no estar materializados):"
+        ]
+        for r in results:
+            tag = r.materialization_status.upper()
+            line = f"  - [{tag}] {r.display_name or r.canonical_title} (kind={r.resource_kind})"
+            if r.materialized_table_name:
+                line += f" → tabla `{r.materialized_table_name}`"
+            if getattr(r, "score", 0):
+                line += f" [score: {round(r.score, 2)}]"
+            lines.append(line)
+        lines.append(
+            "Para LIVE_API/PENDING usá el conector apropiado (BCRA, series_tiempo, etc.). "
+            "Para READY usá query_sandbox con la tabla indicada."
+        )
+        return "\n".join(lines)
+    except Exception:
+        logger.debug("hybrid logical hints failed", exc_info=True)
         return ""
 
 
@@ -415,6 +975,8 @@ async def execute_sandbox_step(
     vector_search: IVectorSearch,
     semantic_cache: SemanticCache,
     user_query: str = "",
+    *,
+    serving_port: Any | None = None,
 ) -> list[DataResult]:
     if not sandbox:
         logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
@@ -431,6 +993,72 @@ async def execute_sandbox_step(
 
     try:
         tables = await sandbox.list_cached_tables()
+        # MASTERPLAN Fase 4.5d — surface marts to the executor's table
+        # universe so a planner that suggested a mart (via the hints
+        # block built by `_serving_port_planner_hints`) actually finds
+        # it after fnmatch filtering. Without this, table_hints like
+        # `mart.staff_estado` never intersect `tables` and the filter
+        # silently falls back to listing every cache_* table → the
+        # NL2SQL subgraph never sees the mart and emits a query against
+        # legacy cache instead.
+        # `PgSandboxAdapter._engine` is a SYNCHRONOUS Engine, so the
+        # query has to run in a worker thread via `asyncio.to_thread`.
+        # The earlier version used `async with engine.connect()` directly,
+        # which AttributeError'd on `__aenter__` and silently dropped the
+        # mart enrichment. Same bug shape that hid marts from /data/search
+        # and /data/tables until Sprint 0.5/0.7 — this is the executor-side
+        # variant. Fixed here so the planner's mart hints actually match
+        # rows in the executor's `tables` universe.
+        def _query_marts_sync() -> list:
+            from sqlalchemy import text as _sql_text
+
+            engine_for_marts = getattr(sandbox, "_engine", None)
+            if engine_for_marts is None:
+                getter = getattr(sandbox, "_get_engine", None)
+                if callable(getter):
+                    engine_for_marts = getter()
+            if engine_for_marts is None:
+                return []
+            with engine_for_marts.connect() as _mart_conn:
+                return (
+                    _mart_conn.execute(
+                        _sql_text(
+                            "SELECT mart_id, mart_schema, mart_view_name, "
+                            "       last_row_count, canonical_columns_json "
+                            "FROM mart_definitions "
+                            "WHERE COALESCE(last_row_count, 0) > 0"
+                        )
+                    )
+                ).fetchall()
+
+        try:
+            import asyncio as _asyncio
+
+            from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+
+            mart_rows = await _asyncio.to_thread(_query_marts_sync)
+            for _mr in mart_rows:
+                _columns: list[str] = []
+                try:
+                    _cc = _mr.canonical_columns_json
+                    if isinstance(_cc, list):
+                        _columns = [str(c.get("name", "")) for c in _cc if c.get("name")]
+                except Exception:
+                    _columns = []
+                _schema = str(_mr.mart_schema or "mart")
+                _view = str(_mr.mart_view_name or _mr.mart_id)
+                tables.append(
+                    CachedTableInfo(
+                        table_name=f"{_schema}.{_view}",
+                        dataset_id="",
+                        row_count=int(_mr.last_row_count or 0),
+                        columns=_columns,
+                    )
+                )
+        except Exception:
+            # Mart enrichment is best-effort. Failure here just means the
+            # planner can't pick a mart; cache_legacy path keeps working.
+            logger.warning("Could not enrich tables with marts", exc_info=True)
         table_hints = params.get("tables", [])
         # Resolve table_notes and table_hints from routing when planner didn't provide them
         table_notes = params.get("table_notes", "")
@@ -570,13 +1198,113 @@ async def execute_sandbox_step(
                             [t.table_name for t in filtered[:5]],
                         )
                     else:
-                        return []
+                        # BUG-001 follow-up (2026-05-14): when fnmatch AND
+                        # vector_search both miss the planner hints, we used
+                        # to `return []` here. That short-circuited the mart
+                        # injection block below — queries like "pauta
+                        # publicitaria GCBA" (planner hint
+                        # `caba_pauta_publicitaria` matches NO cache_* row)
+                        # never got a chance to fall back to the curated mart.
+                        # Empty `tables` lets the injection run; if the mart
+                        # HNSW also returns 0, the post-injection guard
+                        # finally returns [].
+                        tables = []
                 else:
                     logger.warning(
-                        "Sandbox: none of the hinted tables %s found in cache, skipping",
+                        "Sandbox: none of the hinted tables %s found in cache, "
+                        "attempting mart injection before giving up",
                         table_hints,
                     )
+                    tables = []
+
+        # BUG-001 fix (2026-05-13): planner table_hints don't necessarily
+        # include `mart.*` names — they emit `cache_*` globs, bare cache
+        # table names, or mart-id-without-schema. All three paths drop
+        # `mart.X` rows during filtering even when a curated mart for the
+        # domain is the better surface. After ALL planner-driven filtering
+        # runs, re-inject the top semantic mart matches so NL2SQL competes
+        # marts against cache_* on equal footing. The 0.45 threshold
+        # mirrors `_discover_marts.min_sim` (calibrated 2026-05-09 against
+        # the routing eval set). Defensive try/except — failure preserves
+        # the prior filtered universe.
+        try:
+            current_mart_names = {
+                t.table_name for t in tables if t.table_name.startswith("mart.")
+            }
+
+            from sqlalchemy import text as _stxt
+            q_emb = await embedding.embed(nl_query)
+            emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
+
+            def _top_marts_for_query() -> list[tuple[str, list[str]]]:
+                eng = getattr(sandbox, "_engine", None) or (
+                    sandbox._get_engine()  # type: ignore[union-attr]
+                    if hasattr(sandbox, "_get_engine") else None
+                )
+                if eng is None:
                     return []
+                with eng.connect() as conn:
+                    rs = conn.execute(_stxt(
+                        "SELECT mart_schema, mart_view_name, "
+                        "  canonical_columns_json, "
+                        "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                        "FROM mart_definitions "
+                        "WHERE embedding IS NOT NULL "
+                        "  AND COALESCE(last_row_count, 0) > 0 "
+                        "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
+                        "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
+                    ), {"e": emb_str}).fetchall()
+                out: list[tuple[str, list[str]]] = []
+                for r in rs:
+                    cols: list[str] = []
+                    try:
+                        cc = r.canonical_columns_json
+                        if isinstance(cc, list):
+                            cols = [str(c.get("name", "")) for c in cc if c.get("name")]
+                    except Exception:
+                        cols = []
+                    out.append((f"{r.mart_schema}.{r.mart_view_name}", cols))
+                return out
+
+            top_marts = await asyncio.to_thread(_top_marts_for_query)
+            from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+            injected = []
+            for mart_name, cols in top_marts:
+                if mart_name in current_mart_names:
+                    continue
+                injected.append(CachedTableInfo(
+                    table_name=mart_name,
+                    dataset_id="",
+                    row_count=0,
+                    columns=cols,
+                ))
+            if injected:
+                # Prepend so the NL2SQL LLM sees marts at the TOP of the
+                # `tables_context` listing. LLMs systematically favor
+                # earlier candidates when the scoring signal is weak;
+                # putting marts last (append) means the prompt's existing
+                # cache_*-heavy examples dominate. Prepending plus the
+                # explicit "PREFER MARTS" rule in nl2sql.txt is the dual
+                # signal that finally flips routing.
+                tables = injected + tables
+                logger.info(
+                    "BUG-001: injected %d semantically-relevant mart(s) "
+                    "at top of universe: %s",
+                    len(injected),
+                    [t.table_name for t in injected],
+                )
+        except Exception:
+            logger.debug("mart semantic injection failed", exc_info=True)
+
+        # Post-injection guard: if the universe is still empty (planner
+        # hints failed AND no semantically-relevant mart cleared the 0.45
+        # threshold), there's genuinely no table to query — return early.
+        if not tables:
+            logger.info(
+                "Sandbox: no tables after fnmatch + vector_search + mart "
+                "injection; returning empty result"
+            )
+            return []
 
         # Smart table ordering: when the query asks for rates/indices,
         # put pre-aggregated tables (with "tasa", "indice", "porcentaje" in name)
@@ -640,6 +1368,21 @@ async def execute_sandbox_step(
         if all_table_notes:
             tables_context += f"\n\nNOTAS SOBRE LAS TABLAS:\n{all_table_notes}"
 
+        # MASTERPLAN Fase 4.5b — when the planner picked a mart, append its
+        # canonical-column semantics (sourced from `pg_description`, which
+        # `build_mart` populates via `COMMENT ON COLUMN`) to the NL2SQL
+        # context. The LLM uses these to write SQL with the right semantic
+        # intent instead of guessing from column names alone.
+        if serving_port is not None:
+            try:
+                semantics_block = await _mart_semantics_block(
+                    serving_port, [t.table_name for t in tables[:10]]
+                )
+                if semantics_block:
+                    tables_context += f"\n\n{semantics_block}"
+            except Exception:
+                logger.debug("mart semantics block failed", exc_info=True)
+
         # Retrieve dynamic few-shot examples from successful past queries
         few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
 
@@ -668,6 +1411,7 @@ async def execute_sandbox_step(
         )
 
         compiled_subgraph = await get_compiled_nl2sql_subgraph()
+        import time as _time
         initial_state: dict[str, Any] = {
             "nl_query": nl_query,
             "tables": tables,
@@ -677,15 +1421,40 @@ async def execute_sandbox_step(
             "table_descriptions": table_descriptions,
             "few_shot_block": few_shot_block or "",
             "max_attempts": 2,
+            "started_at": _time.perf_counter(),
         }
         with nl2sql_runtime(
             llm=llm,
             sandbox=sandbox,
             embedding=embedding,
             semantic_cache=semantic_cache,
+            serving_port=serving_port,
         ):
             final_state = await compiled_subgraph.ainvoke(initial_state)
-        return final_state.get("data_results", []) or []
+        results = final_state.get("data_results", []) or []
+
+        # MASTERPLAN Fase 4.5c — annotate every result with the medallion
+        # layer the SQL touched. The metric is a side-effect of the SQL
+        # already produced; nothing else changes about the execution path.
+        executed_sql = final_state.get("generated_sql", "")
+        if executed_sql:
+            served_layer = detect_serving_layer_in_sql(executed_sql)
+            for r in results:
+                if r.metadata is None:
+                    r.metadata = {}
+                r.metadata.setdefault("served_from_layer", served_layer)
+            try:
+                from app.infrastructure.monitoring.metrics import MetricsCollector
+
+                MetricsCollector().record_connector_call(
+                    f"sandbox:served_from:{served_layer}",
+                    latency_ms=0,
+                    error=False,
+                )
+            except Exception:
+                logger.debug("Could not record served_from_layer metric", exc_info=True)
+
+        return results
     except Exception:
         logger.warning("Sandbox step %s failed", step.id, exc_info=True)
         return []

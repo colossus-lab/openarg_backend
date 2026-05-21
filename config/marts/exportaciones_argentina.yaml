@@ -1,0 +1,59 @@
+id: exportaciones_argentina
+version: 0.1.0
+description: |
+  Exportaciones argentinas de bienes (valores en USD FOB) por sector
+  económico (CLAE 3 dígitos) y mes. Datos publicados por la Secretaría
+  de Producción.
+
+  Source: 20 versiones de
+  `produccion__exportaciones_de_bienes_valores_y_can` + variante
+  `datos_gob_ar__exportaciones_de_bienes_valores`. Schema cohesivo
+  long-format `(fecha, clae3, total_fob)`.
+
+  Use cases típicos: "exportaciones argentinas mensuales",
+  "evolución de las exportaciones agropecuarias",
+  "exportaciones de soja", "balance exportador por sector",
+  "destinos de exportación", "comercio exterior Argentina".
+domain: economia
+
+sources:
+  portals: [produccion, datos_gob_ar]
+  resource_patterns:
+    - "produccion__exportaciones_de_bienes_valores_y_can*"
+    - "datos_gob_ar__exportaciones_de_bienes_valores*"
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha de la observación (formato YYYY-MM)
+  - name: clae3
+    type: text
+    description: Código CLAE 3 dígitos del sector económico exportador
+  - name: total_fob
+    type: text
+    description: Valor total en USD FOB (Free On Board)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(fecha::text), '')             AS fecha,
+    NULLIF(TRIM(clae3::text), '')             AS clae3,
+    NULLIF(TRIM(total_fob::text), '')         AS total_fob
+  FROM {{ live_tables_by_table_pattern(
+      'produccion__exportaciones_de_bienes_valores_y_can*',
+      expected_columns=['fecha', 'clae3', 'total_fob']
+  ) }} sub
+  WHERE NULLIF(TRIM(clae3::text), '') IS NOT NULL
+  UNION ALL
+  SELECT
+    NULLIF(TRIM(fecha::text), '')             AS fecha,
+    NULLIF(TRIM(clae3::text), '')             AS clae3,
+    NULLIF(TRIM(total_fob::text), '')         AS total_fob
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__exportaciones_de_bienes_valores*',
+      expected_columns=['fecha', 'clae3', 'total_fob']
+  ) }} sub2
+  WHERE NULLIF(TRIM(clae3::text), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

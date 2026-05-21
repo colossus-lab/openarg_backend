@@ -173,6 +173,111 @@ def test_ground_citations_accepts_unit_scaled_claim_and_comparative_derived_delt
     assert confidence == 0.85
 
 
+def test_ground_citations_ignores_date_tokens_in_source_label_claims() -> None:
+    result = DataResult(
+        source="argentina_datos",
+        portal_name="DolarApi",
+        portal_url="https://dolarapi.com",
+        dataset_title="Cotización actual Dólar todas las casas",
+        format="json",
+        records=[
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1335, "venta": 1385},
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1390, "venta": 1410},
+        ],
+        metadata={"fetched_at": "2026-04-14T23:59:08.936247+00:00"},
+    )
+    citations = [{"claim": "Cotizaciones del dólar 14/04/2026", "source": "DolarApi"}]
+
+    grounded, warnings, confidence = ground_citations(
+        "Dólar oficial: $1.335 / $1.385. Blue: $1.390 / $1.410.",
+        citations,
+        [result],
+        0.45,
+    )
+
+    assert warnings == []
+    assert confidence == 0.9
+    assert grounded[0]["verified"] is True
+    assert grounded[0]["unsupported_numbers"] == []
+
+
+def test_ground_citations_ignores_natural_dates_and_clock_time_in_dollar_spot_claims() -> None:
+    result = DataResult(
+        source="argentina_datos",
+        portal_name="DolarApi",
+        portal_url="https://dolarapi.com",
+        dataset_title="Cotización actual Dólar todas las casas",
+        format="json",
+        records=[
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1335, "venta": 1385},
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1390, "venta": 1410},
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1409.3, "venta": 1414.9},
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1463.3, "venta": 1468.7},
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1735.5, "venta": 1800.5},
+        ],
+        metadata={"fetched_at": "2026-04-15T00:51:10.411473+00:00"},
+    )
+    citations = [
+        {
+            "claim": "Cotización oficial, blue, bolsa, contado con liquidación, mayorista, cripto y tarjeta del 14 de abril 2026",
+            "source": "DolarApi (dolarapi.com)",
+        }
+    ]
+
+    grounded, warnings, confidence = ground_citations(
+        (
+            "Dólar oficial: 1335 / 1385. Blue: 1390 / 1410. Bolsa: 1409,30 / 1414,90. "
+            "Los datos son de ayer 14 de abril a las 20:59 hs. "
+            "El contado con liquidación está en 1463,30 / 1468,70 y la tarjeta en 1735,50 / 1800,50."
+        ),
+        citations,
+        [result],
+        0.45,
+    )
+
+    assert warnings == []
+    assert confidence == 0.9
+    assert grounded[0]["verified"] is True
+    assert grounded[0]["unsupported_numbers"] == []
+
+
+def test_ground_citations_accepts_rounded_compra_venta_quote_values() -> None:
+    result = DataResult(
+        source="argentina_datos",
+        portal_name="DolarApi",
+        portal_url="https://dolarapi.com",
+        dataset_title="Cotización actual Dólar todas las casas",
+        format="json",
+        records=[
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1335, "venta": 1385},
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1390, "venta": 1410},
+            {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1463.3, "venta": 1468.7},
+        ],
+        metadata={"fetched_at": "2026-04-15T02:00:01.020645+00:00"},
+    )
+    citations = [
+        {
+            "claim": "Dólar oficial 1335-1385, blue 1390-1410, contado con liquidación 1463-1469",
+            "source": "DolarApi (dolarapi.com) — 14 de abril de 2026",
+        }
+    ]
+
+    grounded, warnings, confidence = ground_citations(
+        (
+            "Dólar oficial: 1335 / 1385. Blue: 1390 / 1410. "
+            "El contado con liquidación está en 1463-1469."
+        ),
+        citations,
+        [result],
+        0.7,
+    )
+
+    assert warnings == []
+    assert confidence == 0.9
+    assert grounded[0]["verified"] is True
+    assert grounded[0]["unsupported_numbers"] == []
+
+
 def test_ground_citations_warns_when_answer_has_numbers_without_citations() -> None:
     result = _make_result([{"anio": 2025, "inflacion": 117.8}])
 

@@ -1,0 +1,135 @@
+id: delitos_argentina_snic
+version: 0.1.1
+description: |
+  Sistema Nacional de Información Criminal (SNIC) — estadísticas de
+  delitos en formato departamental largo: cada fila es un cruce
+  (provincia, departamento, año, código de delito) con cantidad de hechos,
+  cantidad de víctimas (total, masculino, femenino, sin dato) y tasas
+  proyectadas por 100K habitantes.
+
+  Source: 1 dataset multi-version `datos_gob_ar::snic_departamental_estadisticas_criminales*`
+  (~500K filas, capped por MAX_TABLE_ROWS por año fiscal). Publicado por
+  la Dirección Nacional de Estadística Criminal (Ministerio de Seguridad
+  de la Nación).
+
+  Es el panorama nacional de criminalidad — complementa `delitos_caba`
+  (que es solo CABA, granularidad geográfica fina). SNIC cubre las 24
+  provincias y los ~530 departamentos/partidos del país, en formato
+  agregado año-departamento-tipo de delito.
+
+  Casos de uso típicos:
+    * "homicidios por provincia argentina"
+    * "tasa de delitos en Mendoza vs Santa Fe"
+    * "qué provincia tiene más robos"
+    * "víctimas mujeres por departamento"
+    * "evolución del delito en Argentina"
+    * "ranking provincial de criminalidad"
+
+  Nota: el dataset SNIC Provincial existe pero tiene formato wide
+  (>700 columnas: una por delito × provincia × tipo) imposibilitando
+  un mart natural. SNIC Departamental contiene la misma información en
+  formato long.
+
+  AGREGACIÓN (importante): para totales a nivel provincia sumá las
+  columnas `cantidad_*` (cantidad_hechos, cantidad_victimas, etc.) con
+  SUM y GROUP BY provincia_nombre — esas SÍ son aditivas. Las columnas
+  `tasa_*` (tasa_hechos, tasa_victimas, ...) son tasas por 100.000
+  habitantes calculadas a nivel departamental y NO son aditivas: no las
+  sumes ni promedies para obtener una tasa provincial. Este mart no
+  incluye población, así que una tasa provincial no puede recalcularse
+  desde acá — para rankings provinciales usá los conteos absolutos.
+domain: seguridad
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::snic_departamental*"
+
+canonical_columns:
+  - name: provincia_id
+    type: text
+    description: Código de provincia
+  - name: provincia_nombre
+    type: text
+    description: Nombre de la provincia
+  - name: departamento_id
+    type: text
+    description: Código del departamento/partido
+  - name: departamento_nombre
+    type: text
+    description: Nombre del departamento/partido
+  - name: anio
+    type: text
+    description: Año del registro
+  - name: codigo_delito_snic_id
+    type: text
+    description: Código SNIC del tipo de delito
+  - name: cod_delito
+    type: text
+    description: Código corto del delito
+  - name: codigo_delito_snic_nombre
+    type: text
+    description: Nombre del delito (Homicidio doloso, Robo, etc.)
+  - name: cantidad_hechos
+    type: numeric
+    description: Cantidad de hechos registrados
+  - name: cantidad_victimas
+    type: numeric
+    description: Cantidad total de víctimas
+  - name: cantidad_victimas_masc
+    type: numeric
+    description: Víctimas masculinas
+  - name: cantidad_victimas_fem
+    type: numeric
+    description: Víctimas femeninas
+  - name: cantidad_victimas_sd
+    type: numeric
+    description: Víctimas sin dato de género
+  - name: tasa_hechos
+    type: numeric
+    description: Tasa de hechos por 100K habitantes
+  - name: tasa_victimas
+    type: numeric
+    description: Tasa de víctimas por 100K habitantes
+  - name: tasa_victimas_masc
+    type: numeric
+    description: Tasa víctimas masculinas
+  - name: tasa_victimas_fem
+    type: numeric
+    description: Tasa víctimas femeninas
+
+sql: |
+  SELECT
+    NULLIF(TRIM(provincia_id::text), '')                    AS provincia_id,
+    NULLIF(TRIM(provincia_nombre::text), '')                AS provincia_nombre,
+    NULLIF(TRIM(departamento_id::text), '')                 AS departamento_id,
+    NULLIF(TRIM(departamento_nombre::text), '')             AS departamento_nombre,
+    NULLIF(TRIM(anio::text), '')                            AS anio,
+    NULLIF(TRIM(codigo_delito_snic_id::text), '')           AS codigo_delito_snic_id,
+    NULLIF(TRIM(cod_delito::text), '')                      AS cod_delito,
+    NULLIF(TRIM(codigo_delito_snic_nombre::text), '')       AS codigo_delito_snic_nombre,
+    NULLIF(TRIM(cantidad_hechos::text), '')::numeric        AS cantidad_hechos,
+    NULLIF(TRIM(cantidad_victimas::text), '')::numeric      AS cantidad_victimas,
+    NULLIF(TRIM(cantidad_victimas_masc::text), '')::numeric AS cantidad_victimas_masc,
+    NULLIF(TRIM(cantidad_victimas_fem::text), '')::numeric  AS cantidad_victimas_fem,
+    NULLIF(TRIM(cantidad_victimas_sd::text), '')::numeric   AS cantidad_victimas_sd,
+    NULLIF(TRIM(tasa_hechos::text), '')::numeric            AS tasa_hechos,
+    NULLIF(TRIM(tasa_victimas::text), '')::numeric          AS tasa_victimas,
+    NULLIF(TRIM(tasa_victimas_masc::text), '')::numeric     AS tasa_victimas_masc,
+    NULLIF(TRIM(tasa_victimas_fem::text), '')::numeric      AS tasa_victimas_fem
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__snic_departamental*',
+      expected_columns=['provincia_id', 'provincia_nombre', 'departamento_id',
+                        'departamento_nombre', 'anio', 'codigo_delito_snic_id',
+                        'cod_delito', 'codigo_delito_snic_nombre',
+                        'cantidad_hechos', 'cantidad_victimas',
+                        'cantidad_victimas_masc', 'cantidad_victimas_fem',
+                        'cantidad_victimas_sd', 'tasa_hechos', 'tasa_victimas',
+                        'tasa_victimas_masc', 'tasa_victimas_fem'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(provincia_nombre::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

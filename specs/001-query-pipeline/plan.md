@@ -41,7 +41,7 @@ This top-level plan keeps only **graph-wide concerns**: hexagonal mapping, entry
 ### WebSocket streaming
 `WS /api/v1/query/ws/smart` → `smart_query_v2_router.py:234-384`
 - Rate limited 20 connections/min per user.
-- Uses `graph.astream(stream_mode=["updates", "custom"])`; emits `status`, `chunk`, `clarification`, `complete` events.
+- Uses `graph.astream(stream_mode=["updates", "custom"])`; emits `status`, `chunk`, `clarification`, `complete`, `keepalive` events. The `keepalive` is a `{"type": "keepalive"}` heartbeat emitted every 15s by a parallel task while the pipeline runs (BUG-022, commit `c25ff52`) — prevents long steps (slow connectors, analyst LLM) from leaving the socket idle long enough for an intermediary or client per-recv timeout to drop the connection mid-stream. A `send_lock` serializes the keepalive with the stream producers; consumers ignore unknown types harmlessly. The `complete` event no longer carries `confidence` (commit `acc884a` removed it from `_COMPLETE_EVENT_KEYS`).
 
 ### Celery offline
 `openarg.analyze_query` → `infrastructure/celery/tasks/analyst_tasks.py` — analyst queue, concurrency 2, fire-and-forget.

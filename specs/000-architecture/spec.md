@@ -2,9 +2,38 @@
 
 **Type**: Reverse-engineered
 **Status**: Draft
-**Last synced with code**: 2026-04-12
+**Last synced with code**: 2026-05-05 (Sprint 0.7 complete)
 **Hexagonal scope**: Full-stack
 **Related plan**: [./plan.md](./plan.md)
+
+---
+
+## 0. Recent material changes (Sprint 0.1 – 0.7, 2026-05-04 → 2026-05-05)
+
+This block summarises decisions and bug fixes that landed AFTER the previous sync (2026-04-12) and that affect downstream specs. Read it before any spec further down — several of them still reflect pre-Sprint state in their wording.
+
+| Sprint | Change | Spec impact |
+|---|---|---|
+| 0.1 | `raw_table_versions.is_truncated BOOLEAN DEFAULT FALSE` (alembic 0046). Collector marks the flag when `MAX_TABLE_ROWS=500_000` cuts off a CSV/Excel/JSON parse. `OPENARG_RAW_RETENTION_KEEP_LAST` env var now drives `retain_raw_versions` retention window (default 3, configurable without redeploy). | spec 017 (raw layer) — config + flag |
+| 0.2 | `mart_definitions.embedding` populated for all 6 marts via `openarg.backfill_mart_embeddings` (Bedrock Cohere multilingual v3, 1024-dim). `_upsert_mart_definition` now generates the embedding on every successful build. | spec 019 (marts), spec 016 (serving port) |
+| 0.3 | New invariant in `cleanup_invariants`: detects `mart_definitions.last_row_count = 0` while the matview has `reltuples > 0` and refreshes the metadata. Fixed `demo_energia_pozos` row_count=0 drift. | spec 014 (state machine) — extended sweep |
+| 0.4 | `cleanup_invariants` also drops empty orphan raw tables (0 rows, no rtv entry, no `cached_datasets` row). Orphans WITH data still go through canonical/fallback registration. | spec 014 |
+| 0.5 | Planner heuristic accepts `mart.foo` qualified names (was only `mart::foo` before). `parser_version=legacy:unknown` for backfilled rows (was lying as `phase4-v1`). `mart_id == mart_view_name` invariant enforced in `_upsert_mart_definition`. `/data/search` includes marts via embedding similarity. Advisory locks (`_try_advisory_lock`, `_try_backfill_lock`) now cache the acquiring connection in a module-level dict so the session-scoped lock survives between acquire and release — the previous helpers leaked the lock instantly. | spec 016, spec 019, spec 015 |
+| 0.6 | **Atomicity**: raw promotion (`_register_raw_version` + `UPDATE catalog_resources`) now runs BEFORE the `cached_datasets='ready'` write. If it fails, the outcome demotes to `error` with `raw_promotion_failed:` so the dataset never sits as `ready` while the registry/catalog are out of sync. `register_via_b_table` reconciles `catalog_resources.materialized_table_name` to the canonical `{portal}::{source_id}` row so catalog and registry agree on the physical table even when their `resource_identity` strings differ. `sandbox.list_cached_tables` now includes raw layer tables (qualified as `raw.<bare>`). Qualified-name parsing helper applied to `ingestion_findings_sweep` and `catalog_enrichment_tasks`. | spec 014, spec 015, spec 017 |
+| 0.7 | Sandbox `_ALLOWED_SCHEMAS = ("public", "mart", "raw")` with `_PREFIX_FREE_SCHEMAS = ("mart", "raw")` so SELECT against mart/raw is no longer rejected by the validator. `openarg_sandbox_ro` granted USAGE+SELECT on `mart` and `raw` schemas. `_derived_layout_profile` and `_derived_header_quality` in `catalog_backfill` return None for unknown rows (they used to fabricate `simple_tabular`/`good`, mis-tagging legacy rows as phase4-parsed). `ingestion_findings_sweep._load_batch` UNIONs `cached_datasets` with `raw_table_versions` so the ~7% of raw rows without a cd entry are still validated. `catalog_enrichment._resolve_resource_identity_for_table` resolves rtv-first for qualified names. | spec 010 (sandbox), spec 015, spec 014 |
+
+### Architectural deletions
+
+- **Staging schema removed** in mig 0042 (2026-05-04). The medallion is now raw → mart with no intermediate validation table. See [spec 018-contracts-staging](../018-contracts-staging/spec.md) marked DEPRECATED. Specs 016 and 014 still reference staging in places — those references are historical.
+
+### Backlog (explicit deferred)
+
+These bugs are real but the cost/benefit analysis says wait:
+
+- `presupuesto_tasks._register_dimension` bypasses the canonical state machine (55 dimension tables don't get layout_profile/header_quality/error_category). MEDIUM, no runtime impact.
+- `bac_tasks` pre-registers `cached_datasets='downloading'` and updates errors directly, bypassing `_apply_cached_outcome`. Same shape as the presupuesto bypass.
+- vía-B writers (`bcra_tasks`, `presupuesto_tasks`, `senado_tasks`) use `{portal}::{curated}` resource identities while `catalog_resources` uses `{portal}::{datasets.source_id}`. Mitigated in Sprint 0.6 by syncing `materialized_table_name`; a full alignment requires a migration of historical rtv rows + updating mart SQLs that hardcode the curated identity.
+- `register_via_b_table` triggers `_trigger_marts_for_portal` on every `ON CONFLICT DO UPDATE` even when no field changed. Mitigated by 110s debounce.
 
 ---
 

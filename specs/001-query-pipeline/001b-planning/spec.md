@@ -52,7 +52,10 @@ The phase is bounded by `_MAX_REPLAN_DEPTH=2` and a `_TIME_BUDGET_SECONDS=20.0` 
 
 ### Planning
 - **FR-011**: The planner MUST use Bedrock Claude Haiku 4.5 to generate an `ExecutionPlan` with ordered steps and `intent` ("data" | "clarification" | "error" | ...).
-- **FR-012**: The planner MUST discover relevant cached tables via vector search over `table_catalog`.
+- **FR-012**: The planner MUST discover relevant cached tables via vector search over `table_catalog` and surface marts via the Serving Port (`_serving_port_planner_hints`) under a "MARTS DISPONIBLES" block.
+- **FR-012a (BUG-001/002, commit `2fe1a6b`)**: when the catalog discovery surfaced a mart (a "MARTS DISPONIBLES" block appears in `catalog_hints`), the deterministic keyword router's `search_ckan(portalId=...)` hints MUST be suppressed before reaching the planner prompt. A portal-keyword match ("caba", "cordoba", ...) is weak evidence and used to outrank curated marts, steering routing to slow live CKAN fetches (peajes observed at 99s). Implemented as `_resolve_routing_hints(..., suppress_ckan=mart_available)` in `query_planner.py`.
+- **FR-012b (BUG-001/002)**: `planner.txt` carries an explicit hard rule — when "MARTS DISPONIBLES" is present, always pick `query_sandbox` with the listed mart, never `search_ckan`, regardless of any "alta confianza" label on connector hints.
+- **FR-012c (DDJJ universe split, commit `596c4b5`)**: for DDJJ questions, the prompt picks the source by **universe**, not by source preference: `query_ddjj` for diputados-specific questions (covers the 195 precharged diputados; correct subset and only filterable source); `mart.ddjj_funcionarios_federales` (via `query_sandbox`) for broader federal-funcionarios questions (the mart has no `cargo` column, so it cannot filter to diputados — forcing it would return the wrong universe). `search_ckan` is forbidden for DDJJ topics in both cases.
 - *(FR-013 — `search_datasets` fallback injection — lives in Phase C: Execution, since it mutates the plan immediately before dispatch.)*
 
 ### Replanning

@@ -1,0 +1,111 @@
+id: mendoza_ejecucion_administracion_central
+version: 0.1.0
+description: |
+  Ejecución presupuestaria de gastos de la Administración Central
+  de la Provincia de Mendoza — detalle por jurisdicción × unidad
+  organizativa × clasificación económica con crédito votado,
+  preventivo, definitivo, devengado, liquidado, pagado y vigente.
+
+  Source: 16 versiones de
+  `mendoza__ejecucion_presupuestaria_de_gastos_de_la_administracion_central`
+  con schema cohesivo de 20 cols (formato long-format por
+  jurisdicción y mes).
+
+  Use cases típicos: "presupuesto ejecutado por la Provincia de
+  Mendoza", "gasto en educación Mendoza", "ejecución presupuestaria
+  Mendoza por jurisdicción", "qué porcentaje del presupuesto
+  mendocino se ha pagado", "saldo presupuestario por unidad
+  organizativa Mendoza".
+domain: gobierno
+
+sources:
+  portals: [mendoza]
+  resource_patterns: ["mendoza__ejecucion_presupuestaria_de_gastos_de_la*"]
+
+canonical_columns:
+  - name: ejercicio
+    type: text
+    description: Año del ejercicio fiscal
+  - name: caracter
+    type: text
+    description: Carácter (administración central, organismos descentralizados, etc.)
+  - name: jurisdiccion
+    type: text
+    description: Jurisdicción (ministerio, secretaría)
+  - name: unidad_organizativa
+    type: text
+    description: Unidad organizativa
+  - name: clasificacion_economica_principal
+    type: text
+    description: Clasificación económica nivel principal
+  - name: clasificacion_economica
+    type: text
+    description: Clasificación económica detallada
+  - name: ejercicio_mes
+    type: text
+    description: Ejercicio/mes específico
+  - name: financiamiento
+    type: text
+    description: Fuente de financiamiento
+  - name: votado
+    type: text
+    description: Monto votado (sancionado)
+  - name: preventivo
+    type: text
+    description: Monto preventivo
+  - name: definitivo
+    type: text
+    description: Monto definitivo (post modificaciones)
+  - name: devengado
+    type: text
+    description: Monto devengado
+  - name: liquidado
+    type: text
+    description: Monto liquidado
+  - name: pagado
+    type: text
+    description: Monto efectivamente pagado
+  - name: credito_vigente
+    type: text
+    description: Crédito vigente
+  - name: aumentos
+    type: text
+    description: Aumentos al crédito
+  - name: disminuciones
+    type: text
+    description: Disminuciones al crédito
+
+sql: |
+  SELECT
+    NULLIF(TRIM(ejercicio::text), '')                                        AS ejercicio,
+    NULLIF(TRIM(caracter), '')                                               AS caracter,
+    NULLIF(TRIM(jurisdiccion), '')                                           AS jurisdiccion,
+    NULLIF(TRIM("unidad organizativa"), '')                                  AS unidad_organizativa,
+    NULLIF(TRIM(clasificacion_economica_principal), '')                      AS clasificacion_economica_principal,
+    NULLIF(TRIM(clasificacion_economica), '')                                AS clasificacion_economica,
+    NULLIF(TRIM(ejercicio_mes::text), '')                                    AS ejercicio_mes,
+    NULLIF(TRIM(financiamiento), '')                                         AS financiamiento,
+    NULLIF(TRIM(votado::text), '')                                           AS votado,
+    NULLIF(TRIM(preventivo::text), '')                                       AS preventivo,
+    NULLIF(TRIM(definitivo::text), '')                                       AS definitivo,
+    NULLIF(TRIM(devengado::text), '')                                        AS devengado,
+    NULLIF(TRIM(liquidado::text), '')                                        AS liquidado,
+    NULLIF(TRIM(pagado::text), '')                                           AS pagado,
+    NULLIF(TRIM(credito_vigente::text), '')                                  AS credito_vigente,
+    NULLIF(TRIM(aumentos::text), '')                                         AS aumentos,
+    NULLIF(TRIM(disminuciones::text), '')                                    AS disminuciones
+  FROM {{ live_tables_by_table_pattern(
+      'mendoza__ejecucion_presupuestaria_de_gastos_de_la*',
+      expected_columns=['ejercicio', 'caracter', 'jurisdiccion',
+                        'unidad organizativa',
+                        'clasificacion_economica_principal',
+                        'clasificacion_economica', 'ejercicio_mes',
+                        'financiamiento', 'votado', 'preventivo',
+                        'definitivo', 'devengado', 'liquidado', 'pagado',
+                        'credito_vigente', 'aumentos', 'disminuciones']
+  ) }} sub
+  WHERE NULLIF(TRIM(jurisdiccion), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

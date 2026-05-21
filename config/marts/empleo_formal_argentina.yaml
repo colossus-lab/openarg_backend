@@ -1,0 +1,92 @@
+id: empleo_formal_argentina
+version: 0.1.0
+description: |
+  Distribución del empleo formal en Argentina por departamento/provincia,
+  con desagregación por género y métricas de remuneración (media,
+  mediana). Datos del Ministerio de Trabajo / datos.gob.ar.
+
+  Source: `datos_gob_ar::*distribucion_del_empleo_formal*` (~723K filas,
+  publicada periódicamente). Cada snapshot es una foto del territorio
+  con cantidad de trabajadores y nivel salarial. `DISTINCT` colapsa
+  duplicados entre snapshots — para análisis temporal explícito habría
+  que distinguir por `_source_dataset_id` (upstream NO incluye col fecha).
+domain: social
+
+sources:
+  portals: [datos_gob_ar, produccion]
+  resource_patterns:
+    - "datos_gob_ar::*distribucion_del_empleo_formal*"
+    - "produccion::*distribucion_del_empleo_formal*"
+
+canonical_columns:
+  - name: provincia_id
+    type: text
+    description: ID de la provincia (formato GeoRef estandar)
+  - name: departamento_id
+    type: text
+    description: ID del departamento dentro de la provincia
+  - name: cantidad_trabajadores
+    type: text
+    description: Cantidad total de trabajadores formales
+  - name: cantidad_trabajadores_hombres
+    type: text
+    description: Cantidad de trabajadores hombres
+  - name: cantidad_trabajadores_mujeres
+    type: text
+    description: Cantidad de trabajadores mujeres
+  - name: remuneracion_media
+    type: text
+    description: Remuneración media (promedio aritmético)
+  - name: remuneracion_media_hombres
+    type: text
+    description: Remuneración media hombres
+  - name: remuneracion_media_mujeres
+    type: text
+    description: Remuneración media mujeres
+  - name: remuneracion_mediana
+    type: text
+    description: Remuneración mediana
+  - name: remuneracion_mediana_hombres
+    type: text
+    description: Remuneración mediana hombres
+  - name: remuneracion_mediana_mujeres
+    type: text
+    description: Remuneración mediana mujeres
+  - name: poblacion_radio
+    type: text
+    description: Población del radio censal de referencia
+  - name: viviendas_radio
+    type: text
+    description: Viviendas del radio censal de referencia
+
+sql: |
+  SELECT DISTINCT
+    NULLIF(TRIM(provincia_id::text), '')                       AS provincia_id,
+    NULLIF(TRIM(departamento_id::text), '')                    AS departamento_id,
+    NULLIF(TRIM("Cantidad_trabajadores"::text), '')            AS cantidad_trabajadores,
+    NULLIF(TRIM("Cantidad_trabajadores_Hombres"::text), '')    AS cantidad_trabajadores_hombres,
+    NULLIF(TRIM("Cantidad_trabajadores_Mujeres"::text), '')    AS cantidad_trabajadores_mujeres,
+    NULLIF(TRIM("Remuneracion_media"::text), '')               AS remuneracion_media,
+    NULLIF(TRIM("Remuneracion_media_Hombres"::text), '')       AS remuneracion_media_hombres,
+    NULLIF(TRIM("Remuneracion_media_Mujeres"::text), '')       AS remuneracion_media_mujeres,
+    NULLIF(TRIM("Remuneracion_mediana"::text), '')             AS remuneracion_mediana,
+    NULLIF(TRIM("Remuneracion_mediana_Hombres"::text), '')     AS remuneracion_mediana_hombres,
+    NULLIF(TRIM("Remuneracion_mediana_Mujeres"::text), '')     AS remuneracion_mediana_mujeres,
+    NULLIF(TRIM("Poblacion_radio"::text), '')                  AS poblacion_radio,
+    NULLIF(TRIM("Viviendas_radio"::text), '')                  AS viviendas_radio
+  FROM {{ live_tables_by_table_pattern(
+      '*distribucion_del_empleo_formal*',
+      expected_columns=[
+        'provincia_id', 'departamento_id',
+        'Cantidad_trabajadores', 'Cantidad_trabajadores_Hombres', 'Cantidad_trabajadores_Mujeres',
+        'Remuneracion_media', 'Remuneracion_media_Hombres', 'Remuneracion_media_Mujeres',
+        'Remuneracion_mediana', 'Remuneracion_mediana_Hombres', 'Remuneracion_mediana_Mujeres',
+        'Poblacion_radio', 'Viviendas_radio'
+      ],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(provincia_id::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

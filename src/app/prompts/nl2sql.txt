@@ -16,13 +16,16 @@ Rules:
 - Only reference the tables and columns listed above.
 - Always use double-quoted identifiers for column names that contain spaces, accents, or special characters.
 - CRITICAL: Most columns are stored as TEXT (even years, numbers, dates). ALWAYS compare with text literals: WHERE anio = '1980', NOT WHERE anio = 1980. Use CAST(col AS NUMERIC) only for aggregations or arithmetic, never for simple equality/filtering.
-- When casting to NUMERIC, filter NULLs and non-numeric values first: WHERE col IS NOT NULL AND col ~ '^\-?\d+\.?\d*$'
+- When casting to NUMERIC, filter NULLs and non-numeric values first: WHERE col IS NOT NULL AND col ~ '^\-?\d+\.?\d*$'. **This regex pre-check applies ONLY when the column is typed as TEXT in the schema.** If the column is already `numeric`/`integer`/`bigint`/`double precision` (check the "Columnas (tipo):" lines in tables_context), DO NOT use the `~` operator — it errors with `operator does not exist: numeric ~ unknown`. For already-numeric columns, just filter with `WHERE col IS NOT NULL`. Marts often expose pre-cast numeric columns (e.g. `cantidad_pasos`, `cantidad_hechos`, `monto`).
 - Use ILIKE for case-insensitive text matching (Argentine data often has inconsistent casing and accents).
 - Limit results to 1000 rows max (add LIMIT 1000 if appropriate).
 - Return ONLY the SQL query, nothing else. No markdown, no explanation.
 - The query must be valid PostgreSQL syntax.
 - NEVER use parameter placeholders like $1, $2, :param, or ?. Always use literal values in the query.
-- Use GROUP BY for summaries, ORDER BY for rankings.
+- AGGREGATE, DON'T SAMPLE: when the question asks "cuántos", "cuántas", "how many", "cantidad de", "total de", or otherwise wants a count/sum/average, the query MUST use COUNT(*) / SUM(...) / AVG(...) — with GROUP BY when a breakdown is wanted. NEVER answer a count question with `SELECT * ... LIMIT n`: a row dump capped at n rows is NOT a count, and the system will report those n rows as if they were the real total. A question like "¿cuántos robos hubo en X?" must become `SELECT COUNT(*) ...`, never `SELECT * ... LIMIT 50`.
+- Use GROUP BY for summaries and breakdowns, ORDER BY for rankings.
+- NON-ADDITIVE METRICS: never SUM() or AVG() a column whose name contains `tasa`, `indice`, `porcentaje` or `promedio` across rows of different geographic or temporal granularity. Rates and indices are NOT additive — summing the per-100k rate of every department of a province yields a meaningless inflated number. To get a province-level rate from department-level rows you must recompute it as SUM(numerador) / SUM(denominador) * base; if the table has no population/denominator column, a province-level rate CANNOT be derived — return the absolute counts (SUM of the `cantidad_*` column) instead.
+- PRESERVE UNITS: if a rate column is defined "por 100.000 habitantes", keep it per-100,000. Never silently rescale a "por 100K" value to "por mil" or to a percentage.
 - For date columns stored as text, use standard comparison (WHERE fecha >= '2024-01-01').
 - When multiple candidate tables exist, choose the one that covers the requested time period or data.
 - Budget tables are year-suffixed. Use the exact table from context such as `cache_presupuesto_credito_2025`, never invented aliases like `cache_presupuesto_nacional` or unsuffixed names like `cache_presupuesto_credito`.
@@ -30,6 +33,7 @@ Rules:
 - If table notes mention a legacy alias, always use the canonical table name from those notes in the final SQL.
 
 Table selection guidelines:
+- **PREFER MARTS**: Tables named `mart.<id>` are curated, deduplicated, semantically-clean views built from one or more raw sources. When a `mart.X` candidate is present AND its description / columns match the question, ALWAYS prefer it over any `cache_*` or `raw.*` alternative — the mart already resolves type casting, year filters, and cross-source joins that you'd otherwise have to write by hand. Only fall back to `cache_*` / `raw.*` when no mart covers the topic.
 - When the user asks for a RATE (tasa), prefer tables with 'tasa' in the name or small row counts with pre-aggregated data. Do NOT query raw record tables (hundreds of thousands of rows) and try to compute rates from them.
 - When multiple tables match, prefer the one whose name and description best match the user's question.
 - Tables with 'tasa', 'indice', 'porcentaje' in the name contain pre-calculated statistics. Prefer them over raw-data tables when the user asks for rates or indices.
@@ -58,7 +62,19 @@ Question: ¿Cuál es el presupuesto total por jurisdicción en 2025?
 SQL: SELECT jurisdiccion_desc, SUM(CAST(credito_vigente AS NUMERIC)) AS total_credito FROM cache_presupuesto_credito_2025 WHERE ejercicio_presupuestario = '2025' AND credito_vigente ~ '^\-?\d+\.?\d*$' GROUP BY jurisdiccion_desc ORDER BY total_credito DESC LIMIT 50
 
 Question: ¿Cuál era la tasa de mortalidad fetal en 1980?
-SQL: SELECT * FROM cache_tasa_de_mortalidad_fetal_por_sexo WHERE anio = '1980' LIMIT 50
+SQL: SELECT anio, sexo, tasa FROM cache_tasa_de_mortalidad_fetal_por_sexo WHERE anio = '1980'
+
+Question: ¿Cuántos robos hubo en el barrio de Palermo en 2023?
+SQL: SELECT COUNT(*) AS total_robos FROM mart.delitos_caba WHERE barrio ILIKE '%palermo%' AND anio = '2023' AND tipo ILIKE '%robo%'
+
+Question: ¿Cuántos delitos contra la propiedad hubo en CABA en 2023?
+SQL: SELECT tipo, COUNT(*) AS cantidad FROM mart.delitos_caba WHERE anio = '2023' AND (tipo ILIKE '%robo%' OR tipo ILIKE '%hurto%') GROUP BY tipo ORDER BY cantidad DESC
+
+Question: ¿Qué barrios de CABA tuvieron más robos en horario nocturno en 2023?
+SQL: SELECT barrio, COUNT(*) AS robos FROM mart.delitos_caba WHERE anio = '2023' AND tipo ILIKE '%robo%' AND franja ~ '^[0-9]+$' AND (CAST(franja AS NUMERIC) >= 20 OR CAST(franja AS NUMERIC) <= 5) AND barrio IS NOT NULL GROUP BY barrio ORDER BY robos DESC LIMIT 15
+
+Question: ¿Qué provincias tienen más homicidios en Argentina?
+SQL: SELECT provincia_nombre, SUM(cantidad_hechos) AS total_homicidios FROM mart.delitos_argentina_snic WHERE codigo_delito_snic_nombre ILIKE '%homicidio%' GROUP BY provincia_nombre ORDER BY total_homicidios DESC LIMIT 24
 
 Geographic data rules:
 - Some tables have a `_geometry_geojson` column (GeoJSON text) and a `geom` column (PostGIS native geometry, SRID 4326).

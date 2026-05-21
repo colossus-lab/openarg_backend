@@ -32,13 +32,70 @@ _FORBIDDEN_PATTERNS = re.compile(
 
 
 _ALLOWED_TABLE_PREFIXES = tuple(os.getenv("SANDBOX_TABLE_PREFIX", "cache_").split(","))
-_ALLOWED_SCHEMAS = ("public",)
+# `public` hosts legacy `cache_*` tables — those still require the
+# `cache_*` prefix below.
+# `mart` and `raw` host curated views and per-version raw landings — both
+# emerge from our own pipeline (mart_definitions / raw_table_versions),
+# so anything materialized there is already vetted for read-only access.
+# We skip the prefix check for those schemas.
+_ALLOWED_SCHEMAS = ("public", "mart", "raw")
+_PREFIX_FREE_SCHEMAS = ("mart", "raw")
+
+# Internal metadata / PII tables that NL2SQL-generated queries must never
+# reach, regardless of schema. `raw` and `mart` are prefix-free above, so
+# without this blocklist a query could read `raw.catalog_resources`,
+# `raw.raw_table_versions`, `query_analytics`, etc. (BUG-014 — internal
+# schema discovery vector). Matched on the bare table name, case-insensitive.
+_FORBIDDEN_TABLES = frozenset(
+    {
+        "catalog_resources",
+        "raw_table_versions",
+        "cached_datasets",
+        "mart_definitions",
+        "mart_sample_queries",
+        "query_analytics",
+        "query_cache",
+        "table_catalog",
+        "dataset_chunks",
+        "datasets",
+        "parse_repair_audit",
+        "successful_queries",
+        "user_queries",
+        "query_dataset_links",
+        "agent_tasks",
+        "api_keys",
+        "api_usage",
+        "users",
+        "messages",
+        "conversations",
+        "sesion_chunks",
+        "alembic_version",
+    }
+)
 
 # Tables that sandbox queries are allowed to reference (regex for FROM/JOIN clauses)
 _TABLE_REF_PATTERN = re.compile(
     r'\b(?:FROM|JOIN)\s+"?(\w+)"?(?:\."?(\w+)"?)?',
     re.IGNORECASE,
 )
+
+
+def _split_table_reference(table_name: str) -> tuple[str, str]:
+    """Normalize a surfaced table reference to `(schema, bare_name)`.
+
+    `list_cached_tables()` returns a mix of shapes:
+      - `cache_*` legacy public names (unqualified)
+      - `raw.<table>`
+      - `mart.<view>`
+
+    `/sandbox/ask` later feeds those names into `get_column_types()`, which
+    must resolve the actual schema instead of assuming `public`.
+    """
+    value = (table_name or "").strip()
+    if "." not in value:
+        return "public", value.strip('"')
+    schema, bare = value.split(".", 1)
+    return schema.strip('"'), bare.strip('"')
 
 
 def _validate_sql(sql: str) -> str | None:
@@ -61,16 +118,25 @@ def _validate_sql(sql: str) -> str | None:
     if match:
         return f"Forbidden SQL operation: {match.group(0).upper()}"
 
-    # Table allowlist — only cache_* tables and public schema (defense-in-depth layer 2)
+    # Table allowlist — defense-in-depth layer 2.
+    # Public schema: only `cache_*` (or `SANDBOX_TABLE_PREFIX`) tables
+    #   are reachable, since other public objects can be sensitive.
+    # Mart / raw schemas: every relation is emitted by our own pipeline
+    #   (mart_definitions / raw_table_versions). The pipeline already
+    #   gates what lands there, so we don't impose a prefix.
     for m in _TABLE_REF_PATTERN.finditer(no_comments):
         first, second = m.group(1), m.group(2)
-        # schema.table or just table
         if second:
-            schema, table = first, second
-            if schema.lower() not in _ALLOWED_SCHEMAS:
-                return f"Access to schema '{schema}' is not allowed."
+            schema, table = first.lower(), second
         else:
-            table = first
+            schema, table = "public", first
+        # Internal-table blocklist applies regardless of schema (BUG-014).
+        if table.lower() in _FORBIDDEN_TABLES:
+            return f"Access to internal table '{table}' is not allowed."
+        if schema not in _ALLOWED_SCHEMAS:
+            return f"Access to schema '{schema}' is not allowed."
+        if schema in _PREFIX_FREE_SCHEMAS:
+            continue
         if not any(table.lower().startswith(p) for p in _ALLOWED_TABLE_PREFIXES):
             return f"Access to table '{table}' is not allowed. Only cached dataset tables are accessible."
 
@@ -118,12 +184,19 @@ def _validate_sql_ast(sql: str) -> str | None:
             if isinstance(node, _DML_DDL):
                 return f"Forbidden SQL operation in subquery: {type(node).__name__}"
 
-            # Table allowlist — catches all references including comma-separated
+            # Table allowlist — catches all references including comma-separated.
+            # Mirror the regex-based check above: schemas in _PREFIX_FREE_SCHEMAS
+            # (mart, raw) are accepted without imposing the cache_* prefix because
+            # everything materialized there comes from our own pipeline.
             if isinstance(node, exp.Table):
                 table_name = node.name
                 schema_name = node.db if hasattr(node, "db") else None
+                if table_name and table_name.lower() in _FORBIDDEN_TABLES:
+                    return f"Access to internal table '{table_name}' is not allowed."
                 if schema_name and schema_name.lower() not in _ALLOWED_SCHEMAS:
                     return f"Access to schema '{schema_name}' is not allowed."
+                if schema_name and schema_name.lower() in _PREFIX_FREE_SCHEMAS:
+                    continue
                 if table_name and not any(
                     table_name.lower().startswith(p) for p in _ALLOWED_TABLE_PREFIXES
                 ):
@@ -133,13 +206,25 @@ def _validate_sql_ast(sql: str) -> str | None:
         logger.warning("sqlglot validation failed — rejecting query for safety", exc_info=True)
         return "Could not validate SQL safely. Please simplify your query."
 
+    return None
+
 
 class PgSandboxAdapter(ISQLSandbox):
     """Read-only SQL sandbox that executes queries against cached dataset tables."""
 
+    # Per-process cache for list_cached_tables. The query returns 23k+ rows
+    # in staging and gets called on every pipeline run; loading those into
+    # python objects costs ~50 MB of heap and was contributing to OOM kills
+    # of the backend uvicorn worker (see 2026-05-14 incident). 60 s TTL
+    # bounds staleness — new cache_* / mart.* tables become visible within
+    # a minute, which is acceptable since the planner already has the
+    # mart embeddings (refreshed on build_mart) to suggest fresh targets.
+    _LIST_CACHE_TTL_S = 60.0
+
     def __init__(self) -> None:
         self._engine: Engine | None = None
         self._executor = ThreadPoolExecutor(max_workers=2)
+        self._list_cache: tuple[float, list[CachedTableInfo]] | None = None
 
     @property
     def _db_url(self) -> str:
@@ -158,6 +243,40 @@ class PgSandboxAdapter(ISQLSandbox):
                 max_overflow=1,
                 pool_pre_ping=True,
             )
+
+            # The sandbox connects directly to RDS (bypasses PgBouncer to
+            # keep the read-only enforcement local). The DB-level
+            # `ALTER DATABASE openarg_staging SET search_path = raw,
+            # public, "$user"` config gets applied to NEW connections,
+            # but only when they are made through certain login paths.
+            # In practice the sandbox engine ends up with the Postgres
+            # default `"$user", public`, which means bare references to
+            # tables that live ONLY in `raw` (e.g. `cached_datasets`,
+            # `catalog_resources`, `raw_table_versions`) raise
+            # "relation does not exist".
+            #
+            # Force-set the search_path on every new connection so the
+            # 120+ unprefixed `cached_datasets` references in the
+            # codebase resolve correctly inside the sandbox path. Order
+            # `public, raw` keeps tables that exist in BOTH schemas
+            # resolving to `public` (canonical for `mart_definitions`,
+            # `mart_sample_queries`, `query_cache`, `query_plan_cache`,
+            # langgraph `checkpoints`, etc.) while still finding the
+            # raw-only tables as a fallback.
+            from sqlalchemy import event
+
+            @event.listens_for(self._engine, "connect")
+            def _set_default_search_path(dbapi_conn, _connection_record):
+                cursor = dbapi_conn.cursor()
+                try:
+                    cursor.execute("SET search_path = public, raw")
+                except Exception:
+                    logger.warning(
+                        "Failed to set search_path on sandbox connection",
+                        exc_info=True,
+                    )
+                finally:
+                    cursor.close()
         return self._engine
 
     def _execute_sync(self, sql: str, timeout_seconds: int) -> SandboxResult:
@@ -251,16 +370,38 @@ class PgSandboxAdapter(ISQLSandbox):
     def _list_tables_sync(self) -> list[CachedTableInfo]:
         engine = self._get_engine()
         with engine.connect() as conn:
+            # LEFT JOIN with `raw_table_versions` so raw-layer tables are
+            # reported with their qualified `raw.<table>` name. Without
+            # this, the cached_datasets row only carries the bare name
+            # (no schema), so consumers couldn't tell apart legacy
+            # `cache_*` (in public) from raw landings (in raw schema).
+            # The COALESCE leaves cache_* legacy alone (rtv.schema_name
+            # is NULL for those) and the BARE name is preserved.
             result = conn.execute(
                 text(
-                    "SELECT CAST(dataset_id AS text) AS dataset_id, table_name, row_count, columns_json "
-                    "FROM cached_datasets "
-                    "WHERE status = 'ready' "
-                    "ORDER BY table_name"
+                    """
+                    SELECT CAST(cd.dataset_id AS text) AS dataset_id,
+                           CASE
+                               WHEN rtv.schema_name IS NOT NULL
+                                    AND rtv.schema_name <> 'public'
+                                    AND rtv.superseded_at IS NULL
+                                   THEN rtv.schema_name || '.' || cd.table_name
+                               ELSE cd.table_name
+                           END AS table_name,
+                           cd.row_count,
+                           cd.columns_json
+                    FROM raw.cached_datasets cd
+                    LEFT JOIN raw_table_versions rtv
+                      ON rtv.table_name = cd.table_name
+                     AND rtv.superseded_at IS NULL
+                    WHERE cd.status = 'ready'
+                    ORDER BY table_name
+                    """
                 )
             )
             tables = []
             registered_names: set[str] = set()
+            registered_bare: set[str] = set()
             for row in result.fetchall():
                 columns: list[str] = []
                 if row.columns_json:
@@ -277,48 +418,81 @@ class PgSandboxAdapter(ISQLSandbox):
                     )
                 )
                 registered_names.add(row.table_name)
+                # Also track the bare name so the physical-scan path
+                # below skips legacy public.cache_* duplicates AND raw
+                # landings already reported with their qualified name.
+                if "." in row.table_name:
+                    registered_bare.add(row.table_name.split(".", 1)[1])
+                else:
+                    registered_bare.add(row.table_name)
 
-            physical = conn.execute(
+            # MASTERPLAN Fase 1.5 — surface raw layer tables to consumers.
+            # Without this, /data/tables (which docstrings as including
+            # "raw layer and curated marts") was lying: the sandbox only
+            # enumerated public.cache_*. Now we also list every live raw
+            # version (superseded versions are pruned by retain_raw_versions
+            # so they shouldn't appear here, but we filter explicitly to
+            # be safe). Marts are appended by the data_router enrichment
+            # path; we don't add them here so the layering stays clean.
+            raw_rows = conn.execute(
                 text(
                     """
-                    SELECT t.table_name,
-                           COALESCE(s.n_live_tup::bigint, 0) AS row_count
-                    FROM information_schema.tables t
+                    SELECT rtv.schema_name, rtv.table_name,
+                           COALESCE(rtv.row_count, s.n_live_tup::bigint, 0) AS row_count
+                    FROM raw_table_versions rtv
                     LEFT JOIN pg_stat_user_tables s
-                      ON s.schemaname = t.table_schema
-                     AND s.relname = t.table_name
-                    WHERE t.table_schema = 'public'
-                      AND t.table_name LIKE 'cache_%'
-                    ORDER BY t.table_name
+                      ON s.schemaname = rtv.schema_name
+                     AND s.relname = rtv.table_name
+                    WHERE rtv.superseded_at IS NULL
+                      AND rtv.schema_name = 'raw'
+                      AND EXISTS (
+                          SELECT 1 FROM information_schema.tables t
+                          WHERE t.table_schema = rtv.schema_name
+                            AND t.table_name = rtv.table_name
+                      )
+                    ORDER BY rtv.table_name
                     """
                 )
             ).fetchall()
-
-            for row in physical:
-                if row.table_name in registered_names:
+            for raw_row in raw_rows:
+                qualified = f"{raw_row.schema_name}.{raw_row.table_name}"
+                # Skip when this raw landing was already surfaced via the
+                # cached_datasets path (joined with rtv at the top of this
+                # function). `registered_bare` holds the un-prefixed
+                # `table_name` of every row already emitted, regardless
+                # of whether it was emitted with or without schema prefix.
+                if qualified in registered_names or raw_row.table_name in registered_bare:
                     continue
-                columns_result = conn.execute(
+                cols_q = conn.execute(
                     text(
                         "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = 'public' AND table_name = :tn "
+                        "WHERE table_schema = :sch AND table_name = :tn "
                         "ORDER BY ordinal_position"
                     ),
-                    {"tn": row.table_name},
+                    {"sch": raw_row.schema_name, "tn": raw_row.table_name},
                 ).fetchall()
                 tables.append(
                     CachedTableInfo(
-                        table_name=row.table_name,
+                        table_name=qualified,
                         dataset_id="",
-                        row_count=int(row.row_count or 0),
-                        columns=[str(col.column_name) for col in columns_result],
+                        row_count=int(raw_row.row_count or 0),
+                        columns=[str(c.column_name) for c in cols_q],
                     )
                 )
+
             conn.rollback()
             return tables
 
     async def list_cached_tables(self) -> list[CachedTableInfo]:
+        import time as _time
+        now = _time.monotonic()
+        cached = self._list_cache
+        if cached is not None and (now - cached[0]) < self._LIST_CACHE_TTL_S:
+            return cached[1]
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, self._list_tables_sync)
+        tables = await loop.run_in_executor(self._executor, self._list_tables_sync)
+        self._list_cache = (now, tables)
+        return tables
 
     def _get_column_types_sync(
         self,
@@ -327,22 +501,34 @@ class PgSandboxAdapter(ISQLSandbox):
         engine = self._get_engine()
         if not table_names:
             return {}
+        requested_pairs = [
+            (_split_table_reference(name), name) for name in table_names
+        ]
+        target_pairs = list(dict.fromkeys(pair for pair, _original in requested_pairs))
+        schemas = list(dict.fromkeys(schema for schema, _table in target_pairs))
+        tables = list(dict.fromkeys(table for _schema, table in target_pairs))
         with engine.connect() as conn:
             result = conn.execute(
                 text(
-                    "SELECT table_name, column_name, data_type "
+                    "SELECT table_schema, table_name, column_name, data_type "
                     "FROM information_schema.columns "
-                    "WHERE table_schema = 'public' "
+                    "WHERE table_schema = ANY(:schemas) "
                     "AND table_name = ANY(:tables) "
-                    "ORDER BY table_name, ordinal_position"
+                    "ORDER BY table_schema, table_name, ordinal_position"
                 ),
-                {"tables": table_names},
+                {"schemas": schemas, "tables": tables},
             )
-            types: dict[str, list[tuple[str, str]]] = {}
+            by_pair: dict[tuple[str, str], list[tuple[str, str]]] = {}
             for row in result.fetchall():
-                types.setdefault(row.table_name, []).append((row.column_name, row.data_type))
+                pair = (str(row.table_schema), str(row.table_name))
+                if pair not in target_pairs:
+                    continue
+                by_pair.setdefault(pair, []).append((row.column_name, row.data_type))
             conn.rollback()
-            return types
+            return {
+                original_name: list(by_pair.get(pair, []))
+                for pair, original_name in requested_pairs
+            }
 
     async def get_column_types(
         self,

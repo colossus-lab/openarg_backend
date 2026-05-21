@@ -22,4 +22,4 @@ USER app
 
 EXPOSE 8080
 
-CMD ["uvicorn", "app.run:make_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop"]
+CMD ["uvicorn", "app.run:make_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--loop", "uvloop", "--ws-ping-interval", "30", "--ws-ping-timeout", "120"]

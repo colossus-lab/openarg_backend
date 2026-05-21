@@ -1,11 +1,12 @@
 # Spec: Ingest INDEC
 
 **Type**: Reverse-engineered
-**Status**: Draft
-**Last synced with code**: 2026-04-10
+**Status**: Draft — gains hierarchical-header parser via WS5 (2026-04-25)
+**Last synced with code**: 2026-04-25
 **Hexagonal scope**: Infrastructure (task only)
 **Extends**: [`../spec.md`](../spec.md)
 **Related plan**: [./plan.md](./plan.md)
+**Related new specs**: [015-catalog-resources](../../015-catalog-resources/spec.md), [013-ingestion-validation](../../013-ingestion-validation/spec.md)
 
 ---
 
@@ -24,6 +25,9 @@ Monthly ETL that downloads high-value datasets from **INDEC** (Instituto Naciona
 - **FR-002**: MUST parse with pandas and persist in `cache_indec_*` tables.
 - **FR-003**: MUST register each dataset in `datasets` + `cached_datasets`.
 - **FR-004**: MUST trigger embedding indexing for the new ones.
+- **FR-005** *(WS5)*: When the source is a hierarchical INDEC workbook (year row + quarter/month row), the ingestion MUST use `app.application.pipeline.parsers.HierarchicalHeaderParser` instead of `pd.read_excel(header=…)` defaults. The parser detects year/quarter/month rows, forward-fills merged cells and reconstructs canonical column names like `2003_T1` / `2024_01`. `parser_version` and `normalization_version` MUST be persisted in `catalog_resources` for re-build invalidation.
+- **FR-006** *(WS5)*: One INDEC workbook MUST register N×M `catalog_resources` rows (one per cuadro × sheet × provincia), each with its own `resource_identity`, deterministic `materialized_table_name`, and INDEC-templated `display_name` (`INDEC — {provincia?} — Cuadro {cuadro_numero?} — {raw}`).
+- **FR-007** *(WS0 + WS5)*: INDEC materializations MUST pass through the shared WS0 post-parse finalizer before `cached_datasets.status='ready'`. The hierarchical parser is the first line of defense; any residual flattened-header output still surfaces via WS0 findings instead of bypassing validation entirely.
 
 ## 4. Success Criteria
 

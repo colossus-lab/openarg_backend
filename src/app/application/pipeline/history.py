@@ -102,6 +102,143 @@ async def save_history(
             await session.rollback()
 
 
+async def save_query_attempt(
+    *,
+    question: str,
+    served_table: str | None,
+    row_count: int,
+    success: bool,
+    duration_ms: int | None,
+    error_message: str | None,
+    semantic_cache: SemanticCache,
+) -> None:
+    """Persist EVERY query attempt for analytics — successful or not.
+
+    Separate from `save_successful_query` (which feeds few-shot) so that
+    failed/empty queries can be tracked without polluting the few-shot
+    example set. The table is created lazily on first call so this drops
+    into a running staging without an alembic migration.
+
+    The ``embedding`` column is intentionally left NULL: BUG-016/017
+    showed that computing it (a Bedrock round-trip) inside a
+    fire-and-forget background task raced request teardown and silently
+    lost ~2/3 of writes. This is now awaited inline by the terminal
+    nodes, so it must stay cheap — a bare INSERT, no embedding call.
+
+    P1 (round v4.2): ~11% of rows missed query_analytics (R002/R014/C5
+    in a 27-call batch). Symptom: the terminal node ran and emitted
+    ``complete`` but no row landed — a transient pool/lock failure on
+    the first INSERT, swallowed silently. Retry once after a brief
+    backoff before giving up, and keep the DDL setup outside the retry
+    loop (it's idempotent and a CREATE TABLE failure isn't worth
+    retrying).
+    """
+    import asyncio as _asyncio
+
+    # Lazy table create — idempotent. Errors here don't block the INSERT
+    # below from being attempted (the table almost certainly already
+    # exists in long-running deployments).
+    try:
+        async with semantic_cache._session_factory() as session:
+            await session.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS query_analytics (
+                    id BIGSERIAL PRIMARY KEY,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    question TEXT NOT NULL,
+                    served_table TEXT,
+                    mart_used BOOLEAN NOT NULL DEFAULT FALSE,
+                    row_count INTEGER,
+                    success BOOLEAN NOT NULL,
+                    duration_ms INTEGER,
+                    error_message TEXT,
+                    embedding vector(1024)
+                )
+                """
+            ))
+            await session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_query_analytics_ts ON query_analytics(ts DESC)"
+            ))
+            await session.commit()
+    except Exception:
+        logger.debug("query_analytics DDL setup failed", exc_info=True)
+
+    served = (served_table or "").strip()
+    mart_used = served.startswith("mart.")
+    params = {
+        "q": question[:500],
+        "t": served[:200] if served else None,
+        "mu": mart_used,
+        "r": row_count if row_count is not None else None,
+        "ok": success,
+        "d": duration_ms,
+        "err": (error_message or "")[:500] if error_message else None,
+    }
+
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            async with semantic_cache._session_factory() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO query_analytics "
+                        "(question, served_table, mart_used, row_count, success, "
+                        " duration_ms, error_message) "
+                        "VALUES (:q, :t, :mu, :r, :ok, :d, :err)"
+                    ),
+                    params,
+                )
+                await session.commit()
+            return
+        except Exception as exc:
+            last_err = exc
+            if attempt == 0:
+                # Transient (pool exhaustion / lock contention) — brief
+                # backoff then retry once.
+                await _asyncio.sleep(0.5)
+    logger.warning(
+        "Failed to save query_analytics after 2 attempts: %s",
+        last_err,
+        exc_info=last_err,
+    )
+
+
+async def record_terminal_analytics(
+    *,
+    question: str,
+    served_table: str | None,
+    row_count: int,
+    success: bool,
+    duration_ms: int | None,
+    error_message: str | None,
+    semantic_cache: SemanticCache | None,
+) -> None:
+    """Write a ``query_analytics`` row from a terminal pipeline node.
+
+    BUG-016/017: previously only NL2SQL/sandbox queries were logged (via
+    ``save_success_node``). Cache hits, fast replies, clarification replies
+    and connector/mart flows never reached ``query_analytics`` — roughly
+    two thirds of calls went unrecorded. Each of the four terminal nodes
+    now awaits this so every query is logged exactly once.
+
+    Awaited inline (not fire-and-forget): the write is a single cheap
+    INSERT (~20ms) so the latency cost is negligible, and awaiting
+    guarantees it completes before the request scope tears down.
+    """
+    if semantic_cache is None:
+        logger.warning("record_terminal_analytics: semantic_cache is None — skipping")
+        return
+    await save_query_attempt(
+        question=question,
+        served_table=served_table,
+        row_count=row_count,
+        success=success,
+        duration_ms=duration_ms,
+        error_message=error_message,
+        semantic_cache=semantic_cache,
+    )
+
+
 async def save_successful_query(
     question: str,
     sql: str,

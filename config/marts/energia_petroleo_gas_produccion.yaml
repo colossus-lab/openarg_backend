@@ -1,0 +1,55 @@
+id: energia_petroleo_gas_produccion
+version: 0.1.0
+description: |
+  Producción mensual de petróleo y gas en Argentina — datos del SESCO
+  (Seguimiento Estadístico de Combustibles Líquidos y Gas) publicados
+  por la Secretaría de Energía. Granularidad mensual con desglose por
+  concepto productivo (crudo convencional, no convencional, gas
+  natural seco, etc.).
+
+  Source: 41 versiones de `energia__produccion_de_petroleo_y_gas_sesco`
+  con schema cohesivo de 5 cols core + metadata. Long-format:
+  `(anio, mes, indice_tiempo, concepto, cantidad_m3)`.
+
+  Use cases típicos: "producción de petróleo en Argentina", "Vaca
+  Muerta producción no convencional", "evolución del gas natural",
+  "tendencia de producción mensual de hidrocarburos".
+domain: economia
+
+sources:
+  portals: [energia]
+  resource_patterns: ["energia__produccion_de_petroleo_y_gas_sesco*"]
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año del registro
+  - name: mes
+    type: text
+    description: Mes del registro (1-12 o nombre)
+  - name: indice_tiempo
+    type: text
+    description: Período en formato fecha (YYYY-MM)
+  - name: concepto
+    type: text
+    description: Tipo de hidrocarburo / concepto productivo
+  - name: cantidad_m3
+    type: text
+    description: Producción en metros cúbicos
+
+sql: |
+  SELECT
+    NULLIF(TRIM(anio::text), '')              AS anio,
+    NULLIF(TRIM(mes::text), '')               AS mes,
+    NULLIF(TRIM(indice_tiempo::text), '')     AS indice_tiempo,
+    NULLIF(TRIM(concepto), '')                AS concepto,
+    NULLIF(TRIM(cantidad_m3::text), '')       AS cantidad_m3
+  FROM {{ live_tables_by_table_pattern(
+      'energia__produccion_de_petroleo_y_gas_sesco*',
+      expected_columns=['anio', 'mes', 'indice_tiempo', 'concepto', 'cantidad_m3']
+  ) }} sub
+  WHERE NULLIF(TRIM(concepto), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

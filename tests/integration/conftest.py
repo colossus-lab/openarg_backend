@@ -13,7 +13,6 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.pipeline.nodes import PipelineDeps
-from app.application.smart_query_service import SmartQueryService
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
@@ -182,42 +181,6 @@ class MockProvider(Provider):
         mock.revoke = AsyncMock()
         return mock
 
-    @provide
-    def smart_query_service(
-        self,
-        llm: ILLMProvider,
-        embedding: IEmbeddingProvider,
-        vector_search: IVectorSearch,
-        cache: ICacheService,
-        series: ISeriesTiempoConnector,
-        arg_datos: IArgentinaDatosConnector,
-        georef: IGeorefConnector,
-        ckan: ICKANSearchConnector,
-        sesiones: ISesionesConnector,
-        ddjj: DDJJAdapter,
-        semantic_cache: SemanticCache,
-        staff: IStaffConnector,
-        bcra: BCRAAdapter,
-        sandbox: ISQLSandbox,
-        chat_repo: IChatRepository,
-    ) -> SmartQueryService:
-        return SmartQueryService(
-            llm=llm,
-            embedding=embedding,
-            vector_search=vector_search,
-            cache=cache,
-            series=series,
-            arg_datos=arg_datos,
-            georef=georef,
-            ckan=ckan,
-            sesiones=sesiones,
-            ddjj=ddjj,
-            semantic_cache=semantic_cache,
-            staff=staff,
-            bcra=bcra,
-            sandbox=sandbox,
-            chat_repo=chat_repo,
-        )
 
     @provide
     def pipeline_deps(

@@ -1,0 +1,99 @@
+id: caba_departamentos_en_venta
+version: 0.1.0
+description: |
+  Departamentos en venta en la Ciudad de Buenos Aires — relevamiento
+  histórico de ofertas inmobiliarias con precio en dólares y pesos,
+  metros cuadrados, antigüedad, ambientes y amenities (cochera,
+  baulera, terraza). Datos publicados periódicamente por la
+  Dirección General de Estadística y Censos del GCBA.
+
+  Source: 51 versiones de `caba__departamentos_en_venta` con schema
+  drift entre case (CALLE vs calle), naming (BAÑOS vs BANOS) y
+  cobertura (versiones modernas tienen LAT/LON, antiguas no). Mart
+  unifica con COALESCE.
+
+  Use cases típicos: "precio del m² en Palermo", "departamentos en
+  venta Recoleta", "metros cuadrados promedio CABA por barrio",
+  "evolución del precio inmobiliario porteño", "departamentos con
+  cochera Belgrano".
+domain: economia
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__departamentos_en_venta*"]
+
+canonical_columns:
+  - name: calle
+    type: text
+    description: Calle de la propiedad
+  - name: numero
+    type: text
+    description: Número de la propiedad
+  - name: barrio
+    type: text
+    description: Barrio CABA
+  - name: comuna
+    type: text
+    description: Comuna (1-15)
+  - name: m2
+    type: text
+    description: Metros cuadrados totales
+  - name: ambientes
+    type: text
+    description: Cantidad de ambientes
+  - name: antiguedad
+    type: text
+    description: Antigüedad en años
+  - name: precio_dolares
+    type: text
+    description: Precio en dólares
+  - name: precio_m2_dolares
+    type: text
+    description: Precio dólar por m²
+  - name: cochera
+    type: text
+    description: Si tiene cochera (1/0 o sí/no)
+  - name: baulera
+    type: text
+    description: Si tiene baulera
+  - name: terraza
+    type: text
+    description: Si tiene terraza
+  - name: lat
+    type: text
+    description: Latitud (cuando disponible)
+  - name: lon
+    type: text
+    description: Longitud (cuando disponible)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(COALESCE("CALLE", calle)), '')                                AS calle,
+    NULLIF(TRIM(COALESCE("NUMERO"::text, numero::text)), '')                  AS numero,
+    NULLIF(TRIM(COALESCE("BARRIO", barrio, "BARRIOS", "BARRIOS_1")), '')      AS barrio,
+    NULLIF(TRIM(COALESCE("COMUNA"::text, comuna::text, "COMUNAS"::text)), '') AS comuna,
+    NULLIF(TRIM(COALESCE("M2"::text, m2::text, "M2TOTAL"::text)), '')         AS m2,
+    NULLIF(TRIM(COALESCE("AMBIENTES"::text, ambientes::text)), '')            AS ambientes,
+    NULLIF(TRIM(COALESCE("ANTIGUEDAD"::text, antiguedad::text, "ANTIG"::text, "AGE"::text)), '') AS antiguedad,
+    NULLIF(TRIM(COALESCE("DOLARES"::text, dolares::text, "PRECIOUSD"::text)), '') AS precio_dolares,
+    NULLIF(TRIM(COALESCE("U_S_M2"::text, u_s_m2::text, "PRECIOUSDM"::text)), '') AS precio_m2_dolares,
+    NULLIF(TRIM(COALESCE("COCHERA"::text, cochera::text)), '')                AS cochera,
+    NULLIF(TRIM(COALESCE("BAULERA"::text, baulera::text)), '')                AS baulera,
+    NULLIF(TRIM(COALESCE("TERRAZA"::text, terraza::text)), '')                AS terraza,
+    NULLIF(TRIM(COALESCE("LAT"::text, lat::text, "LATITUD"::text)), '')       AS lat,
+    NULLIF(TRIM(COALESCE("LON"::text, lon::text, "LONGITUD"::text)), '')      AS lon
+  FROM {{ live_tables_by_table_pattern(
+      'caba__departamentos_en_venta*',
+      expected_columns=[
+        'CALLE','calle','NUMERO','numero','BARRIO','barrio','BARRIOS','BARRIOS_1',
+        'COMUNA','comuna','COMUNAS','M2','m2','M2TOTAL','AMBIENTES','ambientes',
+        'ANTIGUEDAD','antiguedad','ANTIG','AGE','DOLARES','dolares','PRECIOUSD',
+        'U_S_M2','u_s_m2','PRECIOUSDM','COCHERA','cochera','BAULERA','baulera',
+        'TERRAZA','terraza','LAT','lat','LATITUD','LON','lon','LONGITUD'
+      ]
+  ) }} sub
+  WHERE NULLIF(TRIM(COALESCE("CALLE", calle)), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

@@ -68,3 +68,13 @@ code.test: ## Run tests
 	pytest --cov=app --cov-report=term-missing
 
 code.check: code.lint code.test ## Run lint + tests
+
+mart.scaffold: ## Auto-generate mart YAML from a cluster (e.g. make mart.scaffold subdomain=elecciones)
+	@if [ -z "$(subdomain)$(portal)$(domain)" ]; then echo 'Usage: make mart.scaffold subdomain=<x>  OR  portal=<y>  OR  domain=<z>'; exit 2; fi
+	python scripts/scaffold_mart.py \
+		$(if $(domain),--domain $(domain)) \
+		$(if $(subdomain),--subdomain $(subdomain)) \
+		$(if $(portal),--portal $(portal)) \
+		$(if $(threshold),--threshold $(threshold)) \
+		$(if $(id),--id $(id)) \
+		$(if $(dry_run),--dry-run)

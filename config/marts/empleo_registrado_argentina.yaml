@@ -1,0 +1,58 @@
+id: empleo_registrado_argentina
+version: 0.1.0
+description: |
+  Empleo registrado (asalariados) en Argentina por sector económico
+  (clasificación CLAE letra) y mes. Datos publicados por la Secretaría
+  de Producción y Trabajo.
+
+  Source: 36 versiones de `produccion__puestos_de_trabajo_asalariados`
+  + variantes `datos_gob_ar__puestos_de_trabajo_asalariados`. Schema
+  consistente long-format `(fecha, letra, puestos)` donde `letra` es
+  el código CLAE 2-letras del sector económico.
+
+  Use cases típicos: "evolución del empleo registrado argentino",
+  "puestos de trabajo en industria manufacturera", "empleo en el
+  sector agropecuario por mes", "tendencia laboral por sector".
+domain: economia
+
+sources:
+  portals: [produccion, datos_gob_ar]
+  resource_patterns:
+    - "produccion__puestos_de_trabajo_asalariados*"
+    - "datos_gob_ar__puestos_de_trabajo_asalariados*"
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha de la observación (formato YYYY-MM o similar)
+  - name: letra
+    type: text
+    description: Letra CLAE del sector económico (A=agro, C=industria, etc.)
+  - name: puestos
+    type: text
+    description: Cantidad de puestos de trabajo asalariados registrados
+
+sql: |
+  SELECT
+    NULLIF(TRIM(fecha::text), '')             AS fecha,
+    NULLIF(TRIM(letra), '')                   AS letra,
+    NULLIF(TRIM(puestos::text), '')           AS puestos
+  FROM {{ live_tables_by_table_pattern(
+      'produccion__puestos_de_trabajo_asalariados*',
+      expected_columns=['fecha', 'letra', 'puestos']
+  ) }} sub
+  WHERE NULLIF(TRIM(letra), '') IS NOT NULL
+  UNION ALL
+  SELECT
+    NULLIF(TRIM(fecha::text), '')             AS fecha,
+    NULLIF(TRIM(letra), '')                   AS letra,
+    NULLIF(TRIM(puestos::text), '')           AS puestos
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__puestos_de_trabajo_asalariados*',
+      expected_columns=['fecha', 'letra', 'puestos']
+  ) }} sub2
+  WHERE NULLIF(TRIM(letra), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

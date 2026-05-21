@@ -36,8 +36,11 @@ The top-level modules are ordered roughly by architectural depth. Modules with �
 | 010 | [`010-sandbox-sql/`](010-sandbox-sql/) | **2 sub-modules** | SQL sandbox + NL2SQL. |
 | 010a | [`010-sandbox-sql/010a-sql-sandbox/`](010-sandbox-sql/010a-sql-sandbox/) | — | Read-only executor, 3-layer validation, ThreadPoolExecutor. |
 | 010b | [`010-sandbox-sql/010b-nl2sql/`](010-sandbox-sql/010b-nl2sql/) | — | LLM → SQL → execute → fix loop (subgraph dead code, see FIX-004). |
-| 011 | [`011-table-catalog/`](011-table-catalog/) | — | Vector-indexed cached table metadata for NL2SQL grounding. |
+| 011 | [`011-table-catalog/`](011-table-catalog/) | — | Vector-indexed cached table metadata for NL2SQL grounding (legacy; supplanted by 015). |
 | 012 | [`012-admin/`](012-admin/) | — | Admin task registry + orchestrator endpoints. |
+| 013 | [`013-ingestion-validation/`](013-ingestion-validation/) | — | **WS0** — `IngestionValidator` + 14 detectors + 3 modes (pre/post/retro) + `ingestion_findings` audit trail. |
+| 014 | [`014-state-machine/`](014-state-machine/) | — | **WS0.5** — explicit `cached_datasets` state machine + invariant enforcer + `error_category` taxonomy. |
+| 015 | [`015-catalog-resources/`](015-catalog-resources/) | — | **WS2 / WS3 / WS4** — logical catalog (`catalog_resources`) + deterministic naming + hybrid serving. |
 
 Cross-cutting artifacts:
 

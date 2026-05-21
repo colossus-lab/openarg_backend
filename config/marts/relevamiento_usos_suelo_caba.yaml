@@ -1,0 +1,85 @@
+id: relevamiento_usos_suelo_caba
+version: 0.1.0
+description: |
+  Relevamiento del uso del suelo de la Ciudad de Buenos Aires — registro
+  parcela por parcela del tipo de uso (residencial, comercial, mixto,
+  vacante, etc.) con identificadores SMP (sección/manzana/parcela) y
+  ubicación geográfica.
+
+  ~10 tablas live de ~5M filas. Útil para análisis urbanos, monitoreo de
+  cambios de uso, planificación.
+domain: urbanismo
+
+sources:
+  portals: [caba]
+  resource_patterns:
+    - "caba::relevamiento_usos_del_suelo*"
+
+canonical_columns:
+  - name: fecha
+    type: text
+    description: Fecha del relevamiento
+  - name: barrio
+    type: text
+    description: Barrio CABA
+  - name: seccion
+    type: text
+    description: Sección catastral
+  - name: manzana
+    type: text
+    description: Manzana
+  - name: parcela
+    type: text
+    description: Parcela
+  - name: smp
+    type: text
+    description: Identificador SMP (sección-manzana-parcela)
+  - name: calle
+    type: text
+    description: Calle
+  - name: nro
+    type: text
+    description: Número
+  - name: chapa_visible
+    type: text
+    description: Chapa visible
+  - name: tipo_1
+    type: text
+    description: Tipo de uso primario
+  - name: tipo_2
+    type: text
+    description: Tipo de uso secundario
+  - name: pisos
+    type: text
+    description: Cantidad de pisos
+  - name: nombre
+    type: text
+    description: Denominación / nombre del local
+
+sql: |
+  SELECT
+    NULLIF(TRIM("FECHA"::text), '')         AS fecha,
+    NULLIF(TRIM("BARRIO"::text), '')        AS barrio,
+    NULLIF(TRIM("SECCION"::text), '')       AS seccion,
+    NULLIF(TRIM("MANZANA"::text), '')       AS manzana,
+    NULLIF(TRIM("PARCELA"::text), '')       AS parcela,
+    NULLIF(TRIM("SMP"::text), '')           AS smp,
+    NULLIF(TRIM("CALLE"::text), '')         AS calle,
+    NULLIF(TRIM("NRO"::text), '')           AS nro,
+    NULLIF(TRIM("CHAPA_VISIBLE"::text), '') AS chapa_visible,
+    NULLIF(TRIM("TIPO_1"::text), '')        AS tipo_1,
+    NULLIF(TRIM("TIPO_2"::text), '')        AS tipo_2,
+    NULLIF(TRIM("PISOS"::text), '')         AS pisos,
+    NULLIF(TRIM("NOMBRE"::text), '')        AS nombre
+  FROM {{ live_tables_by_table_pattern(
+      'caba__relevamiento_usos_del_suelo*',
+      expected_columns=['FECHA', 'BARRIO', 'SECCION', 'MANZANA', 'PARCELA',
+                        'SMP', 'CALLE', 'NRO', 'CHAPA_VISIBLE', 'TIPO_1',
+                        'TIPO_2', 'PISOS', 'NOMBRE'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM("SMP"::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

@@ -1,0 +1,53 @@
+id: producciones_cientificas
+version: 0.1.0
+description: |
+  Producciones científico-tecnológicas (artículos, libros, capítulos,
+  ponencias, patentes) registradas por personas en el SICyTAR (Sistema
+  de Información de Ciencia y Tecnología Argentino) — Ministerio de
+  Ciencia, Tecnología e Innovación. Cada fila vincula un producto con
+  una persona y su rol (autor / editor-compilador / revisor).
+
+  Complementa `personal_ciencia_tecnologia` (padrón) — esta tabla provee
+  la actividad de cada persona. ~85 tablas live por snapshot (~4M filas).
+domain: educacion
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::producciones_cientifico_tecnologicas*"
+
+canonical_columns:
+  - name: producto_id
+    type: text
+    description: Identificador del producto
+  - name: persona_id
+    type: text
+    description: Identificador de la persona
+  - name: es_autor
+    type: text
+    description: Flag — autor del producto
+  - name: es_editor_compilador
+    type: text
+    description: Flag — editor o compilador
+  - name: es_revisor
+    type: text
+    description: Flag — revisor
+
+sql: |
+  SELECT
+    NULLIF(TRIM(producto_id::text), '')          AS producto_id,
+    NULLIF(TRIM(persona_id::text), '')           AS persona_id,
+    NULLIF(TRIM(es_autor::text), '')             AS es_autor,
+    NULLIF(TRIM(es_editor_compilador::text), '') AS es_editor_compilador,
+    NULLIF(TRIM(es_revisor::text), '')           AS es_revisor
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__producciones_cientifico_tecnologicas*',
+      expected_columns=['producto_id', 'persona_id', 'es_autor',
+                        'es_editor_compilador', 'es_revisor'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(producto_id::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

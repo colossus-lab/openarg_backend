@@ -195,7 +195,10 @@ class SemanticCache:
                     {"now": datetime.now(UTC)},
                 )
                 await session.commit()
-                return result.rowcount or 0
+                # `Result[Any]` doesn't expose `rowcount` in stubs but
+                # the underlying `CursorResult` from `session.execute(text())`
+                # always does for DML statements.
+                return result.rowcount or 0  # type: ignore[attr-defined]
         except Exception:
             logger.warning("Semantic cache cleanup failed", exc_info=True)
             return 0

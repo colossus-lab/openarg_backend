@@ -1,0 +1,154 @@
+id: presupuesto_nacional_ejecutado
+version: 0.1.0
+description: |
+  Presupuesto de la Administración Pública Nacional argentina —
+  ejecución mensual con jerarquía clasificatoria completa
+  (jurisdicción × servicio × programa × subprograma × proyecto ×
+  actividad × obra) y los 3 momentos del crédito
+  (presupuestado / vigente / devengado).
+
+  Source: 32 versiones de
+  `datos_gob_ar__presupuesto_de_la_administracion_publica` con la
+  shape de TABLA DE HECHOS FULL (33 cols). El mismo cluster tiene
+  otras sub-shapes que son tablas de DIMENSIONES (tipo/clase,
+  finalidad/función, fuente_financiamiento, etc.) — esas no se
+  incluyen acá. Esta es la GRANULAR fact view, una row por
+  (mes × jurisdicción × ... × clasificador económico × inciso ×
+  partida).
+
+  Clasificador económico 8 dígitos cubre la cadena completa
+  (inciso_id → principal_id → parcial_id → subparcial_id) que
+  identifica cada partida específica del gasto público.
+
+  Use cases típicos: "ejecución del presupuesto nacional",
+  "qué jurisdicciones gastaron más", "presupuesto del Ministerio
+  de Salud nacional", "evolución del crédito vigente Educación",
+  "gasto en personal del estado nacional", "fuente de
+  financiamiento por programa", "obras públicas presupuesto
+  nacional".
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns: ["datos_gob_ar__presupuesto_de_la_administracion_pu*"]
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año de impacto presupuestario
+  - name: mes
+    type: text
+    description: Mes de impacto presupuestario
+  - name: jurisdiccion_id
+    type: text
+    description: ID de la jurisdicción (ministerio o secretaría)
+  - name: jurisdiccion_desc
+    type: text
+    description: Nombre de la jurisdicción
+  - name: servicio_id
+    type: text
+    description: ID del servicio administrativo
+  - name: servicio_desc
+    type: text
+    description: Nombre del servicio
+  - name: programa_id
+    type: text
+    description: ID del programa presupuestario
+  - name: programa_desc
+    type: text
+    description: Nombre del programa
+  - name: subprograma_desc
+    type: text
+    description: Nombre del subprograma (cuando aplica)
+  - name: actividad_desc
+    type: text
+    description: Actividad específica
+  - name: obra_desc
+    type: text
+    description: Obra (para inversión real)
+  - name: fuente_financiamiento_desc
+    type: text
+    description: Fuente de financiamiento (Tesoro Nacional, recursos propios, etc.)
+  - name: finalidad_funcion_desc
+    type: text
+    description: Finalidad/función del gasto (educación, salud, defensa, etc.)
+  - name: clasificador_economico_desc
+    type: text
+    description: Clasificador económico 8 dígitos (descripción)
+  - name: inciso_desc
+    type: text
+    description: Inciso del gasto (personal, bienes, servicios, transferencias, etc.)
+  - name: principal_desc
+    type: text
+    description: Partida principal
+  - name: parcial_desc
+    type: text
+    description: Partida parcial
+  - name: subparcial_desc
+    type: text
+    description: Subpartida
+  - name: credito_presupuestado
+    type: text
+    description: Crédito presupuestado (sancionado original)
+  - name: credito_vigente
+    type: text
+    description: Crédito vigente (post modificaciones)
+  - name: credito_devengado
+    type: text
+    description: Crédito devengado (efectivamente ejecutado)
+
+# Filtra a las ~32 tablas con la shape FULL de 33 cols.
+# `require_all_columns=True` descarta las sub-shapes (dimensiones /
+# clasificadores) que comparten el slug pero no tienen TODAS las cols
+# de hecho. Sin este flag, el macro intentaba unir las 597 tablas del
+# cluster y chocaba con el cap de 200.
+sql: |
+  SELECT
+    NULLIF(TRIM(impacto_presupuestario_anio::text), '')              AS anio,
+    NULLIF(TRIM(impacto_presupuestario_mes::text), '')               AS mes,
+    NULLIF(TRIM(jurisdiccion_id::text), '')                          AS jurisdiccion_id,
+    NULLIF(TRIM(jurisdiccion_desc), '')                              AS jurisdiccion_desc,
+    NULLIF(TRIM(servicio_id::text), '')                              AS servicio_id,
+    NULLIF(TRIM(servicio_desc), '')                                  AS servicio_desc,
+    NULLIF(TRIM(programa_id::text), '')                              AS programa_id,
+    NULLIF(TRIM(programa_desc), '')                                  AS programa_desc,
+    NULLIF(TRIM(subprograma_desc), '')                               AS subprograma_desc,
+    NULLIF(TRIM(actividad_desc), '')                                 AS actividad_desc,
+    NULLIF(TRIM(obra_desc), '')                                      AS obra_desc,
+    NULLIF(TRIM(fuente_financiamiento_desc), '')                     AS fuente_financiamiento_desc,
+    NULLIF(TRIM(finalidad_funcion_desc), '')                         AS finalidad_funcion_desc,
+    NULLIF(TRIM(clasificador_economico_8_digitos_desc), '')          AS clasificador_economico_desc,
+    NULLIF(TRIM(inciso_desc), '')                                    AS inciso_desc,
+    NULLIF(TRIM(principal_desc), '')                                 AS principal_desc,
+    NULLIF(TRIM(parcial_desc), '')                                   AS parcial_desc,
+    NULLIF(TRIM(subparcial_desc), '')                                AS subparcial_desc,
+    NULLIF(TRIM(credito_presupuestado::text), '')                    AS credito_presupuestado,
+    NULLIF(TRIM(credito_vigente::text), '')                          AS credito_vigente,
+    NULLIF(TRIM(credito_devengado::text), '')                        AS credito_devengado
+  FROM {{ live_tables_by_table_pattern(
+      'datos_gob_ar__presupuesto_de_la_administracion_pu*',
+      expected_columns=[
+        'impacto_presupuestario_anio', 'impacto_presupuestario_mes',
+        'jurisdiccion_id', 'jurisdiccion_desc',
+        'servicio_id', 'servicio_desc',
+        'programa_id', 'programa_desc',
+        'subprograma_id', 'subprograma_desc',
+        'proyecto_id', 'proyecto_desc',
+        'actividad_id', 'actividad_desc',
+        'obra_id', 'obra_desc',
+        'fuente_financiamiento_id', 'fuente_financiamiento_desc',
+        'finalidad_funcion_id', 'finalidad_funcion_desc',
+        'clasificador_economico_8_digitos_id', 'clasificador_economico_8_digitos_desc',
+        'inciso_id', 'inciso_desc',
+        'principal_id', 'principal_desc',
+        'parcial_id', 'parcial_desc',
+        'subparcial_id', 'subparcial_desc',
+        'credito_presupuestado', 'credito_vigente', 'credito_devengado'
+      ],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(jurisdiccion_desc), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

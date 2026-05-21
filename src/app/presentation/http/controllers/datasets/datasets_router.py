@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -22,11 +23,29 @@ class DatasetSummary(BaseModel):
     format: str | None
     is_cached: bool
     row_count: int | None
+    # Column names of the dataset — lets the /datasets page build a
+    # column-aware "ask in chat" prompt. Stored as a JSON-array string in
+    # the `datasets` table; parsed to a list here.
+    columns: list[str] | None = None
 
 
 class PortalStats(BaseModel):
     portal: str
     count: int
+
+
+def _parse_columns(raw: str | None) -> list[str] | None:
+    """Parse the `datasets.columns` JSON-array text into a list of names."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    names = [str(c).strip() for c in parsed if c and str(c).strip()]
+    return names or None
 
 
 class DownloadResponse(BaseModel):
@@ -47,7 +66,7 @@ async def list_datasets(
     """List indexed datasets, optionally filtered by portal."""
     query = (
         "SELECT CAST(id AS text), title, description, "
-        "organization, portal, format, is_cached, row_count "
+        "organization, portal, format, is_cached, row_count, columns "
         "FROM datasets"
     )
     params: dict[str, Any] = {"limit": limit, "offset": offset}
@@ -71,6 +90,7 @@ async def list_datasets(
             format=row.format,
             is_cached=row.is_cached,
             row_count=row.row_count,
+            columns=_parse_columns(row.columns),
         )
         for row in rows
     ]
@@ -99,7 +119,7 @@ async def download_dataset(
         text(
             "SELECT d.title, d.download_url, d.format, d.source_id, cd.s3_key "
             "FROM datasets d "
-            "LEFT JOIN cached_datasets cd ON cd.dataset_id = d.id AND cd.status = 'ready' "
+            "LEFT JOIN raw.cached_datasets cd ON cd.dataset_id = d.id AND cd.status = 'ready' "
             "WHERE d.id = CAST(:did AS uuid)"
         ),
         {"did": dataset_id},

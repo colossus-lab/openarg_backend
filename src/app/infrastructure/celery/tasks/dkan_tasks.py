@@ -12,6 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -19,6 +20,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +83,9 @@ def _register_dataset(
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
                     (:sid, :title, :desc, :org, :portal, :url, :dl, 'csv', :cols, :tags,
-                     :now, true, :rows)
+                     :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
@@ -108,24 +110,24 @@ def _register_dataset(
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "now": now,
-                },
-            )
+    # Out of the begin() block: cached_datasets INSERT inside
+    # _finalize_cached_dataset opens its own tx and would otherwise race
+    # the uncommitted datasets row, hitting fk_cached_datasets_dataset_id.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal.portal_key,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format="csv",
+            download_url=url,
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -135,7 +137,7 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
     import httpx
 
     engine = get_sync_engine()
-    results = {"portal": portal.portal_key, "ingested": 0, "skipped": 0, "errors": 0}
+    results: dict[str, Any] = {"portal": portal.portal_key, "ingested": 0, "skipped": 0, "errors": 0}
 
     try:
         with httpx.Client(timeout=60.0) as client:
@@ -202,7 +204,7 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
                 if len(df) > MAX_ROWS:
                     df = df.head(MAX_ROWS)
 
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
                 dataset_id = _register_dataset(
                     engine, portal, ds_id, title, table_name, df, download_url
@@ -213,6 +215,20 @@ def _scrape_dkan_portal(portal: DKANPortal) -> dict:
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so marts find this table
+                # via `live_table('<portal_key>::<ds_id>')` macro
+                # (DEBT-019-006). Portal name comes from connector config
+                # (e.g. `rosario_dkan`).
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"{portal.portal_key}::{ds_id}",
+                    table_name=table_name,
+                    schema_name="raw",
+                    row_count=len(df),
+                )
 
                 results["ingested"] += 1
                 logger.info("DKAN %s %s: %d rows", portal.portal_key, ds_id, len(df))

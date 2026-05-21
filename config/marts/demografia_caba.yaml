@@ -1,0 +1,56 @@
+id: demografia_caba
+version: 0.1.0
+description: |
+  Estructura demográfica de la Ciudad Autónoma de Buenos Aires —
+  población por grupo etario, nacionalidad y proporción por año.
+  Source: GCBA, dataset "Estructura demográfica" (versiones múltiples
+  cubriendo años 2010-2025). Cubre los datos publicados oficialmente
+  por la Dirección General de Estadística y Censos del GCBA.
+
+  Build basado en analytics de prod (47 días, ~28 hits sobre temas
+  demográficos CABA): preguntas como "población de CABA por edad",
+  "demografía Buenos Aires", "estructura poblacional ciudad".
+
+  NOTA: 4 de 12 versiones del dataset comparten el schema canónico
+  `(anio, grupo_edad, POBLACION, porc_poblacion, nacionalidad)`. Las
+  otras 8 traen subsets distintos (por sexo, por origen, por año
+  parcial) — quedan en raw, accesibles via NL2SQL pero fuera del mart.
+domain: social
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__estructura_demografica*"]
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año del registro
+  - name: grupo_edad
+    type: text
+    description: Grupo etario (formato origen, ej. "0-14", "15-29")
+  - name: nacionalidad
+    type: text
+    description: Origen (argentino, extranjero, etc)
+  - name: poblacion
+    type: text
+    description: Cantidad absoluta de personas
+  - name: porc_poblacion
+    type: text
+    description: Porcentaje sobre el total
+
+sql: |
+  SELECT
+    NULLIF(TRIM(anio::text), '')                   AS anio,
+    NULLIF(TRIM(grupo_edad), '')                   AS grupo_edad,
+    NULLIF(TRIM(nacionalidad), '')                 AS nacionalidad,
+    NULLIF(TRIM("POBLACION"::text), '')            AS poblacion,
+    NULLIF(TRIM(porc_poblacion::text), '')         AS porc_poblacion
+  FROM {{ live_tables_by_table_pattern(
+      'caba__estructura_demografica*',
+      expected_columns=['anio', 'grupo_edad', 'nacionalidad', 'POBLACION', 'porc_poblacion']
+  ) }} sub
+  WHERE NULLIF(TRIM(anio::text), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

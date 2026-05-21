@@ -76,6 +76,28 @@ class TestBuildDeterministicCharts:
         assert len(charts) == 1
         assert charts[0]["type"] == "bar_chart"
 
+    def test_sorts_time_series_rows_by_fecha(self):
+        records = [
+            {"fecha": "2024-03", "valor": 12.0},
+            {"fecha": "2024-01", "valor": 10.5},
+            {"fecha": "2024-02", "valor": 11.2},
+        ]
+        charts = _build_deterministic_charts([_make_result(records)])
+        assert [row["fecha"] for row in charts[0]["data"]] == ["2024-01", "2024-02", "2024-03"]
+
+    def test_skips_misleading_mixed_dollar_house_snapshot_chart(self):
+        result = _make_result(
+            [
+                {"fecha": "2026-04-14T17:00:00.000Z", "compra": 1335, "venta": 1385},
+                {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1390, "venta": 1410},
+                {"fecha": "2026-04-14T20:59:00.000Z", "compra": 1414.9, "venta": 1409.3},
+                {"fecha": "2026-04-14T16:07:00.000Z", "compra": 1355, "venta": 1364},
+            ],
+            title="Cotización actual Dólar todas las casas",
+        )
+        charts = _build_deterministic_charts([result])
+        assert charts == []
+
 
 class TestExtractLLMCharts:
     def test_extracts_valid_chart(self):

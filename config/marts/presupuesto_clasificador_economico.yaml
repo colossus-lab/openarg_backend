@@ -1,0 +1,108 @@
+id: presupuesto_clasificador_economico
+version: 0.1.0
+description: |
+  Clasificador económico 8 dígitos del Presupuesto de la Administración
+  Pública Nacional, por ejercicio. Dimensión de lookup con la jerarquía
+  inciso → principal → parcial → subparcial. Subshape de 11 cols del
+  cluster: ejercicio + 4 niveles × (id, desc) + meta.
+
+  El clasificador económico identifica QUÉ TIPO de gasto se ejecutó
+  (personal, bienes de consumo, transferencias corrientes,
+  bienes de capital, etc.). Usar para joinear contra el fact
+  `presupuesto_nacional_ejecutado` y para responder queries del
+  tipo "gasto en personal por jurisdicción", "transferencias 2024".
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::*presupuesto_de_la_administracion_pu*"
+
+canonical_columns:
+  - name: ejercicio_presupuestario
+    type: text
+    description: Ejercicio fiscal (año)
+  - name: inciso_id
+    type: text
+    description: ID del inciso (nivel 1 — gran clasificación)
+  - name: inciso_desc
+    type: text
+    description: Nombre del inciso (Personal, Bienes de consumo, etc.)
+  - name: principal_id
+    type: text
+    description: ID de la partida principal (nivel 2)
+  - name: principal_desc
+    type: text
+    description: Nombre de la partida principal
+  - name: parcial_id
+    type: text
+    description: ID de la partida parcial (nivel 3)
+  - name: parcial_desc
+    type: text
+    description: Nombre de la partida parcial
+  - name: subparcial_id
+    type: text
+    description: ID de la subpartida (nivel 4 — más fino)
+  - name: subparcial_desc
+    type: text
+    description: Nombre de la subpartida
+  - name: ultima_actualizacion_fecha
+    type: text
+    description: Fecha de última actualización del registro upstream
+
+sql: |
+  -- Elegimos el snapshot más reciente por clave de negocio para evitar
+  -- fanout al joinear contra el fact si la misma combinación reaparece
+  -- con distinta `ultima_actualizacion_fecha`.
+  WITH ranked AS (
+    SELECT
+      NULLIF(TRIM(ejercicio_presupuestario::text), '')   AS ejercicio_presupuestario,
+      NULLIF(TRIM(inciso_id::text), '')                  AS inciso_id,
+      NULLIF(TRIM(inciso_desc), '')                      AS inciso_desc,
+      NULLIF(TRIM(principal_id::text), '')               AS principal_id,
+      NULLIF(TRIM(principal_desc), '')                   AS principal_desc,
+      NULLIF(TRIM(parcial_id::text), '')                 AS parcial_id,
+      NULLIF(TRIM(parcial_desc), '')                     AS parcial_desc,
+      NULLIF(TRIM(subparcial_id::text), '')              AS subparcial_id,
+      NULLIF(TRIM(subparcial_desc), '')                  AS subparcial_desc,
+      NULLIF(TRIM(ultima_actualizacion_fecha::text), '') AS ultima_actualizacion_fecha,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          NULLIF(TRIM(ejercicio_presupuestario::text), ''),
+          NULLIF(TRIM(inciso_id::text), ''),
+          NULLIF(TRIM(principal_id::text), ''),
+          NULLIF(TRIM(parcial_id::text), ''),
+          NULLIF(TRIM(subparcial_id::text), '')
+        ORDER BY NULLIF(TRIM(ultima_actualizacion_fecha::text), '') DESC NULLS LAST
+      ) AS rn
+    FROM {{ live_tables_by_table_pattern(
+        'datos_gob_ar__presupuesto_de_la_administracion_pu*',
+        expected_columns=[
+          'ejercicio_presupuestario',
+          'inciso_id', 'inciso_desc',
+          'principal_id', 'principal_desc',
+          'parcial_id', 'parcial_desc',
+          'subparcial_id', 'subparcial_desc',
+          'ultima_actualizacion_fecha'
+        ],
+        require_all_columns=True
+    ) }} sub
+    WHERE NULLIF(TRIM(inciso_id::text), '') IS NOT NULL
+  )
+  SELECT
+    ejercicio_presupuestario,
+    inciso_id,
+    inciso_desc,
+    principal_id,
+    principal_desc,
+    parcial_id,
+    parcial_desc,
+    subparcial_id,
+    subparcial_desc,
+    ultima_actualizacion_fecha
+  FROM ranked
+  WHERE rn = 1
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

@@ -1,0 +1,76 @@
+id: subsidios_transporte_publico
+version: 0.1.0
+description: |
+  Transferencias del Estado nacional a empresas operadoras del transporte
+  público de pasajeros (Compensación Tarifaria, FCT, gasoil, etc.) por
+  mes / provincia / municipio / CUIT operador / tipo de subsidio / monto.
+
+  Cluster de 6 tablas en `transporte::subsidios_al_transporte_publico*`,
+  con shape heterogénea entre versiones. Esta vista cubre la shape
+  canónica reciente (3 tablas, ~125K filas) con cols
+  `mes, provincia, municipio, cuit, razon_social, pago, monto` —
+  `monto` ya es numeric, `pago` describe el instrumento (Comp. Tarifaria,
+  Gasoil, FCT). Las shape antiguas con `tipo` numérico + `monto:text`
+  quedan fuera (parser inconsistente).
+
+  El operador receptor está identificado por su CUIT — joineable contra
+  `nombre_empresa` de `sube_uso_transporte_publico` vía catálogos públicos
+  de la CNRT, lo que habilita análisis de "subsidio por boleto pago" o
+  "subsidio por jurisdicción servida".
+
+  Casos de uso típicos:
+    * Distribución del FCT por provincia (debate AMBA vs. interior)
+    * Top-N empresas con mayor monto recibido
+    * Series temporales del gasto en subsidios al transporte
+    * Cruce con uso (`sube_uso_transporte_publico`) → eficiencia transferencias
+    * Cobertura jurisdiccional (qué municipios reciben subsidio nacional)
+domain: transporte
+
+sources:
+  portals: [transporte]
+  resource_patterns:
+    - "transporte::subsidios_al_transporte_publico*"
+
+canonical_columns:
+  - name: mes
+    type: text
+    description: Período (YYYY-MM o nombre mes)
+  - name: provincia
+    type: text
+    description: Provincia de la empresa receptora
+  - name: municipio
+    type: text
+    description: Municipio sede de la empresa
+  - name: cuit
+    type: text
+    description: CUIT de la empresa operadora receptora del subsidio
+  - name: razon_social
+    type: text
+    description: Razón social de la empresa operadora
+  - name: pago
+    type: text
+    description: Instrumento de pago (Comp. Tarifaria, Gasoil, FCT, etc.)
+  - name: monto
+    type: numeric
+    description: Monto transferido en pesos
+
+sql: |
+  SELECT
+    NULLIF(TRIM(mes::text), '')          AS mes,
+    NULLIF(TRIM(provincia::text), '')    AS provincia,
+    NULLIF(TRIM(municipio::text), '')    AS municipio,
+    NULLIF(TRIM(cuit::text), '')         AS cuit,
+    NULLIF(TRIM(razon_social::text), '') AS razon_social,
+    NULLIF(TRIM(pago::text), '')         AS pago,
+    monto::numeric                       AS monto
+  FROM {{ live_tables_by_table_pattern(
+      'transporte__subsidios_al_transporte_publico*',
+      expected_columns=['mes', 'provincia', 'municipio', 'cuit',
+                        'razon_social', 'pago', 'monto'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(mes::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "sources": [
+    {
+      "id": "padron_oficial_2026",
+      "title": "Padrón Oficial de Establecimientos Educativos — 2026",
+      "url": "https://www.argentina.gob.ar/sites/default/files/2026.01.12_padron_oficial_establecimientos_educativos_die.xlsx",
+      "format": "xlsx",
+      "organization": "Ministerio de Educación de la Nación",
+      "portal": "curated",
+      "refresh": "weekly",
+      "added_at": "2026-04-25",
+      "added_by": "manual",
+      "notes": "Versión 2026 del Padrón Nacional (~13.6 MB, ~64k escuelas). El Min de Educación todavía no la publicó en datos.gob.ar — último allí: 2024-07-15. Verificada pública (HTTP 200, content-type xlsx, magic bytes PK)."
+    }
+  ]
+}

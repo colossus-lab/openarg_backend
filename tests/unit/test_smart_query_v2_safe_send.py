@@ -89,7 +89,6 @@ async def test_safe_send_json_accepts_complete_event_with_datetime(
             ],
         },
         "map_data": None,
-        "confidence": 0.92,
         "citations": [],
         "documents": None,
         "warnings": [],
@@ -102,7 +101,6 @@ async def test_safe_send_json_accepts_complete_event_with_datetime(
     assert sent["type"] == "complete"
     assert sent["chart_data"]["data"][0]["fecha"] == "2026-04-01"
     assert sent["chart_data"]["data"][0]["valor"] == "25000.50"
-    assert sent["confidence"] == 0.92
 
 
 async def test_safe_send_json_handles_aware_datetime(
@@ -200,7 +198,6 @@ def test_build_complete_event_uses_state_shape_for_terminal_nodes() -> None:
         "sources": [{"name": "x", "url": "", "portal": "p"}],
         "chart_data": None,
         "map_data": None,
-        "confidence": 1.0,
         "citations": [],
         "documents": None,
         "warnings": ["warn"],

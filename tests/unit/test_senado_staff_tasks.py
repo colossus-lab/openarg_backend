@@ -247,5 +247,9 @@ class TestScrapeIntegration:
         assert result["status"] == "ok"
         assert result["senators_scraped"] == 1
         assert result["staff_found"] == 2
-        # Verify DELETE + INSERT were called
-        assert mock_conn.execute.call_count == 2
+        # Verify DELETE + INSERT staff + register_via_b_table INSERT +
+        # the catalog_resources reconciliation UPDATE that ships in the
+        # vía-B writer. The 4th execute syncs `materialized_table_name`
+        # on the canonical catalog row so /data/search and the serving
+        # port resolve to the same physical table that the rtv registers.
+        assert mock_conn.execute.call_count == 4

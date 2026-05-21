@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,9 @@ def _register_dataset(
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
                     (:sid, :title, :desc, :org, :portal, :url, :dl, :fmt, :cols, :tags,
-                     :now, true, :rows)
+                     :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
@@ -79,23 +80,20 @@ def _register_dataset(
         dataset_id = dataset_row[0] if dataset_row else None
 
         if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "now": now,
-                },
+            finalized = _finalize_cached_dataset(
+                engine,
+                dataset_id=dataset_id,
+                portal=portal,
+                source_id=source_id,
+                table_name=table_name,
+                row_count=len(df),
+                columns=list(df.columns),
+                declared_format=url.rsplit(".", 1)[-1].lower() if "." in url else "csv",
+                download_url=url,
+                now=now,
             )
+            if not finalized["ok"]:
+                return None
 
     return dataset_id
 
@@ -211,7 +209,7 @@ def scrape_cordoba_legislatura(self):
                 if len(df) > MAX_ROWS:
                     df = df.head(MAX_ROWS)
 
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
 
                 dataset_id = _register_dataset(engine, source_id, label, table_name, df, url)
                 if dataset_id:
@@ -220,6 +218,18 @@ def scrape_cordoba_legislatura(self):
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so marts find this table
+                # via `live_table('cordoba_leg::<source>')` macro (DEBT-019-006).
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"cordoba_leg::{_sanitize_name(label)}",
+                    table_name=table_name,
+                    schema_name="raw",
+                    row_count=len(df),
+                )
 
                 results["ingested"] += 1
                 logger.info("Córdoba Legislatura %s: %d rows", label, len(df))

@@ -51,9 +51,6 @@ class TestCoreQueries:
         validate_numbers_in_range(data, "inflacion_mensual", "inflacion mensual")
         assert "sources" in data
         assert isinstance(data["sources"], list)
-        assert "confidence" in data
-        assert isinstance(data["confidence"], int | float)
-        assert 0 <= data["confidence"] <= 1
 
     async def test_reservas_bcra(self, client):
         """BCRA connector: reservas internacionales."""

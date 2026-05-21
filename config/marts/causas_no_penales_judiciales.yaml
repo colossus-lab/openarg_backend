@@ -1,0 +1,85 @@
+id: causas_no_penales_judiciales
+version: 0.1.0
+description: |
+  Causas no penales (civiles, comerciales, laborales, contencioso-
+  administrativas) tramitadas en los Poderes Judiciales provinciales —
+  Sistema Nacional de Información de Justicia. Cada fila es una causa
+  con su materia, objeto de litigio, partes intervinientes y fecha de
+  inicio.
+
+  Combina `justicia` y `datos_gob_ar` (mismo origen). ~14 tablas live
+  (~16M filas con duplicado).
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::poderes_judiciales_causas_no_penales*"
+
+canonical_columns:
+  - name: causa_id
+    type: text
+    description: Identificador de la causa
+  - name: provincia_id
+    type: text
+    description: ID de la provincia
+  - name: provincia_nombre
+    type: text
+    description: Nombre de la provincia
+  - name: materia
+    type: text
+    description: Materia (civil, comercial, laboral, ...)
+  - name: materia_estadistica
+    type: text
+    description: Materia agregada estadística
+  - name: circunscripcion
+    type: text
+    description: Descripción de la circunscripción judicial
+  - name: unidad
+    type: text
+    description: Descripción de la unidad judicial
+  - name: causa_fecha_inicio
+    type: text
+    description: Fecha de inicio de la causa
+  - name: objeto_litigio
+    type: text
+    description: Objeto del litigio
+  - name: objeto_litigio_estadistico
+    type: text
+    description: Objeto del litigio agregado estadístico
+  - name: parte_tipo
+    type: text
+    description: Tipo de parte (actor, demandado)
+  - name: persona_tipo
+    type: text
+    description: Tipo de persona (física, jurídica)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(causa_id::text), '')                     AS causa_id,
+    NULLIF(TRIM(provincia_id::text), '')                 AS provincia_id,
+    NULLIF(TRIM(provincia_nombre::text), '')             AS provincia_nombre,
+    NULLIF(TRIM(materia_descripcion::text), '')          AS materia,
+    NULLIF(TRIM(materia_estadistica::text), '')          AS materia_estadistica,
+    NULLIF(TRIM(circunscripcion_descripcion::text), '')  AS circunscripcion,
+    NULLIF(TRIM(unidad_descripcion::text), '')           AS unidad,
+    NULLIF(TRIM(causa_fecha_inicio::text), '')           AS causa_fecha_inicio,
+    NULLIF(TRIM(objeto_litigio_descripcion::text), '')   AS objeto_litigio,
+    NULLIF(TRIM(objeto_litigio_estadistico::text), '')   AS objeto_litigio_estadistico,
+    NULLIF(TRIM(parte_tipo::text), '')                   AS parte_tipo,
+    NULLIF(TRIM(persona_tipo::text), '')                 AS persona_tipo
+  FROM {{ live_tables_by_table_pattern(
+      '*__poderes_judiciales_causas_no_penales*',
+      expected_columns=['causa_id', 'provincia_id', 'provincia_nombre',
+                        'materia_descripcion', 'materia_estadistica',
+                        'circunscripcion_descripcion', 'unidad_descripcion',
+                        'causa_fecha_inicio', 'objeto_litigio_descripcion',
+                        'objeto_litigio_estadistico', 'parte_tipo',
+                        'persona_tipo'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(causa_id::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

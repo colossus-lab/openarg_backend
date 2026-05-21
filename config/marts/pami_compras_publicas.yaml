@@ -1,0 +1,73 @@
+id: pami_compras_publicas
+version: 0.1.0
+description: |
+  Listado de Llamados a Licitaciones Públicas del Instituto Nacional de
+  Servicios Sociales para Jubilados y Pensionados (PAMI), nivel central.
+  Cubre los snapshots históricos del padrón con shape canónico de 36 cols
+  cuyo header fue rescatado por el repair `title_as_columns` (2026-05-09).
+
+  Bug original (pre-2026-05-09): pandas leyó la fila merged-cell del título
+  ("LISTADO DE LLAMADOS DE LICITACIONES PUBLICAS - AÑO XXXX") como header
+  y dedupeó con sufijos `_Gc_2.._31`. La fila 0 quedó como separador NULL
+  y la fila 1 contenía los headers reales (`N° L.P`, `EXPEDIENTE`, `OBJETO`,
+  ...). El repair manual ejecutó ALTER COLUMN renames + DELETE de las 2
+  filas consumidas — registrado en `parse_repair_audit` con
+  `phase='title_as_columns'`.
+
+  `require_all_columns=True` filtra a las 13 tablas con shape FULL
+  reparado (las otras ~14 del cluster tienen menos cols con un schema
+  diferente y no entran en esta vista canónica).
+domain: gobierno
+
+sources:
+  portals: [pami]
+  resource_patterns:
+    - "pami::*compras_y_contrataciones_de_nivel_central*"
+
+canonical_columns:
+  - name: numero_licitacion
+    type: text
+    description: Número de Licitación Pública (`N° L.P` en raw)
+  - name: expediente
+    type: text
+    description: Identificador del expediente administrativo
+  - name: objeto
+    type: text
+    description: Objeto de la contratación (descripción del bien/servicio)
+  - name: destino
+    type: text
+    description: Área/gerencia destinataria (`GESP`, `GCIA COMUNICACIÓN`, etc.)
+  - name: fecha_de_apertura
+    type: text
+    description: Fecha de apertura del proceso licitatorio (texto, formato heterogéneo)
+  - name: estado
+    type: text
+    description: Estado del proceso (`ADJUDICADO`, `EN CURSO`, etc.)
+  - name: rubro
+    type: text
+    description: Rubro general (`BIENES` / `SERVICIOS`)
+  - name: plazo_de_contrato
+    type: text
+    description: Plazo declarado del contrato (texto libre)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(n_l_p::text), '')             AS numero_licitacion,
+    NULLIF(TRIM(expediente::text), '')        AS expediente,
+    NULLIF(TRIM(objeto::text), '')            AS objeto,
+    NULLIF(TRIM(destino::text), '')           AS destino,
+    NULLIF(TRIM(fecha_de_apertura::text), '') AS fecha_de_apertura,
+    NULLIF(TRIM(estado::text), '')            AS estado,
+    NULLIF(TRIM(rubro::text), '')             AS rubro,
+    NULLIF(TRIM(plazo_de_contrato::text), '') AS plazo_de_contrato
+  FROM {{ live_tables_by_table_pattern(
+      'pami__compras_y_contrataciones_de_nivel_central*',
+      expected_columns=['n_l_p', 'expediente', 'objeto', 'destino',
+                        'fecha_de_apertura', 'estado', 'rubro', 'plazo_de_contrato'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(expediente::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

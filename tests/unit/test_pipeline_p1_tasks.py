@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -276,6 +277,20 @@ class TestCollectLargeGroupP1:
 
 
 class TestBulkCollectAllP4:
+    def setup_method(self) -> None:
+        # The mart-rebuild backpressure check (added 2026-05-09) issues a
+        # SELECT against `pg_stat_activity` at the start of `bulk_collect_all`.
+        # Test mocks for the engine return truthy results indiscriminately,
+        # so without disabling the check every test in this class would
+        # short-circuit with `skipped_mart_rebuild_in_progress`. Disable
+        # via env for the duration of the class.
+        os.environ["OPENARG_BULK_COLLECT_RESPECT_MART_REBUILD"] = "0"
+
+    def teardown_method(self) -> None:
+        os.environ.pop("OPENARG_BULK_COLLECT_RESPECT_MART_REBUILD", None)
+
+    @patch("app.infrastructure.celery.tasks.collector_tasks.bulk_collect_all.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._count_bulk_collect_remaining")
     @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
     @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
     @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
@@ -294,6 +309,8 @@ class TestBulkCollectAllP4:
         mock_recycle_stuck,
         mock_reconcile,
         mock_revive_schema,
+        mock_count_remaining,
+        mock_followup_apply_async,
     ):
         mock_reconcile.return_value = {
             "orphaned_ready": 0,
@@ -318,12 +335,20 @@ class TestBulkCollectAllP4:
         conn = MagicMock()
         conn.execute.side_effect = [
             _ScalarResult(True),
-            _FetchAllResult([(f"id-{i}", "datos_gob_ar") for i in range(60)]),
+            _FetchAllResult(
+                [(f"id-{i}", "datos_gob_ar", "csv", f"Dataset {i}") for i in range(60)]
+            ),
             _FetchAllResult(group_rows),
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
@@ -348,9 +373,23 @@ class TestBulkCollectAllP4:
         assert result["recycled_stale_ready"] == 0
         assert result["recycled_stale_error"] == 0
         assert result["recycled_stale_failed"] == 0
+        assert result["remaining_eligible_individual"] == 0
+        assert result["remaining_eligible_groups"] == 0
+        assert result["followup_scheduled"] is True
+        assert result["converged"] is False
+        assert result["chain_depth"] == 0
         countdowns = [call.kwargs["countdown"] for call in group_result.apply_async.call_args_list]
         assert countdowns == [0, 0]
+        mock_count_remaining.assert_not_called()
+        mock_followup_apply_async.assert_called_once_with(
+            kwargs={"portal": None, "chain_depth": 1},
+            countdown=300,
+        )
 
+    @patch("app.infrastructure.celery.tasks.catalog_backfill.catalog_backfill_task.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.reconcile_cache_coverage.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.bulk_collect_all.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._count_bulk_collect_remaining")
     @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
     @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
     @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
@@ -369,6 +408,10 @@ class TestBulkCollectAllP4:
         mock_recycle_stuck,
         mock_revive_schema,
         mock_reconcile,
+        mock_count_remaining,
+        mock_followup_apply_async,
+        mock_reconcile_apply_async,
+        mock_catalog_backfill_apply_async,
     ):
         mock_reconcile.return_value = {
             "orphaned_ready": 4,
@@ -382,7 +425,14 @@ class TestBulkCollectAllP4:
             "recycled_failed": 3,
         }
         mock_get_inflight_counts.return_value = (98, {"datos_gob_ar": 9, "caba": 10})
-        mock_collect_dataset.s.side_effect = lambda did: f"task-{did}"
+
+        def _mock_signature(did):
+            sig = MagicMock()
+            sig.set = MagicMock(return_value=f"task-{did}-routed")
+            sig.__str__ = lambda self: f"task-{did}"
+            return sig
+
+        mock_collect_dataset.s.side_effect = _mock_signature
         mock_collect_large_group.s.side_effect = lambda title, portal: f"group-{title}-{portal}"
 
         conn = MagicMock()
@@ -390,10 +440,10 @@ class TestBulkCollectAllP4:
             _ScalarResult(True),
             _FetchAllResult(
                 [
-                    ("id-1", "datos_gob_ar"),
-                    ("id-2", "datos_gob_ar"),
-                    ("id-3", "caba"),
-                    ("id-4", "mendoza"),
+                    ("id-1", "datos_gob_ar", "csv", "Dataset 1"),
+                    ("id-2", "datos_gob_ar", "csv", "Dataset 2"),
+                    ("id-3", "caba", "csv", "Dataset 3"),
+                    ("id-4", "mendoza", "csv", "Dataset 4"),
                 ]
             ),
             _FetchAllResult(
@@ -405,8 +455,14 @@ class TestBulkCollectAllP4:
             ),
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
@@ -429,6 +485,85 @@ class TestBulkCollectAllP4:
         assert result["deferred_individual"] == 2
         assert result["dispatched_groups"] == 0
         assert result["deferred_groups"] == 3
+        assert result["remaining_eligible_individual"] == 0
+        assert result["remaining_eligible_groups"] == 0
+        assert result["followup_scheduled"] is True
+        assert result["converged"] is False
+        mock_count_remaining.assert_not_called()
+        mock_followup_apply_async.assert_called_once_with(
+            kwargs={"portal": None, "chain_depth": 1},
+            countdown=300,
+        )
+        mock_reconcile_apply_async.assert_not_called()
+        mock_catalog_backfill_apply_async.assert_not_called()
+
+    @patch("app.infrastructure.celery.tasks.catalog_backfill.catalog_backfill_task.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.reconcile_cache_coverage.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.bulk_collect_all.apply_async")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._count_bulk_collect_remaining")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._revive_schema_mismatch")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._reconcile_cache_coverage")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._recycle_stuck_downloads")
+    @patch("app.infrastructure.celery.tasks.collector_tasks._get_inflight_counts")
+    @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
+    def test_bulk_collect_marks_converged_and_schedules_final_sync(
+        self,
+        mock_get_engine,
+        mock_get_inflight_counts,
+        mock_recycle_stuck,
+        mock_reconcile,
+        mock_revive_schema,
+        mock_count_remaining,
+        mock_followup_apply_async,
+        mock_reconcile_apply_async,
+        mock_catalog_backfill_apply_async,
+    ):
+        mock_reconcile.return_value = {
+            "orphaned_ready": 0,
+            "fixed_cached_flags": 0,
+            "reindexed_missing_chunks": 0,
+        }
+        mock_revive_schema.return_value = {"revived_schema_mismatch": 0}
+        mock_recycle_stuck.return_value = {
+            "recovered_ready": 0,
+            "recycled_error": 0,
+            "recycled_failed": 0,
+        }
+        mock_get_inflight_counts.return_value = (0, {})
+        mock_count_remaining.return_value = {
+            "eligible_individual": 0,
+            "eligible_groups": 0,
+        }
+
+        conn = MagicMock()
+        conn.execute.side_effect = [
+            _ScalarResult(True),
+            _FetchAllResult([]),
+            _FetchAllResult([]),
+        ]
+        mock_engine = MagicMock()
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
+        mock_engine.dispose = MagicMock()
+        mock_get_engine.return_value = mock_engine
+
+        from app.infrastructure.celery.tasks.collector_tasks import bulk_collect_all
+
+        result = bulk_collect_all.run()
+
+        assert result["dispatched_individual"] == 0
+        assert result["dispatched_groups"] == 0
+        assert result["followup_scheduled"] is False
+        assert result["converged"] is True
+        mock_followup_apply_async.assert_not_called()
+        mock_reconcile_apply_async.assert_called_once_with(countdown=60)
+        mock_catalog_backfill_apply_async.assert_called_once_with(countdown=180)
 
 
 class TestRecoverStuckTasksP5:
@@ -493,8 +628,14 @@ class TestFormatDuplicateAliasesP6:
         conn = MagicMock()
         conn.execute.return_value = _FetchAllResult(resources)
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
         mock_materialize.return_value = {"created_aliases": 2, "skipped_missing_source": 0}
@@ -523,8 +664,14 @@ class TestCacheCoverageP6:
             _ScalarResult(8),
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()
         mock_get_engine.return_value = mock_engine
 
@@ -602,8 +749,14 @@ class TestConsolidateGroupTablesP7:
             MagicMock(),  # insert source 2
         ]
         mock_engine = MagicMock()
-        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
-        mock_engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Make engine.connect() return the same `conn` mock both
+        # directly (used by _try_advisory_lock) and via context manager
+        # (`with engine.connect() as c:`). Without this, the lock helper
+        # gets a generic MagicMock and the side_effect on `conn.execute`
+        # gets misaligned for the `with` blocks downstream.
+        mock_engine.connect.return_value = conn
+        conn.__enter__ = MagicMock(return_value=conn)
+        conn.__exit__ = MagicMock(return_value=False)
         mock_engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
         mock_engine.begin.return_value.__exit__ = MagicMock(return_value=False)
         mock_engine.dispose = MagicMock()

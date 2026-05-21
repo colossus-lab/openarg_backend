@@ -89,7 +89,12 @@ def create_app() -> FastAPI:
         openapi_url=openapi_url,
     )
     app.state.limiter = limiter
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    # `_rate_limit_exceeded_handler` from slowapi is typed for the
+    # specific `RateLimitExceeded` exception, but Starlette expects a
+    # broader `Callable[[Request, Exception], ...]` signature. Cast
+    # to silence the false-positive — slowapi only ever calls this
+    # handler with `RateLimitExceeded` instances anyway.
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     return app
 
 

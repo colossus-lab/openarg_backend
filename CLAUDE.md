@@ -168,6 +168,45 @@ s3_tasks → s3 queue (concurrency 2)
 | `successful_queries` | Log of successfully answered queries for analytics |
 | `api_keys` | API keys for public access (SHA-256 hash, unique, per-user) |
 | `api_usage` | Append-only API request log (endpoint, tokens, duration) |
+| `query_analytics` | Per-attempt log (question, served_table, mart_used, success, duration_ms) — feeds `/admin/analytics/*` |
+| `parse_repair_audit` | Reversibility log for in-place table repairs (rename col / drop col / drop superseded). Filterable by `run_id`. |
+| `mart_definitions` | Mart catalog with embedding (1024-dim Cohere). Drives mart routing. |
+| `mart_sample_queries` | Sample queries per mart for the gated +0.17 routing boost. |
+| `raw_table_versions` | Tracks live vs superseded `raw.<table>__<hash>__vN` per resource_identity. |
+
+### Application layer modules (worth knowing)
+
+`src/app/application/` is the inner ring of hexagonal architecture. The modules
+that a contributor most often touches:
+
+- **`pipeline/parsers/`** — Pure-Python primitives reused by every collector path.
+  - `column_normalization.py` — byte-aware dedup (`dedupe_column_names`) and
+    garbage-name detectors (`is_garbage_column` / `is_url_column` /
+    `is_title_row_column`).
+  - `header_recovery.py` — `promote_buried_headers` recovers real headers when
+    pandas mistook a TITLE row for the header. Year-row aware,
+    Argentine-number-format aware, preserves valid original col names.
+  - `time_pivot.py` — `unpivot_if_time_pivoted` melts wide year/month layouts
+    to long format `(id, periodo, valor)`.
+  - `pdf.py` — pdfplumber wrapper for PDF table extraction.
+  - `hierarchical_headers.py` — multi-row header parser (existing).
+
+- **`repair/`** — In-place DDL/DML fixes for tables already in `raw.*` /
+  `public.*` that match a known parser bug. Pair-with-parser pattern: every
+  parser fix has a `repair_<phase>_table()` companion that rewrites existing
+  rows without re-ingesting from upstream. Audited via `parse_repair_audit`.
+
+- **`marts/sql_macros.py`** — `live_table` / `live_tables_by_*` macros expanded
+  by `build_mart` / `refresh_mart` Celery tasks. Supports `expected_columns`
+  (schema-intersection projection) and `require_all_columns=True`
+  (filters out tables missing any expected col, useful for fact-vs-dim
+  clusters). Cap of 200 unions is configurable via
+  `OPENARG_MART_MAX_UNION_TABLES`.
+
+- **`expander/`** — Multi-file expansion (Excel multi-sheet + ZIP children).
+
+- **`validation/collector_hooks.py`** — WS0/WS0.5 ingest validators
+  (`placeholder_headers`, `row_count`, `html_as_data`).
 
 ## Conventions
 

@@ -1,0 +1,59 @@
+id: mujer_centros_atencion
+version: 0.1.0
+description: |
+  Centros Integrales de la Mujer (CIM) en CABA — red de atención y
+  asistencia a víctimas de violencia de género. Incluye dirección,
+  barrio, comuna, contacto y públicos destinatarios. Source: GCBA,
+  dataset "Centros Integrales de la Mujer" (4 versiones del padrón).
+
+  Build basado en analytics de prod (47 días, ~30 hits sobre temas
+  género/mujer): preguntas como "centros de atención a la mujer",
+  "dónde denunciar violencia de género en CABA", "CIM por barrio".
+
+  NOTA: el dataset paralelo `cache_mapa_de_violencia_de_genero*`
+  (17 tablas) tiene schema MUY heterogéneo (una tabla por mes/categoría
+  con cols distintas — `Cantidad`, `Casos`, meses literales como cols)
+  y NO se incluye acá. Tracked como gap en DEBT-019-005.
+domain: gobierno
+
+sources:
+  portals: [caba]
+  resource_patterns: ["caba__centros_integrales_de_la_mujer*"]
+
+canonical_columns:
+  - name: nombre
+    type: text
+    description: Nombre del Centro Integral de la Mujer
+  - name: dirreccion
+    type: text
+    description: Dirección de la oficina (mantengo el typo del origen)
+  - name: barrio
+    type: text
+    description: Barrio CABA
+  - name: comuna
+    type: text
+    description: Comuna CABA (1-15)
+  - name: email
+    type: text
+    description: Email de contacto
+  - name: destinatar
+    type: text
+    description: Públicos destinatarios del servicio
+
+sql: |
+  SELECT
+    NULLIF(TRIM(nombre), '')                       AS nombre,
+    NULLIF(TRIM(dirreccion), '')                   AS dirreccion,
+    NULLIF(TRIM(barrio), '')                       AS barrio,
+    NULLIF(TRIM(comuna), '')                       AS comuna,
+    NULLIF(TRIM(email), '')                        AS email,
+    NULLIF(TRIM(destinatar), '')                   AS destinatar
+  FROM {{ live_tables_by_table_pattern(
+      'caba__centros_integrales_de_la_mujer*',
+      expected_columns=['nombre', 'dirreccion', 'barrio', 'comuna', 'email', 'destinatar']
+  ) }} sub
+  WHERE NULLIF(TRIM(nombre), '') IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

@@ -1,0 +1,75 @@
+id: autoridades_pen
+version: 0.1.0
+description: |
+  Autoridades del Poder Ejecutivo Nacional — funcionarios designados,
+  cargos jerárquicos, organismos a cargo, escalafón. Source: dataset
+  "Mapa del Estado" (mapa_estado.gob.ar). Cubre el universo de
+  autoridades publicadas por el PEN: presidente, ministros,
+  secretarios, subsecretarios, directores y rangos inferiores con sus
+  unidades, normas designatorias y categoría salarial.
+
+  Build basado en analytics de prod (47 días, ~82 hits): preguntas
+  como "cuánto gana el presidente", "sueldo de Milei", "Manuel Adorni
+  en jefatura de gabinete", "datos sobre Claudia Heimberg", "cuánto
+  gana un juez federal" caen sobre este universo.
+
+  NOTE: este mart referencia la tabla legacy `public.cache_autoridades_pen`
+  (6138 rows) directamente. La migración a `raw.*` schema vendrá cuando
+  el connector de Mapa del Estado se reemplace por uno que use el
+  collector tasks pipeline; hasta entonces el mart sigue válido.
+domain: gobierno
+
+sources:
+  portals: [mapa_estado]
+  resource_patterns: ["public.cache_autoridades_pen"]
+
+canonical_columns:
+  - name: jurisdiccion
+    type: text
+    description: Jurisdicción del PEN (ej. Ministerio de Salud)
+  - name: subjurisdiccion
+    type: text
+    description: Subjurisdicción (Secretaría / Subsecretaría)
+  - name: unidad
+    type: text
+    description: Unidad organizativa específica
+  - name: cargo
+    type: text
+    description: Denominación del cargo (Ministro, Secretario, etc.)
+  - name: car_rango_jerarquia
+    type: text
+    description: Rango jerárquico
+  - name: autoridad_nombre
+    type: text
+    description: Nombre de pila del/la titular
+  - name: autoridad_apellido
+    type: text
+    description: Apellido del/la titular
+  - name: autoridad_dni
+    type: text
+    description: DNI del/la titular (puede estar vacío en algunos cargos)
+  - name: norma_competencias_objetivos
+    type: text
+    description: Norma que define las competencias y objetivos del cargo
+
+# SQL directo sin macros — la tabla source es legacy `public.cache_*` y
+# el resolver de macros solo conoce `raw.*` via raw_table_versions ledger.
+# Cuando el connector migre a raw, reescribir con
+# `live_tables_by_table_pattern('mapa_estado__autoridades_pen*')`.
+sql: |
+  SELECT
+    NULLIF(TRIM(jurisdiccion), '')                  AS jurisdiccion,
+    NULLIF(TRIM(subjurisdiccion), '')               AS subjurisdiccion,
+    NULLIF(TRIM(unidad), '')                        AS unidad,
+    NULLIF(TRIM(cargo), '')                         AS cargo,
+    NULLIF(TRIM(car_rango_jerarquia), '')           AS car_rango_jerarquia,
+    NULLIF(TRIM(autoridad_nombre), '')              AS autoridad_nombre,
+    NULLIF(TRIM(autoridad_apellido), '')            AS autoridad_apellido,
+    NULLIF(TRIM(autoridad_dni), '')                 AS autoridad_dni,
+    NULLIF(TRIM(norma_competencias_objetivos), '')  AS norma_competencias_objetivos
+  FROM {{ live_table('mapa_estado::autoridades_pen') }}
+  WHERE COALESCE(NULLIF(TRIM(autoridad_apellido), ''), NULLIF(TRIM(cargo), '')) IS NOT NULL
+
+refresh:
+  policy: manual
+  unique_index: []

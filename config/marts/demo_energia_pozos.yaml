@@ -1,0 +1,83 @@
+id: demo_energia_pozos
+version: 0.3.0
+description: |
+  Producción mensual de pozos de petróleo y gas por empresa, provincia
+  y cuenca. Datos de la Secretaría de Energía publicados en
+  `datos.gob.ar`, particionados en ~100 snapshots históricos (~500K
+  filas cada uno).
+
+  v0.3.0 (2026-05-09): el pin original a `energia::333fd72a-...` quedó
+  obsoleto cuando datos.gob.ar regeneró UUIDs y el slug pasó de
+  `produccion_de_petroleo_y_gas_por_pozo` a las variantes
+  `produccion_de_petroleo_y_gas_por_po*` y
+  `produccion_de_petroleo_y_gas_sesco*`. Ahora apuntamos por
+  `live_tables_by_table_pattern` con `require_all_columns=True` para
+  incluir solo los snapshots con shape FULL (anio, mes, empresa,
+  provincia, prod_pet, prod_gas) — el resto son metadata/dimensiones
+  que no aportan filas válidas.
+domain: energia
+
+sources:
+  portals: [datos_gob_ar, energia]
+  resource_patterns:
+    - "datos_gob_ar::*produccion_de_petroleo_y_gas*"
+    - "energia::*produccion_de_petroleo_y_gas*"
+
+canonical_columns:
+  - name: anio
+    type: int
+    description: Año de la observación
+  - name: mes
+    type: int
+    description: Mes del registro (1-12)
+  - name: empresa
+    type: text
+    description: Nombre comercial del operador del pozo
+  - name: provincia
+    type: text
+    description: Región / provincia donde está el pozo (`formprod` en raw)
+  - name: prod_petroleo_m3
+    type: float
+    description: Producción mensual de petróleo del pozo en m³
+  - name: prod_gas_dam3
+    type: float
+    description: Producción mensual de gas en miles de m³ (dam³)
+
+sql: |
+  -- Aggregate producción mensual a través de los snapshots de producción
+  -- de pozos en raw. `prod_pet` y `prod_gas` aterrizan como TEXT cuando
+  -- el CSV upstream tiene valores no numéricos (e.g. "N/A", coma decimal
+  -- ARG-locale). El CASE con regex valida formato antes del cast: tokens
+  -- parseables → float, resto → NULL (excluidos del SUM).
+  --
+  -- `require_all_columns=True` filtra los ~100 candidatos a las ~30 que
+  -- realmente tienen el shape FULL de producción (las demás son
+  -- dimensiones / sub-formatos sin prod_pet/prod_gas).
+  SELECT
+    anio::int                            AS anio,
+    mes::int                             AS mes,
+    COALESCE(NULLIF(empresa, ''), '')    AS empresa,
+    COALESCE(NULLIF(provincia, ''), '')  AS provincia,
+    SUM(CASE
+      WHEN replace(prod_pet::text, ',', '.') ~ '^-?[0-9]+(\.[0-9]+)?$'
+      THEN replace(prod_pet::text, ',', '.')::float
+      ELSE NULL
+    END)                                 AS prod_petroleo_m3,
+    SUM(CASE
+      WHEN replace(prod_gas::text, ',', '.') ~ '^-?[0-9]+(\.[0-9]+)?$'
+      THEN replace(prod_gas::text, ',', '.')::float
+      ELSE NULL
+    END)                                 AS prod_gas_dam3
+  FROM {{ live_tables_by_table_pattern(
+      '*produccion_de_petroleo_y_gas*',
+      expected_columns=['anio', 'mes', 'empresa', 'provincia', 'prod_pet', 'prod_gas'],
+      require_all_columns=True
+  ) }} energia_pozos
+  WHERE anio IS NOT NULL AND mes IS NOT NULL
+  GROUP BY 1, 2, 3, 4
+
+refresh:
+  policy: on_upstream_change
+  # Sin unique_index: las combinaciones (anio, mes, empresa, provincia)
+  # no son únicas en la fuente (mismas claves con sub-grupos distintos).
+  # Aceptamos REFRESH no concurrente para este demo.

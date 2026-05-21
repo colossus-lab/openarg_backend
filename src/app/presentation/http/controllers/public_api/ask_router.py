@@ -105,7 +105,6 @@ async def public_ask(
         "sources": result.get("sources", []),
         "chart_data": result.get("chart_data"),
         "map_data": result.get("map_data"),
-        "confidence": result.get("confidence", 1.0),
         "citations": result.get("citations", []),
         "warnings": result.get("warnings", []),
         "usage": {

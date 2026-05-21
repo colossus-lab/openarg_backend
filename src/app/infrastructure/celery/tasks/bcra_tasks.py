@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
@@ -18,6 +19,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,12 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
     columns_json = json.dumps(list(df.columns))
     now = datetime.now(UTC)
 
+    # IMPORTANT: the INSERT must commit BEFORE `_finalize_cached_dataset`
+    # runs. The latter opens its own `engine.begin()` and inserts into
+    # `cached_datasets` with a FK to `datasets.id`. If we kept everything
+    # under a single `with engine.begin()`, the FK insert would happen in
+    # a sibling transaction that does not see the still-uncommitted
+    # parent INSERT and the constraint would fire.
     with engine.begin() as conn:
         conn.execute(
             text("""
@@ -36,9 +44,9 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
                     (:sid, :title, :desc, :org, :portal, :url, '', 'json', :cols, :tags,
-                     :now, true, :rows)
+                     :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
@@ -62,24 +70,21 @@ def _register_dataset(engine, source_id: str, title: str, table_name: str, df: p
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": len(df),
-                    "cols": columns_json,
-                    "now": now,
-                },
-            )
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=len(df),
+            columns=list(df.columns),
+            declared_format="json",
+            download_url="https://www.bcra.gob.ar/Estadisticas/Datos_Abiertos.asp",
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -110,13 +115,27 @@ def snapshot_bcra(self):
     try:
         cotizaciones = _fetch_bcra_data()
 
-        results = {"tables": []}
+        results: dict[str, list[dict[str, Any]]] = {"tables": []}
 
         if cotizaciones.records:
             df = pd.DataFrame(cotizaciones.records)
             if not df.empty:
                 table_name = "cache_bcra_cotizaciones"
-                df.to_sql(table_name, engine, if_exists="replace", index=False)
+                # If `series_economicas` (or any other mart) already
+                # depends on this table, DROP+CREATE fails. TRUNCATE
+                # + append preserves the dependency graph.
+                try:
+                    df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
+                except Exception as exc:
+                    if "DependentObjectsStillExist" not in type(exc).__name__ \
+                            and "depend on it" not in str(exc):
+                        raise
+                    logger.info(
+                        "BCRA: replace blocked by dependent view; falling back to TRUNCATE + append"
+                    )
+                    from app.infrastructure.celery.tasks._db import safe_truncate_table
+                    safe_truncate_table(engine, table_name)
+                    df.to_sql(table_name, engine, schema="raw", if_exists="append", index=False)
                 dataset_id = _register_dataset(
                     engine,
                     "bcra-cotizaciones",
@@ -130,6 +149,22 @@ def snapshot_bcra(self):
                     )
 
                     index_dataset_embedding.delay(dataset_id)
+
+                # Register in `raw_table_versions` so the
+                # `series_economicas` mart finds it.
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity="bcra::cotizaciones",
+                    table_name=table_name,
+                    # The table is materialized in `raw` (see `to_sql` above).
+                    # Registering it as `public` made the `series_economicas`
+                    # mart resolve to `public.cache_bcra_cotizaciones`, which
+                    # does not exist → build_failed (BUG-004).
+                    schema_name="raw",
+                    row_count=len(df),
+                )
                 results["tables"].append({"table": table_name, "rows": len(df)})
                 logger.info("BCRA cotizaciones: %d records cached", len(df))
 
@@ -141,5 +176,3 @@ def snapshot_bcra(self):
     except Exception as exc:
         logger.exception("BCRA snapshot failed")
         raise self.retry(exc=exc, countdown=60)
-    finally:
-        engine.dispose()

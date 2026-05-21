@@ -1,0 +1,75 @@
+id: estadistica_mediaciones
+version: 0.1.0
+description: |
+  Estadística agregada de mediaciones prejudiciales y judiciales, agrupada
+  por (año, mes, instancia, fuero, objeto, tema, tipo, estado, resultado).
+  Cada fila es un conteo agregado — Ministerio de Justicia.
+
+  Complementa `mediaciones_prejudiciales` (que es el listado nominal):
+  esta vista provee la métrica para análisis temporal/secorial sin
+  necesidad de scanear 50M filas.
+
+  Combina `justicia` y `datos_gob_ar`. ~20 tablas live (~9M filas).
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::estadistica_de_mediaciones*"
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año
+  - name: mes
+    type: text
+    description: Mes
+  - name: instancia
+    type: text
+    description: Instancia (prejudicial / judicial)
+  - name: fuero
+    type: text
+    description: Fuero
+  - name: objeto
+    type: text
+    description: Objeto de la mediación
+  - name: tema
+    type: text
+    description: Tema
+  - name: tipo_mediacion
+    type: text
+    description: Tipo de mediación
+  - name: estado
+    type: text
+    description: Estado
+  - name: resultado
+    type: text
+    description: Resultado
+  - name: cantidad
+    type: numeric
+    description: Cantidad agregada
+
+sql: |
+  SELECT
+    NULLIF(TRIM(anio::text), '')           AS anio,
+    NULLIF(TRIM(mes::text), '')            AS mes,
+    NULLIF(TRIM(instancia::text), '')      AS instancia,
+    NULLIF(TRIM(fuero::text), '')          AS fuero,
+    NULLIF(TRIM(objeto::text), '')         AS objeto,
+    NULLIF(TRIM(tema::text), '')           AS tema,
+    NULLIF(TRIM(tipo_mediacion::text), '') AS tipo_mediacion,
+    NULLIF(TRIM(estado::text), '')         AS estado,
+    NULLIF(TRIM(resultado::text), '')      AS resultado,
+    cantidad::numeric                      AS cantidad
+  FROM {{ live_tables_by_table_pattern(
+      '*__estadistica_de_mediaciones*',
+      expected_columns=['anio', 'mes', 'instancia', 'fuero', 'objeto',
+                        'tema', 'tipo_mediacion', 'estado', 'resultado',
+                        'cantidad'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(anio::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

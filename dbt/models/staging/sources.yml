@@ -1,0 +1,27 @@
+version: 2
+
+# Sources are the staging-schema tables produced by the Celery
+# `openarg.promote_to_staging` task (MASTERPLAN Fase 2). dbt models
+# reference them via `{{ source('staging', '<name>') }}` instead of
+# hardcoded SQL — that way dbt builds the lineage graph automatically.
+
+sources:
+  - name: staging
+    schema: staging
+    description: |
+      Validated and typed datasets, post-pandera contract validation.
+      Promoted from `raw.*` by `openarg.promote_to_staging`.
+    tables:
+      - name: series_economicas__bcra
+        description: |
+          Series temporales económicas del BCRA (BADLAR, tasa monetaria,
+          dolar, etc.). Esquema canónico: fecha, valor.
+        columns:
+          - name: fecha
+            description: Fecha de observación
+            tests:
+              - not_null
+          - name: valor
+            description: Valor numérico de la serie en la fecha
+            tests:
+              - not_null

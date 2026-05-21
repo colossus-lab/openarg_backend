@@ -1,0 +1,47 @@
+# Example dbt profile. Copy this to `~/.dbt/profiles.yml` (or to a
+# directory pointed at by `DBT_PROFILES_DIR`) and fill in the connection
+# fields with the values for the target environment.
+#
+# Per MASTERPLAN, dbt is OPTIONAL. The medallion runs end-to-end via the
+# Celery tasks in `openarg.application.marts` even without dbt. Use this
+# profile only when you want to add dbt's lineage / tests / docs on top.
+
+openarg:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      user: openarg
+      password: openarg
+      port: 5435
+      dbname: openarg
+      schema: dbt_dev      # personal scratch schema; dbt prefixes models
+      threads: 4
+      keepalives_idle: 0
+      sslmode: prefer
+
+    staging:
+      type: postgres
+      host: openarg-db-staging.cevu4ywygtjp.us-east-1.rds.amazonaws.com
+      user: openarg
+      # Keep the password in env: PGPASSWORD or `dbt --vars '{db_pass: ...}'`
+      password: "{{ env_var('OPENARG_STAGING_DB_PASSWORD') }}"
+      port: 5432
+      dbname: openarg_staging
+      schema: dbt_staging
+      threads: 4
+      keepalives_idle: 0
+      sslmode: require
+
+    prod:
+      type: postgres
+      host: openarg-db-production.cevu4ywygtjp.us-east-1.rds.amazonaws.com
+      user: openarg
+      password: "{{ env_var('OPENARG_PROD_DB_PASSWORD') }}"
+      port: 5432
+      dbname: openarg_db
+      schema: dbt_prod
+      threads: 4
+      keepalives_idle: 0
+      sslmode: require

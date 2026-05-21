@@ -1,0 +1,139 @@
+id: delitos_caba
+version: 0.1.2
+description: |
+  Mapa del Delito de la Ciudad Autónoma de Buenos Aires — registro
+  georreferenciado de delitos denunciados, con tipo (robo, hurto, lesiones,
+  homicidio, etc.), subtipo, barrio, comuna, latitud/longitud, fecha y
+  franja horaria. Cada fila es un hecho denunciado.
+
+  Cluster grande: 16+ versiones en `caba::delitos*` (~2M filas combinadas
+  cuando viven todas), publicado por el Ministerio Público Fiscal CABA y
+  el GCBA. Cobertura desde 2016 hasta el último año fiscal.
+
+  Es el dataset de seguridad ciudadana más rico y vivo del catálogo. Si
+  bien hay heterogeneidad menor entre versiones (`fecha` puede ser
+  timestamp o text, `franja` puede ser bigint o double), las cols
+  semánticas son estables. La macro filtra versiones que no contienen el
+  set canónico.
+
+  Casos de uso típicos:
+    * "robos por barrio CABA"
+    * "delitos en Palermo/Caballito"
+    * "homicidios en Buenos Aires por año"
+    * "uso de armas de fuego CABA"
+    * "comparativa de delitos por comuna"
+    * "franja horaria con más robos en CABA"
+domain: seguridad
+
+sources:
+  portals: [caba]
+  resource_patterns:
+    - "caba::delitos*"
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año del hecho
+  - name: mes
+    type: text
+    description: Mes del hecho
+  - name: dia
+    type: text
+    description: Día del hecho
+  - name: fecha
+    type: text
+    description: Fecha completa
+  - name: franja
+    type: text
+    description: |
+      Hora del día como TEXTO ("0" a "23"), no rango. Para filtrar por
+      banda horaria usar CAST a numeric:
+        - madrugada (00:00-05:59): CAST(franja AS NUMERIC) BETWEEN 0 AND 5
+        - mañana (06:00-11:59):   CAST(franja AS NUMERIC) BETWEEN 6 AND 11
+        - tarde (12:00-19:59):    CAST(franja AS NUMERIC) BETWEEN 12 AND 19
+        - noche/nocturno (20:00-23:59 + 00:00-05:59):
+            CAST(franja AS NUMERIC) >= 20 OR CAST(franja AS NUMERIC) <= 5
+      Aplicar CAST AS NUMERIC sólo donde `franja ~ '^[0-9]+$'` para evitar
+      errores en filas nulas o no numéricas.
+  - name: tipo
+    type: text
+    description: Tipo de delito (Robo, Hurto, Lesiones, Homicidio, etc.)
+  - name: subtipo
+    type: text
+    description: Subtipo del delito (con violencia, automotor, etc.)
+  - name: uso_arma
+    type: text
+    description: Si se usó arma (sí/no)
+  - name: uso_moto
+    type: text
+    description: Si se usó moto (sí/no)
+  - name: barrio
+    type: text
+    description: Barrio donde ocurrió el hecho
+  - name: comuna
+    type: text
+    description: Comuna (1-15)
+  - name: latitud
+    type: numeric
+    description: Latitud geográfica
+  - name: longitud
+    type: numeric
+    description: Longitud geográfica
+  - name: cantidad
+    type: numeric
+    description: Cantidad de hechos (típicamente 1 por fila)
+
+sql: |
+  SELECT
+    NULLIF(TRIM(anio::text), '')     AS anio,
+    NULLIF(TRIM(mes::text), '')      AS mes,
+    NULLIF(TRIM(dia::text), '')      AS dia,
+    NULLIF(TRIM(fecha::text), '')    AS fecha,
+    NULLIF(TRIM(franja::text), '')   AS franja,
+    NULLIF(TRIM(tipo::text), '')     AS tipo,
+    NULLIF(TRIM(subtipo::text), '')  AS subtipo,
+    NULLIF(TRIM(uso_arma::text), '') AS uso_arma,
+    NULLIF(TRIM(uso_moto::text), '') AS uso_moto,
+    NULLIF(TRIM(barrio::text), '')   AS barrio,
+    NULLIF(TRIM(comuna::text), '')   AS comuna,
+    -- BUG-020: the 20 `caba::delitos*` versions store lat/long in three
+    -- incompatible encodings — clean decimal (`-34.530394`), un-pointed
+    -- integer (`-34526608`), and Argentine thousands-dot grouping
+    -- (`-34.629.861`, `-3.461.534`). A bare `::numeric` cast on the last
+    -- one fails and aborts the whole mart build. Every Argentine
+    -- coordinate has a 2-digit integer part (lat -22..-55, lng -53..-73),
+    -- so strip all non-digits and re-insert the decimal point after the
+    -- second digit — this converges all three encodings to the same
+    -- value. Non-recoverable values (no leading '-', <3 digits) → NULL.
+    CASE
+      WHEN latitud::text LIKE '-%'
+       AND length(regexp_replace(latitud::text, '[^0-9]', '', 'g')) >= 3
+      THEN -1 * (
+        left(regexp_replace(latitud::text, '[^0-9]', '', 'g'), 2) || '.' ||
+        substr(regexp_replace(latitud::text, '[^0-9]', '', 'g'), 3)
+      )::numeric
+    END                              AS latitud,
+    CASE
+      WHEN longitud::text LIKE '-%'
+       AND length(regexp_replace(longitud::text, '[^0-9]', '', 'g')) >= 3
+      THEN -1 * (
+        left(regexp_replace(longitud::text, '[^0-9]', '', 'g'), 2) || '.' ||
+        substr(regexp_replace(longitud::text, '[^0-9]', '', 'g'), 3)
+      )::numeric
+    END                              AS longitud,
+    -- `cantidad` is a hecho count: digits-only is always safe and guards
+    -- against the same Argentine-format failure mode.
+    NULLIF(regexp_replace(cantidad::text, '[^0-9]', '', 'g'), '')::numeric
+                                     AS cantidad
+  FROM {{ live_tables_by_table_pattern(
+      'caba__delitos*',
+      expected_columns=['anio', 'mes', 'dia', 'fecha', 'franja', 'tipo',
+                        'subtipo', 'uso_arma', 'uso_moto', 'barrio',
+                        'comuna', 'latitud', 'longitud', 'cantidad'],
+      require_all_columns=True
+  ) }} sub
+  WHERE NULLIF(TRIM(tipo::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []

@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks.collector_tasks import _finalize_cached_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,9 @@ def _register_dataset(engine, file_type: str, table_name: str, total_rows: int, 
                      download_url, format, columns, tags, last_updated_at, is_cached, row_count)
                 VALUES
                     (:sid, :title, :desc, :org, :portal, :url, :dl, 'csv', :cols, :tags,
-                     :now, true, :rows)
+                     :now, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = true, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :now, updated_at = :now
             """),
             {
@@ -77,24 +78,24 @@ def _register_dataset(engine, file_type: str, table_name: str, total_rows: int, 
         ).fetchone()
         dataset_id = dataset_row[0] if dataset_row else None
 
-        if dataset_id:
-            conn.execute(
-                text("""
-                    INSERT INTO cached_datasets (dataset_id, table_name, status, row_count,
-                                                  columns_json, updated_at)
-                    VALUES (CAST(:did AS uuid), :tn, 'ready', :rows, :cols, :now)
-                    ON CONFLICT (table_name) DO UPDATE SET
-                        status = 'ready', row_count = EXCLUDED.row_count,
-                        columns_json = EXCLUDED.columns_json, updated_at = :now
-                """),
-                {
-                    "did": dataset_id,
-                    "tn": table_name,
-                    "rows": total_rows,
-                    "cols": columns_json,
-                    "now": now,
-                },
-            )
+    # Out of the begin() block: cached_datasets INSERT inside
+    # _finalize_cached_dataset opens its own tx and would otherwise race
+    # the uncommitted datasets row, hitting fk_cached_datasets_dataset_id.
+    if dataset_id:
+        finalized = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=portal,
+            source_id=source_id,
+            table_name=table_name,
+            row_count=total_rows,
+            columns=columns,
+            declared_format="csv",
+            download_url=BAC_FILES[file_type],
+            now=now,
+        )
+        if not finalized["ok"]:
+            return None
 
     return dataset_id
 
@@ -122,13 +123,10 @@ def ingest_bac(self):
             # Skip if already cached or permanently failed
             with engine.begin() as conn:
                 cached = conn.execute(
-                    text("SELECT status, retry_count FROM cached_datasets WHERE table_name = :tn"),
+                    text("SELECT status, retry_count FROM raw.cached_datasets WHERE table_name = :tn"),
                     {"tn": table_name},
                 ).fetchone()
             if cached:
-                if cached.status == "ready":
-                    results["skipped"] += 1
-                    continue
                 if cached.status == "permanently_failed":
                     logger.info("BAC %s permanently failed, skipping", file_type)
                     results["skipped"] += 1
@@ -169,7 +167,7 @@ def ingest_bac(self):
                     with engine.begin() as conn:
                         conn.execute(
                             text("""
-                                INSERT INTO cached_datasets (dataset_id, table_name, status, updated_at)
+                                INSERT INTO raw.cached_datasets (dataset_id, table_name, status, updated_at)
                                 VALUES (CAST(:did AS uuid), :tn, 'downloading', NOW())
                                 ON CONFLICT (table_name) DO UPDATE SET status = 'downloading', updated_at = NOW()
                             """),
@@ -178,6 +176,7 @@ def ingest_bac(self):
 
                 # Stream download to temp file to avoid OOM
                 with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
+                    hit_download_cap = False
                     with httpx.Client(timeout=300.0) as client:
                         with client.stream("GET", url, follow_redirects=True) as resp:
                             resp.raise_for_status()
@@ -187,11 +186,17 @@ def ingest_bac(self):
                                 downloaded += len(data)
                                 if downloaded > MAX_DOWNLOAD_BYTES:
                                     logger.warning(
-                                        "BAC %s too large, stopping at %d bytes",
+                                        "BAC %s too large, aborting at %d bytes",
                                         file_type,
                                         downloaded,
                                     )
+                                    hit_download_cap = True
                                     break
+
+                    if hit_download_cap:
+                        raise ValueError(
+                            f"file_too_large:bac:{file_type}:{downloaded}>{MAX_DOWNLOAD_BYTES}"
+                        )
 
                     tmp.flush()
                     tmp.seek(0)
@@ -238,7 +243,7 @@ def ingest_bac(self):
 
                         # First chunk replaces the table; subsequent chunks append
                         if_exists = "replace" if chunk_num == 0 else "append"
-                        chunk.to_sql(table_name, engine, if_exists=if_exists, index=False)
+                        chunk.to_sql(table_name, engine, schema="raw", if_exists=if_exists, index=False)
 
                         if columns is None:
                             columns = list(chunk.columns)
@@ -273,28 +278,48 @@ def ingest_bac(self):
 
                     index_dataset_embedding.delay(dataset_id)
 
+                # Register in `raw_table_versions` so marts find this table
+                # via `live_table('bac::<file_type>')` macro (DEBT-019-006).
+                from app.infrastructure.celery.tasks._db import register_via_b_table
+
+                register_via_b_table(
+                    engine,
+                    resource_identity=f"bac::{file_type}",
+                    table_name=table_name,
+                    schema_name="raw",
+                    row_count=total_rows,
+                )
+
                 results["ingested"] += 1
                 logger.info("BAC %s: %d rows cached", file_type, total_rows)
 
             except Exception as file_exc:
                 results["errors"] += 1
                 logger.warning("Failed to ingest BAC %s", file_type, exc_info=True)
-                # Track error in cached_datasets (row created by pre-registration above)
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text(
-                                "UPDATE cached_datasets SET "
-                                "status = CASE WHEN retry_count + 1 >= 5 "
-                                "THEN 'permanently_failed' ELSE 'error' END, "
-                                "retry_count = retry_count + 1, "
-                                "error_message = :msg, updated_at = NOW() "
-                                "WHERE table_name = :tn"
-                            ),
-                            {"tn": table_name, "msg": str(file_exc)[:500]},
+                # Track error through the canonical state machine
+                # (Sprint 1.3). Previous version reimplemented the
+                # retry+permanently_failed transition inline as a raw
+                # UPDATE which drifted from `_apply_cached_outcome`
+                # (no error_category, no retry_count clamp consistency
+                # with MAX_TOTAL_ATTEMPTS). The helper keeps BAC errors
+                # under the same observability as collector errors.
+                if dataset_id_pre:
+                    try:
+                        from app.infrastructure.celery.tasks._db import (
+                            register_via_b_error,
                         )
-                except Exception:
-                    logger.debug("Could not track BAC error for %s", file_type, exc_info=True)
+
+                        register_via_b_error(
+                            engine,
+                            dataset_id=dataset_id_pre,
+                            table_name=table_name,
+                            error_message=str(file_exc),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "register_via_b_error failed for %s; refusing legacy cached_datasets bypass",
+                            file_type,
+                        )
 
         return results
 
@@ -304,5 +329,3 @@ def ingest_bac(self):
     except Exception as exc:
         logger.exception("BAC ingestion failed")
         raise self.retry(exc=exc, countdown=120)
-    finally:
-        engine.dispose()

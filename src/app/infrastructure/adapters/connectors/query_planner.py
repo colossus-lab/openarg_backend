@@ -259,8 +259,16 @@ async def _classify_ambiguity(
     return None
 
 
-def _resolve_routing_hints(question: str) -> str:
-    """Resolve routing hints from the dataset index. Returns formatted text or empty string."""
+def _resolve_routing_hints(question: str, *, suppress_ckan: bool = False) -> str:
+    """Resolve routing hints from the dataset index. Returns formatted text or empty string.
+
+    BUG-001/002: when the catalog discovery already surfaced a curated
+    mart for this question (``suppress_ckan=True``), the deterministic
+    ``search_ckan`` portal hints are dropped. A portal-keyword match
+    ("caba", "cordoba", ...) is weak evidence — it must not steer the
+    planner to a slow live CKAN fetch (observed 99s) when the data is
+    already materialised in a mart that answers in milliseconds.
+    """
     try:
         from app.infrastructure.adapters.connectors.dataset_index import (
             format_hints_for_prompt,
@@ -268,6 +276,15 @@ def _resolve_routing_hints(question: str) -> str:
         )
 
         hints = resolve_hints(question)
+        if suppress_ckan:
+            dropped = [h for h in hints if h.action == "search_ckan"]
+            if dropped:
+                logger.info(
+                    "BUG-001: suppressed %d search_ckan hint(s) — a curated "
+                    "mart covers this question",
+                    len(dropped),
+                )
+            hints = [h for h in hints if h.action != "search_ckan"]
         if hints:
             return format_hints_for_prompt(hints)
     except Exception:
@@ -280,17 +297,26 @@ async def generate_plan(
     question: str,
     memory_context: str = "",
     catalog_hints: str = "",
+    *,
+    skip_classifier: bool = False,
 ) -> ExecutionPlan:
-    """Generate an execution plan from a user query using the LLM."""
+    """Generate an execution plan from a user query using the LLM.
+
+    `skip_classifier=True` bypasses the in-function ambiguity classifier
+    call. Used by `planner_node` after it ran the classifier in parallel
+    with `discover_catalog_hints` to avoid double-running the same LLM
+    call sequentially.
+    """
     # Correct common typos so that downstream regex checks, keyword routing,
     # and the LLM all see the canonical spelling (e.g. "imflacion" → "inflacion").
     corrected = normalize_query(question)
     if corrected != question.lower().strip():
         logger.info("Typo/normalization: '%s' → '%s'", question, corrected)
 
-    # Classify ambiguity with a lightweight LLM call (skip if history)
+    # Classify ambiguity with a lightweight LLM call (skip if history or
+    # caller already ran it in parallel)
     has_history = bool(memory_context and memory_context.strip())
-    if not has_history:
+    if not has_history and not skip_classifier:
         clar = await _classify_ambiguity(llm, question)
         if clar:
             logger.info(
@@ -322,8 +348,11 @@ async def generate_plan(
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
     # Resolve routing hints from the semantic dataset index
-    # (resolve_hints uses normalize_query internally, so typos are fixed)
-    hints_text = _resolve_routing_hints(question)
+    # (resolve_hints uses normalize_query internally, so typos are fixed).
+    # BUG-001/002: when discovery already found a curated mart, drop the
+    # deterministic `search_ckan` portal hints so they don't outrank it.
+    mart_available = "MARTS DISPONIBLES" in catalog_hints
+    hints_text = _resolve_routing_hints(question, suppress_ckan=mart_available)
 
     # Send the corrected query to the LLM so it sees "inflacion" not "imflacion"
     user_content = f'FECHA ACTUAL: {today}\n\nPregunta del usuario: "{corrected}"'

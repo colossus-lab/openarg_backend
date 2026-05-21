@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import secrets as _secrets_mod
+import time
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -37,7 +38,18 @@ _checkpointer_lock = asyncio.Lock()
 _compiled_graphs: dict[bool, Any] = {}
 _checkpointer = None  # AsyncPostgresSaver instance (lazy)
 _checkpointer_stack: AsyncExitStack | None = None
-_checkpointer_attempted = False  # Prevent repeated init attempts
+_checkpointer_attempted = False  # Most-recent init attempt happened
+_checkpointer_last_attempt_ts: float = 0.0  # epoch seconds of last attempt
+# Re-attempt the lazy init at most every N seconds. A transient DB blip at
+# boot used to leave persistence permanently off until process restart;
+# this TTL lets the next request retry on its own.
+_CHECKPOINTER_RETRY_TTL_SECONDS = 30.0
+
+# BUG-022: how often the WebSocket emits a keepalive frame during a long
+# pipeline step. Must be well below the tightest consumer idle timeout
+# (the frontend bridge's per-message activity timer, proxies, and test
+# clients' per-receive timeouts all sit at 30s+).
+_WS_KEEPALIVE_INTERVAL_S = 15.0
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +85,6 @@ _COMPLETE_EVENT_KEYS: tuple[str, ...] = (
     "sources",
     "chart_data",
     "map_data",
-    "confidence",
     "citations",
     "documents",
     "warnings",
@@ -84,6 +95,16 @@ _TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
         "finalize",
         "cache_reply",
         "fast_reply",
+        # 2026-05-14: `clarify_reply` also produces `clean_answer` and is
+        # a terminal node when the planner returns `intent="clarification"`.
+        # Without it, ambiguous queries (e.g. "Cuáles son los proveedores
+        # con más contratos en BAC?" — planner asks user to clarify what
+        # 'BAC' means) emitted only the custom `clarification` event and
+        # the WS closed without a `complete`. Frontends handle the
+        # clarification chips event; API/QA consumers that don't subscribe
+        # to it saw a graceful 1000 OK close with no payload and reported
+        # it as a transport error.
+        "clarify_reply",
     }
 )
 
@@ -102,7 +123,6 @@ def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
         "sources": update.get("sources", []),
         "chart_data": update.get("chart_data"),
         "map_data": update.get("map_data"),
-        "confidence": update.get("confidence", 1.0),
         "citations": update.get("citations", []),
         "documents": update.get("documents"),
         "warnings": update.get("warnings", []),
@@ -124,7 +144,50 @@ async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
     See ``specs/FIX_BACKLOG.md#FIX-017``.
     """
     text = safe_dumps(to_json_safe(payload), ensure_ascii=False)
-    await ws.send_text(text)
+    try:
+        await ws.send_text(text)
+    except RuntimeError as exc:
+        # BUG-022 Capa 3: when a client closes the WS before the server
+        # finishes (Dante's runner has a hard per-receive timeout that
+        # fires around 45s), Starlette raises RuntimeError("Cannot call
+        # 'send' once a close message has been sent."). The pipeline
+        # keeps running and tries to send 'complete' or 'keepalive' — we
+        # swallow it instead of crashing with a stack trace. The
+        # production WebSocket logs still surface the abnormal close at
+        # the WebSocketDisconnect catch in the handler.
+        if "close message has been sent" in str(exc) or "WebSocket is not connected" in str(exc):
+            logger.debug("WS send after close — client disconnected mid-stream")
+            return
+        raise
+
+
+async def _ws_keepalive(ws: WebSocket, send_lock: asyncio.Lock) -> None:
+    """Emit a lightweight keepalive frame while the pipeline runs.
+
+    BUG-022: a single long pipeline step (a slow connector, the analyst
+    LLM call) can leave the WebSocket with zero traffic for 30-45s — long
+    enough for an intermediary, the browser bridge, or a client's
+    per-receive timeout to drop the connection mid-stream. A periodic
+    keepalive keeps bytes flowing so the connection survives any idle
+    timeout. Consumers that don't recognise the ``keepalive`` type ignore
+    it harmlessly (the frontend bridge's event switch has no such case
+    and falls through; its 120s activity timer is reset by any frame).
+
+    BUG-022 Capa 3: stop the loop on the first failed send. If the WS
+    closed mid-stream there's no point pinging a dead socket every 15s
+    until ``astream`` finishes; bail out quietly.
+    """
+    try:
+        while True:
+            await asyncio.sleep(_WS_KEEPALIVE_INTERVAL_S)
+            async with send_lock:
+                try:
+                    await _safe_send_json(ws, {"type": "keepalive"})
+                except Exception:
+                    logger.debug("WS keepalive send failed — stopping task")
+                    return
+    except asyncio.CancelledError:
+        pass
 
 
 def _filter_stream_payload(payload: Any) -> Any:
@@ -191,22 +254,38 @@ async def _get_checkpointer():
     Returns the singleton checkpointer or *None* when checkpointing is
     unavailable (missing dependency or missing env var).
     Thread-safe via asyncio.Lock with double-check pattern.
+
+    Retry behaviour: a failed init flips `_checkpointer_attempted=True`.
+    Subsequent calls re-attempt after `_CHECKPOINTER_RETRY_TTL_SECONDS`
+    so a transient DB blip at boot doesn't leave persistence off forever.
     """
     global _checkpointer, _checkpointer_attempted, _checkpointer_stack  # noqa: PLW0603
+    global _checkpointer_last_attempt_ts  # noqa: PLW0603
 
     if _checkpointer is not None:
         return _checkpointer
-    if _checkpointer_attempted:
-        return None  # Already tried and failed — don't retry
+
+    import time as _time
+    now = _time.monotonic()
+    if (
+        _checkpointer_attempted
+        and (now - _checkpointer_last_attempt_ts) < _CHECKPOINTER_RETRY_TTL_SECONDS
+    ):
+        return None  # Recently failed — back off
 
     async with _checkpointer_lock:
         # Double-check after acquiring lock
         if _checkpointer is not None:
             return _checkpointer
-        if _checkpointer_attempted:
+        now = _time.monotonic()
+        if (
+            _checkpointer_attempted
+            and (now - _checkpointer_last_attempt_ts) < _CHECKPOINTER_RETRY_TTL_SECONDS
+        ):
             return None
 
         _checkpointer_attempted = True
+        _checkpointer_last_attempt_ts = now
 
         db_url = os.getenv("DATABASE_URL")
         if not db_url:
@@ -290,7 +369,6 @@ class SmartQueryV2Response(BaseModel):
     chart_data: list[dict[str, Any]] | None = None
     map_data: dict[str, Any] | None = None
     tokens_used: int = 0
-    confidence: float = 1.0
     citations: list[dict[str, Any]] = []
     documents: list[dict[str, Any]] | None = None
     warnings: list[str] = []
@@ -312,8 +390,10 @@ async def smart_query_v2(
     # Server-side privacy gate (defense in depth — the frontend also checks).
     await ensure_privacy_accepted(body.user_email, user_repo)
 
-    # Compile graph once (thread-safe), set deps per-request (ContextVar-safe)
-    checkpointer = _checkpointer
+    # Compile graph once (thread-safe), set deps per-request (ContextVar-safe).
+    # `_get_checkpointer()` re-attempts init after the TTL, so a DB blip at
+    # boot doesn't permanently disable persistence.
+    checkpointer = await _get_checkpointer()
     compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
@@ -366,7 +446,6 @@ async def smart_query_v2(
         "chart_data": result.get("chart_data"),
         "map_data": result.get("map_data"),
         "tokens_used": result.get("tokens_used", 0),
-        "confidence": result.get("confidence", 1.0),
         "citations": result.get("citations", []),
         **({"documents": result.get("documents")} if result.get("documents") else {}),
         **({"warnings": result.get("warnings")} if result.get("warnings") else {}),
@@ -427,8 +506,10 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 cache = await request_scope.get(ICacheService)
                 deps = await request_scope.get(PipelineDeps)
 
-                # Compile graph once (thread-safe), set deps per-request
-                checkpointer = _checkpointer
+                # Compile graph once (thread-safe), set deps per-request.
+                # `_get_checkpointer()` re-attempts after TTL; a transient
+                # DB blip at boot does not permanently disable persistence.
+                checkpointer = await _get_checkpointer()
                 set_deps(deps)
                 graph = await _get_or_compile_graph(deps, checkpointer)
 
@@ -499,29 +580,68 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 if checkpointer and conversation_id:
                     stream_config["configurable"] = {"thread_id": conversation_id}
 
-                # Stream the graph execution
-                async for mode, payload in graph.astream(
-                    initial_state,
-                    config=stream_config,
-                    stream_mode=["updates", "custom"],
-                ):
-                    if mode == "custom":
-                        # Custom events emitted by nodes via get_stream_writer().
-                        # _filter_stream_payload applies FR-038 (fail-closed
-                        # allowlist, SEC-07) AND FR-038b (WARNING log on any
-                        # dropped key — DEBT-017 fix 2026-04-11).
-                        await _safe_send_json(ws, _filter_stream_payload(payload))
-                    elif mode == "updates":
-                        # Node completed — check if it's a terminal node
-                        for node_name, update in payload.items():
-                            complete_event = _build_complete_event(node_name, update)
-                            if complete_event is None:
-                                logger.debug(
-                                    "Ignoring non-terminal stream update from node %s",
-                                    node_name,
-                                )
-                                continue
-                            await _safe_send_json(ws, complete_event)
+                # Stream the graph execution. BUG-022: a keepalive task
+                # runs alongside so a long pipeline step never leaves the
+                # socket idle long enough to be dropped mid-stream. A send
+                # lock serializes the two producers (stream + keepalive).
+                send_lock = asyncio.Lock()
+                keepalive_task = asyncio.create_task(_ws_keepalive(ws, send_lock))
+                # P1 last-resort logger: track whether a terminal `complete`
+                # ever flew. If the pipeline starts but never emits one
+                # (WS closed mid-stream, unhandled exception, etc.), the
+                # finally block writes a synthetic query_analytics row so
+                # the request stays visible in telemetry.
+                complete_sent = False
+                stream_started_at = time.monotonic()
+                try:
+                    async for mode, payload in graph.astream(
+                        initial_state,
+                        config=stream_config,
+                        stream_mode=["updates", "custom"],
+                    ):
+                        if mode == "custom":
+                            # Custom events emitted by nodes via get_stream_writer().
+                            # _filter_stream_payload applies FR-038 (fail-closed
+                            # allowlist, SEC-07) AND FR-038b (WARNING log on any
+                            # dropped key — DEBT-017 fix 2026-04-11).
+                            async with send_lock:
+                                await _safe_send_json(ws, _filter_stream_payload(payload))
+                        elif mode == "updates":
+                            # Node completed — check if it's a terminal node
+                            for node_name, update in payload.items():
+                                complete_event = _build_complete_event(node_name, update)
+                                if complete_event is None:
+                                    logger.debug(
+                                        "Ignoring non-terminal stream update from node %s",
+                                        node_name,
+                                    )
+                                    continue
+                                async with send_lock:
+                                    await _safe_send_json(ws, complete_event)
+                                complete_sent = True
+                finally:
+                    keepalive_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await keepalive_task
+                    # P1 last-resort logger: terminal-node analytics fires
+                    # inline within each terminal node (FR-036t). If the
+                    # request died before reaching any terminal, no row
+                    # lands. Write a synthetic one tagged ws_closed_mid_stream
+                    # so the call stays in coverage.
+                    if not complete_sent and question:
+                        with contextlib.suppress(Exception):
+                            from app.application.pipeline.history import save_query_attempt
+                            await save_query_attempt(
+                                question=question,
+                                served_table=None,
+                                row_count=0,
+                                success=False,
+                                duration_ms=int(
+                                    (time.monotonic() - stream_started_at) * 1000
+                                ),
+                                error_message="ws_closed_mid_stream",
+                                semantic_cache=deps.semantic_cache,
+                            )
 
     except WebSocketDisconnect:
         logger.debug("WebSocket v2 client disconnected")

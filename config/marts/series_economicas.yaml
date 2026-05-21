@@ -1,0 +1,62 @@
+id: series_economicas
+version: 0.3.1
+description: |
+  COTIZACIONES CAMBIARIAS DEL BCRA — tipos de cambio diarios de monedas
+  extranjeras vs peso argentino, snapshot publicado por el Banco Central.
+
+  Hoy son ~39 monedas (USD, EUR, BRL, etc.). NO incluye índices económicos
+  como IPC, EMAE, dólar oficial/blue, ni reservas. Esos están pendientes
+  de los conectores INDEC y series-tiempo. El nombre del mart se mantiene
+  como `series_economicas` por compatibilidad con el embedding poblado y
+  el discovery del LLM, pero conceptualmente cubre SOLO el sub-dominio
+  "tipo_de_cambio" del dominio económico más amplio.
+
+  Cuando aterricen las series adicionales (IPC, EMAE, agregados monetarios),
+  se suman al UNION ALL acá. Hasta entonces, los consumers que pregunten
+  "evolución del IPC" deben recibir una respuesta clara de no-cobertura
+  en vez de cotizaciones de monedas.
+domain: economia
+# Subdominio efectivo para el LLM router. Esto es lo que el planner
+# debería ver para no recomendar este mart a queries de IPC/EMAE.
+# (No es un campo nativo del mart loader hoy; vive como pista
+# semántica para el embedding de discovery.)
+
+sources:
+  portals: [bcra]
+  resource_patterns: ["bcra::cotizaciones"]
+
+canonical_columns:
+  - name: serie_id
+    type: text
+    description: Código de la moneda (USD, EUR, BRL, etc.) — PK lógica
+  - name: descripcion
+    type: text
+    description: Nombre legible (e.g. "DOLAR EE.UU.", "EURO")
+  - name: valor
+    type: float
+    description: Cotización vendedora vs peso argentino, último snapshot BCRA
+  - name: unidad
+    type: text
+    description: Siempre "cotizacion_cambiaria" — qué tipo de serie es
+  - name: fuente
+    type: text
+    description: Siempre "BCRA" hoy
+
+sql: |
+  -- v0.3.1: agregado expected_columns. Si bcra::cotizaciones desaparece
+  -- (poco probable, slug-stable interno), el mart construye con 0 rows
+  -- en vez de fallar con "column codigoMoneda does not exist".
+  SELECT
+    "codigoMoneda"::text                         AS serie_id,
+    COALESCE(descripcion, '')::text              AS descripcion,
+    "tipoCotizacion"::float                      AS valor,
+    'cotizacion_cambiaria'::text                 AS unidad,
+    'BCRA'::text                                 AS fuente
+  FROM {{ live_table(
+      'bcra::cotizaciones',
+      expected_columns=['codigoMoneda', 'descripcion', 'tipoCotizacion']
+  ) }}
+  WHERE "codigoMoneda" IS NOT NULL
+
+refresh:
+  policy: on_upstream_change

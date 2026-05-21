@@ -1,0 +1,8 @@
+# dbt build outputs — never commit
+target/
+dbt_packages/
+logs/
+
+# A real profiles.yml goes in ~/.dbt/, not here. The committed file is
+# only `profiles.yml.example` for documentation.
+profiles.yml

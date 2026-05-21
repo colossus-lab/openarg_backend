@@ -49,6 +49,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -71,6 +73,7 @@ class NL2SQLRuntime(TypedDict):
     sandbox: Any
     embedding: Any
     semantic_cache: Any
+    serving_port: Any
 
 
 _runtime_var: ContextVar[NL2SQLRuntime | None] = ContextVar("nl2sql_runtime", default=None)
@@ -83,6 +86,7 @@ def nl2sql_runtime(
     sandbox: Any,
     embedding: Any,
     semantic_cache: Any,
+    serving_port: Any = None,
 ):
     """Bind request-scoped runtime dependencies outside checkpointed state."""
     token = _runtime_var.set(
@@ -91,6 +95,7 @@ def nl2sql_runtime(
             "sandbox": sandbox,
             "embedding": embedding,
             "semantic_cache": semantic_cache,
+            "serving_port": serving_port,
         }
     )
     try:
@@ -137,6 +142,7 @@ class NL2SQLState(TypedDict, total=False):
     last_error: str
     used_fallback: bool
     indec_pattern_match: bool
+    started_at: float
     # --- output ---
     data_results: list
 
@@ -148,7 +154,9 @@ def _resolve_runtime_dep(state: NL2SQLState, key: str, runtime_dep: Any) -> Any:
     if key not in state:
         msg = f"NL2SQL runtime dependency '{key}' not initialised"
         raise RuntimeError(msg)
-    return state[key]
+    # `state[key]` requires literal-key access in TypedDict; we know
+    # `key` came from a known-set list at the caller, so cast to Any.
+    return state[key]  # type: ignore[literal-required]
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +220,7 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
     runtime = _get_runtime_optional()
     llm = _resolve_runtime_dep(state, "llm", runtime["llm"] if runtime else None)
     nl_query = state["nl_query"]
+    started_at = state.get("started_at") or time.perf_counter()
     tables_context = state["tables_context"]
     few_shot_block = state.get("few_shot_block", "")
 
@@ -240,6 +249,7 @@ async def generate_sql_node(state: NL2SQLState) -> dict:
         "attempt": 0,
         "used_fallback": False,
         "indec_pattern_match": _compute_indec_match(nl_query),
+        "started_at": started_at,
     }
 
 
@@ -247,11 +257,17 @@ async def execute_sql_node(state: NL2SQLState) -> dict:
     """FR-002: execute the generated SQL against the sandbox."""
     runtime = _get_runtime_optional()
     sandbox = _resolve_runtime_dep(state, "sandbox", runtime["sandbox"] if runtime else None)
+    serving_port = runtime["serving_port"] if runtime else state.get("serving_port")
     generated_sql = state["generated_sql"]
     available_tables = [table.table_name for table in state.get("tables") or []]
     rewritten_sql = rewrite_legacy_sql_tables(generated_sql, available_tables)
 
-    result = await sandbox.execute_readonly(rewritten_sql)
+    result = await _execute_sql_with_best_backend(
+        rewritten_sql,
+        available_tables=available_tables,
+        sandbox=sandbox,
+        serving_port=serving_port,
+    )
 
     updates: dict[str, Any] = {"result": result, "generated_sql": rewritten_sql}
     if result.error:
@@ -260,6 +276,81 @@ async def execute_sql_node(state: NL2SQLState) -> dict:
         # Clear the error so a downstream success branch is unambiguous.
         updates["last_error"] = ""
     return updates
+
+
+def _first_relation_reference(sql: str) -> tuple[str | None, str | None]:
+    """Return the first `(schema, table)` referenced by FROM/JOIN, if any."""
+    import re
+
+    match = re.search(
+        r'\b(?:FROM|JOIN)\s+(?:"?(\w+)"?\.)?"?(\w+)"?',
+        sql,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+    return (match.group(1) or None, match.group(2) or None)
+
+
+def _resource_id_for_query(sql: str, *, available_tables: list[str]) -> str | None:
+    """Infer a serving resource_id from the SQL's first referenced relation.
+
+    We only force the serving path when the query explicitly targets a
+    medallion layer (`mart.*` / `raw.*`). Legacy unqualified cache_* SQL
+    keeps using the sandbox directly so we don't invent fake resource ids.
+    """
+    schema, table = _first_relation_reference(sql)
+    if not table:
+        return None
+    if schema and schema.lower() == "mart":
+        return f"mart::{table}"
+    if schema and schema.lower() == "raw":
+        qualified = f"{schema.lower()}.{table}"
+        if qualified in available_tables:
+            return f"raw::{table}"
+    return None
+
+
+async def _execute_sql_with_best_backend(
+    sql: str,
+    *,
+    available_tables: list[str],
+    sandbox: Any,
+    serving_port: Any | None,
+):
+    """Use the serving port when the query explicitly targets mart/raw.
+
+    This keeps the execution contract aligned with the discovery contract
+    without forcing legacy cache_* queries through the still-migrating
+    serving layer.
+    """
+    resource_id = _resource_id_for_query(sql, available_tables=available_tables)
+    if resource_id and serving_port is not None:
+        try:
+            from app.application.pipeline.connectors.serving_resolver import ServingResolver
+
+            resolver = ServingResolver(serving_port)
+            rows = await resolver.query(resource_id, sql)
+            dict_rows = [dict(zip(rows.columns, row, strict=False)) for row in rows.data]
+            return type(
+                "_ServingExecutionResult",
+                (),
+                {
+                    "columns": rows.columns,
+                    "rows": dict_rows,
+                    "row_count": len(dict_rows),
+                    "truncated": rows.truncated,
+                    "error": None,
+                },
+            )()
+        except Exception:
+            logger.warning(
+                "ServingPort execution failed for %s; falling back to sandbox",
+                resource_id,
+                exc_info=True,
+            )
+
+    return await sandbox.execute_readonly(sql)
 
 
 def _route_after_execute(state: NL2SQLState) -> str:
@@ -365,6 +456,44 @@ async def last_resort_node(state: NL2SQLState) -> dict:
     return updates
 
 
+_AGGREGATE_FN_RE = re.compile(r"\b(?:count|sum|avg|min|max)\s*\(", re.IGNORECASE)
+_GROUP_BY_RE = re.compile(r"\bgroup\s+by\b", re.IGNORECASE)
+_NONADDITIVE_COL_RE = re.compile(r"(?:tasa|indice|índice|porcentaje|promedio)", re.IGNORECASE)
+
+
+def _classify_result_kind(sql: str) -> str:
+    """Classify a generated query as ``aggregate`` or ``sample``.
+
+    LLM-001: a ``SELECT * ... LIMIT n`` row dump is a *sample* — its row
+    count is a query artefact (the LIMIT), not a real total. The analyst
+    needs this signal so it never narrates "N registros" as if N were the
+    universe. A query carrying COUNT/SUM/AVG/MIN/MAX or GROUP BY produced
+    a genuine aggregate and can be reported as such.
+    """
+    if not sql:
+        return "sample"
+    if _AGGREGATE_FN_RE.search(sql) or _GROUP_BY_RE.search(sql):
+        return "aggregate"
+    return "sample"
+
+
+def _has_nonadditive_aggregate(sql: str) -> bool:
+    """Detect SUM()/AVG() applied to a rate/index column (LLM-002).
+
+    Summing or averaging a ``tasa_*`` / ``indice_*`` / ``porcentaje_*``
+    column across rows of different granularity inflates a meaningless
+    number (e.g. summing every department's per-100k rate into a bogus
+    province total). Flag it so the analyst hedges instead of shipping it.
+    """
+    if not sql:
+        return False
+    for match in re.finditer(r"\b(?:sum|avg)\s*\(", sql, re.IGNORECASE):
+        window = sql[match.end() : match.end() + 60]
+        if _NONADDITIVE_COL_RE.search(window):
+            return True
+    return False
+
+
 async def format_result_node(state: NL2SQLState) -> dict:
     """Format the SQL execution result into a single ``DataResult``.
 
@@ -413,13 +542,47 @@ async def format_result_node(state: NL2SQLState) -> dict:
             ]
         }
 
+    _tables = state.get("tables") or []
+    # P0: served_table must reflect the actual table the SQL hit, not the
+    # table-discovery list — they can drift (e.g. the Fase 3 redirect
+    # populates a different state path that loses `tables`). Prefer the
+    # table parsed from the generated SQL when available, fall back to
+    # the discovery list. This guarantees analytics + the no-data prompt
+    # know which mart was actually queried.
+    sql_schema, sql_table = (
+        _first_relation_reference(generated_sql) if generated_sql else (None, None)
+    )
+    if sql_table:
+        served_from_sql = f"{sql_schema}.{sql_table}" if sql_schema else sql_table
+    else:
+        served_from_sql = ""
+    served_table = served_from_sql or (_tables[0].table_name if _tables else "")
     metadata: dict[str, Any] = {
         "total_records": result.row_count,
         "truncated": result.truncated,
         "columns": result.columns,
         "fetched_at": datetime.now(UTC).isoformat(),
         "table_descriptions": table_descriptions,
+        # BUG-016/017: finalize reads this to log the real served table
+        # (e.g. `mart.series_economicas`) into query_analytics.
+        "served_table": served_table,
+        # P0: when a real table was queried but returned 0 rows, the
+        # analyst's no-data fallback needs to know so it can deflect
+        # honestly ("the dataset doesn't cover that period") instead of
+        # the generic "OpenArg cubre…" boilerplate.
+        "queried_empty_mart": (
+            result.row_count == 0
+            and bool(served_table)
+            and bool(generated_sql)
+        ),
+        # LLM-001/LLM-002: tell the analyst whether the rows are a real
+        # aggregate or a capped sample, and whether a non-additive metric
+        # was summed — so it never reports a LIMIT artefact as a total or
+        # ships an inflated rate without hedging.
+        "result_kind": _classify_result_kind(generated_sql),
     }
+    if _has_nonadditive_aggregate(generated_sql):
+        metadata["nonadditive_warning"] = True
     # SEC-03: never leak the raw SQL to production responses — it enables
     # schema enumeration through error replay. Keep it in dev/local for
     # debugging.
@@ -493,29 +656,40 @@ async def save_success_node(state: NL2SQLState) -> dict:
     note on missing dependencies).
     """
     result = state.get("result")
+    runtime = _get_runtime_optional()
+    tables = state.get("tables") or []
+    nl_query = state["nl_query"]
+    generated_sql = state.get("generated_sql", "")
+    embedder_for_history = runtime["embedding"] if runtime else state.get("embedding")
+    semantic_cache_for_history = runtime["semantic_cache"] if runtime else state.get("semantic_cache")
+
+    # Lazy import to avoid the cycle with connectors/sandbox.py which
+    # re-exports history helpers through its module.
+    from app.application.pipeline.history import save_successful_query
+
+    # BUG-016/017: query_analytics is now written ONCE per query by the
+    # terminal pipeline nodes (finalize / cache_reply / fast_reply /
+    # clarify_reply). This subgraph used to log it here too, which both
+    # double-counted sandbox queries and missed every connector/cache/
+    # clarify flow. The served-table name is propagated to finalize via
+    # the DataResult metadata (`served_table`) in format_result_node.
+    served = tables[0].table_name if tables else ""
+
+    # Few-shot eligibility: only successful, non-fallback queries with rows.
     if result is None or result.error or not result.rows:
         return {}
     if state.get("used_fallback"):
         # FR-018 — don't save last-resort SELECT * as a few-shot example.
         return {}
 
-    # Lazy import to avoid the cycle with connectors/sandbox.py which
-    # re-exports history helpers through its module.
-    from app.application.pipeline.history import save_successful_query
-
-    runtime = _get_runtime_optional()
-    tables = state.get("tables") or []
-    nl_query = state["nl_query"]
-    generated_sql = state.get("generated_sql", "")
-
     spawn_background(
         save_successful_query(
             nl_query,
             generated_sql,
-            tables[0].table_name if tables else "",
+            served,
             result.row_count,
-            runtime["embedding"] if runtime else state.get("embedding"),
-            runtime["semantic_cache"] if runtime else state.get("semantic_cache"),
+            embedder_for_history,
+            semantic_cache_for_history,
         ),
         name="nl2sql.save_success",
     )
