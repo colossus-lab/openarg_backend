@@ -66,6 +66,26 @@ class TestIndexableColumn:
         for name in ["nombre", "cuit", "valor", "monto", "id_caso", "codigo_delito", "tentativa"]:
             assert not _is_indexable_column(name), name
 
+    def test_semantic_filter_columns(self) -> None:
+        # Verified hot via pg_stat_statements in v4.6 migration.
+        for name in [
+            "tipo", "subtipo", "categoria", "categoría",
+            "estado", "fuero", "franja", "estacion", "estación",
+            "tipo_de_mediacion", "resultado_mediacion",
+            "tipo_vehiculo", "sector", "rubro",
+            "tipo_persona", "estado_civil",
+        ]:
+            assert _is_indexable_column(name), name
+
+    def test_semantic_does_not_overmatch(self) -> None:
+        # These should NOT be flagged — too generic / not actual discriminators.
+        for name in [
+            "descripcion", "observaciones", "comentarios",
+            "url", "link", "telefono", "email",
+            "razon_social",  # text-search candidate, separate trigram path
+        ]:
+            assert not _is_indexable_column(name), name
+
 
 class TestBuildIndexSql:
     def test_emits_index_per_matched_column(self) -> None:
@@ -75,10 +95,11 @@ class TestBuildIndexSql:
              ("barrio", "text"), ("comuna", "text"), ("tipo", "text")],
         )
         sql_list = build_index_sql(mart)
-        # 5 indexable cols (tipo is not in patterns)
-        assert len(sql_list) == 5
+        # 6 indexable cols including `tipo` (semantic pattern added in v4.6).
+        assert len(sql_list) == 6
         assert any('"ix_delitos_caba_fecha"' in s for s in sql_list)
         assert any('"ix_delitos_caba_barrio"' in s for s in sql_list)
+        assert any('"ix_delitos_caba_tipo"' in s for s in sql_list)
         assert all("IF NOT EXISTS" in s for s in sql_list)
         assert all(' ON mart."delitos_caba" ' in s for s in sql_list)
 
@@ -114,8 +135,10 @@ class TestBuildIndexSql:
             [("fecha", "text"), ("periodo", "text"), ("estacion", "text")],
         )
         out = build_create_view_sql(mart)
-        # 1 DROP + 1 CREATE VIEW + 2 indexes (fecha, periodo) — estacion not in pattern
+        # 1 DROP + 1 CREATE VIEW + 3 indexes (fecha + periodo + estacion).
+        # `estacion` matches the semantic pattern added in v4.6.
         assert sum(1 for s in out if s.startswith("DROP MATERIALIZED VIEW")) == 1
         assert sum(1 for s in out if s.startswith("CREATE MATERIALIZED VIEW")) == 1
-        assert sum(1 for s in out if s.startswith("CREATE INDEX")) == 2
+        assert sum(1 for s in out if s.startswith("CREATE INDEX")) == 3
         assert any('"ix_flujo_vehicular_peajes_caba_fecha"' in s for s in out)
+        assert any('"ix_flujo_vehicular_peajes_caba_estacion"' in s for s in out)
