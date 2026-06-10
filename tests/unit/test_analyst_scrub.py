@@ -86,6 +86,62 @@ def test_scrub_handles_empty_string() -> None:
     assert _scrub_internal_identifiers("") == ""
 
 
+# ── M7 (round v46): expanded internal-name coverage ──────────────
+
+
+@pytest.mark.parametrize(
+    "leaked_name",
+    [
+        # Pre-fix coverage (kept passing).
+        "cache_leyes_sancionadas",
+        "dataset_chunks",
+        "pgvector",
+        "query_cache",
+        "cached_datasets",
+        # M7 additions — the analyst could mention any of these and the
+        # pre-fix scrubber left them in the visible answer.
+        "catalog_resources",
+        "raw_table_versions",
+        "mart_definitions",
+        "mart_sample_queries",
+        "query_analytics",
+        "table_catalog",
+        "parse_repair_audit",
+        "successful_queries",
+        "user_queries",
+        "query_dataset_links",
+        "agent_tasks",
+        "api_keys",
+        "api_usage",
+        "sesion_chunks",
+    ],
+)
+def test_scrub_strips_full_internal_table_set(leaked_name: str) -> None:
+    answer = f"Dato extraído de {leaked_name} muestra 42 registros."
+    scrubbed = _scrub_internal_identifiers(answer)
+    assert leaked_name not in scrubbed
+    assert "42 registros" in scrubbed
+
+
+def test_scrub_strips_parenthetical_for_new_names() -> None:
+    """The whole `(Fuente: successful_queries)` aside disappears, not
+    just the identifier — so the user doesn't see "(Fuente: )" dangling."""
+    answer = "Hay 7 ejemplos similares (Fuente: successful_queries)."
+    scrubbed = _scrub_internal_identifiers(answer)
+    assert "successful_queries" not in scrubbed
+    assert "fuente:" not in scrubbed.lower()
+    assert "7 ejemplos" in scrubbed
+
+
+def test_scrub_does_not_overmatch_partial_substring() -> None:
+    """`apicultor` (or any word that contains a substring of a banned
+    name as a non-word boundary) must NOT be scrubbed."""
+    answer = "El apicultor produjo miel. Y los api_eros también."
+    scrubbed = _scrub_internal_identifiers(answer)
+    assert "apicultor" in scrubbed
+    assert "api_eros" in scrubbed
+
+
 # ── _drop_apologetic_preface ──────────────────────────────────────
 
 

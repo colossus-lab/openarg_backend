@@ -583,10 +583,15 @@ async def format_result_node(state: NL2SQLState) -> dict:
     }
     if _has_nonadditive_aggregate(generated_sql):
         metadata["nonadditive_warning"] = True
-    # SEC-03: never leak the raw SQL to production responses — it enables
-    # schema enumeration through error replay. Keep it in dev/local for
-    # debugging.
-    if os.getenv("APP_ENV", "local") != "prod":
+    # SEC-03 / M3 (round v46): never leak the raw SQL to production responses —
+    # it enables schema enumeration through error replay. Keep it in
+    # dev/local/staging for debugging.
+    # Pre-fix: `!= "prod"` was brittle — `"PROD"`, `"prod\n"`, or a typo
+    # like `"production"` all leaked the SQL because none equalled the
+    # lowercase literal. Normalise + use a positive allowlist so the
+    # only environments that opt IN to the leak are the ones we name.
+    _app_env_normalised = os.getenv("APP_ENV", "local").strip().lower()
+    if _app_env_normalised in ("local", "dev", "staging", "test"):
         metadata["generated_sql"] = generated_sql
     if state.get("used_fallback"):
         metadata["used_fallback"] = True
