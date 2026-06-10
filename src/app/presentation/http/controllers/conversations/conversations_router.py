@@ -5,7 +5,7 @@ from uuid import UUID
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.domain.entities.chat.conversation import Conversation
 from app.domain.entities.chat.message import Message
@@ -20,6 +20,9 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
 class ConversationCreate(BaseModel):
+    # CONTRACT-02 (round v46): extra='forbid' surfaces BFF / backend
+    # drift as 422 instead of a silent field drop.
+    model_config = ConfigDict(extra="forbid")
     user_email: str
     title: str = ""
 
@@ -32,6 +35,11 @@ class ConversationSummary(BaseModel):
 
 
 class MessageCreate(BaseModel):
+    # CONTRACT-02 (round v46): extra='forbid' surfaces drift loudly.
+    # Note: confidence is kept on the model because historical messages
+    # were persisted with it; the field has been intentionally removed
+    # from the API surface (commit acc884a) but the DB column survives.
+    model_config = ConfigDict(extra="forbid")
     role: str
     content: str
     sources: list[dict[str, Any]] | None = None
@@ -75,10 +83,12 @@ class ConversationDetail(BaseModel):
 
 
 class TitleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     title: str
 
 
 class FeedbackCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     feedback: Literal["up", "down"]
     comment: str | None = None
 

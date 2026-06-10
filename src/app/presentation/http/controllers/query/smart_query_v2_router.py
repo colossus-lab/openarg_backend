@@ -20,7 +20,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.common.privacy_gate import ensure_privacy_accepted
 from app.application.pipeline.graph import build_pipeline_graph
@@ -374,10 +374,20 @@ async def _verify_api_key(api_key: str | None = Depends(_api_key_header)) -> Non
 
 
 class SmartQueryV2Request(BaseModel):
+    # CONTRACT-02 (round v46): extra='forbid' so any drift between the
+    # frontend BFF and this contract surfaces as 422 instead of a
+    # silent drop. The pre-fix BFF posted `history` here and Pydantic
+    # ignored it — context never reached the planner on the HTTP
+    # fallback path. The field is now ACCEPTED at the wire boundary
+    # (so legacy BFF deploys don't break) but the handler still loads
+    # history from the DB via conversation_id (post-H3 ownership
+    # check). The body-supplied history is treated as advisory only.
+    model_config = ConfigDict(extra="forbid")
     question: str = Field(..., min_length=1, max_length=10000)
     user_email: str | None = None
     conversation_id: str | None = None
     policy_mode: bool = False
+    history: list[dict[str, Any]] | None = None
 
 
 class SmartQueryV2Response(BaseModel):

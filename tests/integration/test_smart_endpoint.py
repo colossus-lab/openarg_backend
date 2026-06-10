@@ -24,6 +24,38 @@ class TestSmartQueryEndpoint:
         assert "POST" in route.methods
         assert "GET" not in route.methods
 
+    # CONTRACT-02 (round v46): extra='forbid' means any unrecognised
+    # field surfaces as a 422 instead of being silently dropped. Pre-fix
+    # the BFF posted `history` and Pydantic ignored it; the planner ran
+    # without context and nobody noticed.
+    async def test_extra_fields_are_rejected_with_422(self, client):
+        response = await client.post(
+            "/api/v1/query/smart",
+            json={
+                "question": "test",
+                "unexpected_field": "should be rejected",
+            },
+        )
+        assert response.status_code == 422
+
+    async def test_history_field_is_accepted_for_bff_compatibility(self, client):
+        """Backward compat: the BFF still posts `history` as an advisory
+        hint. The model accepts it (so deploys can interleave); the
+        handler ignores the value and loads history from the DB.
+        """
+        # This will fall through to the H3 AUTH_REQUIRED branch (no JWT
+        # in test transport) once conversation_id is provided, or 200
+        # if no conversation_id is set. We're only asserting it doesn't
+        # 422 because of `history` being declared.
+        response = await client.post(
+            "/api/v1/query/smart",
+            json={
+                "question": "test",
+                "history": [{"role": "user", "content": "antes"}],
+            },
+        )
+        assert response.status_code != 422
+
 
 # ── H3 fix: conversation_id ownership (round v46) ───────────────────
 
