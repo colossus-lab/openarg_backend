@@ -92,6 +92,13 @@ _COMPLETE_EVENT_KEYS: tuple[str, ...] = (
     "citations",
     "documents",
     "warnings",
+    # CONTRACT-03 (round v46): tokens_used was already in the HTTP
+    # response of POST /smart but missing from the WS `complete` event,
+    # so SPA telemetry that watches LLM cost went silent on the
+    # streaming path. confidence was intentionally removed from the API
+    # (commit acc884a) and is NOT restored here — the chip is gone from
+    # the UI and the pipeline still computes it internally.
+    "tokens_used",
 )
 
 _TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
@@ -130,6 +137,12 @@ def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
         "citations": update.get("citations", []),
         "documents": update.get("documents"),
         "warnings": update.get("warnings", []),
+        # CONTRACT-03 (round v46): paridad con la response HTTP POST /smart,
+        # que ya emite tokens_used. Sin esto el frontend ve siempre 0 en
+        # el path streaming. confidence NO se incluye: fue removida de la
+        # API deliberadamente (commit acc884a) — el pipeline la sigue
+        # calculando internamente pero no la expone al cliente.
+        "tokens_used": update.get("tokens_used", 0),
     }
 
 
