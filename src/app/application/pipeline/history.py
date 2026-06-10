@@ -23,18 +23,27 @@ logger = logging.getLogger(__name__)
 async def load_chat_history(
     conversation_id: str,
     chat_repo: IChatRepository | None,
+    owner_user_id: str | None = None,
 ) -> str:
     """Load recent messages from the DB to build conversation context.
 
     Only called when there is a conversation_id and a chat_repo.
     Returns a formatted string or empty if no history.
+
+    H3: when `owner_user_id` is provided, the repo lookup is scoped to
+    that owner. A foreign conversation_id returns []. The endpoint layer
+    is the primary ownership gate; this is defense-in-depth so a future
+    bypass at the controller layer can't read another user's history.
     """
     if not conversation_id or not chat_repo:
         return ""
     try:
         from uuid import UUID
 
-        messages = await chat_repo.get_messages(UUID(conversation_id), limit=7)
+        owner_uuid = UUID(owner_user_id) if owner_user_id else None
+        messages = await chat_repo.get_messages(
+            UUID(conversation_id), limit=7, user_id=owner_uuid
+        )
         if len(messages) <= 1:
             return ""
         # Skip the last message (it's the current question the frontend just saved)

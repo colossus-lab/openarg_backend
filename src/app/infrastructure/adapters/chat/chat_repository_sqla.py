@@ -33,11 +33,25 @@ class ChatRepositorySQLA(IChatRepository):
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_conversation(self, conversation_id: UUID) -> Conversation | None:
-        return await self._session.get(Conversation, conversation_id)
+    async def get_conversation(
+        self, conversation_id: UUID, user_id: UUID | None = None
+    ) -> Conversation | None:
+        if user_id is None:
+            return await self._session.get(Conversation, conversation_id)
+        # H3 fix: owner-scoped read. A mismatched owner returns None, so
+        # callers can treat the response identically to "not found" and the
+        # IDOR vector closes at the SQL layer.
+        stmt = select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
-    async def delete_conversation(self, conversation_id: UUID) -> bool:
-        conv = await self.get_conversation(conversation_id)
+    async def delete_conversation(
+        self, conversation_id: UUID, user_id: UUID | None = None
+    ) -> bool:
+        conv = await self.get_conversation(conversation_id, user_id=user_id)
         if not conv:
             return False
         await self._session.delete(conv)
@@ -45,16 +59,21 @@ class ChatRepositorySQLA(IChatRepository):
         return True
 
     async def update_conversation_title(
-        self, conversation_id: UUID, title: str
+        self, conversation_id: UUID, title: str, user_id: UUID | None = None
     ) -> Conversation | None:
+        where_clause = [Conversation.id == conversation_id]
+        if user_id is not None:
+            where_clause.append(Conversation.user_id == user_id)
         stmt = (
             update(Conversation)
-            .where(Conversation.id == conversation_id)
+            .where(*where_clause)
             .values(title=title, updated_at=func.now())
         )
-        await self._session.execute(stmt)
+        result = await self._session.execute(stmt)
         await self._session.commit()
-        return await self.get_conversation(conversation_id)
+        if result.rowcount == 0:
+            return None
+        return await self.get_conversation(conversation_id, user_id=user_id)
 
     async def add_message(self, message: Message) -> Message:
         self._session.add(message)
@@ -63,7 +82,11 @@ class ChatRepositorySQLA(IChatRepository):
         return message
 
     async def get_messages(
-        self, conversation_id: UUID, limit: int = 100, offset: int = 0
+        self,
+        conversation_id: UUID,
+        limit: int = 100,
+        offset: int = 0,
+        user_id: UUID | None = None,
     ) -> list[Message]:
         stmt = (
             select(Message)
@@ -72,6 +95,18 @@ class ChatRepositorySQLA(IChatRepository):
             .limit(limit)
             .offset(offset)
         )
+        if user_id is not None:
+            # H3 fix: owner-scoped read. Join the parent conversation and
+            # filter so a foreign conv_id returns []. Cheap subquery — the
+            # planner just adds an index lookup on conversations.user_id.
+            from sqlalchemy import exists
+
+            stmt = stmt.where(
+                exists().where(
+                    Conversation.id == conversation_id,
+                    Conversation.user_id == user_id,
+                )
+            )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

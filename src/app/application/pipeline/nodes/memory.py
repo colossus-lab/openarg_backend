@@ -37,7 +37,14 @@ async def load_memory_node(state: OpenArgState) -> dict:
         memory_ctx = build_memory_context_prompt(memory)
         memory_ctx_analyst = build_memory_context_prompt(memory, for_analyst=True)
 
-        chat_history = await load_chat_history(conversation_id, deps.chat_repo)
+        # H3: pass owner_user_id when the endpoint provided it so the
+        # repo scopes the message lookup. If absent, load_chat_history
+        # falls back to its pre-fix behaviour (unscoped) — safe because
+        # the endpoint already gated entry by ownership.
+        owner_user_id = state.get("owner_user_id")  # type: ignore[typeddict-item]
+        chat_history = await load_chat_history(
+            conversation_id, deps.chat_repo, owner_user_id=owner_user_id
+        )
         planner_ctx = chat_history or memory_ctx
 
         return {

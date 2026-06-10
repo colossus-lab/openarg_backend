@@ -27,9 +27,13 @@ from app.application.pipeline.graph import build_pipeline_graph
 from app.application.pipeline.nodes import PipelineDeps, set_deps
 from app.application.pipeline.state import OpenArgState
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
 from app.infrastructure.serialization import safe_dumps, to_json_safe
+from app.presentation.http.middleware.google_jwt_middleware import (
+    get_request_user_email,
+)
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
@@ -385,10 +389,27 @@ async def smart_query_v2(
     body: SmartQueryV2Request,
     deps: FromDishka[PipelineDeps],
     user_repo: FromDishka[IUserRepository],
+    chat_repo: FromDishka[IChatRepository],
 ) -> dict[str, Any] | JSONResponse:
     """Execute a query through the LangGraph pipeline."""
+    # H3 fix: authenticated email comes from the Google JWT validated by
+    # GoogleJwtAuthMiddleware (`request.state.user_email`), NEVER from the
+    # body. A body.user_email that disagrees with the JWT is rejected to
+    # prevent caller spoofing on a shared BACKEND_API_KEY. If the JWT email
+    # is missing (only possible if the middleware exempted this path —
+    # which it doesn't for /smart in prod), fall back to body.user_email
+    # for compatibility but block conversation_id usage.
+    authed_email = get_request_user_email(request)
+    body_email = (body.user_email or "").strip()
+    if authed_email and body_email and authed_email.lower() != body_email.lower():
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "AUTH_SPOOF", "message": "user_email mismatch"}},
+        )
+    user_email = authed_email or body_email
+
     # Server-side privacy gate (defense in depth — the frontend also checks).
-    await ensure_privacy_accepted(body.user_email, user_repo)
+    await ensure_privacy_accepted(user_email, user_repo)
 
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe).
     # `_get_checkpointer()` re-attempts init after the TTL, so a DB blip at
@@ -397,8 +418,49 @@ async def smart_query_v2(
     compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
-    user_id = body.user_email or "anonymous"
+    user_id = user_email or "anonymous"
     conversation_id = body.conversation_id or ""
+
+    # H3 fix: verify conversation ownership before letting the pipeline
+    # load history / use it as the checkpointer thread_id. Without this,
+    # a holder of the shared BACKEND_API_KEY who guesses or steals a
+    # conversation_id can read another user's history via the planner
+    # context (load_chat_history feeds it directly to the LLM prompt).
+    owner_user_id = None
+    if conversation_id:
+        if not authed_email:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "AUTH_REQUIRED",
+                        "message": "conversation_id requires an authenticated user",
+                    }
+                },
+            )
+        from uuid import UUID
+
+        try:
+            conv_uuid = UUID(conversation_id)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "BAD_CONVERSATION_ID", "message": "invalid uuid"}},
+            )
+        user = await user_repo.get_by_email(authed_email)
+        if user is None:
+            # Authed but not synced — treat as no ownership.
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}},
+            )
+        conv = await chat_repo.get_conversation(conv_uuid, user_id=user.id)
+        if conv is None:
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}},
+            )
+        owner_user_id = user.id
 
     initial_state: OpenArgState = {
         "question": body.question,
@@ -407,6 +469,11 @@ async def smart_query_v2(
         "policy_mode": body.policy_mode,
         "replan_count": 0,
     }
+    # Pass the owner_user_id down so load_chat_history can scope the
+    # message fetch as defense-in-depth (the ownership check above already
+    # gates entry, but the repo-level filter closes any future bypass).
+    if owner_user_id is not None:
+        initial_state["owner_user_id"] = str(owner_user_id)  # type: ignore[typeddict-unknown-key]
 
     # When a checkpointer is active, pass thread_id so LangGraph
     # persists state per conversation (enables memory / resumable runs).
@@ -568,12 +635,51 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.close()
                     return
 
+                # H3 fix (defense-in-depth): the WS handshake does NOT yet
+                # validate the Google JWT — body-supplied user_email is the
+                # only identity hint we have. Until Fase 1 wires JWT into
+                # the upgrade path, we at least verify that the requested
+                # conversation_id belongs to the claimed user. A wrong
+                # combination closes 4403; a foreign conv_id whose owner
+                # the attacker happens to also know remains exploitable
+                # until JWT-in-handshake lands.
+                owner_user_id_ws = None
+                if conversation_id and ws_user_email:
+                    from uuid import UUID as _UUID
+
+                    try:
+                        _conv_uuid = _UUID(conversation_id)
+                    except ValueError:
+                        await _safe_send_json(
+                            ws, {"type": "error", "message": "Invalid conversation_id"}
+                        )
+                        await ws.close(code=4400)
+                        return
+                    chat_repo_ws = await request_scope.get(IChatRepository)
+                    user_repo_ws = await request_scope.get(IUserRepository)
+                    user_ws = await user_repo_ws.get_by_email(ws_user_email)
+                    conv_ws = (
+                        await chat_repo_ws.get_conversation(_conv_uuid, user_id=user_ws.id)
+                        if user_ws
+                        else None
+                    )
+                    if conv_ws is None:
+                        await _safe_send_json(
+                            ws,
+                            {"type": "error", "message": "Conversation access denied"},
+                        )
+                        await ws.close(code=4403)
+                        return
+                    owner_user_id_ws = user_ws.id
+
                 initial_state: OpenArgState = {
                     "question": question,
                     "user_id": ws_identifier,
                     "conversation_id": conversation_id,
                     "policy_mode": policy_mode,
                 }
+                if owner_user_id_ws is not None:
+                    initial_state["owner_user_id"] = str(owner_user_id_ws)  # type: ignore[typeddict-unknown-key]
 
                 # When a checkpointer is active, pass thread_id for persistence
                 stream_config: dict[str, Any] = {}
