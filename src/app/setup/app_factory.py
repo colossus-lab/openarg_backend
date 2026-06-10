@@ -155,13 +155,35 @@ def configure_app(
     if settings and settings.security.BACKEND_API_KEY:
         app.add_middleware(APIKeyMiddleware, api_key=settings.security.BACKEND_API_KEY)
 
-    # CORS: use settings origins if defined, else permissive in dev, restrictive in prod
+    # CORS — round v46 H5 fix.
+    # Browsers refuse to honour `Access-Control-Allow-Origin: *` together
+    # with `Access-Control-Allow-Credentials: true`, so the old dev path
+    # (allow_origins=["*"]) was already useless in a real browser — but
+    # it was also a footgun: anyone misconfiguring `APP_ENV` could land
+    # an actually-credentialed wildcard in a public env. Fail-closed in
+    # prod, explicit list in dev/local.
     if settings and settings.security.CORS_ALLOWED_ORIGINS:
         allow_origins = settings.security.CORS_ALLOWED_ORIGINS
     elif environment in ("local", "dev"):
-        allow_origins = ["*"]
+        allow_origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
     else:
+        # Defensive: an unrecognized environment string should NOT silently
+        # open a wildcard. Empty list = no CORS, which makes the
+        # misconfiguration visible at the browser instead of permissive.
         allow_origins = []
+
+    # Fail-fast at startup if prod is missing CORS_ALLOWED_ORIGINS — without
+    # this the API is unreachable from the SPA but no log surfaces why.
+    if environment == "prod" and not allow_origins:
+        raise RuntimeError(
+            "CORS_ALLOWED_ORIGINS must be set in production "
+            "(see app_factory CORS block, round v46 H5)."
+        )
 
     app.add_middleware(
         CORSMiddleware,
