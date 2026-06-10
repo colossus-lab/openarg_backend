@@ -977,6 +977,7 @@ async def execute_sandbox_step(
     user_query: str = "",
     *,
     serving_port: Any | None = None,
+    user_id: str | None = None,
 ) -> list[DataResult]:
     if not sandbox:
         logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
@@ -1383,8 +1384,13 @@ async def execute_sandbox_step(
             except Exception:
                 logger.debug("mart semantics block failed", exc_info=True)
 
-        # Retrieve dynamic few-shot examples from successful past queries
-        few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
+        # Retrieve dynamic few-shot examples from successful past queries.
+        # H4 (round v46) scoped per-user — the helper combines caller's
+        # rows with the `_LEGACY_OWNER` historical bucket so cross-tenant
+        # rows can no longer reach the planner prompt.
+        few_shot_block = await get_few_shot_examples(
+            nl_query, embedding, semantic_cache, user_id=user_id
+        )
 
         # Build display descriptions from catalog entries for the queried
         # table(s). These land in DataResult.metadata.table_descriptions

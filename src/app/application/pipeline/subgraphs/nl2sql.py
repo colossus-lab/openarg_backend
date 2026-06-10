@@ -682,6 +682,14 @@ async def save_success_node(state: NL2SQLState) -> dict:
         # FR-018 — don't save last-resort SELECT * as a few-shot example.
         return {}
 
+    # H4 (round v46): scope the row to the caller's email. The controller
+    # has already enforced that this email came from the verified JWT
+    # (smart_query_v2_router H3 fix); for the WS path it's the
+    # ownership-validated body.user_email. Anonymous/unauthenticated
+    # callers fall through to None and the helper persists with the
+    # `_LEGACY_OWNER` sentinel, which the operator can later reap or
+    # promote.
+    caller_user_id = state.get("user_id") or state.get("owner_user_id")  # type: ignore[typeddict-item]
     spawn_background(
         save_successful_query(
             nl_query,
@@ -690,6 +698,7 @@ async def save_success_node(state: NL2SQLState) -> dict:
             result.row_count,
             embedder_for_history,
             semantic_cache_for_history,
+            user_id=caller_user_id,
         ),
         name="nl2sql.save_success",
     )

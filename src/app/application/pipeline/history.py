@@ -248,6 +248,15 @@ async def record_terminal_analytics(
     )
 
 
+# H4 (round v46): the 'legacy' sentinel represents historical rows that
+# entered the table before per-user scoping landed. They are surfaced to
+# every caller as if operator-curated; new rows always carry the actual
+# caller email. A user can NEVER persist as 'legacy' because the controller
+# layer (smart_query_v2_router) rejects body.user_email='legacy' shapes via
+# the H3 spoof check — JWT-derived emails are real Google addresses.
+_LEGACY_OWNER = "legacy"
+
+
 async def save_successful_query(
     question: str,
     sql: str,
@@ -255,16 +264,39 @@ async def save_successful_query(
     row_count: int,
     embedding_provider: IEmbeddingProvider,
     semantic_cache: SemanticCache,
+    *,
+    user_id: str | None = None,
 ) -> None:
-    """Save a successful NL2SQL query for future few-shot examples."""
+    """Save a successful NL2SQL query for future few-shot examples.
+
+    H4 (round v46): scoped per user. The row is also dropped silently when
+    the question trips the prompt-injection scorer — keeping poisoned
+    inputs out of the few-shot pool is cheaper than trying to neutralize
+    them at retrieval time.
+    """
+    # Lazy import to keep this module free of infrastructure deps unless
+    # the few-shot path actually fires.
+    from app.infrastructure.adapters.search.prompt_injection_detector import (
+        is_suspicious,
+    )
+
+    suspicious, score = is_suspicious(question)
+    if suspicious or score > 0.4:
+        logger.info(
+            "Skipping successful_queries save (suspicious score=%.2f)", score
+        )
+        return
+
+    owner = (user_id or "").strip().lower() or _LEGACY_OWNER
     try:
         embedding = await embedding_provider.embed(question)
         emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
         async with semantic_cache._session_factory() as session:
             await session.execute(
                 text(
-                    "INSERT INTO successful_queries (question, sql, table_name, row_count, embedding) "
-                    "VALUES (:q, :s, :t, :r, CAST(:e AS vector))"
+                    "INSERT INTO successful_queries "
+                    "(question, sql, table_name, row_count, embedding, user_id) "
+                    "VALUES (:q, :s, :t, :r, CAST(:e AS vector), :uid)"
                 ),
                 {
                     "q": question[:500],
@@ -272,6 +304,7 @@ async def save_successful_query(
                     "t": table_name,
                     "r": row_count,
                     "e": emb_str,
+                    "uid": owner,
                 },
             )
             await session.commit()
@@ -284,8 +317,17 @@ async def get_few_shot_examples(
     embedding_provider: IEmbeddingProvider,
     semantic_cache: SemanticCache,
     limit: int = 3,
+    *,
+    user_id: str | None = None,
 ) -> str:
-    """Retrieve similar successful queries as few-shot examples for NL2SQL."""
+    """Retrieve similar successful queries as few-shot examples for NL2SQL.
+
+    H4 (round v46): only rows owned by the caller (or by `_LEGACY_OWNER`,
+    the operator-curated historical bucket) are surfaced. Cross-tenant
+    rows are filtered at the SQL layer so a malicious neighbor's poison
+    can't make it into the planner's prompt.
+    """
+    owner = (user_id or "").strip().lower() or _LEGACY_OWNER
     try:
         embedding = await embedding_provider.embed(question)
         emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
@@ -295,11 +337,17 @@ async def get_few_shot_examples(
                     "SELECT question, sql, "
                     "1 - (embedding <=> CAST(:emb AS vector)) AS score "
                     "FROM successful_queries "
-                    "WHERE 1 - (embedding <=> CAST(:emb AS vector)) > 0.6 "
+                    "WHERE (user_id = :uid OR user_id = :legacy) "
+                    "  AND 1 - (embedding <=> CAST(:emb AS vector)) > 0.6 "
                     "ORDER BY embedding <=> CAST(:emb AS vector) "
                     "LIMIT :lim"
                 ),
-                {"emb": emb_str, "lim": limit},
+                {
+                    "emb": emb_str,
+                    "lim": limit,
+                    "uid": owner,
+                    "legacy": _LEGACY_OWNER,
+                },
             )
             rows = result.fetchall()
         if not rows:

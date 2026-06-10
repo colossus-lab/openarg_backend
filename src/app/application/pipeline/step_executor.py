@@ -64,6 +64,11 @@ class ConnectorDeps:
     # schemas + semantics or read marts directly. Optional; legacy paths
     # still work when this is None.
     serving_port: object | None = None
+    # H4 (round v46) — the authenticated caller's identifier. Propagated
+    # to `execute_sandbox_step` so `get_few_shot_examples` can scope
+    # the cross-tenant prompt-poisoning store (`successful_queries`) by
+    # owner. None for unauthenticated or legacy paths.
+    user_id: str | None = None
 
 
 # ── Retryable error detection ─────────────────────────────────
@@ -186,6 +191,7 @@ async def dispatch_step(
                 deps.semantic_cache,
                 user_query=nl_query,
                 serving_port=deps.serving_port,
+                user_id=deps.user_id,
             )
 
     handler = _DISPATCH_TABLE.get(step.action)
@@ -237,6 +243,7 @@ _DISPATCH_TABLE: dict[str, Callable[..., Any]] = {
         d.semantic_cache,
         user_query=q,
         serving_port=d.serving_port,
+        user_id=d.user_id,
     ),
 }
 
