@@ -1,7 +1,9 @@
 """
 Admin Tasks Router — Manual trigger and status for all background tasks.
 
-Protected by ADMIN_API_KEY (env var). Falls back to BACKEND_API_KEY.
+Protected by ADMIN_API_KEY (env var). NO fallback to BACKEND_API_KEY —
+a missing key returns 503 (fail-closed). Startup in prod asserts
+ADMIN_API_KEY is set and distinct from BACKEND_API_KEY (see app_factory).
 Header: X-Admin-Key
 """
 
@@ -24,7 +26,9 @@ router = APIRouter(prefix="/admin/tasks", tags=["admin-tasks"])
 
 
 def _get_admin_key() -> str:
-    return os.getenv("ADMIN_API_KEY", os.getenv("BACKEND_API_KEY", ""))
+    # No fallback to BACKEND_API_KEY: a holder of the backend key must NOT
+    # gain admin privileges. Missing key → 503 in verify_admin_key.
+    return os.getenv("ADMIN_API_KEY", "")
 
 
 def verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> str:

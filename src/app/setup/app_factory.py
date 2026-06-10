@@ -40,6 +40,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             raise RuntimeError("JWT_SECRET_KEY must be changed in production")
         if not settings.security.BACKEND_API_KEY:
             raise RuntimeError("BACKEND_API_KEY must be set in production")
+        # H7 fix: admin must NOT inherit backend key privileges. Fail-closed
+        # at boot so the gap can't be introduced by a missing env var.
+        admin_key = os.getenv("ADMIN_API_KEY", "")
+        if not admin_key:
+            raise RuntimeError("ADMIN_API_KEY must be set in production")
+        import secrets as _secrets_check
+        if _secrets_check.compare_digest(admin_key, settings.security.BACKEND_API_KEY):
+            raise RuntimeError("ADMIN_API_KEY must differ from BACKEND_API_KEY")
 
     # Warm up DB connection pool — verify pgbouncer is reachable
     from sqlalchemy import text as sa_text
