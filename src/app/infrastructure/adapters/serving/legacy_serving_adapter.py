@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.application.common.sql_safety import is_pure_select
+from app.application.common.sql_safety import is_pure_select_for_relation
 from app.domain.entities.serving import (
     CatalogEntry,
     Resource,
@@ -42,11 +42,6 @@ from app.domain.ports.serving.serving_port import (
 )
 
 logger = logging.getLogger(__name__)
-
-_RELATION_REF_RE = re.compile(
-    r'\b(?:from|join)\s+(?:"?(\w+)"?\.)?"?(\w+)"?',
-    re.IGNORECASE,
-)
 
 
 def _parse_qualified_name(value: str) -> tuple[str, str]:
@@ -75,28 +70,6 @@ def _layer_for_schema(schema_name: str) -> ServingLayer:
         "mart": ServingLayer.MART,
         "public": ServingLayer.CACHE_LEGACY,
     }.get(schema_name, ServingLayer.CACHE_LEGACY)
-
-
-def _sql_references_relation(sql: str, *, schema_name: str, bare_name: str) -> bool:
-    """Return True when the SQL references the expected relation.
-
-    Legacy `public` resources may appear unqualified (`FROM cache_x`) or
-    qualified (`FROM public.cache_x`). Medallion layers must be schema-
-    qualified (`raw.foo`, `mart.bar`, `staging.baz`) to count as a match.
-    """
-    expected_schema = schema_name.lower()
-    expected_table = bare_name.lower()
-    for match in _RELATION_REF_RE.finditer(sql):
-        found_schema = (match.group(1) or "").strip('"').lower()
-        found_table = match.group(2).strip('"').lower()
-        if found_table != expected_table:
-            continue
-        if expected_schema == "public":
-            if found_schema in ("", "public"):
-                return True
-        elif found_schema == expected_schema:
-            return True
-    return False
 
 
 def _discover_marts_enabled() -> bool:
@@ -590,18 +563,36 @@ class LegacyServingAdapter(IServingPort):
         max_rows: int = 1000,
         timeout_seconds: int = 30,
     ) -> Rows:
-        ok, reason = is_pure_select(sql)
-        if not ok:
-            raise WriteAttemptedError(f"{reason}: {sql[:200]}")
+        # H1+H2 fix (round v46): a single AST gate enforces both read-only
+        # structure AND scope. The previous two-step check (is_pure_select
+        # then regex-based _sql_references_relation) accepted a
+        # `SELECT col FROM mart.foo UNION ALL SELECT email FROM api_keys`
+        # because (a) is_pure_select allowed UNION top-level without
+        # walking exp.Table, and (b) _sql_references_relation returned
+        # True on the first match instead of asserting *every* table
+        # reference is the expected one. is_pure_select_for_relation
+        # walks every exp.Table and rejects any out-of-scope reference
+        # or any reference to an internal blocklist table.
         expected_schema, expected_table = await self._expected_relation_for_resource(
             resource_id
         )
-        if not _sql_references_relation(
-            sql, schema_name=expected_schema, bare_name=expected_table
-        ):
-            raise QueryResourceMismatchError(
-                f"{resource_id} expects {expected_schema}.{expected_table}"
-            )
+        ok, reason = is_pure_select_for_relation(
+            sql,
+            expected_schema=expected_schema,
+            expected_table=expected_table,
+        )
+        if not ok:
+            assert reason is not None
+            # Two reason classes flow through the same gate now; preserve
+            # the historical exception types so callers / clients keep
+            # their existing error handling.
+            if reason.startswith("out-of-scope") or reason.startswith(
+                "forbidden table"
+            ):
+                raise QueryResourceMismatchError(
+                    f"{resource_id} expects {expected_schema}.{expected_table}: {reason}"
+                )
+            raise WriteAttemptedError(f"{reason}: {sql[:200]}")
         schema = await self.get_schema(resource_id)
 
         async with self._engine.connect() as conn:
