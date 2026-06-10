@@ -522,21 +522,30 @@ async def smart_query_v2(
 # ── WebSocket rate limit helper ────────────────────────────
 
 
+_WS_RATE_LIMIT_PER_MINUTE = 20
+
+
 async def _check_ws_rate_limit(cache: ICacheService, identifier: str) -> bool:
-    """Return True if the identifier has exceeded the WS rate limit."""
+    """Return True if the identifier has exceeded the WS rate limit.
+
+    H8 (round v46): atomic INCR + EXPIRE NX via `increment_with_ttl`.
+    The previous implementation did get → check → set, which (a) let
+    two concurrent handshakes both observe count<cap and both bump it
+    above the cap, and (b) refreshed the TTL on every hit so a steady
+    stream of requests inside the window kept the counter alive
+    indefinitely instead of resetting at the 60s boundary.
+
+    Cache errors fail OPEN by design — degraded Redis must not block
+    legitimate traffic. The Redis client logs the underlying exception
+    so an operator can spot a sustained outage.
+    """
     key = f"ws_rate:{identifier}"
     try:
-        current = await cache.get(key)
-        if current is not None:
-            count = int(current) if not isinstance(current, int) else current
-            if count >= 20:
-                return True
-            await cache.set(key, count + 1, ttl_seconds=60)
-        else:
-            await cache.set(key, 1, ttl_seconds=60)
-        return False
+        count = await cache.increment_with_ttl(key, ttl_seconds=60)
     except Exception:
+        logger.warning("WS rate-limit cache failed; failing open", exc_info=True)
         return False
+    return count > _WS_RATE_LIMIT_PER_MINUTE
 
 
 def _validate_api_key_value(provided: str) -> bool:
