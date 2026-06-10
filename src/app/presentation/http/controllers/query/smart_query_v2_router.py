@@ -30,6 +30,7 @@ from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
+from app.infrastructure.auth import GoogleJwtValidator, InvalidGoogleToken
 from app.infrastructure.serialization import safe_dumps, to_json_safe
 from app.presentation.http.middleware.google_jwt_middleware import (
     get_request_user_email,
@@ -632,9 +633,56 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         await ws.close(code=4401)
                         return
 
+                # WS JWT-in-handshake (round v46, closes H3 residual gap).
+                # The HTTP path validates the Google JWT in the
+                # GoogleJwtAuthMiddleware; WebSockets bypass starlette
+                # middleware entirely, so the body-supplied user_email is
+                # the only identity hint we get. To stop a holder of
+                # BACKEND_API_KEY from claiming any user_email + any
+                # conversation_id, accept an optional `id_token` in the
+                # handshake message and validate it server-side. When
+                # present and valid, the JWT's verified email overrides
+                # the body's claim and unlocks conversation_id access.
+                # Absent the JWT we keep the legacy path working but
+                # refuse conversation_id reads further down (H3 fix).
+                verified_email = ""
+                raw_id_token = (raw.get("id_token") or "").strip()
+                if raw_id_token:
+                    try:
+                        validator = await request_scope.get(GoogleJwtValidator)
+                        verified_email = await validator.validate(raw_id_token)
+                    except InvalidGoogleToken as exc:
+                        logger.warning("WS rejected invalid Google JWT: %s", exc)
+                        await _safe_send_json(
+                            ws,
+                            {
+                                "type": "error",
+                                "message": "Invalid or expired token",
+                            },
+                        )
+                        await ws.close(code=4401)
+                        return
+
+                # Anti-spoofing: if both are present and disagree, the
+                # body lied — refuse.
+                body_email = (raw.get("user_email") or "").strip()
+                if (
+                    verified_email
+                    and body_email
+                    and verified_email.lower() != body_email.lower()
+                ):
+                    await _safe_send_json(
+                        ws,
+                        {"type": "error", "message": "user_email mismatch"},
+                    )
+                    await ws.close(code=4403)
+                    return
+
                 # Rate limiting
-                ws_identifier = raw.get("user_email") or (
-                    ws.client.host if ws.client else "unknown"
+                ws_identifier = (
+                    verified_email
+                    or raw.get("user_email")
+                    or (ws.client.host if ws.client else "unknown")
                 )
                 if await _check_ws_rate_limit(cache, ws_identifier):
                     audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
@@ -642,8 +690,11 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.close(code=4429)
                     return
 
-                # Server-side privacy gate (defense in depth).
-                ws_user_email = raw.get("user_email") or ""
+                # Server-side privacy gate (defense in depth). Prefer the
+                # JWT-verified email when present; body.user_email is now
+                # advisory and only kicks in for legacy BFFs that haven't
+                # been redeployed with the JWT-in-handshake change yet.
+                ws_user_email = verified_email or raw.get("user_email") or ""
                 if ws_user_email:
                     user_repo = await request_scope.get(IUserRepository)
                     try:
@@ -667,16 +718,26 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.close()
                     return
 
-                # H3 fix (defense-in-depth): the WS handshake does NOT yet
-                # validate the Google JWT — body-supplied user_email is the
-                # only identity hint we have. Until Fase 1 wires JWT into
-                # the upgrade path, we at least verify that the requested
-                # conversation_id belongs to the claimed user. A wrong
-                # combination closes 4403; a foreign conv_id whose owner
-                # the attacker happens to also know remains exploitable
-                # until JWT-in-handshake lands.
+                # Round v46 WS JWT-in-handshake (closes H3 residual gap):
+                # conversation_id reads now REQUIRE the JWT-verified email.
+                # Pre-fix an attacker who knew BOTH the victim's email AND
+                # a conversation_id of that user could pass both through
+                # body fields and the planner would happily load the
+                # history. Post-fix the request is refused unless the
+                # caller proved possession of the Google ID token whose
+                # `email` claim matches the conversation's owner.
                 owner_user_id_ws = None
-                if conversation_id and ws_user_email:
+                if conversation_id:
+                    if not verified_email:
+                        await _safe_send_json(
+                            ws,
+                            {
+                                "type": "error",
+                                "message": "conversation_id requires an authenticated user",
+                            },
+                        )
+                        await ws.close(code=4403)
+                        return
                     from uuid import UUID as _UUID
 
                     try:
@@ -689,7 +750,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         return
                     chat_repo_ws = await request_scope.get(IChatRepository)
                     user_repo_ws = await request_scope.get(IUserRepository)
-                    user_ws = await user_repo_ws.get_by_email(ws_user_email)
+                    user_ws = await user_repo_ws.get_by_email(verified_email)
                     conv_ws = (
                         await chat_repo_ws.get_conversation(_conv_uuid, user_id=user_ws.id)
                         if user_ws
@@ -702,6 +763,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         )
                         await ws.close(code=4403)
                         return
+                    owner_user_id_ws = user_ws.id
                     owner_user_id_ws = user_ws.id
 
                 initial_state: OpenArgState = {
