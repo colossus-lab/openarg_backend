@@ -23,7 +23,9 @@ def _req(state_attrs: dict, *, client_host: str = "10.0.0.1"):
     state = SimpleNamespace(**state_attrs)
     client = SimpleNamespace(host=client_host)
     # slowapi.util.get_remote_address reads request.client.host
-    return SimpleNamespace(state=state, client=client, headers={}, scope={"client": (client_host, 0)})
+    return SimpleNamespace(
+        state=state, client=client, headers={}, scope={"client": (client_host, 0)}
+    )
 
 
 def test_prefers_user_email_when_jwt_middleware_set_it():

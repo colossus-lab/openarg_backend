@@ -77,7 +77,9 @@ class DiscoveredResource:
     source_id: str
     canonical_title: str
     display_name: str
-    materialization_status: str  # 'pending'|'ready'|'live_api'|'non_tabular'|'materialization_corrupted'|'failed'
+    materialization_status: (
+        str  # 'pending'|'ready'|'live_api'|'non_tabular'|'materialization_corrupted'|'failed'
+    )
     materialized_table_name: str | None
     resource_kind: str
     score: float = 0.0
@@ -137,9 +139,7 @@ class CatalogDiscovery:
         eng = self._eng()
         try:
             with eng.connect() as conn:
-                rows = conn.execute(
-                    _KEYWORD_SQL, {"pat": f"%{query.strip()}%", "k": k}
-                ).fetchall()
+                rows = conn.execute(_KEYWORD_SQL, {"pat": f"%{query.strip()}%", "k": k}).fetchall()
         except Exception:
             logger.exception("catalog_discovery.find_by_text failed")
             return []

@@ -40,8 +40,7 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MARTS_DIR = Path(
-    os.getenv("OPENARG_MARTS_DIR")
-    or Path(__file__).resolve().parents[5] / "config" / "marts"
+    os.getenv("OPENARG_MARTS_DIR") or Path(__file__).resolve().parents[5] / "config" / "marts"
 )
 
 
@@ -223,17 +222,20 @@ def _upsert_mart_definition(
         coverage_parts: list[str] = []
         try:
             from app.application.marts.builder import _TEMPORAL_COL_RE  # type: ignore
+
             with engine.connect() as cov_conn:
                 for c in mart.canonical_columns:
                     if not _TEMPORAL_COL_RE.search(c.name):
                         continue
                     qualified = f'{mart.schema_name}."{mart.view_name}"'
                     col_q = f'"{c.name}"'
-                    row = cov_conn.execute(text(
-                        f"SELECT MIN({col_q}::text) AS lo, "
-                        f"       MAX({col_q}::text) AS hi "
-                        f"FROM {qualified} WHERE {col_q} IS NOT NULL"
-                    )).fetchone()
+                    row = cov_conn.execute(
+                        text(
+                            f"SELECT MIN({col_q}::text) AS lo, "
+                            f"       MAX({col_q}::text) AS hi "
+                            f"FROM {qualified} WHERE {col_q} IS NOT NULL"
+                        )
+                    ).fetchone()
                     if row and row.lo and row.hi:
                         coverage_parts.append(f"{c.name} [{row.lo[:10]} .. {row.hi[:10]}]")
         except Exception:
@@ -415,7 +417,7 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
             with engine.connect() as conn:
                 row_count = int(
                     conn.execute(
-                        text(f'SELECT COUNT(*) FROM {mart.qualified_name}')  # noqa: S608
+                        text(f"SELECT COUNT(*) FROM {mart.qualified_name}")  # noqa: S608
                     ).scalar()
                     or 0
                 )
@@ -458,9 +460,7 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
         return {"status": "built", "mart_id": mart_id, "statements": len(statements)}
     finally:
         try:
-            lock_conn.execute(
-                text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key}
-            )
+            lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
         except Exception:
             # Lock release failure leaves the session lock until the
             # conn is GC'd — surface it as a warning so it gets noticed.
@@ -529,9 +529,7 @@ def refresh_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
 
         with engine.connect() as conn:
             prior = conn.execute(
-                text(
-                    "SELECT sql_definition FROM mart_definitions WHERE mart_id = :id"
-                ),
+                text("SELECT sql_definition FROM mart_definitions WHERE mart_id = :id"),
                 {"id": mart_id},
             ).fetchone()
             view_exists = conn.execute(
@@ -549,15 +547,11 @@ def refresh_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
             or prior is None
             or _normalize_sql(prior.sql_definition) != _normalize_sql(resolved_sql)
         ):
-            logger.info(
-                "refresh_mart %s: view missing or SQL changed → full build_mart", mart_id
-            )
+            logger.info("refresh_mart %s: view missing or SQL changed → full build_mart", mart_id)
             # Release our lock before calling build_mart.run, since
             # build_mart will try to take its own lock on the same key.
             try:
-                lock_conn.execute(
-                    text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key}
-                )
+                lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
             except Exception:
                 pass
             lock_conn.close()
@@ -604,9 +598,7 @@ def refresh_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
         return {"status": "refreshed", "mart_id": mart_id, "row_count": row_count}
     finally:
         try:
-            lock_conn.execute(
-                text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key}
-            )
+            lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
         except Exception:
             pass
         try:
@@ -665,10 +657,7 @@ def refresh_via_b_marts(self, *, marts_dir: str | None = None) -> dict:
         logger.exception("refresh_via_b_marts: failed to load mart YAMLs")
         return {"status": "load_failed", "dispatched": 0}
 
-    targets = [
-        m.id for m in marts
-        if any(p in via_b_portals for p in m.source_portals)
-    ]
+    targets = [m.id for m in marts if any(p in via_b_portals for p in m.source_portals)]
 
     dispatched = 0
     for mart_id in targets:
@@ -728,9 +717,7 @@ def backfill_mart_embeddings(
 
     where_clause = "WHERE embedding IS NULL" if only_missing else ""
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(f"SELECT mart_id FROM mart_definitions {where_clause}")
-        ).fetchall()
+        rows = conn.execute(text(f"SELECT mart_id FROM mart_definitions {where_clause}")).fetchall()
     targets = [r.mart_id for r in rows]
 
     updated = 0
@@ -747,9 +734,7 @@ def backfill_mart_embeddings(
             if embedding_vec is None:
                 failed.append(f"{mart_id}:embedding_failed")
                 continue
-            embedding_literal = (
-                "[" + ",".join(repr(float(v)) for v in embedding_vec) + "]"
-            )
+            embedding_literal = "[" + ",".join(repr(float(v)) for v in embedding_vec) + "]"
             with engine.begin() as conn:
                 conn.execute(
                     text(

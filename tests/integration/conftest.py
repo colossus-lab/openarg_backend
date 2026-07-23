@@ -184,7 +184,6 @@ class MockProvider(Provider):
         mock.revoke = AsyncMock()
         return mock
 
-
     @provide
     def pipeline_deps(
         self,

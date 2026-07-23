@@ -29,15 +29,9 @@ def test_physical_name_is_idempotent():
 
 def test_three_collision_cases_from_prod_get_distinct_names():
     """The three real cases from collector_plan WS4."""
-    a = physical_table_name(
-        "datos_gob_ar", "indicadores_de_evolucion_del_sector_externo_long_a"
-    )
-    b = physical_table_name(
-        "datos_gob_ar", "inase_establecimientos_vigentes_inscripto_largo_b"
-    )
-    c = physical_table_name(
-        "datos_gob_ar", "lacteos_estimacion_de_la_distribucion_largo_caso_c"
-    )
+    a = physical_table_name("datos_gob_ar", "indicadores_de_evolucion_del_sector_externo_long_a")
+    b = physical_table_name("datos_gob_ar", "inase_establecimientos_vigentes_inscripto_largo_b")
+    c = physical_table_name("datos_gob_ar", "lacteos_estimacion_de_la_distribucion_largo_caso_c")
     assert a != b != c
     # And they all fit
     assert max(len(x) for x in (a, b, c)) <= MAX_TABLE_NAME_LENGTH
@@ -50,9 +44,7 @@ def test_same_resource_different_words_have_different_discriminators():
 
 
 def test_table_name_charset_is_safe():
-    name = physical_table_name(
-        "datos_córdoba", "Áéíóú niños & números — 2024  ¿? !"
-    )
+    name = physical_table_name("datos_córdoba", "Áéíóú niños & números — 2024  ¿? !")
     # Must be only [a-z0-9_]
     assert all(c.isalnum() or c == "_" for c in name), name
     assert name.islower() or name.replace("_", "").isalnum()

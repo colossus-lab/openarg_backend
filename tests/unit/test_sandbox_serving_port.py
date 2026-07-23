@@ -25,9 +25,7 @@ from app.infrastructure.monitoring.metrics import MetricsCollector
 
 
 def _r(rid: str, layer: ServingLayer, title: str = "") -> Resource:
-    return Resource(
-        resource_id=rid, title=title or rid, layer=layer, domain="test"
-    )
+    return Resource(resource_id=rid, title=title or rid, layer=layer, domain="test")
 
 
 # ── _join_hint_blocks ─────────────────────────────────────────────────────
@@ -277,9 +275,7 @@ async def test_discover_catalog_hints_reranks_legacy_block_when_flag_on(
         limit=5,
     )
 
-    first_data_line = next(
-        line for line in result.splitlines() if line.startswith("  - ")
-    )
+    first_data_line = next(line for line in result.splitlines() if line.startswith("  - "))
     assert "cache_dolar_blue" in first_data_line
 
     metrics = MetricsCollector().get_metrics()
@@ -359,9 +355,7 @@ async def test_discover_catalog_hints_shadow_mode_preserves_base_order(
         limit=5,
     )
 
-    first_data_line = next(
-        line for line in result.splitlines() if line.startswith("  - ")
-    )
+    first_data_line = next(line for line in result.splitlines() if line.startswith("  - "))
     assert "cache_ipc" in first_data_line
 
     metrics = MetricsCollector().get_metrics()

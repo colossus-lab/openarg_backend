@@ -80,9 +80,7 @@ class TitleExtractor:
         # 1. Explicit index entry — highest confidence.
         index_title = _normalize(ctx.get("index_title"))
         if _looks_like_title(index_title):
-            return self._build(
-                ctx, raw=index_title, source=TitleSource.INDEX, confidence=0.95
-            )
+            return self._build(ctx, raw=index_title, source=TitleSource.INDEX, confidence=0.95)
 
         # 2. Caratula / first-rows title block.
         caratula_title = _normalize(ctx.get("caratula_title"))
@@ -96,7 +94,9 @@ class TitleExtractor:
         sheet = _normalize(ctx.get("sheet_name"))
         cuadro = _normalize(ctx.get("cuadro_numero"))
         provincia = _normalize(ctx.get("provincia"))
-        parts = [p for p in (dataset_title, sheet, f"Cuadro {cuadro}" if cuadro else "", provincia) if p]
+        parts = [
+            p for p in (dataset_title, sheet, f"Cuadro {cuadro}" if cuadro else "", provincia) if p
+        ]
         if dataset_title:
             return self._build(
                 ctx,
@@ -111,9 +111,7 @@ class TitleExtractor:
         stem = filename or sub_path or _normalize(ctx.get("source_id")) or "untitled"
         # strip extension if present
         stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", stem)
-        return self._build(
-            ctx, raw=_normalize(stem), source=TitleSource.FALLBACK, confidence=0.2
-        )
+        return self._build(ctx, raw=_normalize(stem), source=TitleSource.FALLBACK, confidence=0.2)
 
     def _build(
         self,

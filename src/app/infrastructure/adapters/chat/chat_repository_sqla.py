@@ -48,9 +48,7 @@ class ChatRepositorySQLA(IChatRepository):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def delete_conversation(
-        self, conversation_id: UUID, user_id: UUID | None = None
-    ) -> bool:
+    async def delete_conversation(self, conversation_id: UUID, user_id: UUID | None = None) -> bool:
         conv = await self.get_conversation(conversation_id, user_id=user_id)
         if not conv:
             return False
@@ -64,11 +62,7 @@ class ChatRepositorySQLA(IChatRepository):
         where_clause = [Conversation.id == conversation_id]
         if user_id is not None:
             where_clause.append(Conversation.user_id == user_id)
-        stmt = (
-            update(Conversation)
-            .where(*where_clause)
-            .values(title=title, updated_at=func.now())
-        )
+        stmt = update(Conversation).where(*where_clause).values(title=title, updated_at=func.now())
         result = await self._session.execute(stmt)
         await self._session.commit()
         if result.rowcount == 0:

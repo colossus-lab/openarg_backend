@@ -22,8 +22,17 @@ def test_year_over_quarter_layout():
     df = pd.DataFrame(
         [
             ["", "2003", "", "", "", "2004", "", "", ""],
-            ["", "1° trimestre", "2° trimestre", "3° trimestre", "4° trimestre",
-             "1° trimestre", "2° trimestre", "3° trimestre", "4° trimestre"],
+            [
+                "",
+                "1° trimestre",
+                "2° trimestre",
+                "3° trimestre",
+                "4° trimestre",
+                "1° trimestre",
+                "2° trimestre",
+                "3° trimestre",
+                "4° trimestre",
+            ],
             ["Tasa", 35.0, 36.0, 37.0, 38.0, 35.5, 36.5, 37.5, 38.5],
         ]
     )

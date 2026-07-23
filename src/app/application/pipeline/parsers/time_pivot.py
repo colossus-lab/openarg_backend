@@ -65,9 +65,7 @@ def time_column_ratio(cols: list[str]) -> float:
     return sum(1 for c in cols if is_time_column(c)) / len(cols)
 
 
-def unpivot_if_time_pivoted(
-    df: pd.DataFrame, *, pivot_threshold: float = 0.50
-) -> pd.DataFrame:
+def unpivot_if_time_pivoted(df: pd.DataFrame, *, pivot_threshold: float = 0.50) -> pd.DataFrame:
     """Detect and unpivot a wide time-pivoted layout to long format.
 
     Wide shape: one row per concept (region, indicator, etc.) and one column

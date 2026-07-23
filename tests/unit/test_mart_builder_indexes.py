@@ -29,9 +29,7 @@ def _mart(view: str, cols: list[tuple[str, str]], unique_index: list[str] | None
         domain="test",
         source_portals=[],
         source_resource_patterns=[],
-        canonical_columns=[
-            MartCanonicalColumn(name=n, type=t, description="") for n, t in cols
-        ],
+        canonical_columns=[MartCanonicalColumn(name=n, type=t, description="") for n, t in cols],
         sql="SELECT 1",
         refresh=MartRefreshPolicy(policy="manual", unique_index=unique_index or []),
     )
@@ -69,19 +67,35 @@ class TestIndexableColumn:
     def test_semantic_filter_columns(self) -> None:
         # Verified hot via pg_stat_statements in v4.6 migration.
         for name in [
-            "tipo", "subtipo", "categoria", "categoría",
-            "estado", "fuero", "franja", "estacion", "estación",
-            "tipo_de_mediacion", "resultado_mediacion",
-            "tipo_vehiculo", "sector", "rubro",
-            "tipo_persona", "estado_civil",
+            "tipo",
+            "subtipo",
+            "categoria",
+            "categoría",
+            "estado",
+            "fuero",
+            "franja",
+            "estacion",
+            "estación",
+            "tipo_de_mediacion",
+            "resultado_mediacion",
+            "tipo_vehiculo",
+            "sector",
+            "rubro",
+            "tipo_persona",
+            "estado_civil",
         ]:
             assert _is_indexable_column(name), name
 
     def test_semantic_does_not_overmatch(self) -> None:
         # These should NOT be flagged — too generic / not actual discriminators.
         for name in [
-            "descripcion", "observaciones", "comentarios",
-            "url", "link", "telefono", "email",
+            "descripcion",
+            "observaciones",
+            "comentarios",
+            "url",
+            "link",
+            "telefono",
+            "email",
             "razon_social",  # text-search candidate, separate trigram path
         ]:
             assert not _is_indexable_column(name), name
@@ -91,8 +105,14 @@ class TestBuildIndexSql:
     def test_emits_index_per_matched_column(self) -> None:
         mart = _mart(
             "delitos_caba",
-            [("anio", "text"), ("mes", "text"), ("fecha", "text"),
-             ("barrio", "text"), ("comuna", "text"), ("tipo", "text")],
+            [
+                ("anio", "text"),
+                ("mes", "text"),
+                ("fecha", "text"),
+                ("barrio", "text"),
+                ("comuna", "text"),
+                ("tipo", "text"),
+            ],
         )
         sql_list = build_index_sql(mart)
         # 6 indexable cols including `tipo` (semantic pattern added in v4.6).

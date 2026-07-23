@@ -501,7 +501,9 @@ class TestCollectorP2:
 
     def test_is_transient_collect_error_detects_remote_protocol_errors(self):
         assert _is_transient_collect_error(
-            httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+            httpx.RemoteProtocolError(
+                "peer closed connection without sending complete message body"
+            )
         )
         assert not _is_transient_collect_error(ValueError("bad_zip_file"))
 
@@ -576,12 +578,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         nested_zip_path = tmp_path / "nested.zip"
         outer_zip_path = tmp_path / "outer.zip"
@@ -671,12 +671,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         nested_one = tmp_path / "sepa_a.zip"
         nested_two = tmp_path / "sepa_b.zip"
@@ -729,12 +727,10 @@ class TestCollectorP2:
         import pandas as pd
 
         mock_read_csv.return_value = pd.DataFrame({"id": [1], "nombre": ["Alpha"]})
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         mock_load_csv_chunked.return_value = (
             2,
@@ -760,7 +756,9 @@ class TestCollectorP2:
         assert mock_read_csv.call_args.kwargs["nrows"] == _ZIP_CSV_PREVIEW_ROWS
         assert mock_load_csv_chunked.call_count == 1
         assert mock_load_csv_chunked.call_args.args[0].endswith(".csv")
-        assert mock_load_csv_chunked.call_args.kwargs["chunk_size"] == _csv_chunk_size_for_columns(3)
+        assert mock_load_csv_chunked.call_args.kwargs["chunk_size"] == _csv_chunk_size_for_columns(
+            3
+        )
         assert mock_load_csv_chunked.call_args.kwargs["source_dataset_id"] == (
             "11111111-1111-1111-1111-111111111111"
         )
@@ -774,12 +772,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         nested_one = tmp_path / "sepa_a.zip"
         nested_two = tmp_path / "sepa_b.zip"
@@ -1007,12 +1003,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         geojson_nested_path = tmp_path / "geojson_nested.zip"
         kml_nested_path = tmp_path / "kml_nested.zip"
@@ -1752,7 +1746,9 @@ class TestCollectorP2:
         mock_get_engine.return_value = mock_engine
 
         with (
-            patch("app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding.delay") as mock_index_delay,
+            patch(
+                "app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding.delay"
+            ) as mock_index_delay,
             patch(
                 "app.infrastructure.celery.tasks.catalog_enrichment_tasks.enrich_single_table.delay"
             ) as mock_enrich_delay,

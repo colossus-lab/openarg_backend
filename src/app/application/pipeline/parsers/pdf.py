@@ -71,10 +71,7 @@ def _table_to_dataframe(
     """
     if not raw_table or len(raw_table) <= header_row_index:
         return None
-    cleaned = [
-        [_normalize_cell(c) for c in row]
-        for row in raw_table
-    ]
+    cleaned = [[_normalize_cell(c) for c in row] for row in raw_table]
     # Pad short rows so columns align.
     max_cols = max(len(r) for r in cleaned) if cleaned else 0
     if max_cols < _MIN_COLUMNS:
@@ -103,9 +100,7 @@ def extract_tables_from_pdf(path: str) -> list[pd.DataFrame]:
     document). Raises `PdfParserError` if the PDF can't be opened.
     """
     if not _HAS_PDFPLUMBER:
-        raise PdfParserError(
-            "pdfplumber not installed — add to dependencies before using"
-        )
+        raise PdfParserError("pdfplumber not installed — add to dependencies before using")
     tables: list[pd.DataFrame] = []
     try:
         with pdfplumber.open(path) as pdf:

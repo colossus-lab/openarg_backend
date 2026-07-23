@@ -76,7 +76,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.8.0",
+    # Pinned: ruff's formatter changes style across releases; an unpinned
+    # range makes CI's format gate drift red without any code change.
+    "ruff==0.15.22",
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
     # Type stubs (required by mypy for `import yaml` and `dateutil`)

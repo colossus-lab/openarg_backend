@@ -85,9 +85,7 @@ def planner_candidate_from_serving_resource(resource: Resource) -> PlannerCandid
     }
     kind = kind_by_layer.get(resource.layer, "logical_resource")
     queryability = (
-        "requires_connector"
-        if resource.layer == ServingLayer.CONNECTOR_LIVE_API
-        else "direct_sql"
+        "requires_connector" if resource.layer == ServingLayer.CONNECTOR_LIVE_API else "direct_sql"
     )
     return PlannerCandidate(
         candidate_id=f"resource:{resource.resource_id}",
@@ -184,9 +182,7 @@ def dedupe_candidates(candidates: list[PlannerCandidate]) -> list[PlannerCandida
     return out
 
 
-def limit_candidates(
-    candidates: list[PlannerCandidate], *, limit: int
-) -> list[PlannerCandidate]:
+def limit_candidates(candidates: list[PlannerCandidate], *, limit: int) -> list[PlannerCandidate]:
     if limit < 1:
         return []
     return candidates[:limit]
@@ -210,4 +206,3 @@ def collect_planner_candidates(
     if limit is None:
         return deduped
     return limit_candidates(deduped, limit=limit)
-

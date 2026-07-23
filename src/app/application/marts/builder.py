@@ -91,9 +91,7 @@ def build_create_view_sql(mart: Mart) -> list[str]:
     # Materialized views can't be CREATE OR REPLACE; we DROP + CREATE.
     # `IF EXISTS` so first-time builds are idempotent.
     statements.append(f"DROP MATERIALIZED VIEW IF EXISTS {qualified} CASCADE")
-    statements.append(
-        f"CREATE MATERIALIZED VIEW {qualified} AS\n{mart.sql.rstrip(';')}"
-    )
+    statements.append(f"CREATE MATERIALIZED VIEW {qualified} AS\n{mart.sql.rstrip(';')}")
 
     if mart.refresh.unique_index:
         idx_cols = ", ".join(_quoted(c) for c in mart.refresh.unique_index)
@@ -150,9 +148,7 @@ def build_comment_sql(mart: Mart) -> list[str]:
         if not col.description:
             continue
         body = col.description.replace("'", "''")
-        statements.append(
-            f"COMMENT ON COLUMN {qualified}.{_quoted(col.name)} IS '{body}'"
-        )
+        statements.append(f"COMMENT ON COLUMN {qualified}.{_quoted(col.name)} IS '{body}'")
     return statements
 
 

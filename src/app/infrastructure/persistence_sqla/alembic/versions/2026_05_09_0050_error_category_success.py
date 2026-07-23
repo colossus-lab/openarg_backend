@@ -101,8 +101,7 @@ def downgrade() -> None:
     # Revert success rows back to unknown so the constraint rollback works.
     bind.execute(
         text_op(
-            "UPDATE cached_datasets SET error_category = 'unknown' "
-            "WHERE error_category = 'success'"
+            "UPDATE cached_datasets SET error_category = 'unknown' WHERE error_category = 'success'"
         )
     )
     bind.execute(

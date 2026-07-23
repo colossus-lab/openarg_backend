@@ -169,16 +169,11 @@ async def dispatch_step(
     # if a `search_ckan` step slips through AND a strong mart covers the
     # question, redirect to the sandbox/mart path. No mart → low score →
     # no redirect → `search_ckan` runs normally (live-only topics intact).
-    if (
-        step.action == "search_ckan"
-        and nl_query.strip()
-        and deps.sandbox is not None
-    ):
+    if step.action == "search_ckan" and nl_query.strip() and deps.sandbox is not None:
         mart_sim = await _top_mart_similarity(nl_query, deps)
         if mart_sim >= _MART_REDIRECT_THRESHOLD:
             logger.info(
-                "BUG-001: redirecting search_ckan step → sandbox/mart "
-                "(top mart sim=%.3f >= %.2f)",
+                "BUG-001: redirecting search_ckan step → sandbox/mart (top mart sim=%.3f >= %.2f)",
                 mart_sim,
                 _MART_REDIRECT_THRESHOLD,
             )
@@ -344,9 +339,7 @@ async def execute_steps(
                     _MART_REDIRECT_THRESHOLD,
                 )
         except Exception:
-            logger.debug(
-                "BUG-001 Capa 1 (execute_steps) check failed", exc_info=True
-            )
+            logger.debug("BUG-001 Capa 1 (execute_steps) check failed", exc_info=True)
 
     if not steps:
         return results, warnings

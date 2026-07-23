@@ -18,7 +18,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("messages", sa.Column("ui_trace", postgresql.JSONB(astext_type=sa.Text()), nullable=True))
+    op.add_column(
+        "messages", sa.Column("ui_trace", postgresql.JSONB(astext_type=sa.Text()), nullable=True)
+    )
 
 
 def downgrade() -> None:

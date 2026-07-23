@@ -27,10 +27,7 @@ from app.infrastructure.celery.app import celery_app
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DBT_DIR = Path(
-    os.getenv("OPENARG_DBT_DIR")
-    or Path(__file__).resolve().parents[5] / "dbt"
-)
+_DEFAULT_DBT_DIR = Path(os.getenv("OPENARG_DBT_DIR") or Path(__file__).resolve().parents[5] / "dbt")
 _DEFAULT_TARGET = os.getenv("OPENARG_DBT_TARGET", "dev")
 
 

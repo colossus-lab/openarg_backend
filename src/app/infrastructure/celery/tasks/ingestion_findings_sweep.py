@@ -296,7 +296,9 @@ def retrospective_sweep(self, *, max_batches: int | None = None) -> dict:
                 break
             for row in batch:
                 cols_real = _materialized_columns(engine, row["table_name"])
-                rows_real = _materialized_row_count(engine, row["table_name"]) if cols_real else None
+                rows_real = (
+                    _materialized_row_count(engine, row["table_name"]) if cols_real else None
+                )
                 findings = validate_retrospective(
                     engine,
                     dataset_id=row["dataset_id"],

@@ -91,9 +91,7 @@ class LegacyServingAdapter(IServingPort):
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
-    async def _expected_relation_for_resource(
-        self, resource_id: str
-    ) -> tuple[str, str]:
+    async def _expected_relation_for_resource(self, resource_id: str) -> tuple[str, str]:
         if resource_id.startswith("mart::"):
             mart_id = resource_id[len("mart::") :]
             async with self._engine.connect() as conn:
@@ -169,9 +167,7 @@ class LegacyServingAdapter(IServingPort):
             # floor. Without it, off-topic queries like "recetas de cocina"
             # surfaced top-5 raws unrelated to the question, polluting the
             # planner's hint set. Calibrated 2026-05-09.
-            min_sim_raws = float(
-                os.getenv("OPENARG_RAW_DISCOVER_MIN_SIM", "0.45")
-            )
+            min_sim_raws = float(os.getenv("OPENARG_RAW_DISCOVER_MIN_SIM", "0.45"))
             vec_sql = (
                 "SELECT resource_identity, "
                 "       COALESCE(canonical_title, raw_title) AS title, "
@@ -198,9 +194,7 @@ class LegacyServingAdapter(IServingPort):
                     if rid in seen_ids:
                         continue
                     seen_ids.add(rid)
-                    schema_name, _ = _parse_qualified_name(
-                        row.materialized_table_name or ""
-                    )
+                    schema_name, _ = _parse_qualified_name(row.materialized_table_name or "")
                     results.append(
                         Resource(
                             resource_id=rid,
@@ -216,9 +210,7 @@ class LegacyServingAdapter(IServingPort):
             except (ProgrammingError, OperationalError) as exc:
                 # Tabla sin columna `embedding` o pgvector no instalado
                 # (defensive). Caemos al lexical path.
-                logger.warning(
-                    "discover: vector path degraded to lexical: %s", exc
-                )
+                logger.warning("discover: vector path degraded to lexical: %s", exc)
             remaining = limit - len(results)
 
             # When the caller provided an embedding and BOTH the marts vector
@@ -230,9 +222,10 @@ class LegacyServingAdapter(IServingPort):
             # noise (e.g. "capital de Francia" lexically matching a budget
             # mart's description because the word "capital" appears in
             # "gastos de capital"). Calibrated 2026-05-09.
-            if not results and os.getenv(
-                "OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0"
-            ) != "1":
+            if (
+                not results
+                and os.getenv("OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0") != "1"
+            ):
                 return []
 
         # Lexical fallback: ILIKE sobre canonical_title/raw_title cuando el
@@ -315,18 +308,14 @@ class LegacyServingAdapter(IServingPort):
                 "  AND COALESCE(last_row_count, 0) > 0 "
                 "  AND 1 - (embedding <=> CAST(:vec AS vector)) >= :min_sim "
             )
-            vec_params["min_sim"] = float(
-                os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45")
-            )
+            vec_params["min_sim"] = float(os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45"))
             if domain:
                 vec_sql += "AND domain = :domain "
                 vec_params["domain"] = domain
             if portal:
                 vec_sql += "AND :portal = ANY(source_portals) "
                 vec_params["portal"] = portal
-            vec_sql += (
-                "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
-            )
+            vec_sql += "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
             try:
                 async with self._engine.connect() as conn:
                     rs = await conn.execute(text(vec_sql), vec_params)
@@ -355,9 +344,7 @@ class LegacyServingAdapter(IServingPort):
             # "capital" against "gastos de capital" in a budget mart's
             # description re-introduces the misroute the threshold was
             # added to prevent. Calibrated 2026-05-09 / spec 016.
-            if os.getenv(
-                "OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0"
-            ) != "1":
+            if os.getenv("OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0") != "1":
                 return []
             # If vector returned 0 rows, fall through to lexical.
 
@@ -366,8 +353,24 @@ class LegacyServingAdapter(IServingPort):
         # chars becomes its own ILIKE clause OR-joined. 3 (not 4) so
         # short domain words like "gas", "ipc", "pbi" still match.
         # Common stopwords are filtered to keep the LIKE list small.
-        _STOP = {"que", "los", "las", "del", "para", "como", "una", "uno",
-                 "este", "esta", "esto", "con", "por", "sin", "sus", "fue"}
+        _STOP = {
+            "que",
+            "los",
+            "las",
+            "del",
+            "para",
+            "como",
+            "una",
+            "uno",
+            "este",
+            "esta",
+            "esto",
+            "con",
+            "por",
+            "sin",
+            "sus",
+            "fue",
+        }
         words = [
             w.lower()
             for w in re.findall(r"[\wáéíóúñÁÉÍÓÚÑ]+", query_text)
@@ -424,9 +427,7 @@ class LegacyServingAdapter(IServingPort):
             # degrade to "no marts" so the rest of the discovery flow can
             # still serve from `catalog_resources`. Anything else (bug in
             # this module's SQL building, type errors, etc.) MUST surface.
-            logger.warning(
-                "_discover_marts degraded to empty: %s", exc, exc_info=True
-            )
+            logger.warning("_discover_marts degraded to empty: %s", exc, exc_info=True)
             return []
 
         return [
@@ -445,13 +446,13 @@ class LegacyServingAdapter(IServingPort):
         # Mart resources are addressed as `mart::<mart_id>` from
         # `_discover_marts`. Resolve to `mart.<view_name>` directly.
         if resource_id.startswith("mart::"):
-            return await self._get_mart_schema(resource_id[len("mart::"):])
+            return await self._get_mart_schema(resource_id[len("mart::") :])
         # Raw resources coming from the NL2SQL serving path are currently
         # addressed as `raw::<bare_table_name>`. Resolve them directly from
         # `information_schema` so execution can stay on the serving path
         # without requiring a prior catalog identity lookup.
         if resource_id.startswith("raw::"):
-            return await self._get_raw_schema(resource_id[len("raw::"):])
+            return await self._get_raw_schema(resource_id[len("raw::") :])
 
         async with self._engine.connect() as conn:
             cat = await conn.execute(
@@ -524,9 +525,7 @@ class LegacyServingAdapter(IServingPort):
                     f"mart::{mart_id} (view {mart_row.mart_schema}.{mart_row.mart_view_name} missing)"
                 )
 
-        semantics = {
-            r.column_name: str(r.comment) for r in col_rows if getattr(r, "comment", None)
-        }
+        semantics = {r.column_name: str(r.comment) for r in col_rows if getattr(r, "comment", None)}
         return Schema(
             columns=[r.column_name for r in col_rows],
             column_types={r.column_name: r.data_type for r in col_rows},
@@ -573,9 +572,7 @@ class LegacyServingAdapter(IServingPort):
         # reference is the expected one. is_pure_select_for_relation
         # walks every exp.Table and rejects any out-of-scope reference
         # or any reference to an internal blocklist table.
-        expected_schema, expected_table = await self._expected_relation_for_resource(
-            resource_id
-        )
+        expected_schema, expected_table = await self._expected_relation_for_resource(resource_id)
         ok, reason = is_pure_select_for_relation(
             sql,
             expected_schema=expected_schema,
@@ -586,9 +583,7 @@ class LegacyServingAdapter(IServingPort):
             # Two reason classes flow through the same gate now; preserve
             # the historical exception types so callers / clients keep
             # their existing error handling.
-            if reason.startswith("out-of-scope") or reason.startswith(
-                "forbidden table"
-            ):
+            if reason.startswith("out-of-scope") or reason.startswith("forbidden table"):
                 raise QueryResourceMismatchError(
                     f"{resource_id} expects {expected_schema}.{expected_table}: {reason}"
                 )

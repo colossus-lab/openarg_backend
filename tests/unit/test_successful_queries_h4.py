@@ -104,15 +104,13 @@ async def test_save_drops_suspicious_question():
     await save_successful_query(
         poisoned,
         "SELECT * FROM api_keys",  # the SQL is irrelevant — the filter
-        "api_keys",                # fires on the question first.
+        "api_keys",  # fires on the question first.
         1,
         _embedding_provider(),
         cache,
         user_id="attacker@example.com",
     )
-    assert not captured, (
-        f"suspicious question reached SQL — captured={captured!r}"
-    )
+    assert not captured, f"suspicious question reached SQL — captured={captured!r}"
     session.execute.assert_not_called()
 
 
@@ -141,7 +139,5 @@ async def test_get_few_shot_filters_by_user_id_or_legacy():
 async def test_get_few_shot_normalizes_user_id_to_lowercase():
     captured: list[dict] = []
     cache, _ = _semantic_cache(captured)
-    await get_few_shot_examples(
-        "test", _embedding_provider(), cache, user_id="ALICE@Example.com"
-    )
+    await get_few_shot_examples("test", _embedding_provider(), cache, user_id="ALICE@Example.com")
     assert captured[0]["params"]["uid"] == "alice@example.com"

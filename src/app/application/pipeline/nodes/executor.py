@@ -73,9 +73,7 @@ async def inject_fallbacks_node(state: OpenArgState) -> dict:
                 )
 
                 deps = nodes_pkg.get_deps()
-                probe_deps = SimpleNamespace(
-                    sandbox=deps.sandbox, embedding=deps.embedding
-                )
+                probe_deps = SimpleNamespace(sandbox=deps.sandbox, embedding=deps.embedding)
                 sim = await _top_mart_similarity(preprocessed_q, probe_deps)
                 if sim >= _MART_REDIRECT_THRESHOLD:
                     dropped = [s for s in plan.steps if s.action == "search_ckan"]
@@ -88,9 +86,7 @@ async def inject_fallbacks_node(state: OpenArgState) -> dict:
                         _MART_REDIRECT_THRESHOLD,
                     )
             except Exception:
-                logger.debug(
-                    "BUG-001 Capa 1 strip-ckan check failed", exc_info=True
-                )
+                logger.debug("BUG-001 Capa 1 strip-ckan check failed", exc_info=True)
 
         return {"plan": plan}
     except Exception:

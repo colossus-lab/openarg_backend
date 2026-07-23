@@ -85,10 +85,7 @@ async def cache_reply_node(state: OpenArgState) -> dict:
             "cache_reply_node: empty cached answer for question=%r",
             state.get("question", "")[:120],
         )
-        clean_answer = (
-            "No tengo una respuesta guardada para esa consulta. "
-            "Probá reformulándola."
-        )
+        clean_answer = "No tengo una respuesta guardada para esa consulta. Probá reformulándola."
 
     # BUG-016/017: log every terminal exit to query_analytics (best-effort —
     # telemetry must never break the response path).

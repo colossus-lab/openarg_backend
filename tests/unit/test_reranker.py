@@ -169,9 +169,7 @@ class TestRerankFallback:
 
 
 class TestPlannerCandidateRerank:
-    async def test_rerank_reorders_candidates(
-        self, planner_reranker, llm_mock, sample_candidates
-    ):
+    async def test_rerank_reorders_candidates(self, planner_reranker, llm_mock, sample_candidates):
         llm_mock.chat.return_value = FakeLLMResponse(content="[2, 0, 1]")
         result = await planner_reranker.rerank("dólar blue", sample_candidates)
         assert result[0].table_name == "cache_c"
