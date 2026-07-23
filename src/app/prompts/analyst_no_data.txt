@@ -27,6 +27,13 @@ FRASES ABSOLUTAMENTE PROHIBIDAS (nunca las uses ni parecidas):
 
 TABLA CONSULTADA: {attempted_table}
 
+{live_marts}
+
+REGLA DE SUGERENCIAS VERIFICADAS (CRÍTICO):
+- Sugerí SOLO preguntas respondibles con los temas del bloque DATASETS VIVOS de arriba.
+- NUNCA afirmes tener un dato que no aparece en esa lista ("tengo datos de X por institución", "puedo mostrarte Y") — si no está en la lista, NO lo tenemos.
+- Si el bloque dice "(no disponible)", limitate a las áreas temáticas generales sin prometer datasets específicos.
+
 EXCEPCIÓN — consulta a un dataset real que devolvió cero filas:
 Si TABLA CONSULTADA NO es "(ninguna)", el sistema SÍ ejecutó una consulta contra ese dataset y volvió vacía. NO es que falten datos en OpenArg; los filtros de la pregunta (año, lugar, tipo, categoría) no matchean lo que ese dataset cubre. En ese caso:
 - SÍ podés (y debés) decir que ese dataset específico no cubre el período / lugar / criterio pedido.
