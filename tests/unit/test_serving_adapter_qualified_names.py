@@ -14,13 +14,22 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.application.common.sql_safety import is_pure_select_for_relation
 from app.domain.entities.serving import Schema, ServingLayer
 from app.domain.ports.serving.serving_port import QueryResourceMismatchError
 from app.infrastructure.adapters.serving.legacy_serving_adapter import (
     LegacyServingAdapter,
     _parse_qualified_name,
-    _sql_references_relation,
 )
+
+
+def _ok(sql: str, schema: str, table: str) -> bool:
+    """Thin wrapper that adapts the new tuple-returning helper to the
+    boolean semantics of the deprecated `_sql_references_relation`."""
+    ok, _ = is_pure_select_for_relation(
+        sql, expected_schema=schema, expected_table=table
+    )
+    return ok
 
 
 def test_legacy_unqualified_defaults_to_public() -> None:
@@ -60,24 +69,99 @@ def test_whitespace_stripped() -> None:
 
 
 def test_sql_reference_match_accepts_public_unqualified() -> None:
-    assert _sql_references_relation(
-        "SELECT * FROM cache_demo",
-        schema_name="public",
-        bare_name="cache_demo",
-    )
+    assert _ok("SELECT * FROM cache_demo", "public", "cache_demo")
 
 
 def test_sql_reference_match_requires_schema_for_raw() -> None:
-    assert _sql_references_relation(
-        'SELECT * FROM raw."cache_demo__v1"',
-        schema_name="raw",
-        bare_name="cache_demo__v1",
+    assert _ok(
+        'SELECT * FROM raw."cache_demo__v1"', "raw", "cache_demo__v1"
     )
-    assert not _sql_references_relation(
-        'SELECT * FROM "cache_demo__v1"',
-        schema_name="raw",
-        bare_name="cache_demo__v1",
+    # Unqualified ref to a raw-only table must NOT count — medallion
+    # schemas require explicit qualification.
+    assert not _ok(
+        'SELECT * FROM "cache_demo__v1"', "raw", "cache_demo__v1"
     )
+
+
+# ── H1+H2 round v46: UNION/JOIN exfil vectors that the legacy regex
+# ── accepted. The new helper walks every exp.Table so any out-of-scope
+# ── reference or any internal-blocklist table rejects the whole query.
+
+
+def test_h1_union_to_api_keys_is_rejected() -> None:
+    """The original exploit: a SELECT against an allowed mart that
+    UNION-leaks rows from `api_keys`. Pre-fix the regex matched on the
+    mart name (returned True at the first match) and the structural
+    check accepted UNION as a pure read."""
+    sql = (
+        "SELECT id FROM mart.flujo_vehicular_peajes_caba "
+        "UNION ALL SELECT id::text FROM api_keys"
+    )
+    ok, reason = is_pure_select_for_relation(
+        sql,
+        expected_schema="mart",
+        expected_table="flujo_vehicular_peajes_caba",
+    )
+    assert not ok
+    assert reason is not None
+    assert "api_keys" in reason.lower() or "out-of-scope" in reason
+
+
+def test_h1_join_to_successful_queries_is_rejected() -> None:
+    """Same idea via JOIN — the regex check matched the mart in the FROM
+    clause and walked away happy."""
+    sql = (
+        "SELECT m.id, q.question FROM mart.foo m "
+        "JOIN successful_queries q ON true"
+    )
+    ok, reason = is_pure_select_for_relation(
+        sql, expected_schema="mart", expected_table="foo"
+    )
+    assert not ok
+    assert reason is not None
+    assert "successful_queries" in reason.lower() or "out-of-scope" in reason
+
+
+def test_h1_cte_hides_internal_table() -> None:
+    """A CTE that secretly reads from `query_analytics` cannot smuggle
+    its rows through into the projected SELECT."""
+    sql = (
+        "WITH x AS (SELECT question FROM query_analytics) "
+        "SELECT * FROM mart.foo, x"
+    )
+    ok, reason = is_pure_select_for_relation(
+        sql, expected_schema="mart", expected_table="foo"
+    )
+    assert not ok
+    assert reason is not None
+
+
+def test_h2_cross_schema_reference_is_rejected() -> None:
+    """Even without an internal-blocklist hit, a reference to a
+    different mart (out of scope for this resource_id) is rejected."""
+    sql = (
+        "SELECT * FROM mart.foo UNION ALL SELECT * FROM mart.other_mart"
+    )
+    ok, reason = is_pure_select_for_relation(
+        sql, expected_schema="mart", expected_table="foo"
+    )
+    assert not ok
+    assert reason is not None
+    assert "out-of-scope" in reason
+
+
+def test_h2_cte_alias_does_not_false_positive() -> None:
+    """A CTE alias that happens to match neither the expected table nor
+    a blocklisted name resolves internally and must not be flagged as
+    an out-of-scope physical table."""
+    sql = (
+        "WITH summary AS (SELECT id FROM mart.foo WHERE id > 0) "
+        "SELECT * FROM summary"
+    )
+    ok, reason = is_pure_select_for_relation(
+        sql, expected_schema="mart", expected_table="foo"
+    )
+    assert ok, reason
 
 
 @pytest.mark.asyncio

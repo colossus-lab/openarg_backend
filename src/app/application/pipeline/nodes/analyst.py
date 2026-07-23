@@ -93,19 +93,47 @@ def _strip_meta(text: str) -> str:
 # ── Internal-identifier scrub (FR-025e, FIX-011 fix) ─────────────
 
 # Matches bare internal identifiers the analyst sometimes cites verbatim.
-# The pattern is intentionally narrow: only tokens that start with one of
-# the internal prefixes ``cache_`` / ``dataset_chunks`` / ``pgvector`` /
-# ``query_cache`` / ``cached_datasets`` get scrubbed. The word boundary
-# prevents partial matches inside legitimate prose.
+# The pattern is intentionally narrow: word-bounded tokens that name a
+# real internal table or schema prefix get scrubbed; legitimate prose
+# is untouched.
+#
+# M7 (round v46) extends coverage to mirror `classifiers._INTERNAL_TABLE_PATTERN`
+# (17 prefixes vs the 5 the analyst used pre-fix). Pre-v46 a jailbroken
+# answer could mention `successful_queries`, `query_analytics`, `api_keys`,
+# `mart_definitions`, `raw_table_versions`, `catalog_resources`, etc.
+# verbatim and the scrubber would leave them in. Keep the two sets in
+# sync: classifiers refuses the question, analyst refuses to emit it.
+_INTERNAL_NAMES = (
+    "cache_[\\w]+",  # cache_* data tables
+    "dataset_chunks",
+    "pgvector",
+    "query_cache",
+    "cached_datasets",
+    "catalog_resources",
+    "raw_table_versions",
+    "mart_definitions",
+    "mart_sample_queries",
+    "query_analytics",
+    "table_catalog",
+    "parse_repair_audit",
+    "successful_queries",
+    "user_queries",
+    "query_dataset_links",
+    "agent_tasks",
+    "api_keys",
+    "api_usage",
+    "sesion_chunks",
+)
+_INTERNAL_NAMES_GROUP = "|".join(_INTERNAL_NAMES)
 _RE_INTERNAL_IDENTIFIER = re.compile(
-    r"\b(?:cache_[\w]+|dataset_chunks|pgvector|query_cache|cached_datasets)\b",
+    r"\b(?:" + _INTERNAL_NAMES_GROUP + r")\b",
     re.IGNORECASE,
 )
 # Matches a parenthetical or punctuation-wrapped citation like
 # "(Fuente: cache_leyes_sancionadas)" so we remove the whole aside,
 # not just the identifier leaving dangling "(Fuente: )" behind.
 _RE_INTERNAL_CITATION = re.compile(
-    r"[\s,;]*[\(\[][^)\]]*\b(?:cache_[\w]+|dataset_chunks|pgvector|query_cache|cached_datasets)\b[^)\]]*[\)\]]",
+    r"[\s,;]*[\(\[][^)\]]*\b(?:" + _INTERNAL_NAMES_GROUP + r")\b[^)\]]*[\)\]]",
     re.IGNORECASE,
 )
 
@@ -579,8 +607,16 @@ async def analyst_node(state: OpenArgState) -> dict:
                 if "<!--" in stream_buf and "-->" not in stream_buf:
                     continue  # Wait for tag to close
 
-                # Strip any complete tags from the buffer before sending
+                # Strip any complete tags from the buffer before sending.
+                # M8 (round v46): also scrub internal identifiers HERE,
+                # not just on the final clean_answer. Pre-fix the user
+                # saw `cache_*` / `successful_queries` / `query_analytics`
+                # etc. flash by in streaming chunks before the final
+                # sanitizer ran on the assembled answer. The final scrub
+                # remains authoritative (the `complete` event), this is
+                # the visible-during-stream defence.
                 cleaned = _RE_ANY_TAG.sub("", stream_buf)
+                cleaned = _scrub_internal_identifiers(cleaned)
                 if cleaned:
                     writer({"type": "chunk", "content": cleaned})
                 stream_buf = ""
@@ -589,6 +625,7 @@ async def analyst_node(state: OpenArgState) -> dict:
             if stream_buf:
                 cleaned = _RE_ANY_TAG.sub("", stream_buf)
                 cleaned = _RE_ANY_TAG_TRUNC.sub("", cleaned)
+                cleaned = _scrub_internal_identifiers(cleaned)
                 if cleaned:
                     writer({"type": "chunk", "content": cleaned})
         except Exception:
@@ -596,7 +633,7 @@ async def analyst_node(state: OpenArgState) -> dict:
             logger.warning("chat_stream failed, falling back to chat()", exc_info=True)
             response = await deps.llm.chat(messages=messages, temperature=0.4, max_tokens=8192)
             full_text = response.content
-            writer({"type": "chunk", "content": _strip_tags(full_text)})
+            writer({"type": "chunk", "content": _scrub_internal_identifiers(_strip_tags(full_text))})
 
         # Charts: prefer deterministic, fall back to LLM-generated
         det_charts = build_deterministic_charts(results)

@@ -20,16 +20,21 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.common.privacy_gate import ensure_privacy_accepted
 from app.application.pipeline.graph import build_pipeline_graph
 from app.application.pipeline.nodes import PipelineDeps, set_deps
 from app.application.pipeline.state import OpenArgState
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
+from app.infrastructure.auth import GoogleJwtValidator, InvalidGoogleToken
 from app.infrastructure.serialization import safe_dumps, to_json_safe
+from app.presentation.http.middleware.google_jwt_middleware import (
+    get_request_user_email,
+)
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
@@ -88,6 +93,13 @@ _COMPLETE_EVENT_KEYS: tuple[str, ...] = (
     "citations",
     "documents",
     "warnings",
+    # CONTRACT-03 (round v46): tokens_used was already in the HTTP
+    # response of POST /smart but missing from the WS `complete` event,
+    # so SPA telemetry that watches LLM cost went silent on the
+    # streaming path. confidence was intentionally removed from the API
+    # (commit acc884a) and is NOT restored here — the chip is gone from
+    # the UI and the pipeline still computes it internally.
+    "tokens_used",
 )
 
 _TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
@@ -126,6 +138,12 @@ def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
         "citations": update.get("citations", []),
         "documents": update.get("documents"),
         "warnings": update.get("warnings", []),
+        # CONTRACT-03 (round v46): paridad con la response HTTP POST /smart,
+        # que ya emite tokens_used. Sin esto el frontend ve siempre 0 en
+        # el path streaming. confidence NO se incluye: fue removida de la
+        # API deliberadamente (commit acc884a) — el pipeline la sigue
+        # calculando internamente pero no la expone al cliente.
+        "tokens_used": update.get("tokens_used", 0),
     }
 
 
@@ -357,10 +375,20 @@ async def _verify_api_key(api_key: str | None = Depends(_api_key_header)) -> Non
 
 
 class SmartQueryV2Request(BaseModel):
+    # CONTRACT-02 (round v46): extra='forbid' so any drift between the
+    # frontend BFF and this contract surfaces as 422 instead of a
+    # silent drop. The pre-fix BFF posted `history` here and Pydantic
+    # ignored it — context never reached the planner on the HTTP
+    # fallback path. The field is now ACCEPTED at the wire boundary
+    # (so legacy BFF deploys don't break) but the handler still loads
+    # history from the DB via conversation_id (post-H3 ownership
+    # check). The body-supplied history is treated as advisory only.
+    model_config = ConfigDict(extra="forbid")
     question: str = Field(..., min_length=1, max_length=10000)
     user_email: str | None = None
     conversation_id: str | None = None
     policy_mode: bool = False
+    history: list[dict[str, Any]] | None = None
 
 
 class SmartQueryV2Response(BaseModel):
@@ -385,10 +413,27 @@ async def smart_query_v2(
     body: SmartQueryV2Request,
     deps: FromDishka[PipelineDeps],
     user_repo: FromDishka[IUserRepository],
+    chat_repo: FromDishka[IChatRepository],
 ) -> dict[str, Any] | JSONResponse:
     """Execute a query through the LangGraph pipeline."""
+    # H3 fix: authenticated email comes from the Google JWT validated by
+    # GoogleJwtAuthMiddleware (`request.state.user_email`), NEVER from the
+    # body. A body.user_email that disagrees with the JWT is rejected to
+    # prevent caller spoofing on a shared BACKEND_API_KEY. If the JWT email
+    # is missing (only possible if the middleware exempted this path —
+    # which it doesn't for /smart in prod), fall back to body.user_email
+    # for compatibility but block conversation_id usage.
+    authed_email = get_request_user_email(request)
+    body_email = (body.user_email or "").strip()
+    if authed_email and body_email and authed_email.lower() != body_email.lower():
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "AUTH_SPOOF", "message": "user_email mismatch"}},
+        )
+    user_email = authed_email or body_email
+
     # Server-side privacy gate (defense in depth — the frontend also checks).
-    await ensure_privacy_accepted(body.user_email, user_repo)
+    await ensure_privacy_accepted(user_email, user_repo)
 
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe).
     # `_get_checkpointer()` re-attempts init after the TTL, so a DB blip at
@@ -397,8 +442,49 @@ async def smart_query_v2(
     compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
-    user_id = body.user_email or "anonymous"
+    user_id = user_email or "anonymous"
     conversation_id = body.conversation_id or ""
+
+    # H3 fix: verify conversation ownership before letting the pipeline
+    # load history / use it as the checkpointer thread_id. Without this,
+    # a holder of the shared BACKEND_API_KEY who guesses or steals a
+    # conversation_id can read another user's history via the planner
+    # context (load_chat_history feeds it directly to the LLM prompt).
+    owner_user_id = None
+    if conversation_id:
+        if not authed_email:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "AUTH_REQUIRED",
+                        "message": "conversation_id requires an authenticated user",
+                    }
+                },
+            )
+        from uuid import UUID
+
+        try:
+            conv_uuid = UUID(conversation_id)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "BAD_CONVERSATION_ID", "message": "invalid uuid"}},
+            )
+        user = await user_repo.get_by_email(authed_email)
+        if user is None:
+            # Authed but not synced — treat as no ownership.
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}},
+            )
+        conv = await chat_repo.get_conversation(conv_uuid, user_id=user.id)
+        if conv is None:
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}},
+            )
+        owner_user_id = user.id
 
     initial_state: OpenArgState = {
         "question": body.question,
@@ -407,6 +493,11 @@ async def smart_query_v2(
         "policy_mode": body.policy_mode,
         "replan_count": 0,
     }
+    # Pass the owner_user_id down so load_chat_history can scope the
+    # message fetch as defense-in-depth (the ownership check above already
+    # gates entry, but the repo-level filter closes any future bypass).
+    if owner_user_id is not None:
+        initial_state["owner_user_id"] = str(owner_user_id)  # type: ignore[typeddict-unknown-key]
 
     # When a checkpointer is active, pass thread_id so LangGraph
     # persists state per conversation (enables memory / resumable runs).
@@ -455,21 +546,30 @@ async def smart_query_v2(
 # ── WebSocket rate limit helper ────────────────────────────
 
 
+_WS_RATE_LIMIT_PER_MINUTE = 20
+
+
 async def _check_ws_rate_limit(cache: ICacheService, identifier: str) -> bool:
-    """Return True if the identifier has exceeded the WS rate limit."""
+    """Return True if the identifier has exceeded the WS rate limit.
+
+    H8 (round v46): atomic INCR + EXPIRE NX via `increment_with_ttl`.
+    The previous implementation did get → check → set, which (a) let
+    two concurrent handshakes both observe count<cap and both bump it
+    above the cap, and (b) refreshed the TTL on every hit so a steady
+    stream of requests inside the window kept the counter alive
+    indefinitely instead of resetting at the 60s boundary.
+
+    Cache errors fail OPEN by design — degraded Redis must not block
+    legitimate traffic. The Redis client logs the underlying exception
+    so an operator can spot a sustained outage.
+    """
     key = f"ws_rate:{identifier}"
     try:
-        current = await cache.get(key)
-        if current is not None:
-            count = int(current) if not isinstance(current, int) else current
-            if count >= 20:
-                return True
-            await cache.set(key, count + 1, ttl_seconds=60)
-        else:
-            await cache.set(key, 1, ttl_seconds=60)
-        return False
+        count = await cache.increment_with_ttl(key, ttl_seconds=60)
     except Exception:
+        logger.warning("WS rate-limit cache failed; failing open", exc_info=True)
         return False
+    return count > _WS_RATE_LIMIT_PER_MINUTE
 
 
 def _validate_api_key_value(provided: str) -> bool:
@@ -533,9 +633,56 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         await ws.close(code=4401)
                         return
 
+                # WS JWT-in-handshake (round v46, closes H3 residual gap).
+                # The HTTP path validates the Google JWT in the
+                # GoogleJwtAuthMiddleware; WebSockets bypass starlette
+                # middleware entirely, so the body-supplied user_email is
+                # the only identity hint we get. To stop a holder of
+                # BACKEND_API_KEY from claiming any user_email + any
+                # conversation_id, accept an optional `id_token` in the
+                # handshake message and validate it server-side. When
+                # present and valid, the JWT's verified email overrides
+                # the body's claim and unlocks conversation_id access.
+                # Absent the JWT we keep the legacy path working but
+                # refuse conversation_id reads further down (H3 fix).
+                verified_email = ""
+                raw_id_token = (raw.get("id_token") or "").strip()
+                if raw_id_token:
+                    try:
+                        validator = await request_scope.get(GoogleJwtValidator)
+                        verified_email = await validator.validate(raw_id_token)
+                    except InvalidGoogleToken as exc:
+                        logger.warning("WS rejected invalid Google JWT: %s", exc)
+                        await _safe_send_json(
+                            ws,
+                            {
+                                "type": "error",
+                                "message": "Invalid or expired token",
+                            },
+                        )
+                        await ws.close(code=4401)
+                        return
+
+                # Anti-spoofing: if both are present and disagree, the
+                # body lied — refuse.
+                body_email = (raw.get("user_email") or "").strip()
+                if (
+                    verified_email
+                    and body_email
+                    and verified_email.lower() != body_email.lower()
+                ):
+                    await _safe_send_json(
+                        ws,
+                        {"type": "error", "message": "user_email mismatch"},
+                    )
+                    await ws.close(code=4403)
+                    return
+
                 # Rate limiting
-                ws_identifier = raw.get("user_email") or (
-                    ws.client.host if ws.client else "unknown"
+                ws_identifier = (
+                    verified_email
+                    or raw.get("user_email")
+                    or (ws.client.host if ws.client else "unknown")
                 )
                 if await _check_ws_rate_limit(cache, ws_identifier):
                     audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
@@ -543,8 +690,11 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.close(code=4429)
                     return
 
-                # Server-side privacy gate (defense in depth).
-                ws_user_email = raw.get("user_email") or ""
+                # Server-side privacy gate (defense in depth). Prefer the
+                # JWT-verified email when present; body.user_email is now
+                # advisory and only kicks in for legacy BFFs that haven't
+                # been redeployed with the JWT-in-handshake change yet.
+                ws_user_email = verified_email or raw.get("user_email") or ""
                 if ws_user_email:
                     user_repo = await request_scope.get(IUserRepository)
                     try:
@@ -568,12 +718,62 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.close()
                     return
 
+                # Round v46 WS JWT-in-handshake (closes H3 residual gap):
+                # conversation_id reads now REQUIRE the JWT-verified email.
+                # Pre-fix an attacker who knew BOTH the victim's email AND
+                # a conversation_id of that user could pass both through
+                # body fields and the planner would happily load the
+                # history. Post-fix the request is refused unless the
+                # caller proved possession of the Google ID token whose
+                # `email` claim matches the conversation's owner.
+                owner_user_id_ws = None
+                if conversation_id:
+                    if not verified_email:
+                        await _safe_send_json(
+                            ws,
+                            {
+                                "type": "error",
+                                "message": "conversation_id requires an authenticated user",
+                            },
+                        )
+                        await ws.close(code=4403)
+                        return
+                    from uuid import UUID as _UUID
+
+                    try:
+                        _conv_uuid = _UUID(conversation_id)
+                    except ValueError:
+                        await _safe_send_json(
+                            ws, {"type": "error", "message": "Invalid conversation_id"}
+                        )
+                        await ws.close(code=4400)
+                        return
+                    chat_repo_ws = await request_scope.get(IChatRepository)
+                    user_repo_ws = await request_scope.get(IUserRepository)
+                    user_ws = await user_repo_ws.get_by_email(verified_email)
+                    conv_ws = (
+                        await chat_repo_ws.get_conversation(_conv_uuid, user_id=user_ws.id)
+                        if user_ws
+                        else None
+                    )
+                    if conv_ws is None:
+                        await _safe_send_json(
+                            ws,
+                            {"type": "error", "message": "Conversation access denied"},
+                        )
+                        await ws.close(code=4403)
+                        return
+                    owner_user_id_ws = user_ws.id
+                    owner_user_id_ws = user_ws.id
+
                 initial_state: OpenArgState = {
                     "question": question,
                     "user_id": ws_identifier,
                     "conversation_id": conversation_id,
                     "policy_mode": policy_mode,
                 }
+                if owner_user_id_ws is not None:
+                    initial_state["owner_user_id"] = str(owner_user_id_ws)  # type: ignore[typeddict-unknown-key]
 
                 # When a checkpointer is active, pass thread_id for persistence
                 stream_config: dict[str, Any] = {}

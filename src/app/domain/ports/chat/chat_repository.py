@@ -17,14 +17,25 @@ class IChatRepository(ABC):
     ) -> list[Conversation]: ...
 
     @abstractmethod
-    async def get_conversation(self, conversation_id: UUID) -> Conversation | None: ...
+    async def get_conversation(
+        self, conversation_id: UUID, user_id: UUID | None = None
+    ) -> Conversation | None:
+        """Return the conversation. When `user_id` is provided, the lookup
+        is scoped to that owner — any conversation belonging to a different
+        user returns None. Defense-in-depth against IDOR: callers that
+        already verified ownership at the application layer can omit it,
+        but pipeline / WS paths must pass it. See H3 in round v46.
+        """
+        ...
 
     @abstractmethod
-    async def delete_conversation(self, conversation_id: UUID) -> bool: ...
+    async def delete_conversation(
+        self, conversation_id: UUID, user_id: UUID | None = None
+    ) -> bool: ...
 
     @abstractmethod
     async def update_conversation_title(
-        self, conversation_id: UUID, title: str
+        self, conversation_id: UUID, title: str, user_id: UUID | None = None
     ) -> Conversation | None: ...
 
     @abstractmethod
@@ -32,8 +43,17 @@ class IChatRepository(ABC):
 
     @abstractmethod
     async def get_messages(
-        self, conversation_id: UUID, limit: int = 100, offset: int = 0
-    ) -> list[Message]: ...
+        self,
+        conversation_id: UUID,
+        limit: int = 100,
+        offset: int = 0,
+        user_id: UUID | None = None,
+    ) -> list[Message]:
+        """Return messages. When `user_id` is provided, the lookup joins
+        on the parent conversation and filters by owner; a mismatched
+        owner returns []. See H3 in round v46.
+        """
+        ...
 
     @abstractmethod
     async def update_message_feedback(

@@ -120,6 +120,14 @@ async def execute_steps_node(state: OpenArgState) -> dict:
     try:
         question = state["question"]
 
+        # H4 (round v46): propagate the caller's identity into the
+        # connector deps so the sandbox dispatcher can pass it to the
+        # few-shot scoping query. The smart_query_v2 controller writes
+        # `user_id` from the JWT-verified email; anonymous paths fall
+        # through to None and the few-shot helper consults the legacy
+        # bucket only.
+        caller_user_id = state.get("user_id") or state.get("owner_user_id")  # type: ignore[typeddict-item]
+
         connector_deps = ConnectorDeps(
             series=deps.series,
             arg_datos=deps.arg_datos,
@@ -134,6 +142,7 @@ async def execute_steps_node(state: OpenArgState) -> dict:
             llm=deps.llm,
             embedding=deps.embedding,
             semantic_cache=deps.semantic_cache,
+            user_id=caller_user_id,
         )
 
         def _on_step_start(step: PlanStep) -> None:

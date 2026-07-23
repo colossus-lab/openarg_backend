@@ -190,6 +190,7 @@ def test_build_complete_event_uses_state_shape_for_terminal_nodes() -> None:
         "clean_answer": "ok",
         "sources": [{"name": "x", "url": "", "portal": "p"}],
         "warnings": ["warn"],
+        "tokens_used": 42,
     }
 
     assert _build_complete_event("finalize", update) == {
@@ -201,7 +202,20 @@ def test_build_complete_event_uses_state_shape_for_terminal_nodes() -> None:
         "citations": [],
         "documents": None,
         "warnings": ["warn"],
+        # CONTRACT-03 (round v46): tokens_used added for parity with the
+        # HTTP /smart response. confidence intentionally stays out.
+        "tokens_used": 42,
     }
+
+
+def test_build_complete_event_tokens_used_defaults_to_zero() -> None:
+    """A pipeline run that never set tokens_used must still produce a
+    well-formed complete event — defensive zero default avoids the
+    frontend seeing `undefined` and rendering it as '0' anyway."""
+    update = {"clean_answer": "ok"}
+    event = _build_complete_event("finalize", update)
+    assert event is not None
+    assert event["tokens_used"] == 0
 
 
 def test_build_complete_event_ignores_non_terminal_analyst_update() -> None:

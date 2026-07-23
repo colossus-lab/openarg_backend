@@ -326,8 +326,13 @@ async def get_session_topics(
 
 
 def _verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> str:
-    """Validate admin API key for destructive transparency operations."""
-    expected = os.getenv("ADMIN_API_KEY", os.getenv("BACKEND_API_KEY", ""))
+    """Validate admin API key for destructive transparency operations.
+
+    No fallback to BACKEND_API_KEY — a holder of the backend key must NOT
+    gain admin privileges. Missing key → 503 (fail-closed). Startup in
+    prod asserts ADMIN_API_KEY is set and distinct from BACKEND_API_KEY.
+    """
+    expected = os.getenv("ADMIN_API_KEY", "")
     if not expected:
         raise HTTPException(status_code=503, detail="Admin key not configured")
     if not _secrets.compare_digest(x_admin_key, expected):
