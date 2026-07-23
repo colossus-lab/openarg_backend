@@ -187,10 +187,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
-    bind.execute(sa.text("DROP TRIGGER IF EXISTS trg_cached_datasets_retry_invariant ON cached_datasets"))
+    bind.execute(
+        sa.text("DROP TRIGGER IF EXISTS trg_cached_datasets_retry_invariant ON cached_datasets")
+    )
     bind.execute(sa.text("DROP FUNCTION IF EXISTS enforce_cached_datasets_retry_invariant()"))
     op.drop_index("ix_cached_datasets_error_category", table_name="cached_datasets")
-    op.drop_constraint(
-        "ck_cached_datasets_error_category", "cached_datasets", type_="check"
-    )
+    op.drop_constraint("ck_cached_datasets_error_category", "cached_datasets", type_="check")
     op.drop_column("cached_datasets", "error_category")
