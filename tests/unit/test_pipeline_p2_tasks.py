@@ -1589,7 +1589,9 @@ class TestCollectorP2:
         assert result == {
             "dataset_id": "11111111-1111-1111-1111-111111111111",
             "status": "rerouted_heavy_retry",
-            "reason": "transient_retry:ConnectionError",
+            # The reroute reason carries the raised exception's class name
+            # (type(exc).__name__) — the mock raises RemoteProtocolError.
+            "reason": "transient_retry:RemoteProtocolError",
             "queue": "collector-heavy-retry",
         }
         mock_apply_async.assert_called_once_with(

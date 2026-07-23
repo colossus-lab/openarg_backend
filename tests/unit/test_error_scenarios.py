@@ -183,7 +183,7 @@ class TestCircuitBreakerOpensAfterFailures:
                 await should_not_run()
             assert exc_info.value.error_code == ErrorCode.CN_CIRCUIT_OPEN
 
-        asyncio.get_event_loop().run_until_complete(run_test())
+        asyncio.run(run_test())
 
 
 class TestCircuitBreakerHalfOpenRecovery:
