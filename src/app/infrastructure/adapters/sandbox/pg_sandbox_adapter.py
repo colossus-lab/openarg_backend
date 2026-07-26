@@ -42,6 +42,10 @@ _ALLOWED_TABLE_PREFIXES = tuple(os.getenv("SANDBOX_TABLE_PREFIX", "cache_").spli
 # emerge from our own pipeline (mart_definitions / raw_table_versions),
 # so anything materialized there is already vetted for read-only access.
 # We skip the prefix check for those schemas.
+# Caveat: "materialized there" no longer implies "fit to serve". A mart
+# can be built and present in `mart.*` yet flagged `serving_blocked`
+# (migration 0054). That case is caught by `_blocked_mart_error()` at
+# execution time, not by this static prefix check.
 _ALLOWED_SCHEMAS = ("public", "mart", "raw")
 _PREFIX_FREE_SCHEMAS = ("mart", "raw")
 
@@ -100,6 +104,64 @@ def _split_table_reference(table_name: str) -> tuple[str, str]:
         return "public", value.strip('"')
     schema, bare = value.split(".", 1)
     return schema.strip('"'), bare.strip('"')
+
+
+def _referenced_mart_views(sql: str) -> set[str]:
+    """Bare `mart.*` relation names referenced by a FROM/JOIN clause."""
+    found: set[str] = set()
+    for m in _TABLE_REF_PATTERN.finditer(sql):
+        first, second = m.group(1), m.group(2)
+        if second and first.lower() == "mart":
+            found.add(second.lower())
+    return found
+
+
+def _blocked_mart_error(engine: Engine, sql: str) -> str | None:
+    """Reject SQL that reads a mart withdrawn from serving.
+
+    `serving_blocked` (migration 0054) is enforced in every *discovery*
+    query — the sandbox universe, the context builder, the serving
+    adapter. None of that helps when the NL2SQL model names a blocked
+    mart directly: the relation still exists in `mart.*`, the prefix-free
+    allowlist above waves it through, and Postgres happily serves numbers
+    we already declared unfit. Discovery-only gating was safe while the
+    schema comment below held ("the pipeline gates what lands there");
+    0054 is precisely the case where a mart is built and present but must
+    not be served, so the gate has to run at execution too.
+    """
+    referenced = _referenced_mart_views(sql)
+    if not referenced:
+        return None
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT mart_view_name, serving_blocked_reason "
+                    "FROM mart_definitions "
+                    "WHERE mart_schema = 'mart' "
+                    "AND lower(mart_view_name) = ANY(:names) "
+                    "AND COALESCE(serving_blocked, FALSE)"
+                ),
+                {"names": sorted(referenced)},
+            ).fetchall()
+            conn.rollback()
+    except Exception:
+        # Never fail open on an unreadable catalog: a query we cannot
+        # clear is a query we do not run.
+        logger.warning("serving-block lookup failed; refusing mart query", exc_info=True)
+        return "Could not verify mart availability. Query refused."
+
+    if not rows:
+        return None
+
+    name = str(rows[0][0])
+    reason = str(rows[0][1] or "").strip()
+    logger.warning("Blocked mart %s referenced by generated SQL; refusing execution", name)
+    detail = f" Motivo: {reason}" if reason else ""
+    return (
+        f"El mart '{name}' está retirado del serving por problemas de "
+        f"calidad de datos y no puede consultarse.{detail}"
+    )
 
 
 def _validate_sql(sql: str) -> str | None:
@@ -305,6 +367,16 @@ class PgSandboxAdapter(ISQLSandbox):
         engine = self._get_engine()
         timeout_ms = timeout_seconds * 1000
 
+        blocked_error = _blocked_mart_error(engine, sql)
+        if blocked_error:
+            return SandboxResult(
+                columns=[],
+                rows=[],
+                row_count=0,
+                truncated=False,
+                error=blocked_error,
+            )
+
         try:
             with engine.connect() as conn:
                 # Set the transaction to read-only and apply statement timeout
@@ -506,13 +578,25 @@ class PgSandboxAdapter(ISQLSandbox):
         schemas = list(dict.fromkeys(schema for schema, _table in target_pairs))
         tables = list(dict.fromkeys(table for _schema, table in target_pairs))
         with engine.connect() as conn:
+            # pg_class/pg_attribute instead of information_schema.columns:
+            # the latter omits materialized views entirely, and every mart
+            # is a matview (relkind='m'). Going through information_schema
+            # silently returned zero columns for `mart.*`, which left the
+            # NL2SQL prompt with no type information for exactly the tables
+            # that expose pre-cast numeric columns.
             result = conn.execute(
                 text(
-                    "SELECT table_schema, table_name, column_name, data_type "
-                    "FROM information_schema.columns "
-                    "WHERE table_schema = ANY(:schemas) "
-                    "AND table_name = ANY(:tables) "
-                    "ORDER BY table_schema, table_name, ordinal_position"
+                    "SELECT n.nspname AS table_schema, c.relname AS table_name, "
+                    "       a.attname AS column_name, "
+                    "       format_type(a.atttypid, a.atttypmod) AS data_type "
+                    "FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "JOIN pg_attribute a ON a.attrelid = c.oid "
+                    "WHERE c.relkind = ANY(ARRAY['r', 'p', 'v', 'm', 'f']) "
+                    "AND a.attnum > 0 AND NOT a.attisdropped "
+                    "AND n.nspname = ANY(:schemas) "
+                    "AND c.relname = ANY(:tables) "
+                    "ORDER BY n.nspname, c.relname, a.attnum"
                 ),
                 {"schemas": schemas, "tables": tables},
             )

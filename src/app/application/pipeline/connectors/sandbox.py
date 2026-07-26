@@ -1338,21 +1338,35 @@ async def execute_sandbox_step(
                 catalog_entries=catalog_entries,
             )
 
+        # Real PostgreSQL types for the same 50 tables. `table_catalog.column_types`
+        # is NOT a substitute: catalog_enrichment.txt asks the LLM for a
+        # "descripción breve" per column, so that field holds prose. Rendering
+        # prose in the `(tipo)` slot is worse than rendering nothing — the
+        # NL2SQL prompt tells the model to read that slot to decide whether a
+        # column needs decimal normalization, and marts expose pre-cast
+        # `numeric` columns where `replace()` errors outright.
+        pg_column_types: dict[str, dict[str, str]] = {}
+        try:
+            if sandbox:
+                raw_types = await sandbox.get_column_types([t.table_name for t in tables[:50]])
+                pg_column_types = {table: dict(pairs) for table, pairs in raw_types.items()}
+        except Exception:
+            logger.debug("column type lookup failed", exc_info=True)
+
+        def _columns_with_types(table_name: str, columns: list[str] | None) -> str:
+            types = pg_column_types.get(table_name, {})
+            if not columns:
+                return "(no column info)"
+            return ", ".join(f"{c} ({types[c]})" if c in types else c for c in columns)
+
         tables_context_parts = []
         for t in tables[:50]:
-            cols = ", ".join(t.columns) if t.columns else "(no column info)"
+            col_desc = _columns_with_types(t.table_name, list(t.columns or []))
             entry = catalog_entries.get(t.table_name)
             if entry:
                 name = entry.get("display_name") or t.table_name
                 desc = entry.get("description") or ""
                 domain = entry.get("domain") or ""
-                col_types = entry.get("column_types") or {}
-                col_desc = (
-                    ", ".join(
-                        f"{c} ({col_types[c]})" if c in col_types else c for c in (t.columns or [])
-                    )
-                    or cols
-                )
                 part = f"Table: {t.table_name} — {name}  (rows: {t.row_count or '?'})"
                 if desc:
                     part += f"\n  Descripción: {desc}"
@@ -1360,7 +1374,7 @@ async def execute_sandbox_step(
                     part += f"\n  Dominio: {domain}"
                 part += f"\n  Columns: {col_desc}"
             else:
-                part = f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
+                part = f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {col_desc}"
             tables_context_parts.append(part)
         tables_context = "\n\n".join(tables_context_parts)
 
