@@ -41,9 +41,7 @@ async def load_chat_history(
         from uuid import UUID
 
         owner_uuid = UUID(owner_user_id) if owner_user_id else None
-        messages = await chat_repo.get_messages(
-            UUID(conversation_id), limit=7, user_id=owner_uuid
-        )
+        messages = await chat_repo.get_messages(UUID(conversation_id), limit=7, user_id=owner_uuid)
         if len(messages) <= 1:
             return ""
         # Skip the last message (it's the current question the frontend just saved)
@@ -149,8 +147,9 @@ async def save_query_attempt(
     # exists in long-running deployments).
     try:
         async with semantic_cache._session_factory() as session:
-            await session.execute(text(
-                """
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE IF NOT EXISTS query_analytics (
                     id BIGSERIAL PRIMARY KEY,
                     ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -164,10 +163,11 @@ async def save_query_attempt(
                     embedding vector(1024)
                 )
                 """
-            ))
-            await session.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_query_analytics_ts ON query_analytics(ts DESC)"
-            ))
+                )
+            )
+            await session.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_query_analytics_ts ON query_analytics(ts DESC)")
+            )
             await session.commit()
     except Exception:
         logger.debug("query_analytics DDL setup failed", exc_info=True)
@@ -282,9 +282,7 @@ async def save_successful_query(
 
     suspicious, score = is_suspicious(question)
     if suspicious or score > 0.4:
-        logger.info(
-            "Skipping successful_queries save (suspicious score=%.2f)", score
-        )
+        logger.info("Skipping successful_queries save (suspicious score=%.2f)", score)
         return
 
     owner = (user_id or "").strip().lower() or _LEGACY_OWNER

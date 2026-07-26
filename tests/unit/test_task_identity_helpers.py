@@ -22,7 +22,9 @@ def test_load_batch_sql_keeps_full_source_id_after_first_separator() -> None:
 
     stmt = conn.execute.call_args.args[0]
     sql = str(stmt)
-    assert "substring(rtv.resource_identity FROM POSITION('::' IN rtv.resource_identity) + 2)" in sql
+    assert (
+        "substring(rtv.resource_identity FROM POSITION('::' IN rtv.resource_identity) + 2)" in sql
+    )
 
 
 def test_resolve_resource_identity_for_mart_table() -> None:
@@ -39,7 +41,9 @@ def test_resolve_resource_identity_for_mart_table() -> None:
     assert rid == "mart::series_economicas"
 
 
-@patch("app.infrastructure.celery.tasks.catalog_enrichment_tasks._resolve_resource_identity_for_table")
+@patch(
+    "app.infrastructure.celery.tasks.catalog_enrichment_tasks._resolve_resource_identity_for_table"
+)
 def test_catalog_projection_skips_marts(mock_resolve) -> None:
     mock_resolve.return_value = "mart::series_economicas"
     engine = MagicMock()

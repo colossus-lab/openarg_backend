@@ -59,13 +59,9 @@ def run_repair(
 
     engine = get_sync_engine()
     if phase == "col_n":
-        candidates = list_col_n_candidates(
-            engine, limit=limit, min_garbage_ratio=min_garbage_ratio
-        )
+        candidates = list_col_n_candidates(engine, limit=limit, min_garbage_ratio=min_garbage_ratio)
     else:
-        candidates = list_trailing_garbage_candidates(
-            engine, limit=limit, min_garbage_count=5
-        )
+        candidates = list_trailing_garbage_candidates(engine, limit=limit, min_garbage_count=5)
     run_id = uuid.uuid4()
     results: list[dict[str, Any]] = []
     applied = 0
@@ -124,13 +120,9 @@ def list_candidates(
         return {"ok": False, "error": f"unsupported phase: {phase!r}"}
     engine = get_sync_engine()
     if phase == "col_n":
-        candidates = list_col_n_candidates(
-            engine, limit=limit, min_garbage_ratio=min_garbage_ratio
-        )
+        candidates = list_col_n_candidates(engine, limit=limit, min_garbage_ratio=min_garbage_ratio)
     else:
-        candidates = list_trailing_garbage_candidates(
-            engine, limit=limit, min_garbage_count=5
-        )
+        candidates = list_trailing_garbage_candidates(engine, limit=limit, min_garbage_count=5)
     return {
         "ok": True,
         "phase": phase,
@@ -142,8 +134,7 @@ def list_candidates(
                 "garbage_columns": sum(
                     1
                     for c in cols
-                    if str(c).startswith("col_")
-                    or str(c).lower().startswith("unnamed:")
+                    if str(c).startswith("col_") or str(c).lower().startswith("unnamed:")
                 ),
             }
             for s, t, cols in candidates

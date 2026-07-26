@@ -155,9 +155,7 @@ async def _maybe_rerank_planner_candidates(
             from app.infrastructure.monitoring.metrics import MetricsCollector
 
             latency_ms = (datetime.now(UTC) - started_at).total_seconds() * 1000.0
-            MetricsCollector().record_connector_call(
-                "planner_reranker", latency_ms, error=True
-            )
+            MetricsCollector().record_connector_call("planner_reranker", latency_ms, error=True)
         except Exception:
             logger.debug("planner reranker metrics recording failed", exc_info=True)
         logger.debug("planner candidate rerank failed; preserving base order", exc_info=True)
@@ -533,15 +531,17 @@ async def discover_catalog_hints_for_planner(
                     boosted = base + 0.17 if sample >= 0.70 else base
                     if boosted < min_sim:
                         continue
-                    resources.append(Resource(
-                        resource_id=f"mart::{r.mart_id}",
-                        title=str(r.mart_id or ""),
-                        domain=r.domain,
-                        subdomain=None,
-                        portal=None,
-                        layer=ServingLayer.MART,
-                        score=boosted,
-                    ))
+                    resources.append(
+                        Resource(
+                            resource_id=f"mart::{r.mart_id}",
+                            title=str(r.mart_id or ""),
+                            domain=r.domain,
+                            subdomain=None,
+                            portal=None,
+                            layer=ServingLayer.MART,
+                            score=boosted,
+                        )
+                    )
                 return resources
 
         try:
@@ -690,7 +690,7 @@ async def _mart_semantics_block(serving_port: Any, table_names: list[str]) -> st
             # try it as a mart_id resource. Today mart_id == mart_view_name
             # so this works; if they ever diverge, this still resolves
             # via mart_view_name lookup downstream.
-            candidates.append(f"mart::{tn[len('mart.'):]}")
+            candidates.append(f"mart::{tn[len('mart.') :]}")
         else:
             candidates.append(f"mart::{tn}")
         for resource_id in candidates:
@@ -745,9 +745,7 @@ async def _serving_port_planner_hints(
         serving_resources=resources,
         limit=limit,
     )
-    preferred = [
-        c for c in candidates if c.layer in {"mart", "staging", "raw"}
-    ]
+    preferred = [c for c in candidates if c.layer in {"mart", "staging", "raw"}]
     if not preferred:
         return ""
 
@@ -760,9 +758,7 @@ async def _serving_port_planner_hints(
         lines.append("MARTS DISPONIBLES (vistas semánticas curadas, preferí estas):")
         for c in by_layer["mart"]:
             lines.append(f"  - {_planner_hint_label(c)}")
-        lines.append(
-            "Para una mart, usá query_sandbox con el nombre canónico de la vista."
-        )
+        lines.append("Para una mart, usá query_sandbox con el nombre canónico de la vista.")
 
     if "staging" in by_layer:
         lines.append("")
@@ -785,9 +781,7 @@ async def _serving_port_planner_hints(
     return "\n".join(lines)
 
 
-async def _hybrid_logical_hints(
-    query: str, q_embedding: list[float] | None, *, limit: int
-) -> str:
+async def _hybrid_logical_hints(query: str, q_embedding: list[float] | None, *, limit: int) -> str:
     """WS3 — surface `catalog_resources` to the planner when the flag is on.
 
     Returns a planner-facing block describing logical resources that match
@@ -807,9 +801,7 @@ async def _hybrid_logical_hints(
         results = await loop.run_in_executor(None, _search)
         if not results:
             return ""
-        lines = [
-            "RECURSOS LÓGICOS RELEVANTES (catalog_resources, pueden no estar materializados):"
-        ]
+        lines = ["RECURSOS LÓGICOS RELEVANTES (catalog_resources, pueden no estar materializados):"]
         for r in results:
             tag = r.materialization_status.upper()
             line = f"  - [{tag}] {r.display_name or r.canonical_title} (kind={r.resource_kind})"
@@ -994,6 +986,7 @@ async def execute_sandbox_step(
 
     try:
         tables = await sandbox.list_cached_tables()
+
         # MASTERPLAN Fase 4.5d — surface marts to the executor's table
         # universe so a planner that suggested a mart (via the hints
         # block built by `_serving_port_planner_hints`) actually finds
@@ -1229,32 +1222,35 @@ async def execute_sandbox_step(
         # the routing eval set). Defensive try/except — failure preserves
         # the prior filtered universe.
         try:
-            current_mart_names = {
-                t.table_name for t in tables if t.table_name.startswith("mart.")
-            }
+            current_mart_names = {t.table_name for t in tables if t.table_name.startswith("mart.")}
 
             from sqlalchemy import text as _stxt
+
             q_emb = await embedding.embed(nl_query)
             emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
 
             def _top_marts_for_query() -> list[tuple[str, list[str]]]:
                 eng = getattr(sandbox, "_engine", None) or (
                     sandbox._get_engine()  # type: ignore[union-attr]
-                    if hasattr(sandbox, "_get_engine") else None
+                    if hasattr(sandbox, "_get_engine")
+                    else None
                 )
                 if eng is None:
                     return []
                 with eng.connect() as conn:
-                    rs = conn.execute(_stxt(
-                        "SELECT mart_schema, mart_view_name, "
-                        "  canonical_columns_json, "
-                        "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
-                        "FROM mart_definitions "
-                        "WHERE embedding IS NOT NULL "
-                        "  AND COALESCE(last_row_count, 0) > 0 "
-                        "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
-                        "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
-                    ), {"e": emb_str}).fetchall()
+                    rs = conn.execute(
+                        _stxt(
+                            "SELECT mart_schema, mart_view_name, "
+                            "  canonical_columns_json, "
+                            "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                            "FROM mart_definitions "
+                            "WHERE embedding IS NOT NULL "
+                            "  AND COALESCE(last_row_count, 0) > 0 "
+                            "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
+                            "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
+                        ),
+                        {"e": emb_str},
+                    ).fetchall()
                 out: list[tuple[str, list[str]]] = []
                 for r in rs:
                     cols: list[str] = []
@@ -1269,16 +1265,19 @@ async def execute_sandbox_step(
 
             top_marts = await asyncio.to_thread(_top_marts_for_query)
             from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+
             injected = []
             for mart_name, cols in top_marts:
                 if mart_name in current_mart_names:
                     continue
-                injected.append(CachedTableInfo(
-                    table_name=mart_name,
-                    dataset_id="",
-                    row_count=0,
-                    columns=cols,
-                ))
+                injected.append(
+                    CachedTableInfo(
+                        table_name=mart_name,
+                        dataset_id="",
+                        row_count=0,
+                        columns=cols,
+                    )
+                )
             if injected:
                 # Prepend so the NL2SQL LLM sees marts at the TOP of the
                 # `tables_context` listing. LLMs systematically favor
@@ -1289,8 +1288,7 @@ async def execute_sandbox_step(
                 # signal that finally flips routing.
                 tables = injected + tables
                 logger.info(
-                    "BUG-001: injected %d semantically-relevant mart(s) "
-                    "at top of universe: %s",
+                    "BUG-001: injected %d semantically-relevant mart(s) at top of universe: %s",
                     len(injected),
                     [t.table_name for t in injected],
                 )
@@ -1418,6 +1416,7 @@ async def execute_sandbox_step(
 
         compiled_subgraph = await get_compiled_nl2sql_subgraph()
         import time as _time
+
         initial_state: dict[str, Any] = {
             "nl_query": nl_query,
             "tables": tables,

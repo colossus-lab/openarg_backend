@@ -11,7 +11,9 @@ async def test_cache_reply_node_preserves_cached_confidence_citations_and_warnin
         {
             "cached_result": {
                 "answer": "Respuesta cacheada",
-                "sources": [{"name": "IPC", "url": "https://datos.gob.ar", "portal": "datos.gob.ar"}],
+                "sources": [
+                    {"name": "IPC", "url": "https://datos.gob.ar", "portal": "datos.gob.ar"}
+                ],
                 "confidence": 0.42,
                 "citations": [{"claim": "inflación 2025", "source": "IPC"}],
                 "warnings": ["Cifra no totalmente verificada"],

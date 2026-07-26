@@ -50,9 +50,7 @@ MAX_TABLE_ROWS: int = _int_env("OPENARG_MAX_TABLE_ROWS", 500_000)
 # bigger than this is rejected by the multi-file expander (for ZIPs) or
 # by the streaming download loop (for plain files). 500 MB is the largest
 # legit dataset we've seen (CABA buenos_aires_compras at ~328 MB).
-MAX_DOWNLOAD_BYTES: int = _int_env(
-    "OPENARG_MAX_DOWNLOAD_BYTES", 500 * 1024 * 1024
-)
+MAX_DOWNLOAD_BYTES: int = _int_env("OPENARG_MAX_DOWNLOAD_BYTES", 500 * 1024 * 1024)
 
 
 # ── Retry caps ──────────────────────────────────────────────────────────────
@@ -69,9 +67,7 @@ MAX_TOTAL_ATTEMPTS: int = _int_env("OPENARG_MAX_TOTAL_ATTEMPTS", 5)
 # a single `refresh_mart` dispatch. Was hard-coded as
 # `_BCRA_PROD_DEBOUNCE_SECONDS = 110` in `_db.py` even though it applies
 # to every via-B writer (BCRA, presupuesto, senado, staff_*).
-MART_REFRESH_DEBOUNCE_SECONDS: int = _int_env(
-    "OPENARG_MART_REFRESH_DEBOUNCE_SECONDS", 110
-)
+MART_REFRESH_DEBOUNCE_SECONDS: int = _int_env("OPENARG_MART_REFRESH_DEBOUNCE_SECONDS", 110)
 
 
 # ── DB statement timeout ────────────────────────────────────────────────────
@@ -81,9 +77,7 @@ MART_REFRESH_DEBOUNCE_SECONDS: int = _int_env(
 # soft_time_limit kicks in (10 minutes). 600 seconds gives the longest
 # legitimate operation (mart matview refresh on 500K rows) plenty of
 # headroom while still bounding worker hang.
-DB_STATEMENT_TIMEOUT_SECONDS: int = _int_env(
-    "OPENARG_DB_STATEMENT_TIMEOUT_SECONDS", 600
-)
+DB_STATEMENT_TIMEOUT_SECONDS: int = _int_env("OPENARG_DB_STATEMENT_TIMEOUT_SECONDS", 600)
 
 
 # ── Raw retention ───────────────────────────────────────────────────────────

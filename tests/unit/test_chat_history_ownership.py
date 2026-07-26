@@ -46,9 +46,7 @@ async def test_load_chat_history_returns_empty_when_repo_returns_empty():
     chat_repo = AsyncMock()
     chat_repo.get_messages = AsyncMock(return_value=[])
 
-    out = await load_chat_history(
-        str(uuid4()), chat_repo, owner_user_id=str(uuid4())
-    )
+    out = await load_chat_history(str(uuid4()), chat_repo, owner_user_id=str(uuid4()))
     assert out == ""
 
 

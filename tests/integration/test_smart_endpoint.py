@@ -158,4 +158,3 @@ class TestSmartQueryConversationOwnership:
             smart_query_v2_router.get_request_user_email = original
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "NO_OWNERSHIP"
-

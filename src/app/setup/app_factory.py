@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if not admin_key:
             raise RuntimeError("ADMIN_API_KEY must be set in production")
         import secrets as _secrets_check
+
         if _secrets_check.compare_digest(admin_key, settings.security.BACKEND_API_KEY):
             raise RuntimeError("ADMIN_API_KEY must differ from BACKEND_API_KEY")
 

@@ -24,9 +24,7 @@ async def test_under_cap_returns_false():
     cache = AsyncMock()
     cache.increment_with_ttl = AsyncMock(return_value=_WS_RATE_LIMIT_PER_MINUTE - 1)
     assert await _check_ws_rate_limit(cache, "user@example.com") is False
-    cache.increment_with_ttl.assert_awaited_once_with(
-        "ws_rate:user@example.com", ttl_seconds=60
-    )
+    cache.increment_with_ttl.assert_awaited_once_with("ws_rate:user@example.com", ttl_seconds=60)
 
 
 @pytest.mark.asyncio

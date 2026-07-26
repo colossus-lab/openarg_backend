@@ -59,6 +59,7 @@ def _normalize_domain(value: Any) -> str | None:
     stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
     return stripped.lower()
 
+
 _VALID_REFRESH_POLICIES = frozenset({"manual", "daily", "hourly", "on_upstream_change"})
 
 # `mart_id` becomes a Postgres identifier (`mart."<id>"`). Restrict to a

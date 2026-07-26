@@ -107,9 +107,7 @@ def list_col_n_candidates(
     """
     out: list[tuple[str, str, list[str], float]] = []
     with engine.connect() as conn:
-        candidate_rows = conn.execute(
-            text(list_sql), {"schemas": list(schemas)}
-        ).fetchall()
+        candidate_rows = conn.execute(text(list_sql), {"schemas": list(schemas)}).fetchall()
         for sch, tname in candidate_rows:
             col_rows = conn.execute(text(cols_sql), {"s": sch, "t": tname}).fetchall()
             cols = [r[0] for r in col_rows]
@@ -169,9 +167,7 @@ def _audit(
                 },
             )
     except Exception:
-        logger.warning(
-            "parse_repair_audit insert failed (non-fatal)", exc_info=True
-        )
+        logger.warning("parse_repair_audit insert failed (non-fatal)", exc_info=True)
 
 
 def propose_col_n_rename(
@@ -321,17 +317,15 @@ def repair_trailing_garbage_cols(
     if dry_run:
         outcome.ok = True
         outcome.reason = "dry_run_proposal"
-        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="trailing_garbage")
+        _audit(
+            engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="trailing_garbage"
+        )
         return outcome
 
     try:
         with engine.begin() as conn:
             for c in drops:
-                conn.execute(
-                    text(
-                        f"ALTER TABLE {qident_table} DROP COLUMN {_quote_ident(c)}"
-                    )
-                )
+                conn.execute(text(f"ALTER TABLE {qident_table} DROP COLUMN {_quote_ident(c)}"))
         outcome.ok = True
         outcome.reason = "applied"
         _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="trailing_garbage")
@@ -345,9 +339,7 @@ def repair_trailing_garbage_cols(
         outcome.ok = False
         outcome.error_message = f"{type(exc).__name__}: {exc!s}"[:500]
         _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="trailing_garbage")
-        logger.exception(
-            "parse_repair (trim) failed for %s.%s", table_schema, table_name
-        )
+        logger.exception("parse_repair (trim) failed for %s.%s", table_schema, table_name)
     return outcome
 
 
@@ -388,9 +380,7 @@ def list_trailing_garbage_candidates(
         ).fetchall()
         out = []
         for sch, tname in candidate_rows[:limit]:
-            col_rows = conn.execute(
-                text(cols_sql), {"s": sch, "t": tname}
-            ).fetchall()
+            col_rows = conn.execute(text(cols_sql), {"s": sch, "t": tname}).fetchall()
             cols = [r[0] for r in col_rows]
             out.append((sch, tname, cols))
     return out
@@ -455,7 +445,8 @@ def repair_col_n_table(
         ).fetchall()
 
     proposed_cols, rows_to_delete, reason = propose_col_n_rename(
-        old_cols, [list(r) for r in sample],
+        old_cols,
+        [list(r) for r in sample],
         min_garbage_ratio=min_garbage_ratio,
     )
 
@@ -465,9 +456,7 @@ def repair_col_n_table(
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip")
         return outcome
 
-    rename_pairs = [
-        (old, new) for old, new in zip(old_cols, proposed_cols) if old != new
-    ]
+    rename_pairs = [(old, new) for old, new in zip(old_cols, proposed_cols) if old != new]
     outcome.new_columns = proposed_cols
     outcome.rows_deleted = rows_to_delete
 
@@ -515,9 +504,7 @@ def repair_col_n_table(
         outcome.ok = False
         outcome.error_message = f"{type(exc).__name__}: {exc!s}"[:500]
         _audit(engine, run_id=run_id, outcome=outcome, operation="apply")
-        logger.exception(
-            "parse_repair failed for %s.%s", table_schema, table_name
-        )
+        logger.exception("parse_repair failed for %s.%s", table_schema, table_name)
 
     return outcome
 
@@ -641,9 +628,7 @@ def propose_title_as_columns_rename(
         return old_cols, 0, "row0_not_separator"
 
     row1 = sample_rows_data[1]
-    alpha_count = sum(
-        1 for v in row1 if v is not None and _ASCII_ALPHA_RE.search(str(v))
-    )
+    alpha_count = sum(1 for v in row1 if v is not None and _ASCII_ALPHA_RE.search(str(v)))
     if alpha_count < min_alpha_cells_in_header_row:
         return old_cols, 0, "row1_not_header_like"
 
@@ -740,12 +725,12 @@ def repair_title_as_columns_table(
     if dry_run:
         outcome.ok = True
         outcome.reason = "dry_run_proposal"
-        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="title_as_columns")
+        _audit(
+            engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="title_as_columns"
+        )
         return outcome
 
-    rename_pairs = [
-        (old, new) for old, new in zip(old_cols, proposed_cols) if old != new
-    ]
+    rename_pairs = [(old, new) for old, new in zip(old_cols, proposed_cols) if old != new]
     try:
         with engine.begin() as conn:
             for old, new in rename_pairs:
@@ -768,8 +753,7 @@ def repair_title_as_columns_table(
         outcome.reason = "applied"
         _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="title_as_columns")
         logger.info(
-            "parse_repair (title_as_columns): %s.%s renamed %d cols, "
-            "deleted %d rows",
+            "parse_repair (title_as_columns): %s.%s renamed %d cols, deleted %d rows",
             table_schema,
             table_name,
             len(rename_pairs),
@@ -861,9 +845,7 @@ async def propose_llm_assisted_rename(
     # max_cell_chars per cell. JSON-encoded for the LLM.
     samples = []
     for row in sample_rows_data[:max_sample_rows]:
-        truncated = [
-            (str(v)[:max_cell_chars] if v is not None else None) for v in row
-        ]
+        truncated = [(str(v)[:max_cell_chars] if v is not None else None) for v in row]
         samples.append(truncated)
 
     user_prompt = json.dumps(
@@ -879,9 +861,7 @@ async def propose_llm_assisted_rename(
     ]
     schema = {
         "type": "object",
-        "properties": {
-            "proposed_columns": {"type": "array", "items": {"type": "string"}}
-        },
+        "properties": {"proposed_columns": {"type": "array", "items": {"type": "string"}}},
         "required": ["proposed_columns"],
     }
 
@@ -913,9 +893,7 @@ async def propose_llm_assisted_rename(
         return old_cols, 0, "llm_bad_json"
 
     if not isinstance(proposed_raw, list) or len(proposed_raw) != len(old_cols):
-        return old_cols, 0, (
-            f"length_mismatch:{len(proposed_raw)}_vs_{len(old_cols)}"
-        )
+        return old_cols, 0, (f"length_mismatch:{len(proposed_raw)}_vs_{len(old_cols)}")
 
     # Defense-in-depth: re-normalize what the LLM returned and dedupe.
     proposed_normalized = [
@@ -997,9 +975,7 @@ async def repair_with_llm_assist(
         _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="llm_assisted")
         return outcome
 
-    rename_pairs = [
-        (old, new) for old, new in zip(old_cols, proposed_cols) if old != new
-    ]
+    rename_pairs = [(old, new) for old, new in zip(old_cols, proposed_cols) if old != new]
     try:
         with engine.begin() as conn:
             for old, new in rename_pairs:
@@ -1014,7 +990,9 @@ async def repair_with_llm_assist(
         _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="llm_assisted")
         logger.info(
             "parse_repair (llm_assisted): %s.%s renamed %d cols",
-            table_schema, table_name, len(rename_pairs),
+            table_schema,
+            table_name,
+            len(rename_pairs),
         )
     except Exception as exc:
         outcome.ok = False
@@ -1022,7 +1000,8 @@ async def repair_with_llm_assist(
         _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="llm_assisted")
         logger.exception(
             "parse_repair (llm_assisted) failed for %s.%s",
-            table_schema, table_name,
+            table_schema,
+            table_name,
         )
 
     return outcome

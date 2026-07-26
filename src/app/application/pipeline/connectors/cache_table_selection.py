@@ -71,7 +71,9 @@ def resolve_compat_table_name(table_name: str, available_tables: list[str]) -> s
         return direct
 
     if table_name == "cache_presupuesto_nacional":
-        credito_tables = [name for name in available_tables if name.startswith("cache_presupuesto_credito_")]
+        credito_tables = [
+            name for name in available_tables if name.startswith("cache_presupuesto_credito_")
+        ]
         if credito_tables:
             return max(credito_tables, key=_extract_year)
         budget_tables = [name for name in available_tables if name.startswith("cache_presupuesto_")]
@@ -91,9 +93,7 @@ def build_table_compat_notes(available_tables: list[str]) -> str:
             "Las series usan prefijo cache_series_*."
         )
     if "cache_bcra_cotizaciones" in available_tables:
-        notes.append(
-            "Alias legado: cache_bcra_principales_variables -> cache_bcra_cotizaciones."
-        )
+        notes.append("Alias legado: cache_bcra_principales_variables -> cache_bcra_cotizaciones.")
     if any(name.startswith("cache_presupuesto_credito_") for name in available_tables):
         notes.append(
             "No existe una tabla unica cache_presupuesto_nacional. "
@@ -113,7 +113,7 @@ def rewrite_legacy_sql_tables(sql: str, available_tables: list[str]) -> str:
         if not target or target == legacy_name:
             continue
         rewritten = re.sub(
-            rf'(?<![A-Za-z0-9_]){re.escape(legacy_name)}(?![A-Za-z0-9_])',
+            rf"(?<![A-Za-z0-9_]){re.escape(legacy_name)}(?![A-Za-z0-9_])",
             target,
             rewritten,
         )

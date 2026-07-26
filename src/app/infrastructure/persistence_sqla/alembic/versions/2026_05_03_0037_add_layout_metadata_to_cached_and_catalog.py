@@ -37,11 +37,19 @@ def _header_check_clause() -> str:
 
 
 def upgrade() -> None:
-    op.add_column("cached_datasets", sa.Column("layout_profile", sa.String(length=40), nullable=True))
-    op.add_column("cached_datasets", sa.Column("header_quality", sa.String(length=20), nullable=True))
+    op.add_column(
+        "cached_datasets", sa.Column("layout_profile", sa.String(length=40), nullable=True)
+    )
+    op.add_column(
+        "cached_datasets", sa.Column("header_quality", sa.String(length=20), nullable=True)
+    )
 
-    op.add_column("catalog_resources", sa.Column("layout_profile", sa.String(length=40), nullable=True))
-    op.add_column("catalog_resources", sa.Column("header_quality", sa.String(length=20), nullable=True))
+    op.add_column(
+        "catalog_resources", sa.Column("layout_profile", sa.String(length=40), nullable=True)
+    )
+    op.add_column(
+        "catalog_resources", sa.Column("header_quality", sa.String(length=20), nullable=True)
+    )
 
     op.create_check_constraint(
         "ck_cached_datasets_layout_profile",

@@ -283,9 +283,7 @@ def _build_union(
         lives_list = [
             r
             for r in lives_list
-            if expected_set.issubset(
-                actual_cols.get((r.schema_name, r.table_name), set())
-            )
+            if expected_set.issubset(actual_cols.get((r.schema_name, r.table_name), set()))
         ]
 
     if len(lives_list) > _MAX_UNION_TABLES:
@@ -303,9 +301,7 @@ def _build_union(
         # a particular column emit `NULL::text AS col` to keep the union
         # row-shape consistent.
         if engine is None:
-            raise MacroResolutionError(
-                "expected_columns requires engine for schema introspection"
-            )
+            raise MacroResolutionError("expected_columns requires engine for schema introspection")
         actual_cols_by_table = _query_columns(
             engine,
             [(r.schema_name, r.table_name) for r in lives_list],
@@ -320,16 +316,10 @@ def _build_union(
             # its own casts (`cue::int`, `lat::numeric`, etc.) — text
             # is castable from anything that started as NULL or string.
             projected = [
-                (
-                    f'"{c}"::text AS "{c}"'
-                    if c in cols_present
-                    else f'NULL::text AS "{c}"'
-                )
+                (f'"{c}"::text AS "{c}"' if c in cols_present else f'NULL::text AS "{c}"')
                 for c in expected_columns
             ]
-            selects.append(
-                f"SELECT {', '.join(projected)} FROM {_qualified(r)}"
-            )
+            selects.append(f"SELECT {', '.join(projected)} FROM {_qualified(r)}")
         return "(" + " UNION ALL ".join(selects) + ")"
 
     # Legacy path (no expected_columns).
@@ -347,9 +337,7 @@ def _typed_empty_select(expected_columns: list[str]) -> str:
     casts (`col::numeric`, `col::int`, etc.). `text` is castable to
     every type when the value is NULL, so this is safe.
     """
-    cols = ", ".join(
-        f'NULL::text AS "{c}"' for c in expected_columns
-    )
+    cols = ", ".join(f'NULL::text AS "{c}"' for c in expected_columns)
     return f"(SELECT {cols} WHERE FALSE)"
 
 
@@ -408,26 +396,18 @@ def _parse_macro_call(call_text: str) -> tuple[str, str, dict]:
     except SyntaxError as exc:
         raise MacroResolutionError(f"Macro syntax error: {exc}") from exc
     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-        raise MacroResolutionError(
-            f"Macro must be a function call, got {ast.dump(node)}"
-        )
+        raise MacroResolutionError(f"Macro must be a function call, got {ast.dump(node)}")
     name = node.func.id
     if name not in _VALID_MACRO_NAMES:
         raise MacroResolutionError(f"Unknown macro: {name}")
     if len(node.args) != 1:
-        raise MacroResolutionError(
-            f"Macro {name}() must take exactly one positional arg"
-        )
+        raise MacroResolutionError(f"Macro {name}() must take exactly one positional arg")
     try:
         positional = ast.literal_eval(node.args[0])
     except (ValueError, SyntaxError) as exc:
-        raise MacroResolutionError(
-            f"Macro {name}() positional arg must be a literal"
-        ) from exc
+        raise MacroResolutionError(f"Macro {name}() positional arg must be a literal") from exc
     if not isinstance(positional, str):
-        raise MacroResolutionError(
-            f"Macro {name}() positional arg must be a string"
-        )
+        raise MacroResolutionError(f"Macro {name}() positional arg must be a string")
     kwargs: dict = {}
     for kw in node.keywords:
         if kw.arg is None:
@@ -503,18 +483,14 @@ def resolve_macros(sql: str, engine) -> str:
                 )
         require_all_columns = kwargs.get("require_all_columns", False)
         if not isinstance(require_all_columns, bool):
-            raise MacroResolutionError(
-                f"Macro {name}(): require_all_columns must be a bool"
-            )
+            raise MacroResolutionError(f"Macro {name}(): require_all_columns must be a bool")
         if require_all_columns and not expected_columns:
             raise MacroResolutionError(
                 f"Macro {name}(): require_all_columns=True requires expected_columns"
             )
 
         if not _RESOURCE_IDENTITY_RE.match(arg):
-            raise MacroResolutionError(
-                f"Macro {name}(): invalid arg {arg!r} (charset)"
-            )
+            raise MacroResolutionError(f"Macro {name}(): invalid arg {arg!r} (charset)")
 
         if name == "live_table":
             row = by_identity.get(arg)
@@ -523,35 +499,22 @@ def resolve_macros(sql: str, engine) -> str:
                 # legacy untyped dummy (caller's outer SELECT may break).
                 if expected_columns:
                     return _typed_empty_select(expected_columns)
-                return (
-                    f"(SELECT NULL::text AS dummy WHERE FALSE) "
-                    f"/* live_table({arg!r}) absent */"
-                )
+                return f"(SELECT NULL::text AS dummy WHERE FALSE) /* live_table({arg!r}) absent */"
             if expected_columns:
                 # Project only the requested columns (NULL-fallback for
                 # ones that don't exist in this specific table).
                 cache_key = (row.schema_name, row.table_name)
                 actual_cols = columns_cache.get(cache_key)
                 if actual_cols is None:
-                    actual_cols = _query_columns(
-                        engine, [cache_key]
-                    ).get(cache_key, set())
+                    actual_cols = _query_columns(engine, [cache_key]).get(cache_key, set())
                     columns_cache[cache_key] = actual_cols
-                if require_all_columns and not set(expected_columns).issubset(
-                    actual_cols
-                ):
+                if require_all_columns and not set(expected_columns).issubset(actual_cols):
                     return _typed_empty_select(expected_columns)
                 projected = [
-                    (
-                        f'"{c}"::text AS "{c}"'
-                        if c in actual_cols
-                        else f'NULL::text AS "{c}"'
-                    )
+                    (f'"{c}"::text AS "{c}"' if c in actual_cols else f'NULL::text AS "{c}"')
                     for c in expected_columns
                 ]
-                return (
-                    f"(SELECT {', '.join(projected)} FROM {_qualified(row)})"
-                )
+                return f"(SELECT {', '.join(projected)} FROM {_qualified(row)})"
             return _qualified(row)
 
         if name == "live_tables_by_portal":

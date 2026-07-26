@@ -253,17 +253,22 @@ def ingest_presupuesto(self):
                     # append so the table identity (and downstream views) is
                     # preserved across re-runs.
                     try:
-                        df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
+                        df.to_sql(
+                            table_name, engine, schema="raw", if_exists="replace", index=False
+                        )
                     except Exception as exc:
-                        if "DependentObjectsStillExist" not in type(exc).__name__ \
-                                and "depend on it" not in str(exc):
+                        if "DependentObjectsStillExist" not in type(
+                            exc
+                        ).__name__ and "depend on it" not in str(exc):
                             raise
                         logger.info(
                             "Presupuesto %s %d: replace blocked by dependent view; "
                             "falling back to TRUNCATE + append",
-                            endpoint, year,
+                            endpoint,
+                            year,
                         )
                         from app.infrastructure.celery.tasks._db import safe_truncate_table
+
                         safe_truncate_table(engine, table_name)
                         df.to_sql(table_name, engine, schema="raw", if_exists="append", index=False)
 
@@ -450,17 +455,22 @@ def ingest_presupuesto_dimensiones(self):
                     # ingest_presupuesto: TRUNCATE + append when a mart
                     # already depends on this dimension table.
                     try:
-                        df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
+                        df.to_sql(
+                            table_name, engine, schema="raw", if_exists="replace", index=False
+                        )
                     except Exception as exc:
-                        if "DependentObjectsStillExist" not in type(exc).__name__ \
-                                and "depend on it" not in str(exc):
+                        if "DependentObjectsStillExist" not in type(
+                            exc
+                        ).__name__ and "depend on it" not in str(exc):
                             raise
                         logger.info(
                             "Presupuesto dim %s %d: replace blocked by dependent view; "
                             "falling back to TRUNCATE + append",
-                            dim_key, year,
+                            dim_key,
+                            year,
                         )
                         from app.infrastructure.celery.tasks._db import safe_truncate_table
+
                         safe_truncate_table(engine, table_name)
                         df.to_sql(table_name, engine, schema="raw", if_exists="append", index=False)
 

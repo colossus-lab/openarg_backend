@@ -277,6 +277,7 @@ class PgSandboxAdapter(ISQLSandbox):
                     )
                 finally:
                     cursor.close()
+
         return self._engine
 
     def _execute_sync(self, sql: str, timeout_seconds: int) -> SandboxResult:
@@ -485,6 +486,7 @@ class PgSandboxAdapter(ISQLSandbox):
 
     async def list_cached_tables(self) -> list[CachedTableInfo]:
         import time as _time
+
         now = _time.monotonic()
         cached = self._list_cache
         if cached is not None and (now - cached[0]) < self._LIST_CACHE_TTL_S:
@@ -501,9 +503,7 @@ class PgSandboxAdapter(ISQLSandbox):
         engine = self._get_engine()
         if not table_names:
             return {}
-        requested_pairs = [
-            (_split_table_reference(name), name) for name in table_names
-        ]
+        requested_pairs = [(_split_table_reference(name), name) for name in table_names]
         target_pairs = list(dict.fromkeys(pair for pair, _original in requested_pairs))
         schemas = list(dict.fromkeys(schema for schema, _table in target_pairs))
         tables = list(dict.fromkeys(table for _schema, table in target_pairs))

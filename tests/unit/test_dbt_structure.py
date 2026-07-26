@@ -98,9 +98,7 @@ def test_mart_schema_yml_has_tests() -> None:
     with (DBT_DIR / "models" / "marts" / "schema.yml").open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
     has_tests = any(
-        col.get("tests")
-        for model in data.get("models", [])
-        for col in model.get("columns", [])
+        col.get("tests") for model in data.get("models", []) for col in model.get("columns", [])
     )
     assert has_tests, "No tests declared in marts/schema.yml — dbt isn't earning its keep"
 

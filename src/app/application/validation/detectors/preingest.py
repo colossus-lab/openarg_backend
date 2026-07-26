@@ -103,7 +103,9 @@ class HttpErrorDetector(Detector):
                 mode=mode,
                 payload={"http_status": status, "url": (ctx.download_url or "")[:200]},
                 message=f"download URL returned HTTP {status}",
-                severity=Severity.CRITICAL if status >= 500 or status in {404, 410} else Severity.WARN,
+                severity=Severity.CRITICAL
+                if status >= 500 or status in {404, 410}
+                else Severity.WARN,
                 should_redownload=False,
             )
         return None
@@ -125,10 +127,7 @@ class FileTooLargeDetector(Detector):
     RAW_DOWNLOAD_LIMIT_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
 
     def applicable_to(self, ctx: ResourceContext) -> bool:
-        return (
-            ctx.declared_size_bytes is not None
-            or ctx.zip_member_sizes is not None
-        )
+        return ctx.declared_size_bytes is not None or ctx.zip_member_sizes is not None
 
     def run(self, ctx: ResourceContext, mode: Mode) -> Finding | None:
         # Per-file ZIP entry check (preferred over total)

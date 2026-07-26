@@ -58,9 +58,7 @@ def test_load_returns_empty_when_file_missing(tmp_path):
 
 
 def test_validate_flags_missing_url():
-    bad = CuratedSource(
-        id="x", title="T", url="", format="csv", organization="O"
-    )
+    bad = CuratedSource(id="x", title="T", url="", format="csv", organization="O")
     errors = validate_curated_sources([bad])
     assert any("missing_download_url" in e for e in errors)
 
