@@ -1415,7 +1415,11 @@ KEYWORD_ROUTES: dict[str, dict] = {
     "universidad": {
         "action": "query_sandbox",
         "params": {
-            "tables": ["mart.presupuesto_nacional_ejecutado", "cache_presupuesto_*"],
+            # NO nombrar mart.presupuesto_nacional_ejecutado acá: está
+            # `serving.blocked` (montos TEXT, anio corrupto, cobertura 32/560) y
+            # un hint hardcodeado saltea los gates de discovery, que es
+            # exactamente cómo se coló después de bloquearlo.
+            "tables": ["mart.presupuesto_consolidado", "cache_presupuesto_*"],
             "table_notes": (
                 _TRANSFERENCIAS_NOTES + " Las tablas cache_*universid* solo tienen "
                 "ubicaciones de universidades (CABA y Mendoza), no presupuesto. "

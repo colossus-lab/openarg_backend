@@ -90,3 +90,24 @@ class TestShippedMarts:
         assert blocked == {"presupuesto_nacional_ejecutado"}, (
             f"unexpected marts withheld from serving: {sorted(blocked)}"
         )
+
+    def test_no_routing_hint_names_a_blocked_mart(self) -> None:
+        """A hard-coded hint bypasses every discovery gate.
+
+        After blocking presupuesto_nacional_ejecutado the chat kept serving it,
+        because the `universidad` route named the mart explicitly in its
+        `tables` and hints skip the mart_definitions queries entirely.
+        """
+        from app.infrastructure.adapters.connectors.dataset_index import KEYWORD_ROUTES
+
+        blocked = {f"mart.{m.id}" for m in load_all_marts(_MARTS_DIR) if m.serving_blocked}
+        offenders = [
+            (keyword, table)
+            for keyword, route in KEYWORD_ROUTES.items()
+            for table in route.get("params", {}).get("tables", [])
+            if table in blocked
+        ]
+        assert not offenders, (
+            "routing hints must not name a serving-blocked mart — the hint path "
+            f"skips the discovery gates: {offenders}"
+        )

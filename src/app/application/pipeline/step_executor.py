@@ -139,6 +139,7 @@ async def _top_mart_similarity(nl_query: str, deps: ConnectorDeps) -> float:
                         "FROM mart_definitions "
                         "WHERE embedding IS NOT NULL "
                         "  AND COALESCE(last_row_count, 0) > 0 "
+                        "  AND NOT COALESCE(serving_blocked, FALSE) "
                         "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 1"
                     ),
                     {"e": emb_str},
