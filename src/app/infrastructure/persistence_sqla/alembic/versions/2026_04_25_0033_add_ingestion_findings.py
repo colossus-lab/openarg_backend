@@ -76,14 +76,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "uq_ingestion_findings_dedup", "ingestion_findings", type_="unique"
-    )
+    op.drop_constraint("uq_ingestion_findings_dedup", "ingestion_findings", type_="unique")
     op.drop_index("ix_ingestion_findings_found_at", table_name="ingestion_findings")
-    op.drop_index(
-        "ix_ingestion_findings_detector_severity", table_name="ingestion_findings"
-    )
-    op.drop_index(
-        "ix_ingestion_findings_resource_open", table_name="ingestion_findings"
-    )
+    op.drop_index("ix_ingestion_findings_detector_severity", table_name="ingestion_findings")
+    op.drop_index("ix_ingestion_findings_resource_open", table_name="ingestion_findings")
     op.drop_table("ingestion_findings")

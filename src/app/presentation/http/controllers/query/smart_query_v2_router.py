@@ -242,9 +242,7 @@ async def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type:
     if cache_key not in _compiled_graphs:
         async with _compiled_graphs_lock:
             if cache_key not in _compiled_graphs:
-                _compiled_graphs[cache_key] = build_pipeline_graph(
-                    deps, checkpointer=checkpointer
-                )
+                _compiled_graphs[cache_key] = build_pipeline_graph(deps, checkpointer=checkpointer)
     return _compiled_graphs[cache_key]
 
 
@@ -284,6 +282,7 @@ async def _get_checkpointer():
         return _checkpointer
 
     import time as _time
+
     now = _time.monotonic()
     if (
         _checkpointer_attempted
@@ -321,9 +320,7 @@ async def _get_checkpointer():
                 with contextlib.suppress(Exception):
                     await stack.aclose()
                 stack, saver = await _open_checkpointer(conn_str)
-                logger.info(
-                    "LangGraph checkpointer initialised after concurrent setup race"
-                )
+                logger.info("LangGraph checkpointer initialised after concurrent setup race")
             _checkpointer = saver
             _checkpointer_stack = stack
             return saver
@@ -476,13 +473,17 @@ async def smart_query_v2(
             # Authed but not synced — treat as no ownership.
             return JSONResponse(
                 status_code=403,
-                content={"error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}},
+                content={
+                    "error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}
+                },
             )
         conv = await chat_repo.get_conversation(conv_uuid, user_id=user.id)
         if conv is None:
             return JSONResponse(
                 status_code=403,
-                content={"error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}},
+                content={
+                    "error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}
+                },
             )
         owner_user_id = user.id
 
@@ -666,11 +667,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 # Anti-spoofing: if both are present and disagree, the
                 # body lied — refuse.
                 body_email = (raw.get("user_email") or "").strip()
-                if (
-                    verified_email
-                    and body_email
-                    and verified_email.lower() != body_email.lower()
-                ):
+                if verified_email and body_email and verified_email.lower() != body_email.lower():
                     await _safe_send_json(
                         ws,
                         {"type": "error", "message": "user_email mismatch"},
@@ -831,14 +828,13 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     if not complete_sent and question:
                         with contextlib.suppress(Exception):
                             from app.application.pipeline.history import save_query_attempt
+
                             await save_query_attempt(
                                 question=question,
                                 served_table=None,
                                 row_count=0,
                                 success=False,
-                                duration_ms=int(
-                                    (time.monotonic() - stream_started_at) * 1000
-                                ),
+                                duration_ms=int((time.monotonic() - stream_started_at) * 1000),
                                 error_message="ws_closed_mid_stream",
                                 semantic_cache=deps.semantic_cache,
                             )

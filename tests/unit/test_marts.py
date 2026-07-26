@@ -105,11 +105,9 @@ def test_build_create_view_sql_basic(tmp_path: Path) -> None:
 
 
 def test_build_create_view_sql_with_unique_index(tmp_path: Path) -> None:
-    yaml_text = (
-        _minimal_yaml().replace(
-            "policy: manual\n",
-            "policy: manual\n  unique_index: [foo]\n",
-        )
+    yaml_text = _minimal_yaml().replace(
+        "policy: manual\n",
+        "policy: manual\n  unique_index: [foo]\n",
     )
     p = tmp_path / "m.yaml"
     p.write_text(yaml_text)
@@ -117,7 +115,7 @@ def test_build_create_view_sql_with_unique_index(tmp_path: Path) -> None:
     statements = build_create_view_sql(m)
     assert len(statements) == 3  # DROP + CREATE + UNIQUE INDEX
     assert "CREATE UNIQUE INDEX" in statements[2]
-    assert "(\"foo\")" in statements[2]
+    assert '("foo")' in statements[2]
 
 
 def test_build_comment_sql_skips_undocumented(tmp_path: Path) -> None:
@@ -167,11 +165,9 @@ refresh:
 
 
 def test_build_refresh_sql_concurrent(tmp_path: Path) -> None:
-    yaml_text = (
-        _minimal_yaml().replace(
-            "policy: manual\n",
-            "policy: manual\n  unique_index: [foo]\n",
-        )
+    yaml_text = _minimal_yaml().replace(
+        "policy: manual\n",
+        "policy: manual\n  unique_index: [foo]\n",
     )
     p = tmp_path / "m.yaml"
     p.write_text(yaml_text)

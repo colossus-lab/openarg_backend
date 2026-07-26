@@ -197,9 +197,7 @@ def validate_curated_sources(sources: list[CuratedSource]) -> list[str]:
         MissingDownloadUrlDetector,
     )
 
-    detectors = IngestionValidator(
-        [MissingDownloadUrlDetector(), FileTooLargeDetector()]
-    )
+    detectors = IngestionValidator([MissingDownloadUrlDetector(), FileTooLargeDetector()])
     errors: list[str] = []
     seen_ids: set[str] = set()
     for src in sources:

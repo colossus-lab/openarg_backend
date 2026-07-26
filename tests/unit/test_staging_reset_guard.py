@@ -82,11 +82,13 @@ def test_trigger_repopulation_dispatches_full_rebuild_flow(mod, monkeypatch):
     def _record_delay(name):
         def _inner(*args, **kwargs):
             calls.append((name, ("delay", args, kwargs)))
+
         return _inner
 
     def _record_apply_async(name):
         def _inner(*args, **kwargs):
             calls.append((name, ("apply_async", args, kwargs)))
+
         return _inner
 
     monkeypatch.setitem(
@@ -97,9 +99,7 @@ def test_trigger_repopulation_dispatches_full_rebuild_flow(mod, monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "app.infrastructure.celery.tasks.scraper_tasks",
-        SimpleNamespace(
-            scrape_catalog=SimpleNamespace(delay=_record_delay("scrape_catalog"))
-        ),
+        SimpleNamespace(scrape_catalog=SimpleNamespace(delay=_record_delay("scrape_catalog"))),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -117,9 +117,7 @@ def test_trigger_repopulation_dispatches_full_rebuild_flow(mod, monkeypatch):
         sys.modules,
         "app.infrastructure.celery.tasks.collector_tasks",
         SimpleNamespace(
-            bulk_collect_all=SimpleNamespace(
-                apply_async=_record_apply_async("bulk_collect_all")
-            ),
+            bulk_collect_all=SimpleNamespace(apply_async=_record_apply_async("bulk_collect_all")),
             reconcile_cache_coverage=SimpleNamespace(
                 apply_async=_record_apply_async("reconcile_cache_coverage")
             ),
@@ -146,11 +144,13 @@ def test_trigger_repopulation_dispatches_materialization_flow_without_scrape(mod
     def _record_delay(name):
         def _inner(*args, **kwargs):
             calls.append((name, ("delay", args, kwargs)))
+
         return _inner
 
     def _record_apply_async(name):
         def _inner(*args, **kwargs):
             calls.append((name, ("apply_async", args, kwargs)))
+
         return _inner
 
     monkeypatch.setitem(
@@ -161,9 +161,7 @@ def test_trigger_repopulation_dispatches_materialization_flow_without_scrape(mod
     monkeypatch.setitem(
         sys.modules,
         "app.infrastructure.celery.tasks.scraper_tasks",
-        SimpleNamespace(
-            scrape_catalog=SimpleNamespace(delay=_record_delay("scrape_catalog"))
-        ),
+        SimpleNamespace(scrape_catalog=SimpleNamespace(delay=_record_delay("scrape_catalog"))),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -181,9 +179,7 @@ def test_trigger_repopulation_dispatches_materialization_flow_without_scrape(mod
         sys.modules,
         "app.infrastructure.celery.tasks.collector_tasks",
         SimpleNamespace(
-            bulk_collect_all=SimpleNamespace(
-                apply_async=_record_apply_async("bulk_collect_all")
-            ),
+            bulk_collect_all=SimpleNamespace(apply_async=_record_apply_async("bulk_collect_all")),
             reconcile_cache_coverage=SimpleNamespace(
                 apply_async=_record_apply_async("reconcile_cache_coverage")
             ),

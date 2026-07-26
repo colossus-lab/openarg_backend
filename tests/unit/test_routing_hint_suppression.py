@@ -24,9 +24,7 @@ def test_ckan_hint_present_without_suppression() -> None:
 
 
 def test_ckan_hint_suppressed_when_mart_available() -> None:
-    hints = _resolve_routing_hints(
-        "flujo vehicular en peajes de caba 2023", suppress_ckan=True
-    )
+    hints = _resolve_routing_hints("flujo vehicular en peajes de caba 2023", suppress_ckan=True)
     assert "search_ckan" not in hints
 
 

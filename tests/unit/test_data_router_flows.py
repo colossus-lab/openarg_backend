@@ -516,12 +516,22 @@ class TestDataRouterDataShapes:
 
         # `sampled_tables` added in Sprint 0.8 (raw-layer truncation surfacing).
         expected_query_fields = {
-            "columns", "rows", "row_count", "truncated", "sampled_tables", "error"
+            "columns",
+            "rows",
+            "row_count",
+            "truncated",
+            "sampled_tables",
+            "error",
         }
         expected_search_fields = {"table_name", "name", "title", "description", "relevance"}
         # `is_truncated` added in Sprint 0.8.
         expected_table_fields = {
-            "table_name", "name", "dataset_id", "row_count", "columns", "is_truncated"
+            "table_name",
+            "name",
+            "dataset_id",
+            "row_count",
+            "columns",
+            "is_truncated",
         }
 
         async with _build_client(

@@ -41,7 +41,9 @@ def test_collect_numeric_evidence_adds_scaled_variant_when_units_are_millions() 
 
     evidence = collect_numeric_evidence([result])
 
-    assert any(item.path == "records[0].reservas" and item.normalized == 41167.0 for item in evidence)
+    assert any(
+        item.path == "records[0].reservas" and item.normalized == 41167.0 for item in evidence
+    )
     assert any(
         item.path == "records[0].reservas.scaled_units" and item.normalized == 41167000000.0
         for item in evidence
@@ -100,7 +102,9 @@ def test_ground_citations_keeps_low_confidence_when_only_supported_number_is_tem
     assert confidence == 0.45
 
 
-def test_ground_citations_keeps_medium_confidence_for_single_partially_grounded_derived_claim() -> None:
+def test_ground_citations_keeps_medium_confidence_for_single_partially_grounded_derived_claim() -> (
+    None
+):
     result = DataResult(
         source="bcra",
         portal_name="BCRA",
@@ -332,7 +336,12 @@ def test_ground_citations_accepts_record_count_summary_for_time_series_context()
         records=[{"fecha": f"2026-0{month}-01", "reservas": month * 1000} for month in range(1, 4)],
         metadata={"fetched_at": "2026-04-14"},
     )
-    citations = [{"claim": "La serie muestra 3 registros recientes de reservas", "source": "Reservas Internacionales"}]
+    citations = [
+        {
+            "claim": "La serie muestra 3 registros recientes de reservas",
+            "source": "Reservas Internacionales",
+        }
+    ]
 
     grounded, warnings, confidence = ground_citations(
         "La serie muestra 3 registros recientes de reservas.",
@@ -361,7 +370,9 @@ def test_ground_citations_accepts_years_embedded_in_record_dates() -> None:
         ],
         metadata={"fetched_at": "2026-04-14"},
     )
-    citations = [{"claim": "En 2026 las reservas llegaron a 43125", "source": "Reservas Internacionales"}]
+    citations = [
+        {"claim": "En 2026 las reservas llegaron a 43125", "source": "Reservas Internacionales"}
+    ]
 
     grounded, warnings, confidence = ground_citations(
         "En 2026 las reservas llegaron a 43125.",
@@ -398,7 +409,12 @@ def test_ground_citations_accepts_years_embedded_in_dataset_titles_for_listings(
             metadata={"fetched_at": "2026-04-14"},
         ),
     ]
-    citations = [{"claim": "Hay 2 datasets de educación, incluyendo un relevamiento 2024", "source": "datos.gob.ar"}]
+    citations = [
+        {
+            "claim": "Hay 2 datasets de educación, incluyendo un relevamiento 2024",
+            "source": "datos.gob.ar",
+        }
+    ]
 
     grounded, warnings, confidence = ground_citations(
         "Hay 2 datasets de educación, incluyendo un relevamiento 2024.",
@@ -412,10 +428,15 @@ def test_ground_citations_accepts_years_embedded_in_dataset_titles_for_listings(
     assert grounded[0]["verified"] is True
     assert grounded[0]["unsupported_numbers"] == []
     assert any(item["path"] == "summary.results_count" for item in grounded[0]["grounding"])
-    assert any(item["path"] == "dataset_title.year" and item["value"] == 2024 for item in grounded[0]["grounding"])
+    assert any(
+        item["path"] == "dataset_title.year" and item["value"] == 2024
+        for item in grounded[0]["grounding"]
+    )
 
 
-def test_ground_citations_promotes_basic_bcra_query_to_high_when_only_secondary_delta_is_derived() -> None:
+def test_ground_citations_promotes_basic_bcra_query_to_high_when_only_secondary_delta_is_derived() -> (
+    None
+):
     result = DataResult(
         source="series_tiempo",
         portal_name="API de Series de Tiempo",

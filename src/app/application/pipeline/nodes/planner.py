@@ -211,12 +211,14 @@ def _plan_from_cached_dict(plan_dict: dict):
         steps = []
         for s in steps_in:
             if isinstance(s, dict):
-                steps.append(PlanStep(
-                    id=str(s.get("id", "")),
-                    action=str(s.get("action", "")),
-                    description=str(s.get("description", "")),
-                    params=s.get("params") or {},
-                ))
+                steps.append(
+                    PlanStep(
+                        id=str(s.get("id", "")),
+                        action=str(s.get("action", "")),
+                        description=str(s.get("description", "")),
+                        params=s.get("params") or {},
+                    )
+                )
         return ExecutionPlan(
             query=str(plan_dict.get("query", "")),
             intent=str(plan_dict.get("intent", "")),
@@ -323,9 +325,7 @@ async def planner_node(state: OpenArgState) -> dict:
                 q_embedding = None
 
         use_parallel = (
-            _parallel_classifier_enabled()
-            and not has_history
-            and not skip_classifier_high_conf
+            _parallel_classifier_enabled() and not has_history and not skip_classifier_high_conf
         )
 
         async def _discover() -> str:
@@ -460,6 +460,7 @@ async def clarify_reply_node(state: OpenArgState) -> dict:
     plan with ``intent="clarification"`` and a clarification step
     containing a question and clickable options.
     """
+
     # BUG-016/017: log every terminal exit to query_analytics (best-effort —
     # telemetry must never break the response path).
     async def _log_analytics(ok: bool) -> None:

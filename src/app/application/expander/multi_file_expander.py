@@ -42,9 +42,7 @@ _DOC_SUFFIXES = frozenset(
         ".rtf",
     }
 )
-_IMAGE_SUFFIXES = frozenset(
-    {".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp"}
-)
+_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp"})
 _VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".avi", ".mkv"})
 _GEO_SUFFIXES = frozenset({".shp", ".dbf", ".shx", ".prj", ".kml", ".kmz"})
 
@@ -158,11 +156,7 @@ def _classify(name: str, size: int, sample: bytes) -> EntryClassification:
             detected_format=detected,
             decision=EntryDecision.EXPAND_TABULAR,
         )
-    if (
-        suffix in _DOC_SUFFIXES
-        or suffix in _IMAGE_SUFFIXES
-        or suffix in _VIDEO_SUFFIXES
-    ):
+    if suffix in _DOC_SUFFIXES or suffix in _IMAGE_SUFFIXES or suffix in _VIDEO_SUFFIXES:
         return EntryClassification(
             name=name,
             size_bytes=size,

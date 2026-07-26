@@ -163,7 +163,9 @@ class TestRunPipelineP1:
 
 
 class TestCollectLargeGroupP1:
-    @patch("app.infrastructure.celery.tasks.collector_tasks.materialize_format_duplicate_aliases.apply_async")
+    @patch(
+        "app.infrastructure.celery.tasks.collector_tasks.materialize_format_duplicate_aliases.apply_async"
+    )
     @patch("app.infrastructure.celery.tasks.collector_tasks.consolidate_group_tables.apply_async")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")
     @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset")
@@ -222,7 +224,9 @@ class TestCollectLargeGroupP1:
         mock_materialize_aliases.assert_not_called()
         mock_engine.begin.assert_not_called()
 
-    @patch("app.infrastructure.celery.tasks.collector_tasks.materialize_format_duplicate_aliases.apply_async")
+    @patch(
+        "app.infrastructure.celery.tasks.collector_tasks.materialize_format_duplicate_aliases.apply_async"
+    )
     @patch("app.infrastructure.celery.tasks.collector_tasks.consolidate_group_tables.apply_async")
     @patch("app.infrastructure.celery.tasks.collector_tasks._get_table_row_count")
     @patch("app.infrastructure.celery.tasks.collector_tasks.collect_dataset")

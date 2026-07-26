@@ -53,8 +53,7 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        "CREATE INDEX IF NOT EXISTS idx_query_plan_cache_expires "
-        "ON query_plan_cache (expires_at)"
+        "CREATE INDEX IF NOT EXISTS idx_query_plan_cache_expires ON query_plan_cache (expires_at)"
     )
 
 

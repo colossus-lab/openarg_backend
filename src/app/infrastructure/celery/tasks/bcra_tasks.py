@@ -127,13 +127,15 @@ def snapshot_bcra(self):
                 try:
                     df.to_sql(table_name, engine, schema="raw", if_exists="replace", index=False)
                 except Exception as exc:
-                    if "DependentObjectsStillExist" not in type(exc).__name__ \
-                            and "depend on it" not in str(exc):
+                    if "DependentObjectsStillExist" not in type(
+                        exc
+                    ).__name__ and "depend on it" not in str(exc):
                         raise
                     logger.info(
                         "BCRA: replace blocked by dependent view; falling back to TRUNCATE + append"
                     )
                     from app.infrastructure.celery.tasks._db import safe_truncate_table
+
                     safe_truncate_table(engine, table_name)
                     df.to_sql(table_name, engine, schema="raw", if_exists="append", index=False)
                 dataset_id = _register_dataset(

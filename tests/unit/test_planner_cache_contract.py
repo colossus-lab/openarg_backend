@@ -32,9 +32,7 @@ async def test_discover_reuses_precomputed_embedding_for_serving(
 
     assert result == ""
     embedding.embed.assert_not_awaited()
-    assert (
-        serving_port.discover.await_args.kwargs["query_embedding"] == precomputed
-    )
+    assert serving_port.discover.await_args.kwargs["query_embedding"] == precomputed
 
 
 @pytest.mark.asyncio

@@ -48,12 +48,32 @@ def _is_numeric_str(v: str) -> bool:
 
 
 _MONTHS_AR_FULL = {
-    "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO",
-    "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+    "ENERO",
+    "FEBRERO",
+    "MARZO",
+    "ABRIL",
+    "MAYO",
+    "JUNIO",
+    "JULIO",
+    "AGOSTO",
+    "SEPTIEMBRE",
+    "OCTUBRE",
+    "NOVIEMBRE",
+    "DICIEMBRE",
 }
 _MONTHS_AR_SHORT = {
-    "ENE", "FEB", "MAR", "ABR", "MAY", "JUN",
-    "JUL", "AGO", "SEP", "OCT", "NOV", "DIC",
+    "ENE",
+    "FEB",
+    "MAR",
+    "ABR",
+    "MAY",
+    "JUN",
+    "JUL",
+    "AGO",
+    "SEP",
+    "OCT",
+    "NOV",
+    "DIC",
 }
 
 
@@ -71,11 +91,7 @@ def _looks_like_month_header_row(values: list[str]) -> bool:
     if len(populated) < 3:
         return False
     upper = [v.strip().upper() for v in populated]
-    month_count = sum(
-        1
-        for v in upper
-        if v in _MONTHS_AR_FULL or v in _MONTHS_AR_SHORT
-    )
+    month_count = sum(1 for v in upper if v in _MONTHS_AR_FULL or v in _MONTHS_AR_SHORT)
     if month_count < 3:
         return False
     # >=70% of populated cells are month names → header, not data.
@@ -151,9 +167,7 @@ def find_data_start_row(
     Returns None if no row in the window crosses the threshold (e.g. a pure
     text-only sheet) — caller should leave the dataframe alone.
     """
-    data_col_idx = [
-        idx for idx, c in enumerate(df.columns) if not str(c).startswith("_")
-    ]
+    data_col_idx = [idx for idx, c in enumerate(df.columns) if not str(c).startswith("_")]
     if not data_col_idx:
         return None
     for i in range(min(max_search, len(df))):
@@ -261,8 +275,7 @@ def promote_buried_headers(
     header_stack: list[list[str]] = []
     for i in range(data_start):
         row_vals = [
-            re.sub(r"\s+", " ", str(v)).strip() if pd.notna(v) else ""
-            for v in df.iloc[i].tolist()
+            re.sub(r"\s+", " ", str(v)).strip() if pd.notna(v) else "" for v in df.iloc[i].tolist()
         ]
         header_stack.append(_forward_fill(row_vals))
 

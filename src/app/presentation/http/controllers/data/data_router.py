@@ -156,16 +156,11 @@ async def data_query(
 
             from sqlalchemy import text as _sql_text
 
-            referenced = {
-                m.group(1)
-                for m in _re.finditer(r'raw\."([^"]+)"', body.sql)
-            }
-            referenced.update(
-                m.group(1)
-                for m in _re.finditer(r'\braw\.(\w+)', body.sql)
-            )
+            referenced = {m.group(1) for m in _re.finditer(r'raw\."([^"]+)"', body.sql)}
+            referenced.update(m.group(1) for m in _re.finditer(r"\braw\.(\w+)", body.sql))
 
             if referenced:
+
                 def _check_sampled() -> list[str]:
                     engine = getattr(sandbox, "_engine", None)
                     if engine is None:
@@ -258,9 +253,7 @@ async def data_tables(
             try:
                 _cc = _r.canonical_columns_json
                 if isinstance(_cc, list):
-                    _columns = [
-                        str(c.get("name", "")) for c in _cc if c.get("name")
-                    ]
+                    _columns = [str(c.get("name", "")) for c in _cc if c.get("name")]
             except Exception:
                 _columns = []
             _schema = str(_r.mart_schema or "mart")

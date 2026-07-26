@@ -234,7 +234,9 @@ class TestPgVectorSearchAdapter:
         first_params = mock_session.execute.await_args_list[0].args[1]
         assert first_params["min_score"] == 0.05
 
-    async def test_lexical_query_does_not_requery_when_results_are_sparse(self, adapter, mock_session):
+    async def test_lexical_query_does_not_requery_when_results_are_sparse(
+        self, adapter, mock_session
+    ):
         mock_result = MagicMock()
         mock_result.fetchall.return_value = []
         mock_session.execute.return_value = mock_result

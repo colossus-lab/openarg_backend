@@ -24,9 +24,7 @@ from app.domain.entities.serving import (
 
 
 def _resource(rid: str, layer: ServingLayer = ServingLayer.MART) -> Resource:
-    return Resource(
-        resource_id=rid, title=rid.replace("_", " "), layer=layer
-    )
+    return Resource(resource_id=rid, title=rid.replace("_", " "), layer=layer)
 
 
 def _schema(rid: str, layer: ServingLayer = ServingLayer.MART) -> Schema:
@@ -86,9 +84,7 @@ async def test_query_proxies_to_port() -> None:
 @pytest.mark.asyncio
 async def test_explain_proxies_to_port() -> None:
     port = AsyncMock()
-    port.explain.return_value = CatalogEntry(
-        resource=_resource("rid"), schema=_schema("rid")
-    )
+    port.explain.return_value = CatalogEntry(resource=_resource("rid"), schema=_schema("rid"))
     resolver = ServingResolver(port)
     result = await resolver.explain("rid")
     port.explain.assert_awaited_once_with("rid")

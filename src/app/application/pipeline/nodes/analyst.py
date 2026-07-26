@@ -619,7 +619,9 @@ async def analyst_node(state: OpenArgState) -> dict:
             logger.warning("chat_stream failed, falling back to chat()", exc_info=True)
             response = await deps.llm.chat(messages=messages, temperature=0.4, max_tokens=8192)
             full_text = response.content
-            writer({"type": "chunk", "content": _scrub_internal_identifiers(_strip_tags(full_text))})
+            writer(
+                {"type": "chunk", "content": _scrub_internal_identifiers(_strip_tags(full_text))}
+            )
 
         # Charts: prefer deterministic, fall back to LLM-generated
         det_charts = build_deterministic_charts(results)

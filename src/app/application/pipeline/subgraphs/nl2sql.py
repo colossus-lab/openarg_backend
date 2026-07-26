@@ -571,9 +571,7 @@ async def format_result_node(state: NL2SQLState) -> dict:
         # honestly ("the dataset doesn't cover that period") instead of
         # the generic "OpenArg cubre…" boilerplate.
         "queried_empty_mart": (
-            result.row_count == 0
-            and bool(served_table)
-            and bool(generated_sql)
+            result.row_count == 0 and bool(served_table) and bool(generated_sql)
         ),
         # LLM-001/LLM-002: tell the analyst whether the rows are a real
         # aggregate or a capped sample, and whether a non-additive metric
@@ -666,7 +664,9 @@ async def save_success_node(state: NL2SQLState) -> dict:
     nl_query = state["nl_query"]
     generated_sql = state.get("generated_sql", "")
     embedder_for_history = runtime["embedding"] if runtime else state.get("embedding")
-    semantic_cache_for_history = runtime["semantic_cache"] if runtime else state.get("semantic_cache")
+    semantic_cache_for_history = (
+        runtime["semantic_cache"] if runtime else state.get("semantic_cache")
+    )
 
     # Lazy import to avoid the cycle with connectors/sandbox.py which
     # re-exports history helpers through its module.

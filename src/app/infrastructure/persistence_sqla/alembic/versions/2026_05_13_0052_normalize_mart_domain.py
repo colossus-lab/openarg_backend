@@ -65,10 +65,7 @@ def upgrade() -> None:
     )
 
     # Drop if exists to keep the migration idempotent under partial reruns.
-    op.execute(
-        "DROP TRIGGER IF EXISTS mart_definitions_normalize_domain_trg "
-        "ON mart_definitions"
-    )
+    op.execute("DROP TRIGGER IF EXISTS mart_definitions_normalize_domain_trg ON mart_definitions")
     op.execute(
         """
         CREATE TRIGGER mart_definitions_normalize_domain_trg
@@ -86,9 +83,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute(
-        "DROP TRIGGER IF EXISTS mart_definitions_normalize_domain_trg "
-        "ON mart_definitions"
-    )
+    op.execute("DROP TRIGGER IF EXISTS mart_definitions_normalize_domain_trg ON mart_definitions")
     op.execute("DROP FUNCTION IF EXISTS mart_definitions_normalize_domain_fn()")
     op.execute("DROP FUNCTION IF EXISTS normalize_domain_token(text)")

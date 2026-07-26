@@ -50,9 +50,7 @@ def truncate_utf8_bytes(s: str, byte_limit: int = PG_NAME_LIMIT_BYTES) -> str:
     return encoded[:byte_limit].decode("utf-8", errors="ignore")
 
 
-def dedupe_column_names(
-    cols: list[str], *, byte_limit: int = PG_NAME_LIMIT_BYTES
-) -> list[str]:
+def dedupe_column_names(cols: list[str], *, byte_limit: int = PG_NAME_LIMIT_BYTES) -> list[str]:
     """Truncate each name to `byte_limit` AND dedupe collisions in one pass.
 
     Why both at once: two long names that differ in their tail share their
