@@ -68,6 +68,37 @@ _NONADDITIVE_WARNING_NOTE = (
     "puede estar inflado y carecer de sentido. NO lo presentes como dato firme: "
     "aclará la limitación o respondé con los valores absolutos (cantidades)."
 )
+# The generated SQL filtered rows by shape before casting to numeric, so the
+# aggregate covers only part of the universe. Reporting it as a total would be
+# a wrong answer stated as fact — the one failure mode a fact-checking
+# platform cannot afford.
+_COVERAGE_WARNING_HEAD = "⚠ TOTAL INCOMPLETO"
+
+
+def _coverage_warning_note(payload: dict) -> str:
+    cols = ", ".join(payload.get("columns") or []) or "una columna numérica"
+    excluded = payload.get("excluded_rows")
+    total = payload.get("total_rows")
+    if payload.get("measured") and excluded and total:
+        pct = payload.get("excluded_pct")
+        pct_text = f" ({pct} %)" if pct is not None else ""
+        detail = (
+            f"Se excluyeron {excluded} de {total} filas{pct_text} porque su formato "
+            f"numérico no coincidía con el filtro aplicado sobre {cols}."
+        )
+    else:
+        detail = (
+            f"La consulta filtró filas de {cols} por formato antes de sumar, así que "
+            "un número indeterminado de registros quedó fuera del total."
+        )
+    return (
+        f"{_COVERAGE_WARNING_HEAD}: {detail} "
+        "Los números de abajo NO representan el universo completo. "
+        "NO los presentes como total, ranking ni porcentaje: cualquier posición o "
+        "suma calculada sobre ellos puede estar equivocada. Explicá que el dato no "
+        "se puede calcular de forma confiable sobre este dataset y ofrecé una "
+        "consulta alternativa. Es preferible no dar el número a darlo mal."
+    )
 
 
 @functools.cache
@@ -281,6 +312,8 @@ def build_data_context(results: list[DataResult]) -> str:
                 lines.append(_SAMPLE_RESULT_NOTE)
             if metadata.get("nonadditive_warning"):
                 lines.append(_NONADDITIVE_WARNING_NOTE)
+            if metadata.get("coverage_warning"):
+                lines.append(_coverage_warning_note(metadata["coverage_warning"]))
             lines.append(f"Columnas: {display_columns_text}")
             if description:
                 lines.append(f"Descripción: {description}")

@@ -432,7 +432,43 @@ def _assess_citation(
     )
 
 
+def _quality_ceiling(results: list[DataResult]) -> float:
+    """Cap confidence from the data-quality flags the pipeline already sets.
+
+    Grounding only proves the analyst transcribed a number that was in the
+    rows — it says nothing about whether the rows themselves are a sound
+    basis for the claim. A query that silently dropped part of its universe
+    scored 0.9 before this cap existed (prod, 2026-07-26).
+    """
+    ceiling = 1.0
+    for result in results:
+        metadata = result.metadata or {}
+        if metadata.get("coverage_warning"):
+            ceiling = min(ceiling, 0.35)
+        if metadata.get("nonadditive_warning"):
+            ceiling = min(ceiling, 0.5)
+        if metadata.get("used_fallback"):
+            ceiling = min(ceiling, 0.6)
+        if metadata.get("result_kind") == "sample":
+            ceiling = min(ceiling, 0.7)
+        if metadata.get("truncated"):
+            ceiling = min(ceiling, 0.75)
+    return ceiling
+
+
 def _derive_confidence(
+    answer: str,
+    assessments: list[CitationAssessment],
+    results: list[DataResult],
+    llm_confidence: float,
+) -> float:
+    return min(
+        _derive_grounding_confidence(answer, assessments, results, llm_confidence),
+        _quality_ceiling(results),
+    )
+
+
+def _derive_grounding_confidence(
     answer: str,
     assessments: list[CitationAssessment],
     results: list[DataResult],
@@ -483,6 +519,29 @@ def ground_citations(
         warnings.append(
             "La respuesta contiene números pero no incluye citas estructuradas; verificación parcial."
         )
+
+    # `confidence` is deliberately stripped from the API response, so a
+    # coverage failure has to ride the `warnings` channel to reach the client
+    # at all. Emit it regardless of what the analyst wrote.
+    for result in results:
+        coverage = (result.metadata or {}).get("coverage_warning")
+        if not coverage:
+            continue
+        excluded = coverage.get("excluded_rows")
+        total = coverage.get("total_rows")
+        if coverage.get("measured") and excluded and total:
+            pct = coverage.get("excluded_pct")
+            pct_text = f" ({pct} %)" if pct is not None else ""
+            warnings.append(
+                f"Total incompleto: {excluded} de {total} filas{pct_text} "
+                "quedaron fuera del cálculo por su formato numérico."
+            )
+        else:
+            warnings.append(
+                "Total incompleto: la consulta descartó filas por formato numérico "
+                "antes de agregar, así que el resultado no cubre todo el universo."
+            )
+        break
 
     for citation in citations:
         assessment = _assess_citation(citation, evidence)

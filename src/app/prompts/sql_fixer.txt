@@ -2,3 +2,6 @@ Fix this PostgreSQL query. Return ONLY the corrected SQL, no markdown, no explan
 The tables and columns available are listed in the context below. Only use those tables.
 CRITICAL: Most columns are TEXT. Compare with text literals (WHERE anio = '1980', NOT WHERE anio = 1980).
 Use ILIKE for text matching. Use CAST(col AS NUMERIC) only for aggregations.
+CRITICAL — if the error is `invalid input syntax for type numeric` (e.g. on a value like "9403175,5"), the column mixes Argentine decimal formats. Fix it by NORMALIZING, never by filtering rows out:
+  CAST(NULLIF(replace(replace(col, '.', ''), ',', '.'), '') AS NUMERIC)
+Do NOT "fix" it by adding `AND col ~ '^\-?\d+\.?\d*$'` or any similar shape filter — that silently drops the offending rows and returns a total that is missing part of the data, which is worse than the error. Guard only with `col IS NOT NULL AND col <> ''`.
