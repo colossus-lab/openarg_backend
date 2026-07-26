@@ -37,6 +37,21 @@ DGSIAF_URL = "https://dgsiaf-repo.mecon.gob.ar/repository/pa/datasets"
 # two silently produces marts that reference a non-existent relation.
 _TARGET_SCHEMA = "raw"
 
+# DGSIAF ships es-AR CSVs: `.` groups thousands and `,` is the decimal mark.
+# Reading them with pandas defaults left `'2.022'` as a year string and
+# `'9403175,5'` as an amount string, so every column landed as `object` →
+# TEXT, and downstream aggregation had to guess the format (and got it
+# wrong — see the 2026-07-26 budget ranking). `sep=None` + the python
+# engine sniffs `,` vs `;`, which also explains the ragged rows that
+# `on_bad_lines="skip"` was quietly hiding.
+_CSV_READ_OPTS: dict = {
+    "sep": None,
+    "engine": "python",
+    "thousands": ".",
+    "decimal": ",",
+    "on_bad_lines": "warn",
+}
+
 # ── API Endpoints (requieren PRESUPUESTO_API_TOKEN) ──────────
 ENDPOINTS = {
     "credito": [
@@ -459,12 +474,12 @@ def ingest_presupuesto_dimensiones(self):
                         df = None
                         with zf.open(csv_files[0]) as f:
                             try:
-                                df = pd.read_csv(f, encoding="utf-8", on_bad_lines="skip")
+                                df = pd.read_csv(f, encoding="utf-8", **_CSV_READ_OPTS)
                             except UnicodeDecodeError:
                                 pass
                         if df is None:
                             with zf.open(csv_files[0]) as f2:
-                                df = pd.read_csv(f2, encoding="latin-1", on_bad_lines="skip")
+                                df = pd.read_csv(f2, encoding="latin-1", **_CSV_READ_OPTS)
 
                     if df.empty:
                         results["skipped"] += 1

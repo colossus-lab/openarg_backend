@@ -1,5 +1,5 @@
 id: presupuesto_nacional_ejecutado
-version: 0.1.0
+version: 0.2.0
 description: |
   Presupuesto de la Administración Pública Nacional argentina —
   ejecución mensual con jerarquía clasificatoria completa
@@ -34,10 +34,10 @@ sources:
 
 canonical_columns:
   - name: anio
-    type: text
+    type: int
     description: Año de impacto presupuestario
   - name: mes
-    type: text
+    type: int
     description: Mes de impacto presupuestario
   - name: jurisdiccion_id
     type: text
@@ -88,24 +88,48 @@ canonical_columns:
     type: text
     description: Subpartida
   - name: credito_presupuestado
-    type: text
+    type: numeric
     description: Crédito presupuestado (sancionado original)
   - name: credito_vigente
-    type: text
+    type: numeric
     description: Crédito vigente (post modificaciones)
   - name: credito_devengado
-    type: text
+    type: numeric
     description: Crédito devengado (efectivamente ejecutado)
 
-# Filtra a las ~32 tablas con la shape FULL de 33 cols.
-# `require_all_columns=True` descarta las sub-shapes (dimensiones /
-# clasificadores) que comparten el slug pero no tienen TODAS las cols
-# de hecho. Sin este flag, el macro intentaba unir las 597 tablas del
-# cluster y chocaba con el cap de 200.
+# COBERTURA (corregido 2026-07-26)
+# `require_all_columns=True` exigía las 33 columnas y dejaba 36 de 560 tablas
+# vivas: 91.299 filas de 15.801.820, el 0,58 % del cluster. El mart se veía
+# sano (91k filas, sin error) mientras representaba una fracción del
+# presupuesto nacional — y de ahí salieron los rankings incorrectos.
+# Medido: 62 tablas más estaban completas salvo por `finalidad_funcion_*`
+# (58) o `impacto_presupuestario_mes` (26), columnas que el mart proyecta
+# pero que no definen si una fila es un hecho presupuestario.
+# `require_columns` filtra por el núcleo que sí lo define; el resto se
+# proyecta como NULL cuando falta. Las sub-shapes reales (dimensiones y
+# clasificadores, con 0-14 columnas en común) siguen quedando afuera.
 sql: |
+  -- v0.2.0 (2026-07-26): el SELECT externo reaplica los casts que el macro
+  -- fuerza a ::text para poder unir shapes heterogéneas. Antes no lo hacía,
+  -- así que los montos quedaban TEXT con formato mixto y cualquier
+  -- agregación dependía de que el LLM normalizara a mano (y no lo hacía).
+  --
+  -- `_num()` inline: los montos vienen de la API en formato es-AR, donde
+  -- conviven '32291165' y '9403175,5'. Se quita el punto de miles y se pasa
+  -- la coma decimal a punto ANTES de castear. Nunca se descartan filas por
+  -- formato: eso sesga los totales.
+  --
+  -- `anio`: la ingesta dejó pasar '2.022' junto a '2022' (1.602 filas
+  -- huérfanas). Se limpia el separador antes de castear a int.
+  --
+  -- PENDIENTE: las etiquetas todavía duplican por acento ('Universidad
+  -- Tecnologica' vs 'Universidad Tecnológica' son dos filas en un ranking).
+  -- No se pliega acá porque esta es una vista de HECHOS granular: plegar
+  -- cambiaría el texto que se muestra al usuario en todo el mart. La
+  -- solución correcta es una columna de agrupación normalizada aparte.
   SELECT
-    NULLIF(TRIM(impacto_presupuestario_anio::text), '')              AS anio,
-    NULLIF(TRIM(impacto_presupuestario_mes::text), '')               AS mes,
+    NULLIF(replace(TRIM(impacto_presupuestario_anio::text), '.', ''), '')::int  AS anio,
+    NULLIF(TRIM(impacto_presupuestario_mes::text), '')::int          AS mes,
     NULLIF(TRIM(jurisdiccion_id::text), '')                          AS jurisdiccion_id,
     NULLIF(TRIM(jurisdiccion_desc), '')                              AS jurisdiccion_desc,
     NULLIF(TRIM(servicio_id::text), '')                              AS servicio_id,
@@ -122,9 +146,12 @@ sql: |
     NULLIF(TRIM(principal_desc), '')                                 AS principal_desc,
     NULLIF(TRIM(parcial_desc), '')                                   AS parcial_desc,
     NULLIF(TRIM(subparcial_desc), '')                                AS subparcial_desc,
-    NULLIF(TRIM(credito_presupuestado::text), '')                    AS credito_presupuestado,
-    NULLIF(TRIM(credito_vigente::text), '')                          AS credito_vigente,
-    NULLIF(TRIM(credito_devengado::text), '')                        AS credito_devengado
+    NULLIF(replace(replace(TRIM(credito_presupuestado::text), '.', ''), ',', '.'), '')::numeric
+                                                                     AS credito_presupuestado,
+    NULLIF(replace(replace(TRIM(credito_vigente::text), '.', ''), ',', '.'), '')::numeric
+                                                                     AS credito_vigente,
+    NULLIF(replace(replace(TRIM(credito_devengado::text), '.', ''), ',', '.'), '')::numeric
+                                                                     AS credito_devengado
   FROM {{ live_tables_by_table_pattern(
       'datos_gob_ar__presupuesto_de_la_administracion_pu*',
       expected_columns=[
@@ -145,7 +172,10 @@ sql: |
         'subparcial_id', 'subparcial_desc',
         'credito_presupuestado', 'credito_vigente', 'credito_devengado'
       ],
-      require_all_columns=True
+      require_columns=[
+        'impacto_presupuestario_anio', 'jurisdiccion_desc',
+        'credito_vigente', 'credito_devengado'
+      ]
   ) }} sub
   WHERE NULLIF(TRIM(jurisdiccion_desc), '') IS NOT NULL
 
