@@ -494,6 +494,90 @@ def _has_nonadditive_aggregate(sql: str) -> bool:
     return False
 
 
+# A `col ~ '<shape>'` guard placed on a column that is then aggregated. The
+# regex only has to be *shape-like* (anchored, digit classes) — those are the
+# ones used to make a numeric cast "work" by throwing rows away.
+_LOSSY_FILTER_RE = re.compile(
+    r"""["']?(?P<col>[A-Za-z_][A-Za-z0-9_]*)["']?\s*
+        (?P<op>!?~\*?)\s*
+        '(?P<pattern>\^[^']*\$)'""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def find_lossy_numeric_filters(sql: str) -> list[tuple[str, str]]:
+    """Find `col ~ '^…$'` shape guards that silently drop rows from an aggregate.
+
+    Argentine data mixes decimal formats inside one TEXT column (``32291165``
+    next to ``9403175,5``). A shape guard like ``col ~ '^\\-?\\d+\\.?\\d*$'``
+    excludes every comma-decimal row, so the SUM covers only part of the
+    universe and the total is reported as if it were complete. That is the
+    exact mechanism behind the wrong budget ranking of 2026-07-26.
+
+    Only flags queries that also aggregate — a shape guard on a plain SELECT
+    narrows a listing, which is a legitimate filter, not a silent loss.
+
+    Returns a list of ``(column, pattern)`` pairs, empty when the query is
+    clean.
+    """
+    if not sql or not _AGGREGATE_FN_RE.search(sql):
+        return []
+    return [(m.group("col"), m.group("pattern")) for m in _LOSSY_FILTER_RE.finditer(sql)]
+
+
+async def _measure_excluded_rows(
+    *,
+    served_table: str,
+    filters: list[tuple[str, str]],
+    sandbox: Any,
+) -> dict[str, Any]:
+    """Count how many rows a shape guard removed from the aggregate.
+
+    Runs one cheap `COUNT(*) FILTER (...)` against the same relation. Best
+    effort: any failure returns ``{"measured": False}`` so the caller still
+    warns, just without a number — a warning we cannot quantify is far better
+    than a total we cannot trust.
+    """
+    if not served_table or sandbox is None:
+        return {"measured": False}
+
+    # Reuse the identifier exactly as the generated SQL referenced it; it
+    # already passed the sandbox's own validation on the main query.
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?", served_table):
+        return {"measured": False}
+
+    col, pattern = filters[0]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", col):
+        return {"measured": False}
+
+    escaped = pattern.replace("'", "''")
+    probe = (
+        f"SELECT COUNT(*) AS total, "  # noqa: S608 - identifiers validated above
+        f"COUNT(*) FILTER (WHERE {col} IS NOT NULL AND {col} <> '' "
+        f"AND NOT ({col} ~ '{escaped}')) AS excluded "
+        f"FROM {served_table}"
+    )
+    try:
+        res = await sandbox.execute_readonly(probe)
+        if res.error or not res.rows:
+            return {"measured": False}
+        row = res.rows[0]
+        total = int(row.get("total") or 0)
+        excluded = int(row.get("excluded") or 0)
+    except Exception:
+        logger.debug("coverage probe failed", exc_info=True)
+        return {"measured": False}
+
+    if total <= 0:
+        return {"measured": False}
+    return {
+        "measured": True,
+        "total_rows": total,
+        "excluded_rows": excluded,
+        "excluded_pct": round(100.0 * excluded / total, 1),
+    }
+
+
 async def format_result_node(state: NL2SQLState) -> dict:
     """Format the SQL execution result into a single ``DataResult``.
 
@@ -581,6 +665,20 @@ async def format_result_node(state: NL2SQLState) -> dict:
     }
     if _has_nonadditive_aggregate(generated_sql):
         metadata["nonadditive_warning"] = True
+    # A shape guard on an aggregated TEXT column drops rows silently. Measure
+    # how many instead of guessing, so the analyst can state a fact ("el 21 %
+    # de las filas quedó fuera") rather than a vague hedge.
+    lossy = find_lossy_numeric_filters(generated_sql)
+    if lossy:
+        coverage = await _measure_excluded_rows(
+            served_table=served_table,
+            filters=lossy,
+            sandbox=_resolve_runtime_dep(state, "sandbox", None),
+        )
+        metadata["coverage_warning"] = {
+            "columns": [col for col, _ in lossy],
+            **coverage,
+        }
     # SEC-03 / M3 (round v46): never leak the raw SQL to production responses —
     # it enables schema enumeration through error replay. Keep it in
     # dev/local/staging for debugging.
