@@ -97,17 +97,39 @@ canonical_columns:
     type: numeric
     description: Crédito devengado (efectivamente ejecutado)
 
-# COBERTURA (corregido 2026-07-26)
-# `require_all_columns=True` exigía las 33 columnas y dejaba 36 de 560 tablas
-# vivas: 91.299 filas de 15.801.820, el 0,58 % del cluster. El mart se veía
-# sano (91k filas, sin error) mientras representaba una fracción del
-# presupuesto nacional — y de ahí salieron los rankings incorrectos.
-# Medido: 62 tablas más estaban completas salvo por `finalidad_funcion_*`
-# (58) o `impacto_presupuestario_mes` (26), columnas que el mart proyecta
-# pero que no definen si una fila es un hecho presupuestario.
-# `require_columns` filtra por el núcleo que sí lo define; el resto se
-# proyecta como NULL cuando falta. Las sub-shapes reales (dimensiones y
-# clasificadores, con 0-14 columnas en común) siguen quedando afuera.
+# ESTADO: BLOQUEADO — el problema es la FUENTE, no la definición (2026-07-26)
+#
+# Se intentó recuperar cobertura relajando el filtro de columnas a un núcleo
+# de 4 (`require_columns`). Entraron 92 de 560 tablas y el mart pasó de 91k a
+# 10,4M filas — con resultados absurdos, así que se revirtió:
+#   - aparecieron años 2007-2015, varios con EXACTAMENTE 500.000 filas, que es
+#     el tope MAX_ROWS del collector: son tablas TRUNCADAS, no universos.
+#   - el 67 % de las filas violó `credito_devengado <= credito_vigente`.
+#
+# Investigando por qué, apareció la causa de fondo: **las tablas del cluster
+# NO comparten unidad**. Una muestra del crudo tiene credito_vigente con
+# valores como '0,002379' (52.322 filas con coma decimal) mientras otras
+# traen enteros como '32291165'. Sumar entre tablas de distinta unidad no
+# tiene sentido, se casteen los tipos como se casteen.
+#
+# Además el mart cubre 37 jurisdicciones contra las 51 de
+# `presupuesto_consolidado`, y para 2024 apenas 8 con pocos cientos de filas
+# cada una: no es "el presupuesto nacional ejecutado", es un subconjunto.
+#
+# Conclusión: este mart no se arregla desde el YAML. Requiere caracterizar
+# qué es cada sub-shape del cluster (unidad, grano, universo, truncamiento
+# via `is_truncated`) antes de decidir qué se puede unir. Hasta entonces
+# `presupuesto_consolidado` es la fuente correcta del dominio: viene de la
+# API de Presupuesto Abierto con unidad consistente (millones de pesos),
+# tipos numéricos y los 11 ejercicios.
+#
+# Lo que SÍ quedó de este intento (útil aunque el mart siga bloqueado):
+#   - los casts numéricos y de anio, correctos en sí mismos
+#   - `pg_input_is_valid` para nulear basura sin descartar filas
+#   - el kwarg `require_columns` del macro, con tests, disponible para marts
+#     cuyo cluster sí sea homogéneo
+#   - el log de "kept N of M tables", que es lo que hizo visible todo esto
+
 sql: |
   -- v0.2.0 (2026-07-26): el SELECT externo reaplica los casts que el macro
   -- fuerza a ::text para poder unir shapes heterogéneas. Antes no lo hacía,
@@ -119,6 +141,13 @@ sql: |
   -- la coma decimal a punto ANTES de castear. Nunca se descartan filas por
   -- formato: eso sesga los totales.
   --
+  -- `pg_input_is_valid` (PG16) nulea el VALOR cuando el origen trae basura
+  -- que no es un número en ningún formato — medido: 2 filas de 6.961.694
+  -- con '#¡REF!', una celda de Excel rota. Ojo con la diferencia: esto
+  -- conserva la FILA y deja el monto en NULL (honesto: "no se sabe"), a
+  -- diferencia de un `WHERE col ~ regex`, que borraría la fila entera del
+  -- agregado y sesgaría el total sin avisar.
+  --
   -- `anio`: la ingesta dejó pasar '2.022' junto a '2022' (1.602 filas
   -- huérfanas). Se limpia el separador antes de castear a int.
   --
@@ -128,8 +157,13 @@ sql: |
   -- cambiaría el texto que se muestra al usuario en todo el mart. La
   -- solución correcta es una columna de agrupación normalizada aparte.
   SELECT
-    NULLIF(replace(TRIM(impacto_presupuestario_anio::text), '.', ''), '')::int  AS anio,
-    NULLIF(TRIM(impacto_presupuestario_mes::text), '')::int          AS mes,
+    CASE WHEN pg_input_is_valid(
+           NULLIF(replace(TRIM(impacto_presupuestario_anio::text), '.', ''), ''), 'int')
+         THEN NULLIF(replace(TRIM(impacto_presupuestario_anio::text), '.', ''), '')::int
+         END                                                          AS anio,
+    CASE WHEN pg_input_is_valid(NULLIF(TRIM(impacto_presupuestario_mes::text), ''), 'int')
+         THEN NULLIF(TRIM(impacto_presupuestario_mes::text), '')::int
+         END                                                          AS mes,
     NULLIF(TRIM(jurisdiccion_id::text), '')                          AS jurisdiccion_id,
     NULLIF(TRIM(jurisdiccion_desc), '')                              AS jurisdiccion_desc,
     NULLIF(TRIM(servicio_id::text), '')                              AS servicio_id,
@@ -146,11 +180,23 @@ sql: |
     NULLIF(TRIM(principal_desc), '')                                 AS principal_desc,
     NULLIF(TRIM(parcial_desc), '')                                   AS parcial_desc,
     NULLIF(TRIM(subparcial_desc), '')                                AS subparcial_desc,
-    NULLIF(replace(replace(TRIM(credito_presupuestado::text), '.', ''), ',', '.'), '')::numeric
+    CASE WHEN pg_input_is_valid(
+           NULLIF(replace(replace(TRIM(credito_presupuestado::text), '.', ''), ',', '.'), ''),
+           'numeric')
+         THEN NULLIF(replace(replace(TRIM(credito_presupuestado::text), '.', ''), ',', '.'), '')::numeric
+         END
                                                                      AS credito_presupuestado,
-    NULLIF(replace(replace(TRIM(credito_vigente::text), '.', ''), ',', '.'), '')::numeric
+    CASE WHEN pg_input_is_valid(
+           NULLIF(replace(replace(TRIM(credito_vigente::text), '.', ''), ',', '.'), ''),
+           'numeric')
+         THEN NULLIF(replace(replace(TRIM(credito_vigente::text), '.', ''), ',', '.'), '')::numeric
+         END
                                                                      AS credito_vigente,
-    NULLIF(replace(replace(TRIM(credito_devengado::text), '.', ''), ',', '.'), '')::numeric
+    CASE WHEN pg_input_is_valid(
+           NULLIF(replace(replace(TRIM(credito_devengado::text), '.', ''), ',', '.'), ''),
+           'numeric')
+         THEN NULLIF(replace(replace(TRIM(credito_devengado::text), '.', ''), ',', '.'), '')::numeric
+         END
                                                                      AS credito_devengado
   FROM {{ live_tables_by_table_pattern(
       'datos_gob_ar__presupuesto_de_la_administracion_pu*',
@@ -172,10 +218,7 @@ sql: |
         'subparcial_id', 'subparcial_desc',
         'credito_presupuestado', 'credito_vigente', 'credito_devengado'
       ],
-      require_columns=[
-        'impacto_presupuestario_anio', 'jurisdiccion_desc',
-        'credito_vigente', 'credito_devengado'
-      ]
+      require_all_columns=True
   ) }} sub
   WHERE NULLIF(TRIM(jurisdiccion_desc), '') IS NOT NULL
 
@@ -201,6 +244,8 @@ refresh:
 serving:
   blocked: true
   blocked_reason: >-
-    Montos TEXT con formato mixto, anio corrupto ('2.022') y cobertura parcial
-    (32 de 560 tablas del cluster). Produjo un ranking de transferencias
-    incorrecto. Usar presupuesto_consolidado hasta que se limpie.
+    El cluster de origen mezcla unidades (valores '0,002379' junto a enteros
+    de 8 digitos), incluye tablas truncadas por MAX_ROWS y cubre 37 de 51
+    jurisdicciones. Sumar entre sus tablas no tiene sentido: produjo un
+    ranking de transferencias incorrecto por ordenes de magnitud. Requiere
+    caracterizar cada sub-shape antes de unir. Usar presupuesto_consolidado.
