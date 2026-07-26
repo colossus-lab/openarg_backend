@@ -51,12 +51,15 @@ are allowed. If we need more, dbt is the upgrade path.
 from __future__ import annotations
 
 import ast
+import logging
 import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 # Match the entire `{{ ... }}` payload — content parsed afterward by `ast`.
 _MACRO_RE = re.compile(r"\{\{\s*(?P<call>.+?)\s*\}\}", re.DOTALL)
@@ -247,6 +250,7 @@ def _build_union(
     macro_name: str = "",
     expected_columns: list[str] | None = None,
     require_all_columns: bool = False,
+    require_columns: list[str] | None = None,
     engine=None,
 ) -> str:
     """Build a UNION ALL subquery from N live rows.
@@ -264,27 +268,55 @@ def _build_union(
       and only the FULL shape is desired (e.g. fact tables vs. dimension
       tables in the same cluster).
 
+    With `require_columns=[...]`:
+      Same filtering, but on an explicit SUBSET instead of the whole
+      projection list. This decouples "what identifies a fact table" from
+      "what the mart projects", which matters because an optional column
+      should not cost you the table. Measured on the presupuesto cluster:
+      requiring all 33 projected columns kept 36 of 560 tables — 91k of
+      15.8M rows, 0.58 % of the data — while 62 further tables were
+      complete apart from `finalidad_funcion_*` or
+      `impacto_presupuestario_mes`. Columns in `expected_columns` but
+      absent from a matched table are still projected as NULL, so the
+      outer SELECT is unaffected.
+      Takes precedence over `require_all_columns` when both are given.
+
     Without `expected_columns`:
       - Empty list → `SELECT NULL::text AS dummy WHERE FALSE` (legacy).
       - N matches → `SELECT * FROM <each>` UNION ALL (legacy).
     """
     lives_list = list(lives)
 
-    if require_all_columns and expected_columns:
+    filter_set: set[str] | None = None
+    if require_columns:
+        filter_set = set(require_columns)
+    elif require_all_columns and expected_columns:
+        filter_set = set(expected_columns)
+
+    if filter_set:
         if engine is None:
             raise MacroResolutionError(
-                "require_all_columns requires engine for schema introspection"
+                "require_all_columns/require_columns need an engine for schema introspection"
             )
         actual_cols = _query_columns(
             engine,
             [(r.schema_name, r.table_name) for r in lives_list],
         )
-        expected_set = set(expected_columns)
+        before = len(lives_list)
         lives_list = [
             r
             for r in lives_list
-            if expected_set.issubset(actual_cols.get((r.schema_name, r.table_name), set()))
+            if filter_set.issubset(actual_cols.get((r.schema_name, r.table_name), set()))
         ]
+        # Dropping source tables silently is how a mart ends up serving a
+        # fraction of its domain while looking healthy. Say it out loud.
+        logger.info(
+            "%s: column filter kept %d of %d live tables (required: %s)",
+            macro_name or "live_tables_by_*",
+            len(lives_list),
+            before,
+            ", ".join(sorted(filter_set)),
+        )
 
     if len(lives_list) > _MAX_UNION_TABLES:
         raise MacroExpansionTooLarge(
@@ -484,6 +516,23 @@ def resolve_macros(sql: str, engine) -> str:
         require_all_columns = kwargs.get("require_all_columns", False)
         if not isinstance(require_all_columns, bool):
             raise MacroResolutionError(f"Macro {name}(): require_all_columns must be a bool")
+        require_columns = kwargs.get("require_columns")
+        if require_columns is not None:
+            if not isinstance(require_columns, list) or not all(
+                isinstance(x, str) for x in require_columns
+            ):
+                raise MacroResolutionError(
+                    f"Macro {name}(): require_columns must be a list of strings"
+                )
+            if not expected_columns:
+                raise MacroResolutionError(
+                    f"Macro {name}(): require_columns requires expected_columns"
+                )
+            missing = set(require_columns) - set(expected_columns)
+            if missing:
+                raise MacroResolutionError(
+                    f"Macro {name}(): require_columns not in expected_columns: {sorted(missing)}"
+                )
         if require_all_columns and not expected_columns:
             raise MacroResolutionError(
                 f"Macro {name}(): require_all_columns=True requires expected_columns"
@@ -525,6 +574,7 @@ def resolve_macros(sql: str, engine) -> str:
                 macro_name=f"live_tables_by_portal({arg!r})",
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
+                require_columns=require_columns,
                 engine=engine,
             )
 
@@ -538,6 +588,7 @@ def resolve_macros(sql: str, engine) -> str:
                 macro_name=f"live_tables_by_pattern({arg!r})",
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
+                require_columns=require_columns,
                 engine=engine,
             )
 
@@ -551,6 +602,7 @@ def resolve_macros(sql: str, engine) -> str:
                 macro_name=f"live_tables_by_table_pattern({arg!r})",
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
+                require_columns=require_columns,
                 engine=engine,
             )
 
