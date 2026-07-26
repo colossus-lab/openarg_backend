@@ -20,6 +20,7 @@ from app.application.pipeline.citation_guard import ground_citations
 from app.application.pipeline.context_builder import (
     build_capabilities_block,
     build_data_context,
+    build_live_marts_block,
 )
 from app.application.pipeline.state import OpenArgState
 from app.domain.ports.llm.llm_provider import LLMMessage
@@ -448,6 +449,14 @@ def _enforce_prompt_budget(
 # ── Analysis prompt builder (same logic as _build_analysis_prompt) ─
 
 
+def _is_no_data_fallback(results: list) -> bool:
+    """True when no step produced usable data and the analyst must deflect."""
+    return not results or not any(
+        r.records or r.source.startswith("pgvector:") or r.source.startswith("ckan:")
+        for r in results
+    )
+
+
 def _build_analysis_prompt(
     question: str,
     plan: Any,
@@ -455,6 +464,7 @@ def _build_analysis_prompt(
     memory_ctx_analyst: str,
     all_warnings: list[str],
     skill_context: dict[str, str] | None = None,
+    live_marts_block: str = "",
 ) -> str:
     """Build the analyst LLM prompt from data context and warnings."""
     data_context = build_data_context(results)
@@ -464,10 +474,7 @@ def _build_analysis_prompt(
     if all_warnings:
         errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {w}" for w in all_warnings)
 
-    no_data_fallback = not results or not any(
-        r.records or r.source.startswith("pgvector:") or r.source.startswith("ckan:")
-        for r in results
-    )
+    no_data_fallback = _is_no_data_fallback(results)
 
     if no_data_fallback:
         caps = build_capabilities_block()
@@ -489,6 +496,7 @@ def _build_analysis_prompt(
             today=today,
             memory_ctx_analyst="",
             caps=caps,
+            live_marts=live_marts_block or "(no disponible)",
             attempted_table=attempted_table or "(ninguna)",
         )
 
@@ -561,6 +569,11 @@ async def analyst_node(state: OpenArgState) -> dict:
 
         # Build prompt
         skill_context = state.get("skill_context")
+        # Only the no-data template needs the live-marts list; skip the
+        # (TTL-cached) DB lookup on the happy path.
+        live_marts_block = ""
+        if _is_no_data_fallback(results):
+            live_marts_block = await build_live_marts_block(deps.sandbox)
         analysis_prompt = _build_analysis_prompt(
             question,
             plan,
@@ -568,6 +581,7 @@ async def analyst_node(state: OpenArgState) -> dict:
             memory_ctx_analyst,
             all_warnings,
             skill_context=skill_context,
+            live_marts_block=live_marts_block,
         )
 
         # LLM streaming call — emit chunks as they arrive
@@ -677,6 +691,9 @@ async def analyst_node(state: OpenArgState) -> dict:
             "citations": citations,
             "step_warnings": grounding_warnings,
             "tokens_used": tokens_used,
+            # Always emitted (True and False) so a post-replan analyst pass
+            # that finds data overwrites a stale True from the first pass.
+            "no_data_deflection": _is_no_data_fallback(results),
         }
     except Exception:
         logger.exception("analyst_node failed")
@@ -691,5 +708,6 @@ async def analyst_node(state: OpenArgState) -> dict:
             "confidence": 0.0,
             "citations": [],
             "tokens_used": 0,
+            "no_data_deflection": False,
             "error": "Analyst LLM call failed",
         }

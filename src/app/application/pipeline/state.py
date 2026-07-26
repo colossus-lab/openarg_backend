@@ -72,6 +72,10 @@ class OpenArgState(TypedDict, total=False):
     clean_answer: str
     confidence: float
     citations: list[dict[str, Any]]
+    # True when the analyst answered via the no-data deflection template
+    # (no step returned records). Finalize uses it to skip the semantic
+    # cache write and to mark the analytics row as unsuccessful.
+    no_data_deflection: bool
 
     # ── Charts ──────────────────────────────────────────────
     chart_data: list[dict[str, Any]] | None

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
+import time
+from typing import Any
 
 from app.domain.entities.connectors.data_result import DataResult
 
@@ -115,6 +118,66 @@ def build_capabilities_block() -> str:
             "• Infraestructura (transporte, energía, telecomunicaciones)\n"
             "• Georeferenciación (provincias, municipios, localidades)"
         )
+
+
+# The no-data reply must only suggest questions the system can actually
+# answer, so it needs the list of marts that are alive right now. TTL-cached
+# in-process: deflections are frequent enough that hitting mart_definitions
+# on every one would be wasteful, and 5 minutes of staleness is harmless.
+_LIVE_MARTS_TTL_S = 300.0
+_live_marts_cache: tuple[float, str] = (0.0, "")
+
+
+async def build_live_marts_block(sandbox: Any) -> str:
+    """List live marts (``last_row_count > 0``) for the no-data reply.
+
+    Returns an empty string when the sandbox engine is unavailable or the
+    query fails — the caller renders the reply without the block.
+    """
+    global _live_marts_cache
+    ts, cached = _live_marts_cache
+    if cached and time.monotonic() - ts < _LIVE_MARTS_TTL_S:
+        return cached
+
+    try:
+        from sqlalchemy import text
+
+        def _query() -> list[tuple[str, str | None, str | None]]:
+            eng = getattr(sandbox, "_engine", None) or (
+                sandbox._get_engine() if hasattr(sandbox, "_get_engine") else None
+            )
+            if eng is None:
+                return []
+            with eng.connect() as conn:
+                rs = conn.execute(
+                    text(
+                        "SELECT mart_view_name, domain, description "
+                        "FROM mart_definitions "
+                        "WHERE COALESCE(last_row_count, 0) > 0 "
+                        "ORDER BY domain NULLS LAST, mart_view_name"
+                    )
+                ).fetchall()
+            return [(r[0], r[1], r[2]) for r in rs]
+
+        rows = await asyncio.to_thread(_query)
+    except Exception:
+        logger.debug("build_live_marts_block failed", exc_info=True)
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = ["DATASETS VIVOS (los únicos temas con datos consultables ahora mismo):"]
+    for view_name, domain, description in rows:
+        label = view_name.replace("_", " ")
+        detail = (description or "").strip().splitlines()[0] if description else ""
+        suffix = f" — {detail}" if detail else ""
+        prefix = f"[{domain}] " if domain else ""
+        lines.append(f"• {prefix}{label}{suffix}")
+
+    block = "\n".join(lines)
+    _live_marts_cache = (time.monotonic(), block)
+    return block
 
 
 def build_data_context(results: list[DataResult]) -> str:

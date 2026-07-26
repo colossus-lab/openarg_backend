@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.infrastructure.adapters.connectors.dataset_index import (
     _KEYWORD_PATTERNS,
     KEYWORD_ROUTES,
@@ -322,3 +324,61 @@ class TestKeywordCount:
     def test_minimum_routes(self):
         """Ensure we have at least 190 keyword routes after expansion."""
         assert len(KEYWORD_ROUTES) >= 190
+
+
+class TestTableGlobsMatchInventory:
+    """Every cache_* glob in KEYWORD_ROUTES must match at least one real table.
+
+    A hint whose glob matches nothing silently degrades the planner: the
+    sandbox falls through fnmatch -> vector search -> mart injection and
+    usually ends in a no-data deflection even when the data exists under
+    another table family (this is how "transferencias a universidades"
+    deflected in prod, 2026-07-23).
+
+    Fixtures:
+    - ``cache_table_inventory.txt`` — snapshot of ``cached_datasets WHERE
+      status='ready'`` table names from prod (2026-07-23). Regenerate from a
+      fresh export when table families change.
+    - ``known_broken_hints.txt`` — pre-existing drift frozen at the time this
+      test landed (150 keyword -> pattern pairs across ~40 domains, e.g.
+      ``elecciones -> cache_elecciones_*`` where real tables are
+      portal-prefixed). Each line is a hint that needs a routing decision.
+      The test fails on NEW drift and on stale baseline entries, so the file
+      can only shrink.
+    """
+
+    @staticmethod
+    def _fixture_lines(name: str) -> list[str]:
+        fixture = Path(__file__).resolve().parent.parent / "fixtures" / name
+        return [line.strip() for line in fixture.read_text().splitlines() if line.strip()]
+
+    def test_table_globs_match_inventory(self):
+        import fnmatch
+
+        inventory = self._fixture_lines("cache_table_inventory.txt")
+        assert len(inventory) > 1000, "inventory fixture looks truncated"
+        baseline = set(self._fixture_lines("known_broken_hints.txt"))
+
+        failures: set[str] = set()
+        for keyword, route in KEYWORD_ROUTES.items():
+            for pattern in route.get("params", {}).get("tables", []):
+                if not pattern.startswith("cache_"):
+                    continue  # mart.* / raw.* names are validated elsewhere
+                if "*" in pattern or "?" in pattern:
+                    matched = any(fnmatch.fnmatch(name, pattern) for name in inventory)
+                else:
+                    matched = pattern in inventory
+                if not matched:
+                    failures.add(f"{keyword} -> {pattern}")
+
+        new_drift = sorted(failures - baseline)
+        assert not new_drift, (
+            "KEYWORD_ROUTES globs matching zero real tables (fix the hint; do "
+            "NOT extend known_broken_hints.txt for new entries):\n" + "\n".join(new_drift)
+        )
+
+        stale = sorted(baseline - failures)
+        assert not stale, (
+            "Fixed hints still listed in known_broken_hints.txt — remove them "
+            "so the baseline only shrinks:\n" + "\n".join(stale)
+        )

@@ -94,18 +94,25 @@ async def finalize_node(state: OpenArgState) -> dict:
         "citations": state.get("citations", []),
         "warnings": all_warnings,
     }
-    try:
-        await write_cache(
-            question,
-            result_dict,
-            plan_intent,
-            deps.cache,
-            deps.embedding,
-            deps.semantic_cache,
-            last_embedding=last_embedding,
-        )
-    except Exception:
-        logger.debug("Cache write failed in finalize_node", exc_info=True)
+    # No-data deflections must never be cached: a cached deflection gets
+    # re-served verbatim to reformulations of the same question, locking
+    # the user in a suggestion loop even after the data becomes reachable.
+    no_data_deflection = bool(state.get("no_data_deflection"))
+    if no_data_deflection:
+        logger.debug("finalize_node: no-data deflection, skipping cache write")
+    else:
+        try:
+            await write_cache(
+                question,
+                result_dict,
+                plan_intent,
+                deps.cache,
+                deps.embedding,
+                deps.semantic_cache,
+                last_embedding=last_embedding,
+            )
+        except Exception:
+            logger.debug("Cache write failed in finalize_node", exc_info=True)
 
     # Memory update (fire-and-forget background task)
     conversation_id = state.get("conversation_id", "")
@@ -139,14 +146,23 @@ async def finalize_node(state: OpenArgState) -> dict:
         (r.metadata.get("served_table") or r.source for r in results if r.records),
         None,
     )
+    # A no-data deflection has a non-empty answer but served no data —
+    # log it as a failure with a distinct marker so /admin/analytics
+    # surfaces it instead of counting it as a success.
+    if no_data_deflection:
+        analytics_success = False
+        analytics_error = "no_data_deflection"
+    else:
+        analytics_success = answer_ok
+        analytics_error = None if answer_ok else "empty_answer"
     try:
         await record_terminal_analytics(
             question=question,
             served_table=served_table,
             row_count=sum(len(r.records) for r in results),
-            success=answer_ok,
+            success=analytics_success,
             duration_ms=duration_ms,
-            error_message=None if answer_ok else "empty_answer",
+            error_message=analytics_error,
             semantic_cache=deps.semantic_cache,
         )
     except Exception:
