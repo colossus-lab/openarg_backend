@@ -15,13 +15,17 @@ Available tables, their columns (with types), and row counts:
 Rules:
 - Only reference the tables and columns listed above.
 - Always use double-quoted identifiers for column names that contain spaces, accents, or special characters.
-- CRITICAL: Most columns are stored as TEXT (even years, numbers, dates). ALWAYS compare with text literals: WHERE anio = '1980', NOT WHERE anio = 1980. Use CAST(col AS NUMERIC) only for aggregations or arithmetic, never for simple equality/filtering.
+- CRITICAL: In `cache_*` tables most columns are stored as TEXT (even years, numbers, dates). ALWAYS compare those with text literals: WHERE anio = '1980', NOT WHERE anio = 1980. Use CAST(col AS NUMERIC) only for aggregations or arithmetic, never for simple equality/filtering. **The annotated type in the `Columns:` line always wins over this default** — `mart.*` views expose real `integer`/`numeric` columns. Never JOIN a text column to an integer one without an explicit cast (`a.anio = CAST(b.ejercicio_presupuestario AS INTEGER)`); Postgres rejects `integer = text`.
 - NUMERIC CASTS — NEVER DISCARD ROWS TO MAKE A CAST WORK (CRITICAL). Argentine data mixes decimal formats in the SAME column: plain integers (`32291165`), comma decimals (`9403175,5`) and thousands separators (`1.234.567,89`). A filter like `col ~ '^\-?\d+\.?\d*$'` does NOT protect the query — it silently DROPS every comma-decimal row from the SUM and reports a total that is missing part of the universe. That is a wrong answer presented as a fact, which is worse than no answer. **NORMALIZE, DON'T FILTER.** For a TEXT column, cast through this expression:
   `CAST(NULLIF(replace(replace(col, '.', ''), ',', '.'), '') AS NUMERIC)`
   (strip thousands dots first, then turn the decimal comma into a dot). Guard only against NULL/empty, never against "shape":
   `WHERE col IS NOT NULL AND col <> ''`
   If a column genuinely mixes both `1.234,56` (AR) and `1234.56` (US) styles, prefer `to_number(col, '999G999G999D99')` or ask for the count instead of the sum — but never solve it by filtering rows out.
-  **This applies ONLY when the column is typed as TEXT in the schema.** If the column is already `numeric`/`integer`/`bigint`/`double precision` (check the "Columnas (tipo):" lines in tables_context), do NOT wrap it — `replace()` and `~` both error on numeric types. Just use the column directly with `WHERE col IS NOT NULL`. Marts often expose pre-cast numeric columns (e.g. `cantidad_pasos`, `cantidad_hechos`, `monto`, `credito_vigente`).
+  **CHECK THE TYPE FIRST — this applies ONLY to TEXT columns.** Every `Columns:` line above annotates the real PostgreSQL type in parentheses, e.g. `Columns: anio (integer), credito_vigente (numeric), jurisdiccion (text)`. A column with no annotation is TEXT. If the type is `numeric`/`integer`/`bigint`/`double precision`/`real`, the value is ALREADY a number: use it directly, `SUM(col)`, guarded only by `WHERE col IS NOT NULL`.
+  Two distinct failures if you ignore the type:
+  1. `replace()` and `~` ERROR on numeric input (`function replace(numeric, unknown, unknown) does not exist`) — the query dies.
+  2. Worse, forcing it through with `col::text` CORRUPTS the value: `replace(1234.56::text, '.', '')` yields `123456`, silently multiplying the amount by 100. NEVER cast a numeric column to text to normalize it.
+  Marts (`mart.*`) expose pre-cast numeric columns — `credito_vigente`, `credito_devengado`, `monto`, `cantidad_pasos`, `cantidad_hechos` — and integer `anio`. The `cache_*` examples below normalize because those tables land as raw TEXT; do not carry that pattern over to a mart.
 - Use ILIKE for case-insensitive text matching (Argentine data often has inconsistent casing and accents).
 - Limit results to 1000 rows max (add LIMIT 1000 if appropriate).
 - Return ONLY the SQL query, nothing else. No markdown, no explanation.
@@ -65,6 +69,10 @@ SQL: SELECT provincia, gobernador, partido, inicio_mandato FROM cache_gobernador
 
 Question: ¿Cuál es el presupuesto total por jurisdicción en 2025?
 SQL: SELECT jurisdiccion_desc, SUM(CAST(NULLIF(replace(replace(credito_vigente, '.', ''), ',', '.'), '') AS NUMERIC)) AS total_credito FROM cache_presupuesto_credito_2025 WHERE ejercicio_presupuestario = '2025' AND credito_vigente IS NOT NULL AND credito_vigente <> '' GROUP BY jurisdiccion_desc ORDER BY total_credito DESC LIMIT 50
+
+Question: ¿Cuánto se transfirió a universidades nacionales en 2024?
+Tables: mart.presupuesto_consolidado — Columns: anio (integer), jurisdiccion (text), programa (text), credito_vigente (numeric), credito_devengado (numeric)
+SQL: SELECT programa, SUM(credito_devengado) AS total_devengado FROM mart.presupuesto_consolidado WHERE anio = 2024 AND programa ILIKE '%educacion superior%' AND credito_devengado IS NOT NULL GROUP BY programa ORDER BY total_devengado DESC LIMIT 50
 
 Question: ¿Cuál era la tasa de mortalidad fetal en 1980?
 SQL: SELECT anio, sexo, tasa FROM cache_tasa_de_mortalidad_fetal_por_sexo WHERE anio = '1980'
