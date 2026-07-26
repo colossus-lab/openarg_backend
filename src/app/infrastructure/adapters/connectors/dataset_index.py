@@ -142,6 +142,23 @@ class RoutingHint:
 # target action, default params, confidence [0-1], and a short description.
 # ---------------------------------------------------------------------------
 
+# Verified against mart.presupuesto_nacional_ejecutado on staging
+# (2026-07-26). The receptor of a transfer is NOT in programa_desc — it is
+# in the economic-classifier columns, and the per-institution breakdown
+# lives in subparcial_desc (individual universities, UBA included).
+_TRANSFERENCIAS_NOTES = (
+    "No existe una tabla cache_presupuesto_transferencias_*. Preferí "
+    "mart.presupuesto_nacional_ejecutado. Las transferencias se identifican por "
+    "principal_desc (ej: 'Transferencias a universidades nacionales', "
+    "'Transferencias al sector privado para financiar gastos corrientes'), NO por "
+    "programa_desc. El detalle por institución receptora está en subparcial_desc "
+    "(ej: 'Universidad de Buenos Aires'); parcial_desc separa gastos corrientes de "
+    "capital. Los montos (credito_vigente, credito_devengado) son TEXT con formato "
+    "mixto: hay valores con coma decimal ('9403175,5'), así que un "
+    "CAST(x AS NUMERIC) directo falla — normalizá la coma a punto antes de agregar, "
+    "y nunca descartes filas con un filtro regex (sesga el total)."
+)
+
 _RESULTADO_FISCAL_NOTES = (
     "No existen tablas cache_presupuesto_resultado_*. El resultado fiscal se "
     "calcula como recursos percibidos (recurso_ingresado_percibido en "
@@ -769,13 +786,7 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "action": "query_sandbox",
         "params": {
             "tables": ["cache_presupuesto_*"],
-            "table_notes": (
-                "No existe una tabla cache_presupuesto_transferencias_*. Las "
-                "transferencias se identifican en cache_presupuesto_credito_<anio> "
-                "por jurisdiccion_desc / programa_desc del receptor. Las "
-                "transferencias a universidades nacionales son el programa "
-                "'Desarrollo de la Educacion Superior'."
-            ),
+            "table_notes": _TRANSFERENCIAS_NOTES,
         },
         "confidence": 0.85,
         "description": "Transferencias presupuestarias",
@@ -1404,14 +1415,11 @@ KEYWORD_ROUTES: dict[str, dict] = {
     "universidad": {
         "action": "query_sandbox",
         "params": {
-            "tables": ["cache_presupuesto_*", "cache_*universid*"],
+            "tables": ["mart.presupuesto_nacional_ejecutado", "cache_presupuesto_*"],
             "table_notes": (
-                "Las tablas cache_*universid* solo tienen ubicaciones de "
-                "universidades (CABA y Mendoza). Para presupuesto/transferencias/"
-                "gasto de universidades nacionales usá "
-                "cache_presupuesto_credito_<anio> filtrando programa_desc "
-                "'Desarrollo de la Educacion Superior'. No hay datos de matricula, "
-                "aranceles ni nacionalidad de estudiantes."
+                _TRANSFERENCIAS_NOTES + " Las tablas cache_*universid* solo tienen "
+                "ubicaciones de universidades (CABA y Mendoza), no presupuesto. "
+                "No hay datos de matricula, aranceles ni nacionalidad de estudiantes."
             ),
         },
         "confidence": 0.80,
