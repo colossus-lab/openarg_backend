@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 MAX_ROWS = int(os.getenv("SANDBOX_MAX_ROWS", "1000"))
 _SANDBOX_TIMEOUT_MS = int(os.getenv("SANDBOX_TIMEOUT_MS", "10000"))
+# Schema resolution order for every sandbox connection. No spaces — this
+# rides in the libpq `options` connection parameter, where a space would
+# be parsed as the start of another option.
+_SANDBOX_SEARCH_PATH = "public,raw"
 
 # Patterns that indicate write/DDL operations (case-insensitive)
 _FORBIDDEN_PATTERNS = re.compile(
@@ -237,13 +241,6 @@ class PgSandboxAdapter(ISQLSandbox):
 
     def _get_engine(self) -> Engine:
         if self._engine is None:
-            self._engine = create_engine(
-                self._db_url,
-                pool_size=2,
-                max_overflow=1,
-                pool_pre_ping=True,
-            )
-
             # The sandbox connects directly to RDS (bypasses PgBouncer to
             # keep the read-only enforcement local). The DB-level
             # `ALTER DATABASE openarg_staging SET search_path = raw,
@@ -252,31 +249,32 @@ class PgSandboxAdapter(ISQLSandbox):
             # In practice the sandbox engine ends up with the Postgres
             # default `"$user", public`, which means bare references to
             # tables that live ONLY in `raw` (e.g. `cached_datasets`,
-            # `catalog_resources`, `raw_table_versions`) raise
-            # "relation does not exist".
+            # `catalog_resources`, `raw_table_versions`, and the ~4.4k
+            # `cache_*` data tables) raise "relation does not exist".
             #
-            # Force-set the search_path on every new connection so the
-            # 120+ unprefixed `cached_datasets` references in the
-            # codebase resolve correctly inside the sandbox path. Order
-            # `public, raw` keeps tables that exist in BOTH schemas
+            # Set the search_path through the libpq `options` connection
+            # parameter rather than a `SET` in a `connect` event listener.
+            # A `SET` runs inside psycopg3's implicit transaction, so the
+            # ROLLBACK that SQLAlchemy issues when the connection returns
+            # to the pool REVERTS it: only the very first checkout of each
+            # physical connection saw `public, raw`, every later one fell
+            # back to `"$user", public` (measured on staging: 1 of 10
+            # checkouts had `raw` in `current_schemas()`). Applying it at
+            # connection establishment makes it part of the session's
+            # startup state, which no rollback can undo.
+            #
+            # Order `public, raw` keeps tables that exist in BOTH schemas
             # resolving to `public` (canonical for `mart_definitions`,
             # `mart_sample_queries`, `query_cache`, `query_plan_cache`,
             # langgraph `checkpoints`, etc.) while still finding the
             # raw-only tables as a fallback.
-            from sqlalchemy import event
-
-            @event.listens_for(self._engine, "connect")
-            def _set_default_search_path(dbapi_conn, _connection_record):
-                cursor = dbapi_conn.cursor()
-                try:
-                    cursor.execute("SET search_path = public, raw")
-                except Exception:
-                    logger.warning(
-                        "Failed to set search_path on sandbox connection",
-                        exc_info=True,
-                    )
-                finally:
-                    cursor.close()
+            self._engine = create_engine(
+                self._db_url,
+                pool_size=2,
+                max_overflow=1,
+                pool_pre_ping=True,
+                connect_args={"options": f"-csearch_path={_SANDBOX_SEARCH_PATH}"},
+            )
 
         return self._engine
 
