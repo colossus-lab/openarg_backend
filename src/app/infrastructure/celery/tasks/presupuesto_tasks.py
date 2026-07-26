@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 API_URL = "https://www.presupuestoabierto.gob.ar/api/v1"
 DGSIAF_URL = "https://dgsiaf-repo.mecon.gob.ar/repository/pa/datasets"
 
+# Single source of truth for where these tables land. It must be used BOTH in
+# `to_sql(schema=...)` and in `register_via_b_table(schema_name=...)`: the mart
+# macros render `{schema_name}."{table_name}"`, so any divergence between the
+# two silently produces marts that reference a non-existent relation.
+_TARGET_SCHEMA = "raw"
+
 # ── API Endpoints (requieren PRESUPUESTO_API_TOKEN) ──────────
 ENDPOINTS = {
     "credito": [
@@ -254,7 +260,11 @@ def ingest_presupuesto(self):
                     # preserved across re-runs.
                     try:
                         df.to_sql(
-                            table_name, engine, schema="raw", if_exists="replace", index=False
+                            table_name,
+                            engine,
+                            schema=_TARGET_SCHEMA,
+                            if_exists="replace",
+                            index=False,
                         )
                     except Exception as exc:
                         if "DependentObjectsStillExist" not in type(
@@ -270,7 +280,13 @@ def ingest_presupuesto(self):
                         from app.infrastructure.celery.tasks._db import safe_truncate_table
 
                         safe_truncate_table(engine, table_name)
-                        df.to_sql(table_name, engine, schema="raw", if_exists="append", index=False)
+                        df.to_sql(
+                            table_name,
+                            engine,
+                            schema=_TARGET_SCHEMA,
+                            if_exists="append",
+                            index=False,
+                        )
 
                     dataset_id = _register_dataset(engine, endpoint, year, table_name, df)
                     if dataset_id:
@@ -281,14 +297,20 @@ def ingest_presupuesto(self):
                         index_dataset_embedding.delay(dataset_id)
 
                     # Register in `raw_table_versions` so the
-                    # `presupuesto_consolidado` mart finds it.
+                    # `presupuesto_consolidado` mart finds it. The schema MUST
+                    # match the `to_sql(schema="raw")` above: the mart macros
+                    # render `{schema_name}."{table_name}"`, so registering
+                    # `public` here made every budget mart resolve to a
+                    # non-existent relation. `presupuesto_consolidado` sat in
+                    # `build_failed` with `relation "public.cache_presupuesto_
+                    # credito_2016" does not exist` because of this line.
                     from app.infrastructure.celery.tasks._db import register_via_b_table
 
                     register_via_b_table(
                         engine,
                         resource_identity=f"presupuesto_abierto::{endpoint}::{year}",
                         table_name=table_name,
-                        schema_name="public",
+                        schema_name=_TARGET_SCHEMA,
                         row_count=len(df),
                     )
 
@@ -456,7 +478,11 @@ def ingest_presupuesto_dimensiones(self):
                     # already depends on this dimension table.
                     try:
                         df.to_sql(
-                            table_name, engine, schema="raw", if_exists="replace", index=False
+                            table_name,
+                            engine,
+                            schema=_TARGET_SCHEMA,
+                            if_exists="replace",
+                            index=False,
                         )
                     except Exception as exc:
                         if "DependentObjectsStillExist" not in type(
@@ -472,7 +498,13 @@ def ingest_presupuesto_dimensiones(self):
                         from app.infrastructure.celery.tasks._db import safe_truncate_table
 
                         safe_truncate_table(engine, table_name)
-                        df.to_sql(table_name, engine, schema="raw", if_exists="append", index=False)
+                        df.to_sql(
+                            table_name,
+                            engine,
+                            schema=_TARGET_SCHEMA,
+                            if_exists="append",
+                            index=False,
+                        )
 
                     dataset_id = _register_dimension(
                         engine, dim_key, dim_info, year, table_name, df
@@ -490,7 +522,7 @@ def ingest_presupuesto_dimensiones(self):
                         engine,
                         resource_identity=f"presupuesto_abierto::{dim_key}::{year}",
                         table_name=table_name,
-                        schema_name="public",
+                        schema_name=_TARGET_SCHEMA,
                         row_count=len(df),
                     )
 
