@@ -746,8 +746,7 @@ KEYWORD_ROUTES: dict[str, dict] = {
         "params": {
             "tables": ["cache_presupuesto_credito_*"],
             "table_notes": (
-                "El devengado es la columna credito_devengado de "
-                "cache_presupuesto_credito_<anio>."
+                "El devengado es la columna credito_devengado de cache_presupuesto_credito_<anio>."
             ),
         },
         "confidence": 0.85,

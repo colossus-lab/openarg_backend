@@ -374,8 +374,7 @@ class TestTableGlobsMatchInventory:
         new_drift = sorted(failures - baseline)
         assert not new_drift, (
             "KEYWORD_ROUTES globs matching zero real tables (fix the hint; do "
-            "NOT extend known_broken_hints.txt for new entries):\n"
-            + "\n".join(new_drift)
+            "NOT extend known_broken_hints.txt for new entries):\n" + "\n".join(new_drift)
         )
 
         stale = sorted(baseline - failures)
