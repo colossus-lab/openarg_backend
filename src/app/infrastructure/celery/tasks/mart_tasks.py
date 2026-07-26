@@ -269,13 +269,15 @@ def _upsert_mart_definition(
                     source_portals, sql_definition, canonical_columns_json,
                     refresh_policy, unique_index_columns,
                     last_refreshed_at, last_refresh_status, last_refresh_error,
-                    last_row_count, yaml_version, embedding, updated_at
+                    last_row_count, yaml_version, embedding, updated_at,
+                    serving_blocked, serving_blocked_reason
                 ) VALUES (
                     :id, :sch, :vn, :desc, :dom,
                     CAST(:portals AS text[]), :sql, CAST(:canonical AS jsonb),
                     :rp, CAST(:uniq AS text[]),
                     NOW(), :st, :err,
-                    :lrc, :yv, CAST(:emb AS vector), NOW()
+                    :lrc, :yv, CAST(:emb AS vector), NOW(),
+                    :sblocked, :sreason
                 )
                 ON CONFLICT (mart_id) DO UPDATE SET
                     mart_schema = EXCLUDED.mart_schema,
@@ -294,6 +296,8 @@ def _upsert_mart_definition(
                                               mart_definitions.last_row_count),
                     yaml_version = EXCLUDED.yaml_version,
                     embedding = COALESCE(EXCLUDED.embedding, mart_definitions.embedding),
+                    serving_blocked = EXCLUDED.serving_blocked,
+                    serving_blocked_reason = EXCLUDED.serving_blocked_reason,
                     updated_at = NOW()
                 """
             ),
@@ -313,6 +317,8 @@ def _upsert_mart_definition(
                 "lrc": last_row_count,
                 "yv": mart.version,
                 "emb": embedding_literal,
+                "sblocked": mart.serving_blocked,
+                "sreason": mart.serving_blocked_reason,
             },
         )
 

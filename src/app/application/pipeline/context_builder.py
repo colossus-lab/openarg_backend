@@ -185,6 +185,7 @@ async def build_live_marts_block(sandbox: Any) -> str:
                         "SELECT mart_view_name, domain, description "
                         "FROM mart_definitions "
                         "WHERE COALESCE(last_row_count, 0) > 0 "
+                        "  AND NOT COALESCE(serving_blocked, FALSE) "
                         "ORDER BY domain NULLS LAST, mart_view_name"
                     )
                 ).fetchall()

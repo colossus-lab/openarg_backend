@@ -152,3 +152,25 @@ sql: |
 refresh:
   policy: manual
   unique_index: []
+
+# Retirado del serving el 2026-07-26 tras servir un ranking de transferencias
+# a universidades incorrecto por órdenes de magnitud y con las posiciones
+# cambiadas. Tres defectos concurrentes, todos verificados contra staging:
+#   1. Los montos (credito_*) se materializan como TEXT con formatos mixtos
+#      (enteros planos junto a comas decimales), así que cualquier agregación
+#      exige normalizar a mano y es fácil de hacer mal.
+#   2. `anio` es TEXT y contiene '2.022' además de '2022' — 1.602 filas quedan
+#      huérfanas de cualquier agrupación por año.
+#   3. `require_all_columns=True` reduce el cluster de 560 tablas vivas a ~32,
+#      en silencio: la cobertura por año es de 62k filas para 2023 contra 12k
+#      para 2024. El mart no representa el presupuesto nacional completo.
+# Mientras tanto `presupuesto_consolidado` cubre el dominio con tipos correctos
+# (anio integer, montos numeric) y los 11 ejercicios.
+# Desbloquear SOLO después de arreglar los tres puntos y validar contra
+# presupuestoabierto.gob.ar.
+serving:
+  blocked: true
+  blocked_reason: >-
+    Montos TEXT con formato mixto, anio corrupto ('2.022') y cobertura parcial
+    (32 de 560 tablas del cluster). Produjo un ranking de transferencias
+    incorrecto. Usar presupuesto_consolidado hasta que se limpie.
