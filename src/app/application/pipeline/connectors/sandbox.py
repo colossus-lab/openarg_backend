@@ -1020,7 +1020,8 @@ async def execute_sandbox_step(
                             "SELECT mart_id, mart_schema, mart_view_name, "
                             "       last_row_count, canonical_columns_json "
                             "FROM mart_definitions "
-                            "WHERE COALESCE(last_row_count, 0) > 0"
+                            "WHERE COALESCE(last_row_count, 0) > 0 "
+                            "  AND NOT COALESCE(serving_blocked, FALSE)"
                         )
                     )
                 ).fetchall()
@@ -1246,6 +1247,7 @@ async def execute_sandbox_step(
                             "FROM mart_definitions "
                             "WHERE embedding IS NOT NULL "
                             "  AND COALESCE(last_row_count, 0) > 0 "
+                            "  AND NOT COALESCE(serving_blocked, FALSE) "
                             "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
                             "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
                         ),

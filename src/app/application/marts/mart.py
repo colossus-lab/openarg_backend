@@ -113,6 +113,13 @@ class Mart:
     sql: str
     refresh: MartRefreshPolicy
     schema_name: str = "mart"
+    # Withhold a mart from the Serving Port while keeping it materialised.
+    # `last_row_count > 0` only hides marts that are EMPTY; this hides marts
+    # whose rows are known to be WRONG (bad types, partial coverage), which
+    # a fact-checking platform must not serve. Lives in the YAML so a
+    # DROP+CREATE rebuild cannot silently clear it.
+    serving_blocked: bool = False
+    serving_blocked_reason: str | None = None
 
     @property
     def view_name(self) -> str:
@@ -221,6 +228,17 @@ def load_mart(path: Path | str) -> Mart:
 
     refresh = _parse_refresh(data.get("refresh"), p)
 
+    serving_raw = data.get("serving") or {}
+    if not isinstance(serving_raw, dict):
+        raise MartParseError(f"{p}: 'serving' must be a mapping")
+    serving_blocked = bool(serving_raw.get("blocked", False))
+    serving_blocked_reason = serving_raw.get("blocked_reason")
+    if serving_blocked and not serving_blocked_reason:
+        raise MartParseError(
+            f"{p}: 'serving.blocked' requires a 'blocked_reason' — a mart withheld "
+            "from users must say why, so it can be un-blocked knowingly"
+        )
+
     return Mart(
         id=id_,
         version=version,
@@ -231,6 +249,10 @@ def load_mart(path: Path | str) -> Mart:
         canonical_columns=canonical_columns,
         sql=sql,
         refresh=refresh,
+        serving_blocked=serving_blocked,
+        serving_blocked_reason=(
+            str(serving_blocked_reason) if serving_blocked_reason is not None else None
+        ),
     )
 
 

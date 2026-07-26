@@ -306,6 +306,7 @@ class LegacyServingAdapter(IServingPort):
                 "FROM mart_definitions "
                 "WHERE embedding IS NOT NULL "
                 "  AND COALESCE(last_row_count, 0) > 0 "
+                "  AND NOT COALESCE(serving_blocked, FALSE) "
                 "  AND 1 - (embedding <=> CAST(:vec AS vector)) >= :min_sim "
             )
             vec_params["min_sim"] = float(os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45"))
@@ -402,7 +403,7 @@ class LegacyServingAdapter(IServingPort):
         sql = (
             "SELECT mart_id, description, domain, mart_schema, mart_view_name "
             "FROM mart_definitions "
-            f"WHERE COALESCE(last_row_count, 0) > 0 AND {search_clause} "
+            f"WHERE COALESCE(last_row_count, 0) > 0 AND NOT COALESCE(serving_blocked, FALSE) AND {search_clause} "
         )
         if domain:
             sql += "AND domain = :domain "
