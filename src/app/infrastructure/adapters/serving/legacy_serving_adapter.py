@@ -99,7 +99,8 @@ class LegacyServingAdapter(IServingPort):
                     await conn.execute(
                         text(
                             "SELECT mart_schema, mart_view_name "
-                            "FROM mart_definitions WHERE mart_id = :id"
+                            "FROM mart_definitions WHERE mart_id = :id "
+                            "  AND NOT COALESCE(serving_blocked, FALSE)"
                         ),
                         {"id": mart_id},
                     )
@@ -498,7 +499,8 @@ class LegacyServingAdapter(IServingPort):
             mdef = await conn.execute(
                 text(
                     "SELECT mart_schema, mart_view_name, canonical_columns_json "
-                    "FROM mart_definitions WHERE mart_id = :id"
+                    "FROM mart_definitions WHERE mart_id = :id "
+                    "  AND NOT COALESCE(serving_blocked, FALSE)"
                 ),
                 {"id": mart_id},
             )
@@ -623,7 +625,8 @@ class LegacyServingAdapter(IServingPort):
                     await conn.execute(
                         text(
                             "SELECT mart_id, description, domain, yaml_version, updated_at "
-                            "FROM mart_definitions WHERE mart_id = :id"
+                            "FROM mart_definitions WHERE mart_id = :id "
+                            "  AND NOT COALESCE(serving_blocked, FALSE)"
                         ),
                         {"id": mart_id},
                     )
