@@ -143,6 +143,8 @@ class NL2SQLState(TypedDict, total=False):
     used_fallback: bool
     indec_pattern_match: bool
     started_at: float
+    value_discovery_done: bool
+    value_substitution: dict
     # --- output ---
     data_results: list
 
@@ -353,16 +355,90 @@ async def _execute_sql_with_best_backend(
     return await sandbox.execute_readonly(sql)
 
 
+# A discovery pass only runs when we can show the model EVERY value of the
+# column. A truncated list invites it to pick the best of a bad slice, and a
+# total computed over the wrong concept is worse than no answer at all.
+_MAX_DISCOVERABLE_VALUES = 500
+
+# Text predicates whose literal can be swapped for a real value. Captures the
+# whole predicate so it can be substituted out verbatim when scoping the
+# discovery query.
+_TEXT_PREDICATE_PATTERN = re.compile(
+    r"""(?P<whole>
+            (?:"?(?P<table>\w+)"?\.)?"?(?P<column>\w+)"?
+            \s+(?P<op>ILIKE|LIKE|=)\s+
+            '(?P<literal>[^']*)'
+        )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_effectively_empty(result: Any) -> bool:
+    """True when a successful query carries no usable data.
+
+    ``row_count == 0`` is the obvious case. The subtle one is an aggregate
+    over zero matching rows: ``SUM(x)`` returns a single row holding NULL,
+    which every downstream consumer counted as "one row of data" while
+    meaning exactly the opposite.
+    """
+    if result is None or getattr(result, "error", None):
+        return False
+    rows = getattr(result, "rows", None) or []
+    if not rows:
+        return True
+    if len(rows) == 1 and isinstance(rows[0], dict):
+        return all(value is None for value in rows[0].values())
+    return False
+
+
+def _swappable_text_predicates(sql: str) -> list[dict[str, str]]:
+    """Text filters whose literal could be the reason nothing matched.
+
+    Numeric-looking literals are skipped: `anio = '2024'` returning nothing
+    means the year is absent, not misspelled, and offering the model a list
+    of every year invites it to answer about a different one.
+    """
+    found: list[dict[str, str]] = []
+    for m in _TEXT_PREDICATE_PATTERN.finditer(sql):
+        literal = m.group("literal")
+        bare = literal.strip("%").strip()
+        if not bare or bare.replace(".", "").replace(",", "").replace("-", "").isdigit():
+            continue
+        found.append(
+            {
+                "whole": m.group("whole"),
+                "column": m.group("column"),
+                "literal": literal,
+            }
+        )
+    return found
+
+
 def _route_after_execute(state: NL2SQLState) -> str:
-    """Decide whether to finish, retry, or fall back after an execute.
+    """Decide whether to finish, retry, discover values, or fall back.
 
     Per FR-004 / FR-006: retry up to ``max_attempts``; after that, go to
-    the last-resort fallback. Success exits to format_result directly.
+    the last-resort fallback.
+
+    A query that succeeds but returns nothing used to exit straight to
+    "success", and the analyst reported "no tenemos ese dato" — even when
+    the only thing wrong was the search literal. Measured 2026-07-26:
+    `programa ILIKE '%universidad%'` found nothing because the program is
+    named "Desarrollo de la Educacion Superior". The data was there; the
+    vocabulary was not. One discovery pass gets the real values in front
+    of the model before we deflect.
     """
     result = state.get("result")
     if result is None:
         return "last_resort"
+
     if not result.error:
+        if (
+            _is_effectively_empty(result)
+            and not state.get("value_discovery_done")
+            and _swappable_text_predicates(state.get("generated_sql", ""))
+        ):
+            return "discover_values"
         return "success"
 
     attempt = state.get("attempt", 0)
@@ -414,6 +490,141 @@ async def fix_sql_node(state: NL2SQLState) -> dict:
         "generated_sql": fixed_sql,
         "attempt": attempt,
     }
+
+
+async def _fetch_column_values(
+    *,
+    sandbox: Any,
+    served_table: str,
+    predicate: dict[str, str],
+    failed_sql: str,
+) -> list[str] | None:
+    """Every distinct value of the filtered column, or None if unusable.
+
+    The offending predicate is replaced by TRUE rather than dropped, so the
+    rest of the query's scope survives: asking about 2024 must not surface
+    the values of every other year.
+
+    Returns None when the column has more distinct values than we are
+    willing to show in full — see ``_MAX_DISCOVERABLE_VALUES``.
+    """
+    if not sandbox or not served_table:
+        return None
+    column = predicate["column"]
+    if not column.isidentifier():
+        return None
+
+    scoped = failed_sql.replace(predicate["whole"], "TRUE")
+    where_match = re.search(
+        r"\bWHERE\b(?P<body>.*?)(?=\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|$)",
+        scoped,
+        re.IGNORECASE | re.DOTALL,
+    )
+    where_clause = f"WHERE {where_match.group('body').strip()}" if where_match else ""
+
+    probe = (
+        f'SELECT DISTINCT "{column}" AS value FROM {served_table} '
+        f"{where_clause} "
+        f'{"AND" if where_clause else "WHERE"} "{column}" IS NOT NULL '
+        f'ORDER BY "{column}" LIMIT {_MAX_DISCOVERABLE_VALUES + 1}'
+    )
+
+    result = await sandbox.execute_readonly(probe)
+    if result.error or not result.rows:
+        logger.info(
+            "value discovery: probe on %s.%s returned nothing (%s)",
+            served_table,
+            column,
+            result.error,
+        )
+        return None
+    if len(result.rows) > _MAX_DISCOVERABLE_VALUES:
+        logger.info(
+            "value discovery: %s.%s has >%d distinct values; skipping rather "
+            "than offering a truncated list",
+            served_table,
+            column,
+            _MAX_DISCOVERABLE_VALUES,
+        )
+        return None
+    return [str(row["value"]) for row in result.rows if row.get("value") is not None]
+
+
+async def discover_values_node(state: NL2SQLState) -> dict:
+    """Re-aim a zero-row query at values that actually exist.
+
+    Only rewrites the offending literal. If nothing in the column matches
+    what the user asked for, the model is instructed to answer NONE and we
+    keep the empty result — deflecting honestly beats reporting a total for
+    a concept the user did not ask about.
+    """
+    runtime = _get_runtime_optional()
+    llm = _resolve_runtime_dep(state, "llm", runtime["llm"] if runtime else None)
+    sandbox = _resolve_runtime_dep(state, "sandbox", runtime["sandbox"] if runtime else None)
+    failed_sql = state.get("generated_sql", "")
+    nl_query = state["nl_query"]
+
+    predicates = _swappable_text_predicates(failed_sql)
+    schema, table = _first_relation_reference(failed_sql)
+    served_table = f"{schema}.{table}" if schema and table else (table or "")
+
+    for predicate in predicates:
+        values = await _fetch_column_values(
+            sandbox=sandbox,
+            served_table=served_table,
+            predicate=predicate,
+            failed_sql=failed_sql,
+        )
+        if not values:
+            continue
+
+        response = await llm.chat(
+            messages=[
+                LLMMessage(
+                    role="system",
+                    content=load_prompt(
+                        "sql_value_discovery",
+                        nl_query=nl_query,
+                        failed_sql=failed_sql,
+                        column=predicate["column"],
+                        literal=predicate["literal"],
+                        value_count=str(len(values)),
+                        values="\n".join(f"- {v}" for v in values),
+                    ),
+                ),
+                LLMMessage(role="user", content=nl_query),
+            ],
+            temperature=0.0,
+            max_tokens=1024,
+        )
+        rewritten = _extract_sql(response.content).strip()
+
+        if not rewritten or rewritten.upper().rstrip(";").strip() == "NONE":
+            logger.info(
+                "value discovery: no value of %s.%s matches %r — deflecting honestly",
+                served_table,
+                predicate["column"],
+                nl_query[:80],
+            )
+            continue
+
+        logger.info(
+            "value discovery: %s.%s literal %r had no match; retrying with real values",
+            served_table,
+            predicate["column"],
+            predicate["literal"],
+        )
+        return {
+            "generated_sql": rewritten,
+            "value_discovery_done": True,
+            "value_substitution": {
+                "column": predicate["column"],
+                "searched_for": predicate["literal"],
+                "table": served_table,
+            },
+        }
+
+    return {"value_discovery_done": True}
 
 
 async def last_resort_node(state: NL2SQLState) -> dict:
@@ -654,8 +865,11 @@ async def format_result_node(state: NL2SQLState) -> dict:
         # analyst's no-data fallback needs to know so it can deflect
         # honestly ("the dataset doesn't cover that period") instead of
         # the generic "OpenArg cubre…" boilerplate.
+        # An aggregate over zero matching rows returns one row of NULLs, not
+        # zero rows — `_is_effectively_empty` catches both so the deflection
+        # stays honest instead of reporting a NULL as a value.
         "queried_empty_mart": (
-            result.row_count == 0 and bool(served_table) and bool(generated_sql)
+            _is_effectively_empty(result) and bool(served_table) and bool(generated_sql)
         ),
         # LLM-001/LLM-002: tell the analyst whether the rows are a real
         # aggregate or a capped sample, and whether a non-additive metric
@@ -665,6 +879,13 @@ async def format_result_node(state: NL2SQLState) -> dict:
     }
     if _has_nonadditive_aggregate(generated_sql):
         metadata["nonadditive_warning"] = True
+    # The user asked about one word and we answered about another. That may
+    # well be the right call ("universidades" -> "Desarrollo de la Educacion
+    # Superior"), but it is an interpretation, and the reader has to be able
+    # to check it rather than take the number on faith.
+    substitution = state.get("value_substitution")
+    if substitution and not _is_effectively_empty(result):
+        metadata["value_substitution"] = substitution
     # A shape guard on an aggregated TEXT column drops rows silently. Measure
     # how many instead of guessing, so the analyst can state a fact ("el 21 %
     # de las filas quedó fuera") rather than a vague hedge.
@@ -825,6 +1046,7 @@ def build_nl2sql_subgraph():
     builder.add_node("generate_sql", generate_sql_node)
     builder.add_node("execute_sql", execute_sql_node)
     builder.add_node("fix_sql", fix_sql_node)
+    builder.add_node("discover_values", discover_values_node)
     builder.add_node("last_resort", last_resort_node)
     builder.add_node("indec_fallback", indec_fallback_node)
     builder.add_node("save_success", save_success_node)
@@ -839,10 +1061,14 @@ def build_nl2sql_subgraph():
         {
             "retry": "fix_sql",
             "success": "format_result",
+            "discover_values": "discover_values",
             "last_resort": "last_resort",
         },
     )
     builder.add_edge("fix_sql", "execute_sql")
+    # `value_discovery_done` is set before returning, so the second pass
+    # through the router cannot loop back here.
+    builder.add_edge("discover_values", "execute_sql")
     builder.add_edge("last_resort", "format_result")
 
     builder.add_conditional_edges(
