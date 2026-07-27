@@ -75,6 +75,25 @@ _NONADDITIVE_WARNING_NOTE = (
 _COVERAGE_WARNING_HEAD = "⚠ TOTAL INCOMPLETO"
 
 
+def _value_substitution_note(substitution: dict) -> str:
+    """The user's wording matched nothing; we answered about something else.
+
+    Usually right — nobody searching "universidades" expects the program to
+    be filed as "Desarrollo de la Educacion Superior" — but it is still an
+    interpretation standing between the question and the number, so the
+    reader has to see it stated rather than infer it.
+    """
+    searched = str(substitution.get("searched_for", "")).strip("%")
+    column = substitution.get("column", "")
+    return (
+        f"⚠ TÉRMINO REINTERPRETADO: la búsqueda literal de «{searched}» en la columna "
+        f"`{column}` no encontró ninguna fila, así que se identificaron los valores "
+        f"reales de esa columna que corresponden a lo pedido. DECILE AL USUARIO, en una "
+        f"línea, qué categoría exacta se usó para responder, para que pueda verificar "
+        f"que es la que tenía en mente."
+    )
+
+
 def _coverage_warning_note(payload: dict) -> str:
     cols = ", ".join(payload.get("columns") or []) or "una columna numérica"
     excluded = payload.get("excluded_rows")
@@ -315,6 +334,8 @@ def build_data_context(results: list[DataResult]) -> str:
                 lines.append(_NONADDITIVE_WARNING_NOTE)
             if metadata.get("coverage_warning"):
                 lines.append(_coverage_warning_note(metadata["coverage_warning"]))
+            if metadata.get("value_substitution"):
+                lines.append(_value_substitution_note(metadata["value_substitution"]))
             lines.append(f"Columnas: {display_columns_text}")
             if description:
                 lines.append(f"Descripción: {description}")
