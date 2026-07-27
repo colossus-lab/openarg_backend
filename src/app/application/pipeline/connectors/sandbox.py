@@ -233,6 +233,46 @@ def _build_dataset_discovery_results(
 # ---------------------------------------------------------------------------
 
 
+async def get_mart_descriptions(
+    table_names: list[str],
+    sandbox: ISQLSandbox | None,
+) -> dict[str, str]:
+    """Curated `mart_definitions.description` for any `mart.*` name.
+
+    `table_catalog` is the `cache_*` catalog and holds no rows for marts,
+    so the description a mart author writes reached nothing. That
+    description is where the semantics a number cannot carry on its own
+    live — most importantly the unit. `presupuesto_consolidado` states
+    that its amounts are in MILLIONS of pesos and that the raw figure must
+    never be reported as pesos; without this the analyst read
+    `3326595.47` as $3.326.595, off by six orders of magnitude.
+    """
+    mart_views = [name.split(".", 1)[1] for name in table_names if name.lower().startswith("mart.")]
+    if not mart_views or not sandbox:
+        return {}
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _fetch() -> dict[str, str]:
+            engine = sandbox._get_engine()  # type: ignore[union-attr]
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT mart_view_name, description FROM mart_definitions "
+                        "WHERE mart_schema = 'mart' AND mart_view_name = ANY(:views) "
+                        "AND description IS NOT NULL"
+                    ),
+                    {"views": mart_views},
+                ).fetchall()
+                conn.rollback()
+                return {f"mart.{r.mart_view_name}": str(r.description) for r in rows}
+
+        return await loop.run_in_executor(None, _fetch)
+    except Exception:
+        logger.debug("mart description lookup failed", exc_info=True)
+        return {}
+
+
 async def get_catalog_entries(
     table_names: list[str],
     sandbox: ISQLSandbox | None,
@@ -1411,6 +1451,12 @@ async def execute_sandbox_step(
         # Build display descriptions from catalog entries for the queried
         # table(s). These land in DataResult.metadata.table_descriptions
         # via the subgraph's format_result_node.
+        # Marts are absent from `table_catalog`, so before this their curated
+        # description — the one place a unit or a caveat is written down —
+        # reached no one. That is how `3326595.47` MILLIONS of pesos was
+        # served as "$3.326.595".
+        mart_descriptions = await get_mart_descriptions([t.table_name for t in tables[:5]], sandbox)
+
         table_descriptions: list[str] = []
         for t in tables[:5]:
             entry = catalog_entries.get(t.table_name)
@@ -1422,6 +1468,8 @@ async def execute_sandbox_step(
                     desc_parts.append(entry["description"])
                 if desc_parts:
                     table_descriptions.append(f"{t.table_name}: {' — '.join(desc_parts)}")
+            elif t.table_name in mart_descriptions:
+                table_descriptions.append(f"{t.table_name}: {mart_descriptions[t.table_name]}")
 
         # Hand off to the NL2SQL subgraph. It owns the generate → execute
         # → fix → last_resort → indec_fallback → save_success → format
