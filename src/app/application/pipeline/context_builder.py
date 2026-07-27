@@ -82,15 +82,36 @@ def _value_substitution_note(substitution: dict) -> str:
     be filed as "Desarrollo de la Educacion Superior" — but it is still an
     interpretation standing between the question and the number, so the
     reader has to see it stated rather than infer it.
+
+    The exact values must be spelled out here. An earlier version said only
+    that a substitution had happened and asked the analyst to name the
+    category; with no way to know it, the model invented one, crediting a
+    classification absent from the queried mart. A fabricated provenance
+    line is worse than none: it survives a reader's spot check.
     """
     searched = str(substitution.get("searched_for", "")).strip("%")
     column = substitution.get("column", "")
-    return (
+    values = [str(v) for v in (substitution.get("values_used") or [])]
+
+    head = (
         f"⚠ TÉRMINO REINTERPRETADO: la búsqueda literal de «{searched}» en la columna "
-        f"`{column}` no encontró ninguna fila, así que se identificaron los valores "
-        f"reales de esa columna que corresponden a lo pedido. DECILE AL USUARIO, en una "
-        f"línea, qué categoría exacta se usó para responder, para que pueda verificar "
-        f"que es la que tenía en mente."
+        f"`{column}` no encontró ninguna fila, así que se usaron los valores reales de "
+        f"esa columna que corresponden a lo pedido."
+    )
+    if values:
+        listado = ", ".join(f"«{v}»" for v in values)
+        return (
+            f"{head} Los valores efectivamente consultados son EXACTAMENTE estos: "
+            f"{listado}. DECILE AL USUARIO, en una línea, que la respuesta se calculó "
+            f"sobre esas categorías, nombrándolas TAL CUAL figuran acá. No las "
+            f"parafrasees, no las reemplaces por otra clasificación y no menciones "
+            f"ninguna categoría que no esté en esa lista: el lector puede verificarlas "
+            f"contra la fuente."
+        )
+    return (
+        f"{head} No se pudo determinar con certeza qué valores se usaron, así que "
+        f"NO afirmes de qué categoría salió el dato — decí que el término consultado "
+        f"no coincide literalmente con la nomenclatura oficial y ofrecé precisarlo."
     )
 
 

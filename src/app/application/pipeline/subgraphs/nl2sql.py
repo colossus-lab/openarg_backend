@@ -550,6 +550,31 @@ async def _fetch_column_values(
     return [str(row["value"]) for row in result.rows if row.get("value") is not None]
 
 
+def _literals_chosen_for(sql: str, column: str, candidates: list[str]) -> list[str]:
+    """Which of the column's real values the rewritten SQL ended up using.
+
+    The analyst is told to state the category it answered about. Telling it
+    that a substitution happened without telling it *what* was substituted
+    invites invention: measured on staging 2026-07-27, the answer credited
+    "Transferencias Corrientes del clasificador económico" — a classification
+    that does not exist in the queried mart — for a figure that in fact came
+    from three named programmes.
+
+    Matching against the known candidate list rather than parsing quotes
+    keeps a malformed rewrite from producing a confident-sounding but wrong
+    provenance line: anything not drawn from the real values is not reported.
+    """
+    if not sql or not column:
+        return []
+    predicate_region = re.search(
+        rf'"?{re.escape(column)}"?\s*(?:=|IN)\s*\(?(?P<body>[^)]*\)?)',
+        sql,
+        re.IGNORECASE,
+    )
+    haystack = predicate_region.group("body") if predicate_region else sql
+    return [value for value in candidates if f"'{value}'" in haystack]
+
+
 async def discover_values_node(state: NL2SQLState) -> dict:
     """Re-aim a zero-row query at values that actually exist.
 
@@ -608,11 +633,13 @@ async def discover_values_node(state: NL2SQLState) -> dict:
             )
             continue
 
+        chosen = _literals_chosen_for(rewritten, predicate["column"], values)
         logger.info(
-            "value discovery: %s.%s literal %r had no match; retrying with real values",
+            "value discovery: %s.%s literal %r had no match; retrying with %s",
             served_table,
             predicate["column"],
             predicate["literal"],
+            chosen or "real values",
         )
         return {
             "generated_sql": rewritten,
@@ -621,6 +648,10 @@ async def discover_values_node(state: NL2SQLState) -> dict:
                 "column": predicate["column"],
                 "searched_for": predicate["literal"],
                 "table": served_table,
+                # Without this the analyst is asked to name the category it
+                # answered about while having no way to know it, and it
+                # invents one.
+                "values_used": chosen,
             },
         }
 

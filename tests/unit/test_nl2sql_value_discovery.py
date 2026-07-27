@@ -36,6 +36,7 @@ from app.application.pipeline.subgraphs.nl2sql import (
     _MAX_DISCOVERABLE_VALUES,
     _fetch_column_values,
     _is_effectively_empty,
+    _literals_chosen_for,
     _route_after_execute,
     _swappable_text_predicates,
     discover_values_node,
@@ -263,5 +264,98 @@ class TestSubstitutionIsSurfaced:
 
     def test_note_instructs_the_analyst_to_tell_the_user(self) -> None:
         """A silent reinterpretation is the failure mode being guarded."""
-        note = _value_substitution_note({"column": "programa", "searched_for": "%x%"})
+        note = _value_substitution_note(
+            {
+                "column": "programa",
+                "searched_for": "%x%",
+                "values_used": ["Desarrollo de la Educacion Superior"],
+            }
+        )
         assert "USUARIO" in note.upper()
+
+    def test_note_spells_out_the_exact_values(self) -> None:
+        """Naming the substitution without the values invites invention.
+
+        Measured on staging 2026-07-27: told only that a substitution had
+        occurred, the analyst credited "Transferencias Corrientes del
+        clasificador económico" — absent from the queried mart — for a
+        figure that came from three named programmes.
+        """
+        note = _value_substitution_note(
+            {
+                "column": "programa",
+                "searched_for": "%universidad%",
+                "values_used": [
+                    "Desarrollo de la Educacion Superior",
+                    "Evaluacion y Acreditacion Universitaria",
+                ],
+            }
+        )
+        assert "Desarrollo de la Educacion Superior" in note
+        assert "Evaluacion y Acreditacion Universitaria" in note
+        assert "TAL CUAL" in note
+
+    def test_without_values_the_analyst_is_told_not_to_claim_a_category(self) -> None:
+        """Silence beats a guess when we cannot say where the number came from."""
+        note = _value_substitution_note({"column": "programa", "searched_for": "%x%"})
+        assert "NO afirmes" in note
+
+
+class TestChosenLiteralsAreRecovered:
+    _CANDIDATES = [
+        "Desarrollo de la Educacion Superior",
+        "Evaluacion y Acreditacion Universitaria",
+        "Formacion Universitaria en Derechos Humanos",
+        "Prestaciones Previsionales",
+    ]
+
+    def test_recovers_an_in_list(self) -> None:
+        sql = (
+            "SELECT SUM(credito_devengado) FROM mart.presupuesto_consolidado "
+            "WHERE anio = 2024 AND programa IN ('Desarrollo de la Educacion Superior', "
+            "'Evaluacion y Acreditacion Universitaria')"
+        )
+        assert _literals_chosen_for(sql, "programa", self._CANDIDATES) == [
+            "Desarrollo de la Educacion Superior",
+            "Evaluacion y Acreditacion Universitaria",
+        ]
+
+    def test_recovers_a_single_equality(self) -> None:
+        sql = "SELECT 1 FROM t WHERE programa = 'Prestaciones Previsionales'"
+        assert _literals_chosen_for(sql, "programa", self._CANDIDATES) == [
+            "Prestaciones Previsionales"
+        ]
+
+    def test_ignores_literals_from_other_columns(self) -> None:
+        """A value filtered on a different column is not the substitution."""
+        sql = (
+            "SELECT 1 FROM t WHERE jurisdiccion = 'Prestaciones Previsionales' "
+            "AND programa IN ('Desarrollo de la Educacion Superior')"
+        )
+        assert _literals_chosen_for(sql, "programa", self._CANDIDATES) == [
+            "Desarrollo de la Educacion Superior"
+        ]
+
+    def test_reports_nothing_when_the_rewrite_invented_a_value(self) -> None:
+        """Only values known to exist are ever reported as provenance."""
+        sql = "SELECT 1 FROM t WHERE programa = 'Transferencias Corrientes'"
+        assert _literals_chosen_for(sql, "programa", self._CANDIDATES) == []
+
+
+class TestDiscoveryRecordsWhatItUsed:
+    @pytest.mark.asyncio
+    async def test_substitution_carries_the_chosen_values(self) -> None:
+        rewritten = (
+            "SELECT SUM(credito_devengado) AS total FROM mart.presupuesto_consolidado "
+            "WHERE anio = 2024 AND programa IN ('Desarrollo de la Educacion Superior')"
+        )
+        sandbox = _Sandbox([_result([{"value": "Desarrollo de la Educacion Superior"}])])
+        out = await discover_values_node(
+            {
+                "nl_query": "¿Cuánto se transfirió a universidades en 2024?",
+                "generated_sql": _FAILED_SQL,
+                "sandbox": sandbox,
+                "llm": _LLM(rewritten),
+            }
+        )
+        assert out["value_substitution"]["values_used"] == ["Desarrollo de la Educacion Superior"]
