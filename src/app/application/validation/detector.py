@@ -19,6 +19,12 @@ class Mode(StrEnum):
     POST_PARSE = "post_parse"
     RETROSPECTIVE = "retrospective"
     STATE_INVARIANT = "state_invariant"
+    # Quality audit of a built mart. Shares the findings table and its
+    # open/resolved lifecycle, but nothing else with ingestion: its subject is
+    # a `mart.*` view, not a downloaded resource. Kept distinct so ops can ask
+    # what is wrong with the marts without it being answered by state-machine
+    # violations. Migration 0055 widens the CHECK to admit it.
+    MART_AUDIT = "mart_audit"
 
 
 @dataclass

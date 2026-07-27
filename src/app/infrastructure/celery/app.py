@@ -102,6 +102,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.censo2022_ingest",
             # Medallion mart tasks (raw → mart, no staging layer).
             "app.infrastructure.celery.tasks.mart_tasks",
+            "app.infrastructure.celery.tasks.mart_audit_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -164,6 +165,7 @@ def create_celery() -> Celery:
         "openarg.retain_raw_versions": {"queue": "ingest"},
         "openarg.cleanup_invariants": {"queue": "ingest"},
         "openarg.refresh_via_b_marts": {"queue": "ingest"},
+        "openarg.audit_marts": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -380,6 +382,15 @@ def create_celery() -> Celery:
                 # an unchanged source is cheap.
                 "task": "openarg.refresh_via_b_marts",
                 "schedule": crontab(hour=3, minute=0),  # 03:00 ART daily
+                "options": {"queue": "ingest"},
+            },
+            "audit-marts-daily": {
+                # Quality sweep over every built mart. Runs after the 03:00
+                # refresh so it audits what users will be served today, not
+                # yesterday's state. Reports only — blocking a mart is a YAML
+                # edit, since a DB-only flag is erased by the next build.
+                "task": "openarg.audit_marts",
+                "schedule": crontab(hour=3, minute=45),  # 03:45 ART daily
                 "options": {"queue": "ingest"},
             },
             "snapshot-staff-weekly": {

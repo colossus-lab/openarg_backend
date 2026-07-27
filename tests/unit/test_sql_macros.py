@@ -219,3 +219,29 @@ def test_require_columns_keeps_tables_missing_an_optional_column(monkeypatch) ->
     assert 'NULL::text AS "finalidad"' in resolved
     # Real sub-shapes (dimension tables) are still excluded.
     assert 'raw."p_dimension"' not in resolved
+
+
+def test_column_filter_records_its_coverage_in_the_sql(monkeypatch) -> None:
+    """The kept/candidate ratio has to outlive the build that computed it.
+
+    It used to exist only as a `logger.info`, so the one number that says
+    "this mart answers about 6 % of its domain" was gone the moment the build
+    finished — `mart_definitions` keeps a healthy-looking `last_row_count` and
+    nothing else. The marker rides into `sql_definition`, where the quality
+    auditor reads it.
+    """
+    _patch(monkeypatch, _rows())
+    sql = (
+        "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', "
+        f"expected_columns={_EXPECTED!r}, require_all_columns=True) }}}} s"
+    )
+    resolved = resolve_macros(sql, engine=object())
+    assert "/* macro_coverage: kept 1 of 3 */" in resolved
+
+
+def test_no_coverage_marker_when_nothing_was_filtered(monkeypatch) -> None:
+    """Absent marker means "no filter ran", not "filter kept everything"."""
+    _patch(monkeypatch, _rows())
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*') }} s"
+    resolved = resolve_macros(sql, engine=object())
+    assert "macro_coverage" not in resolved
