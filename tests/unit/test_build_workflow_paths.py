@@ -97,3 +97,30 @@ class TestBuildTriggersCoverImageContents:
     def test_config_is_covered(self) -> None:
         """Regression: the specific gap that shipped a stale mart."""
         assert _covers(_build_trigger_paths(), "config")
+
+
+class TestManualRunsCanPublish:
+    """The escape hatch has to actually publish, or it is not one.
+
+    `workflow_dispatch` exists precisely for what the `paths:` filter
+    misses. Both the registry login and the push were gated on
+    `event_name == 'push'`, so a manual run built nine images, threw them
+    away, and reported success — indistinguishable from a real build until
+    you compare image digests on the host.
+    """
+
+    def _workflow_text(self) -> str:
+        return _WORKFLOW.read_text(encoding="utf-8")
+
+    def test_push_is_not_gated_on_the_push_event_alone(self) -> None:
+        text = self._workflow_text()
+        gates = re.findall(r"github\.event_name.{0,4}==.{0,4}'push'", text)
+        for gate in gates:
+            idx = text.index(gate)
+            window = text[idx : idx + 200]
+            assert "workflow_dispatch" in window, (
+                f"a step gated on the push event alone silently disables manual builds: {gate}"
+            )
+
+    def test_shell_push_guard_accepts_manual_runs(self) -> None:
+        assert 'github.event_name }}" = "workflow_dispatch"' in self._workflow_text()
