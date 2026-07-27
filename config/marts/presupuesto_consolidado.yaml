@@ -1,5 +1,5 @@
 id: presupuesto_consolidado
-version: 0.4.0
+version: 0.5.0
 description: |
   Crédito presupuestario nacional consolidado por año, jurisdicción y
   programa. Fuente: API de Presupuesto Abierto (Min. Economía), tablas
@@ -59,6 +59,25 @@ sql: |
   -- para evitar type mismatches entre tablas heterogéneas. El SELECT
   -- de afuera reaplica casts a int/numeric. Eso requiere doble cast
   -- para los aggregados (text → numeric → SUM → numeric output).
+  --
+  -- v0.5.0: el filtro de v0.2.1 se movía a HAVING porque el invariante
+  -- es presupuestario y sólo se sostiene DESPUÉS de agregar; aplicarlo
+  -- fila por fila descartaba ejecución real. Medido sobre
+  -- `cache_presupuesto_credito_2024` (7.635 filas) el 2026-07-26:
+  --
+  --   * descartaba 3.219 filas (42,2 %), y con ellas el 55,1 % del
+  --     devengado del año — no "1 row" como estimó el audit de Sprint 1.7;
+  --   * 1.921 de esas filas son `vigente = 0, devengado > 0`, que es
+  --     ejecución normal contra crédito reasignado, no un dato corrupto;
+  --   * el programa de universidades quedaba con el 0,03 % de su
+  --     ejecución real (903 de 3.320.980 millones);
+  --   * agregado por (jurisdicción, programa), el invariante se cumple
+  --     en los 474 grupos de 2024: 0 violaciones. El HAVING no descarta
+  --     nada hoy y protege el caso que motivó el filtro original.
+  --
+  -- Descartar filas para que un invariante cierre produce un total
+  -- incompleto presentado como cierto, que es el modo de falla que esta
+  -- plataforma no puede permitirse.
   SELECT
     ejercicio_presupuestario::int                AS anio,
     COALESCE(jurisdiccion_desc, '')::text        AS jurisdiccion,
@@ -71,11 +90,9 @@ sql: |
                         'programa_desc', 'credito_vigente', 'credito_devengado']
   ) }} c
   WHERE ejercicio_presupuestario IS NOT NULL
-    AND (
-      credito_devengado IS NULL OR credito_vigente IS NULL OR
-      credito_devengado::numeric <= credito_vigente::numeric
-    )
   GROUP BY ejercicio_presupuestario, jurisdiccion_desc, programa_desc
+  HAVING COALESCE(SUM(credito_devengado::numeric), 0)
+         <= COALESCE(SUM(credito_vigente::numeric), 0)
 
 refresh:
   policy: on_upstream_change
