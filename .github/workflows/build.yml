@@ -7,6 +7,13 @@ on:
       - staging
     paths:
       - 'src/**'
+      # Mart definitions and app config are COPYed into every image
+      # (`COPY config/ config/`), and only `config/prod` is bind-mounted
+      # at runtime — so a mart YAML reaches a container solely through a
+      # rebuild. Without this path, merging a mart fix produced no image:
+      # the deploy pulled the previous tag and `build_mart` kept reading
+      # the old SQL, with nothing anywhere reporting a failure.
+      - 'config/**'
       - 'docker/**'
       - 'pyproject.toml'
       - 'alembic.ini'
@@ -86,8 +93,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # `workflow_dispatch` is the manual escape hatch for anything the
+      # `paths:` filter misses. It could not publish: without this login
+      # the push had no credentials, and the guard below skipped it
+      # outright — so a manual run compiled nine images, discarded them,
+      # and reported success.
       - name: Login to GitHub Container Registry
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -126,10 +138,13 @@ jobs:
             fi
           done
 
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "${{ github.event_name }}" = "push" ] || \
+             [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             for tag in $TAGS; do
               docker push "$tag"
             done
+          else
+            echo "::warning::event=${{ github.event_name }} — images built but NOT pushed"
           fi
 
           docker rmi $(docker images -q) 2>/dev/null || true
