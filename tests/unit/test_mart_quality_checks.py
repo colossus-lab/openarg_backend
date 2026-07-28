@@ -184,6 +184,7 @@ class TestCheckRegistry:
     def test_default_checks_are_registered(self) -> None:
         names = {c.name for c in build_default_mart_checks()}
         assert names == {
+            "mart_hidden_despite_rows",
             "mart_source_coverage",
             "mart_amount_filter_before_aggregation",
             "mart_amount_column_is_text",

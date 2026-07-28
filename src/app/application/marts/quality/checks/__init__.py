@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from app.application.marts.quality.check import MartCheck
 from app.application.marts.quality.checks.numeric_typing import NumericTypingCheck
+from app.application.marts.quality.checks.row_count_drift import RowCountDriftCheck
 from app.application.marts.quality.checks.row_filter import RowFilterCheck
 from app.application.marts.quality.checks.source_coverage import SourceCoverageCheck
 
 __all__ = [
     "NumericTypingCheck",
+    "RowCountDriftCheck",
     "RowFilterCheck",
     "SourceCoverageCheck",
     "build_default_mart_checks",
@@ -22,8 +24,11 @@ __all__ = [
 
 def build_default_mart_checks() -> list[MartCheck]:
     return [
-        # Ordered by how far upstream the damage starts: what the mart was
-        # built from, then how it filtered, then how it typed the result.
+        # Reachability first: a mart nobody can query makes the quality of its
+        # columns a secondary question.
+        RowCountDriftCheck(),
+        # Then by how far upstream the damage starts: what the mart was built
+        # from, then how it filtered, then how it typed the result.
         SourceCoverageCheck(),
         RowFilterCheck(),
         NumericTypingCheck(),

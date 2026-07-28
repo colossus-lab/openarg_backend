@@ -55,6 +55,12 @@ class MartAuditContext:
 
     # --- as materialized in Postgres ---
     columns: tuple[MartColumn, ...] = ()
+    # Planner estimate for the view itself (`pg_class.reltuples`). An estimate
+    # on purpose: distinguishing "empty" from "52 million rows" does not need
+    # an exact count, and a nightly sweep cannot afford `count(*)` over every
+    # mart. PostgreSQL reports -1 for a relation never analysed, which is
+    # normalised to None here — unknown, not zero.
+    approx_row_count: int | None = None
 
     # --- the universe the mart was built from ---
     source_tables: tuple[SourceTable, ...] = ()
