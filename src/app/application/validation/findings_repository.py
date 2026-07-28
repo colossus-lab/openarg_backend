@@ -100,6 +100,42 @@ def mark_resolved(engine: Engine, resource_id: str, *, detector_name: str | None
         return 0
 
 
+def resolve_missing(
+    engine: Engine,
+    resource_id: str,
+    *,
+    mode: Mode,
+    keep_hashes: Iterable[str],
+) -> int:
+    """Close open findings for a resource that the latest run no longer reports.
+
+    `mark_resolved` is all-or-nothing per resource, which suits a re-ingest
+    ("this resource is fine now"). A recurring audit needs the partial case:
+    a mart with three badly typed columns, one of which gets fixed, must end
+    up with two open findings rather than three forever. Nothing else closes
+    them — the upsert only ever re-opens.
+
+    Scoped to one mode so an audit sweep cannot resolve ingestion findings
+    about the same resource, which it knows nothing about.
+    """
+    keep = sorted({h for h in keep_hashes if h})
+    sql = (
+        "UPDATE ingestion_findings SET resolved_at = NOW() "
+        "WHERE resource_id = :rid AND resolved_at IS NULL AND mode = :mode"
+    )
+    params: dict[str, object] = {"rid": resource_id, "mode": mode.value}
+    if keep:
+        sql += " AND input_hash <> ALL(:keep)"
+        params["keep"] = keep
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text(sql), params)
+            return int(res.rowcount or 0)
+    except Exception:
+        logger.exception("Failed to resolve stale findings for %s", resource_id)
+        return 0
+
+
 def open_findings_for(
     engine: Engine,
     resource_id: str,
