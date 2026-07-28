@@ -293,6 +293,14 @@ def _build_union(
     elif require_all_columns and expected_columns:
         filter_set = set(expected_columns)
 
+    # Coverage marker, emitted into the generated SQL below. The kept/candidate
+    # ratio used to exist only as the log line further down, which meant the one
+    # number that says "this mart answers about 6 % of its domain" vanished the
+    # moment the build finished — `mart_definitions` stores a healthy-looking
+    # `last_row_count` and nothing else. A block comment rides along into
+    # `sql_definition`, where the quality auditor can read it.
+    coverage_note = ""
+
     if filter_set:
         if engine is None:
             raise MacroResolutionError(
@@ -317,6 +325,7 @@ def _build_union(
             before,
             ", ".join(sorted(filter_set)),
         )
+        coverage_note = f"/* macro_coverage: kept {len(lives_list)} of {before} */ "
 
     if len(lives_list) > _MAX_UNION_TABLES:
         raise MacroExpansionTooLarge(
@@ -327,7 +336,7 @@ def _build_union(
 
     if expected_columns:
         if not lives_list:
-            return _typed_empty_select(expected_columns)
+            return _typed_empty_select(expected_columns, coverage_note=coverage_note)
         # Inspect the actual schema of each matched table and project the
         # intersection that's also in `expected_columns`. Tables missing
         # a particular column emit `NULL::text AS col` to keep the union
@@ -352,16 +361,16 @@ def _build_union(
                 for c in expected_columns
             ]
             selects.append(f"SELECT {', '.join(projected)} FROM {_qualified(r)}")
-        return "(" + " UNION ALL ".join(selects) + ")"
+        return "(" + coverage_note + " UNION ALL ".join(selects) + ")"
 
     # Legacy path (no expected_columns).
     selects = [f"SELECT * FROM {_qualified(r)}" for r in lives_list]
     if not selects:
-        return "(SELECT NULL::text AS dummy WHERE FALSE)"
-    return "(" + " UNION ALL ".join(selects) + ")"
+        return f"({coverage_note}SELECT NULL::text AS dummy WHERE FALSE)"
+    return "(" + coverage_note + " UNION ALL ".join(selects) + ")"
 
 
-def _typed_empty_select(expected_columns: list[str]) -> str:
+def _typed_empty_select(expected_columns: list[str], *, coverage_note: str = "") -> str:
     """Emit a schema-shaped empty subquery for the 0-match case.
 
     All columns typed as `text` because we don't know the real types
@@ -370,7 +379,7 @@ def _typed_empty_select(expected_columns: list[str]) -> str:
     every type when the value is NULL, so this is safe.
     """
     cols = ", ".join(f'NULL::text AS "{c}"' for c in expected_columns)
-    return f"(SELECT {cols} WHERE FALSE)"
+    return f"({coverage_note}SELECT {cols} WHERE FALSE)"
 
 
 def _query_columns(
