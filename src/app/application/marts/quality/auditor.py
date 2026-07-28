@@ -37,6 +37,15 @@ _MART_ROWS_SQL = text(
     "FROM mart_definitions ORDER BY mart_id"
 )
 
+# Planner estimate per mart relation. `reltuples` is -1 when the relation has
+# never been analysed; the caller normalises that to None so "unknown" is not
+# mistaken for "empty" — which is the exact distinction this feeds.
+_MART_STATS_SQL = text(
+    "SELECT c.relname AS view_name, c.reltuples::bigint AS approx_rows "
+    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'mart' AND c.relkind = ANY(ARRAY['m', 'v', 'r'])"
+)
+
 _COLUMNS_SQL = text(
     "SELECT c.relname AS view_name, a.attname AS column_name, "
     "       format_type(a.atttypid, a.atttypmod) AS pg_type, a.attnum "
@@ -101,6 +110,7 @@ def collect_contexts(engine: Engine) -> list[MartAuditContext]:
     with engine.connect() as conn:
         mart_rows = conn.execute(_MART_ROWS_SQL).fetchall()
         column_rows = conn.execute(_COLUMNS_SQL).fetchall()
+        stat_rows = conn.execute(_MART_STATS_SQL).fetchall()
         source_rows = conn.execute(_SOURCE_STATS_SQL).fetchall()
         try:
             traffic_rows = conn.execute(_TRAFFIC_SQL).fetchall()
@@ -119,6 +129,10 @@ def collect_contexts(engine: Engine) -> list[MartAuditContext]:
         )
 
     rows_by_table = {(r.schema, r.name): int(r.approx_rows) for r in source_rows}
+    # reltuples == -1 means "never analysed". Keeping it out of the map makes
+    # the lookup return None, so a check sees "unknown" rather than a negative
+    # row count it would have to special-case.
+    approx_by_view = {r.view_name: int(r.approx_rows) for r in stat_rows if r.approx_rows >= 0}
     traffic = {r.mart_id: (int(r.hits), float(r.success_rate or 0.0)) for r in traffic_rows}
 
     contexts: list[MartAuditContext] = []
@@ -143,6 +157,7 @@ def collect_contexts(engine: Engine) -> list[MartAuditContext]:
                 serving_blocked=bool(row.serving_blocked),
                 yaml_version=row.yaml_version,
                 columns=tuple(columns_by_view.get(view_name, [])),
+                approx_row_count=approx_by_view.get(view_name),
                 source_tables=sources,
                 candidate_table_count=candidate_count,
                 kept_table_count=kept_count,
