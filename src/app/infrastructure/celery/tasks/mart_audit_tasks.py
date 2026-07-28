@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 
-from app.application.marts.quality import audit_all, summarize
+from app.application.marts.quality import audit_all, finding_discriminator, summarize
 from app.application.validation.detector import ResourceContext, Severity
 from app.application.validation.findings_repository import mark_resolved, persist_findings
 from app.infrastructure.celery.app import celery_app
@@ -61,17 +61,24 @@ def audit_marts(self, *, persist: bool = True) -> dict:
                 "serving_blocked": ctx.serving_blocked,
             },
         )
+        seen: set[str] = set()
         for finding in findings:
-            # One row per (check, column) rather than per check: a mart with
-            # three badly typed columns is three problems that get fixed and
-            # resolved independently.
-            discriminator = finding.payload.get("column") or ctx.mart_id
-            persisted += persist_findings(
-                engine,
-                audit_ctx,
-                [finding],
-                input_hash=f"{finding.detector_name}:{discriminator}",
-            )
+            input_hash = f"{finding.detector_name}:{finding_discriminator(finding, ctx.mart_id)}"
+            if input_hash in seen:
+                # Two findings racing for one row. Whichever lands second wins
+                # and the other disappears, so say it rather than let the
+                # summary report a number the table does not hold.
+                logger.error(
+                    "mart audit: %s emitted findings sharing key %r on %s — "
+                    "one will overwrite the other; the check must set a distinct "
+                    "`finding_key`",
+                    finding.detector_name,
+                    input_hash,
+                    ctx.mart_id,
+                )
+                continue
+            seen.add(input_hash)
+            persisted += persist_findings(engine, audit_ctx, [finding], input_hash=input_hash)
 
     summary = summarize(results)
     summary["persisted"] = persisted

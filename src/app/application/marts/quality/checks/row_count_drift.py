@@ -44,6 +44,7 @@ class RowCountDriftCheck(MartCheck):
             findings.append(
                 self._finding(
                     severity=Severity.CRITICAL,
+                    key="hidden_despite_rows",
                     message=(
                         f"{ctx.mart_id} está oculto del discovery "
                         f"(last_row_count={ctx.last_row_count}) pero la vista tiene "
@@ -72,6 +73,7 @@ class RowCountDriftCheck(MartCheck):
             findings.append(
                 self._finding(
                     severity=Severity.WARN,
+                    key="failed_refresh_status",
                     message=(
                         f"{ctx.mart_id} quedó en estado '{status}': lo que se sirva "
                         f"—o se deje de servir— viene de un build anterior"
