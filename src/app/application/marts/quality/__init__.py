@@ -13,6 +13,7 @@ block that silently disappears. Findings name the fix; a human applies it.
 from app.application.marts.quality.auditor import (
     audit_all,
     collect_contexts,
+    finding_discriminator,
     run_checks,
     summarize,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "audit_all",
     "build_default_mart_checks",
     "collect_contexts",
+    "finding_discriminator",
     "run_checks",
     "summarize",
 ]

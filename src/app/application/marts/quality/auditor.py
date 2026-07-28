@@ -199,6 +199,24 @@ def audit_all(
     return results
 
 
+def finding_discriminator(finding: Finding, mart_id: str) -> str:
+    """What separates two findings of the same check on the same mart.
+
+    Completes the persistence layer's idempotency tuple. Two findings that
+    share it overwrite each other — silently, because the upsert is doing
+    exactly what it was designed to do. That cost the auditor's first real run
+    its most severe finding: a WARN about a failed refresh replaced the
+    CRITICAL about 52 million unreachable rows, while the summary went on
+    counting both.
+
+    `finding_key` is what a check sets when it emits several findings per mart;
+    `column` covers the per-column checks; the mart id is the floor for checks
+    that emit exactly one.
+    """
+    payload = getattr(finding, "payload", None) or {}
+    return str(payload.get("finding_key") or payload.get("column") or mart_id)
+
+
 def summarize(results: list[tuple[MartAuditContext, list[Finding]]]) -> dict[str, Any]:
     findings = [f for _ctx, fs in results for f in fs]
     by_severity: dict[str, int] = {}
