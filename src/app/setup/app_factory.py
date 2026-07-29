@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from app.infrastructure.auth import GoogleJwtValidator
+from app.infrastructure.auth import build_google_jwt_validator
 from app.infrastructure.monitoring.middleware import MetricsMiddleware
 from app.infrastructure.persistence_sqla.mappings.all import map_tables
 from app.presentation.http.errors.handlers import register_exception_handlers
@@ -137,7 +137,9 @@ def configure_app(
         if client_id:
             app.add_middleware(
                 _gjwt.GoogleJwtAuthMiddleware,
-                validator=GoogleJwtValidator(client_id=client_id),
+                # Shared with the DI provider that serves `/ws/smart`, so the
+                # JWKS key cache is one per process as the validator asks.
+                validator=build_google_jwt_validator(client_id),
             )
         elif environment == "prod":
             raise RuntimeError(

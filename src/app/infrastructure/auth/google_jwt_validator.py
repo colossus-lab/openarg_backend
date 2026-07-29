@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from typing import Any
 
@@ -90,3 +91,16 @@ class GoogleJwtValidator:
             raise InvalidGoogleToken("token email is not verified")
 
         return email.lower()
+
+
+@functools.lru_cache(maxsize=4)
+def build_google_jwt_validator(client_id: str) -> GoogleJwtValidator:
+    """One validator per client id, per process.
+
+    The class docstring asks for a shared instance because it holds a JWKS
+    key cache, and the two callers cannot reach each other: the HTTP
+    middleware is registered while the app is being configured, before the
+    DI container exists. Routing both through this cache keeps the promise
+    without threading the instance through app construction.
+    """
+    return GoogleJwtValidator(client_id=client_id)
