@@ -649,9 +649,21 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 verified_email = ""
                 raw_id_token = (raw.get("id_token") or "").strip()
                 if raw_id_token:
+                    # `GoogleJwtValidator | None`, not the bare class: those are
+                    # distinct container keys, and asking for the bare one is
+                    # what made every logged-in socket die on NoFactoryError.
+                    # None means the deployment has no GOOGLE_OAUTH_CLIENT_ID,
+                    # which is legitimate outside prod — and means we cannot
+                    # verify anything, so no elevation is granted.
+                    validator = await request_scope.get(GoogleJwtValidator | None)
+                    if validator is None:
+                        logger.warning(
+                            "WS received an id_token but no Google client id is "
+                            "configured; continuing unverified"
+                        )
                     try:
-                        validator = await request_scope.get(GoogleJwtValidator)
-                        verified_email = await validator.validate(raw_id_token)
+                        if validator is not None:
+                            verified_email = await validator.validate(raw_id_token)
                     except InvalidGoogleToken as exc:
                         logger.warning("WS rejected invalid Google JWT: %s", exc)
                         await _safe_send_json(

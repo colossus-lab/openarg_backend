@@ -46,6 +46,7 @@ from app.infrastructure.adapters.serving.legacy_serving_adapter import LegacySer
 from app.infrastructure.adapters.source.caba_adapter import CABADataAdapter
 from app.infrastructure.adapters.source.datos_gob_ar_adapter import DatosGobArAdapter
 from app.infrastructure.adapters.user.user_repository_sqla import UserRepositorySQLA
+from app.infrastructure.auth import GoogleJwtValidator, build_google_jwt_validator
 from app.infrastructure.monitoring.health import HealthCheckService
 from app.infrastructure.persistence_sqla.config import PostgresDsn, SqlaEngineConfig
 from app.infrastructure.persistence_sqla.provider import (
@@ -355,8 +356,36 @@ class ApiKeyProvider(Provider):  # type: ignore[misc]
         return ApiKeyRepositorySQLA(session)
 
 
+class AuthProvider(Provider):  # type: ignore[misc]
+    """Google JWT validation for callers that cannot use HTTP middleware.
+
+    WebSockets bypass Starlette middleware entirely, so `/ws/smart` validates
+    the handshake token itself and asks the container for a validator. Nothing
+    ever registered one: every logged-in WebSocket connection died on
+    `NoFactoryError` from 2026-06-10 until this provider existed.
+
+    Provided as `GoogleJwtValidator | None` rather than raising when
+    `GOOGLE_OAUTH_CLIENT_ID` is unset, because that is a legitimate
+    configuration outside prod — `app_factory` skips the HTTP middleware in
+    the same case, and prod refuses to boot without it. Callers must treat
+    `None` as "cannot verify", never as "verified".
+    """
+
+    scope = Scope.APP
+
+    @provide  # type: ignore[untyped-decorator]
+    def google_jwt_validator(self, settings: AppSettings) -> GoogleJwtValidator | None:
+        client_id = settings.security.GOOGLE_OAUTH_CLIENT_ID
+        if not client_id:
+            return None
+        # Same cache the HTTP middleware goes through, so both paths share one
+        # JWKS key cache per process as the validator's docstring requires.
+        return build_google_jwt_validator(client_id)
+
+
 def get_providers() -> Iterable[Provider]:
     return (
+        AuthProvider(),
         DatabaseProvider(),
         DatasetProvider(),
         ServingProvider(),
