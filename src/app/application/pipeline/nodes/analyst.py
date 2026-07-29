@@ -147,17 +147,33 @@ def _scrub_internal_identifiers(text: str) -> str:
     parenthetical/bracket citations that contain such a token, then strip
     any remaining bare tokens, and finally collapse the leftover
     whitespace so the prose reads cleanly.
+
+    The whitespace tidying only runs when something was actually removed,
+    and never touches the string's own edges. M8 (round v46) started calling
+    this per streaming chunk, and an LLM emits tokens with the space attached
+    to the front — ``"Entiendo"``, ``" que"``, ``" querés"``. Unconditional
+    edge-stripping deleted every one of those spaces, so the browser
+    assembled ``"Entiendoquequerésverificaresas"``. Observed by a user on
+    staging 2026-07-29; the answer was correct and unreadable.
     """
     if not text:
         return text
-    scrubbed = _RE_INTERNAL_CITATION.sub("", text)
-    scrubbed = _RE_INTERNAL_IDENTIFIER.sub("", scrubbed)
-    # Collapse the whitespace runs left behind by the removals, but
-    # preserve paragraph breaks.
+    scrubbed, citations = _RE_INTERNAL_CITATION.subn("", text)
+    scrubbed, bare = _RE_INTERNAL_IDENTIFIER.subn("", scrubbed)
+    if not (citations or bare):
+        # Nothing removed, so there is no mess to tidy. Returning the input
+        # untouched is what makes this safe to call on a stream fragment.
+        return text
+
+    # A removal can leave a double space or a dangling indent behind. Fix
+    # that inside the text, but keep whatever whitespace bounded the original
+    # — on a chunk those edges are the separators between words.
+    leading = text[: len(text) - len(text.lstrip())]
+    trailing = text[len(text.rstrip()) :]
     scrubbed = re.sub(r"[ \t]+", " ", scrubbed)
     scrubbed = re.sub(r" *\n *", "\n", scrubbed)
     scrubbed = re.sub(r"\n{3,}", "\n\n", scrubbed)
-    return scrubbed.strip()
+    return f"{leading}{scrubbed.strip()}{trailing}"
 
 
 # ── Apologetic preface stripper (FR-025f, FIX-012 fix) ───────────
