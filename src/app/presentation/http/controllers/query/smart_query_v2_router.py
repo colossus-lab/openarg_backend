@@ -50,6 +50,31 @@ _checkpointer_last_attempt_ts: float = 0.0  # epoch seconds of last attempt
 # this TTL lets the next request retry on its own.
 _CHECKPOINTER_RETRY_TTL_SECONDS = 30.0
 
+# The checkpointer used to run on a single `psycopg.AsyncConnection`, opened
+# once by `AsyncPostgresSaver.from_conn_string()` and kept for the lifetime of
+# the process. That connection had no pre-ping, no recycle and no reconnect,
+# and `_get_checkpointer()` handed the same object back forever, so the first
+# time anything closed it authenticated chat stayed broken until the next
+# deploy. Prod ran 68 days on one connection; an RDS OOM-kill on 2026-07-30
+# 00:21 UTC dropped it and every logged-in WebSocket failed for five hours
+# with `OperationalError('the connection is closed')`.
+#
+# A pool with `check` revalidates on every checkout, which is what
+# `pool_pre_ping` does for the SQLAlchemy engine — that flag lives on a
+# *different* engine (`persistence_sqla/provider.py`) and never covered this
+# connection.
+_CHECKPOINTER_POOL_MIN_SIZE = 1
+_CHECKPOINTER_POOL_MAX_SIZE = 4
+# Both ceilings stay below the pgbouncer timeouts in front of RDS
+# (`server_idle_timeout = 300`, `server_lifetime` at its 3600s default) so the
+# pool retires a connection before pgbouncer drops it unannounced.
+_CHECKPOINTER_CONN_MAX_LIFETIME_S = 900.0
+_CHECKPOINTER_CONN_MAX_IDLE_S = 120.0
+# Bounds how long a checkout waits for a connection. Keeps `init_pipeline
+# _persistence()` from stalling startup when the database is unreachable —
+# the retry TTL above is what recovers from that, not a longer wait.
+_CHECKPOINTER_POOL_TIMEOUT_S = 15.0
+
 # BUG-022: how often the WebSocket emits a keepalive frame during a long
 # pipeline step. Must be well below the tightest consumer idle timeout
 # (the frontend bridge's per-message activity timer, proxies, and test
@@ -247,12 +272,90 @@ async def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type:
 
 
 async def _open_checkpointer(conn_str: str) -> tuple[AsyncExitStack, Any]:
-    """Open an AsyncPostgresSaver inside an AsyncExitStack."""
+    """Open an AsyncPostgresSaver over a self-healing pool, in an exit stack.
+
+    Deliberately *not* `AsyncPostgresSaver.from_conn_string()`: that helper
+    opens one bare `AsyncConnection` and nothing ever revalidates or replaces
+    it. `_ainternal.Conn` also accepts an `AsyncConnectionPool`, and
+    `get_connection()` then acquires per operation — so `check` runs on every
+    checkout and a connection killed between requests is replaced instead of
+    poisoning the saver.
+    """
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
 
     stack = AsyncExitStack()
-    saver = await stack.enter_async_context(AsyncPostgresSaver.from_conn_string(conn_str))
+    try:
+        pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
+            conninfo=conn_str,
+            min_size=_CHECKPOINTER_POOL_MIN_SIZE,
+            max_size=_CHECKPOINTER_POOL_MAX_SIZE,
+            # AsyncPostgresSaver assumes all three on whatever connection it is
+            # handed. `from_conn_string` set them; a pool will not unless told.
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+            check=AsyncConnectionPool.check_connection,
+            max_lifetime=_CHECKPOINTER_CONN_MAX_LIFETIME_S,
+            max_idle=_CHECKPOINTER_CONN_MAX_IDLE_S,
+            timeout=_CHECKPOINTER_POOL_TIMEOUT_S,
+            # psycopg warns when a pool opens from its own constructor; the
+            # AsyncExitStack owns the lifecycle instead.
+            open=False,
+        )
+        await stack.enter_async_context(pool)
+        saver = AsyncPostgresSaver(conn=pool)
+    except BaseException:
+        # An opened pool must never outlive the failure that abandoned it: its
+        # workers keep reconnecting in the background forever, which hangs the
+        # process rather than erroring. Anything raised after `enter_async
+        # _context` — a bad saver signature, cancellation — leaks it otherwise.
+        with contextlib.suppress(Exception):
+            await stack.aclose()
+        raise
     return stack, saver
+
+
+def _checkpointer_is_live() -> bool:
+    """True when the cached saver still has a usable source of connections.
+
+    The pool revalidates individual connections itself, so the only state it
+    cannot come back from is the pool being closed — shutdown, or an init that
+    was torn down halfway.
+    """
+    if _checkpointer is None:
+        return False
+    conn = getattr(_checkpointer, "conn", None)
+    return not getattr(conn, "closed", False)
+
+
+async def _teardown_checkpointer_locked() -> None:
+    """Drop the cached saver, its pool and the compiled graphs.
+
+    Caller must hold `_checkpointer_lock`. `_compiled_graphs` has to go too: a
+    compiled graph captures the saver object, so leaving it cached would keep
+    routing requests at the saver we just discarded.
+
+    Clears `_checkpointer_attempted` as well, so the next call gets one
+    immediate rebuild. The back-off exists to stop us hammering a database that
+    fails at *init*; a connection that died after a healthy life is a different
+    situation, and init is already known to work. If the rebuild then fails,
+    the flag is set again and the back-off resumes its job.
+    """
+    global _checkpointer, _checkpointer_stack, _compiled_graphs  # noqa: PLW0603
+    global _checkpointer_attempted  # noqa: PLW0603
+
+    stack = _checkpointer_stack
+    _checkpointer = None
+    _checkpointer_stack = None
+    _checkpointer_attempted = False
+    _compiled_graphs = {}
+    if stack is not None:
+        with contextlib.suppress(Exception):
+            await stack.aclose()
 
 
 def _is_benign_checkpointer_setup_race(exc: Exception) -> bool:
@@ -274,26 +377,32 @@ async def _get_checkpointer():
     Retry behaviour: a failed init flips `_checkpointer_attempted=True`.
     Subsequent calls re-attempt after `_CHECKPOINTER_RETRY_TTL_SECONDS`
     so a transient DB blip at boot doesn't leave persistence off forever.
+
+    That TTL only ever covered a failed *init*. A saver whose connection died
+    later was still handed back forever, which is what kept prod's chat broken
+    for five hours on 2026-07-30 — so a cached-but-dead saver is now treated
+    as a miss and rebuilt.
     """
     global _checkpointer, _checkpointer_attempted, _checkpointer_stack  # noqa: PLW0603
     global _checkpointer_last_attempt_ts  # noqa: PLW0603
 
-    if _checkpointer is not None:
+    if _checkpointer is not None and _checkpointer_is_live():
         return _checkpointer
 
     import time as _time
 
-    now = _time.monotonic()
-    if (
-        _checkpointer_attempted
-        and (now - _checkpointer_last_attempt_ts) < _CHECKPOINTER_RETRY_TTL_SECONDS
-    ):
-        return None  # Recently failed — back off
-
+    # The retry back-off is consulted *inside* the lock, after any dead saver
+    # has been discarded. Checking it up front — as an unlocked fast path —
+    # meant a checkpointer that died within the TTL of its own successful init
+    # was neither rebuilt nor torn down: the call just returned None and left
+    # the corpse cached, with the graph still compiled around it.
     async with _checkpointer_lock:
         # Double-check after acquiring lock
         if _checkpointer is not None:
-            return _checkpointer
+            if _checkpointer_is_live():
+                return _checkpointer
+            logger.warning("LangGraph checkpointer pool is closed — discarding it and rebuilding")
+            await _teardown_checkpointer_locked()
         now = _time.monotonic()
         if (
             _checkpointer_attempted
@@ -308,6 +417,7 @@ async def _get_checkpointer():
         if not db_url:
             return None
 
+        stack: AsyncExitStack | None = None
         try:
             conn_str = db_url.replace("postgresql+psycopg://", "postgresql://")
             stack, saver = await _open_checkpointer(conn_str)
@@ -319,16 +429,19 @@ async def _get_checkpointer():
                     raise
                 with contextlib.suppress(Exception):
                     await stack.aclose()
+                stack = None
                 stack, saver = await _open_checkpointer(conn_str)
                 logger.info("LangGraph checkpointer initialised after concurrent setup race")
             _checkpointer = saver
             _checkpointer_stack = stack
             return saver
         except Exception:
-            if _checkpointer_stack is not None:
+            # Close the stack we just opened, not the global one. On this path
+            # the global is still unset, so the previous version closed nothing
+            # and leaked whatever `_open_checkpointer` had already opened.
+            if stack is not None:
                 with contextlib.suppress(Exception):
-                    await _checkpointer_stack.aclose()
-                _checkpointer_stack = None
+                    await stack.aclose()
             logger.warning(
                 "LangGraph checkpointer not available — running without persistence",
                 exc_info=True,

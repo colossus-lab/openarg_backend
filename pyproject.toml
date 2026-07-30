@@ -17,6 +17,10 @@ dependencies = [
     # Database
     "sqlalchemy[asyncio]>=2.0.36",
     "psycopg[binary]>=3.2.0",
+    # Direct import in the WS router's checkpointer pool. Arrives transitively
+    # via langgraph-checkpoint-postgres, but we import it ourselves so it is
+    # declared here rather than relied on by accident.
+    "psycopg-pool>=3.2.0",
     "alembic>=1.14.0",
     "pgvector>=0.2.5",
 
