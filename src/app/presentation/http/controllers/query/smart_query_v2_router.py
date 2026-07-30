@@ -286,27 +286,36 @@ async def _open_checkpointer(conn_str: str) -> tuple[AsyncExitStack, Any]:
     from psycopg_pool import AsyncConnectionPool
 
     stack = AsyncExitStack()
-    pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
-        conninfo=conn_str,
-        min_size=_CHECKPOINTER_POOL_MIN_SIZE,
-        max_size=_CHECKPOINTER_POOL_MAX_SIZE,
-        # AsyncPostgresSaver assumes all three on whatever connection it is
-        # handed. `from_conn_string` set them; a pool will not unless told.
-        kwargs={
-            "autocommit": True,
-            "prepare_threshold": 0,
-            "row_factory": dict_row,
-        },
-        check=AsyncConnectionPool.check_connection,
-        max_lifetime=_CHECKPOINTER_CONN_MAX_LIFETIME_S,
-        max_idle=_CHECKPOINTER_CONN_MAX_IDLE_S,
-        timeout=_CHECKPOINTER_POOL_TIMEOUT_S,
-        # psycopg warns when a pool opens from its own constructor; the
-        # AsyncExitStack owns the lifecycle instead.
-        open=False,
-    )
-    await stack.enter_async_context(pool)
-    saver = AsyncPostgresSaver(conn=pool)
+    try:
+        pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
+            conninfo=conn_str,
+            min_size=_CHECKPOINTER_POOL_MIN_SIZE,
+            max_size=_CHECKPOINTER_POOL_MAX_SIZE,
+            # AsyncPostgresSaver assumes all three on whatever connection it is
+            # handed. `from_conn_string` set them; a pool will not unless told.
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+            check=AsyncConnectionPool.check_connection,
+            max_lifetime=_CHECKPOINTER_CONN_MAX_LIFETIME_S,
+            max_idle=_CHECKPOINTER_CONN_MAX_IDLE_S,
+            timeout=_CHECKPOINTER_POOL_TIMEOUT_S,
+            # psycopg warns when a pool opens from its own constructor; the
+            # AsyncExitStack owns the lifecycle instead.
+            open=False,
+        )
+        await stack.enter_async_context(pool)
+        saver = AsyncPostgresSaver(conn=pool)
+    except BaseException:
+        # An opened pool must never outlive the failure that abandoned it: its
+        # workers keep reconnecting in the background forever, which hangs the
+        # process rather than erroring. Anything raised after `enter_async
+        # _context` — a bad saver signature, cancellation — leaks it otherwise.
+        with contextlib.suppress(Exception):
+            await stack.aclose()
+        raise
     return stack, saver
 
 
@@ -329,12 +338,20 @@ async def _teardown_checkpointer_locked() -> None:
     Caller must hold `_checkpointer_lock`. `_compiled_graphs` has to go too: a
     compiled graph captures the saver object, so leaving it cached would keep
     routing requests at the saver we just discarded.
+
+    Clears `_checkpointer_attempted` as well, so the next call gets one
+    immediate rebuild. The back-off exists to stop us hammering a database that
+    fails at *init*; a connection that died after a healthy life is a different
+    situation, and init is already known to work. If the rebuild then fails,
+    the flag is set again and the back-off resumes its job.
     """
     global _checkpointer, _checkpointer_stack, _compiled_graphs  # noqa: PLW0603
+    global _checkpointer_attempted  # noqa: PLW0603
 
     stack = _checkpointer_stack
     _checkpointer = None
     _checkpointer_stack = None
+    _checkpointer_attempted = False
     _compiled_graphs = {}
     if stack is not None:
         with contextlib.suppress(Exception):
@@ -374,13 +391,11 @@ async def _get_checkpointer():
 
     import time as _time
 
-    now = _time.monotonic()
-    if (
-        _checkpointer_attempted
-        and (now - _checkpointer_last_attempt_ts) < _CHECKPOINTER_RETRY_TTL_SECONDS
-    ):
-        return None  # Recently failed — back off
-
+    # The retry back-off is consulted *inside* the lock, after any dead saver
+    # has been discarded. Checking it up front — as an unlocked fast path —
+    # meant a checkpointer that died within the TTL of its own successful init
+    # was neither rebuilt nor torn down: the call just returned None and left
+    # the corpse cached, with the graph still compiled around it.
     async with _checkpointer_lock:
         # Double-check after acquiring lock
         if _checkpointer is not None:
