@@ -747,6 +747,25 @@ _LOSSY_FILTER_RE = re.compile(
 )
 
 
+# A `CASE … END` block, innermost first so repeated substitution unwinds
+# nesting. Regex matching over SQL is the existing idiom here; a parser would
+# be a heavier dependency than this one question justifies.
+_CASE_BLOCK_RE = re.compile(
+    r"\bCASE\b(?:(?!\bCASE\b|\bEND\b).)*?\bEND\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_case_blocks(sql: str) -> str:
+    """Remove `CASE … END` expressions, unwinding nested ones outward."""
+    previous = None
+    stripped = sql
+    while previous != stripped:
+        previous = stripped
+        stripped = _CASE_BLOCK_RE.sub(" ", stripped)
+    return stripped
+
+
 def find_lossy_numeric_filters(sql: str) -> list[tuple[str, str]]:
     """Find `col ~ '^…$'` shape guards that silently drop rows from an aggregate.
 
@@ -759,12 +778,19 @@ def find_lossy_numeric_filters(sql: str) -> list[tuple[str, str]]:
     Only flags queries that also aggregate — a shape guard on a plain SELECT
     narrows a listing, which is a legitimate filter, not a silent loss.
 
+    `CASE … END` blocks are excluded before scanning. A regex inside a CASE
+    *classifies* a value, it does not remove a row: the shape-branching
+    normalisation the NL2SQL prompt now teaches is built entirely out of
+    `col ~ '^…$'` tests, and without this the guard would reject every query
+    written the correct way — turning a safety net into a blanket refusal.
+
     Returns a list of ``(column, pattern)`` pairs, empty when the query is
     clean.
     """
     if not sql or not _AGGREGATE_FN_RE.search(sql):
         return []
-    return [(m.group("col"), m.group("pattern")) for m in _LOSSY_FILTER_RE.finditer(sql)]
+    scannable = _strip_case_blocks(sql)
+    return [(m.group("col"), m.group("pattern")) for m in _LOSSY_FILTER_RE.finditer(scannable)]
 
 
 async def _measure_excluded_rows(

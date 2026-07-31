@@ -154,9 +154,12 @@ _TRANSFERENCIAS_NOTES = (
     "programa_desc. El detalle por institución receptora está en subparcial_desc "
     "(ej: 'Universidad de Buenos Aires'); parcial_desc separa gastos corrientes de "
     "capital. Los montos (credito_vigente, credito_devengado) son TEXT con formato "
-    "mixto: hay valores con coma decimal ('9403175,5'), así que un "
-    "CAST(x AS NUMERIC) directo falla — normalizá la coma a punto antes de agregar, "
-    "y nunca descartes filas con un filtro regex (sesga el total)."
+    "mixto: hay valores con coma decimal ('9403175,5') y otros con punto decimal "
+    "('1086738.69'), así que un CAST(x AS NUMERIC) directo falla. Normalizá "
+    "ramificando por la FORMA completa del valor (la regla NUMERIC CASTS del prompt), "
+    "nunca borrando todos los puntos: eso multiplica por 100 las filas donde el punto "
+    "es el separador decimal. Y nunca descartes filas con un filtro regex (sesga el "
+    "total)."
 )
 
 _RESULTADO_FISCAL_NOTES = (
