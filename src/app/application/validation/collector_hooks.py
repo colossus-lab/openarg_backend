@@ -234,17 +234,28 @@ def validate_retrospective(
         ctx = _build_ctx(**kwargs)
         validator = get_validator()
         findings = list(validator.run(ctx, Mode.RETROSPECTIVE))
-        # `placeholder_headers` reads nothing but `materialized_columns`, which
-        # this hook observes directly, so there was never a reason for it to be
-        # exclusive to the parse path — it just grew there. Left that way it is
-        # written once and re-checked never: measured on staging 2026-07-31,
-        # 117 of the 121 tables carrying an open one had clean columns, some
-        # since May.
-        placeholder = _placeholder_header_finding(ctx, mode=Mode.RETROSPECTIVE)
+
+        # Whether this run actually looked at the relation. Everything below
+        # that *closes* a finding depends on it: silence from a detector that
+        # was handed nothing is not evidence of health, and treating it as such
+        # turns a coverage gap into data loss. That is not hypothetical — the
+        # sweep resolved `raw.*` names against `public`, saw no columns for
+        # 25288 of 25288 tables, and on 2026-07-31 closed the findings of four
+        # genuinely broken ones on the strength of having never read them.
+        observed = bool(ctx.materialized_columns)
+
+        # `placeholder_headers` reads nothing but `materialized_columns`, so
+        # there was never a reason for it to be exclusive to the parse path —
+        # it just grew there. Left that way it is written once and re-checked
+        # never: 117 of 121 tables carrying an open one had clean columns.
+        placeholder = (
+            _placeholder_header_finding(ctx, mode=Mode.RETROSPECTIVE) if observed else None
+        )
         if placeholder is not None:
             findings.append(placeholder)
         _persist(engine, ctx, findings)
-        if resolve_stale and ctx.resource_id:
+
+        if resolve_stale and ctx.resource_id and observed:
             # The hash covers this run's inputs, so anything stored under a
             # different one describes a state the resource has left behind.
             keep = [IngestionValidator.input_hash(ctx)] if findings else []
