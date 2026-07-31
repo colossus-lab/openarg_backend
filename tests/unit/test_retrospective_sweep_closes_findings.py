@@ -61,7 +61,15 @@ class TestStaleFindingsAreClosed:
         ):
             get_validator.return_value.run.return_value = []
             hooks.validate_retrospective(
-                MagicMock(), resolve_stale=True, dataset_id="res-1", table_name="raw.t"
+                MagicMock(),
+                resolve_stale=True,
+                dataset_id="res-1",
+                table_name="raw.t",
+                # Closing requires having actually read the relation. See
+                # test_sweep_schema_resolution: the sweep resolved every raw
+                # table against `public`, read nothing, and resolved four
+                # broken tables on the strength of it.
+                materialized_columns=["Apellido", "Nombre", "Cargo"],
             )
         resolve.assert_called_once()
         assert resolve.call_args.kwargs["mode"] is Mode.RETROSPECTIVE
@@ -76,7 +84,11 @@ class TestStaleFindingsAreClosed:
         ):
             get_validator.return_value.run.return_value = [_finding()]
             hooks.validate_retrospective(
-                MagicMock(), resolve_stale=True, dataset_id="res-1", table_name="raw.t"
+                MagicMock(),
+                resolve_stale=True,
+                dataset_id="res-1",
+                table_name="raw.t",
+                materialized_columns=["Apellido", "Nombre", "Cargo"],
             )
         keep = list(resolve.call_args.kwargs["keep_hashes"])
         assert len(keep) == 1 and keep[0], "the current run's hash must survive"

@@ -137,6 +137,45 @@ def _split_qualified_name(table_name: str) -> tuple[str, str]:
     return schema.strip('"'), rest.strip('"')
 
 
+# Where an unqualified `cached_datasets.table_name` can actually live. The
+# split above answers `public` for those, which was true when `cache_*` sat in
+# the public schema and has not been true for a while: measured 2026-07-31, all
+# 25288 ready rows carry an unqualified name and all 25288 relations are in
+# `raw`. Resolving against the wrong schema returned no columns, so the sweep
+# has been walking its whole inventory and validating almost none of it —
+# silently, because "no columns" produced no findings rather than an error.
+# `raw` first, since that is where they are; `public` kept for the legacy shape.
+_CANDIDATE_SCHEMAS = ("raw", "public")
+
+
+def _resolve_columns(cols_by_key: dict[tuple[str, str], list[str]], table_name: str) -> list[str]:
+    """Columns for a relation, trying the named schema then the real ones."""
+    schema, bare = _split_qualified_name(table_name or "")
+    if not bare:
+        return []
+    found = cols_by_key.get((schema, bare))
+    if found:
+        return found
+    for candidate in _CANDIDATE_SCHEMAS:
+        found = cols_by_key.get((candidate, bare))
+        if found:
+            return found
+    return []
+
+
+def _resolve_row_count(
+    counts_by_key: dict[tuple[str, str], int | None], table_name: str
+) -> int | None:
+    """Row count for a relation, resolved the same way as its columns."""
+    schema, bare = _split_qualified_name(table_name or "")
+    if not bare:
+        return None
+    for key in ((schema, bare), *((c, bare) for c in _CANDIDATE_SCHEMAS)):
+        if key in counts_by_key:
+            return counts_by_key[key]
+    return None
+
+
 def _columns_for_batch(engine, table_names: list[str]) -> dict[tuple[str, str], list[str]]:
     """Column lists for a whole batch in one query, keyed by `(schema, name)`.
 
@@ -148,7 +187,10 @@ def _columns_for_batch(engine, table_names: list[str]) -> dict[tuple[str, str], 
     pairs = [_split_qualified_name(t) for t in table_names if t]
     if not pairs:
         return {}
-    schemas = sorted({s for s, _ in pairs})
+    # Search the schemas the names claim AND the ones relations actually live
+    # in, because for unqualified names those are not the same set — see
+    # `_CANDIDATE_SCHEMAS`. `_resolve_columns` picks between the results.
+    schemas = sorted({s for s, _ in pairs} | set(_CANDIDATE_SCHEMAS))
     bares = sorted({b for _, b in pairs})
     out: dict[tuple[str, str], list[str]] = {}
     try:
@@ -203,16 +245,16 @@ def _row_counts_for_batch(engine, table_names: list[str]) -> dict[tuple[str, str
                     "  AND c.relkind = ANY(ARRAY['r','p','m','v'])"
                 ),
                 {
-                    "schemas": sorted({s for s, _ in pairs}),
+                    "schemas": sorted({s for s, _ in pairs} | set(_CANDIDATE_SCHEMAS)),
                     "bares": sorted({b for _, b in pairs}),
                 },
             ).fetchall()
             conn.rollback()
-            wanted = set(pairs)
+            wanted = {b for _, b in pairs}
             needs_exact: list[tuple[str, str]] = []
             for r in rows:
                 key = (r.schema, r.name)
-                if key not in wanted:
+                if r.name not in wanted:
                     continue
                 approx = int(r.approx)
                 if approx > _EXACT_COUNT_BELOW:
@@ -364,9 +406,12 @@ def retrospective_sweep(self, *, max_batches: int | None = None) -> dict:
             cols_by_table = _columns_for_batch(engine, names)
             counts_by_table = _row_counts_for_batch(engine, names)
             for row in batch:
-                key = _split_qualified_name(row["table_name"] or "")
-                cols_real = cols_by_table.get(key, [])
-                rows_real = counts_by_table.get(key) if cols_real else None
+                cols_real = _resolve_columns(cols_by_table, row["table_name"] or "")
+                rows_real = (
+                    _resolve_row_count(counts_by_table, row["table_name"] or "")
+                    if cols_real
+                    else None
+                )
                 findings = validate_retrospective(
                     engine,
                     # Close what this resource stopped reporting. Without it the
