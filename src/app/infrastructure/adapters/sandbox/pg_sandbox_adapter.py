@@ -116,6 +116,99 @@ def _referenced_mart_views(sql: str) -> set[str]:
     return found
 
 
+def _referenced_data_tables(sql: str) -> set[str]:
+    """Bare relation names for the raw/cached tables a query reads.
+
+    Covers the shapes NL2SQL emits for ingested data: `raw.<table>`, legacy
+    `cache_*` names in `public`, and — because the engine runs with
+    `search_path = public, raw` — *any* unqualified name, which resolves to a
+    `raw.*` relation whenever public has no such table. Restricting the
+    unqualified branch to the `cache_` prefix would miss exactly the tables
+    that carry findings: they are versioned raw landings like
+    `indec__…__2971d412__v3`, and an unqualified reference to one reaches it.
+
+    Over-collecting is free here: a name with no row in `cached_datasets`
+    simply doesn't match. Under-collecting is the failure that matters.
+
+    Marts are handled separately by `_referenced_mart_views` — they are
+    curated, and their quality signal lives in `mart_definitions`, not in
+    `ingestion_findings`.
+    """
+    found: set[str] = set()
+    for m in _TABLE_REF_PATTERN.finditer(sql):
+        first, second = m.group(1), m.group(2)
+        if second:
+            if first.lower() == "raw":
+                found.add(second.lower())
+        elif first.lower() != "mart":
+            found.add(first.lower())
+    return found
+
+
+def _findings_blocked_error(engine: Engine, sql: str) -> str | None:
+    """Reject SQL that reads a table with an unresolved CRITICAL finding.
+
+    The ingestion validators already detect this — `html_as_data`,
+    `placeholder_headers`, `row_count`, `separator_mismatch` — and the
+    promotion gate keeps a failing table out of `ready`. What it cannot do is
+    reach backwards: a table that went `ready` before a detector existed, or
+    whose defect a retrospective sweep found afterwards, keeps being served
+    with the finding sitting open next to it. Measured 2026-07-31: 143 such
+    tables across staging and prod, 17 of them in prod's discoverable catalog.
+
+    `open_findings_for()` was written for exactly this and had no callers in
+    the entire repo — the detection was built, correct, and never consulted.
+
+    Enforced here rather than in discovery for the reason
+    `_blocked_mart_error` documents above: discovery only controls what gets
+    *suggested*, and the model names tables on its own.
+    """
+    referenced = _referenced_data_tables(sql)
+    if not referenced:
+        return None
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT cd.table_name, f.detector_name, f.message "
+                    "FROM raw.cached_datasets cd "
+                    "JOIN ingestion_findings f "
+                    "  ON f.resource_id = cd.dataset_id::text "
+                    "WHERE lower(cd.table_name) = ANY(:names) "
+                    "  AND f.severity = 'critical' "
+                    "  AND f.resolved_at IS NULL "
+                    "  AND f.mode <> 'mart_audit' "
+                    "LIMIT 1"
+                ),
+                {"names": sorted(referenced)},
+            ).fetchall()
+            conn.rollback()
+    except Exception:
+        # Deliberately NOT fail-closed, unlike the mart guard. That one covers
+        # a handful of curated views a human explicitly withdrew; this one sits
+        # in front of ~27k ingested tables, so an unreadable findings table
+        # would take the whole corpus offline. A logged warning and normal
+        # execution is the safer failure here.
+        logger.warning("findings lookup failed; serving without the quality gate", exc_info=True)
+        return None
+
+    if not rows:
+        return None
+
+    table = str(rows[0][0])
+    detector = str(rows[0][1] or "").strip()
+    detail = str(rows[0][2] or "").strip()
+    logger.warning(
+        "Table %s has an open critical finding (%s); refusing execution", table, detector
+    )
+    because = f" ({detail})" if detail else ""
+    return (
+        f"La tabla '{table}' tiene un problema de calidad sin resolver "
+        f"detectado por '{detector}'{because}, así que no se puede usar para "
+        f"responder. Preferí no dar un número antes que dar uno que no se sostiene."
+    )
+
+
 def _blocked_mart_error(engine: Engine, sql: str) -> str | None:
     """Reject SQL that reads a mart withdrawn from serving.
 
@@ -367,7 +460,7 @@ class PgSandboxAdapter(ISQLSandbox):
         engine = self._get_engine()
         timeout_ms = timeout_seconds * 1000
 
-        blocked_error = _blocked_mart_error(engine, sql)
+        blocked_error = _blocked_mart_error(engine, sql) or _findings_blocked_error(engine, sql)
         if blocked_error:
             return SandboxResult(
                 columns=[],
