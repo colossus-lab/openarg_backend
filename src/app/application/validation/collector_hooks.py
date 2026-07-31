@@ -26,7 +26,7 @@ from app.application.validation.detector import (
     ResourceContext,
     Severity,
 )
-from app.application.validation.findings_repository import persist_findings
+from app.application.validation.findings_repository import persist_findings, resolve_missing
 from app.application.validation.ingestion_validator import (
     IngestionValidator,
     default_validator,
@@ -176,16 +176,37 @@ def validate_post_parse(engine: Engine, **kwargs: Any) -> Finding | None:
         return None
 
 
-def validate_retrospective(engine: Engine, **kwargs: Any) -> list[Finding]:
+def validate_retrospective(
+    engine: Engine, *, resolve_stale: bool = False, **kwargs: Any
+) -> list[Finding]:
     """Run all detectors in retrospective mode. Returns ALL findings.
 
     Used by the Celery beat sweep — caller decides what to do with them.
+
+    With `resolve_stale=True` the run also *closes* findings this resource no
+    longer produces, which is what makes the sweep a synchronisation rather
+    than an append-only log. Without it the upsert only ever re-opens
+    (`persist_findings` resets `resolved_at` on conflict) and nothing else
+    closes a retrospective finding: `_close_resolved_findings_query` requires
+    the dataset to have been re-processed *after* the finding, so a table that
+    got fixed and was never re-collected keeps its finding open forever.
+    Measured 2026-07-31 on prod: 1459 open retrospective findings, the oldest
+    dating to 2026-05-06.
+
+    Same semantics the mart auditor already uses via `resolve_missing`: keep
+    what this run reported, close the rest, so a partially-fixed resource ends
+    up with fewer open findings instead of the same ones forever.
     """
     try:
         ctx = _build_ctx(**kwargs)
         validator = get_validator()
         findings = validator.run(ctx, Mode.RETROSPECTIVE)
         _persist(engine, ctx, findings)
+        if resolve_stale and ctx.resource_id:
+            # The hash covers this run's inputs, so anything stored under a
+            # different one describes a state the resource has left behind.
+            keep = [IngestionValidator.input_hash(ctx)] if findings else []
+            resolve_missing(engine, ctx.resource_id, mode=Mode.RETROSPECTIVE, keep_hashes=keep)
         return findings
     except Exception:
         logger.exception("retrospective validator hook failed")
