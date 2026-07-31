@@ -16,11 +16,17 @@ Rules:
 - Only reference the tables and columns listed above.
 - Always use double-quoted identifiers for column names that contain spaces, accents, or special characters.
 - CRITICAL: In `cache_*` tables most columns are stored as TEXT (even years, numbers, dates). ALWAYS compare those with text literals: WHERE anio = '1980', NOT WHERE anio = 1980. Use CAST(col AS NUMERIC) only for aggregations or arithmetic, never for simple equality/filtering. **The annotated type in the `Columns:` line always wins over this default** — `mart.*` views expose real `integer`/`numeric` columns. Never JOIN a text column to an integer one without an explicit cast (`a.anio = CAST(b.ejercicio_presupuestario AS INTEGER)`); Postgres rejects `integer = text`.
-- NUMERIC CASTS — NEVER DISCARD ROWS TO MAKE A CAST WORK (CRITICAL). Argentine data mixes decimal formats in the SAME column: plain integers (`32291165`), comma decimals (`9403175,5`) and thousands separators (`1.234.567,89`). A filter like `col ~ '^\-?\d+\.?\d*$'` does NOT protect the query — it silently DROPS every comma-decimal row from the SUM and reports a total that is missing part of the universe. That is a wrong answer presented as a fact, which is worse than no answer. **NORMALIZE, DON'T FILTER.** For a TEXT column, cast through this expression:
-  `CAST(NULLIF(replace(replace(col, '.', ''), ',', '.'), '') AS NUMERIC)`
-  (strip thousands dots first, then turn the decimal comma into a dot). Guard only against NULL/empty, never against "shape":
-  `WHERE col IS NOT NULL AND col <> ''`
-  If a column genuinely mixes both `1.234,56` (AR) and `1234.56` (US) styles, prefer `to_number(col, '999G999G999D99')` or ask for the count instead of the sum — but never solve it by filtering rows out.
+- NUMERIC CASTS — NEVER DISCARD ROWS TO MAKE A CAST WORK (CRITICAL). Argentine data mixes decimal formats in the SAME column: plain integers (`32291165`), comma decimals (`9403175,5`), full Argentine notation (`1.234.567,89`) AND dot decimals (`1086738.69`). A filter like `col ~ '^\-?\d+\.?\d*$'` does NOT protect the query — it silently DROPS every comma-decimal row from the SUM and reports a total that is missing part of the universe. That is a wrong answer presented as a fact, which is worse than no answer. **NORMALIZE, DON'T FILTER.**
+  **Do NOT use a blanket `replace(replace(col, '.', ''), ',', '.')`.** It assumes the dot is always a thousands separator, so wherever the dot is the DECIMAL separator it multiplies that row by 100. Measured on real data: that is 75% of the rows in `mart.caba_departamentos_en_venta.precio_m2_dolares` and 33% in `mart.caba_pauta_publicitaria.importe`. Branch on the SHAPE of the whole value, never on which symbol happens to be present:
+  `CASE`
+  `  WHEN col ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+,[0-9]+\s*$' THEN replace(replace(btrim(col),'.',''),',','.')`
+  `  WHEN col ~ '^\s*-?[0-9]+,[0-9]+\s*$'                  THEN replace(btrim(col),',','.')`
+  `  WHEN col ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+\s*$'        THEN replace(btrim(col),'.','')`
+  `  WHEN col ~ '^\s*-?[0-9]+(\.[0-9]+)?\s*$'              THEN btrim(col)`
+  `END::numeric`
+  In order those branches read: `1.234,56` (AR, dot = thousands) · `1234,56` (comma decimal) · `1.234` (dot = thousands) · `1234.56` or `1234` (dot = decimal, or plain integer). A value matching none of them falls through to NULL, so the row still counts in `COUNT(*)` but contributes nothing to the `SUM`. **Null the value, never drop the row** — that is the whole point.
+  If the column also carries currency symbols or stray spaces (`$ 99.900,00`), wrap it once with `btrim(regexp_replace(col, '[^0-9,.-]', '', 'g'))` and branch on that instead of on `col`.
+  Never use `to_number(col, '999G999G999D99')`. In PostgreSQL `G` and `D` resolve from the server's `lc_numeric`, NOT from the mask, so under a `C`/`en_US` locale they mean the English convention — the exact opposite of Argentine notation, silently.
   **CHECK THE TYPE FIRST — this applies ONLY to TEXT columns.** Every `Columns:` line above annotates the real PostgreSQL type in parentheses, e.g. `Columns: anio (integer), credito_vigente (numeric), jurisdiccion (text)`. A column with no annotation is TEXT. If the type is `numeric`/`integer`/`bigint`/`double precision`/`real`, the value is ALREADY a number: use it directly, `SUM(col)`, guarded only by `WHERE col IS NOT NULL`.
   Two distinct failures if you ignore the type:
   1. `replace()` and `~` ERROR on numeric input (`function replace(numeric, unknown, unknown) does not exist`) — the query dies.
@@ -56,10 +62,10 @@ Table selection guidelines:
 Examples:
 
 Question: ¿Cuánto se gastó en el programa "Asignaciones Familiares" en 2024?
-SQL: SELECT ejercicio_presupuestario, programa_desc, CAST(credito_devengado AS NUMERIC) AS devengado FROM cache_presupuesto_credito_2024 WHERE programa_desc ILIKE '%asignaciones familiares%' AND ejercicio_presupuestario = '2024' ORDER BY CAST(credito_devengado AS NUMERIC) DESC LIMIT 100
+SQL: SELECT ejercicio_presupuestario, programa_desc, CASE WHEN credito_devengado ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+,[0-9]+\s*$' THEN replace(replace(btrim(credito_devengado),'.',''),',','.') WHEN credito_devengado ~ '^\s*-?[0-9]+,[0-9]+\s*$' THEN replace(btrim(credito_devengado),',','.') WHEN credito_devengado ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+\s*$' THEN replace(btrim(credito_devengado),'.','') WHEN credito_devengado ~ '^\s*-?[0-9]+(\.[0-9]+)?\s*$' THEN btrim(credito_devengado) END::numeric AS devengado FROM cache_presupuesto_credito_2024 WHERE programa_desc ILIKE '%asignaciones familiares%' AND ejercicio_presupuestario = '2024' ORDER BY devengado DESC NULLS LAST LIMIT 100
 
 Question: ¿Cuáles son los 10 proveedores con más contratos en Buenos Aires Compras?
-SQL: SELECT suppliers_name, COUNT(*) AS total_contratos, SUM(CAST(NULLIF(replace(replace(awards_value_amount, '.', ''), ',', '.'), '') AS NUMERIC)) AS monto_total FROM cache_bac_awards WHERE suppliers_name IS NOT NULL AND awards_value_amount IS NOT NULL AND awards_value_amount <> '' GROUP BY suppliers_name ORDER BY total_contratos DESC LIMIT 10
+SQL: SELECT suppliers_name, COUNT(*) AS total_contratos, SUM(CASE WHEN awards_value_amount ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+,[0-9]+\s*$' THEN replace(replace(btrim(awards_value_amount),'.',''),',','.') WHEN awards_value_amount ~ '^\s*-?[0-9]+,[0-9]+\s*$' THEN replace(btrim(awards_value_amount),',','.') WHEN awards_value_amount ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+\s*$' THEN replace(btrim(awards_value_amount),'.','') WHEN awards_value_amount ~ '^\s*-?[0-9]+(\.[0-9]+)?\s*$' THEN btrim(awards_value_amount) END::numeric) AS monto_total FROM cache_bac_awards WHERE suppliers_name IS NOT NULL GROUP BY suppliers_name ORDER BY total_contratos DESC LIMIT 10
 
 Question: ¿Cuántos diputados hay por bloque?
 SQL: SELECT bloque, COUNT(*) AS cantidad FROM cache_diputados_1 WHERE bloque IS NOT NULL GROUP BY bloque ORDER BY cantidad DESC
@@ -68,7 +74,7 @@ Question: ¿Quién es el gobernador de Córdoba?
 SQL: SELECT provincia, gobernador, partido, inicio_mandato FROM cache_gobernadores WHERE provincia ILIKE '%cordoba%' OR provincia ILIKE '%córdoba%' LIMIT 5
 
 Question: ¿Cuál es el presupuesto total por jurisdicción en 2025?
-SQL: SELECT jurisdiccion_desc, SUM(CAST(NULLIF(replace(replace(credito_vigente, '.', ''), ',', '.'), '') AS NUMERIC)) AS total_credito FROM cache_presupuesto_credito_2025 WHERE ejercicio_presupuestario = '2025' AND credito_vigente IS NOT NULL AND credito_vigente <> '' GROUP BY jurisdiccion_desc ORDER BY total_credito DESC LIMIT 50
+SQL: SELECT jurisdiccion_desc, SUM(CASE WHEN credito_vigente ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+,[0-9]+\s*$' THEN replace(replace(btrim(credito_vigente),'.',''),',','.') WHEN credito_vigente ~ '^\s*-?[0-9]+,[0-9]+\s*$' THEN replace(btrim(credito_vigente),',','.') WHEN credito_vigente ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+\s*$' THEN replace(btrim(credito_vigente),'.','') WHEN credito_vigente ~ '^\s*-?[0-9]+(\.[0-9]+)?\s*$' THEN btrim(credito_vigente) END::numeric) AS total_credito FROM cache_presupuesto_credito_2025 WHERE ejercicio_presupuestario = '2025' GROUP BY jurisdiccion_desc ORDER BY total_credito DESC LIMIT 50
 
 Question: ¿Cuánto se transfirió a universidades nacionales en 2024?
 Tables: mart.presupuesto_consolidado — Columns: anio (integer), jurisdiccion (text), programa (text), credito_vigente (numeric), credito_devengado (numeric)

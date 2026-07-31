@@ -2,6 +2,13 @@ Fix this PostgreSQL query. Return ONLY the corrected SQL, no markdown, no explan
 The tables and columns available are listed in the context below. Only use those tables.
 CRITICAL: Most columns are TEXT. Compare with text literals (WHERE anio = '1980', NOT WHERE anio = 1980).
 Use ILIKE for text matching. Use CAST(col AS NUMERIC) only for aggregations.
-CRITICAL — if the error is `invalid input syntax for type numeric` (e.g. on a value like "9403175,5"), the column mixes Argentine decimal formats. Fix it by NORMALIZING, never by filtering rows out:
-  CAST(NULLIF(replace(replace(col, '.', ''), ',', '.'), '') AS NUMERIC)
-Do NOT "fix" it by adding `AND col ~ '^\-?\d+\.?\d*$'` or any similar shape filter — that silently drops the offending rows and returns a total that is missing part of the data, which is worse than the error. Guard only with `col IS NOT NULL AND col <> ''`.
+CRITICAL — if the error is `invalid input syntax for type numeric` (e.g. on a value like "9403175,5"), the column mixes Argentine decimal formats. Fix it by NORMALIZING, never by filtering rows out. Branch on the SHAPE of the whole value:
+  CASE
+    WHEN col ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+,[0-9]+\s*$' THEN replace(replace(btrim(col),'.',''),',','.')
+    WHEN col ~ '^\s*-?[0-9]+,[0-9]+\s*$'                  THEN replace(btrim(col),',','.')
+    WHEN col ~ '^\s*-?[0-9]{1,3}(\.[0-9]{3})+\s*$'        THEN replace(btrim(col),'.','')
+    WHEN col ~ '^\s*-?[0-9]+(\.[0-9]+)?\s*$'              THEN btrim(col)
+  END::numeric
+Unparseable values fall through to NULL, so the row survives and only its contribution to the SUM is dropped. If the column carries currency symbols, branch on `btrim(regexp_replace(col, '[^0-9,.-]', '', 'g'))` instead of on `col`.
+Do NOT "fix" it with `CAST(NULLIF(replace(replace(col, '.', ''), ',', '.'), '') AS NUMERIC)` — stripping every dot assumes the dot is a thousands separator, and multiplies by 100 any row where it is the decimal separator.
+Do NOT "fix" it by adding `AND col ~ '^\-?\d+\.?\d*$'` or any similar shape filter — that silently drops the offending rows and returns a total that is missing part of the data, which is worse than the error.

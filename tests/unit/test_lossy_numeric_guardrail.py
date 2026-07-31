@@ -32,11 +32,25 @@ _BAD_SQL = (
     "GROUP BY jurisdiccion_desc ORDER BY total DESC LIMIT 10"
 )
 
+# Shape-branching normalisation, the form the prompt now teaches. The earlier
+# fixture here used `replace(replace(col,'.',''),',','.')`, which this test
+# labelled "good" — it is not: stripping every dot multiplies by 100 any row
+# where the dot is the decimal separator (measured 2026-07-31 at 75% of the rows
+# in mart.caba_departamentos_en_venta). It is not *lossy* in the sense this
+# detector looks for, which is why the test kept passing; it is simply wrong,
+# and a fixture named _GOOD_SQL teaches whoever reads it next.
 _GOOD_SQL = (
-    "SELECT jurisdiccion_desc, "
-    "SUM(CAST(NULLIF(replace(replace(credito_devengado, '.', ''), ',', '.'), '') AS NUMERIC)) AS total "
+    "SELECT jurisdiccion_desc, SUM(CASE "
+    "WHEN credito_devengado ~ '^\\s*-?[0-9]{1,3}(\\.[0-9]{3})+,[0-9]+\\s*$' "
+    "THEN replace(replace(btrim(credito_devengado),'.',''),',','.') "
+    "WHEN credito_devengado ~ '^\\s*-?[0-9]+,[0-9]+\\s*$' "
+    "THEN replace(btrim(credito_devengado),',','.') "
+    "WHEN credito_devengado ~ '^\\s*-?[0-9]{1,3}(\\.[0-9]{3})+\\s*$' "
+    "THEN replace(btrim(credito_devengado),'.','') "
+    "WHEN credito_devengado ~ '^\\s*-?[0-9]+(\\.[0-9]+)?\\s*$' "
+    "THEN btrim(credito_devengado) "
+    "END::numeric) AS total "
     "FROM mart.presupuesto_nacional_ejecutado "
-    "WHERE credito_devengado IS NOT NULL AND credito_devengado <> '' "
     "GROUP BY jurisdiccion_desc ORDER BY total DESC LIMIT 10"
 )
 

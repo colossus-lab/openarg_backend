@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -256,6 +257,29 @@ async def record_terminal_analytics(
 # the H3 spoof check — JWT-derived emails are real Google addresses.
 _LEGACY_OWNER = "legacy"
 
+# `replace(<anything>, '.', '')` — stripping every dot from a TEXT amount.
+_DOT_STRIP_RE = re.compile(r"replace\s*\([^()]*(?:\([^()]*\)[^()]*)*,\s*'\.'\s*,\s*''\s*\)", re.I)
+# A `CASE … WHEN … ~` shape guard, which is what makes dot-stripping conditional.
+_SHAPE_BRANCH_RE = re.compile(r"\bCASE\b.*?\bWHEN\b[^~]{0,200}~", re.I | re.S)
+
+
+def teaches_discredited_normalisation(sql: str) -> bool:
+    """True when `sql` strips every dot from an amount without checking its shape.
+
+    Few-shot examples are drawn from `successful_queries`, so a query that ran
+    without erroring gets replayed to the model as a worked example — and
+    "ran without erroring" is exactly what the old normalisation did while
+    multiplying dot-decimal rows by 100. Fixing the prompt alone leaves the
+    history teaching the opposite; measured 2026-07-31, staging held 2 such rows.
+
+    The correct formula also contains `replace(col,'.','')`, but only inside a
+    `CASE` branch guarded by `~ '^…$'`, so the presence of a shape branch is what
+    separates the two rather than the replace itself.
+    """
+    if not sql:
+        return False
+    return bool(_DOT_STRIP_RE.search(sql)) and not _SHAPE_BRANCH_RE.search(sql)
+
 
 async def save_successful_query(
     question: str,
@@ -283,6 +307,13 @@ async def save_successful_query(
     suspicious, score = is_suspicious(question)
     if suspicious or score > 0.4:
         logger.info("Skipping successful_queries save (suspicious score=%.2f)", score)
+        return
+
+    # "It ran" is not "it was right". The discredited normalisation never
+    # errors — it just returns a number 100x too large — so without this the
+    # pool keeps re-teaching what the prompt was fixed to stop saying.
+    if teaches_discredited_normalisation(sql):
+        logger.info("Skipping successful_queries save (unguarded dot-stripping in SQL)")
         return
 
     owner = (user_id or "").strip().lower() or _LEGACY_OWNER
@@ -350,8 +381,13 @@ async def get_few_shot_examples(
             rows = result.fetchall()
         if not rows:
             return ""
+        # Rows saved before the write-side guard existed are still in the table;
+        # filtering here means the fix takes effect without a data migration.
+        usable = [r for r in rows if not teaches_discredited_normalisation(r.sql)]
+        if not usable:
+            return ""
         lines = ["Successful similar queries (use as reference):"]
-        for r in rows:
+        for r in usable:
             lines.append(f"\nQuestion: {r.question}\nSQL: {r.sql}")
         return "\n".join(lines)
     except Exception:
