@@ -74,9 +74,7 @@ def upgrade() -> None:
         sa.Column("canonical_title", sa.Text, nullable=False, server_default=""),
         sa.Column("display_name", sa.Text, nullable=False, server_default=""),
         sa.Column("title_source", sa.String(length=30), nullable=False, server_default="fallback"),
-        sa.Column(
-            "title_confidence", sa.Float, nullable=False, server_default=sa.text("0.0")
-        ),
+        sa.Column("title_confidence", sa.Float, nullable=False, server_default=sa.text("0.0")),
         # Taxonomy
         sa.Column("domain", sa.String(length=100), nullable=True),
         sa.Column("subdomain", sa.String(length=100), nullable=True),
@@ -97,12 +95,8 @@ def upgrade() -> None:
         sa.Column("materialized_table_name", sa.String(length=255), nullable=True),
         sa.Column("parser_version", sa.String(length=20), nullable=True),
         sa.Column("normalization_version", sa.String(length=20), nullable=True),
-        sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now()
-        ),
-        sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()
-        ),
+        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.CheckConstraint(
             "materialization_status IN ("
             + ",".join(f"'{s}'" for s in _MATERIALIZATION_STATUSES)
@@ -110,9 +104,7 @@ def upgrade() -> None:
             name="ck_catalog_resources_materialization_status",
         ),
         sa.CheckConstraint(
-            "resource_kind IN ("
-            + ",".join(f"'{k}'" for k in _RESOURCE_KINDS)
-            + ")",
+            "resource_kind IN (" + ",".join(f"'{k}'" for k in _RESOURCE_KINDS) + ")",
             name="ck_catalog_resources_resource_kind",
         ),
         sa.CheckConstraint(
@@ -156,12 +148,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS ix_catalog_resources_embedding")
     op.drop_index("ix_catalog_resources_parent", table_name="catalog_resources")
-    op.drop_index(
-        "ix_catalog_resources_materialized_table_name", table_name="catalog_resources"
-    )
-    op.drop_index(
-        "ix_catalog_resources_materialization_status", table_name="catalog_resources"
-    )
+    op.drop_index("ix_catalog_resources_materialized_table_name", table_name="catalog_resources")
+    op.drop_index("ix_catalog_resources_materialization_status", table_name="catalog_resources")
     op.drop_index("ix_catalog_resources_dataset_id", table_name="catalog_resources")
     op.drop_index("ix_catalog_resources_portal_source", table_name="catalog_resources")
     op.drop_table("catalog_resources")

@@ -20,16 +20,21 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.common.privacy_gate import ensure_privacy_accepted
 from app.application.pipeline.graph import build_pipeline_graph
 from app.application.pipeline.nodes import PipelineDeps, set_deps
 from app.application.pipeline.state import OpenArgState
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
+from app.infrastructure.auth import GoogleJwtValidator, InvalidGoogleToken
 from app.infrastructure.serialization import safe_dumps, to_json_safe
+from app.presentation.http.middleware.google_jwt_middleware import (
+    get_request_user_email,
+)
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
@@ -44,6 +49,31 @@ _checkpointer_last_attempt_ts: float = 0.0  # epoch seconds of last attempt
 # boot used to leave persistence permanently off until process restart;
 # this TTL lets the next request retry on its own.
 _CHECKPOINTER_RETRY_TTL_SECONDS = 30.0
+
+# The checkpointer used to run on a single `psycopg.AsyncConnection`, opened
+# once by `AsyncPostgresSaver.from_conn_string()` and kept for the lifetime of
+# the process. That connection had no pre-ping, no recycle and no reconnect,
+# and `_get_checkpointer()` handed the same object back forever, so the first
+# time anything closed it authenticated chat stayed broken until the next
+# deploy. Prod ran 68 days on one connection; an RDS OOM-kill on 2026-07-30
+# 00:21 UTC dropped it and every logged-in WebSocket failed for five hours
+# with `OperationalError('the connection is closed')`.
+#
+# A pool with `check` revalidates on every checkout, which is what
+# `pool_pre_ping` does for the SQLAlchemy engine — that flag lives on a
+# *different* engine (`persistence_sqla/provider.py`) and never covered this
+# connection.
+_CHECKPOINTER_POOL_MIN_SIZE = 1
+_CHECKPOINTER_POOL_MAX_SIZE = 4
+# Both ceilings stay below the pgbouncer timeouts in front of RDS
+# (`server_idle_timeout = 300`, `server_lifetime` at its 3600s default) so the
+# pool retires a connection before pgbouncer drops it unannounced.
+_CHECKPOINTER_CONN_MAX_LIFETIME_S = 900.0
+_CHECKPOINTER_CONN_MAX_IDLE_S = 120.0
+# Bounds how long a checkout waits for a connection. Keeps `init_pipeline
+# _persistence()` from stalling startup when the database is unreachable —
+# the retry TTL above is what recovers from that, not a longer wait.
+_CHECKPOINTER_POOL_TIMEOUT_S = 15.0
 
 # BUG-022: how often the WebSocket emits a keepalive frame during a long
 # pipeline step. Must be well below the tightest consumer idle timeout
@@ -88,6 +118,13 @@ _COMPLETE_EVENT_KEYS: tuple[str, ...] = (
     "citations",
     "documents",
     "warnings",
+    # CONTRACT-03 (round v46): tokens_used was already in the HTTP
+    # response of POST /smart but missing from the WS `complete` event,
+    # so SPA telemetry that watches LLM cost went silent on the
+    # streaming path. confidence was intentionally removed from the API
+    # (commit acc884a) and is NOT restored here — the chip is gone from
+    # the UI and the pipeline still computes it internally.
+    "tokens_used",
 )
 
 _TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
@@ -126,6 +163,12 @@ def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
         "citations": update.get("citations", []),
         "documents": update.get("documents"),
         "warnings": update.get("warnings", []),
+        # CONTRACT-03 (round v46): paridad con la response HTTP POST /smart,
+        # que ya emite tokens_used. Sin esto el frontend ve siempre 0 en
+        # el path streaming. confidence NO se incluye: fue removida de la
+        # API deliberadamente (commit acc884a) — el pipeline la sigue
+        # calculando internamente pero no la expone al cliente.
+        "tokens_used": update.get("tokens_used", 0),
     }
 
 
@@ -224,19 +267,95 @@ async def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type:
     if cache_key not in _compiled_graphs:
         async with _compiled_graphs_lock:
             if cache_key not in _compiled_graphs:
-                _compiled_graphs[cache_key] = build_pipeline_graph(
-                    deps, checkpointer=checkpointer
-                )
+                _compiled_graphs[cache_key] = build_pipeline_graph(deps, checkpointer=checkpointer)
     return _compiled_graphs[cache_key]
 
 
 async def _open_checkpointer(conn_str: str) -> tuple[AsyncExitStack, Any]:
-    """Open an AsyncPostgresSaver inside an AsyncExitStack."""
+    """Open an AsyncPostgresSaver over a self-healing pool, in an exit stack.
+
+    Deliberately *not* `AsyncPostgresSaver.from_conn_string()`: that helper
+    opens one bare `AsyncConnection` and nothing ever revalidates or replaces
+    it. `_ainternal.Conn` also accepts an `AsyncConnectionPool`, and
+    `get_connection()` then acquires per operation — so `check` runs on every
+    checkout and a connection killed between requests is replaced instead of
+    poisoning the saver.
+    """
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
 
     stack = AsyncExitStack()
-    saver = await stack.enter_async_context(AsyncPostgresSaver.from_conn_string(conn_str))
+    try:
+        pool: AsyncConnectionPool[Any] = AsyncConnectionPool(
+            conninfo=conn_str,
+            min_size=_CHECKPOINTER_POOL_MIN_SIZE,
+            max_size=_CHECKPOINTER_POOL_MAX_SIZE,
+            # AsyncPostgresSaver assumes all three on whatever connection it is
+            # handed. `from_conn_string` set them; a pool will not unless told.
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+            check=AsyncConnectionPool.check_connection,
+            max_lifetime=_CHECKPOINTER_CONN_MAX_LIFETIME_S,
+            max_idle=_CHECKPOINTER_CONN_MAX_IDLE_S,
+            timeout=_CHECKPOINTER_POOL_TIMEOUT_S,
+            # psycopg warns when a pool opens from its own constructor; the
+            # AsyncExitStack owns the lifecycle instead.
+            open=False,
+        )
+        await stack.enter_async_context(pool)
+        saver = AsyncPostgresSaver(conn=pool)
+    except BaseException:
+        # An opened pool must never outlive the failure that abandoned it: its
+        # workers keep reconnecting in the background forever, which hangs the
+        # process rather than erroring. Anything raised after `enter_async
+        # _context` — a bad saver signature, cancellation — leaks it otherwise.
+        with contextlib.suppress(Exception):
+            await stack.aclose()
+        raise
     return stack, saver
+
+
+def _checkpointer_is_live() -> bool:
+    """True when the cached saver still has a usable source of connections.
+
+    The pool revalidates individual connections itself, so the only state it
+    cannot come back from is the pool being closed — shutdown, or an init that
+    was torn down halfway.
+    """
+    if _checkpointer is None:
+        return False
+    conn = getattr(_checkpointer, "conn", None)
+    return not getattr(conn, "closed", False)
+
+
+async def _teardown_checkpointer_locked() -> None:
+    """Drop the cached saver, its pool and the compiled graphs.
+
+    Caller must hold `_checkpointer_lock`. `_compiled_graphs` has to go too: a
+    compiled graph captures the saver object, so leaving it cached would keep
+    routing requests at the saver we just discarded.
+
+    Clears `_checkpointer_attempted` as well, so the next call gets one
+    immediate rebuild. The back-off exists to stop us hammering a database that
+    fails at *init*; a connection that died after a healthy life is a different
+    situation, and init is already known to work. If the rebuild then fails,
+    the flag is set again and the back-off resumes its job.
+    """
+    global _checkpointer, _checkpointer_stack, _compiled_graphs  # noqa: PLW0603
+    global _checkpointer_attempted  # noqa: PLW0603
+
+    stack = _checkpointer_stack
+    _checkpointer = None
+    _checkpointer_stack = None
+    _checkpointer_attempted = False
+    _compiled_graphs = {}
+    if stack is not None:
+        with contextlib.suppress(Exception):
+            await stack.aclose()
 
 
 def _is_benign_checkpointer_setup_race(exc: Exception) -> bool:
@@ -258,25 +377,32 @@ async def _get_checkpointer():
     Retry behaviour: a failed init flips `_checkpointer_attempted=True`.
     Subsequent calls re-attempt after `_CHECKPOINTER_RETRY_TTL_SECONDS`
     so a transient DB blip at boot doesn't leave persistence off forever.
+
+    That TTL only ever covered a failed *init*. A saver whose connection died
+    later was still handed back forever, which is what kept prod's chat broken
+    for five hours on 2026-07-30 — so a cached-but-dead saver is now treated
+    as a miss and rebuilt.
     """
     global _checkpointer, _checkpointer_attempted, _checkpointer_stack  # noqa: PLW0603
     global _checkpointer_last_attempt_ts  # noqa: PLW0603
 
-    if _checkpointer is not None:
+    if _checkpointer is not None and _checkpointer_is_live():
         return _checkpointer
 
     import time as _time
-    now = _time.monotonic()
-    if (
-        _checkpointer_attempted
-        and (now - _checkpointer_last_attempt_ts) < _CHECKPOINTER_RETRY_TTL_SECONDS
-    ):
-        return None  # Recently failed — back off
 
+    # The retry back-off is consulted *inside* the lock, after any dead saver
+    # has been discarded. Checking it up front — as an unlocked fast path —
+    # meant a checkpointer that died within the TTL of its own successful init
+    # was neither rebuilt nor torn down: the call just returned None and left
+    # the corpse cached, with the graph still compiled around it.
     async with _checkpointer_lock:
         # Double-check after acquiring lock
         if _checkpointer is not None:
-            return _checkpointer
+            if _checkpointer_is_live():
+                return _checkpointer
+            logger.warning("LangGraph checkpointer pool is closed — discarding it and rebuilding")
+            await _teardown_checkpointer_locked()
         now = _time.monotonic()
         if (
             _checkpointer_attempted
@@ -291,6 +417,7 @@ async def _get_checkpointer():
         if not db_url:
             return None
 
+        stack: AsyncExitStack | None = None
         try:
             conn_str = db_url.replace("postgresql+psycopg://", "postgresql://")
             stack, saver = await _open_checkpointer(conn_str)
@@ -302,18 +429,19 @@ async def _get_checkpointer():
                     raise
                 with contextlib.suppress(Exception):
                     await stack.aclose()
+                stack = None
                 stack, saver = await _open_checkpointer(conn_str)
-                logger.info(
-                    "LangGraph checkpointer initialised after concurrent setup race"
-                )
+                logger.info("LangGraph checkpointer initialised after concurrent setup race")
             _checkpointer = saver
             _checkpointer_stack = stack
             return saver
         except Exception:
-            if _checkpointer_stack is not None:
+            # Close the stack we just opened, not the global one. On this path
+            # the global is still unset, so the previous version closed nothing
+            # and leaked whatever `_open_checkpointer` had already opened.
+            if stack is not None:
                 with contextlib.suppress(Exception):
-                    await _checkpointer_stack.aclose()
-                _checkpointer_stack = None
+                    await stack.aclose()
             logger.warning(
                 "LangGraph checkpointer not available — running without persistence",
                 exc_info=True,
@@ -357,10 +485,20 @@ async def _verify_api_key(api_key: str | None = Depends(_api_key_header)) -> Non
 
 
 class SmartQueryV2Request(BaseModel):
+    # CONTRACT-02 (round v46): extra='forbid' so any drift between the
+    # frontend BFF and this contract surfaces as 422 instead of a
+    # silent drop. The pre-fix BFF posted `history` here and Pydantic
+    # ignored it — context never reached the planner on the HTTP
+    # fallback path. The field is now ACCEPTED at the wire boundary
+    # (so legacy BFF deploys don't break) but the handler still loads
+    # history from the DB via conversation_id (post-H3 ownership
+    # check). The body-supplied history is treated as advisory only.
+    model_config = ConfigDict(extra="forbid")
     question: str = Field(..., min_length=1, max_length=10000)
     user_email: str | None = None
     conversation_id: str | None = None
     policy_mode: bool = False
+    history: list[dict[str, Any]] | None = None
 
 
 class SmartQueryV2Response(BaseModel):
@@ -385,10 +523,27 @@ async def smart_query_v2(
     body: SmartQueryV2Request,
     deps: FromDishka[PipelineDeps],
     user_repo: FromDishka[IUserRepository],
+    chat_repo: FromDishka[IChatRepository],
 ) -> dict[str, Any] | JSONResponse:
     """Execute a query through the LangGraph pipeline."""
+    # H3 fix: authenticated email comes from the Google JWT validated by
+    # GoogleJwtAuthMiddleware (`request.state.user_email`), NEVER from the
+    # body. A body.user_email that disagrees with the JWT is rejected to
+    # prevent caller spoofing on a shared BACKEND_API_KEY. If the JWT email
+    # is missing (only possible if the middleware exempted this path —
+    # which it doesn't for /smart in prod), fall back to body.user_email
+    # for compatibility but block conversation_id usage.
+    authed_email = get_request_user_email(request)
+    body_email = (body.user_email or "").strip()
+    if authed_email and body_email and authed_email.lower() != body_email.lower():
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "AUTH_SPOOF", "message": "user_email mismatch"}},
+        )
+    user_email = authed_email or body_email
+
     # Server-side privacy gate (defense in depth — the frontend also checks).
-    await ensure_privacy_accepted(body.user_email, user_repo)
+    await ensure_privacy_accepted(user_email, user_repo)
 
     # Compile graph once (thread-safe), set deps per-request (ContextVar-safe).
     # `_get_checkpointer()` re-attempts init after the TTL, so a DB blip at
@@ -397,8 +552,53 @@ async def smart_query_v2(
     compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     set_deps(deps)
 
-    user_id = body.user_email or "anonymous"
+    user_id = user_email or "anonymous"
     conversation_id = body.conversation_id or ""
+
+    # H3 fix: verify conversation ownership before letting the pipeline
+    # load history / use it as the checkpointer thread_id. Without this,
+    # a holder of the shared BACKEND_API_KEY who guesses or steals a
+    # conversation_id can read another user's history via the planner
+    # context (load_chat_history feeds it directly to the LLM prompt).
+    owner_user_id = None
+    if conversation_id:
+        if not authed_email:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "AUTH_REQUIRED",
+                        "message": "conversation_id requires an authenticated user",
+                    }
+                },
+            )
+        from uuid import UUID
+
+        try:
+            conv_uuid = UUID(conversation_id)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "BAD_CONVERSATION_ID", "message": "invalid uuid"}},
+            )
+        user = await user_repo.get_by_email(authed_email)
+        if user is None:
+            # Authed but not synced — treat as no ownership.
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}
+                },
+            )
+        conv = await chat_repo.get_conversation(conv_uuid, user_id=user.id)
+        if conv is None:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {"code": "NO_OWNERSHIP", "message": "conversation access denied"}
+                },
+            )
+        owner_user_id = user.id
 
     initial_state: OpenArgState = {
         "question": body.question,
@@ -407,6 +607,11 @@ async def smart_query_v2(
         "policy_mode": body.policy_mode,
         "replan_count": 0,
     }
+    # Pass the owner_user_id down so load_chat_history can scope the
+    # message fetch as defense-in-depth (the ownership check above already
+    # gates entry, but the repo-level filter closes any future bypass).
+    if owner_user_id is not None:
+        initial_state["owner_user_id"] = str(owner_user_id)  # type: ignore[typeddict-unknown-key]
 
     # When a checkpointer is active, pass thread_id so LangGraph
     # persists state per conversation (enables memory / resumable runs).
@@ -455,21 +660,30 @@ async def smart_query_v2(
 # ── WebSocket rate limit helper ────────────────────────────
 
 
+_WS_RATE_LIMIT_PER_MINUTE = 20
+
+
 async def _check_ws_rate_limit(cache: ICacheService, identifier: str) -> bool:
-    """Return True if the identifier has exceeded the WS rate limit."""
+    """Return True if the identifier has exceeded the WS rate limit.
+
+    H8 (round v46): atomic INCR + EXPIRE NX via `increment_with_ttl`.
+    The previous implementation did get → check → set, which (a) let
+    two concurrent handshakes both observe count<cap and both bump it
+    above the cap, and (b) refreshed the TTL on every hit so a steady
+    stream of requests inside the window kept the counter alive
+    indefinitely instead of resetting at the 60s boundary.
+
+    Cache errors fail OPEN by design — degraded Redis must not block
+    legitimate traffic. The Redis client logs the underlying exception
+    so an operator can spot a sustained outage.
+    """
     key = f"ws_rate:{identifier}"
     try:
-        current = await cache.get(key)
-        if current is not None:
-            count = int(current) if not isinstance(current, int) else current
-            if count >= 20:
-                return True
-            await cache.set(key, count + 1, ttl_seconds=60)
-        else:
-            await cache.set(key, 1, ttl_seconds=60)
-        return False
+        count = await cache.increment_with_ttl(key, ttl_seconds=60)
     except Exception:
+        logger.warning("WS rate-limit cache failed; failing open", exc_info=True)
         return False
+    return count > _WS_RATE_LIMIT_PER_MINUTE
 
 
 def _validate_api_key_value(provided: str) -> bool:
@@ -533,9 +747,64 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         await ws.close(code=4401)
                         return
 
+                # WS JWT-in-handshake (round v46, closes H3 residual gap).
+                # The HTTP path validates the Google JWT in the
+                # GoogleJwtAuthMiddleware; WebSockets bypass starlette
+                # middleware entirely, so the body-supplied user_email is
+                # the only identity hint we get. To stop a holder of
+                # BACKEND_API_KEY from claiming any user_email + any
+                # conversation_id, accept an optional `id_token` in the
+                # handshake message and validate it server-side. When
+                # present and valid, the JWT's verified email overrides
+                # the body's claim and unlocks conversation_id access.
+                # Absent the JWT we keep the legacy path working but
+                # refuse conversation_id reads further down (H3 fix).
+                verified_email = ""
+                raw_id_token = (raw.get("id_token") or "").strip()
+                if raw_id_token:
+                    # `GoogleJwtValidator | None`, not the bare class: those are
+                    # distinct container keys, and asking for the bare one is
+                    # what made every logged-in socket die on NoFactoryError.
+                    # None means the deployment has no GOOGLE_OAUTH_CLIENT_ID,
+                    # which is legitimate outside prod — and means we cannot
+                    # verify anything, so no elevation is granted.
+                    validator = await request_scope.get(GoogleJwtValidator | None)
+                    if validator is None:
+                        logger.warning(
+                            "WS received an id_token but no Google client id is "
+                            "configured; continuing unverified"
+                        )
+                    try:
+                        if validator is not None:
+                            verified_email = await validator.validate(raw_id_token)
+                    except InvalidGoogleToken as exc:
+                        logger.warning("WS rejected invalid Google JWT: %s", exc)
+                        await _safe_send_json(
+                            ws,
+                            {
+                                "type": "error",
+                                "message": "Invalid or expired token",
+                            },
+                        )
+                        await ws.close(code=4401)
+                        return
+
+                # Anti-spoofing: if both are present and disagree, the
+                # body lied — refuse.
+                body_email = (raw.get("user_email") or "").strip()
+                if verified_email and body_email and verified_email.lower() != body_email.lower():
+                    await _safe_send_json(
+                        ws,
+                        {"type": "error", "message": "user_email mismatch"},
+                    )
+                    await ws.close(code=4403)
+                    return
+
                 # Rate limiting
-                ws_identifier = raw.get("user_email") or (
-                    ws.client.host if ws.client else "unknown"
+                ws_identifier = (
+                    verified_email
+                    or raw.get("user_email")
+                    or (ws.client.host if ws.client else "unknown")
                 )
                 if await _check_ws_rate_limit(cache, ws_identifier):
                     audit_rate_limited(user=ws_identifier, endpoint="ws/smart")
@@ -543,8 +812,11 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.close(code=4429)
                     return
 
-                # Server-side privacy gate (defense in depth).
-                ws_user_email = raw.get("user_email") or ""
+                # Server-side privacy gate (defense in depth). Prefer the
+                # JWT-verified email when present; body.user_email is now
+                # advisory and only kicks in for legacy BFFs that haven't
+                # been redeployed with the JWT-in-handshake change yet.
+                ws_user_email = verified_email or raw.get("user_email") or ""
                 if ws_user_email:
                     user_repo = await request_scope.get(IUserRepository)
                     try:
@@ -568,12 +840,62 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     await ws.close()
                     return
 
+                # Round v46 WS JWT-in-handshake (closes H3 residual gap):
+                # conversation_id reads now REQUIRE the JWT-verified email.
+                # Pre-fix an attacker who knew BOTH the victim's email AND
+                # a conversation_id of that user could pass both through
+                # body fields and the planner would happily load the
+                # history. Post-fix the request is refused unless the
+                # caller proved possession of the Google ID token whose
+                # `email` claim matches the conversation's owner.
+                owner_user_id_ws = None
+                if conversation_id:
+                    if not verified_email:
+                        await _safe_send_json(
+                            ws,
+                            {
+                                "type": "error",
+                                "message": "conversation_id requires an authenticated user",
+                            },
+                        )
+                        await ws.close(code=4403)
+                        return
+                    from uuid import UUID as _UUID
+
+                    try:
+                        _conv_uuid = _UUID(conversation_id)
+                    except ValueError:
+                        await _safe_send_json(
+                            ws, {"type": "error", "message": "Invalid conversation_id"}
+                        )
+                        await ws.close(code=4400)
+                        return
+                    chat_repo_ws = await request_scope.get(IChatRepository)
+                    user_repo_ws = await request_scope.get(IUserRepository)
+                    user_ws = await user_repo_ws.get_by_email(verified_email)
+                    conv_ws = (
+                        await chat_repo_ws.get_conversation(_conv_uuid, user_id=user_ws.id)
+                        if user_ws
+                        else None
+                    )
+                    if conv_ws is None:
+                        await _safe_send_json(
+                            ws,
+                            {"type": "error", "message": "Conversation access denied"},
+                        )
+                        await ws.close(code=4403)
+                        return
+                    owner_user_id_ws = user_ws.id
+                    owner_user_id_ws = user_ws.id
+
                 initial_state: OpenArgState = {
                     "question": question,
                     "user_id": ws_identifier,
                     "conversation_id": conversation_id,
                     "policy_mode": policy_mode,
                 }
+                if owner_user_id_ws is not None:
+                    initial_state["owner_user_id"] = str(owner_user_id_ws)  # type: ignore[typeddict-unknown-key]
 
                 # When a checkpointer is active, pass thread_id for persistence
                 stream_config: dict[str, Any] = {}
@@ -631,14 +953,13 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     if not complete_sent and question:
                         with contextlib.suppress(Exception):
                             from app.application.pipeline.history import save_query_attempt
+
                             await save_query_attempt(
                                 question=question,
                                 served_table=None,
                                 row_count=0,
                                 success=False,
-                                duration_ms=int(
-                                    (time.monotonic() - stream_started_at) * 1000
-                                ),
+                                duration_ms=int((time.monotonic() - stream_started_at) * 1000),
                                 error_message="ws_closed_mid_stream",
                                 semantic_cache=deps.semantic_cache,
                             )

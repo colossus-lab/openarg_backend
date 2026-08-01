@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 _ALWAYS_PUBLIC = frozenset({"/health", "/health/ready", "/api/v1/ask"})
 _SERVICE_PREFIXES = (
-    "/api/v1/data/",   # Own auth via Bearer service token
+    "/api/v1/data/",  # Own auth via Bearer service token
     "/api/v1/admin/",  # Own auth via X-Admin-Key (verify_admin_key dependency)
 )
 _DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})

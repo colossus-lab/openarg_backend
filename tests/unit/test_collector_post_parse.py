@@ -21,9 +21,7 @@ from app.infrastructure.celery.tasks.collector_tasks import (
 
 
 def test_post_parse_normalize_idempotent_on_clean():
-    df = pd.DataFrame(
-        {"provincia": ["BA", "Córdoba"], "anio": [2020, 2021], "valor": [1.0, 2.0]}
-    )
+    df = pd.DataFrame({"provincia": ["BA", "Córdoba"], "anio": [2020, 2021], "valor": [1.0, 2.0]})
     out = _post_parse_normalize(df)
     assert list(out.columns) == ["provincia", "anio", "valor"]
     assert len(out) == 2

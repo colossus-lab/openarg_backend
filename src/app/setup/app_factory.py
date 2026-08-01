@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
-from app.infrastructure.auth import GoogleJwtValidator
+from app.infrastructure.auth import build_google_jwt_validator
 from app.infrastructure.monitoring.middleware import MetricsMiddleware
 from app.infrastructure.persistence_sqla.mappings.all import map_tables
 from app.presentation.http.errors.handlers import register_exception_handlers
@@ -40,6 +40,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             raise RuntimeError("JWT_SECRET_KEY must be changed in production")
         if not settings.security.BACKEND_API_KEY:
             raise RuntimeError("BACKEND_API_KEY must be set in production")
+        # H7 fix: admin must NOT inherit backend key privileges. Fail-closed
+        # at boot so the gap can't be introduced by a missing env var.
+        admin_key = os.getenv("ADMIN_API_KEY", "")
+        if not admin_key:
+            raise RuntimeError("ADMIN_API_KEY must be set in production")
+        import secrets as _secrets_check
+
+        if _secrets_check.compare_digest(admin_key, settings.security.BACKEND_API_KEY):
+            raise RuntimeError("ADMIN_API_KEY must differ from BACKEND_API_KEY")
 
     # Warm up DB connection pool — verify pgbouncer is reachable
     from sqlalchemy import text as sa_text
@@ -128,7 +137,9 @@ def configure_app(
         if client_id:
             app.add_middleware(
                 _gjwt.GoogleJwtAuthMiddleware,
-                validator=GoogleJwtValidator(client_id=client_id),
+                # Shared with the DI provider that serves `/ws/smart`, so the
+                # JWKS key cache is one per process as the validator asks.
+                validator=build_google_jwt_validator(client_id),
             )
         elif environment == "prod":
             raise RuntimeError(
@@ -147,13 +158,35 @@ def configure_app(
     if settings and settings.security.BACKEND_API_KEY:
         app.add_middleware(APIKeyMiddleware, api_key=settings.security.BACKEND_API_KEY)
 
-    # CORS: use settings origins if defined, else permissive in dev, restrictive in prod
+    # CORS — round v46 H5 fix.
+    # Browsers refuse to honour `Access-Control-Allow-Origin: *` together
+    # with `Access-Control-Allow-Credentials: true`, so the old dev path
+    # (allow_origins=["*"]) was already useless in a real browser — but
+    # it was also a footgun: anyone misconfiguring `APP_ENV` could land
+    # an actually-credentialed wildcard in a public env. Fail-closed in
+    # prod, explicit list in dev/local.
     if settings and settings.security.CORS_ALLOWED_ORIGINS:
         allow_origins = settings.security.CORS_ALLOWED_ORIGINS
     elif environment in ("local", "dev"):
-        allow_origins = ["*"]
+        allow_origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ]
     else:
+        # Defensive: an unrecognized environment string should NOT silently
+        # open a wildcard. Empty list = no CORS, which makes the
+        # misconfiguration visible at the browser instead of permissive.
         allow_origins = []
+
+    # Fail-fast at startup if prod is missing CORS_ALLOWED_ORIGINS — without
+    # this the API is unreachable from the SPA but no log surfaces why.
+    if environment == "prod" and not allow_origins:
+        raise RuntimeError(
+            "CORS_ALLOWED_ORIGINS must be set in production "
+            "(see app_factory CORS block, round v46 H5)."
+        )
 
     app.add_middleware(
         CORSMiddleware,

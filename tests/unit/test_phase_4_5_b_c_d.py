@@ -103,7 +103,7 @@ def test_detect_serving_layer_raw() -> None:
 
 
 def test_detect_serving_layer_legacy() -> None:
-    sql = 'SELECT * FROM cache_caba_subte_viajes'
+    sql = "SELECT * FROM cache_caba_subte_viajes"
     assert detect_serving_layer_in_sql(sql) == "cache_legacy"
 
 

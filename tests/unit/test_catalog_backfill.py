@@ -40,10 +40,7 @@ def _row(**kwargs):
 
 
 def test_build_catalog_embedding_text_dedupes_titles():
-    assert (
-        _build_catalog_embedding_text("Reservas BCRA", "Reservas BCRA")
-        == "Reservas BCRA"
-    )
+    assert _build_catalog_embedding_text("Reservas BCRA", "Reservas BCRA") == "Reservas BCRA"
     assert (
         _build_catalog_embedding_text("Reservas BCRA", "Serie histórica")
         == "Reservas BCRA - Serie histórica"

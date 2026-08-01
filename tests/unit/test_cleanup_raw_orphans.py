@@ -33,9 +33,7 @@ class _FakeResult:
         return self._rows
 
 
-def _build_engine_with_select(
-    rows: list, mart_rows: list | None = None
-) -> MagicMock:
+def _build_engine_with_select(rows: list, mart_rows: list | None = None) -> MagicMock:
     """Engine that returns:
       1. mart_definitions rows
       2. pg_matviews rows
@@ -163,8 +161,7 @@ def test_mart_protected_identities_excluded():
     mart_row = MagicMock()
     mart_row.mart_id = "escuelas_argentina"
     mart_row.sql_definition = (
-        "SELECT cue, nombre FROM "
-        "{{ live_table('buenos_aires_prov::70f9ae07-protected') }}"
+        "SELECT cue, nombre FROM {{ live_table('buenos_aires_prov::70f9ae07-protected') }}"
     )
 
     # Two candidates from the orphan SELECT — but the first matches a

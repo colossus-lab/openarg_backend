@@ -17,6 +17,10 @@ dependencies = [
     # Database
     "sqlalchemy[asyncio]>=2.0.36",
     "psycopg[binary]>=3.2.0",
+    # Direct import in the WS router's checkpointer pool. Arrives transitively
+    # via langgraph-checkpoint-postgres, but we import it ourselves so it is
+    # declared here rather than relied on by accident.
+    "psycopg-pool>=3.2.0",
     "alembic>=1.14.0",
     "pgvector>=0.2.5",
 
@@ -76,7 +80,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.8.0",
+    # Pinned: ruff's formatter changes style across releases; an unpinned
+    # range makes CI's format gate drift red without any code change.
+    "ruff==0.15.22",
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
     # Type stubs (required by mypy for `import yaml` and `dateutil`)

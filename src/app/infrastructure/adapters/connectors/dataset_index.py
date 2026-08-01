@@ -142,6 +142,33 @@ class RoutingHint:
 # target action, default params, confidence [0-1], and a short description.
 # ---------------------------------------------------------------------------
 
+# Verified against mart.presupuesto_nacional_ejecutado on staging
+# (2026-07-26). The receptor of a transfer is NOT in programa_desc — it is
+# in the economic-classifier columns, and the per-institution breakdown
+# lives in subparcial_desc (individual universities, UBA included).
+_TRANSFERENCIAS_NOTES = (
+    "No existe una tabla cache_presupuesto_transferencias_*. Preferí "
+    "mart.presupuesto_nacional_ejecutado. Las transferencias se identifican por "
+    "principal_desc (ej: 'Transferencias a universidades nacionales', "
+    "'Transferencias al sector privado para financiar gastos corrientes'), NO por "
+    "programa_desc. El detalle por institución receptora está en subparcial_desc "
+    "(ej: 'Universidad de Buenos Aires'); parcial_desc separa gastos corrientes de "
+    "capital. Los montos (credito_vigente, credito_devengado) son TEXT con formato "
+    "mixto: hay valores con coma decimal ('9403175,5') y otros con punto decimal "
+    "('1086738.69'), así que un CAST(x AS NUMERIC) directo falla. Normalizá "
+    "ramificando por la FORMA completa del valor (la regla NUMERIC CASTS del prompt), "
+    "nunca borrando todos los puntos: eso multiplica por 100 las filas donde el punto "
+    "es el separador decimal. Y nunca descartes filas con un filtro regex (sesga el "
+    "total)."
+)
+
+_RESULTADO_FISCAL_NOTES = (
+    "No existen tablas cache_presupuesto_resultado_*. El resultado fiscal se "
+    "calcula como recursos percibidos (recurso_ingresado_percibido en "
+    "cache_presupuesto_recurso_<anio>) menos gasto devengado (credito_devengado "
+    "en cache_presupuesto_credito_<anio>)."
+)
+
 KEYWORD_ROUTES: dict[str, dict] = {
     # ── Economia: Inflacion / IPC / Precios ────────────────────
     "inflacion": {
@@ -711,55 +738,84 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "ejecucion presupuestaria": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_ejecucion_presupuestaria_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_credito_*"],
+            "table_notes": (
+                "La ejecucion presupuestaria vive en cache_presupuesto_credito_<anio>: "
+                "columnas credito_devengado (ejecutado) y credito_pagado, junto a "
+                "credito_presupuestado/vigente/comprometido."
+            ),
+        },
         "confidence": 0.90,
         "description": "Ejecucion presupuestaria",
     },
     "credito vigente": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_credito_presupuestario_*"]},
+        "params": {"tables": ["cache_presupuesto_credito_*"]},
         "confidence": 0.90,
         "description": "Credito presupuestario vigente",
     },
     "credito presupuestario": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_credito_presupuestario_*"]},
+        "params": {"tables": ["cache_presupuesto_credito_*"]},
         "confidence": 0.90,
         "description": "Credito presupuestario",
     },
     "devengado": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_ejecucion_presupuestaria_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_credito_*"],
+            "table_notes": (
+                "El devengado es la columna credito_devengado de cache_presupuesto_credito_<anio>."
+            ),
+        },
         "confidence": 0.85,
         "description": "Devengado presupuestario",
     },
     "deuda publica": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_deuda_publica_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_*"],
+            "table_notes": (
+                "No existe una tabla cache_presupuesto_deuda_publica_*. Buscá en las "
+                "tablas de presupuesto nacional programas/jurisdicciones de servicio "
+                "de la deuda publica (intereses y amortizaciones)."
+            ),
+        },
         "confidence": 0.90,
         "description": "Deuda publica nacional",
     },
     "transferencias": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_transferencias_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_*"],
+            "table_notes": _TRANSFERENCIAS_NOTES,
+        },
         "confidence": 0.85,
         "description": "Transferencias presupuestarias",
     },
     "planta de personal": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_planta_de_personal_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_*"],
+            "table_notes": (
+                "No existe una tabla cache_presupuesto_planta_de_personal_*. El gasto "
+                "en personal se identifica en las tablas de presupuesto por inciso/"
+                "clasificador economico 'Gastos en personal'."
+            ),
+        },
         "confidence": 0.90,
         "description": "Planta de personal del Estado nacional",
     },
     "ingresos fiscales": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_recursos_recaudacion_*"]},
+        "params": {"tables": ["cache_presupuesto_recurso_*"]},
         "confidence": 0.85,
         "description": "Ingresos fiscales / recaudacion",
     },
     "recaudacion": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_recursos_recaudacion_*"]},
+        "params": {"tables": ["cache_presupuesto_recurso_*"]},
         "confidence": 0.85,
         "description": "Recaudacion tributaria",
     },
@@ -778,17 +834,22 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "ingresos tributarios": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_presupuesto_ingresos_tributarios_*"]},
+        "params": {
+            "tables": ["cache_presupuesto_recurso_*"],
+            "table_notes": (
+                "Los ingresos tributarios viven en cache_presupuesto_recurso_<anio>: "
+                "filtrá por tipo_desc/clase_desc tributarios y usá "
+                "recurso_ingresado_percibido."
+            ),
+        },
         "confidence": 0.90,
         "description": "Ingresos tributarios nacionales",
     },
     "resultado fiscal": {
         "action": "query_sandbox",
         "params": {
-            "tables": [
-                "cache_presupuesto_resultado_financiero_*",
-                "cache_presupuesto_resultado_primario_*",
-            ]
+            "tables": ["cache_presupuesto_recurso_*", "cache_presupuesto_credito_*"],
+            "table_notes": _RESULTADO_FISCAL_NOTES,
         },
         "confidence": 0.85,
         "description": "Resultado fiscal / financiero",
@@ -796,10 +857,8 @@ KEYWORD_ROUTES: dict[str, dict] = {
     "deficit fiscal": {
         "action": "query_sandbox",
         "params": {
-            "tables": [
-                "cache_presupuesto_resultado_financiero_*",
-                "cache_presupuesto_resultado_primario_*",
-            ]
+            "tables": ["cache_presupuesto_recurso_*", "cache_presupuesto_credito_*"],
+            "table_notes": _RESULTADO_FISCAL_NOTES,
         },
         "confidence": 0.85,
         "description": "Deficit fiscal",
@@ -807,10 +866,8 @@ KEYWORD_ROUTES: dict[str, dict] = {
     "superavit fiscal": {
         "action": "query_sandbox",
         "params": {
-            "tables": [
-                "cache_presupuesto_resultado_financiero_*",
-                "cache_presupuesto_resultado_primario_*",
-            ]
+            "tables": ["cache_presupuesto_recurso_*", "cache_presupuesto_credito_*"],
+            "table_notes": _RESULTADO_FISCAL_NOTES,
         },
         "confidence": 0.85,
         "description": "Superavit fiscal",
@@ -1360,7 +1417,18 @@ KEYWORD_ROUTES: dict[str, dict] = {
     },
     "universidad": {
         "action": "query_sandbox",
-        "params": {"tables": ["cache_*universid*"]},
+        "params": {
+            # NO nombrar mart.presupuesto_nacional_ejecutado acá: está
+            # `serving.blocked` (montos TEXT, anio corrupto, cobertura 32/560) y
+            # un hint hardcodeado saltea los gates de discovery, que es
+            # exactamente cómo se coló después de bloquearlo.
+            "tables": ["mart.presupuesto_consolidado", "cache_presupuesto_*"],
+            "table_notes": (
+                _TRANSFERENCIAS_NOTES + " Las tablas cache_*universid* solo tienen "
+                "ubicaciones de universidades (CABA y Mendoza), no presupuesto. "
+                "No hay datos de matricula, aranceles ni nacionalidad de estudiantes."
+            ),
+        },
         "confidence": 0.80,
         "description": "Datos de universidades",
     },

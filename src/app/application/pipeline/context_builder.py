@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
+import time
+from typing import Any
 
 from app.domain.entities.connectors.data_result import DataResult
 
@@ -65,6 +68,77 @@ _NONADDITIVE_WARNING_NOTE = (
     "puede estar inflado y carecer de sentido. NO lo presentes como dato firme: "
     "aclará la limitación o respondé con los valores absolutos (cantidades)."
 )
+# The generated SQL filtered rows by shape before casting to numeric, so the
+# aggregate covers only part of the universe. Reporting it as a total would be
+# a wrong answer stated as fact — the one failure mode a fact-checking
+# platform cannot afford.
+_COVERAGE_WARNING_HEAD = "⚠ TOTAL INCOMPLETO"
+
+
+def _value_substitution_note(substitution: dict) -> str:
+    """The user's wording matched nothing; we answered about something else.
+
+    Usually right — nobody searching "universidades" expects the program to
+    be filed as "Desarrollo de la Educacion Superior" — but it is still an
+    interpretation standing between the question and the number, so the
+    reader has to see it stated rather than infer it.
+
+    The exact values must be spelled out here. An earlier version said only
+    that a substitution had happened and asked the analyst to name the
+    category; with no way to know it, the model invented one, crediting a
+    classification absent from the queried mart. A fabricated provenance
+    line is worse than none: it survives a reader's spot check.
+    """
+    searched = str(substitution.get("searched_for", "")).strip("%")
+    column = substitution.get("column", "")
+    values = [str(v) for v in (substitution.get("values_used") or [])]
+
+    head = (
+        f"⚠ TÉRMINO REINTERPRETADO: la búsqueda literal de «{searched}» en la columna "
+        f"`{column}` no encontró ninguna fila, así que se usaron los valores reales de "
+        f"esa columna que corresponden a lo pedido."
+    )
+    if values:
+        listado = ", ".join(f"«{v}»" for v in values)
+        return (
+            f"{head} Los valores efectivamente consultados son EXACTAMENTE estos: "
+            f"{listado}. DECILE AL USUARIO, en una línea, que la respuesta se calculó "
+            f"sobre esas categorías, nombrándolas TAL CUAL figuran acá. No las "
+            f"parafrasees, no las reemplaces por otra clasificación y no menciones "
+            f"ninguna categoría que no esté en esa lista: el lector puede verificarlas "
+            f"contra la fuente."
+        )
+    return (
+        f"{head} No se pudo determinar con certeza qué valores se usaron, así que "
+        f"NO afirmes de qué categoría salió el dato — decí que el término consultado "
+        f"no coincide literalmente con la nomenclatura oficial y ofrecé precisarlo."
+    )
+
+
+def _coverage_warning_note(payload: dict) -> str:
+    cols = ", ".join(payload.get("columns") or []) or "una columna numérica"
+    excluded = payload.get("excluded_rows")
+    total = payload.get("total_rows")
+    if payload.get("measured") and excluded and total:
+        pct = payload.get("excluded_pct")
+        pct_text = f" ({pct} %)" if pct is not None else ""
+        detail = (
+            f"Se excluyeron {excluded} de {total} filas{pct_text} porque su formato "
+            f"numérico no coincidía con el filtro aplicado sobre {cols}."
+        )
+    else:
+        detail = (
+            f"La consulta filtró filas de {cols} por formato antes de sumar, así que "
+            "un número indeterminado de registros quedó fuera del total."
+        )
+    return (
+        f"{_COVERAGE_WARNING_HEAD}: {detail} "
+        "Los números de abajo NO representan el universo completo. "
+        "NO los presentes como total, ranking ni porcentaje: cualquier posición o "
+        "suma calculada sobre ellos puede estar equivocada. Explicá que el dato no "
+        "se puede calcular de forma confiable sobre este dataset y ofrecé una "
+        "consulta alternativa. Es preferible no dar el número a darlo mal."
+    )
 
 
 @functools.cache
@@ -115,6 +189,67 @@ def build_capabilities_block() -> str:
             "• Infraestructura (transporte, energía, telecomunicaciones)\n"
             "• Georeferenciación (provincias, municipios, localidades)"
         )
+
+
+# The no-data reply must only suggest questions the system can actually
+# answer, so it needs the list of marts that are alive right now. TTL-cached
+# in-process: deflections are frequent enough that hitting mart_definitions
+# on every one would be wasteful, and 5 minutes of staleness is harmless.
+_LIVE_MARTS_TTL_S = 300.0
+_live_marts_cache: tuple[float, str] = (0.0, "")
+
+
+async def build_live_marts_block(sandbox: Any) -> str:
+    """List live marts (``last_row_count > 0``) for the no-data reply.
+
+    Returns an empty string when the sandbox engine is unavailable or the
+    query fails — the caller renders the reply without the block.
+    """
+    global _live_marts_cache
+    ts, cached = _live_marts_cache
+    if cached and time.monotonic() - ts < _LIVE_MARTS_TTL_S:
+        return cached
+
+    try:
+        from sqlalchemy import text
+
+        def _query() -> list[tuple[str, str | None, str | None]]:
+            eng = getattr(sandbox, "_engine", None) or (
+                sandbox._get_engine() if hasattr(sandbox, "_get_engine") else None
+            )
+            if eng is None:
+                return []
+            with eng.connect() as conn:
+                rs = conn.execute(
+                    text(
+                        "SELECT mart_view_name, domain, description "
+                        "FROM mart_definitions "
+                        "WHERE COALESCE(last_row_count, 0) > 0 "
+                        "  AND NOT COALESCE(serving_blocked, FALSE) "
+                        "ORDER BY domain NULLS LAST, mart_view_name"
+                    )
+                ).fetchall()
+            return [(r[0], r[1], r[2]) for r in rs]
+
+        rows = await asyncio.to_thread(_query)
+    except Exception:
+        logger.debug("build_live_marts_block failed", exc_info=True)
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = ["DATASETS VIVOS (los únicos temas con datos consultables ahora mismo):"]
+    for view_name, domain, description in rows:
+        label = view_name.replace("_", " ")
+        detail = (description or "").strip().splitlines()[0] if description else ""
+        suffix = f" — {detail}" if detail else ""
+        prefix = f"[{domain}] " if domain else ""
+        lines.append(f"• {prefix}{label}{suffix}")
+
+    block = "\n".join(lines)
+    _live_marts_cache = (time.monotonic(), block)
+    return block
 
 
 def build_data_context(results: list[DataResult]) -> str:
@@ -218,6 +353,10 @@ def build_data_context(results: list[DataResult]) -> str:
                 lines.append(_SAMPLE_RESULT_NOTE)
             if metadata.get("nonadditive_warning"):
                 lines.append(_NONADDITIVE_WARNING_NOTE)
+            if metadata.get("coverage_warning"):
+                lines.append(_coverage_warning_note(metadata["coverage_warning"]))
+            if metadata.get("value_substitution"):
+                lines.append(_value_substitution_note(metadata["value_substitution"]))
             lines.append(f"Columnas: {display_columns_text}")
             if description:
                 lines.append(f"Descripción: {description}")

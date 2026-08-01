@@ -123,7 +123,9 @@ def ingest_bac(self):
             # Skip if already cached or permanently failed
             with engine.begin() as conn:
                 cached = conn.execute(
-                    text("SELECT status, retry_count FROM raw.cached_datasets WHERE table_name = :tn"),
+                    text(
+                        "SELECT status, retry_count FROM raw.cached_datasets WHERE table_name = :tn"
+                    ),
                     {"tn": table_name},
                 ).fetchone()
             if cached:
@@ -243,7 +245,9 @@ def ingest_bac(self):
 
                         # First chunk replaces the table; subsequent chunks append
                         if_exists = "replace" if chunk_num == 0 else "append"
-                        chunk.to_sql(table_name, engine, schema="raw", if_exists=if_exists, index=False)
+                        chunk.to_sql(
+                            table_name, engine, schema="raw", if_exists=if_exists, index=False
+                        )
 
                         if columns is None:
                             columns = list(chunk.columns)

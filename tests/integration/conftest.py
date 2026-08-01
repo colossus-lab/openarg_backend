@@ -74,6 +74,9 @@ class MockProvider(Provider):
         mock = MagicMock(spec=ICacheService)
         mock.get = AsyncMock(return_value=None)
         mock.set = AsyncMock(return_value=None)
+        # H8 (round v46): return 1 by default so the WS rate-limit guard
+        # sees first-hit-of-the-window in tests that haven't pre-armed it.
+        mock.increment_with_ttl = AsyncMock(return_value=1)
         return mock
 
     @provide
@@ -180,7 +183,6 @@ class MockProvider(Provider):
         mock.get_by_user_id = AsyncMock(return_value=[])
         mock.revoke = AsyncMock()
         return mock
-
 
     @provide
     def pipeline_deps(

@@ -20,6 +20,7 @@ from app.application.pipeline.citation_guard import ground_citations
 from app.application.pipeline.context_builder import (
     build_capabilities_block,
     build_data_context,
+    build_live_marts_block,
 )
 from app.application.pipeline.state import OpenArgState
 from app.domain.ports.llm.llm_provider import LLMMessage
@@ -92,19 +93,47 @@ def _strip_meta(text: str) -> str:
 # ── Internal-identifier scrub (FR-025e, FIX-011 fix) ─────────────
 
 # Matches bare internal identifiers the analyst sometimes cites verbatim.
-# The pattern is intentionally narrow: only tokens that start with one of
-# the internal prefixes ``cache_`` / ``dataset_chunks`` / ``pgvector`` /
-# ``query_cache`` / ``cached_datasets`` get scrubbed. The word boundary
-# prevents partial matches inside legitimate prose.
+# The pattern is intentionally narrow: word-bounded tokens that name a
+# real internal table or schema prefix get scrubbed; legitimate prose
+# is untouched.
+#
+# M7 (round v46) extends coverage to mirror `classifiers._INTERNAL_TABLE_PATTERN`
+# (17 prefixes vs the 5 the analyst used pre-fix). Pre-v46 a jailbroken
+# answer could mention `successful_queries`, `query_analytics`, `api_keys`,
+# `mart_definitions`, `raw_table_versions`, `catalog_resources`, etc.
+# verbatim and the scrubber would leave them in. Keep the two sets in
+# sync: classifiers refuses the question, analyst refuses to emit it.
+_INTERNAL_NAMES = (
+    "cache_[\\w]+",  # cache_* data tables
+    "dataset_chunks",
+    "pgvector",
+    "query_cache",
+    "cached_datasets",
+    "catalog_resources",
+    "raw_table_versions",
+    "mart_definitions",
+    "mart_sample_queries",
+    "query_analytics",
+    "table_catalog",
+    "parse_repair_audit",
+    "successful_queries",
+    "user_queries",
+    "query_dataset_links",
+    "agent_tasks",
+    "api_keys",
+    "api_usage",
+    "sesion_chunks",
+)
+_INTERNAL_NAMES_GROUP = "|".join(_INTERNAL_NAMES)
 _RE_INTERNAL_IDENTIFIER = re.compile(
-    r"\b(?:cache_[\w]+|dataset_chunks|pgvector|query_cache|cached_datasets)\b",
+    r"\b(?:" + _INTERNAL_NAMES_GROUP + r")\b",
     re.IGNORECASE,
 )
 # Matches a parenthetical or punctuation-wrapped citation like
 # "(Fuente: cache_leyes_sancionadas)" so we remove the whole aside,
 # not just the identifier leaving dangling "(Fuente: )" behind.
 _RE_INTERNAL_CITATION = re.compile(
-    r"[\s,;]*[\(\[][^)\]]*\b(?:cache_[\w]+|dataset_chunks|pgvector|query_cache|cached_datasets)\b[^)\]]*[\)\]]",
+    r"[\s,;]*[\(\[][^)\]]*\b(?:" + _INTERNAL_NAMES_GROUP + r")\b[^)\]]*[\)\]]",
     re.IGNORECASE,
 )
 
@@ -118,17 +147,33 @@ def _scrub_internal_identifiers(text: str) -> str:
     parenthetical/bracket citations that contain such a token, then strip
     any remaining bare tokens, and finally collapse the leftover
     whitespace so the prose reads cleanly.
+
+    The whitespace tidying only runs when something was actually removed,
+    and never touches the string's own edges. M8 (round v46) started calling
+    this per streaming chunk, and an LLM emits tokens with the space attached
+    to the front — ``"Entiendo"``, ``" que"``, ``" querés"``. Unconditional
+    edge-stripping deleted every one of those spaces, so the browser
+    assembled ``"Entiendoquequerésverificaresas"``. Observed by a user on
+    staging 2026-07-29; the answer was correct and unreadable.
     """
     if not text:
         return text
-    scrubbed = _RE_INTERNAL_CITATION.sub("", text)
-    scrubbed = _RE_INTERNAL_IDENTIFIER.sub("", scrubbed)
-    # Collapse the whitespace runs left behind by the removals, but
-    # preserve paragraph breaks.
+    scrubbed, citations = _RE_INTERNAL_CITATION.subn("", text)
+    scrubbed, bare = _RE_INTERNAL_IDENTIFIER.subn("", scrubbed)
+    if not (citations or bare):
+        # Nothing removed, so there is no mess to tidy. Returning the input
+        # untouched is what makes this safe to call on a stream fragment.
+        return text
+
+    # A removal can leave a double space or a dangling indent behind. Fix
+    # that inside the text, but keep whatever whitespace bounded the original
+    # — on a chunk those edges are the separators between words.
+    leading = text[: len(text) - len(text.lstrip())]
+    trailing = text[len(text.rstrip()) :]
     scrubbed = re.sub(r"[ \t]+", " ", scrubbed)
     scrubbed = re.sub(r" *\n *", "\n", scrubbed)
     scrubbed = re.sub(r"\n{3,}", "\n\n", scrubbed)
-    return scrubbed.strip()
+    return f"{leading}{scrubbed.strip()}{trailing}"
 
 
 # ── Apologetic preface stripper (FR-025f, FIX-012 fix) ───────────
@@ -420,6 +465,14 @@ def _enforce_prompt_budget(
 # ── Analysis prompt builder (same logic as _build_analysis_prompt) ─
 
 
+def _is_no_data_fallback(results: list) -> bool:
+    """True when no step produced usable data and the analyst must deflect."""
+    return not results or not any(
+        r.records or r.source.startswith("pgvector:") or r.source.startswith("ckan:")
+        for r in results
+    )
+
+
 def _build_analysis_prompt(
     question: str,
     plan: Any,
@@ -427,6 +480,7 @@ def _build_analysis_prompt(
     memory_ctx_analyst: str,
     all_warnings: list[str],
     skill_context: dict[str, str] | None = None,
+    live_marts_block: str = "",
 ) -> str:
     """Build the analyst LLM prompt from data context and warnings."""
     data_context = build_data_context(results)
@@ -436,10 +490,7 @@ def _build_analysis_prompt(
     if all_warnings:
         errors_block = "\nERRORES EN LA RECOLECCIÓN:\n" + "\n".join(f"- {w}" for w in all_warnings)
 
-    no_data_fallback = not results or not any(
-        r.records or r.source.startswith("pgvector:") or r.source.startswith("ckan:")
-        for r in results
-    )
+    no_data_fallback = _is_no_data_fallback(results)
 
     if no_data_fallback:
         caps = build_capabilities_block()
@@ -461,6 +512,7 @@ def _build_analysis_prompt(
             today=today,
             memory_ctx_analyst="",
             caps=caps,
+            live_marts=live_marts_block or "(no disponible)",
             attempted_table=attempted_table or "(ninguna)",
         )
 
@@ -533,6 +585,11 @@ async def analyst_node(state: OpenArgState) -> dict:
 
         # Build prompt
         skill_context = state.get("skill_context")
+        # Only the no-data template needs the live-marts list; skip the
+        # (TTL-cached) DB lookup on the happy path.
+        live_marts_block = ""
+        if _is_no_data_fallback(results):
+            live_marts_block = await build_live_marts_block(deps.sandbox)
         analysis_prompt = _build_analysis_prompt(
             question,
             plan,
@@ -540,6 +597,7 @@ async def analyst_node(state: OpenArgState) -> dict:
             memory_ctx_analyst,
             all_warnings,
             skill_context=skill_context,
+            live_marts_block=live_marts_block,
         )
 
         # LLM streaming call — emit chunks as they arrive
@@ -565,8 +623,16 @@ async def analyst_node(state: OpenArgState) -> dict:
                 if "<!--" in stream_buf and "-->" not in stream_buf:
                     continue  # Wait for tag to close
 
-                # Strip any complete tags from the buffer before sending
+                # Strip any complete tags from the buffer before sending.
+                # M8 (round v46): also scrub internal identifiers HERE,
+                # not just on the final clean_answer. Pre-fix the user
+                # saw `cache_*` / `successful_queries` / `query_analytics`
+                # etc. flash by in streaming chunks before the final
+                # sanitizer ran on the assembled answer. The final scrub
+                # remains authoritative (the `complete` event), this is
+                # the visible-during-stream defence.
                 cleaned = _RE_ANY_TAG.sub("", stream_buf)
+                cleaned = _scrub_internal_identifiers(cleaned)
                 if cleaned:
                     writer({"type": "chunk", "content": cleaned})
                 stream_buf = ""
@@ -575,6 +641,7 @@ async def analyst_node(state: OpenArgState) -> dict:
             if stream_buf:
                 cleaned = _RE_ANY_TAG.sub("", stream_buf)
                 cleaned = _RE_ANY_TAG_TRUNC.sub("", cleaned)
+                cleaned = _scrub_internal_identifiers(cleaned)
                 if cleaned:
                     writer({"type": "chunk", "content": cleaned})
         except Exception:
@@ -582,7 +649,9 @@ async def analyst_node(state: OpenArgState) -> dict:
             logger.warning("chat_stream failed, falling back to chat()", exc_info=True)
             response = await deps.llm.chat(messages=messages, temperature=0.4, max_tokens=8192)
             full_text = response.content
-            writer({"type": "chunk", "content": _strip_tags(full_text)})
+            writer(
+                {"type": "chunk", "content": _scrub_internal_identifiers(_strip_tags(full_text))}
+            )
 
         # Charts: prefer deterministic, fall back to LLM-generated
         det_charts = build_deterministic_charts(results)
@@ -638,6 +707,9 @@ async def analyst_node(state: OpenArgState) -> dict:
             "citations": citations,
             "step_warnings": grounding_warnings,
             "tokens_used": tokens_used,
+            # Always emitted (True and False) so a post-replan analyst pass
+            # that finds data overwrites a stale True from the first pass.
+            "no_data_deflection": _is_no_data_fallback(results),
         }
     except Exception:
         logger.exception("analyst_node failed")
@@ -652,5 +724,6 @@ async def analyst_node(state: OpenArgState) -> dict:
             "confidence": 0.0,
             "citations": [],
             "tokens_used": 0,
+            "no_data_deflection": False,
             "error": "Analyst LLM call failed",
         }

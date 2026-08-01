@@ -36,6 +36,9 @@ def _quoted(name: str) -> str:
 #   - suffixed temporal columns (e.g. `tramite_fecha`, `_anio`)
 #   - geo with optional `_nombre` / `_id` / `_desc` suffix
 #   - embedded geo (e.g. `dom_fiscal_provincia`, `provincia_nombre`)
+#   - semantic discriminators that NL2SQL filters by (`tipo`, `estado`,
+#     `franja`, `estacion`, ...) — verified via `pg_stat_statements`
+#     in the v4.6 migration that the planner picks them up.
 _TEMPORAL_COL_RE = re.compile(
     r"^(fecha|anio|año|ano|periodo|per[ií]odo|mes|trimestre|semestre|ejercicio|year|date)$"
     r"|^(fecha|anio|año|periodo|year|date)_"
@@ -47,11 +50,31 @@ _GEOGRAPHIC_COL_RE = re.compile(
     r"|_(provincia|barrio|comuna|departamento|municipio|jurisdicci[oó]n|partido)(_nombre|_id|_desc)?$",
     re.IGNORECASE,
 )
+# Semantic-filter columns: hot discriminators NL2SQL filters with =/ILIKE.
+# Added in v4.6 migration after `pg_stat_statements` showed F3 (delitos
+# nocturno) filtering by `tipo` + `franja`, R002 by `estacion`, and the
+# mediaciones queries by `estado` + `tipo_de_mediacion`. Kept tight on
+# purpose — each pattern is a column that we have evidence the LLM hits.
+# Do NOT add generic words like `id`, `nombre`, `descripcion` here —
+# those are too broad and would create indexes that the planner won't
+# use (low cardinality or just too many candidates).
+_SEMANTIC_COL_RE = re.compile(
+    r"^(tipo|subtipo|categor[ií]a|clasificaci[oó]n|estado|fuero|"
+    r"especie|motivo|franja|estaci[oó]n|sector|rubro|resultado)$"
+    r"|_(tipo|subtipo|categor[ií]a|estado|fuero|resultado|"
+    r"especie|motivo|franja|estaci[oó]n|sector|rubro)$"
+    r"|^(tipo|categor[ií]a|estado|resultado)_",
+    re.IGNORECASE,
+)
 
 
 def _is_indexable_column(name: str) -> bool:
-    """True when the column name matches a temporal or geographic filter pattern."""
-    return bool(_TEMPORAL_COL_RE.search(name) or _GEOGRAPHIC_COL_RE.search(name))
+    """True when the column name matches a temporal/geographic/semantic pattern."""
+    return bool(
+        _TEMPORAL_COL_RE.search(name)
+        or _GEOGRAPHIC_COL_RE.search(name)
+        or _SEMANTIC_COL_RE.search(name)
+    )
 
 
 def build_create_view_sql(mart: Mart) -> list[str]:
@@ -68,9 +91,7 @@ def build_create_view_sql(mart: Mart) -> list[str]:
     # Materialized views can't be CREATE OR REPLACE; we DROP + CREATE.
     # `IF EXISTS` so first-time builds are idempotent.
     statements.append(f"DROP MATERIALIZED VIEW IF EXISTS {qualified} CASCADE")
-    statements.append(
-        f"CREATE MATERIALIZED VIEW {qualified} AS\n{mart.sql.rstrip(';')}"
-    )
+    statements.append(f"CREATE MATERIALIZED VIEW {qualified} AS\n{mart.sql.rstrip(';')}")
 
     if mart.refresh.unique_index:
         idx_cols = ", ".join(_quoted(c) for c in mart.refresh.unique_index)
@@ -127,9 +148,7 @@ def build_comment_sql(mart: Mart) -> list[str]:
         if not col.description:
             continue
         body = col.description.replace("'", "''")
-        statements.append(
-            f"COMMENT ON COLUMN {qualified}.{_quoted(col.name)} IS '{body}'"
-        )
+        statements.append(f"COMMENT ON COLUMN {qualified}.{_quoted(col.name)} IS '{body}'")
     return statements
 
 

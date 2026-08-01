@@ -155,9 +155,7 @@ async def _maybe_rerank_planner_candidates(
             from app.infrastructure.monitoring.metrics import MetricsCollector
 
             latency_ms = (datetime.now(UTC) - started_at).total_seconds() * 1000.0
-            MetricsCollector().record_connector_call(
-                "planner_reranker", latency_ms, error=True
-            )
+            MetricsCollector().record_connector_call("planner_reranker", latency_ms, error=True)
         except Exception:
             logger.debug("planner reranker metrics recording failed", exc_info=True)
         logger.debug("planner candidate rerank failed; preserving base order", exc_info=True)
@@ -233,6 +231,46 @@ def _build_dataset_discovery_results(
 # ---------------------------------------------------------------------------
 # Catalog helpers
 # ---------------------------------------------------------------------------
+
+
+async def get_mart_descriptions(
+    table_names: list[str],
+    sandbox: ISQLSandbox | None,
+) -> dict[str, str]:
+    """Curated `mart_definitions.description` for any `mart.*` name.
+
+    `table_catalog` is the `cache_*` catalog and holds no rows for marts,
+    so the description a mart author writes reached nothing. That
+    description is where the semantics a number cannot carry on its own
+    live — most importantly the unit. `presupuesto_consolidado` states
+    that its amounts are in MILLIONS of pesos and that the raw figure must
+    never be reported as pesos; without this the analyst read
+    `3326595.47` as $3.326.595, off by six orders of magnitude.
+    """
+    mart_views = [name.split(".", 1)[1] for name in table_names if name.lower().startswith("mart.")]
+    if not mart_views or not sandbox:
+        return {}
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _fetch() -> dict[str, str]:
+            engine = sandbox._get_engine()  # type: ignore[union-attr]
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT mart_view_name, description FROM mart_definitions "
+                        "WHERE mart_schema = 'mart' AND mart_view_name = ANY(:views) "
+                        "AND description IS NOT NULL"
+                    ),
+                    {"views": mart_views},
+                ).fetchall()
+                conn.rollback()
+                return {f"mart.{r.mart_view_name}": str(r.description) for r in rows}
+
+        return await loop.run_in_executor(None, _fetch)
+    except Exception:
+        logger.debug("mart description lookup failed", exc_info=True)
+        return {}
 
 
 async def get_catalog_entries(
@@ -354,6 +392,7 @@ async def discover_tables_by_catalog_search(
                         "  FROM mart_definitions md "
                         "  WHERE md.embedding IS NOT NULL "
                         "    AND COALESCE(md.last_row_count, 0) > 0 "
+                        "    AND NOT COALESCE(md.serving_blocked, FALSE) "
                         "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
                         "  LIMIT 3"
                         ") "
@@ -502,6 +541,7 @@ async def discover_catalog_hints_for_planner(
                         "  FROM mart_definitions md "
                         "  WHERE md.embedding IS NOT NULL "
                         "    AND COALESCE(md.last_row_count, 0) > 0 "
+                        "    AND NOT COALESCE(md.serving_blocked, FALSE) "
                         "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
                         "  LIMIT 3"
                         ") "
@@ -533,15 +573,17 @@ async def discover_catalog_hints_for_planner(
                     boosted = base + 0.17 if sample >= 0.70 else base
                     if boosted < min_sim:
                         continue
-                    resources.append(Resource(
-                        resource_id=f"mart::{r.mart_id}",
-                        title=str(r.mart_id or ""),
-                        domain=r.domain,
-                        subdomain=None,
-                        portal=None,
-                        layer=ServingLayer.MART,
-                        score=boosted,
-                    ))
+                    resources.append(
+                        Resource(
+                            resource_id=f"mart::{r.mart_id}",
+                            title=str(r.mart_id or ""),
+                            domain=r.domain,
+                            subdomain=None,
+                            portal=None,
+                            layer=ServingLayer.MART,
+                            score=boosted,
+                        )
+                    )
                 return resources
 
         try:
@@ -690,7 +732,7 @@ async def _mart_semantics_block(serving_port: Any, table_names: list[str]) -> st
             # try it as a mart_id resource. Today mart_id == mart_view_name
             # so this works; if they ever diverge, this still resolves
             # via mart_view_name lookup downstream.
-            candidates.append(f"mart::{tn[len('mart.'):]}")
+            candidates.append(f"mart::{tn[len('mart.') :]}")
         else:
             candidates.append(f"mart::{tn}")
         for resource_id in candidates:
@@ -745,9 +787,7 @@ async def _serving_port_planner_hints(
         serving_resources=resources,
         limit=limit,
     )
-    preferred = [
-        c for c in candidates if c.layer in {"mart", "staging", "raw"}
-    ]
+    preferred = [c for c in candidates if c.layer in {"mart", "staging", "raw"}]
     if not preferred:
         return ""
 
@@ -760,9 +800,7 @@ async def _serving_port_planner_hints(
         lines.append("MARTS DISPONIBLES (vistas semánticas curadas, preferí estas):")
         for c in by_layer["mart"]:
             lines.append(f"  - {_planner_hint_label(c)}")
-        lines.append(
-            "Para una mart, usá query_sandbox con el nombre canónico de la vista."
-        )
+        lines.append("Para una mart, usá query_sandbox con el nombre canónico de la vista.")
 
     if "staging" in by_layer:
         lines.append("")
@@ -785,9 +823,7 @@ async def _serving_port_planner_hints(
     return "\n".join(lines)
 
 
-async def _hybrid_logical_hints(
-    query: str, q_embedding: list[float] | None, *, limit: int
-) -> str:
+async def _hybrid_logical_hints(query: str, q_embedding: list[float] | None, *, limit: int) -> str:
     """WS3 — surface `catalog_resources` to the planner when the flag is on.
 
     Returns a planner-facing block describing logical resources that match
@@ -807,9 +843,7 @@ async def _hybrid_logical_hints(
         results = await loop.run_in_executor(None, _search)
         if not results:
             return ""
-        lines = [
-            "RECURSOS LÓGICOS RELEVANTES (catalog_resources, pueden no estar materializados):"
-        ]
+        lines = ["RECURSOS LÓGICOS RELEVANTES (catalog_resources, pueden no estar materializados):"]
         for r in results:
             tag = r.materialization_status.upper()
             line = f"  - [{tag}] {r.display_name or r.canonical_title} (kind={r.resource_kind})"
@@ -977,6 +1011,7 @@ async def execute_sandbox_step(
     user_query: str = "",
     *,
     serving_port: Any | None = None,
+    user_id: str | None = None,
 ) -> list[DataResult]:
     if not sandbox:
         logger.warning("ISQLSandbox not configured, skipping step %s", step.id)
@@ -993,6 +1028,7 @@ async def execute_sandbox_step(
 
     try:
         tables = await sandbox.list_cached_tables()
+
         # MASTERPLAN Fase 4.5d — surface marts to the executor's table
         # universe so a planner that suggested a mart (via the hints
         # block built by `_serving_port_planner_hints`) actually finds
@@ -1026,7 +1062,8 @@ async def execute_sandbox_step(
                             "SELECT mart_id, mart_schema, mart_view_name, "
                             "       last_row_count, canonical_columns_json "
                             "FROM mart_definitions "
-                            "WHERE COALESCE(last_row_count, 0) > 0"
+                            "WHERE COALESCE(last_row_count, 0) > 0 "
+                            "  AND NOT COALESCE(serving_blocked, FALSE)"
                         )
                     )
                 ).fetchall()
@@ -1228,32 +1265,36 @@ async def execute_sandbox_step(
         # the routing eval set). Defensive try/except — failure preserves
         # the prior filtered universe.
         try:
-            current_mart_names = {
-                t.table_name for t in tables if t.table_name.startswith("mart.")
-            }
+            current_mart_names = {t.table_name for t in tables if t.table_name.startswith("mart.")}
 
             from sqlalchemy import text as _stxt
+
             q_emb = await embedding.embed(nl_query)
             emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
 
             def _top_marts_for_query() -> list[tuple[str, list[str]]]:
                 eng = getattr(sandbox, "_engine", None) or (
                     sandbox._get_engine()  # type: ignore[union-attr]
-                    if hasattr(sandbox, "_get_engine") else None
+                    if hasattr(sandbox, "_get_engine")
+                    else None
                 )
                 if eng is None:
                     return []
                 with eng.connect() as conn:
-                    rs = conn.execute(_stxt(
-                        "SELECT mart_schema, mart_view_name, "
-                        "  canonical_columns_json, "
-                        "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
-                        "FROM mart_definitions "
-                        "WHERE embedding IS NOT NULL "
-                        "  AND COALESCE(last_row_count, 0) > 0 "
-                        "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
-                        "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
-                    ), {"e": emb_str}).fetchall()
+                    rs = conn.execute(
+                        _stxt(
+                            "SELECT mart_schema, mart_view_name, "
+                            "  canonical_columns_json, "
+                            "  1 - (embedding <=> CAST(:e AS vector)) AS sim "
+                            "FROM mart_definitions "
+                            "WHERE embedding IS NOT NULL "
+                            "  AND COALESCE(last_row_count, 0) > 0 "
+                            "  AND NOT COALESCE(serving_blocked, FALSE) "
+                            "  AND 1 - (embedding <=> CAST(:e AS vector)) >= 0.45 "
+                            "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 3"
+                        ),
+                        {"e": emb_str},
+                    ).fetchall()
                 out: list[tuple[str, list[str]]] = []
                 for r in rs:
                     cols: list[str] = []
@@ -1268,16 +1309,19 @@ async def execute_sandbox_step(
 
             top_marts = await asyncio.to_thread(_top_marts_for_query)
             from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+
             injected = []
             for mart_name, cols in top_marts:
                 if mart_name in current_mart_names:
                     continue
-                injected.append(CachedTableInfo(
-                    table_name=mart_name,
-                    dataset_id="",
-                    row_count=0,
-                    columns=cols,
-                ))
+                injected.append(
+                    CachedTableInfo(
+                        table_name=mart_name,
+                        dataset_id="",
+                        row_count=0,
+                        columns=cols,
+                    )
+                )
             if injected:
                 # Prepend so the NL2SQL LLM sees marts at the TOP of the
                 # `tables_context` listing. LLMs systematically favor
@@ -1288,8 +1332,7 @@ async def execute_sandbox_step(
                 # signal that finally flips routing.
                 tables = injected + tables
                 logger.info(
-                    "BUG-001: injected %d semantically-relevant mart(s) "
-                    "at top of universe: %s",
+                    "BUG-001: injected %d semantically-relevant mart(s) at top of universe: %s",
                     len(injected),
                     [t.table_name for t in injected],
                 )
@@ -1335,21 +1378,35 @@ async def execute_sandbox_step(
                 catalog_entries=catalog_entries,
             )
 
+        # Real PostgreSQL types for the same 50 tables. `table_catalog.column_types`
+        # is NOT a substitute: catalog_enrichment.txt asks the LLM for a
+        # "descripción breve" per column, so that field holds prose. Rendering
+        # prose in the `(tipo)` slot is worse than rendering nothing — the
+        # NL2SQL prompt tells the model to read that slot to decide whether a
+        # column needs decimal normalization, and marts expose pre-cast
+        # `numeric` columns where `replace()` errors outright.
+        pg_column_types: dict[str, dict[str, str]] = {}
+        try:
+            if sandbox:
+                raw_types = await sandbox.get_column_types([t.table_name for t in tables[:50]])
+                pg_column_types = {table: dict(pairs) for table, pairs in raw_types.items()}
+        except Exception:
+            logger.debug("column type lookup failed", exc_info=True)
+
+        def _columns_with_types(table_name: str, columns: list[str] | None) -> str:
+            types = pg_column_types.get(table_name, {})
+            if not columns:
+                return "(no column info)"
+            return ", ".join(f"{c} ({types[c]})" if c in types else c for c in columns)
+
         tables_context_parts = []
         for t in tables[:50]:
-            cols = ", ".join(t.columns) if t.columns else "(no column info)"
+            col_desc = _columns_with_types(t.table_name, list(t.columns or []))
             entry = catalog_entries.get(t.table_name)
             if entry:
                 name = entry.get("display_name") or t.table_name
                 desc = entry.get("description") or ""
                 domain = entry.get("domain") or ""
-                col_types = entry.get("column_types") or {}
-                col_desc = (
-                    ", ".join(
-                        f"{c} ({col_types[c]})" if c in col_types else c for c in (t.columns or [])
-                    )
-                    or cols
-                )
                 part = f"Table: {t.table_name} — {name}  (rows: {t.row_count or '?'})"
                 if desc:
                     part += f"\n  Descripción: {desc}"
@@ -1357,7 +1414,7 @@ async def execute_sandbox_step(
                     part += f"\n  Dominio: {domain}"
                 part += f"\n  Columns: {col_desc}"
             else:
-                part = f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {cols}"
+                part = f"Table: {t.table_name}  (rows: {t.row_count or '?'})\n  Columns: {col_desc}"
             tables_context_parts.append(part)
         tables_context = "\n\n".join(tables_context_parts)
 
@@ -1383,12 +1440,23 @@ async def execute_sandbox_step(
             except Exception:
                 logger.debug("mart semantics block failed", exc_info=True)
 
-        # Retrieve dynamic few-shot examples from successful past queries
-        few_shot_block = await get_few_shot_examples(nl_query, embedding, semantic_cache)
+        # Retrieve dynamic few-shot examples from successful past queries.
+        # H4 (round v46) scoped per-user — the helper combines caller's
+        # rows with the `_LEGACY_OWNER` historical bucket so cross-tenant
+        # rows can no longer reach the planner prompt.
+        few_shot_block = await get_few_shot_examples(
+            nl_query, embedding, semantic_cache, user_id=user_id
+        )
 
         # Build display descriptions from catalog entries for the queried
         # table(s). These land in DataResult.metadata.table_descriptions
         # via the subgraph's format_result_node.
+        # Marts are absent from `table_catalog`, so before this their curated
+        # description — the one place a unit or a caveat is written down —
+        # reached no one. That is how `3326595.47` MILLIONS of pesos was
+        # served as "$3.326.595".
+        mart_descriptions = await get_mart_descriptions([t.table_name for t in tables[:5]], sandbox)
+
         table_descriptions: list[str] = []
         for t in tables[:5]:
             entry = catalog_entries.get(t.table_name)
@@ -1400,6 +1468,8 @@ async def execute_sandbox_step(
                     desc_parts.append(entry["description"])
                 if desc_parts:
                     table_descriptions.append(f"{t.table_name}: {' — '.join(desc_parts)}")
+            elif t.table_name in mart_descriptions:
+                table_descriptions.append(f"{t.table_name}: {mart_descriptions[t.table_name]}")
 
         # Hand off to the NL2SQL subgraph. It owns the generate → execute
         # → fix → last_resort → indec_fallback → save_success → format
@@ -1412,6 +1482,7 @@ async def execute_sandbox_step(
 
         compiled_subgraph = await get_compiled_nl2sql_subgraph()
         import time as _time
+
         initial_state: dict[str, Any] = {
             "nl_query": nl_query,
             "tables": tables,

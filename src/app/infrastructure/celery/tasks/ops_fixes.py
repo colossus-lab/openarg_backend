@@ -47,12 +47,9 @@ def _mart_dependency_guards(engine) -> tuple[set[str], list[str], set[str]]:
     import re
 
     mart_definitions_select = text(
-        "SELECT mart_id, sql_definition FROM mart_definitions "
-        "WHERE sql_definition IS NOT NULL"
+        "SELECT mart_id, sql_definition FROM mart_definitions WHERE sql_definition IS NOT NULL"
     )
-    live_matviews_select = text(
-        "SELECT definition FROM pg_matviews WHERE schemaname = 'mart'"
-    )
+    live_matviews_select = text("SELECT definition FROM pg_matviews WHERE schemaname = 'mart'")
     protected_identities: set[str] = set()
     protected_raw_tables: set[str] = set()
 
@@ -486,9 +483,7 @@ def force_recollect_separator_mismatches(self, *, dry_run: bool = False) -> dict
         for r in rows
     ]
     if dry_run:
-        logger.info(
-            "force_recollect_separator_mismatches dry-run: %d candidates", len(candidates)
-        )
+        logger.info("force_recollect_separator_mismatches dry-run: %d candidates", len(candidates))
         return {"candidates": len(candidates), "samples": candidates[:5], "dry_run": True}
 
     if not candidates:
@@ -510,9 +505,7 @@ def force_recollect_separator_mismatches(self, *, dry_run: bool = False) -> dict
         for c in candidates:
             conn.execute(update_sql, {"id": c["cached_id"]})
             marked += 1
-    logger.info(
-        "force_recollect_separator_mismatches marked %d datasets pending", marked
-    )
+    logger.info("force_recollect_separator_mismatches marked %d datasets pending", marked)
     return {"candidates": len(candidates), "marked_pending": marked}
 
 
@@ -737,9 +730,7 @@ def retain_raw_versions(
             )
             with engine.begin() as conn:
                 conn.execute(
-                    text(
-                        f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE'
-                    )
+                    text(f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE')
                 )
                 conn.execute(
                     text(
@@ -907,9 +898,7 @@ def cleanup_raw_orphans(
             )
             with engine.begin() as conn:
                 conn.execute(
-                    text(
-                        f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE'
-                    )
+                    text(f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE')
                 )
                 conn.execute(
                     text(
@@ -994,10 +983,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         fixed_unknown = result.rowcount or 0
 
         result = conn.execute(
-            text(
-                "UPDATE raw.cached_datasets SET retry_count = 5 "
-                "WHERE retry_count > 5"
-            )
+            text("UPDATE raw.cached_datasets SET retry_count = 5 WHERE retry_count > 5")
         )
         fixed_retry = result.rowcount or 0
 
@@ -1450,9 +1436,7 @@ def cleanup_empty_raw_tables(
             )
             with engine.begin() as conn:
                 conn.execute(
-                    text(
-                        f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE'
-                    )
+                    text(f'DROP TABLE IF EXISTS "{c["schema_name"]}"."{c["table_name"]}" CASCADE')
                 )
                 conn.execute(
                     text(
@@ -1532,9 +1516,7 @@ def cleanup_garbage_cols_in_raw(
         "dry_run": dry_run,
     }
 
-    UUID_RE = re.compile(
-        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-    )
+    UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
     # --- Pass 1: UUID col drop ---
     try:
@@ -1559,9 +1541,7 @@ def cleanup_garbage_cols_in_raw(
                 continue
             try:
                 with engine.begin() as conn:
-                    conn.execute(
-                        text(f'ALTER TABLE raw."{tbl}" DROP COLUMN "{col}"')
-                    )
+                    conn.execute(text(f'ALTER TABLE raw."{tbl}" DROP COLUMN "{col}"'))
                 stats["uuid_dropped"] += 1
                 seen_tables.add(tbl)
             except Exception:
@@ -1591,12 +1571,12 @@ def cleanup_garbage_cols_in_raw(
                 with engine.connect() as conn:
                     res = conn.execute(
                         text(
-                            f'SELECT count(*), '
+                            f"SELECT count(*), "
                             f'SUM(CASE WHEN "{col}" IS NOT NULL '
-                            f'AND LOWER(COALESCE(TRIM("{col}"::text), \'\')) '
+                            f"AND LOWER(COALESCE(TRIM(\"{col}\"::text), '')) "
                             f"NOT IN ('', 'none', 'nan', 'null', 'n/a', 'na', '<na>', "
                             f"'-', '--', 's/d', 's.d.', '.') "
-                            f'THEN 1 ELSE 0 END) FROM '
+                            f"THEN 1 ELSE 0 END) FROM "
                             f'(SELECT "{col}" FROM raw."{tbl}" LIMIT :n) sub'
                         ),
                         {"n": sample_size},
@@ -1612,9 +1592,7 @@ def cleanup_garbage_cols_in_raw(
                     stats["empty_garbage_dropped"] += 1
                     continue
                 with engine.begin() as conn:
-                    conn.execute(
-                        text(f'ALTER TABLE raw."{tbl}" DROP COLUMN "{col}"')
-                    )
+                    conn.execute(text(f'ALTER TABLE raw."{tbl}" DROP COLUMN "{col}"'))
                 stats["empty_garbage_dropped"] += 1
             except Exception:
                 stats["errors"] += 1
@@ -1846,9 +1824,7 @@ def prewarm_query_plan_cache(
                     logger.exception("prewarm_query_plan_cache failed for %s", q[:80])
                     return "error"
 
-        results = await asyncio.gather(
-            *[_bound(q) for q in candidates], return_exceptions=False
-        )
+        results = await asyncio.gather(*[_bound(q) for q in candidates], return_exceptions=False)
         for r in results:
             if r == "hit":
                 stats["already_cached"] += 1

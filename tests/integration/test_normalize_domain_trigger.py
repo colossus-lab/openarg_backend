@@ -40,10 +40,7 @@ def _skip_if_trigger_missing(engine) -> None:
     """Skip cleanly when migration 0052 hasn't run yet (e.g. an older DB)."""
     with engine.connect() as conn:
         present = conn.execute(
-            text(
-                "SELECT 1 FROM pg_trigger "
-                "WHERE tgname = 'mart_definitions_normalize_domain_trg'"
-            )
+            text("SELECT 1 FROM pg_trigger WHERE tgname = 'mart_definitions_normalize_domain_trg'")
         ).scalar()
     if not present:
         pytest.skip("Migration 0052 not applied — trigger missing")
@@ -107,8 +104,7 @@ def test_trigger_normalizes_on_insert(engine, input_value, expected):
                 {"id": mart_id},
             ).scalar()
         assert stored == expected, (
-            f"trigger should normalize {input_value!r} → {expected!r}, "
-            f"got {stored!r}"
+            f"trigger should normalize {input_value!r} → {expected!r}, got {stored!r}"
         )
     finally:
         _cleanup_test_rows(engine, mart_id)
@@ -128,9 +124,7 @@ def test_trigger_normalizes_on_update(engine):
                 text("SELECT domain FROM mart_definitions WHERE mart_id = :id"),
                 {"id": mart_id},
             ).scalar()
-        assert stored == "economia", (
-            f"trigger should normalize on UPDATE; got {stored!r}"
-        )
+        assert stored == "economia", f"trigger should normalize on UPDATE; got {stored!r}"
     finally:
         _cleanup_test_rows(engine, mart_id)
 

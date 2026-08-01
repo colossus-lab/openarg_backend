@@ -196,17 +196,13 @@ class HierarchicalHeaderParser:
             classifications.append(cls)
 
         year_cls = next((c for c in classifications if c.kind == "year"), None)
-        period_cls = next(
-            (c for c in classifications if c.kind in {"quarter", "month"}), None
-        )
+        period_cls = next((c for c in classifications if c.kind in {"quarter", "month"}), None)
 
         if year_cls is None and period_cls is None:
             # No temporal hierarchy detected — fall back to first non-empty row
             return self._flat_first_row(df)
 
-        max_used = max(
-            (c.row_index for c in (year_cls, period_cls) if c is not None), default=0
-        )
+        max_used = max((c.row_index for c in (year_cls, period_cls) if c is not None), default=0)
         n_cols = df.shape[1]
         year_row = (
             _forward_fill([_strip(df.iat[year_cls.row_index, j]) for j in range(n_cols)])

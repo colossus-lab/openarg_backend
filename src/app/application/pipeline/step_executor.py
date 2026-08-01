@@ -64,6 +64,11 @@ class ConnectorDeps:
     # schemas + semantics or read marts directly. Optional; legacy paths
     # still work when this is None.
     serving_port: object | None = None
+    # H4 (round v46) — the authenticated caller's identifier. Propagated
+    # to `execute_sandbox_step` so `get_few_shot_examples` can scope
+    # the cross-tenant prompt-poisoning store (`successful_queries`) by
+    # owner. None for unauthenticated or legacy paths.
+    user_id: str | None = None
 
 
 # ── Retryable error detection ─────────────────────────────────
@@ -134,6 +139,7 @@ async def _top_mart_similarity(nl_query: str, deps: ConnectorDeps) -> float:
                         "FROM mart_definitions "
                         "WHERE embedding IS NOT NULL "
                         "  AND COALESCE(last_row_count, 0) > 0 "
+                        "  AND NOT COALESCE(serving_blocked, FALSE) "
                         "ORDER BY embedding <=> CAST(:e AS vector) LIMIT 1"
                     ),
                     {"e": emb_str},
@@ -164,16 +170,11 @@ async def dispatch_step(
     # if a `search_ckan` step slips through AND a strong mart covers the
     # question, redirect to the sandbox/mart path. No mart → low score →
     # no redirect → `search_ckan` runs normally (live-only topics intact).
-    if (
-        step.action == "search_ckan"
-        and nl_query.strip()
-        and deps.sandbox is not None
-    ):
+    if step.action == "search_ckan" and nl_query.strip() and deps.sandbox is not None:
         mart_sim = await _top_mart_similarity(nl_query, deps)
         if mart_sim >= _MART_REDIRECT_THRESHOLD:
             logger.info(
-                "BUG-001: redirecting search_ckan step → sandbox/mart "
-                "(top mart sim=%.3f >= %.2f)",
+                "BUG-001: redirecting search_ckan step → sandbox/mart (top mart sim=%.3f >= %.2f)",
                 mart_sim,
                 _MART_REDIRECT_THRESHOLD,
             )
@@ -186,6 +187,7 @@ async def dispatch_step(
                 deps.semantic_cache,
                 user_query=nl_query,
                 serving_port=deps.serving_port,
+                user_id=deps.user_id,
             )
 
     handler = _DISPATCH_TABLE.get(step.action)
@@ -237,6 +239,7 @@ _DISPATCH_TABLE: dict[str, Callable[..., Any]] = {
         d.semantic_cache,
         user_query=q,
         serving_port=d.serving_port,
+        user_id=d.user_id,
     ),
 }
 
@@ -337,9 +340,7 @@ async def execute_steps(
                     _MART_REDIRECT_THRESHOLD,
                 )
         except Exception:
-            logger.debug(
-                "BUG-001 Capa 1 (execute_steps) check failed", exc_info=True
-            )
+            logger.debug("BUG-001 Capa 1 (execute_steps) check failed", exc_info=True)
 
     if not steps:
         return results, warnings

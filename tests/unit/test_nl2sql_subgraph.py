@@ -177,7 +177,7 @@ async def test_self_correction_one_retry():
 
 @pytest.mark.asyncio
 async def test_legacy_table_alias_is_rewritten_before_execution():
-    llm = FakeLLM(['SELECT * FROM cache_series_tiempo_ipc LIMIT 10'])
+    llm = FakeLLM(["SELECT * FROM cache_series_tiempo_ipc LIMIT 10"])
     sandbox = FakeSandbox([FakeSandboxResult(rows=[{"fecha": "2026-01-01"}], row_count=1)])
 
     subgraph = build_nl2sql_subgraph()
@@ -194,7 +194,7 @@ async def test_legacy_table_alias_is_rewritten_before_execution():
     )
 
     assert final["data_results"][0].records
-    assert sandbox.calls == ['SELECT * FROM cache_series_inflacion_ipc LIMIT 10']
+    assert sandbox.calls == ["SELECT * FROM cache_series_inflacion_ipc LIMIT 10"]
 
 
 @pytest.mark.asyncio
@@ -446,7 +446,7 @@ async def test_explicit_raw_query_uses_serving_port() -> None:
                     columns=["nombre"],
                 )
             ],
-            tables_context='Table: raw.caba__padron__abcd1234__v1\n  Columns: nombre',
+            tables_context="Table: raw.caba__padron__abcd1234__v1\n  Columns: nombre",
         ),
         llm=llm,
         sandbox=sandbox,

@@ -400,7 +400,9 @@ def _resource_kind(cached_status: str | None, error_message: str | None = None) 
     return RESOURCE_KIND_FILE
 
 
-def _derived_layout_profile(cached_layout_profile: str | None, cached_status: str | None) -> str | None:
+def _derived_layout_profile(
+    cached_layout_profile: str | None, cached_status: str | None
+) -> str | None:
     """Return the layout_profile to project into `catalog_resources`.
 
     Earlier versions defaulted to `simple_tabular` when status='ready' even
@@ -522,7 +524,9 @@ def backfill_batch(
                 row.header_quality, row.cached_status, row.error_message
             ),
             "parser_version": _BACKFILL_LEGACY_PARSER_VERSION if row.cached_status else None,
-            "normalization_version": _BACKFILL_LEGACY_NORMALIZATION_VERSION if row.cached_status else None,
+            "normalization_version": _BACKFILL_LEGACY_NORMALIZATION_VERSION
+            if row.cached_status
+            else None,
         }
         if dry_run:
             logger.debug("dry-run upsert %s", identity)
@@ -600,7 +604,9 @@ def _load_embedding_batch(engine: Engine, *, limit: int) -> list[dict]:
     return out
 
 
-def _persist_embedding_batch(engine: Engine, rows: list[dict], embeddings: list[list[float]]) -> int:
+def _persist_embedding_batch(
+    engine: Engine, rows: list[dict], embeddings: list[list[float]]
+) -> int:
     payload = [
         {
             "id": row["id"],

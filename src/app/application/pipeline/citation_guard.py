@@ -9,7 +9,10 @@ from typing import Any
 
 from app.domain.entities.connectors.data_result import DataResult
 
-_NUM_RE = re.compile(r"(?<![\w/])[-+]?\d[\d.,]*(?:\s*%|(?:\s+(?:millones|millón|miles|mil|billones|billón)))?", re.IGNORECASE)
+_NUM_RE = re.compile(
+    r"(?<![\w/])[-+]?\d[\d.,]*(?:\s*%|(?:\s+(?:millones|millón|miles|mil|billones|billón)))?",
+    re.IGNORECASE,
+)
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 _DATE_RE = re.compile(r"\b(19\d{2}|20\d{2})([-/])(\d{1,2})(?:\2(\d{1,2}))?\b")
 _DATE_DMY_RE = re.compile(r"\b(\d{1,2})([-/])(\d{1,2})\2(19\d{2}|20\d{2})\b")
@@ -174,7 +177,9 @@ def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]
         accessed_at = _safe_str(result.metadata.get("fetched_at", ""))
         unit_scale = _unit_scale_factor(_safe_str(result.metadata.get("units", "")))
         normalized: float | None = None
-        for path, raw, temporal_normalized in _iter_temporal_evidence_values(result.dataset_title, "dataset_title"):
+        for path, raw, temporal_normalized in _iter_temporal_evidence_values(
+            result.dataset_title, "dataset_title"
+        ):
             normalized = temporal_normalized
             evidence.append(
                 NumericEvidence(
@@ -203,7 +208,11 @@ def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]
             for path, raw in _iter_evidence_values(record, f"records[{idx}]"):
                 normalized = _normalize_numeric_token(_safe_str(raw))
                 if normalized is None:
-                    for temporal_path, temporal_raw, temporal_normalized in _iter_temporal_evidence_values(raw, path):
+                    for (
+                        temporal_path,
+                        temporal_raw,
+                        temporal_normalized,
+                    ) in _iter_temporal_evidence_values(raw, path):
                         evidence.append(
                             NumericEvidence(
                                 source_name=result.dataset_title,
@@ -242,7 +251,11 @@ def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]
         for path, raw in _iter_evidence_values(result.metadata, "metadata"):
             normalized = _normalize_numeric_token(_safe_str(raw))
             if normalized is None:
-                for temporal_path, temporal_raw, temporal_normalized in _iter_temporal_evidence_values(raw, path):
+                for (
+                    temporal_path,
+                    temporal_raw,
+                    temporal_normalized,
+                ) in _iter_temporal_evidence_values(raw, path):
                     evidence.append(
                         NumericEvidence(
                             source_name=result.dataset_title,
@@ -292,15 +305,15 @@ def collect_numeric_evidence(results: list[DataResult]) -> list[NumericEvidence]
     return evidence
 
 
-def _match_source_evidence(source_hint: str, evidence: list[NumericEvidence]) -> list[NumericEvidence]:
+def _match_source_evidence(
+    source_hint: str, evidence: list[NumericEvidence]
+) -> list[NumericEvidence]:
     hint = source_hint.strip().lower()
     summary = [item for item in evidence if item.path.startswith("summary.")]
     if not hint:
         return evidence
     matched = [
-        item
-        for item in evidence
-        if hint in item.source_name.lower() or hint in item.portal.lower()
+        item for item in evidence if hint in item.source_name.lower() or hint in item.portal.lower()
     ]
     if matched:
         return matched + [item for item in summary if item not in matched]
@@ -309,7 +322,9 @@ def _match_source_evidence(source_hint: str, evidence: list[NumericEvidence]) ->
 
 def _numbers_in_text(text: str) -> list[float]:
     values: list[float] = []
-    stripped = _TIME_RE.sub(" ", _DATE_TEXT_RE.sub(" ", _DATE_DMY_RE.sub(" ", _DATE_RE.sub(" ", text))))
+    stripped = _TIME_RE.sub(
+        " ", _DATE_TEXT_RE.sub(" ", _DATE_DMY_RE.sub(" ", _DATE_RE.sub(" ", text)))
+    )
     for match in _NUM_RE.findall(stripped):
         normalized = _normalize_numeric_token(match)
         if normalized is not None:
@@ -327,9 +342,9 @@ def _is_rounded_quote_match(target: float, item: NumericEvidence) -> bool:
 def _matches_any(target: float, evidence: list[NumericEvidence]) -> list[NumericEvidence]:
     hits: list[NumericEvidence] = []
     for item in evidence:
-        if math.isclose(item.normalized, target, rel_tol=1e-6, abs_tol=1e-6) or _is_rounded_quote_match(
-            target, item
-        ):
+        if math.isclose(
+            item.normalized, target, rel_tol=1e-6, abs_tol=1e-6
+        ) or _is_rounded_quote_match(target, item):
             hits.append(item)
     return hits
 
@@ -417,7 +432,43 @@ def _assess_citation(
     )
 
 
+def _quality_ceiling(results: list[DataResult]) -> float:
+    """Cap confidence from the data-quality flags the pipeline already sets.
+
+    Grounding only proves the analyst transcribed a number that was in the
+    rows — it says nothing about whether the rows themselves are a sound
+    basis for the claim. A query that silently dropped part of its universe
+    scored 0.9 before this cap existed (prod, 2026-07-26).
+    """
+    ceiling = 1.0
+    for result in results:
+        metadata = result.metadata or {}
+        if metadata.get("coverage_warning"):
+            ceiling = min(ceiling, 0.35)
+        if metadata.get("nonadditive_warning"):
+            ceiling = min(ceiling, 0.5)
+        if metadata.get("used_fallback"):
+            ceiling = min(ceiling, 0.6)
+        if metadata.get("result_kind") == "sample":
+            ceiling = min(ceiling, 0.7)
+        if metadata.get("truncated"):
+            ceiling = min(ceiling, 0.75)
+    return ceiling
+
+
 def _derive_confidence(
+    answer: str,
+    assessments: list[CitationAssessment],
+    results: list[DataResult],
+    llm_confidence: float,
+) -> float:
+    return min(
+        _derive_grounding_confidence(answer, assessments, results, llm_confidence),
+        _quality_ceiling(results),
+    )
+
+
+def _derive_grounding_confidence(
     answer: str,
     assessments: list[CitationAssessment],
     results: list[DataResult],
@@ -469,14 +520,35 @@ def ground_citations(
             "La respuesta contiene números pero no incluye citas estructuradas; verificación parcial."
         )
 
+    # `confidence` is deliberately stripped from the API response, so a
+    # coverage failure has to ride the `warnings` channel to reach the client
+    # at all. Emit it regardless of what the analyst wrote.
+    for result in results:
+        coverage = (result.metadata or {}).get("coverage_warning")
+        if not coverage:
+            continue
+        excluded = coverage.get("excluded_rows")
+        total = coverage.get("total_rows")
+        if coverage.get("measured") and excluded and total:
+            pct = coverage.get("excluded_pct")
+            pct_text = f" ({pct} %)" if pct is not None else ""
+            warnings.append(
+                f"Total incompleto: {excluded} de {total} filas{pct_text} "
+                "quedaron fuera del cálculo por su formato numérico."
+            )
+        else:
+            warnings.append(
+                "Total incompleto: la consulta descartó filas por formato numérico "
+                "antes de agregar, así que el resultado no cubre todo el universo."
+            )
+        break
+
     for citation in citations:
         assessment = _assess_citation(citation, evidence)
         assessments.append(assessment)
 
         if assessment.claim_numbers and assessment.unsupported:
-            warnings.append(
-                f"Cita sin grounding numérico completo para '{assessment.claim[:80]}'"
-            )
+            warnings.append(f"Cita sin grounding numérico completo para '{assessment.claim[:80]}'")
         elif assessment.is_source_warning:
             warnings.append(f"Cita sin fuente enlazable para '{assessment.claim[:80]}'")
 

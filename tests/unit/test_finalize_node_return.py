@@ -218,3 +218,60 @@ async def test_finalize_writes_confidence_citations_and_warnings_to_cache(
     assert captured["result"]["confidence"] == 0.87
     assert captured["result"]["citations"] == [{"source": "BCRA", "note": "monthly series"}]
     assert captured["result"]["warnings"] == ["warning-a"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_skips_cache_write_for_no_data_deflection(
+    _deps: _StubDeps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-data deflection must never reach the semantic cache — a cached
+    deflection gets re-served verbatim to reformulations of the question
+    (prod 2026-07-23: the 'transferencias a universidades' loop)."""
+    called = False
+
+    async def _capture_write_cache(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "app.application.pipeline.nodes.finalize.write_cache",
+        _capture_write_cache,
+    )
+
+    state = _make_state(no_data_deflection=True)
+    await finalize_node(state)  # type: ignore[arg-type]
+    assert not called, "no-data deflection was written to the cache"
+
+    state = _make_state(no_data_deflection=False)
+    await finalize_node(state)  # type: ignore[arg-type]
+    assert called, "regular answer must still be cached"
+
+
+@pytest.mark.asyncio
+async def test_finalize_logs_no_data_deflection_as_failure(
+    _deps: _StubDeps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Analytics must record a deflection as success=False with a distinct
+    marker; a non-empty deflection text used to be logged success=True."""
+    captured: dict[str, Any] = {}
+
+    async def _capture_analytics(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "app.application.pipeline.nodes.finalize.record_terminal_analytics",
+        _capture_analytics,
+    )
+
+    state = _make_state(no_data_deflection=True, clean_answer="OpenArg cubre ...")
+    await finalize_node(state)  # type: ignore[arg-type]
+    assert captured["success"] is False
+    assert captured["error_message"] == "no_data_deflection"
+
+    captured.clear()
+    state = _make_state(no_data_deflection=False)
+    await finalize_node(state)  # type: ignore[arg-type]
+    assert captured["success"] is True
+    assert captured["error_message"] is None

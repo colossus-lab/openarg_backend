@@ -51,7 +51,9 @@ def _slugify(value: str) -> str:
     return norm
 
 
-def _stable_discriminator(portal: str, source_id: str, *, length: int = DISCRIMINATOR_LENGTH) -> str:
+def _stable_discriminator(
+    portal: str, source_id: str, *, length: int = DISCRIMINATOR_LENGTH
+) -> str:
     """Stable hex digest used as the trailing identifier of a physical
     table name. `length` defaults to the module constant so callers
     that don't care keep working unchanged. PhysicalNamer overrides it
@@ -92,9 +94,7 @@ class PhysicalNamer:
         # Use the per-instance length so an override at __init__ actually
         # propagates. Without `length=`, the API exposed `discriminator_length`
         # but every call still produced an 8-char tail.
-        discriminator = _stable_discriminator(
-            portal, source_id, length=self._discriminator_length
-        )
+        discriminator = _stable_discriminator(portal, source_id, length=self._discriminator_length)
 
         # Reserve the discriminator suffix slot up front.
         suffix = f"{_DISCRIM_SEP}{discriminator}"
@@ -111,7 +111,7 @@ class PhysicalNamer:
         if _LEADING_DIGITS_RE.match(slug):
             # Shrink slug to make room
             slug = "t_" + slug
-            slug = slug[: budget].rstrip("_") or "t_x"
+            slug = slug[:budget].rstrip("_") or "t_x"
         name = f"{head}{slug}{suffix}"
         # Final safety clamp
         if len(name) > self._max_length:
@@ -141,10 +141,10 @@ def physical_table_name(portal: str, source_id: str, *, slug_hint: str = "") -> 
 _RAW_DISCRIM_SEP = "__"
 _RAW_VERSION_PREFIX = "__v"
 _RAW_BUDGET_RESERVE = (
-    len(_RAW_DISCRIM_SEP)         # before discriminator
-    + DISCRIMINATOR_LENGTH        # 8 chars hex
-    + len(_RAW_VERSION_PREFIX)    # 3 chars
-    + 3                           # version number budget (up to 999)
+    len(_RAW_DISCRIM_SEP)  # before discriminator
+    + DISCRIMINATOR_LENGTH  # 8 chars hex
+    + len(_RAW_VERSION_PREFIX)  # 3 chars
+    + 3  # version number budget (up to 999)
 )
 
 
@@ -208,9 +208,7 @@ class RawPhysicalNamer:
         portal_slug = _slugify(portal) or "unknown"
         slug_source = slug_hint or source_id
         slug = _slugify(slug_source) or "resource"
-        discriminator = _stable_discriminator(
-            portal, source_id, length=self._discriminator_length
-        )
+        discriminator = _stable_discriminator(portal, source_id, length=self._discriminator_length)
 
         version_suffix = f"{_RAW_VERSION_PREFIX}{version}"
         discrim_suffix = f"{_RAW_DISCRIM_SEP}{discriminator}"

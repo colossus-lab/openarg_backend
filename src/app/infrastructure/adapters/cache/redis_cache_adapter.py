@@ -31,3 +31,16 @@ class RedisCacheAdapter(ICacheService):
 
     async def exists(self, key: str) -> bool:
         return bool(await self._redis.exists(key))
+
+    async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
+        # H8 (round v46): atomic INCR + EXPIRE NX in a pipeline. The two
+        # commands fan out to Redis as a single round-trip; INCR is
+        # itself atomic on the Redis side; EXPIRE NX only sets the TTL
+        # when the key has none yet — so a steady stream of hits inside
+        # the window does NOT extend the expiry, and concurrent callers
+        # see strictly monotonic counts (no two-callers-bump-to-N race).
+        pipe = self._redis.pipeline()
+        pipe.incr(key, 1)
+        pipe.expire(key, ttl_seconds, nx=True)
+        results = await pipe.execute()
+        return int(results[0])

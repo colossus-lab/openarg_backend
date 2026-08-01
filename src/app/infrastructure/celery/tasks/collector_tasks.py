@@ -120,6 +120,7 @@ def _detect_format_from_bytes(path: str) -> str | None:
         pass
     return None
 
+
 # Domains with known SSL certificate issues (self-signed, missing intermediates).
 _DOMAINS_SKIP_SSL = frozenset(
     {
@@ -234,10 +235,10 @@ _COLLECT_MAX_INFLIGHT_PER_PORTAL = int(os.getenv("OPENARG_COLLECT_MAX_INFLIGHT_P
 # When the collector queue's inflight count crosses this threshold, route
 # part of the new dispatch wave to the heavy worker so the spare CPU on
 # `worker_collector_heavy` (~0.2% baseline) absorbs the overflow.
-_COLLECT_HEAVY_OVERFLOW_THRESHOLD = int(
-    os.getenv("OPENARG_COLLECT_HEAVY_OVERFLOW_THRESHOLD", "70")
+_COLLECT_HEAVY_OVERFLOW_THRESHOLD = int(os.getenv("OPENARG_COLLECT_HEAVY_OVERFLOW_THRESHOLD", "70"))
+_BULK_COLLECT_RETRY_DELAY_SECONDS = int(
+    os.getenv("OPENARG_BULK_COLLECT_RETRY_DELAY_SECONDS", "300")
 )
-_BULK_COLLECT_RETRY_DELAY_SECONDS = int(os.getenv("OPENARG_BULK_COLLECT_RETRY_DELAY_SECONDS", "300"))
 _BULK_COLLECT_MAX_CHAIN_DEPTH = int(os.getenv("OPENARG_BULK_COLLECT_MAX_CHAIN_DEPTH", "48"))
 _BULK_COLLECT_SOFT_TIME_LIMIT = int(os.getenv("OPENARG_BULK_COLLECT_SOFT_TIME_LIMIT", "600"))
 _BULK_COLLECT_TIME_LIMIT = int(os.getenv("OPENARG_BULK_COLLECT_TIME_LIMIT", "720"))
@@ -859,9 +860,7 @@ def _reconcile_cache_coverage(
         )
         false_positives_skipped = 0
         for row in orphaned_rows:
-            still_missing = conn.execute(
-                verify_sql, {"tn": row.table_name}
-            ).scalar()
+            still_missing = conn.execute(verify_sql, {"tn": row.table_name}).scalar()
             if not still_missing:
                 false_positives_skipped += 1
                 continue
@@ -1057,9 +1056,7 @@ def _create_alias_view(engine, alias_table_name: str, source_table_name: str) ->
         conn.execute(text(f'DROP VIEW IF EXISTS "{alias_table_name}" CASCADE'))  # noqa: S608
         conn.execute(text(f'DROP TABLE IF EXISTS "{alias_table_name}" CASCADE'))  # noqa: S608
         conn.execute(
-            text(
-                f'CREATE VIEW "{alias_table_name}" AS SELECT * FROM "{source_table_name}"'
-            )  # noqa: S608
+            text(f'CREATE VIEW "{alias_table_name}" AS SELECT * FROM "{source_table_name}"')  # noqa: S608
         )
 
 
@@ -1369,8 +1366,7 @@ def _read_shapefile_from_zip(zip_path: str) -> pd.DataFrame | None:
                     members_to_extract = [
                         name
                         for name in zf.namelist()
-                        if name.startswith(sibling_prefix)
-                        or name == shp_member
+                        if name.startswith(sibling_prefix) or name == shp_member
                     ]
                     for member in members_to_extract:
                         if member.endswith("/"):
@@ -1482,11 +1478,14 @@ def _zip_member_suffix(name: str) -> str:
 def _zip_structure_summary(member_names: list[str]) -> dict[str, Any]:
     file_members = [name for name in member_names if not name.endswith("/")]
     suffix_counter = Counter(_zip_member_suffix(name) or "<noext>" for name in file_members)
-    parseable_count = sum(1 for name in file_members if _zip_member_suffix(name) in _ZIP_PARSEABLE_SUFFIXES)
-    document_count = sum(1 for name in file_members if _zip_member_suffix(name) in _ZIP_DOCUMENT_SUFFIXES)
+    parseable_count = sum(
+        1 for name in file_members if _zip_member_suffix(name) in _ZIP_PARSEABLE_SUFFIXES
+    )
+    document_count = sum(
+        1 for name in file_members if _zip_member_suffix(name) in _ZIP_DOCUMENT_SUFFIXES
+    )
     directory_depths = [
-        max(0, len([part for part in name.split("/") if part]) - 1)
-        for name in file_members
+        max(0, len([part for part in name.split("/") if part]) - 1) for name in file_members
     ]
     max_depth = max(directory_depths, default=0)
     return {
@@ -1626,7 +1625,10 @@ def _parse_zip_archive(
             routed_status = None
         if routed_status:
             if routed_status == "resource_table_full":
-                return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+                return {
+                    "parsed": False,
+                    "result": {"dataset_id": dataset_id, "error": routed_status},
+                }
             return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
 
         _to_sql_safe(
@@ -1687,7 +1689,10 @@ def _parse_zip_archive(
             routed_status = None
         if routed_status:
             if routed_status == "resource_table_full":
-                return {"parsed": False, "result": {"dataset_id": dataset_id, "error": routed_status}}
+                return {
+                    "parsed": False,
+                    "result": {"dataset_id": dataset_id, "error": routed_status},
+                }
             return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
 
         row_count, columns, truncated = _load_csv_chunked(
@@ -1748,9 +1753,7 @@ def _parse_zip_archive(
             if ctype in _SUPPORTED_COMPRESS_TYPES:
                 member_names.append(nm)
             else:
-                skipped_compress_types[ctype] = (
-                    skipped_compress_types.get(ctype, 0) + 1
-                )
+                skipped_compress_types[ctype] = skipped_compress_types.get(ctype, 0) + 1
     except Exception:
         member_names = raw_member_names
     if skipped_compress_types:
@@ -1842,8 +1845,7 @@ def _parse_zip_archive(
             original_len = len(df)
             if original_len >= MAX_TABLE_ROWS:
                 sampled_note = (
-                    f"sampled: first {MAX_TABLE_ROWS} rows kept"
-                    f" (excel in zip, file may have more)"
+                    f"sampled: first {MAX_TABLE_ROWS} rows kept (excel in zip, file may have more)"
                 )
                 logger.warning(
                     "Dataset %s (zip/excel) truncated at %d rows",
@@ -1900,7 +1902,8 @@ def _parse_zip_archive(
                         best_len = 0
                         for k, v in raw_j.items():
                             if (
-                                isinstance(v, list) and v
+                                isinstance(v, list)
+                                and v
                                 and isinstance(v[0], dict)
                                 and len(v) > best_len
                             ):
@@ -1909,7 +1912,8 @@ def _parse_zip_archive(
                             elif isinstance(v, dict):
                                 for kk, vv in v.items():
                                     if (
-                                        isinstance(vv, list) and vv
+                                        isinstance(vv, list)
+                                        and vv
                                         and isinstance(vv[0], dict)
                                         and len(vv) > best_len
                                     ):
@@ -2062,7 +2066,11 @@ def _parse_zip_archive(
         primary = parsed_members[0]
         total_rows = sum(int(member.get("row_count", 0) or 0) for member in parsed_members)
         latest_sampled = next(
-            (member.get("sampled_note") for member in reversed(parsed_members) if member.get("sampled_note")),
+            (
+                member.get("sampled_note")
+                for member in reversed(parsed_members)
+                if member.get("sampled_note")
+            ),
             None,
         )
         return {
@@ -2099,7 +2107,9 @@ def _stream_download(
     total = 0
     # connect=30s, read=60s per chunk (not total). Celery soft_time_limit handles total.
     dl_timeout = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0)
-    with httpx.Client(timeout=dl_timeout, verify=verify_ssl, headers=_HTTP_HEADERS, max_redirects=10) as client:
+    with httpx.Client(
+        timeout=dl_timeout, verify=verify_ssl, headers=_HTTP_HEADERS, max_redirects=10
+    ) as client:
         with client.stream("GET", url, follow_redirects=True) as resp:
             resp.raise_for_status()
             content_length = int(resp.headers.get("content-length", 0) or 0)
@@ -2235,6 +2245,7 @@ def _sanitize_outer_quoted_lines(file_path: str, encoding: str) -> str:
     removed; embedded quotes (rare in this shape) pass through.
     """
     import tempfile
+
     sanitized = tempfile.NamedTemporaryFile(
         delete=False, suffix=".csv", mode="w", encoding="utf-8", newline=""
     )
@@ -2248,7 +2259,9 @@ def _sanitize_outer_quoted_lines(file_path: str, encoding: str) -> str:
     return sanitized.name
 
 
-def _read_csv_preview(file_path: str, *, nrows: int, csv_params: dict | None = None) -> pd.DataFrame:
+def _read_csv_preview(
+    file_path: str, *, nrows: int, csv_params: dict | None = None
+) -> pd.DataFrame:
     params = dict(csv_params) if csv_params is not None else _detect_csv_params(file_path)
     if params.pop("_outer_quoted_lines", False):
         file_path = _sanitize_outer_quoted_lines(
@@ -2344,9 +2357,7 @@ def _csv_load_inner(
             mode = "append"
         else:
             mode = "replace" if is_first else "append"
-        _to_sql_safe(
-            chunk_df, table_name, engine, schema=write_schema, if_exists=mode, index=False
-        )
+        _to_sql_safe(chunk_df, table_name, engine, schema=write_schema, if_exists=mode, index=False)
         total_rows += len(chunk_df)
         if is_first:
             columns = list(chunk_df.columns)
@@ -2768,7 +2779,9 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     df = _maybe_promote_header_row(df)
     df.columns = _make_unique_columns(df.columns)
-    df.attrs.setdefault("layout_profile", _infer_layout_profile(df).profile if not df.empty else _LAYOUT_SIMPLE)
+    df.attrs.setdefault(
+        "layout_profile", _infer_layout_profile(df).profile if not df.empty else _LAYOUT_SIMPLE
+    )
     df.attrs["header_quality"] = _header_quality_label(df.columns)
     # Sprint 1.7: layout flip uses _WIDE_LAYOUT_COLUMN_THRESHOLD (default
     # 50) instead of the heavy-queue routing threshold (600). 53 ready
@@ -2819,8 +2832,7 @@ def _detect_data_header_row(df_raw: pd.DataFrame, *, max_scan: int = 15) -> int:
         placeholder = sum(
             1
             for t in tokens
-            if t.lower().startswith("unnamed:")
-            or re.fullmatch(r"col_[0-9]+", t.lower())
+            if t.lower().startswith("unnamed:") or re.fullmatch(r"col_[0-9]+", t.lower())
         )
         alpha = sum(1 for t in tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t))
         if placeholder / max(nonempty, 1) >= 0.35:
@@ -2831,9 +2843,7 @@ def _detect_data_header_row(df_raw: pd.DataFrame, *, max_scan: int = 15) -> int:
     return 0
 
 
-def _detect_data_header_range(
-    df_raw: pd.DataFrame, *, max_scan: int = 15
-) -> tuple[int, int]:
+def _detect_data_header_range(df_raw: pd.DataFrame, *, max_scan: int = 15) -> tuple[int, int]:
     """Find header row(s); supports N-level multi-row headers from merged cells.
 
     Returns `(start, end)` where `end` is exclusive (slice-style).
@@ -2877,12 +2887,8 @@ def _detect_data_header_range(
         nonempty = sum(1 for t in tokens if t)
         if nonempty < max(2, int(ncols * 0.3)):
             continue
-        numeric = sum(
-            1 for t in tokens if re.fullmatch(r"-?\d+([.,]\d+)?", t)
-        )
-        alpha = sum(
-            1 for t in tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t)
-        )
+        numeric = sum(1 for t in tokens if re.fullmatch(r"-?\d+([.,]\d+)?", t))
+        alpha = sum(1 for t in tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t))
         # A data row dominates with numeric cells and may have 1-2 label
         # columns (year, period name, category). The threshold of
         # numeric > alpha + 1 lets through rows like
@@ -2924,9 +2930,7 @@ def _detect_data_header_range(
         top_filled = sum(1 for t in top_tokens if t)
         next_filled = sum(1 for t in next_tokens if t)
         # Parent row must have ≥2 alpha tokens (rules out single-cell titles)
-        top_alpha = sum(
-            1 for t in top_tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t)
-        )
+        top_alpha = sum(1 for t in top_tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t))
         if top_alpha < 2:
             continue
         # Parent row must NOT be a single-cell title and must have gaps
@@ -2939,16 +2943,12 @@ def _detect_data_header_range(
         if next_filled <= top_filled:
             continue
         gaps_filled_by_next = sum(
-            1
-            for col in range(ncols)
-            if not top_tokens[col] and next_tokens[col]
+            1 for col in range(ncols) if not top_tokens[col] and next_tokens[col]
         )
         if gaps_filled_by_next < max(2, int(ncols * 0.3)):
             continue
         # Child row must look like a header (alpha labels), not data
-        next_alpha = sum(
-            1 for t in next_tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t)
-        )
+        next_alpha = sum(1 for t in next_tokens if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", t))
         if next_alpha < 1:
             continue
         # Reject when the "child" row has too many numeric cells —
@@ -2957,9 +2957,7 @@ def _detect_data_header_range(
         # alpha cells are >0 and child has the alpha label too.
         # A row like ["Total", "Total", "Total", "2143", "907", "1236"]
         # has 3 numeric cells = 50 % of ncols → rejected.
-        next_numeric = sum(
-            1 for t in next_tokens if re.fullmatch(r"-?\d+([.,]\d+)?", t)
-        )
+        next_numeric = sum(1 for t in next_tokens if re.fullmatch(r"-?\d+([.,]\d+)?", t))
         if next_numeric > max(2, int(ncols * 0.3)):
             continue
         # Heavy duplicates in child are NOT a rejection signal on their
@@ -2976,9 +2974,7 @@ def _detect_data_header_range(
     return start, start + 1
 
 
-def _combine_multirow_header(
-    df_raw: pd.DataFrame, start: int, end: int
-) -> list[str]:
+def _combine_multirow_header(df_raw: pd.DataFrame, start: int, end: int) -> list[str]:
     """Build column names from one or more header rows.
 
     Single-row case is a no-op (just the row tokens). Multi-row case
@@ -2989,9 +2985,7 @@ def _combine_multirow_header(
     `Total_Total`). Empty results fall back to `col_N`.
     """
     if end <= start + 1:
-        return [
-            _normalize_header_token(v) for v in df_raw.iloc[start].tolist()
-        ]
+        return [_normalize_header_token(v) for v in df_raw.iloc[start].tolist()]
 
     rows: list[list[str]] = []
     for i in range(start, end):
@@ -3014,9 +3008,7 @@ def _combine_multirow_header(
     combined: list[str] = []
     ncols = max(len(r) for r in rows) if rows else 0
     for col in range(ncols):
-        parts = [
-            rows[r][col] for r in range(len(rows)) if col < len(rows[r]) and rows[r][col]
-        ]
+        parts = [rows[r][col] for r in range(len(rows)) if col < len(rows[r]) and rows[r][col]]
         # Drop adjacent duplicates: parent and child with same token
         # collapse to a single token, not `Total_Total`.
         deduped: list[str] = []
@@ -3072,8 +3064,7 @@ def _normalize_string_nan(df: pd.DataFrame) -> pd.DataFrame:
         sentinels = {
             v: pd.NA
             for v in col.dropna().unique()
-            if isinstance(v, str)
-            and v.strip().lower() in _STRING_NAN_TOKENS
+            if isinstance(v, str) and v.strip().lower() in _STRING_NAN_TOKENS
         }
         if sentinels:
             replacements[c] = sentinels
@@ -3212,9 +3203,7 @@ def _read_excel_frame(source, *, nrows: int, **kwargs) -> pd.DataFrame:
         return _post_parse_normalize(df)
     if _header_quality_label(retry.columns) == _HEADER_INVALID:
         return _post_parse_normalize(df)
-    logger.info(
-        "Excel header auto-detected at row %d (was invalid at row 0)", start
-    )
+    logger.info("Excel header auto-detected at row %d (was invalid at row 0)", start)
     return _post_parse_normalize(retry)
 
 
@@ -3398,9 +3387,7 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                     )
                     if tx.is_active:
                         tx.rollback()
-                    drop_qualified = (
-                        f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
-                    )
+                    drop_qualified = f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
                     _record_cache_drop(
                         engine,
                         table_name=f"{schema}.{table_name}" if schema else table_name,
@@ -3409,7 +3396,7 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                         extra={"exc": str(exc)[:300]},
                     )
                     with engine.begin() as reset_conn:
-                        reset_conn.execute(text(f'DROP TABLE IF EXISTS {drop_qualified} CASCADE'))  # noqa: S608
+                        reset_conn.execute(text(f"DROP TABLE IF EXISTS {drop_qualified} CASCADE"))  # noqa: S608
                     retry_kwargs = dict(kwargs)
                     retry_kwargs["if_exists"] = "replace"
                     # Force a hard dedup before the retry: `_sanitize_columns`
@@ -3470,7 +3457,9 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                 # Materialisation lock leak — surface as warning so the
                 # next collect_dataset for the same table doesn't loop on
                 # `already_collecting` waiting for the conn to GC.
-                logger.warning("Could not release materialization lock for %s", table_name, exc_info=True)
+                logger.warning(
+                    "Could not release materialization lock for %s", table_name, exc_info=True
+                )
 
 
 def _get_table_row_count(engine, table_name: str) -> int:
@@ -3561,7 +3550,11 @@ def _load_csv_chunked(
     Stops after ``MAX_TABLE_ROWS`` rows.
     `write_schema` selects medallion layer; defaults to legacy `public`.
     """
-    csv_params = dict(csv_params_override) if csv_params_override is not None else _detect_csv_params(file_path)
+    csv_params = (
+        dict(csv_params_override)
+        if csv_params_override is not None
+        else _detect_csv_params(file_path)
+    )
     if csv_params.pop("_outer_quoted_lines", False):
         file_path = _sanitize_outer_quoted_lines(
             file_path, encoding=csv_params.get("encoding", "utf-8")
@@ -3803,7 +3796,9 @@ def _load_json_record_map_chunked(
     return total_rows, columns, current_table, append_mode, sampled_note
 
 
-def _prune_open_cached_entries(engine, dataset_id: str, *, keep_table_name: str | None = None) -> None:
+def _prune_open_cached_entries(
+    engine, dataset_id: str, *, keep_table_name: str | None = None
+) -> None:
     """Delete duplicate open cached_datasets rows for one dataset.
 
     Keep terminal history and ready rows untouched; only collapse the noisy
@@ -4105,9 +4100,7 @@ def _materialization_outcome_for_ready(
             "separator_mismatch",
         }
         cached_status = (
-            "error"
-            if ws0_finding.detector_name in retryable_detectors
-            else "permanently_failed"
+            "error" if ws0_finding.detector_name in retryable_detectors else "permanently_failed"
         )
         return _CollectorRunOutcome(
             result_kind=_OUTCOME_PARSER_INVALID,
@@ -4162,7 +4155,9 @@ def _materialization_outcome_for_ready(
     )
 
 
-def _classify_collect_exception(exc: Exception, *, heavy_execution: bool, current_queue: str | None) -> _CollectorRunOutcome:
+def _classify_collect_exception(
+    exc: Exception, *, heavy_execution: bool, current_queue: str | None
+) -> _CollectorRunOutcome:
     exc_str = str(exc)
     lowered = exc_str.lower()
 
@@ -4195,7 +4190,9 @@ def _classify_collect_exception(exc: Exception, *, heavy_execution: bool, curren
     )
     if non_retryable:
         result_kind = (
-            _OUTCOME_TERMINAL_NON_TABULAR if _is_non_tabular_error_message(exc_str) else _OUTCOME_TERMINAL_UPSTREAM
+            _OUTCOME_TERMINAL_NON_TABULAR
+            if _is_non_tabular_error_message(exc_str)
+            else _OUTCOME_TERMINAL_UPSTREAM
         )
         return _CollectorRunOutcome(
             result_kind=result_kind,
@@ -4372,9 +4369,7 @@ def _classify_error_category(
 
     # Network / HTTP (extended: SSL failures are network-level)
     if "ssl" in msg and (
-        "record layer failure" in msg
-        or "verification" in msg
-        or "handshake" in msg
+        "record layer failure" in msg or "verification" in msg or "handshake" in msg
     ):
         return "download_network"
     if "403 forbidden" in msg or "401 unauthorized" in msg:
@@ -4383,7 +4378,9 @@ def _classify_error_category(
         return "download_http_error"
     if "exceeded maximum allowed redirects" in msg or "toomanyredirects" in msg:
         return "download_http_error"
-    if "5" in msg and ("server error" in msg or " 500" in msg or " 502" in msg or " 503" in msg or " 504" in msg):
+    if "5" in msg and (
+        "server error" in msg or " 500" in msg or " 502" in msg or " 503" in msg or " 504" in msg
+    ):
         return "download_http_error"
     if "name or service not known" in msg or "no route to host" in msg:
         return "download_network"
@@ -4484,9 +4481,7 @@ _RAW_SCHEMA_ALLOWED = frozenset({"raw"})
 #
 # When the ContextVar is set, `_to_sql_safe(schema=None, ...)` falls back
 # to it. Explicit `schema=` kwargs always win.
-_current_write_schema: ContextVar[str | None] = ContextVar(
-    "_current_write_schema", default=None
-)
+_current_write_schema: ContextVar[str | None] = ContextVar("_current_write_schema", default=None)
 
 
 @dataclass(frozen=True)
@@ -4932,7 +4927,9 @@ def _apply_cached_outcome(
     raw_finalized = False
     if raw_promotion_attempted:
         try:
-            assert raw_schema is not None and raw_version is not None and resource_identity is not None  # for mypy
+            assert (
+                raw_schema is not None and raw_version is not None and resource_identity is not None
+            )  # for mypy
             # Single-transaction atomic promotion: rtv INSERT + catalog
             # UPDATE share one engine.begin() so a partial failure
             # cannot leave them out of sync (Sprint 0.6 used 2 separate
@@ -5110,7 +5107,9 @@ def _apply_cached_outcome(
                 },
             )
             current = conn.execute(
-                text("SELECT COALESCE(MAX(retry_count), 0) AS retry_count FROM raw.cached_datasets WHERE dataset_id = CAST(:did AS uuid)"),
+                text(
+                    "SELECT COALESCE(MAX(retry_count), 0) AS retry_count FROM raw.cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
+                ),
                 {"did": dataset_id},
             ).fetchone()
             retry_count = int(current.retry_count) if current else 0
@@ -5169,10 +5168,10 @@ def _apply_cached_outcome(
         # produce ONE refresh per mart, not 50. Trade: a refresh can be
         # delayed up to 120s after the last landing — acceptable for a
         # mart layer.
-        if (
-            raw_finalized
-            and os.getenv("OPENARG_AUTO_REFRESH_MARTS", "0").lower()
-            in ("1", "true", "yes")
+        if raw_finalized and os.getenv("OPENARG_AUTO_REFRESH_MARTS", "0").lower() in (
+            "1",
+            "true",
+            "yes",
         ):
             try:
                 # Import inside the branch to avoid the circular dep at
@@ -5223,9 +5222,7 @@ def _apply_cached_outcome(
                     enrich_single_table,
                 )
 
-                qualified = (
-                    f"{raw_schema}.{table_name}" if raw_schema else table_name
-                )
+                qualified = f"{raw_schema}.{table_name}" if raw_schema else table_name
                 enrich_single_table.apply_async(
                     args=[qualified],
                     queue="embedding",
@@ -5284,9 +5281,8 @@ def _finalize_cached_dataset(
         declared_size_bytes=declared_size_bytes,
         columns_json=columns_json,
     )
-    resolved_layout_profile = (
-        layout_profile
-        or (_LAYOUT_WIDE if len(normalized_columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
+    resolved_layout_profile = layout_profile or (
+        _LAYOUT_WIDE if len(normalized_columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE
     )
     resolved_header_quality = header_quality or _header_quality_label(normalized_columns)
     outcome = _materialization_outcome_for_ready(
@@ -5457,7 +5453,7 @@ def _route_table_for_schema(
             already_appended = conn.execute(
                 text(
                     f'SELECT EXISTS(SELECT 1 FROM "{schema_name}"."{bare_name}" '
-                    f'WHERE _source_dataset_id = :did LIMIT 1)'
+                    f"WHERE _source_dataset_id = :did LIMIT 1)"
                 ),  # noqa: S608
                 {"did": dataset_id},
             ).scalar()
@@ -5566,20 +5562,20 @@ def _update_row_count_after_append(engine, table_name: str):
 # Heavy caps are set so that worst-case RAM stays under 1.2 GB
 # (leaving headroom for OS + other in-flight tasks in the same worker).
 _DOWNLOAD_SIZE_CAPS_NORMAL_BYTES = {
-    "zip": int(os.getenv("OPENARG_MAX_DOWNLOAD_ZIP_BYTES", "200000000")),         # 200 MB
-    "xlsx": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLSX_BYTES", "100000000")),       # 100 MB
-    "xls": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLS_BYTES", "80000000")),          # 80 MB
-    "csv": int(os.getenv("OPENARG_MAX_DOWNLOAD_CSV_BYTES", "500000000")),         # 500 MB
-    "json": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),       # 100 MB
-    "geojson": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),    # 100 MB
+    "zip": int(os.getenv("OPENARG_MAX_DOWNLOAD_ZIP_BYTES", "200000000")),  # 200 MB
+    "xlsx": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLSX_BYTES", "100000000")),  # 100 MB
+    "xls": int(os.getenv("OPENARG_MAX_DOWNLOAD_XLS_BYTES", "80000000")),  # 80 MB
+    "csv": int(os.getenv("OPENARG_MAX_DOWNLOAD_CSV_BYTES", "500000000")),  # 500 MB
+    "json": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),  # 100 MB
+    "geojson": int(os.getenv("OPENARG_MAX_DOWNLOAD_JSON_BYTES", "100000000")),  # 100 MB
 }
 _DOWNLOAD_SIZE_CAPS_HEAVY_BYTES = {
-    "zip": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_ZIP_BYTES", "2000000000")),     # 2 GB
-    "xlsx": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_XLSX_BYTES", "500000000")),    # 500 MB
-    "xls": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_XLS_BYTES", "400000000")),      # 400 MB
-    "csv": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_CSV_BYTES", "3000000000")),     # 3 GB
-    "json": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_JSON_BYTES", "500000000")),    # 500 MB
-    "geojson": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_JSON_BYTES", "500000000")), # 500 MB
+    "zip": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_ZIP_BYTES", "2000000000")),  # 2 GB
+    "xlsx": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_XLSX_BYTES", "500000000")),  # 500 MB
+    "xls": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_XLS_BYTES", "400000000")),  # 400 MB
+    "csv": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_CSV_BYTES", "3000000000")),  # 3 GB
+    "json": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_JSON_BYTES", "500000000")),  # 500 MB
+    "geojson": int(os.getenv("OPENARG_HEAVY_MAX_DOWNLOAD_JSON_BYTES", "500000000")),  # 500 MB
 }
 _DOWNLOAD_SIZE_CAP_NORMAL_DEFAULT = int(
     os.getenv("OPENARG_MAX_DOWNLOAD_DEFAULT_BYTES", "200000000")
@@ -5589,9 +5585,7 @@ _DOWNLOAD_SIZE_CAP_HEAVY_DEFAULT = int(
 )
 # Threshold to route to heavy worker (with bigger memory). Below this
 # the default collector is fine. Above this → heavy queue.
-_DOWNLOAD_HEAVY_ROUTE_BYTES = int(
-    os.getenv("OPENARG_HEAVY_ROUTE_BYTES", "50000000")
-)
+_DOWNLOAD_HEAVY_ROUTE_BYTES = int(os.getenv("OPENARG_HEAVY_ROUTE_BYTES", "50000000"))
 
 # Portals that consistently OOM the normal worker (large shapefiles, GIS
 # bundles, etc.) bypass HEAD probe and route unconditionally to heavy.
@@ -5622,7 +5616,10 @@ def _probe_download_size(url: str, *, timeout: float = 10.0) -> int | None:
         return None
     try:
         import httpx
-        with httpx.Client(follow_redirects=True, timeout=timeout, headers=_HTTP_HEADERS, max_redirects=10) as client:
+
+        with httpx.Client(
+            follow_redirects=True, timeout=timeout, headers=_HTTP_HEADERS, max_redirects=10
+        ) as client:
             resp = client.head(url)
             if resp.status_code >= 400:
                 return None
@@ -5825,7 +5822,10 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             if probed_size > heavy_cap:
                 logger.warning(
                     "Dataset %s file size %d bytes exceeds HEAVY cap %d for format %s",
-                    dataset_id, probed_size, heavy_cap, fmt,
+                    dataset_id,
+                    probed_size,
+                    heavy_cap,
+                    fmt,
                 )
                 with engine.begin() as conn:
                     conn.execute(
@@ -5852,16 +5852,13 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     "size": probed_size,
                 }
             if not _is_heavy_execution() and (
-                probed_size > normal_cap
-                or probed_size > _DOWNLOAD_HEAVY_ROUTE_BYTES
+                probed_size > normal_cap or probed_size > _DOWNLOAD_HEAVY_ROUTE_BYTES
             ):
                 # On normal queue and the file exceeds the normal cap
                 # (would SIGKILL during parse) OR the route threshold
                 # (50 MB — small enough to fit normal but heavy worker
                 # has more headroom). Reroute to heavy.
-                return _reroute_to_heavy(
-                    f"size_route:{probed_size}_bytes"
-                )
+                return _reroute_to_heavy(f"size_route:{probed_size}_bytes")
 
         # Resource staging is the primary materialization path: each dataset gets its own table.
         append_mode = False
@@ -6031,7 +6028,8 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 if _actual_fmt == "xlsx":
                     logger.info(
                         "Dataset %s declared as %s but bytes are ZIP — re-routing to zip branch",
-                        dataset_id, fmt,
+                        dataset_id,
+                        fmt,
                     )
                     fmt = "zip"
 
@@ -6280,8 +6278,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
 
             elif fmt == "json":
                 file_size = os.path.getsize(tmp_path)
-                if file_size >= _JSON_RECORD_MAP_STREAM_THRESHOLD_BYTES and _looks_like_json_record_map(
-                    tmp_path
+                if (
+                    file_size >= _JSON_RECORD_MAP_STREAM_THRESHOLD_BYTES
+                    and _looks_like_json_record_map(tmp_path)
                 ):
                     try:
                         row_count, columns, table_name, append_mode, streamed_sampled = (
@@ -6321,7 +6320,8 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     best_len = 0
                                     for k, v in raw.items():
                                         if (
-                                            isinstance(v, list) and v
+                                            isinstance(v, list)
+                                            and v
                                             and isinstance(v[0], dict)
                                             and len(v) > best_len
                                         ):
@@ -6330,7 +6330,8 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                         elif isinstance(v, dict):
                                             for kk, vv in v.items():
                                                 if (
-                                                    isinstance(vv, list) and vv
+                                                    isinstance(vv, list)
+                                                    and vv
                                                     and isinstance(vv[0], dict)
                                                     and len(vv) > best_len
                                                 ):
@@ -6367,9 +6368,25 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                             return {"dataset_id": dataset_id, "error": routed_status}
                         return {"dataset_id": dataset_id, "status": routed_status}
                     if append_mode:
-                        _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
+                        _collect_write_chunk(
+                            df,
+                            table_name,
+                            engine,
+                            write_schema=write_schema,
+                            source_url=download_url,
+                            if_exists="append",
+                            index=False,
+                        )
                     else:
-                        _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
+                        _collect_write_chunk(
+                            df,
+                            table_name,
+                            engine,
+                            write_schema=write_schema,
+                            source_url=download_url,
+                            if_exists="replace",
+                            index=False,
+                        )
                     row_count, columns = len(df), list(df.columns)
 
             elif fmt == "geojson":
@@ -6406,9 +6423,25 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="append",
+                        index=False,
+                    )
                 else:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="replace",
+                        index=False,
+                    )
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt in ("xlsx", "xls"):
@@ -6423,10 +6456,12 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 if actual_fmt == "html":
                     logger.warning(
                         "Dataset %s declared as %s but bytes are HTML — likely error page",
-                        dataset_id, fmt,
+                        dataset_id,
+                        fmt,
                     )
                     _set_error_status(
-                        engine, dataset_id,
+                        engine,
+                        dataset_id,
                         "ingestion_validation_failed:html_as_data",
                         table_name=table_name,
                     )
@@ -6434,7 +6469,8 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 if actual_fmt == "csv":
                     logger.info(
                         "Dataset %s declared as %s but bytes are CSV — re-routing",
-                        dataset_id, fmt,
+                        dataset_id,
+                        fmt,
                     )
                     fmt = "csv"
                     # Fall through to the next iteration's CSV branch
@@ -6450,13 +6486,17 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         # file is actually a ZIP-based modern Excel).
                         logger.info(
                             "Dataset %s magic-byte format=%s overrides declared %s",
-                            dataset_id, actual_fmt, fmt,
+                            dataset_id,
+                            actual_fmt,
+                            fmt,
                         )
                     try:
                         df = _read_excel_frame(tmp_path, nrows=MAX_TABLE_ROWS)
                     except ValueError as exc:
                         if str(exc) == "excel_no_worksheets":
-                            logger.warning("Dataset %s: Excel workbook has no worksheets", dataset_id)
+                            logger.warning(
+                                "Dataset %s: Excel workbook has no worksheets", dataset_id
+                            )
                             _set_error_status(
                                 engine,
                                 dataset_id,
@@ -6487,9 +6527,25 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="append",
+                        index=False,
+                    )
                 else:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="replace",
+                        index=False,
+                    )
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "pdf":
@@ -6503,24 +6559,23 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     parse_pdf_file,
                     unpivot_if_time_pivoted,
                 )
+
                 try:
                     pdf_df = parse_pdf_file(tmp_path)
                 except PdfParserError as exc:
-                    logger.warning(
-                        "Dataset %s: PDF parse failed: %s", dataset_id, exc
-                    )
+                    logger.warning("Dataset %s: PDF parse failed: %s", dataset_id, exc)
                     _set_error_status(
-                        engine, dataset_id,
+                        engine,
+                        dataset_id,
                         "ingestion_pdf_parse_failed",
                         table_name=table_name,
                     )
                     return {"error": "pdf_parse_failed"}
                 if pdf_df is None or pdf_df.empty:
-                    logger.info(
-                        "Dataset %s: PDF has no extractable tables", dataset_id
-                    )
+                    logger.info("Dataset %s: PDF has no extractable tables", dataset_id)
                     _set_error_status(
-                        engine, dataset_id,
+                        engine,
+                        dataset_id,
                         "policy_non_tabular",
                         table_name=table_name,
                     )
@@ -6533,9 +6588,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 pdf_df = _post_parse_normalize(pdf_df)
                 df = pdf_df
                 if len(df) >= MAX_TABLE_ROWS:
-                    sampled_note = (
-                        f"sampled: first {MAX_TABLE_ROWS} rows kept (PDF may have more)"
-                    )
+                    sampled_note = f"sampled: first {MAX_TABLE_ROWS} rows kept (PDF may have more)"
                     logger.warning(
                         "Dataset %s (pdf) truncated at %d rows",
                         dataset_id,
@@ -6555,9 +6608,25 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="append",
+                        index=False,
+                    )
                 else:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="replace",
+                        index=False,
+                    )
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "ods":
@@ -6584,9 +6653,25 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="append",
+                        index=False,
+                    )
                 else:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="replace",
+                        index=False,
+                    )
                 row_count, columns = len(df), list(df.columns)
 
             elif fmt == "xml":
@@ -6620,9 +6705,25 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         return {"dataset_id": dataset_id, "error": routed_status}
                     return {"dataset_id": dataset_id, "status": routed_status}
                 if append_mode:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="append", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="append",
+                        index=False,
+                    )
                 else:
-                    _collect_write_chunk(df, table_name, engine, write_schema=write_schema, source_url=download_url, if_exists="replace", index=False)
+                    _collect_write_chunk(
+                        df,
+                        table_name,
+                        engine,
+                        write_schema=write_schema,
+                        source_url=download_url,
+                        if_exists="replace",
+                        index=False,
+                    )
                 row_count, columns = len(df), list(df.columns)
 
             else:
@@ -6741,7 +6842,8 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     size_bytes=file_size,
                                     source_url=download_url,
                                     parser_version=_DEFAULT_PARSER_VERSION,
-                                    collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
+                                    collector_version=os.getenv("OPENARG_COLLECTOR_VERSION")
+                                    or None,
                                 )
                             except Exception:
                                 logger.warning(
@@ -6751,7 +6853,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     dataset_id,
                                     exc_info=True,
                                 )
-                    row_count = sum(int(member.get("row_count", 0) or 0) for member in member_tables)
+                    row_count = sum(
+                        int(member.get("row_count", 0) or 0) for member in member_tables
+                    )
                     sampled_note = next(
                         (
                             member.get("sampled_note")
@@ -6808,7 +6912,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             finalize_layout_profile = (
                 (getattr(df, "attrs", {}) or {}).get("layout_profile")
                 if "df" in locals()
-                else (_LAYOUT_WIDE if len(columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE)
+                else (
+                    _LAYOUT_WIDE if len(columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE
+                )
             )
             finalize_header_quality = (
                 (getattr(df, "attrs", {}) or {}).get("header_quality")
@@ -6852,7 +6958,9 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             _ensure_postgis_geom(engine, table_name, columns)
 
             previous_table_name = previous_cache_state.table_name if previous_cache_state else None
-            previous_row_count = previous_cache_state.cached_row_count if previous_cache_state else None
+            previous_row_count = (
+                previous_cache_state.cached_row_count if previous_cache_state else None
+            )
             previous_columns_json = (
                 previous_cache_state.columns_json if previous_cache_state else None
             )
@@ -6955,10 +7063,15 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 total_ms,
                 str(exc)[:200],
             )
-            _set_error_status(engine, dataset_id, outcome.error_message or str(exc)[:500], table_name=table_name)
+            _set_error_status(
+                engine, dataset_id, outcome.error_message or str(exc)[:500], table_name=table_name
+            )
             return {"error": "non_retryable"}
 
-        if outcome.cached_status == "pending" and outcome.result_kind == _OUTCOME_RETRYABLE_UPSTREAM:
+        if (
+            outcome.cached_status == "pending"
+            and outcome.result_kind == _OUTCOME_RETRYABLE_UPSTREAM
+        ):
             backoff = min(60 * (2**self.request.retries), 600)
             jitter = random.uniform(0, backoff * 0.3)
             countdown = int(backoff + jitter)
@@ -7020,13 +7133,15 @@ def _mart_rebuild_in_progress(engine) -> bool:
         return False
     try:
         with engine.connect() as conn:
-            rows = conn.execute(text(
-                "SELECT 1 FROM pg_stat_activity "
-                "WHERE state = 'active' "
-                "  AND pid <> pg_backend_pid() "
-                "  AND query ~* 'CREATE MATERIALIZED VIEW|REFRESH MATERIALIZED VIEW' "
-                "LIMIT 1"
-            )).fetchall()
+            rows = conn.execute(
+                text(
+                    "SELECT 1 FROM pg_stat_activity "
+                    "WHERE state = 'active' "
+                    "  AND pid <> pg_backend_pid() "
+                    "  AND query ~* 'CREATE MATERIALIZED VIEW|REFRESH MATERIALIZED VIEW' "
+                    "LIMIT 1"
+                )
+            ).fetchall()
         return bool(rows)
     except Exception:
         logger.debug("mart-rebuild backpressure check failed", exc_info=True)
@@ -7217,9 +7332,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         # keeps the heavy worker reserved for genuinely heavy datasets when
         # the normal queue is healthy; it only kicks in once the normal
         # queue is past `_COLLECT_HEAVY_OVERFLOW_THRESHOLD` inflight tasks.
-        _heavy_overflow_active = (
-            inflight_total >= _COLLECT_HEAVY_OVERFLOW_THRESHOLD
-        )
+        _heavy_overflow_active = inflight_total >= _COLLECT_HEAVY_OVERFLOW_THRESHOLD
         tasks = [
             _collect_dataset_signature(
                 str(_row_value(row, "id", 0)),
@@ -7299,9 +7412,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
                 _COLLECT_MAX_INFLIGHT_PER_PORTAL
                 - inflight_by_portal.get(portal_key, 0)
                 - sum(
-                    1
-                    for row in selected_rows
-                    if str(_row_value(row, "portal", 1)) == portal_key
+                    1 for row in selected_rows if str(_row_value(row, "portal", 1)) == portal_key
                 ),
                 0,
             )
@@ -7339,8 +7450,7 @@ def bulk_collect_all(self, portal: str | None = None, chain_depth: int = 0):
         if not immediate_continue:
             remaining = _count_bulk_collect_remaining(engine, portal=portal)
             should_continue = (
-                remaining["eligible_individual"] > 0
-                or remaining["eligible_groups"] > 0
+                remaining["eligible_individual"] > 0 or remaining["eligible_groups"] > 0
             )
 
         followup_scheduled = False
@@ -7687,6 +7797,7 @@ def recover_stuck_tasks(self):
                     # the table. Re-check after a short pause; if it
                     # reappeared, this row was a victim of the race.
                     import time as _t
+
                     _t.sleep(0.2)
                     table_exists_recheck = conn.execute(
                         text(
@@ -7883,9 +7994,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
         # Phase 1: ANALYZE all live tables (refresh planner stats)
         for schema, table in live:
             try:
-                with engine.connect().execution_options(
-                    isolation_level="AUTOCOMMIT"
-                ) as conn:
+                with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                     conn.execute(text(f'ANALYZE "{schema}"."{table}"'))
                 stats["analyzed"] += 1
             except Exception:
@@ -7997,7 +8106,9 @@ def audit_cache_coverage():
             )
             permanently_failed = (
                 conn.execute(
-                    text("SELECT COUNT(*) FROM raw.cached_datasets WHERE status = 'permanently_failed'")
+                    text(
+                        "SELECT COUNT(*) FROM raw.cached_datasets WHERE status = 'permanently_failed'"
+                    )
                 ).scalar()
                 or 0
             )

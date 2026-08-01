@@ -113,6 +113,7 @@ def get_sync_engine() -> Engine:
                 )
             finally:
                 cursor.close()
+
     return _engine
 
 
@@ -298,9 +299,7 @@ def _trigger_marts_for_portal(engine: Engine, resource_identity: str) -> None:
         # would create a cycle.
         from app.infrastructure.celery.tasks.mart_tasks import refresh_mart
     except Exception:
-        _logger.debug(
-            "Could not import refresh_mart; skipping auto-refresh", exc_info=True
-        )
+        _logger.debug("Could not import refresh_mart; skipping auto-refresh", exc_info=True)
         return
 
     import time as _time
@@ -463,9 +462,7 @@ def safe_truncate_table(engine: Engine, table_name: str) -> None:
     here means upstream gave us something genuinely unsafe.
     """
     if not _VALID_TABLE_NAME.match(table_name):
-        raise ValueError(
-            f"Refusing to TRUNCATE {table_name!r}: name fails identifier guard"
-        )
+        raise ValueError(f"Refusing to TRUNCATE {table_name!r}: name fails identifier guard")
     with engine.begin() as conn:
         # quote_ident-equivalent: the regex above already rejects backticks
         # and double quotes, so the literal `"…"` wrapper is purely cosmetic

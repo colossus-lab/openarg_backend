@@ -128,7 +128,9 @@ def mart_coverage(hours: int = Query(168, ge=1, le=720)) -> dict:
     )
     by_route = {bool(r["mart_used"]): r for r in raw}
     mart = by_route.get(True, {"queries": 0, "successes": 0, "success_rate": 0.0, "avg_rows": 0.0})
-    raw_route = by_route.get(False, {"queries": 0, "successes": 0, "success_rate": 0.0, "avg_rows": 0.0})
+    raw_route = by_route.get(
+        False, {"queries": 0, "successes": 0, "success_rate": 0.0, "avg_rows": 0.0}
+    )
     return {"hours": hours, "mart": mart, "raw": raw_route}
 
 

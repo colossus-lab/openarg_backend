@@ -28,6 +28,13 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 
 
+# Below this planner estimate the sweep pays for an exact `COUNT(*)`. The
+# `row_count` detector calls 0 rows CRITICAL, so the bottom of the range is
+# where an estimate would invent or hide a finding; above it, the detector
+# only ever asks whether the count is within 50% of the declared one.
+_EXACT_COUNT_BELOW = 1000
+
+
 def _batch_size() -> int:
     try:
         return int(os.getenv("OPENARG_SWEEP_BATCH_SIZE", "500"))
@@ -130,44 +137,145 @@ def _split_qualified_name(table_name: str) -> tuple[str, str]:
     return schema.strip('"'), rest.strip('"')
 
 
-def _materialized_columns(engine, table_name: str) -> list[str]:
-    if not table_name:
+# Where an unqualified `cached_datasets.table_name` can actually live. The
+# split above answers `public` for those, which was true when `cache_*` sat in
+# the public schema and has not been true for a while: measured 2026-07-31, all
+# 25288 ready rows carry an unqualified name and all 25288 relations are in
+# `raw`. Resolving against the wrong schema returned no columns, so the sweep
+# has been walking its whole inventory and validating almost none of it —
+# silently, because "no columns" produced no findings rather than an error.
+# `raw` first, since that is where they are; `public` kept for the legacy shape.
+_CANDIDATE_SCHEMAS = ("raw", "public")
+
+
+def _resolve_columns(cols_by_key: dict[tuple[str, str], list[str]], table_name: str) -> list[str]:
+    """Columns for a relation, trying the named schema then the real ones."""
+    schema, bare = _split_qualified_name(table_name or "")
+    if not bare:
         return []
-    schema, bare = _split_qualified_name(table_name)
+    found = cols_by_key.get((schema, bare))
+    if found:
+        return found
+    for candidate in _CANDIDATE_SCHEMAS:
+        found = cols_by_key.get((candidate, bare))
+        if found:
+            return found
+    return []
+
+
+def _resolve_row_count(
+    counts_by_key: dict[tuple[str, str], int | None], table_name: str
+) -> int | None:
+    """Row count for a relation, resolved the same way as its columns."""
+    schema, bare = _split_qualified_name(table_name or "")
+    if not bare:
+        return None
+    for key in ((schema, bare), *((c, bare) for c in _CANDIDATE_SCHEMAS)):
+        if key in counts_by_key:
+            return counts_by_key[key]
+    return None
+
+
+def _columns_for_batch(engine, table_names: list[str]) -> dict[tuple[str, str], list[str]]:
+    """Column lists for a whole batch in one query, keyed by `(schema, name)`.
+
+    Was one connection and one `information_schema` query per table. Over the
+    27.7k relations this sweep walks that is 27.7k round trips before any
+    detector runs, and the task was dying on its 600s soft limit every single
+    run — so the tail of the inventory was never validated at all.
+    """
+    pairs = [_split_qualified_name(t) for t in table_names if t]
+    if not pairs:
+        return {}
+    # Search the schemas the names claim AND the ones relations actually live
+    # in, because for unqualified names those are not the same set — see
+    # `_CANDIDATE_SCHEMAS`. `_resolve_columns` picks between the results.
+    schemas = sorted({s for s, _ in pairs} | set(_CANDIDATE_SCHEMAS))
+    bares = sorted({b for _, b in pairs})
+    out: dict[tuple[str, str], list[str]] = {}
     try:
         with engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = :tn AND table_schema = :sch "
-                    "ORDER BY ordinal_position"
+                    "SELECT table_schema, table_name, column_name "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = ANY(:schemas) AND table_name = ANY(:bares) "
+                    "ORDER BY table_schema, table_name, ordinal_position"
                 ),
-                {"tn": bare, "sch": schema},
+                {"schemas": schemas, "bares": bares},
             ).fetchall()
-            return [r.column_name for r in rows]
+            conn.rollback()
     except Exception:
-        # Failed introspection means the sweep cannot validate this
-        # row — that's a real coverage gap, not a missing optional.
-        logger.warning("Could not introspect columns for %s", table_name, exc_info=True)
-        return []
+        # Failed introspection means the sweep cannot validate these rows —
+        # a real coverage gap, not a missing optional.
+        logger.warning("Could not introspect columns for a batch", exc_info=True)
+        return {}
+    for r in rows:
+        out.setdefault((r.table_schema, r.table_name), []).append(r.column_name)
+    return out
 
 
-def _materialized_row_count(engine, table_name: str) -> int | None:
-    if not table_name:
-        return None
-    schema, bare = _split_qualified_name(table_name)
-    # Quote the identifier parts manually since SQLAlchemy parameters
-    # don't bind into FROM <schema>.<table>.
-    safe_schema = schema.replace('"', '""')
-    safe_bare = bare.replace('"', '""')
+def _row_counts_for_batch(engine, table_names: list[str]) -> dict[tuple[str, str], int | None]:
+    """Row counts for a batch, estimated first and only counted when it matters.
+
+    `COUNT(*)` per table was the sweep's other per-row cost, and it is a full
+    scan — one of these relations holds 52 million rows. The planner's
+    `reltuples` is free and precise enough for the only question the detectors
+    ask of a large table (`RowCountDetector` compares against the declared
+    count with a 50% tolerance).
+
+    The estimate is *not* good enough at the bottom of the range, where the
+    difference between 0 and 3 rows is a CRITICAL finding, and where
+    `reltuples` reports -1 for a relation that was never analysed. Those get
+    the exact count — few enough to be affordable, and exactly the ones where
+    being wrong would fabricate or hide a finding.
+    """
+    pairs = [_split_qualified_name(t) for t in table_names if t]
+    if not pairs:
+        return {}
+    counts: dict[tuple[str, str], int | None] = {}
     try:
         with engine.connect() as conn:
-            res = conn.execute(
-                text(f'SELECT COUNT(*) FROM "{safe_schema}"."{safe_bare}"')  # noqa: S608
-            )
-            return int(res.scalar() or 0)
+            rows = conn.execute(
+                text(
+                    "SELECT n.nspname AS schema, c.relname AS name, "
+                    "       c.reltuples::bigint AS approx "
+                    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = ANY(:schemas) AND c.relname = ANY(:bares) "
+                    "  AND c.relkind = ANY(ARRAY['r','p','m','v'])"
+                ),
+                {
+                    "schemas": sorted({s for s, _ in pairs} | set(_CANDIDATE_SCHEMAS)),
+                    "bares": sorted({b for _, b in pairs}),
+                },
+            ).fetchall()
+            conn.rollback()
+            wanted = {b for _, b in pairs}
+            needs_exact: list[tuple[str, str]] = []
+            for r in rows:
+                key = (r.schema, r.name)
+                if r.name not in wanted:
+                    continue
+                approx = int(r.approx)
+                if approx > _EXACT_COUNT_BELOW:
+                    counts[key] = approx
+                else:
+                    needs_exact.append(key)
+            for schema, bare in needs_exact:
+                safe_schema = schema.replace('"', '""')
+                safe_bare = bare.replace('"', '""')
+                try:
+                    res = conn.execute(
+                        text(f'SELECT COUNT(*) FROM "{safe_schema}"."{safe_bare}"')  # noqa: S608
+                    )
+                    counts[(schema, bare)] = int(res.scalar() or 0)
+                except Exception:
+                    counts[(schema, bare)] = None
+                    conn.rollback()
     except Exception:
-        return None
+        logger.warning("Could not read row counts for a batch", exc_info=True)
+        return {}
+    return counts
 
 
 def _maybe_flip_status(engine, dataset_id: str, table_name: str, has_critical: bool) -> None:
@@ -294,11 +402,23 @@ def retrospective_sweep(self, *, max_batches: int | None = None) -> dict:
             batch = _load_batch(engine, offset=offset, limit=batch_size, portals=portals)
             if not batch:
                 break
+            names = [r["table_name"] for r in batch]
+            cols_by_table = _columns_for_batch(engine, names)
+            counts_by_table = _row_counts_for_batch(engine, names)
             for row in batch:
-                cols_real = _materialized_columns(engine, row["table_name"])
-                rows_real = _materialized_row_count(engine, row["table_name"]) if cols_real else None
+                cols_real = _resolve_columns(cols_by_table, row["table_name"] or "")
+                rows_real = (
+                    _resolve_row_count(counts_by_table, row["table_name"] or "")
+                    if cols_real
+                    else None
+                )
                 findings = validate_retrospective(
                     engine,
+                    # Close what this resource stopped reporting. Without it the
+                    # sweep is append-only: `persist_findings` re-opens on
+                    # conflict and nothing ever resolves, so a table that got
+                    # fixed keeps its finding forever.
+                    resolve_stale=True,
                     dataset_id=row["dataset_id"],
                     portal=row["portal"],
                     source_id=row["source_id"],

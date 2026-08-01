@@ -18,6 +18,7 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.application.validation.detector import (
@@ -26,7 +27,7 @@ from app.application.validation.detector import (
     ResourceContext,
     Severity,
 )
-from app.application.validation.findings_repository import persist_findings
+from app.application.validation.findings_repository import persist_findings, resolve_missing
 from app.application.validation.ingestion_validator import (
     IngestionValidator,
     default_validator,
@@ -176,16 +177,91 @@ def validate_post_parse(engine: Engine, **kwargs: Any) -> Finding | None:
         return None
 
 
-def validate_retrospective(engine: Engine, **kwargs: Any) -> list[Finding]:
+def _resolve_placeholder_headers(engine: Engine, resource_id: str) -> int:
+    """Close `placeholder_headers` findings across modes once the headers are fine.
+
+    `resolve_missing` is deliberately mode-scoped so an audit cannot resolve
+    findings it knows nothing about, and that is the right default. This is the
+    one detector where the scoping is wrong rather than cautious: the finding is
+    stored under POST_PARSE but derives from `materialized_columns` alone, which
+    the retrospective sweep reads straight from `information_schema`. It has
+    exactly the evidence the parse path had — no bytes, no parser required.
+
+    Without this the finding is immortal. Nothing else re-evaluates it, and
+    `_close_resolved_findings_query` needs a re-collection that never comes for
+    a table whose headers were repaired in place. On staging 2026-07-31 that was
+    117 tables held out of serving with headers reading `Apellido, Nombre,
+    Cargo` — withheld for a defect fixed months earlier.
+    """
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(
+                text(
+                    "UPDATE ingestion_findings SET resolved_at = NOW() "
+                    "WHERE resource_id = :rid AND resolved_at IS NULL "
+                    "  AND detector_name = 'placeholder_headers'"
+                ),
+                {"rid": resource_id},
+            )
+            return int(res.rowcount or 0)
+    except Exception:
+        logger.exception("Failed to resolve placeholder_headers for %s", resource_id)
+        return 0
+
+
+def validate_retrospective(
+    engine: Engine, *, resolve_stale: bool = False, **kwargs: Any
+) -> list[Finding]:
     """Run all detectors in retrospective mode. Returns ALL findings.
 
     Used by the Celery beat sweep — caller decides what to do with them.
+
+    With `resolve_stale=True` the run also *closes* findings this resource no
+    longer produces, which is what makes the sweep a synchronisation rather
+    than an append-only log. Without it the upsert only ever re-opens
+    (`persist_findings` resets `resolved_at` on conflict) and nothing else
+    closes a retrospective finding: `_close_resolved_findings_query` requires
+    the dataset to have been re-processed *after* the finding, so a table that
+    got fixed and was never re-collected keeps its finding open forever.
+    Measured 2026-07-31 on prod: 1459 open retrospective findings, the oldest
+    dating to 2026-05-06.
+
+    Same semantics the mart auditor already uses via `resolve_missing`: keep
+    what this run reported, close the rest, so a partially-fixed resource ends
+    up with fewer open findings instead of the same ones forever.
     """
     try:
         ctx = _build_ctx(**kwargs)
         validator = get_validator()
-        findings = validator.run(ctx, Mode.RETROSPECTIVE)
+        findings = list(validator.run(ctx, Mode.RETROSPECTIVE))
+
+        # Whether this run actually looked at the relation. Everything below
+        # that *closes* a finding depends on it: silence from a detector that
+        # was handed nothing is not evidence of health, and treating it as such
+        # turns a coverage gap into data loss. That is not hypothetical — the
+        # sweep resolved `raw.*` names against `public`, saw no columns for
+        # 25288 of 25288 tables, and on 2026-07-31 closed the findings of four
+        # genuinely broken ones on the strength of having never read them.
+        observed = bool(ctx.materialized_columns)
+
+        # `placeholder_headers` reads nothing but `materialized_columns`, so
+        # there was never a reason for it to be exclusive to the parse path —
+        # it just grew there. Left that way it is written once and re-checked
+        # never: 117 of 121 tables carrying an open one had clean columns.
+        placeholder = (
+            _placeholder_header_finding(ctx, mode=Mode.RETROSPECTIVE) if observed else None
+        )
+        if placeholder is not None:
+            findings.append(placeholder)
         _persist(engine, ctx, findings)
+
+        if resolve_stale and ctx.resource_id and observed:
+            # The hash covers this run's inputs, so anything stored under a
+            # different one describes a state the resource has left behind.
+            keep = [IngestionValidator.input_hash(ctx)] if findings else []
+            resolve_missing(engine, ctx.resource_id, mode=Mode.RETROSPECTIVE, keep_hashes=keep)
+            if placeholder is None:
+                _resolve_placeholder_headers(engine, ctx.resource_id)
         return findings
     except Exception:
         logger.exception("retrospective validator hook failed")

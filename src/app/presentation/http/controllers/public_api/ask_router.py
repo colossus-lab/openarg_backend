@@ -14,7 +14,7 @@ from typing import Any
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.api_key_service import check_rate_limit, verify_api_key
@@ -32,6 +32,10 @@ router = APIRouter(tags=["public-api"])
 
 
 class AskRequest(BaseModel):
+    # CONTRACT-02 (round v46): extra='forbid' makes API drift visible.
+    # A future Bearer client that posts an unrecognised field gets 422
+    # instead of having the field silently dropped.
+    model_config = ConfigDict(extra="forbid")
     question: str = Field(..., min_length=1, max_length=10000)
 
 

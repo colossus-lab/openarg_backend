@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.application.common.sql_safety import is_pure_select
+from app.application.common.sql_safety import is_pure_select_for_relation
 from app.domain.entities.serving import (
     CatalogEntry,
     Resource,
@@ -42,11 +42,6 @@ from app.domain.ports.serving.serving_port import (
 )
 
 logger = logging.getLogger(__name__)
-
-_RELATION_REF_RE = re.compile(
-    r'\b(?:from|join)\s+(?:"?(\w+)"?\.)?"?(\w+)"?',
-    re.IGNORECASE,
-)
 
 
 def _parse_qualified_name(value: str) -> tuple[str, str]:
@@ -77,28 +72,6 @@ def _layer_for_schema(schema_name: str) -> ServingLayer:
     }.get(schema_name, ServingLayer.CACHE_LEGACY)
 
 
-def _sql_references_relation(sql: str, *, schema_name: str, bare_name: str) -> bool:
-    """Return True when the SQL references the expected relation.
-
-    Legacy `public` resources may appear unqualified (`FROM cache_x`) or
-    qualified (`FROM public.cache_x`). Medallion layers must be schema-
-    qualified (`raw.foo`, `mart.bar`, `staging.baz`) to count as a match.
-    """
-    expected_schema = schema_name.lower()
-    expected_table = bare_name.lower()
-    for match in _RELATION_REF_RE.finditer(sql):
-        found_schema = (match.group(1) or "").strip('"').lower()
-        found_table = match.group(2).strip('"').lower()
-        if found_table != expected_table:
-            continue
-        if expected_schema == "public":
-            if found_schema in ("", "public"):
-                return True
-        elif found_schema == expected_schema:
-            return True
-    return False
-
-
 def _discover_marts_enabled() -> bool:
     """Default ON — marts are the preferred surface once they exist.
     Operators can disable with OPENARG_DISCOVER_MARTS=0 for debugging.
@@ -118,9 +91,7 @@ class LegacyServingAdapter(IServingPort):
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
-    async def _expected_relation_for_resource(
-        self, resource_id: str
-    ) -> tuple[str, str]:
+    async def _expected_relation_for_resource(self, resource_id: str) -> tuple[str, str]:
         if resource_id.startswith("mart::"):
             mart_id = resource_id[len("mart::") :]
             async with self._engine.connect() as conn:
@@ -128,7 +99,8 @@ class LegacyServingAdapter(IServingPort):
                     await conn.execute(
                         text(
                             "SELECT mart_schema, mart_view_name "
-                            "FROM mart_definitions WHERE mart_id = :id"
+                            "FROM mart_definitions WHERE mart_id = :id "
+                            "  AND NOT COALESCE(serving_blocked, FALSE)"
                         ),
                         {"id": mart_id},
                     )
@@ -196,9 +168,7 @@ class LegacyServingAdapter(IServingPort):
             # floor. Without it, off-topic queries like "recetas de cocina"
             # surfaced top-5 raws unrelated to the question, polluting the
             # planner's hint set. Calibrated 2026-05-09.
-            min_sim_raws = float(
-                os.getenv("OPENARG_RAW_DISCOVER_MIN_SIM", "0.45")
-            )
+            min_sim_raws = float(os.getenv("OPENARG_RAW_DISCOVER_MIN_SIM", "0.45"))
             vec_sql = (
                 "SELECT resource_identity, "
                 "       COALESCE(canonical_title, raw_title) AS title, "
@@ -225,9 +195,7 @@ class LegacyServingAdapter(IServingPort):
                     if rid in seen_ids:
                         continue
                     seen_ids.add(rid)
-                    schema_name, _ = _parse_qualified_name(
-                        row.materialized_table_name or ""
-                    )
+                    schema_name, _ = _parse_qualified_name(row.materialized_table_name or "")
                     results.append(
                         Resource(
                             resource_id=rid,
@@ -243,9 +211,7 @@ class LegacyServingAdapter(IServingPort):
             except (ProgrammingError, OperationalError) as exc:
                 # Tabla sin columna `embedding` o pgvector no instalado
                 # (defensive). Caemos al lexical path.
-                logger.warning(
-                    "discover: vector path degraded to lexical: %s", exc
-                )
+                logger.warning("discover: vector path degraded to lexical: %s", exc)
             remaining = limit - len(results)
 
             # When the caller provided an embedding and BOTH the marts vector
@@ -257,9 +223,10 @@ class LegacyServingAdapter(IServingPort):
             # noise (e.g. "capital de Francia" lexically matching a budget
             # mart's description because the word "capital" appears in
             # "gastos de capital"). Calibrated 2026-05-09.
-            if not results and os.getenv(
-                "OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0"
-            ) != "1":
+            if (
+                not results
+                and os.getenv("OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0") != "1"
+            ):
                 return []
 
         # Lexical fallback: ILIKE sobre canonical_title/raw_title cuando el
@@ -340,20 +307,17 @@ class LegacyServingAdapter(IServingPort):
                 "FROM mart_definitions "
                 "WHERE embedding IS NOT NULL "
                 "  AND COALESCE(last_row_count, 0) > 0 "
+                "  AND NOT COALESCE(serving_blocked, FALSE) "
                 "  AND 1 - (embedding <=> CAST(:vec AS vector)) >= :min_sim "
             )
-            vec_params["min_sim"] = float(
-                os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45")
-            )
+            vec_params["min_sim"] = float(os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45"))
             if domain:
                 vec_sql += "AND domain = :domain "
                 vec_params["domain"] = domain
             if portal:
                 vec_sql += "AND :portal = ANY(source_portals) "
                 vec_params["portal"] = portal
-            vec_sql += (
-                "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
-            )
+            vec_sql += "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
             try:
                 async with self._engine.connect() as conn:
                     rs = await conn.execute(text(vec_sql), vec_params)
@@ -382,9 +346,7 @@ class LegacyServingAdapter(IServingPort):
             # "capital" against "gastos de capital" in a budget mart's
             # description re-introduces the misroute the threshold was
             # added to prevent. Calibrated 2026-05-09 / spec 016.
-            if os.getenv(
-                "OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0"
-            ) != "1":
+            if os.getenv("OPENARG_DISCOVER_LEXICAL_FALLBACK_ON_EMBEDDING", "0") != "1":
                 return []
             # If vector returned 0 rows, fall through to lexical.
 
@@ -393,8 +355,24 @@ class LegacyServingAdapter(IServingPort):
         # chars becomes its own ILIKE clause OR-joined. 3 (not 4) so
         # short domain words like "gas", "ipc", "pbi" still match.
         # Common stopwords are filtered to keep the LIKE list small.
-        _STOP = {"que", "los", "las", "del", "para", "como", "una", "uno",
-                 "este", "esta", "esto", "con", "por", "sin", "sus", "fue"}
+        _STOP = {
+            "que",
+            "los",
+            "las",
+            "del",
+            "para",
+            "como",
+            "una",
+            "uno",
+            "este",
+            "esta",
+            "esto",
+            "con",
+            "por",
+            "sin",
+            "sus",
+            "fue",
+        }
         words = [
             w.lower()
             for w in re.findall(r"[\wáéíóúñÁÉÍÓÚÑ]+", query_text)
@@ -426,7 +404,7 @@ class LegacyServingAdapter(IServingPort):
         sql = (
             "SELECT mart_id, description, domain, mart_schema, mart_view_name "
             "FROM mart_definitions "
-            f"WHERE COALESCE(last_row_count, 0) > 0 AND {search_clause} "
+            f"WHERE COALESCE(last_row_count, 0) > 0 AND NOT COALESCE(serving_blocked, FALSE) AND {search_clause} "
         )
         if domain:
             sql += "AND domain = :domain "
@@ -451,9 +429,7 @@ class LegacyServingAdapter(IServingPort):
             # degrade to "no marts" so the rest of the discovery flow can
             # still serve from `catalog_resources`. Anything else (bug in
             # this module's SQL building, type errors, etc.) MUST surface.
-            logger.warning(
-                "_discover_marts degraded to empty: %s", exc, exc_info=True
-            )
+            logger.warning("_discover_marts degraded to empty: %s", exc, exc_info=True)
             return []
 
         return [
@@ -472,13 +448,13 @@ class LegacyServingAdapter(IServingPort):
         # Mart resources are addressed as `mart::<mart_id>` from
         # `_discover_marts`. Resolve to `mart.<view_name>` directly.
         if resource_id.startswith("mart::"):
-            return await self._get_mart_schema(resource_id[len("mart::"):])
+            return await self._get_mart_schema(resource_id[len("mart::") :])
         # Raw resources coming from the NL2SQL serving path are currently
         # addressed as `raw::<bare_table_name>`. Resolve them directly from
         # `information_schema` so execution can stay on the serving path
         # without requiring a prior catalog identity lookup.
         if resource_id.startswith("raw::"):
-            return await self._get_raw_schema(resource_id[len("raw::"):])
+            return await self._get_raw_schema(resource_id[len("raw::") :])
 
         async with self._engine.connect() as conn:
             cat = await conn.execute(
@@ -523,7 +499,8 @@ class LegacyServingAdapter(IServingPort):
             mdef = await conn.execute(
                 text(
                     "SELECT mart_schema, mart_view_name, canonical_columns_json "
-                    "FROM mart_definitions WHERE mart_id = :id"
+                    "FROM mart_definitions WHERE mart_id = :id "
+                    "  AND NOT COALESCE(serving_blocked, FALSE)"
                 ),
                 {"id": mart_id},
             )
@@ -551,9 +528,7 @@ class LegacyServingAdapter(IServingPort):
                     f"mart::{mart_id} (view {mart_row.mart_schema}.{mart_row.mart_view_name} missing)"
                 )
 
-        semantics = {
-            r.column_name: str(r.comment) for r in col_rows if getattr(r, "comment", None)
-        }
+        semantics = {r.column_name: str(r.comment) for r in col_rows if getattr(r, "comment", None)}
         return Schema(
             columns=[r.column_name for r in col_rows],
             column_types={r.column_name: r.data_type for r in col_rows},
@@ -590,18 +565,32 @@ class LegacyServingAdapter(IServingPort):
         max_rows: int = 1000,
         timeout_seconds: int = 30,
     ) -> Rows:
-        ok, reason = is_pure_select(sql)
-        if not ok:
-            raise WriteAttemptedError(f"{reason}: {sql[:200]}")
-        expected_schema, expected_table = await self._expected_relation_for_resource(
-            resource_id
+        # H1+H2 fix (round v46): a single AST gate enforces both read-only
+        # structure AND scope. The previous two-step check (is_pure_select
+        # then regex-based _sql_references_relation) accepted a
+        # `SELECT col FROM mart.foo UNION ALL SELECT email FROM api_keys`
+        # because (a) is_pure_select allowed UNION top-level without
+        # walking exp.Table, and (b) _sql_references_relation returned
+        # True on the first match instead of asserting *every* table
+        # reference is the expected one. is_pure_select_for_relation
+        # walks every exp.Table and rejects any out-of-scope reference
+        # or any reference to an internal blocklist table.
+        expected_schema, expected_table = await self._expected_relation_for_resource(resource_id)
+        ok, reason = is_pure_select_for_relation(
+            sql,
+            expected_schema=expected_schema,
+            expected_table=expected_table,
         )
-        if not _sql_references_relation(
-            sql, schema_name=expected_schema, bare_name=expected_table
-        ):
-            raise QueryResourceMismatchError(
-                f"{resource_id} expects {expected_schema}.{expected_table}"
-            )
+        if not ok:
+            assert reason is not None
+            # Two reason classes flow through the same gate now; preserve
+            # the historical exception types so callers / clients keep
+            # their existing error handling.
+            if reason.startswith("out-of-scope") or reason.startswith("forbidden table"):
+                raise QueryResourceMismatchError(
+                    f"{resource_id} expects {expected_schema}.{expected_table}: {reason}"
+                )
+            raise WriteAttemptedError(f"{reason}: {sql[:200]}")
         schema = await self.get_schema(resource_id)
 
         async with self._engine.connect() as conn:
@@ -636,7 +625,8 @@ class LegacyServingAdapter(IServingPort):
                     await conn.execute(
                         text(
                             "SELECT mart_id, description, domain, yaml_version, updated_at "
-                            "FROM mart_definitions WHERE mart_id = :id"
+                            "FROM mart_definitions WHERE mart_id = :id "
+                            "  AND NOT COALESCE(serving_blocked, FALSE)"
                         ),
                         {"id": mart_id},
                     )

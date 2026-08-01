@@ -1,0 +1,150 @@
+aranceles -> cache_*arancel*
+aranceles de importacion -> cache_*arancel*
+aranceles de exportacion -> cache_*arancel*
+aduana -> cache_*aduana*
+uso del tiempo -> cache_indec_uso_tiempo
+pib provincial -> cache_indec_pib_provincial
+variables bcra historicas -> cache_bcra_variables
+elecciones -> cache_elecciones_*
+elecciones 2023 -> cache_elecciones_2023_*
+elecciones 2019 -> cache_elecciones_2019_*
+elecciones 2017 -> cache_elecciones_2017_*
+elecciones 2015 -> cache_elecciones_2015_*
+elecciones 2025 -> cache_elecciones_2025_*
+resultados electorales -> cache_elecciones_*
+votacion -> cache_elecciones_*
+votaciones nominales -> cache_votaciones_nominales_*
+voto nominal -> cache_votaciones_nominales_*
+licitaciones -> cache_bac_tenders
+legislatura cordoba -> cache_cordoba_leg_*
+cordoba legislatura -> cache_cordoba_leg_*
+siniestros viales -> cache_siniestros_viales_*
+accidentes de transito -> cache_siniestros_viales_*
+educacion -> cache_*educaci*
+matricula escolar -> cache_*matricul*
+salud -> cache_*mortalid*
+tasa de mortalidad fetal -> cache_tasa_de_mortalidad_fetal_por_sexo
+tasa de mortalidad fetal -> cache_tasa_de_mortalidad_fetal_total
+mortalidad fetal -> cache_tasa_de_mortalidad_fetal_por_sexo
+mortalidad fetal -> cache_tasa_de_mortalidad_fetal_total
+tasa de mortalidad infantil -> cache_tasa_de_mortalidad_infantil*
+mortalidad infantil -> cache_*mortalidad_infantil*
+mortalidad infantil -> cache_tasa_de_mortalidad_infantil*
+tasa de mortalidad -> cache_tasa_de_mortalidad*
+mortalidad -> cache_*mortalid*
+natalidad -> cache_*natalid*
+seguridad -> cache_*homicid*
+homicidios -> cache_*homicid*
+femicidios -> cache_*femicid*
+hurtos -> cache_*hurto*
+hurto -> cache_*hurto*
+denuncias -> cache_*denuncia*
+denuncia -> cache_*denuncia*
+denuncias penales -> cache_*denuncia*
+crimen -> cache_*homicid*
+criminalidad -> cache_*homicid*
+inseguridad -> cache_*denuncia*
+datasets de seguridad -> cache_*homicid*
+datasets de seguridad -> cache_*denuncia*
+siniestros -> cache_siniestros_viales_*
+siniestros -> cache_*siniestro*
+accidentes viales -> cache_siniestros_viales_*
+transporte -> cache_*transit*
+transporte -> cache_*ferrocarril*
+transporte -> cache_*pasajero*
+transporte publico -> cache_*pasajero*
+transporte publico -> cache_*metrobus*
+subsidios al transporte -> cache_subsidios_al_transporte*
+ferrocarril -> cache_*ferrocarril*
+ferrocarril -> cache_*estacion*tren*
+ferrocarril -> cache_subte_trenes_despachados
+ferrocarril -> cache_cruces_ferroviarios
+tren -> cache_*ferrocarril*
+tren -> cache_*estacion*tren*
+tren -> cache_subte_trenes_despachados
+tren -> cache_cruces_ferroviarios
+trenes -> cache_*ferrocarril*
+trenes -> cache_*estacion*tren*
+trenes -> cache_subte_trenes_despachados
+trenes -> cache_cruces_ferroviarios
+ferroviario -> cache_*ferrocarril*
+ferroviario -> cache_*estacion*tren*
+ferroviario -> cache_subte_trenes_despachados
+ferroviario -> cache_cruces_ferroviarios
+subte -> cache_subte_trenes_despachados
+subte -> cache_subte_cronograma_de_servicio
+colectivo -> cache_lineas_y_empresas_de_transporte_urbano_de_pasajero
+colectivo -> cache_l_neas_de_transporte_de_rmba
+colectivo -> cache_empresas_de_transporte_de_rmba
+colectivos -> cache_lineas_y_empresas_de_transporte_urbano_de_pasajero
+colectivos -> cache_l_neas_de_transporte_de_rmba
+colectivos -> cache_empresas_de_transporte_de_rmba
+sube -> cache_sube_operaciones_de_viaje_por_mes_de_regi_n_metrop
+sube -> cache_sube_cantidad_de_transacciones_usos_por_fecha
+sube -> cache_sube_estudiantil
+sube -> cache_puntos_de_carga_sube
+ecobici -> cache_*ecobici*
+metrobus -> cache_*metrobus*
+energia -> cache_*electri*
+energia -> cache_*petrole*
+petroleo -> cache_*petrole*
+petroleo -> cache_*crudo*
+nafta -> cache_*nafta*
+energia renovable -> cache_*eolic*
+energia renovable -> cache_*solar*
+agricultura -> cache_*cultiv*
+lecheria -> cache_*leche*
+lecheria -> cache_*tambo*
+justicia -> cache_*penal*
+anticorrupcion -> cache_*anticorrupci*
+ambiente -> cache_*forestal*
+ambiente -> cache_*bosqu*
+contaminacion -> cache_*efluent*
+bosques -> cache_*bosqu*
+bosques -> cache_*forestal*
+incendios forestales -> cache_*incendi*
+genero -> cache_*genero*
+genero -> cache_*femeni*
+brecha de genero -> cache_*genero*
+violencia de genero -> cache_*violencia*genero*
+violencia de genero -> cache_*femicid*
+telecomunicaciones -> cache_*teleco*
+telecomunicaciones -> cache_*internet*
+telecomunicaciones -> cache_*conectivid*
+banda ancha -> cache_*internet*
+banda ancha -> cache_*banda_anch*
+banda ancha -> cache_*conectivid*
+celulares -> cache_*celular*
+celulares -> cache_*telefon*movil*
+celular -> cache_*celular*
+censo -> cache_*demograf*
+censo 2022 -> cache_*censo*2022*
+ultimo censo -> cache_*demograf*
+datos del censo -> cache_*demograf*
+datos censales -> cache_*demograf*
+poblacion -> cache_*demograf*
+poblacion de -> cache_*demograf*
+cuanta poblacion -> cache_*demograf*
+habitantes -> cache_*demograf*
+cuantos habitantes -> cache_*demograf*
+cantidad de habitantes -> cache_*demograf*
+densidad poblacional -> cache_*densidad*
+densidad poblacional -> cache_*demograf*
+crecimiento poblacional -> cache_*demograf*
+piramide poblacional -> cache_*demograf*
+piramide poblacional -> cache_*piramide*
+proyecciones de poblacion -> cache_*demograf*
+demografia -> cache_*demograf*
+demografico -> cache_*demograf*
+migracion -> cache_*migraci*
+ciencia y tecnologia -> cache_*conicet*
+vivienda -> cache_*viviend*
+vivienda -> cache_*hipotec*
+tarjeta alimentar -> cache_*alimentar*
+derechos humanos -> cache_*derecho*human*
+derechos humanos -> cache_*memoria*
+informalidad laboral -> cache_*informal*
+diputados nacionales -> cache_diputados
+legisladores -> cache_diputados
+legisladores -> cache_bloques
+bloques parlamentarios -> cache_bloques

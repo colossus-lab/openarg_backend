@@ -142,15 +142,22 @@ def test_propose_title_as_columns_pami_pattern():
         [None] * 36,  # row 0: separator
         # row 1: real headers
         [
-            "N° L.P", "EXPEDIENTE", "OBJETO", "DESTINO", "FECHA DE APERTURA",
-            "ESTADO", "RUBRO", "PLAZO DE CONTRATO",
-        ] + ["headercol"] * 23 + [None, None, None, None, None],
-        ["1", "EX-001", "Servicio X", "GESP", "2020-01-01", "ADJUDICADO",
-         "BIENES", "30 días"] + ["x"] * 23 + ["data1", "data2", "data3", "data4", "data5"],
+            "N° L.P",
+            "EXPEDIENTE",
+            "OBJETO",
+            "DESTINO",
+            "FECHA DE APERTURA",
+            "ESTADO",
+            "RUBRO",
+            "PLAZO DE CONTRATO",
+        ]
+        + ["headercol"] * 23
+        + [None, None, None, None, None],
+        ["1", "EX-001", "Servicio X", "GESP", "2020-01-01", "ADJUDICADO", "BIENES", "30 días"]
+        + ["x"] * 23
+        + ["data1", "data2", "data3", "data4", "data5"],
     ]
-    new_cols, rows_to_delete, reason = propose_title_as_columns_rename(
-        old_cols, sample
-    )
+    new_cols, rows_to_delete, reason = propose_title_as_columns_rename(old_cols, sample)
     assert reason == "applied"
     assert rows_to_delete == 2
     # First col 'N° L.P' becomes a normalized identifier
@@ -228,9 +235,7 @@ async def test_propose_llm_applied_when_llm_returns_valid_proposal():
         {"proposed_columns": ["provincia", "anio", "monto"]}
     )
 
-    new_cols, rows, reason = await propose_llm_assisted_rename(
-        old_cols, sample, llm=llm
-    )
+    new_cols, rows, reason = await propose_llm_assisted_rename(old_cols, sample, llm=llm)
 
     assert reason == "applied"
     assert new_cols == ["provincia", "anio", "monto"]
@@ -246,9 +251,7 @@ async def test_propose_llm_skips_when_length_mismatch():
         {"proposed_columns": ["only_one"]}  # wrong length
     )
 
-    new_cols, _, reason = await propose_llm_assisted_rename(
-        old_cols, sample, llm=llm
-    )
+    new_cols, _, reason = await propose_llm_assisted_rename(old_cols, sample, llm=llm)
 
     assert reason.startswith("length_mismatch")
     assert new_cols == old_cols
@@ -272,9 +275,7 @@ async def test_propose_llm_handles_bad_json_gracefully():
     llm = AsyncMock()
     llm.chat_json.return_value.content = "not valid json {{"
 
-    _, _, reason = await propose_llm_assisted_rename(
-        old_cols, [["a", "b"]], llm=llm
-    )
+    _, _, reason = await propose_llm_assisted_rename(old_cols, [["a", "b"]], llm=llm)
 
     assert reason == "llm_bad_json"
 
@@ -288,9 +289,7 @@ async def test_propose_llm_normalizes_and_dedupes_response():
         {"proposed_columns": ["Estado", "Estado", "ESTADO"]}
     )
 
-    new_cols, _, reason = await propose_llm_assisted_rename(
-        old_cols, [["a", "b", "c"]], llm=llm
-    )
+    new_cols, _, reason = await propose_llm_assisted_rename(old_cols, [["a", "b", "c"]], llm=llm)
 
     assert reason == "applied"
     # All three normalize to `estado`, dedup to estado / estado_2 / estado_3

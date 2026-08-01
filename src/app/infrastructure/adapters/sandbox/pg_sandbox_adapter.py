@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 MAX_ROWS = int(os.getenv("SANDBOX_MAX_ROWS", "1000"))
 _SANDBOX_TIMEOUT_MS = int(os.getenv("SANDBOX_TIMEOUT_MS", "10000"))
+# Schema resolution order for every sandbox connection. No spaces — this
+# rides in the libpq `options` connection parameter, where a space would
+# be parsed as the start of another option.
+_SANDBOX_SEARCH_PATH = "public,raw"
 
 # Patterns that indicate write/DDL operations (case-insensitive)
 _FORBIDDEN_PATTERNS = re.compile(
@@ -38,6 +42,10 @@ _ALLOWED_TABLE_PREFIXES = tuple(os.getenv("SANDBOX_TABLE_PREFIX", "cache_").spli
 # emerge from our own pipeline (mart_definitions / raw_table_versions),
 # so anything materialized there is already vetted for read-only access.
 # We skip the prefix check for those schemas.
+# Caveat: "materialized there" no longer implies "fit to serve". A mart
+# can be built and present in `mart.*` yet flagged `serving_blocked`
+# (migration 0054). That case is caught by `_blocked_mart_error()` at
+# execution time, not by this static prefix check.
 _ALLOWED_SCHEMAS = ("public", "mart", "raw")
 _PREFIX_FREE_SCHEMAS = ("mart", "raw")
 
@@ -96,6 +104,157 @@ def _split_table_reference(table_name: str) -> tuple[str, str]:
         return "public", value.strip('"')
     schema, bare = value.split(".", 1)
     return schema.strip('"'), bare.strip('"')
+
+
+def _referenced_mart_views(sql: str) -> set[str]:
+    """Bare `mart.*` relation names referenced by a FROM/JOIN clause."""
+    found: set[str] = set()
+    for m in _TABLE_REF_PATTERN.finditer(sql):
+        first, second = m.group(1), m.group(2)
+        if second and first.lower() == "mart":
+            found.add(second.lower())
+    return found
+
+
+def _referenced_data_tables(sql: str) -> set[str]:
+    """Bare relation names for the raw/cached tables a query reads.
+
+    Covers the shapes NL2SQL emits for ingested data: `raw.<table>`, legacy
+    `cache_*` names in `public`, and — because the engine runs with
+    `search_path = public, raw` — *any* unqualified name, which resolves to a
+    `raw.*` relation whenever public has no such table. Restricting the
+    unqualified branch to the `cache_` prefix would miss exactly the tables
+    that carry findings: they are versioned raw landings like
+    `indec__…__2971d412__v3`, and an unqualified reference to one reaches it.
+
+    Over-collecting is free here: a name with no row in `cached_datasets`
+    simply doesn't match. Under-collecting is the failure that matters.
+
+    Marts are handled separately by `_referenced_mart_views` — they are
+    curated, and their quality signal lives in `mart_definitions`, not in
+    `ingestion_findings`.
+    """
+    found: set[str] = set()
+    for m in _TABLE_REF_PATTERN.finditer(sql):
+        first, second = m.group(1), m.group(2)
+        if second:
+            if first.lower() == "raw":
+                found.add(second.lower())
+        elif first.lower() != "mart":
+            found.add(first.lower())
+    return found
+
+
+def _findings_blocked_error(engine: Engine, sql: str) -> str | None:
+    """Reject SQL that reads a table with an unresolved CRITICAL finding.
+
+    The ingestion validators already detect this — `html_as_data`,
+    `placeholder_headers`, `row_count`, `separator_mismatch` — and the
+    promotion gate keeps a failing table out of `ready`. What it cannot do is
+    reach backwards: a table that went `ready` before a detector existed, or
+    whose defect a retrospective sweep found afterwards, keeps being served
+    with the finding sitting open next to it. Measured 2026-07-31: 143 such
+    tables across staging and prod, 17 of them in prod's discoverable catalog.
+
+    `open_findings_for()` was written for exactly this and had no callers in
+    the entire repo — the detection was built, correct, and never consulted.
+
+    Enforced here rather than in discovery for the reason
+    `_blocked_mart_error` documents above: discovery only controls what gets
+    *suggested*, and the model names tables on its own.
+    """
+    referenced = _referenced_data_tables(sql)
+    if not referenced:
+        return None
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT cd.table_name, f.detector_name, f.message "
+                    "FROM raw.cached_datasets cd "
+                    "JOIN ingestion_findings f "
+                    "  ON f.resource_id = cd.dataset_id::text "
+                    "WHERE lower(cd.table_name) = ANY(:names) "
+                    "  AND f.severity = 'critical' "
+                    "  AND f.resolved_at IS NULL "
+                    "  AND f.mode <> 'mart_audit' "
+                    "LIMIT 1"
+                ),
+                {"names": sorted(referenced)},
+            ).fetchall()
+            conn.rollback()
+    except Exception:
+        # Deliberately NOT fail-closed, unlike the mart guard. That one covers
+        # a handful of curated views a human explicitly withdrew; this one sits
+        # in front of ~27k ingested tables, so an unreadable findings table
+        # would take the whole corpus offline. A logged warning and normal
+        # execution is the safer failure here.
+        logger.warning("findings lookup failed; serving without the quality gate", exc_info=True)
+        return None
+
+    if not rows:
+        return None
+
+    table = str(rows[0][0])
+    detector = str(rows[0][1] or "").strip()
+    detail = str(rows[0][2] or "").strip()
+    logger.warning(
+        "Table %s has an open critical finding (%s); refusing execution", table, detector
+    )
+    because = f" ({detail})" if detail else ""
+    return (
+        f"La tabla '{table}' tiene un problema de calidad sin resolver "
+        f"detectado por '{detector}'{because}, así que no se puede usar para "
+        f"responder. Preferí no dar un número antes que dar uno que no se sostiene."
+    )
+
+
+def _blocked_mart_error(engine: Engine, sql: str) -> str | None:
+    """Reject SQL that reads a mart withdrawn from serving.
+
+    `serving_blocked` (migration 0054) is enforced in every *discovery*
+    query — the sandbox universe, the context builder, the serving
+    adapter. None of that helps when the NL2SQL model names a blocked
+    mart directly: the relation still exists in `mart.*`, the prefix-free
+    allowlist above waves it through, and Postgres happily serves numbers
+    we already declared unfit. Discovery-only gating was safe while the
+    schema comment below held ("the pipeline gates what lands there");
+    0054 is precisely the case where a mart is built and present but must
+    not be served, so the gate has to run at execution too.
+    """
+    referenced = _referenced_mart_views(sql)
+    if not referenced:
+        return None
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT mart_view_name, serving_blocked_reason "
+                    "FROM mart_definitions "
+                    "WHERE mart_schema = 'mart' "
+                    "AND lower(mart_view_name) = ANY(:names) "
+                    "AND COALESCE(serving_blocked, FALSE)"
+                ),
+                {"names": sorted(referenced)},
+            ).fetchall()
+            conn.rollback()
+    except Exception:
+        # Never fail open on an unreadable catalog: a query we cannot
+        # clear is a query we do not run.
+        logger.warning("serving-block lookup failed; refusing mart query", exc_info=True)
+        return "Could not verify mart availability. Query refused."
+
+    if not rows:
+        return None
+
+    name = str(rows[0][0])
+    reason = str(rows[0][1] or "").strip()
+    logger.warning("Blocked mart %s referenced by generated SQL; refusing execution", name)
+    detail = f" Motivo: {reason}" if reason else ""
+    return (
+        f"El mart '{name}' está retirado del serving por problemas de "
+        f"calidad de datos y no puede consultarse.{detail}"
+    )
 
 
 def _validate_sql(sql: str) -> str | None:
@@ -237,13 +396,6 @@ class PgSandboxAdapter(ISQLSandbox):
 
     def _get_engine(self) -> Engine:
         if self._engine is None:
-            self._engine = create_engine(
-                self._db_url,
-                pool_size=2,
-                max_overflow=1,
-                pool_pre_ping=True,
-            )
-
             # The sandbox connects directly to RDS (bypasses PgBouncer to
             # keep the read-only enforcement local). The DB-level
             # `ALTER DATABASE openarg_staging SET search_path = raw,
@@ -252,31 +404,33 @@ class PgSandboxAdapter(ISQLSandbox):
             # In practice the sandbox engine ends up with the Postgres
             # default `"$user", public`, which means bare references to
             # tables that live ONLY in `raw` (e.g. `cached_datasets`,
-            # `catalog_resources`, `raw_table_versions`) raise
-            # "relation does not exist".
+            # `catalog_resources`, `raw_table_versions`, and the ~4.4k
+            # `cache_*` data tables) raise "relation does not exist".
             #
-            # Force-set the search_path on every new connection so the
-            # 120+ unprefixed `cached_datasets` references in the
-            # codebase resolve correctly inside the sandbox path. Order
-            # `public, raw` keeps tables that exist in BOTH schemas
+            # Set the search_path through the libpq `options` connection
+            # parameter rather than a `SET` in a `connect` event listener.
+            # A `SET` runs inside psycopg3's implicit transaction, so the
+            # ROLLBACK that SQLAlchemy issues when the connection returns
+            # to the pool REVERTS it: only the very first checkout of each
+            # physical connection saw `public, raw`, every later one fell
+            # back to `"$user", public` (measured on staging: 1 of 10
+            # checkouts had `raw` in `current_schemas()`). Applying it at
+            # connection establishment makes it part of the session's
+            # startup state, which no rollback can undo.
+            #
+            # Order `public, raw` keeps tables that exist in BOTH schemas
             # resolving to `public` (canonical for `mart_definitions`,
             # `mart_sample_queries`, `query_cache`, `query_plan_cache`,
             # langgraph `checkpoints`, etc.) while still finding the
             # raw-only tables as a fallback.
-            from sqlalchemy import event
+            self._engine = create_engine(
+                self._db_url,
+                pool_size=2,
+                max_overflow=1,
+                pool_pre_ping=True,
+                connect_args={"options": f"-csearch_path={_SANDBOX_SEARCH_PATH}"},
+            )
 
-            @event.listens_for(self._engine, "connect")
-            def _set_default_search_path(dbapi_conn, _connection_record):
-                cursor = dbapi_conn.cursor()
-                try:
-                    cursor.execute("SET search_path = public, raw")
-                except Exception:
-                    logger.warning(
-                        "Failed to set search_path on sandbox connection",
-                        exc_info=True,
-                    )
-                finally:
-                    cursor.close()
         return self._engine
 
     def _execute_sync(self, sql: str, timeout_seconds: int) -> SandboxResult:
@@ -305,6 +459,16 @@ class PgSandboxAdapter(ISQLSandbox):
 
         engine = self._get_engine()
         timeout_ms = timeout_seconds * 1000
+
+        blocked_error = _blocked_mart_error(engine, sql) or _findings_blocked_error(engine, sql)
+        if blocked_error:
+            return SandboxResult(
+                columns=[],
+                rows=[],
+                row_count=0,
+                truncated=False,
+                error=blocked_error,
+            )
 
         try:
             with engine.connect() as conn:
@@ -485,6 +649,7 @@ class PgSandboxAdapter(ISQLSandbox):
 
     async def list_cached_tables(self) -> list[CachedTableInfo]:
         import time as _time
+
         now = _time.monotonic()
         cached = self._list_cache
         if cached is not None and (now - cached[0]) < self._LIST_CACHE_TTL_S:
@@ -501,20 +666,30 @@ class PgSandboxAdapter(ISQLSandbox):
         engine = self._get_engine()
         if not table_names:
             return {}
-        requested_pairs = [
-            (_split_table_reference(name), name) for name in table_names
-        ]
+        requested_pairs = [(_split_table_reference(name), name) for name in table_names]
         target_pairs = list(dict.fromkeys(pair for pair, _original in requested_pairs))
         schemas = list(dict.fromkeys(schema for schema, _table in target_pairs))
         tables = list(dict.fromkeys(table for _schema, table in target_pairs))
         with engine.connect() as conn:
+            # pg_class/pg_attribute instead of information_schema.columns:
+            # the latter omits materialized views entirely, and every mart
+            # is a matview (relkind='m'). Going through information_schema
+            # silently returned zero columns for `mart.*`, which left the
+            # NL2SQL prompt with no type information for exactly the tables
+            # that expose pre-cast numeric columns.
             result = conn.execute(
                 text(
-                    "SELECT table_schema, table_name, column_name, data_type "
-                    "FROM information_schema.columns "
-                    "WHERE table_schema = ANY(:schemas) "
-                    "AND table_name = ANY(:tables) "
-                    "ORDER BY table_schema, table_name, ordinal_position"
+                    "SELECT n.nspname AS table_schema, c.relname AS table_name, "
+                    "       a.attname AS column_name, "
+                    "       format_type(a.atttypid, a.atttypmod) AS data_type "
+                    "FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "JOIN pg_attribute a ON a.attrelid = c.oid "
+                    "WHERE c.relkind = ANY(ARRAY['r', 'p', 'v', 'm', 'f']) "
+                    "AND a.attnum > 0 AND NOT a.attisdropped "
+                    "AND n.nspname = ANY(:schemas) "
+                    "AND c.relname = ANY(:tables) "
+                    "ORDER BY n.nspname, c.relname, a.attnum"
                 ),
                 {"schemas": schemas, "tables": tables},
             )

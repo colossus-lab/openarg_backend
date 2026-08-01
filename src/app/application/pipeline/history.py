@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -23,18 +24,25 @@ logger = logging.getLogger(__name__)
 async def load_chat_history(
     conversation_id: str,
     chat_repo: IChatRepository | None,
+    owner_user_id: str | None = None,
 ) -> str:
     """Load recent messages from the DB to build conversation context.
 
     Only called when there is a conversation_id and a chat_repo.
     Returns a formatted string or empty if no history.
+
+    H3: when `owner_user_id` is provided, the repo lookup is scoped to
+    that owner. A foreign conversation_id returns []. The endpoint layer
+    is the primary ownership gate; this is defense-in-depth so a future
+    bypass at the controller layer can't read another user's history.
     """
     if not conversation_id or not chat_repo:
         return ""
     try:
         from uuid import UUID
 
-        messages = await chat_repo.get_messages(UUID(conversation_id), limit=7)
+        owner_uuid = UUID(owner_user_id) if owner_user_id else None
+        messages = await chat_repo.get_messages(UUID(conversation_id), limit=7, user_id=owner_uuid)
         if len(messages) <= 1:
             return ""
         # Skip the last message (it's the current question the frontend just saved)
@@ -140,8 +148,9 @@ async def save_query_attempt(
     # exists in long-running deployments).
     try:
         async with semantic_cache._session_factory() as session:
-            await session.execute(text(
-                """
+            await session.execute(
+                text(
+                    """
                 CREATE TABLE IF NOT EXISTS query_analytics (
                     id BIGSERIAL PRIMARY KEY,
                     ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -155,10 +164,11 @@ async def save_query_attempt(
                     embedding vector(1024)
                 )
                 """
-            ))
-            await session.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_query_analytics_ts ON query_analytics(ts DESC)"
-            ))
+                )
+            )
+            await session.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_query_analytics_ts ON query_analytics(ts DESC)")
+            )
             await session.commit()
     except Exception:
         logger.debug("query_analytics DDL setup failed", exc_info=True)
@@ -239,6 +249,38 @@ async def record_terminal_analytics(
     )
 
 
+# H4 (round v46): the 'legacy' sentinel represents historical rows that
+# entered the table before per-user scoping landed. They are surfaced to
+# every caller as if operator-curated; new rows always carry the actual
+# caller email. A user can NEVER persist as 'legacy' because the controller
+# layer (smart_query_v2_router) rejects body.user_email='legacy' shapes via
+# the H3 spoof check — JWT-derived emails are real Google addresses.
+_LEGACY_OWNER = "legacy"
+
+# `replace(<anything>, '.', '')` — stripping every dot from a TEXT amount.
+_DOT_STRIP_RE = re.compile(r"replace\s*\([^()]*(?:\([^()]*\)[^()]*)*,\s*'\.'\s*,\s*''\s*\)", re.I)
+# A `CASE … WHEN … ~` shape guard, which is what makes dot-stripping conditional.
+_SHAPE_BRANCH_RE = re.compile(r"\bCASE\b.*?\bWHEN\b[^~]{0,200}~", re.I | re.S)
+
+
+def teaches_discredited_normalisation(sql: str) -> bool:
+    """True when `sql` strips every dot from an amount without checking its shape.
+
+    Few-shot examples are drawn from `successful_queries`, so a query that ran
+    without erroring gets replayed to the model as a worked example — and
+    "ran without erroring" is exactly what the old normalisation did while
+    multiplying dot-decimal rows by 100. Fixing the prompt alone leaves the
+    history teaching the opposite; measured 2026-07-31, staging held 2 such rows.
+
+    The correct formula also contains `replace(col,'.','')`, but only inside a
+    `CASE` branch guarded by `~ '^…$'`, so the presence of a shape branch is what
+    separates the two rather than the replace itself.
+    """
+    if not sql:
+        return False
+    return bool(_DOT_STRIP_RE.search(sql)) and not _SHAPE_BRANCH_RE.search(sql)
+
+
 async def save_successful_query(
     question: str,
     sql: str,
@@ -246,16 +288,44 @@ async def save_successful_query(
     row_count: int,
     embedding_provider: IEmbeddingProvider,
     semantic_cache: SemanticCache,
+    *,
+    user_id: str | None = None,
 ) -> None:
-    """Save a successful NL2SQL query for future few-shot examples."""
+    """Save a successful NL2SQL query for future few-shot examples.
+
+    H4 (round v46): scoped per user. The row is also dropped silently when
+    the question trips the prompt-injection scorer — keeping poisoned
+    inputs out of the few-shot pool is cheaper than trying to neutralize
+    them at retrieval time.
+    """
+    # Lazy import to keep this module free of infrastructure deps unless
+    # the few-shot path actually fires.
+    from app.infrastructure.adapters.search.prompt_injection_detector import (
+        is_suspicious,
+    )
+
+    suspicious, score = is_suspicious(question)
+    if suspicious or score > 0.4:
+        logger.info("Skipping successful_queries save (suspicious score=%.2f)", score)
+        return
+
+    # "It ran" is not "it was right". The discredited normalisation never
+    # errors — it just returns a number 100x too large — so without this the
+    # pool keeps re-teaching what the prompt was fixed to stop saying.
+    if teaches_discredited_normalisation(sql):
+        logger.info("Skipping successful_queries save (unguarded dot-stripping in SQL)")
+        return
+
+    owner = (user_id or "").strip().lower() or _LEGACY_OWNER
     try:
         embedding = await embedding_provider.embed(question)
         emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
         async with semantic_cache._session_factory() as session:
             await session.execute(
                 text(
-                    "INSERT INTO successful_queries (question, sql, table_name, row_count, embedding) "
-                    "VALUES (:q, :s, :t, :r, CAST(:e AS vector))"
+                    "INSERT INTO successful_queries "
+                    "(question, sql, table_name, row_count, embedding, user_id) "
+                    "VALUES (:q, :s, :t, :r, CAST(:e AS vector), :uid)"
                 ),
                 {
                     "q": question[:500],
@@ -263,6 +333,7 @@ async def save_successful_query(
                     "t": table_name,
                     "r": row_count,
                     "e": emb_str,
+                    "uid": owner,
                 },
             )
             await session.commit()
@@ -275,8 +346,17 @@ async def get_few_shot_examples(
     embedding_provider: IEmbeddingProvider,
     semantic_cache: SemanticCache,
     limit: int = 3,
+    *,
+    user_id: str | None = None,
 ) -> str:
-    """Retrieve similar successful queries as few-shot examples for NL2SQL."""
+    """Retrieve similar successful queries as few-shot examples for NL2SQL.
+
+    H4 (round v46): only rows owned by the caller (or by `_LEGACY_OWNER`,
+    the operator-curated historical bucket) are surfaced. Cross-tenant
+    rows are filtered at the SQL layer so a malicious neighbor's poison
+    can't make it into the planner's prompt.
+    """
+    owner = (user_id or "").strip().lower() or _LEGACY_OWNER
     try:
         embedding = await embedding_provider.embed(question)
         emb_str = "[" + ",".join(str(v) for v in embedding) + "]"
@@ -286,17 +366,28 @@ async def get_few_shot_examples(
                     "SELECT question, sql, "
                     "1 - (embedding <=> CAST(:emb AS vector)) AS score "
                     "FROM successful_queries "
-                    "WHERE 1 - (embedding <=> CAST(:emb AS vector)) > 0.6 "
+                    "WHERE (user_id = :uid OR user_id = :legacy) "
+                    "  AND 1 - (embedding <=> CAST(:emb AS vector)) > 0.6 "
                     "ORDER BY embedding <=> CAST(:emb AS vector) "
                     "LIMIT :lim"
                 ),
-                {"emb": emb_str, "lim": limit},
+                {
+                    "emb": emb_str,
+                    "lim": limit,
+                    "uid": owner,
+                    "legacy": _LEGACY_OWNER,
+                },
             )
             rows = result.fetchall()
         if not rows:
             return ""
+        # Rows saved before the write-side guard existed are still in the table;
+        # filtering here means the fix takes effect without a data migration.
+        usable = [r for r in rows if not teaches_discredited_normalisation(r.sql)]
+        if not usable:
+            return ""
         lines = ["Successful similar queries (use as reference):"]
-        for r in rows:
+        for r in usable:
             lines.append(f"\nQuestion: {r.question}\nSQL: {r.sql}")
         return "\n".join(lines)
     except Exception:
