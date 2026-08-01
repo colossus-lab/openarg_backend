@@ -170,11 +170,113 @@ def _audit(
         logger.warning("parse_repair_audit insert failed (non-fatal)", exc_info=True)
 
 
+# Characters that legitimately appear in Argentine public-data column names.
+# Anything outside this set is almost always a decoding artefact: the header row
+# the repair recovers came out of the same badly-decoded file as the names it is
+# replacing, so a "recovered" name can be worse than what it replaces.
+# Observed on staging 2026-07-31: `Periodo: Ańo 2003`, `AÒo`, `Utilizaci—n`,
+# `socioeconůmicos`, `C¾rdoba`, `b·sic`, `1¤ Sem.` — each one an accented vowel
+# that arrived through the wrong codec.
+_SPANISH_OK = set(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789"
+    "áéíóúüñÁÉÍÓÚÜÑ"
+    " \t.,;:()[]{}/%-_+°ºª'\"$#&@!¡?¿<>=*|\\~^\n"
+)
+
+# `Periodo: Ańo 2003`, `_2`, `_3` … ×148. A proposal where most names share one
+# base is the defect it was meant to fix, one row further down.
+_MAX_REPEATED_BASE_SHARE = 0.50
+
+# Consuming header rows is irreversible — the audit log stores column names, not
+# deleted rows. `caba__fecundidad` has 9 rows and the proposal ate 2 of them
+# (22%), one of which was the TOTAL data row. On a 100k-row table the same 2
+# rows are free; the cost only matters relative to what is left.
+_MAX_HEADER_ROW_SHARE = 0.15
+
+# Above this many rows the header-row cost is irrelevant, so the probe stops
+# counting. Keeps the check off the critical path of a 52-million-row relation.
+_ROW_COUNT_PROBE_CAP = 1000
+
+_SUFFIX_RE = re.compile(r"^(?P<base>.*?)(?:_\d+)?$")
+
+
+# Compare a bounded prefix, not the whole base. Postgres truncates identifiers
+# at 63 bytes, so appending `_2` pushes the cut one character earlier and two
+# copies of the same title stop matching exactly:
+#     'Provincia de Córdoba … Proyecciones de Pob'
+#     'Provincia de Córdoba … Proyecciones de P_2'
+# That pair slipped the check and would have been applied. Any prefix shorter
+# than the truncation point sees them as identical, while names that genuinely
+# differ (`1998_Total` vs `1999_Total`, `Año_2023_Sexo_Mujer` vs `…_Varón`)
+# diverge in their first few characters.
+_BASE_COMPARISON_PREFIX = 40
+
+
+def _repeated_base_share(cols: list[str]) -> float:
+    """Largest share of names collapsing to the same base once `_N` is stripped."""
+    bases = [
+        (_SUFFIX_RE.match(str(c) or "").group("base") or "")
+        .strip()
+        .lower()[:_BASE_COMPARISON_PREFIX]
+        for c in cols
+    ]
+    bases = [b for b in bases if b]
+    if not bases:
+        return 0.0
+    return max(bases.count(b) for b in set(bases)) / len(bases)
+
+
+def _has_decoding_artefacts(cols: list[str]) -> bool:
+    """True when an unexpected character sits where a letter should be.
+
+    Position is what separates the two cases, not the character. An em dash is
+    ordinary punctuation in `Cuadro 3.1 Población — Total`, and a mis-decoded
+    `ó` in `Utilizaci—n`. Same codepoint, and a flat blocklist has to be wrong
+    about one of them. Mojibake lands *inside* a word, glued to the letters
+    around it; punctuation is separated by whitespace or ends the string.
+    """
+    for name in cols:
+        text_value = str(name or "")
+        for i, ch in enumerate(text_value):
+            if ch in _SPANISH_OK:
+                continue
+            before = text_value[i - 1] if i else ""
+            after = text_value[i + 1] if i + 1 < len(text_value) else ""
+            if before.isalnum() or after.isalnum():
+                return True
+    return False
+
+
+def assess_rename_proposal(
+    proposed: list[str],
+    *,
+    rows_to_delete: int,
+    total_rows: int | None,
+) -> str | None:
+    """Reject a proposal that is not actually an improvement. None means accept.
+
+    `propose_col_n_rename` already refuses when the garbage ratio does not drop,
+    which catches `col_N` surviving the rename. It does not catch a rename into
+    names that are *differently* useless, and on staging that was 3 of every 5
+    viable proposals. Each check below is one observed failure, not a guess.
+    """
+    if _repeated_base_share(proposed) > _MAX_REPEATED_BASE_SHARE:
+        return "proposal_is_one_repeated_title"
+    if _has_decoding_artefacts(proposed):
+        return "proposal_has_decoding_artefacts"
+    if total_rows and rows_to_delete and rows_to_delete / total_rows > _MAX_HEADER_ROW_SHARE:
+        return f"header_cost_too_high:{rows_to_delete}/{total_rows}"
+    return None
+
+
 def propose_col_n_rename(
     old_cols: list[str],
     sample_rows_data: list[list[Any]],
     *,
     min_garbage_ratio: float = 0.40,
+    total_rows: int | None = None,
 ) -> tuple[list[str], int, str]:
     """Pure-function core of the repair: given the current column names and
     a few sample rows of data, propose new column names and how many header
@@ -205,6 +307,11 @@ def propose_col_n_rename(
         )
     if proposed == old_cols:
         return old_cols, 0, "no_renames_needed"
+    rejected = assess_rename_proposal(
+        proposed, rows_to_delete=rows_to_delete, total_rows=total_rows
+    )
+    if rejected:
+        return old_cols, 0, rejected
     return proposed, rows_to_delete, "applied"
 
 
@@ -443,11 +550,20 @@ def repair_col_n_table(
             text(f"SELECT {select_cols} FROM {qident_table} LIMIT :n"),
             {"n": sample_rows},
         ).fetchall()
+        # Bounded count, not `COUNT(*)`. The quality gate only cares whether
+        # deleting the header rows costs a meaningful share of the table, and
+        # that is only ever true for a small one — so "exactly n, or at least
+        # the cap" is the whole answer, and it never scans a large relation.
+        total_rows = conn.execute(
+            text(f"SELECT count(*) FROM (SELECT 1 FROM {qident_table} LIMIT :cap) s"),
+            {"cap": _ROW_COUNT_PROBE_CAP},
+        ).scalar()
 
     proposed_cols, rows_to_delete, reason = propose_col_n_rename(
         old_cols,
         [list(r) for r in sample],
         min_garbage_ratio=min_garbage_ratio,
+        total_rows=int(total_rows or 0),
     )
 
     if reason != "applied":
