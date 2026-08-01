@@ -1049,8 +1049,18 @@ def cleanup_invariants(self) -> dict[str, int]:
                 )
                 SELECT
                     d.portal || '::' || d.source_id,
+                    -- `substring(... from '__v([0-9]+)$')` returns NULL when the
+                    -- name carries no version suffix, which is what the COALESCE
+                    -- needs. `regexp_replace` did not: with no match it returns
+                    -- the *whole* name unchanged, so NULLIF never fired and the
+                    -- `::int` raised InvalidTextRepresentation on the first
+                    -- unversioned table it met. Since the whole task runs in one
+                    -- `engine.begin()`, that aborted all six invariant repairs —
+                    -- measured 2026-08-01 on prod: 6395 of 26862 `raw` tables
+                    -- have no `__vN` suffix (the legacy `cache_*_r<hex>` shape),
+                    -- so the task had been failing every hour since 2026-05-05.
                     COALESCE(
-                        NULLIF(regexp_replace(t.table_name, '^.*__v', ''), '')::int,
+                        NULLIF(substring(t.table_name from '__v([0-9]+)$'), '')::int,
                         1
                     ),
                     'raw',
