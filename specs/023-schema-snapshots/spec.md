@@ -192,7 +192,9 @@ Detecting it requires no model — only that the profile was stored.
 - **Classifying the change.** This spec stores evidence. Deciding that a diff is
   "a rename" or "a breaking change" belongs to a consumer that does not exist yet.
 - **Repairing anything.** No behaviour changes as a result of a snapshot.
-- **Alerting.** Nothing reads these rows yet. See [DEBT-023-001].
+- **Alerting.** The consumer added in DEBT-023-001 reports; it does not
+  alert. Turning a summary into a notification is a calibration decision that
+  needs the measured false-positive rate first.
 - **Preventing the drop.** Whether `schema_mismatch_recreate` should version the
   table instead of overwriting it is a real question and a different change; it
   is entangled with the `OPENARG_USE_RAW_LAYER` cutover and is not decided here.
@@ -213,12 +215,23 @@ Detecting it requires no model — only that the profile was stored.
 
 ## 9. Tech Debt Discovered
 
-- **[DEBT-023-001] — No consumer.** The same debt as
-  [022-mart-quality](../022-mart-quality/spec.md) DEBT-022-001, and it is
-  acknowledged up front here: these rows are evidence for a question nobody is
-  asking yet. The first consumer should be a periodic job that diffs consecutive
-  snapshots per resource and reports the rate and the classes of change. Until
-  that exists, the value of this table is potential, not realised.
+- **[DEBT-023-001] — RESOLVED 2026-08-21.** The consumer exists:
+  `openarg.report_schema_drift` (weekly, Mondays 06:15 ART) pairs consecutive
+  snapshots per table, runs each pair through
+  [024-drift-classification](../024-drift-classification/spec.md) and logs the
+  rate and classes of change broken down per exoneration gate. It runs in
+  **shadow** — no notification, no findings row, no behaviour change — because
+  the false-positive rate of the cascade is still unmeasured and two of its
+  gates abstain on every call. See DEBT-023-005 for what shadow mode leaves open.
+
+- **[DEBT-023-005] — The report is only as good as the drop rate.** A table needs
+  two audited drops before anything is comparable. Measured on staging on
+  2026-08-21: zero drops in the preceding seven days, because
+  `raw.cached_datasets` has not existed since the 2026-08-03 `cleanup_raw_orphans`
+  incident and nothing has been collected since. The snapshot corpus there will
+  stay empty until collection resumes — which is a staging availability problem,
+  not a defect in this module, but it does mean staging cannot be the environment
+  that calibrates the thresholds.
 
 - **[DEBT-023-002] — The snapshot commits independently of the drop.** The
   cleanup tasks wrap their loop in an outer transaction while

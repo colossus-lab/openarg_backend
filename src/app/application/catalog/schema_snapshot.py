@@ -365,6 +365,51 @@ def collect_snapshot(
     )
 
 
+def snapshot_from_row(row: Any) -> TableSnapshot:
+    """Rebuild a `TableSnapshot` from a `raw_schema_snapshots` row.
+
+    The inverse of the capture. It exists so a consumer can compare two
+    snapshots long after both tables were dropped — which is the whole reason
+    the rows are stored, and the reason `diff_snapshots` takes objects rather
+    than reading the database itself.
+
+    Tolerant by design: a row written before migration 0057 has no provenance
+    columns, and `getattr` with a default keeps it readable instead of raising.
+    """
+    raw_profile = row.columns_profile or []
+    if isinstance(raw_profile, str):
+        raw_profile = json.loads(raw_profile)
+
+    columns = [
+        ColumnProfile(
+            name=str(c.get("name", "")),
+            ordinal=int(c.get("ordinal") or 0),
+            pg_type=str(c.get("pg_type", "")),
+            null_frac=c.get("null_frac"),
+            n_distinct=c.get("n_distinct"),
+            most_common_vals=list(c.get("most_common_vals") or []),
+            histogram_sample=list(c.get("histogram_sample") or []),
+        )
+        for c in raw_profile
+    ]
+    return TableSnapshot(
+        schema_name=row.schema_name,
+        table_name=row.table_name,
+        columns=columns,
+        row_count_estimate=row.row_count_estimate,
+        stats_available=bool(row.stats_available),
+        resource_identity=row.resource_identity,
+        version=row.version,
+        provenance=Provenance(
+            parser_version=getattr(row, "parser_version", None),
+            normalization_version=getattr(row, "normalization_version", None),
+            layout_profile=getattr(row, "layout_profile", None),
+            header_quality=getattr(row, "header_quality", None),
+            is_truncated=getattr(row, "is_truncated", None),
+        ),
+    )
+
+
 def capture_table_snapshot(
     engine: Engine,
     *,

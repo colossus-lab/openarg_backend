@@ -103,6 +103,7 @@ def create_celery() -> Celery:
             # Medallion mart tasks (raw → mart, no staging layer).
             "app.infrastructure.celery.tasks.mart_tasks",
             "app.infrastructure.celery.tasks.mart_audit_tasks",
+            "app.infrastructure.celery.tasks.drift_report_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -166,6 +167,7 @@ def create_celery() -> Celery:
         "openarg.cleanup_invariants": {"queue": "ingest"},
         "openarg.refresh_via_b_marts": {"queue": "ingest"},
         "openarg.audit_marts": {"queue": "ingest"},
+        "openarg.report_schema_drift": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -391,6 +393,20 @@ def create_celery() -> Celery:
                 # edit, since a DB-only flag is erased by the next build.
                 "task": "openarg.audit_marts",
                 "schedule": crontab(hour=3, minute=45),  # 03:45 ART daily
+                "options": {"queue": "ingest"},
+            },
+            "report-schema-drift-weekly": {
+                # Reads the snapshots that migrations 0056/0057 preserve and
+                # answers the question this project has never been able to
+                # answer: how often, and in what way, do our inputs change
+                # shape? Weekly, not daily — a table has to be dropped twice
+                # before anything is comparable, so a daily run would mostly
+                # re-report the same window.
+                #
+                # Shadow mode: it logs a summary and notifies nobody. The
+                # alert comes after the noise is measured, not before.
+                "task": "openarg.report_schema_drift",
+                "schedule": crontab(hour=6, minute=15, day_of_week=1),  # Monday 06:15 ART
                 "options": {"queue": "ingest"},
             },
             "snapshot-staff-weekly": {
