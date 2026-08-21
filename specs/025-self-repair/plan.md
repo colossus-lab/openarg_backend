@@ -26,10 +26,13 @@ Computed from the source of the modules that decide shape —
 `app/application/pipeline/parsers/*` plus the parse entry points in
 `collector_tasks` — hashed and truncated. Computed once per process and cached.
 
-Chosen over a hand-bumped constant because `_DEFAULT_PARSER_VERSION`
-(`collector_tasks.py:268`) is an env var defaulting to `"phase4"` that has never
-been bumped: it cannot distinguish a parser change from no change, which is the
-one thing G1 needs.
+Chosen over a configured constant for a reason now confirmed rather than
+suspected: `_DEFAULT_PARSER_VERSION` (`collector_tasks.py:268`) reads
+`OPENARG_PARSER_VERSION`, and staging has it **set to the literal string
+`2026-05-04`**. The mechanism is not broken — it has been faithfully stamping
+what it was given for 21,989 rows. A value that only changes when a person edits
+an environment file cannot distinguish a parser change from no change, which is
+the one thing G1 needs.
 
 *Risk*: the fingerprint changes on a comment edit, producing a spurious G1
 exoneration. Mitigation: hash the parsed AST with docstrings stripped, not raw
@@ -38,16 +41,24 @@ literal must.
 
 ### 1.2 Migration 0058 — `raw_table_versions.normalization_version`
 
-The column does not exist (verified 2026-08-21); `raw_schema_snapshots` has it
-since 0057. Nullable text, no backfill — historical rows are genuinely unknown
+The column does not exist there (verified 2026-08-21); `raw_schema_snapshots` has
+it since 0057. Nullable text, no backfill — historical rows are genuinely unknown
 and inventing a value would defeat FR-005.
+
+**Only worth shipping together with 1.1.** Nothing in the codebase computes a
+general normalization version today — `censo2022_ingest.py` hardcodes `"1"` and
+is the only writer. Adding the column first would create a second field that
+means nothing, which is the exact defect this phase exists to remove.
 
 ### 1.3 Stamp on every write path
 
-Four call sites insert into `raw_table_versions`
-(`collector_tasks.py:4756`, `:4883`, `_db.py:register_via_b_table`, plus the
-`ops_fixes` re-registration). Two currently forward a `parser_version` argument
-that arrives empty. All must pass the fingerprints.
+Verified: sites at `collector_tasks.py:5012` and `:6910` pass
+`_DEFAULT_PARSER_VERSION`; sites at `:4602` and `:4835` forward a parameter
+declared `parser_version: str | None = None` that callers do not supply. The
+database corroborates the split exactly — 21,989 rows with the env value, 6,089
+NULL. `_db.register_via_b_table` accepts no provenance argument at all.
+
+All of them must record the fingerprints.
 
 ### 1.4 Read provenance from the registry
 
@@ -68,38 +79,55 @@ exonerated by G1; today's five findings re-report as `UNATTRIBUTABLE`.
 
 ---
 
-## Phase 2 — Evidence retention
+## Phase 2 — Evidence: fix what exists, do not build a second one
 
-*Blocks the code lane, and only the code lane. Started early because it cannot be
-backfilled: 0 of 26,780 cached datasets retain their bytes today, and every day
-without it is a permanent hole in the corpus.*
+*Blocks the code lane only. The first draft of this plan proposed a new table and
+a new capture path. That was wrong: the archival exists, is scheduled, and had
+been failing since 2026-08-03 on the same missing `raw.cached_datasets` as
+everything else. Restoring that table unblocked it, and uploads began succeeding
+the same day.*
 
-### 2.1 Migration 0059 — `raw.parse_evidence`
+### 2.1 Confirm the archival keeps running
 
-`(id, resource_identity, version, source_url, content_hash, byte_prefix bytea,
-prefix_bytes int, truncated bool, media_type, captured_at)`.
+`s3_tasks.retry_s3_uploads` is on beat, `S3_BUCKET=openarg-datasets-staging` is
+configured, `_upload_to_s3` stores the raw file. First run after the restore: 17
+uploads and climbing, with 404s where the source URL has already died. No new
+migration, no new table, no new capture path.
 
-Separate table rather than a column on `parse_repair_audit`, because evidence is
-captured at ingest and repairs happen later and repeatedly — the cardinalities do
-not match.
+Work: watch the rate, measure the 404 share, and confirm it converges rather than
+stalling on the same failures.
 
-### 2.2 Capture on ingest
+### 2.2 The real gap — bytes that are not the bytes
 
-In the collector's download path, retain the first N bytes (start: 64 KB,
-`OPENARG_EVIDENCE_PREFIX_BYTES`). Best-effort with the same contract as the
-snapshot hook: a failure here must never fail an ingest.
+`upload_dataset_to_s3` re-downloads from `download_url` **at archival time**, so
+it stores whatever the URL serves now, not what produced the stored table. For a
+drift study that is precisely the assumption that cannot be made.
 
-*Open* (CL-025-002): a ZIP's useful part is not its prefix, and a wide workbook
-may need more. Start with the prefix, measure how often replay fails for lack of
-bytes, then decide.
+Two options, and the choice needs a measurement first:
+
+- **Capture at ingest** — keep the bytes already in hand during the download the
+  collector is doing anyway, instead of fetching them a second time later.
+  Correct, and costs a second write on the ingest path.
+- **Keep re-download, record the difference** — cheaper, but every sample needs a
+  flag saying it may not match, and the corpus has to honour it.
+
+Either way, FR-007b: store the content hash and compare against
+`raw_table_versions.source_file_hash`, which already exists. A replay must be
+able to refuse bytes that are not the ones under study.
 
 ### 2.3 Corpus builder
 
 `app/application/repair/corpus.py::build_regression_corpus()` — joins
-`parse_repair_audit` (8,287 real repairs, each with `old_columns → new_columns`)
-to `parse_evidence`, yielding `(sample, expected_columns)`.
+`parse_repair_audit` to the archived objects, yielding
+`(sample, expected_columns)`.
 
-**Done when**: SC-006 — one historical repair replays end to end.
+Size, measured rather than assumed: **543** usable pairs (`operation='apply'`,
+`ok`, not `dry_run`), all with `old_columns <> new_columns`. Not 8,287 — the rest
+are `skip` rows where no repair was made. 543 is enough to validate a parser
+change against a class, and not enough to train anything.
+
+**Done when**: SC-006 — one historical repair replays end to end, against bytes
+whose hash matches the version that produced it.
 
 ---
 
@@ -145,7 +173,25 @@ candidate with its count, and nothing is written.
 
 ## Phase 4 — The data lane
 
-### 4.1 The verifier, first
+### 4.0 A revert, before anything applies automatically
+
+**New** `app/application/repair/revert.py::revert_repair(run_id | audit_id)`
+
+Verified 2026-08-21: **no revert exists**. Nothing matching `revert`, `rollback`
+or `undo` appears in `app/application/repair/` or the admin router. The audit
+table records `old_columns`, so reversal is possible in principle — but that
+makes reversibility a property of the *data*, not of the system, and "we could
+reconstruct it by hand" is not a rollback.
+
+Every argument in this spec for letting the data lane act rather than only
+propose rests on its failure being cheap and reversible. Until this exists, that
+argument is not true, and no automatic repair may ship.
+
+Scope: read an audit row, rename the columns back, refuse if the current columns
+no longer match `new_columns` (someone else changed the table since), and record
+the reversal as its own audit row.
+
+### 4.1 The verifier, second
 
 `app/application/repair/verify.py::verify_repair()`
 
@@ -166,9 +212,10 @@ older" is the right direction for this class. Stated as a limit, not a solution.
 
 `app/application/repair/lane_data.py` maps a signature to the repair that already
 exists — `repair_title_as_columns_table`, `repair_col_n_table`,
-`repair_trailing_garbage_cols`. These have applied ~8,287 times and are reached
-today only through an admin HTTP route, which is the missing wire this whole
-spec is about. Every call is gated by 4.1 and audited.
+`repair_trailing_garbage_cols`. They have applied 543 times between them
+(trailing_garbage 403, col_n 108, title_as_columns 32) and skipped far more
+often, and they are reached today only through an admin HTTP route — the missing
+wire this whole spec is about. Every call is gated by 4.1 and audited.
 
 ### 4.3 LLM tier
 
@@ -212,14 +259,21 @@ behind it, exactly as shadow mode is being held today on a measured 0/5.
 | Phase | Blocked by | Why the block is real |
 |---|---|---|
 | 1 Attribution | — | Without it, repairs target our own improvements |
-| 2 Evidence | — (parallel) | Cannot be backfilled; every day is a permanent hole |
+| 2 Evidence | — (parallel) | Archival exists and now runs; the gap is that its bytes may not be the parsed bytes |
 | 3 Router | 1 | Routing an unattributable finding routes noise |
-| 4 Data lane | 1, 3 | Repairing before routing repairs the wrong artefact |
+| 4.0 Revert | — | Every argument for letting the lane act assumes a rollback that does not exist |
+| 4 Data lane | 1, 3, 4.0 | Repairing before routing repairs the wrong artefact; applying before a revert exists is unbounded |
 | 5 Code lane | 2, 3, 4 | The corpus is the oracle; it does not exist yet |
 | 6 Autonomy | 4 | A level needs a measurement, and 4 produces the first |
 
-**Proposed first cut**: Phase 1 complete, plus 2.1 and 2.2 so the corpus starts
-filling while the rest is built.
+**Proposed first cut**: Phase 1 complete, plus 4.0 (the revert), plus watching
+2.1. Phase 1 is the blocker for correctness; 4.0 is the blocker for safety and is
+small; 2.1 needs observation rather than code now that the archival is running
+again.
+
+Deliberately *not* in the first cut: the signature design (Phase 3), because it
+is the one piece with no verified basis yet and guessing it early is how the
+router ends up routing by whatever the first ten examples happened to look like.
 
 ---
 

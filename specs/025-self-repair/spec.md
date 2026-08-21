@@ -47,8 +47,8 @@ the observable that decides it is **recurrence**:
   one portal's quirk into a generic parser makes the code worse to fix one table.
 - The **same** change signature seen across many resources is not a coincidence —
   it is a defect in the code, and repairing each table individually treats the
-  symptom forever. Today's four PAMI findings are exactly this case, and
-  `parse_repair_audit` shows the class has already been repaired 2,026 times.
+  symptom forever. Today's four PAMI findings are exactly this case: the
+  `title_as_columns` class has been *attempted* 2,026 times and applied 32.
 
 ### 1.2 The asymmetry that makes the hybrid safe
 
@@ -61,17 +61,43 @@ lane's failure mode is one table and is reversible. Blast radius decides who is
 allowed to act.
 
 **And the data lane manufactures the code lane's oracle.** `parse_repair_audit`
-holds 10,973 rows, 8,287 of them real parse repairs, each carrying
-`old_columns → new_columns`: a labelled example of what the parser produced and
-what it should have produced. That is precisely the oracle APR needs and does
-not otherwise have here. Reinduction running continuously is what makes code
-repair verifiable later.
+rows carry `old_columns → new_columns`: a labelled example of what the parser
+produced and what it should have produced. That is precisely the oracle APR
+needs and does not otherwise have here.
 
-**One thing must start now or it is lost.** Replaying a candidate parser needs
-the bytes it would parse. Measured 2026-08-21: **0 of 26,780** `cached_datasets`
-rows carry an `s3_key`, and only 78 % of `raw_table_versions` rows still have a
-`source_url`. The corpus can only ever cover repairs made *after* evidence
-retention exists.
+The corpus is far smaller than the row count suggests, and the number matters
+because it decides whether the code lane is viable at all. Of 10,973 rows
+(staging, 2026-08-21):
+
+| `operation` | `ok` | `dry_run` | rows | usable as an example? |
+|---|---|---|---|---|
+| `apply` | yes | no | **543** | **yes** |
+| `dry_run` | yes | yes | 213 | proposal only, never applied |
+| `skip` | no | no | 5,960 | no repair was made |
+| `skip` | no | yes | 1,573 | no repair was made |
+| cleanup phases | — | — | 2,684 | not parse repairs |
+
+**543 usable pairs**, all of which do have `old_columns <> new_columns`. Not
+8,287. The `skip` rows are not failures — the repair function looked and decided
+nothing was needed — but they are not examples either.
+
+Reinduction running continuously is what grows this corpus, and 543 is the
+honest starting point.
+
+**Evidence retention already exists, and was broken for the same reason
+everything else was.** Replaying a candidate parser needs the bytes it would
+parse. `s3_tasks._upload_to_s3` archives the raw file, `S3_BUCKET` is configured,
+and `retry_s3_uploads` is on the beat schedule — but it had been failing on the
+missing `raw.cached_datasets` since 2026-08-03, which is why 0 of 26,780 rows
+carried an `s3_key`. Restoring that table unblocked it; uploads began succeeding
+the same day.
+
+This spec therefore does **not** build an archival subsystem. It has one, and the
+real gap is narrower and worth stating precisely: `upload_dataset_to_s3`
+re-downloads from `download_url` at archival time, so it captures *today's* bytes
+rather than the bytes that produced the stored table. Observed on the first run:
+some URLs already 404. For repairs made close to ingest the approximation holds;
+for anything older it does not, and no amount of retry recovers it.
 
 ---
 
@@ -116,20 +142,25 @@ retention exists.
 
 ### 4.1 Attribution comes before everything, and it does not exist yet
 
-Measured on staging: `raw_table_versions.parser_version` holds the literal
-string `2026-05-04` for 21,989 rows — the date of the May backfill, not a parser
-version — and NULL for 6,089. `catalog_resources` holds the placeholder
-`legacy:unknown`. Of 699 consecutive version pairs, **zero** have two non-null,
-differing provenance values.
+The stamping mechanism is not missing. It works, and it faithfully records a
+value that carries no information.
 
-G1 therefore cannot exonerate anything historical, and it fired zero times
-against five findings that were all ours. Worse, `_DEFAULT_PARSER_VERSION` is an
-environment variable defaulting to `"phase4"` that nobody bumps, so it would not
-change even when parser behaviour does.
+`OPENARG_PARSER_VERSION` is set to the literal string `2026-05-04` in the staging
+environment. Two of the four insert sites pass `_DEFAULT_PARSER_VERSION`, which
+reads it; the other two forward a function parameter that defaults to `None` and
+that callers do not supply. The database agrees exactly: 21,989 rows carry
+`2026-05-04`, 6,089 carry NULL. `catalog_resources` holds `legacy:unknown` for
+26,436 rows and NULL for 6,128 — never a real value. Of 699 consecutive version
+pairs, **zero** have two non-null, differing provenance values.
+
+So G1 fired zero times against five findings that were all ours, for two
+separable reasons: a constant that never changes, and two write paths that record
+nothing.
 
 The fix is a **derived** fingerprint — computed from the parser sources
-themselves, so it changes when behaviour changes and cannot drift from reality
-through neglect.
+themselves, so it changes when behaviour changes and cannot be left stale by
+whoever last edited an environment file. Plus making all four write paths record
+it.
 
 ### 4.2 A pair we cannot attribute is not an unexplained change
 
@@ -169,7 +200,11 @@ every table and whose failure is silent.
   fingerprint. Four call sites exist today and two pass a value that arrives
   empty.
 - **FR-003**: `raw_table_versions` MUST carry `normalization_version` alongside
-  `parser_version`. The column does not exist today; the snapshot table has it.
+  `parser_version` — but only once something computes one. The column does not
+  exist there today, and nothing in the codebase produces a general value:
+  `censo2022_ingest.py` hardcodes `"1"` and that is the only writer. Adding the
+  column before the fingerprint of §4.1 supplies a value would create a second
+  field that means nothing, which is the defect this spec is trying to remove.
 - **FR-004**: A snapshot MUST read provenance from `raw_table_versions` — which
   is per-version — before falling back to `catalog_resources`, which holds only
   the resource's current value and is therefore identical on both sides of a
@@ -180,11 +215,18 @@ every table and whose failure is silent.
 
 ### Evidence
 
-- **FR-006**: When a resource is ingested, a bounded prefix of the source bytes
-  MUST be retained, with its content hash, so a candidate parser can be replayed
-  later against a real input.
-- **FR-007**: Evidence retention MUST be bounded per sample and in total, and
-  MUST degrade to "no sample" rather than failing the ingest.
+- **FR-006**: The existing S3 archival MUST be the evidence store. It already
+  uploads the raw file and is already scheduled; this spec adds no parallel
+  mechanism.
+- **FR-007**: Archival MUST move from re-download to capture-at-ingest, or the
+  corpus MUST record which of the two produced each sample. Re-downloading from
+  `download_url` at archival time captures whatever the URL serves *now* — which
+  for a drift study is the one thing that cannot be assumed constant. Observed on
+  the first successful run: some URLs already return 404.
+- **FR-007b**: A sample MUST carry the content hash of the bytes that produced
+  the stored table, so a replay can refuse to run against bytes that are not the
+  ones being studied. `raw_table_versions.source_file_hash` already exists for
+  this comparison.
 - **FR-008**: The regression corpus MUST be derivable from `parse_repair_audit`
   joined to retained evidence, as `(sample, expected_columns)` pairs.
 
@@ -206,8 +248,13 @@ every table and whose failure is silent.
 - **FR-013**: The data lane MUST attempt known deterministic repairs first,
   matched by signature, and MUST reach the LLM tier only when no known class
   matches.
-- **FR-014**: Every repair MUST be audited in `parse_repair_audit` with the
-  before and after columns, and MUST be reversible from that record.
+- **FR-014**: A working revert MUST exist **before** any repair is applied
+  without a human. `parse_repair_audit` records `old_columns`, so a revert is
+  possible in principle, but no function implements one today — verified
+  2026-08-21, nothing matching `revert`/`rollback`/`undo` exists in
+  `app/application/repair/` or the admin router. Reversibility is currently a
+  property of the data, not of the system, and automatic repair must not ship
+  before it is a property of the system.
 - **FR-015**: No repair may apply unless it passes verification against the
   previous version's value profile.
 - **FR-016**: A repair MUST NOT run against a resource whose change was
@@ -246,9 +293,13 @@ every table and whose failure is silent.
 
 **Assumptions**
 
-- `parse_repair_audit` remains reversible and append-only.
-- The existing repairs in `parse_repair.py` are correct. They have applied ~8,287
-  times; this spec wires them, it does not re-derive them.
+- `parse_repair_audit` remains append-only. (Reversibility is *not* assumed — see
+  FR-014; it does not exist and must be built.)
+- The existing repairs in `parse_repair.py` are correct where they applied. They
+  have applied 543 times and skipped far more often; this spec wires them, it
+  does not re-derive them. Their skip rate is itself unmeasured and may mean the
+  heuristics are conservative, or that they are being pointed at tables they were
+  never meant to fix.
 
 **Out of scope**
 
@@ -294,3 +345,52 @@ every table and whose failure is silent.
   the wrong target. The four PAMI cases are exactly this: v1 was right and v2
   wrong, but nothing in the profile says which is which. Direction matters and
   the verifier does not yet know it.
+
+---
+
+## 10. Verification log
+
+Every factual claim above was checked against the running system on 2026-08-21
+(staging unless noted). This section exists because the first draft of this spec
+contained six claims that turned out to be wrong, and each one would have
+produced a phase of work aimed at the wrong thing.
+
+### Verified true
+
+| Claim | How |
+|---|---|
+| `catalog_resources` cannot distinguish versions | 32,564 rows = 32,564 resources = 32,564 tables; no version column |
+| `catalog_resources.parser_version` is never a real value | `legacy:unknown` ×26,436, NULL ×6,128 |
+| Zero version pairs carry differing non-null provenance | 699 pairs, 0 with both sides non-null and different |
+| `raw_table_versions` lacks `normalization_version` | column list |
+| All 543 applied repairs have `old_columns <> new_columns` | per-phase count |
+| `profile_similarity` returns `0.0` without sampled values | executed |
+| The repairs are reachable only from an admin HTTP route | no other caller in `src/` |
+| `repair_with_llm_assist` takes an LLM port, defaults `dry_run=True`, audits as `llm_assisted` | read |
+| Raw bytes are not kept on local disk | downloads go to `TemporaryDirectory` |
+| Alembic head is 0057, so the next migration is 0058 | prod and staging |
+
+### Found false, and corrected
+
+| First draft said | Actually |
+|---|---|
+| 8,287 usable repair examples | **543**. The rest are `skip` (5,960 + 1,573), dry-runs (213) and cleanups |
+| `title_as_columns` repaired 2,026 times | attempted 2,026, applied **32** |
+| `parser_version` holds a backfill date | `OPENARG_PARSER_VERSION=2026-05-04` is **set in the environment**; the mechanism works and records exactly what it was given |
+| No raw-byte retention exists | `s3_tasks._upload_to_s3` archives the raw file, `S3_BUCKET` is configured, `retry_s3_uploads` is on beat. It was failing on the missing `raw.cached_datasets`; restored the same day and now succeeding |
+| `parse_repair_audit` is reversible | no revert exists anywhere. See FR-014 |
+| `normalization_version` should be added for symmetry | nothing produces one; `censo2022_ingest.py` hardcodes `"1"` |
+
+### Still assumed — flagged, not resolved
+
+- That a change signature can be designed to make the four PAMI findings collide
+  without also colliding unrelated failures. Untested. DEBT-025-002.
+- That similarity to the previous version is the right verification target. In
+  the PAMI cases the *older* version was the correct one, so the direction is
+  not obvious. DEBT-025-003.
+- That the 543 applied repairs are correct. They were applied by heuristics and
+  never audited against ground truth; using them as an oracle inherits whatever
+  they got wrong.
+- That the archived bytes correspond to the parsed table. They do not, wherever
+  archival ran later than ingest — which today is all of them. FR-007.
+
