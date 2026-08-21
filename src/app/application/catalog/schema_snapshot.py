@@ -224,11 +224,23 @@ _IDENTITY_SQL = text(
 # `catalog_resources` carries the parser versions, `cached_datasets` the parse
 # path. Both are keyed by the physical table name. LEFT JOIN so a missing
 # catalog row still yields whatever `cached_datasets` knows.
+# `raw_table_versions` first, because it is the only per-version record.
+# `catalog_resources` holds one row per resource — 32,564 rows for 32,564
+# resources, with no version column — so both sides of a historical pair read
+# back the same value and G1 is structurally blind. That is why it fired zero
+# times against five findings that were all our parser's doing.
+#
+# The catalogue stays as a fallback for layout and header quality, which it is
+# the only source of, and for provenance on rows the registry never recorded.
 _PROVENANCE_SQL = text(
-    "SELECT cr.parser_version, cr.normalization_version, "
+    "SELECT COALESCE(rtv.parser_version, cr.parser_version) AS parser_version, "
+    "       COALESCE(rtv.normalization_version, cr.normalization_version) "
+    "           AS normalization_version, "
     "       COALESCE(cr.layout_profile, cd.layout_profile) AS layout_profile, "
     "       COALESCE(cr.header_quality, cd.header_quality) AS header_quality "
-    "FROM (SELECT :tbl AS tn) k "
+    "FROM (SELECT :tbl AS tn, :sch AS sn) k "
+    "LEFT JOIN raw_table_versions rtv "
+    "       ON rtv.table_name = k.tn AND rtv.schema_name = k.sn "
     "LEFT JOIN catalog_resources cr ON cr.materialized_table_name = k.tn "
     "LEFT JOIN cached_datasets cd ON cd.table_name = k.tn "
     "LIMIT 1"

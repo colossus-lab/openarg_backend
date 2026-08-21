@@ -117,6 +117,18 @@ def get_sync_engine() -> Engine:
     return _engine
 
 
+def _default_parser_version() -> str:
+    from app.application.catalog.parser_fingerprint import parser_fingerprint
+
+    return os.getenv("OPENARG_PARSER_VERSION") or parser_fingerprint()
+
+
+def _default_normalization_version() -> str:
+    from app.application.catalog.parser_fingerprint import normalization_fingerprint
+
+    return os.getenv("OPENARG_NORMALIZATION_VERSION") or normalization_fingerprint()
+
+
 def register_via_b_table(
     engine: Engine,
     *,
@@ -125,6 +137,8 @@ def register_via_b_table(
     schema_name: str = "public",
     version: int = 1,
     row_count: int | None = None,
+    parser_version: str | None = None,
+    normalization_version: str | None = None,
 ) -> None:
     """Register a vía-B table (transparency / senado / staff / bcra ingest)
     in `raw_table_versions` so the medallion mart layer can `live_table()`
@@ -156,15 +170,24 @@ def register_via_b_table(
                     """
                     INSERT INTO raw_table_versions (
                         resource_identity, version, schema_name, table_name,
-                        row_count
-                    ) VALUES (:rid, :v, :sch, :tn, :rc)
+                        row_count, parser_version, normalization_version
+                    ) VALUES (:rid, :v, :sch, :tn, :rc, :pv, :nv)
                     ON CONFLICT (resource_identity, version) DO UPDATE SET
                         row_count = COALESCE(EXCLUDED.row_count, raw_table_versions.row_count),
                         schema_name = EXCLUDED.schema_name,
-                        table_name = EXCLUDED.table_name
+                        table_name = EXCLUDED.table_name,
+                        parser_version = EXCLUDED.parser_version,
+                        normalization_version = EXCLUDED.normalization_version
                     """
                 ),
                 {
+                    # Vía-B connectors do not run the collector's parser, but
+                    # they do run its normalisation, and a row with no
+                    # provenance is a row G1 can say nothing about. Recording
+                    # the fingerprints here is what stops those tables being
+                    # permanently unattributable.
+                    "pv": parser_version or _default_parser_version(),
+                    "nv": normalization_version or _default_normalization_version(),
                     "rid": resource_identity,
                     "v": version,
                     "sch": schema_name,

@@ -85,11 +85,44 @@ def test_g1_does_not_exonerate_on_unknown_provenance():
 
     Most of production predates provenance tracking. Treating `None` as "same
     parser" would exonerate nearly everything and quietly disable the cascade.
+
+    It reports UNATTRIBUTABLE rather than UNEXPLAINED, which is the sharper
+    claim: we do not know whose change this was, which calls for recording
+    provenance — not for adapting the parser to a portal that may not have
+    moved.
     """
     before = _snap([_col("a", mcv=PROVINCIAS)], prov=Provenance())
     after = _snap([_col("b", mcv=MONTOS)], prov=Provenance(parser_version="phase4-v1"))
 
-    assert classify_change(before, after).verdict is Verdict.UNEXPLAINED
+    verdict = classify_change(before, after)
+    assert verdict.verdict is Verdict.UNATTRIBUTABLE
+    assert not verdict.is_actionable
+    assert "G1_provenance" in verdict.gates_not_evaluated
+
+
+def test_a_placeholder_is_not_provenance():
+    """`legacy:unknown` and a bare date look like values and carry nothing.
+    Treating them as real is what let the cascade report our own regressions as
+    upstream drift — 5 of 5 on 2026-08-21."""
+    for placeholder in ("legacy:unknown", "2026-05-04"):
+        before = _snap([_col("a", mcv=PROVINCIAS)], prov=Provenance(parser_version=placeholder))
+        after = _snap([_col("b", mcv=MONTOS)], prov=Provenance(parser_version=placeholder))
+
+        assert classify_change(before, after).verdict is Verdict.UNATTRIBUTABLE, placeholder
+
+
+def test_two_real_fingerprints_that_match_leave_the_change_unexplained():
+    """When provenance is real on both sides and identical, the parser did not
+    move — so the change is genuinely not ours, and the cascade may say so."""
+    before = _snap([_col("a", mcv=PROVINCIAS)], prov=Provenance(parser_version="p:ac538ee9d1a7"))
+    after = _snap(
+        [_col("a", mcv=PROVINCIAS), _col("nueva", 2, mcv=MONTOS)],
+        prov=Provenance(parser_version="p:ac538ee9d1a7"),
+    )
+
+    verdict = classify_change(before, after)
+    assert verdict.verdict is Verdict.UNEXPLAINED
+    assert verdict.is_actionable
 
 
 # ── G3 · comportamiento del pipeline ───────────────────────────

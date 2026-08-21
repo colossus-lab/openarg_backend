@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from app.application.catalog.parser_fingerprint import is_real_provenance
 from app.application.catalog.schema_snapshot import TableSnapshot, diff_snapshots
 
 
@@ -43,8 +44,15 @@ class Verdict(StrEnum):
     NO_CHANGE = "no_change"
     # A gate proved the diff was not upstream drift. `exonerated_by` says which.
     EXONERATED = "exonerated"
-    # Nothing could explain it away. This is the only value that should ever
-    # reach a human or a model.
+    # The shape changed and G1 could not run, because provenance is missing on
+    # one or both sides. Distinct from UNEXPLAINED on purpose: "we cannot tell
+    # whose change this was" is a different claim from "nothing explains it",
+    # and it calls for recording provenance rather than for adapting to a
+    # portal. Measured 2026-08-21: all five findings the cascade reported as
+    # UNEXPLAINED were our own parser, and all five would land here.
+    UNATTRIBUTABLE = "unattributable"
+    # Nothing could explain it away, and every gate that could speak did. This
+    # is the only value that should ever reach a human or a model.
     UNEXPLAINED = "unexplained"
 
 
@@ -159,6 +167,16 @@ def classify_change(
     # reasons that have nothing to do with the portal.
     provenance_changed = diff.get("provenance_changed") or []
     parser_fields = {"parser_version", "normalization_version"}
+
+    # Before asking whether the parser moved, ask whether we could tell. A
+    # placeholder is not provenance: `legacy:unknown` from the catalogue
+    # backfill and the bare date `OPENARG_PARSER_VERSION` supplied both look
+    # like values and carry nothing. Treating them as real is what let the
+    # cascade report our own regressions as upstream drift.
+    attributable = is_real_provenance(before.provenance.parser_version) and is_real_provenance(
+        after.provenance.parser_version
+    )
+
     if parser_fields.intersection(provenance_changed):
         return DriftVerdict(
             verdict=Verdict.EXONERATED,
@@ -167,6 +185,19 @@ def classify_change(
                 "Cambió nuestro parser entre las dos capturas "
                 f"({', '.join(sorted(parser_fields.intersection(provenance_changed)))}). "
                 "El cambio de forma es nuestro, no del origen."
+            ),
+            diff=diff,
+            gates_not_evaluated=not_evaluated,
+        )
+
+    if not attributable:
+        not_evaluated.append("G1_provenance")
+        return DriftVerdict(
+            verdict=Verdict.UNATTRIBUTABLE,
+            reason=(
+                "La forma cambió, pero no hay procedencia utilizable en al menos "
+                "uno de los dos lados, así que no se puede saber si el cambio fue "
+                "nuestro o del origen. Registrar procedencia, no adaptar el parser."
             ),
             diff=diff,
             gates_not_evaluated=not_evaluated,

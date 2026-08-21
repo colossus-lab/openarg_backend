@@ -261,11 +261,27 @@ _HEAVY_WIDTH_COLUMN_THRESHOLD = int(os.getenv("OPENARG_HEAVY_WIDTH_COLUMN_THRESH
 _WIDE_LAYOUT_COLUMN_THRESHOLD = int(os.getenv("OPENARG_WIDE_LAYOUT_COLUMN_THRESHOLD", "50"))
 
 # Default parser version persisted to `raw_table_versions.parser_version`.
-# Sprint 1.7 audit found 833 live rtv rows with NULL — the env var simply
-# wasn't set in some staging deploys, so the registration call passed
-# None to the column. Defaulting to the active parser tag here keeps the
-# observability column populated even when ops forgets to set the env.
-_DEFAULT_PARSER_VERSION = os.getenv("OPENARG_PARSER_VERSION", "phase4")
+# Derived from the parser sources, not declared. The env var is kept as an
+# explicit override for a deploy that needs to pin a value, but it is no longer
+# the source of truth: staging had it set to the literal string `2026-05-04`,
+# which the collector then recorded 21,989 times. A provenance value that only
+# changes when someone edits an environment file cannot distinguish a parser
+# change from no change, and G1 — the gate that asks whether *our* parser
+# moved — is the only gate with a producer.
+#
+# Sprint 1.7 had already found 833 live rtv rows with NULL for the same reason,
+# and answered it by defaulting the env var. That kept the column populated
+# without making it mean anything.
+def _default_parser_version() -> str:
+    from app.application.catalog.parser_fingerprint import parser_fingerprint
+
+    return os.getenv("OPENARG_PARSER_VERSION") or parser_fingerprint()
+
+
+def _default_normalization_version() -> str:
+    from app.application.catalog.parser_fingerprint import normalization_fingerprint
+
+    return os.getenv("OPENARG_NORMALIZATION_VERSION") or normalization_fingerprint()
 _HEAVY_METADATA_PORTAL_FORMATS: dict[str, frozenset[str]] = {
     "datos_gob_ar": frozenset({"zip"}),
     "diputados": frozenset({"json"}),
@@ -4737,6 +4753,7 @@ def _register_raw_version_in_conn(
     source_url: str | None = None,
     source_file_hash: str | None = None,
     parser_version: str | None = None,
+    normalization_version: str | None = None,
     collector_version: str | None = None,
     is_truncated: bool = False,
 ) -> None:
@@ -4756,11 +4773,11 @@ def _register_raw_version_in_conn(
             INSERT INTO raw_table_versions (
                 resource_identity, version, schema_name, table_name,
                 row_count, size_bytes, source_url, source_file_hash,
-                parser_version, collector_version, is_truncated
+                parser_version, normalization_version, collector_version, is_truncated
             ) VALUES (
                 :rid, :v, :sch, :tn,
                 :rc, :sz, :url, :hash,
-                :pv, :cv, :trunc
+                :pv, :nv, :cv, :trunc
             )
             ON CONFLICT (resource_identity, version) DO NOTHING
             """
@@ -4774,7 +4791,10 @@ def _register_raw_version_in_conn(
             "sz": size_bytes,
             "url": source_url,
             "hash": source_file_hash,
-            "pv": parser_version,
+            # Never None: a write path that records nothing is how 6,089
+            # rows ended up unattributable, and G1 cannot speak about those.
+            "pv": parser_version or _default_parser_version(),
+            "nv": normalization_version or _default_normalization_version(),
             "cv": collector_version,
             "trunc": is_truncated,
         },
@@ -4849,7 +4869,9 @@ def _promote_to_raw_atomic(
             ),
             {
                 "qn": qualified,
-                "pv": parser_version,
+                # Never None: a write path that records nothing is how 6,089
+                # rows ended up unattributable, and G1 cannot speak about those.
+                "pv": parser_version or _default_parser_version(),
                 "rid": resource_identity,
             },
         )
@@ -4867,6 +4889,7 @@ def _register_raw_version(
     source_url: str | None = None,
     source_file_hash: str | None = None,
     parser_version: str | None = None,
+    normalization_version: str | None = None,
     collector_version: str | None = None,
     is_truncated: bool = False,
 ) -> None:
@@ -4883,11 +4906,11 @@ def _register_raw_version(
                 INSERT INTO raw_table_versions (
                     resource_identity, version, schema_name, table_name,
                     row_count, size_bytes, source_url, source_file_hash,
-                    parser_version, collector_version, is_truncated
+                    parser_version, normalization_version, collector_version, is_truncated
                 ) VALUES (
                     :rid, :v, :sch, :tn,
                     :rc, :sz, :url, :hash,
-                    :pv, :cv, :trunc
+                    :pv, :nv, :cv, :trunc
                 )
                 ON CONFLICT (resource_identity, version) DO NOTHING
                 """
@@ -4901,7 +4924,10 @@ def _register_raw_version(
                 "sz": size_bytes,
                 "url": source_url,
                 "hash": source_file_hash,
-                "pv": parser_version,
+                # Never None: a write path that records nothing is how 6,089
+                # rows ended up unattributable, and G1 cannot speak about those.
+                "pv": parser_version or _default_parser_version(),
+                "nv": normalization_version or _default_normalization_version(),
                 "cv": collector_version,
                 "trunc": is_truncated,
             },
@@ -5009,7 +5035,7 @@ def _apply_cached_outcome(
                 row_count=row_count,
                 size_bytes=size_bytes,
                 source_url=source_url,
-                parser_version=_DEFAULT_PARSER_VERSION,
+                parser_version=_default_parser_version(),
                 collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
                 is_truncated=is_truncated,
             )
@@ -6907,7 +6933,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     row_count=int(member.get("row_count", 0) or 0),
                                     size_bytes=file_size,
                                     source_url=download_url,
-                                    parser_version=_DEFAULT_PARSER_VERSION,
+                                    parser_version=_default_parser_version(),
                                     collector_version=os.getenv("OPENARG_COLLECTOR_VERSION")
                                     or None,
                                 )
