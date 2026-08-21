@@ -41,6 +41,13 @@ The top-level modules are ordered roughly by architectural depth. Modules with �
 | 013 | [`013-ingestion-validation/`](013-ingestion-validation/) | — | **WS0** — `IngestionValidator` + 14 detectors + 3 modes (pre/post/retro) + `ingestion_findings` audit trail. |
 | 014 | [`014-state-machine/`](014-state-machine/) | — | **WS0.5** — explicit `cached_datasets` state machine + invariant enforcer + `error_category` taxonomy. |
 | 015 | [`015-catalog-resources/`](015-catalog-resources/) | — | **WS2 / WS3 / WS4** — logical catalog (`catalog_resources`) + deterministic naming + hybrid serving. |
+| 016 | [`016-serving-port/`](016-serving-port/) | — | `IServingPort` — the medallion-aware discovery surface the pipeline reads instead of physical table names. |
+| 017 | [`017-raw-layer/`](017-raw-layer/) | — | The `raw` schema: one immutable table per ingest, `<portal>__<slug>__<hash>__v<N>`, tracked in `raw_table_versions`. |
+| 018 | [`018-contracts-staging/`](018-contracts-staging/) | — | **DEPRECATED 2026-05-06** — the contracts + staging layer (medallion L2). Superseded by 019; content kept for history. |
+| 019 | [`019-marts/`](019-marts/) | — | Marts: curated materialized views built from `raw.*` via SQL macros. The surface the chat actually serves. |
+| 020 | [`020-legacy-pipeline-tests-migration/`](020-legacy-pipeline-tests-migration/) | — | Retirement of `smart_query_service` and its test suite once the LangGraph pipeline became the only path. |
+| 021 | [`021-parser-hardening/`](021-parser-hardening/) | — | Parser fixes applied in-place over already-ingested tables (`parse_repair`), plus the PDF parser. |
+| 022 | [`022-mart-quality/`](022-mart-quality/) | — | Nightly quality audit over every built mart + the `serving_blocked` switch. |
 
 Cross-cutting artifacts:
 

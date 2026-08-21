@@ -3,7 +3,7 @@
 **Type**: Forward-engineered
 **Status**: Implemented 2026-05-04, hardened 2026-05-06 (Sprint Marts Overhaul), expanded 2026-05-09 (analytics-driven sprint).
 **Hexagonal scope**: Application (mart loader + builder + sql_macros) + Infrastructure (Celery tasks + adapter integration)
-**Sister specs**: [015-catalog-resources](../015-catalog-resources/spec.md), [016-serving-port](../016-serving-port/spec.md), [017-raw-layer](../017-raw-layer/spec.md). [018-contracts-staging](../018-contracts-staging/spec.md) is **deprecated**.
+**Sister specs**: [015-catalog-resources](../015-catalog-resources/spec.md), [016-serving-port](../016-serving-port/spec.md), [017-raw-layer](../017-raw-layer/spec.md), [022-mart-quality](../022-mart-quality/spec.md) (nightly audit + `serving_blocked`). [018-contracts-staging](../018-contracts-staging/spec.md) is **deprecated**.
 
 **Recent capability updates (2026-05-09, analytics-driven sprint)**:
 - **Macros now accept `require_all_columns=True` kwarg**: filters out tables that don't have ALL `expected_columns` before the cap check. Resolves the case where a broad pattern (e.g. `presupuesto_de_la_administracion_pu*`) matches hundreds of tables but only a small subset has the canonical FULL shape. Validation at parse time: `require_all_columns=True` requires `expected_columns` to be non-empty.
@@ -193,8 +193,8 @@ when no curated mart has data. `_get_mart_schema` resolves
 - **FR-007**: Macro resolution failures MUST surface as `MacroResolutionError` and mark the mart `build_failed`. The mart MUST NOT silently produce a wrong-shape view.
 - **FR-008**: `mart_id` MUST match `^[a-z][a-z0-9_]{0,62}$`. Any other charset is rejected at YAML load — defense against SQL injection if `mart.id` is ever interpolated unquoted.
 - **FR-009**: `sources.portals` MUST be non-empty. Empty portals means no raw landing triggers refresh — almost always a YAML mistake.
-- **FR-010**: Empty-resolution macros (zero matching live rows) MUST emit `(SELECT NULL::text AS dummy WHERE FALSE)` — valid in any SQL position.
-- **FR-011**: The Serving Port discovery MUST filter `last_row_count > 0` so the planner never sees empty marts.
+- **FR-010**: Empty-resolution macros (zero matching live rows) MUST emit an empty subquery valid in any SQL position. With `expected_columns` this is `(SELECT NULL::text AS "c1", … WHERE FALSE)` (`_typed_empty_select`), so the consuming mart still references a known schema and builds with 0 rows; without it, `(SELECT NULL AS dummy WHERE FALSE)`. *Corrected 2026-08-19 — the FR still described the pre-`expected_columns` behaviour that this spec's own 2026-05-06 changelog superseded.*
+- **FR-011**: Every mart discovery path MUST filter `COALESCE(last_row_count, 0) > 0 AND NOT COALESCE(serving_blocked, FALSE)` — the first hides empty marts, the second hides marts deliberately withheld (migration 0054). The block MUST also be enforced at execution time, since NL2SQL can name a blocked mart directly. See [022-mart-quality](../022-mart-quality/spec.md) FR-015/FR-016. *Corrected 2026-08-19 — the FR named only the first half of the filter.*
 
 ## 9. Success Criteria
 
