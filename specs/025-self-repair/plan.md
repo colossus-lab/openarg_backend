@@ -8,7 +8,7 @@ and 6 outstanding.
 |---|---|
 | 1.1 derived fingerprint | done — `parser_fingerprint.py`, AST-based, 12 tests |
 | 1.2 migration 0058 | done — qualified to `public`, round-trip tested |
-| 1.3 all write paths | done — including `register_via_b_table`, verified writing `p:ac538ee9d1a7` |
+| 1.3 all write paths | done on staging — including `register_via_b_table`, verified writing `p:ac538ee9d1a7`. **Inert in production**: the collector still registers through unqualified SQL, so the value lands in whichever table the pooler hands over. See 1.6 |
 | 1.4 provenance from the registry | done — and schema-qualified, which turned out to matter more |
 | 1.5 `UNATTRIBUTABLE` | done — SC-002 confirmed on staging: the five findings re-report, 0 actionable |
 | 4.0 revert | done — `revert.py`, 10 tests, refuses when the table moved on |
@@ -116,6 +116,37 @@ database corroborates the split exactly — 21,989 rows with the env value, 6,08
 NULL. `_db.register_via_b_table` accepts no provenance argument at all.
 
 All of them must record the fingerprints.
+
+### 1.6 Make the registry resolve to one table in production
+
+*Added after Phase 1 shipped, because Phase 1 does not work in production
+without it.*
+
+Staging holds `raw_table_versions` in `public` only, so an unqualified reference
+resolves correctly there no matter what the pooler does — which is why the
+end-to-end verification passed and why it did not reveal this. Production holds
+the table in both schemas, and the collector registers through unqualified SQL.
+The fingerprints of 1.1 therefore land in whichever table the pooler hands over,
+and the provenance read of 1.4 — now qualified to `public` — will not find the
+ones that went to the shadow.
+
+Three options, measured rather than weighed by taste:
+
+1. **Qualify every reference.** ~100 references across 36 files, including the
+   SQL sandbox, the mart macros and every connector. Rejected: too much surface
+   for a bookkeeping fix.
+2. **Flip the role's `search_path` to `public, raw`.** Right shape — it applies
+   per backend regardless of pooling — but the role resolves `raw` first on
+   purpose, so unqualified names written by an LLM find `raw.cache_*`. Rejected:
+   it would change how every sandbox query resolves.
+3. **Drop `raw.raw_table_versions`.** Leaves `raw` first for everything else and
+   removes the ambiguity for this one table only. **Recommended**, and blocked on
+   a reconciliation: 72 of its 74 unique rows collide with
+   `uq(schema_name, table_name)` in `public`, meaning the two registries disagree
+   about which resource owns 72 physical tables. Nothing becomes a drop candidate
+   either way, so there is time to do it properly.
+
+Requires the user's explicit approval: it is a `DROP TABLE` in production.
 
 ### 1.4 Read provenance from the registry
 
@@ -318,13 +349,15 @@ behind it, exactly as shadow mode is being held today on a measured 0/5.
 | 1 Attribution | — | Without it, repairs target our own improvements |
 | 2 Evidence | — (parallel) | Archival exists and now runs; the gap is that its bytes may not be the parsed bytes |
 | 3 Router | 1 | Routing an unattributable finding routes noise |
+| 1.6 One registry | — | Phase 1 records provenance into a table chosen by the pooler; in production that is a coin flip |
 | 4.0 Revert | — | Every argument for letting the lane act assumes a rollback that does not exist |
 | 4 Data lane | 1, 3, 4.0 | Repairing before routing repairs the wrong artefact; applying before a revert exists is unbounded |
 | 5 Code lane | 2, 3, 4 | The corpus is the oracle; it does not exist yet |
 | 6 Autonomy | 4 | A level needs a measurement, and 4 produces the first |
 
-**Proposed first cut**: Phase 1 complete, plus 4.0 (the revert), plus watching
-2.1. Phase 1 is the blocker for correctness; 4.0 is the blocker for safety and is
+**Next**: 1.6, the registry reconciliation. It is the only thing standing between
+Phase 1 working on staging and Phase 1 working at all, and it needs a decision
+that is not the implementer's to take. Phase 1 is the blocker for correctness; 4.0 is the blocker for safety and is
 small; 2.1 needs observation rather than code now that the archival is running
 again.
 

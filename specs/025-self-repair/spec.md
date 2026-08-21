@@ -428,9 +428,55 @@ reading `rtv`. `cleanup_raw_orphans` deciding against a 166-row view of a
 reports zero candidates, so nothing has come of it, but the reason it reports
 zero has not been established and should not be assumed benign.
 
-Recorded as **[DEBT-025-004]**. Two ways out, and the choice is not this spec's
-to make: drop the shadow, or qualify every reference in the codebase. Neither is
-safe to do while the other is outstanding.
+Recorded as **[DEBT-025-004]**, and measured further before proposing anything.
+
+**Qualifying every reference is out.** There are roughly 100 unqualified
+references across 36 files, including the SQL sandbox, the mart macros, the
+analyst prompt path and every connector. A sweep of that surface to fix a
+bookkeeping defect trades a known problem for an unknown one.
+
+**Flipping the role's `search_path` is also out.** `ALTER ROLE ... SET
+search_path` would apply to every backend regardless of pooling, which is the
+right shape — but the role resolves `raw` first *on purpose*, so that the
+unqualified names an LLM writes find `raw.cache_*`. Putting `public` first to fix
+the registry would change how every sandbox query resolves.
+
+**Dropping the shadow is the surgical option**, because it leaves `raw` first for
+everything else and removes only the ambiguity for this one table. It is not
+clean yet:
+
+| | |
+|---|---|
+| Rows in the shadow | 166 |
+| Identical to a row in `public` | 92 (zero differ in content) |
+| Present only in the shadow | 74, of which 72 point at a table that exists |
+| Of those, holding data | 50 |
+| **Colliding with `uq(schema_name, table_name)` in `public`** | **72 of 74** |
+| Would become drop candidates either way | 0 |
+
+The last two rows are the finding. Those 72 are not rows waiting to be merged:
+`public` already claims the same physical tables under a *different*
+`resource_identity`. The two registries **disagree about who owns 72 tables**,
+and a straight INSERT would fail on all of them. Nothing gets deleted either way
+— 0 become cleanup candidates — so there is no urgency, only a reconciliation
+that has to be done case by case.
+
+Also worth recording: **eight** tables are duplicated across the two schemas in
+production, not one. Among them `query_analytics` and the LangGraph
+`checkpoints*` set, which are outside this work's perimeter and were not touched
+or measured beyond their names.
+
+### What this changes about Phase 1
+
+**Phase 1 is complete on staging and inert in production.** Staging holds
+`raw_table_versions` in `public` only, so an unqualified reference resolves
+correctly there whatever the pooler does. Production does not: the collector
+still registers through unqualified SQL, so the fingerprints Phase 1 wires land
+in whichever table the pooler hands over — and the provenance read, now
+qualified to `public`, will not find the ones that went to the shadow.
+
+Attribution in production therefore waits on DEBT-025-004. That is a change to
+the plan, not a caveat on it.
 
 ### What this says about measuring production
 
