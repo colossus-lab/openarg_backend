@@ -171,6 +171,13 @@ Detecting it requires no model — only that the profile was stored.
 - **SC-005**: Capturing a snapshot issues no query against the table's data,
   observable as no sequential scan in `pg_stat_statements` attributable to the
   capture.
+- **SC-007 — met 2026-08-21.** Validated end to end on staging: two real
+  `raw_orphan_cleanup` drops produced two snapshots, each with 13 columns
+  profiled, `stats_available=true`, and row estimates (3,507 / 4,363) captured
+  before the tables ceased to exist. The profile also surfaced a BOM (U+FEFF)
+  embedded in a column name — an artefact invisible everywhere else in the
+  system.
+
 - **SC-006**: Storage stays under ~4 KB per snapshot, so the whole corpus of
   27,061 tables costs order-of-100 MB rather than the terabytes that retaining
   the tables themselves would.
@@ -225,13 +232,24 @@ Detecting it requires no model — only that the profile was stored.
   gates abstain on every call. See DEBT-023-005 for what shadow mode leaves open.
 
 - **[DEBT-023-005] — The report is only as good as the drop rate.** A table needs
-  two audited drops before anything is comparable. Measured on staging on
-  2026-08-21: zero drops in the preceding seven days, because
-  `raw.cached_datasets` has not existed since the 2026-08-03 `cleanup_raw_orphans`
-  incident and nothing has been collected since. The snapshot corpus there will
-  stay empty until collection resumes — which is a staging availability problem,
-  not a defect in this module, but it does mean staging cannot be the environment
-  that calibrates the thresholds.
+  two audited drops before anything is comparable, and the second one arrives
+  only when the table is dropped again. Staging was restored to collecting on
+  2026-08-21 and produced its first two snapshots the same day; production has
+  recorded no drop at all since 2026-05-20. Neither environment will yield a
+  comparable pair quickly, and no threshold in this spec or in
+  [024](../024-drift-classification/spec.md) can be calibrated until they do.
+
+- **[DEBT-023-006] — The evidence exists because something deletes the table,
+  and the deleters are not trustworthy.** Restoring `raw.cached_datasets`
+  unblocked `cleanup_raw_orphans`, which immediately presented 700 candidates —
+  652 of them live versions holding 99.2M rows, orphaned only because their
+  `datasets` row had been re-keyed upstream. A guard now excludes live tables
+  that hold data. The wider point stands: this module's corpus is produced by
+  destructive tasks whose definition of "abandoned" is a proxy
+  (`no cached_datasets row`) that fails in exactly the situation the module was
+  built to study — the upstream identifier changing. Every drop reason should be
+  re-read with that in mind before any of this is used to justify an automated
+  repair.
 
 - **[DEBT-023-002] — The snapshot commits independently of the drop.** The
   cleanup tasks wrap their loop in an outer transaction while
