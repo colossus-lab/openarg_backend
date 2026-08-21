@@ -1,7 +1,25 @@
 # Plan 025 — Self-Repair
 
 **Spec**: [./spec.md](./spec.md)
-**Status**: Draft — awaiting approval
+**Status**: Phase 1 and 4.0 implemented 2026-08-21. Phases 2.2, 3, 4.1–4.3, 5
+and 6 outstanding.
+
+| Step | State |
+|---|---|
+| 1.1 derived fingerprint | done — `parser_fingerprint.py`, AST-based, 12 tests |
+| 1.2 migration 0058 | done — qualified to `public`, round-trip tested |
+| 1.3 all write paths | done — including `register_via_b_table`, verified writing `p:ac538ee9d1a7` |
+| 1.4 provenance from the registry | done — and schema-qualified, which turned out to matter more |
+| 1.5 `UNATTRIBUTABLE` | done — SC-002 confirmed on staging: the five findings re-report, 0 actionable |
+| 4.0 revert | done — `revert.py`, 10 tests, refuses when the table moved on |
+| 2.1 archival runs | confirmed running; 2.2 (bytes that are not the parsed bytes) outstanding |
+| 3 router | not started, deliberately — see below |
+| 4.1–4.3 data lane | not started; blocked on 3 |
+| 5 code lane | not started; blocked on the corpus |
+| 6 autonomy | not started; blocked on a measurement |
+
+Unplanned work that Phase 1 forced: the production registry split and the
+pooler's non-deterministic `search_path`. See spec §11 and DEBT-025-004.
 **Sequencing rule**: each phase is blocked by the one before it for a stated
 reason. The reasons are not process; skipping any of them produces a system that
 repairs the wrong thing.
