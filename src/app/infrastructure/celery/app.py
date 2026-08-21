@@ -105,6 +105,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.mart_audit_tasks",
             "app.infrastructure.celery.tasks.drift_report_tasks",
             "app.infrastructure.celery.tasks.schema_baseline_tasks",
+            "app.infrastructure.celery.tasks.refresh_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -170,6 +171,7 @@ def create_celery() -> Celery:
         "openarg.audit_marts": {"queue": "ingest"},
         "openarg.report_schema_drift": {"queue": "ingest"},
         "openarg.baseline_schema_snapshots": {"queue": "ingest"},
+        "openarg.refresh_stale_datasets": {"queue": "orchestrator"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
