@@ -150,6 +150,42 @@ that they **abstained**, rather than silently assuming they passed.
 
 ---
 
+## 7bis. First measurement (2026-08-21, staging)
+
+The point of the module is to produce a number nobody could produce before.
+Here is the first one, and it does not say what the project assumed.
+
+| | |
+|---|---|
+| Pairs evaluated | 203 (91 same-table, 112 version) |
+| `no_change` | 198 |
+| Actionable (`UNEXPLAINED`) | 5 — 1 reshape, 4 renames |
+| Exonerated by a gate | **0** |
+
+All five actionable findings were then read by hand. **All five are our own
+parser, not upstream drift.**
+
+- `datos_gob_ar::energia_ab782c06` v2→v3 — v2's "columns" included
+  `2026-05-04`, `col_0`, a sentence of release notes and a URL. Those are a
+  title block parsed as a header. v3 dropped them and gained the `_source_*`
+  metadata columns. The reshape is our parse getting *better*.
+- Four PAMI `compras_y_contrataciones` resources, v1→v2 — v1 had
+  `destino`, `estado`, `expediente`, `fecha_de_apertura`; v2 has
+  `LISTADO DE LLAMADOS DE LICITACIONES PUBLICAS - AÑO 2018 / G_10`. That is
+  the `title_as_columns` bug [021-parser-hardening](../021-parser-hardening/spec.md)
+  already has a repair for. The change is a regression of ours.
+
+Precision for the question the module exists to answer — *did the upstream
+format change?* — is **0 of 5** in this sample. That is the finding, and it is
+why shadow mode was the right default. Had a notification been wired on day
+one, its first five alerts would all have been noise for that question.
+
+It is a small sample and it is one environment. It is also the first evidence
+this project has ever had on the subject, and it points at a specific defect
+rather than a vague "needs tuning": see DEBT-024-005.
+
+---
+
 ## 8. Tech Debt Discovered
 
 - **[DEBT-024-001] — G0 and G2 have no producer.** The two gates that would
@@ -184,3 +220,24 @@ that they **abstained**, rather than silently assuming they passed.
   identity-resolution producer exists, this classifier's verdicts on a re-keyed
   resource will read UNEXPLAINED when the honest verdict is "we never knew it
   was the same thing".
+
+- **[DEBT-024-005] — G1 cannot speak about a historical pair, and that is why
+  all five findings were noise.** The gate exonerates when *our* parser moved,
+  which is exactly what happened in all five cases — yet it fired zero times.
+  Two reasons, both structural:
+
+  1. Provenance is read from `catalog_resources` **at snapshot time**, not
+     recorded at ingest time. For a pair captured today, both sides carry
+     today's value.
+  2. Where a value does exist for the older side it is `legacy:unknown`, a
+     placeholder that names no parser. Measured: of 165 version pairs, 163
+     have "differing" provenance, and the difference is almost always
+     `None` vs `legacy:unknown`. `Provenance.differs_from` deliberately treats
+     a `None` as *not* a difference — the right rule, since the alternative is
+     inventing exonerations — so the gate abstains.
+
+  The fix is to stamp the parser and normalization versions onto
+  `raw_table_versions` at write time, so a version carries the provenance of
+  the run that produced it rather than of whenever someone looked. Until then
+  G1 is decorative on anything but a pair captured across a deploy, and the
+  cascade will keep returning UNEXPLAINED for changes that are ours.
