@@ -539,7 +539,9 @@ def cleanup_orphan_cache_tables(self, *, dry_run: bool = True, max_drops: int = 
         SELECT t.tablename
         FROM pg_tables t
         WHERE t.schemaname = 'public'
-          AND t.tablename LIKE 'cache_%'
+          -- Escaped: `_` is a single-character wildcard unescaped, so the
+          -- pattern reached past the collector's own tables.
+          AND t.tablename LIKE 'cache\_%'
           AND t.tablename <> 'cache_drop_audit'
           AND (
               t.tablename ~ '_r[0-9a-f]{8,12}(_s[0-9a-f]{6,10})*$'
@@ -1214,7 +1216,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         # a dataset.
         result_double_ready = conn.execute(
             text(
-                """
+                r"""
                 DELETE FROM raw.cached_datasets cd_legacy
                 USING cached_datasets cd_raw,
                       raw_table_versions rtv
@@ -1222,7 +1224,10 @@ def cleanup_invariants(self) -> dict[str, int]:
                   AND cd_legacy.status = 'ready'
                   AND cd_raw.status = 'ready'
                   AND cd_legacy.table_name <> cd_raw.table_name
-                  AND cd_legacy.table_name LIKE 'cache_%'
+                  -- Escaped: an unescaped `_` is a single-character
+                  -- wildcard, so 'cache_%' also matches 'cached_datasets'
+                  -- and anything else beginning with five letters + one.
+                  AND cd_legacy.table_name LIKE 'cache\_%'
                   AND rtv.schema_name = 'raw'
                   AND rtv.table_name = cd_raw.table_name
                   AND rtv.superseded_at IS NULL

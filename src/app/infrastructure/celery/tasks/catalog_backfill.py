@@ -230,7 +230,11 @@ _QUERY_SQL = text(
                  cd.updated_at DESC NULLS LAST
         LIMIT 1
     ) cd ON true
-    WHERE :cursor_id IS NULL OR d.id > CAST(:cursor_id AS uuid)
+    -- Both sides are cast: a bare `:cursor_id IS NULL` gives Postgres no type
+    -- context for the parameter, and it refuses the statement with
+    -- AmbiguousParameter rather than guessing. Same failure the semantic
+    -- cache hit in March.
+    WHERE CAST(:cursor_id AS uuid) IS NULL OR d.id > CAST(:cursor_id AS uuid)
     ORDER BY d.id
     LIMIT :limit
     """
