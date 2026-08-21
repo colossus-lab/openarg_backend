@@ -260,7 +260,7 @@ _HEAVY_WIDTH_COLUMN_THRESHOLD = int(os.getenv("OPENARG_HEAVY_WIDTH_COLUMN_THRESH
 # is no longer "simple".
 _WIDE_LAYOUT_COLUMN_THRESHOLD = int(os.getenv("OPENARG_WIDE_LAYOUT_COLUMN_THRESHOLD", "50"))
 
-# Default parser version persisted to `raw_table_versions.parser_version`.
+# Default parser version persisted to `public.raw_table_versions.parser_version`.
 # Derived from the parser sources, not declared. The env var is kept as an
 # explicit override for a deploy that needs to pin a value, but it is no longer
 # the source of truth: staging had it set to the literal string `2026-05-04`,
@@ -4647,7 +4647,7 @@ def _resolve_collect_destination(
 ) -> _CollectDestination:
     """Decide where the next materialization for `dataset_id` should land.
 
-    Raw path (`OPENARG_USE_RAW_LAYER=1`): bumps `raw_table_versions` and returns
+    Raw path (`OPENARG_USE_RAW_LAYER=1`): bumps `public.raw_table_versions` and returns
     a versioned name in schema `raw`.
 
     Legacy path (default): returns the historical `cache_<portal>_<slug>__<hash>`
@@ -4690,7 +4690,7 @@ def _resolve_raw_table_for_dataset(
 ) -> RawPhysicalName:
     """Resolve the raw-schema table name for the next ingest of `dataset_id`.
 
-    Reads `raw_table_versions` to find the previous max version; bumps by 1.
+    Reads `public.raw_table_versions` to find the previous max version; bumps by 1.
     `portal` and `source_id` may be passed explicitly; if omitted, they are
     looked up from the `datasets` row.
 
@@ -4724,7 +4724,7 @@ def _resolve_raw_table_for_dataset(
         prev = conn.execute(
             text(
                 "SELECT COALESCE(MAX(version), 0) AS v "
-                "FROM raw_table_versions WHERE resource_identity = :rid"
+                "FROM public.raw_table_versions WHERE resource_identity = :rid"
             ),
             {"rid": resource_identity},
         ).fetchone()
@@ -4770,7 +4770,7 @@ def _register_raw_version_in_conn(
     conn.execute(
         text(
             """
-            INSERT INTO raw_table_versions (
+            INSERT INTO public.raw_table_versions (
                 resource_identity, version, schema_name, table_name,
                 row_count, size_bytes, source_url, source_file_hash,
                 parser_version, normalization_version, collector_version, is_truncated
@@ -4802,7 +4802,7 @@ def _register_raw_version_in_conn(
     conn.execute(
         text(
             """
-            UPDATE raw_table_versions
+            UPDATE public.raw_table_versions
             SET superseded_at = NOW()
             WHERE resource_identity = :rid
               AND version < :v
@@ -4830,7 +4830,7 @@ def _promote_to_raw_atomic(
     """Promote a freshly materialised raw table to the medallion in a
     SINGLE transaction.
 
-    Both writes (`raw_table_versions` insert + `catalog_resources` update)
+    Both writes (`public.raw_table_versions` insert + `catalog_resources` update)
     must be atomic: a half-promotion (rtv has the new version but the
     catalog still points at the old physical name) leaves `live_table()`
     and the serving port resolving to a stale row. The previous Sprint 0.6
@@ -4893,7 +4893,7 @@ def _register_raw_version(
     collector_version: str | None = None,
     is_truncated: bool = False,
 ) -> None:
-    """Insert a new entry into `raw_table_versions` and mark prior versions
+    """Insert a new entry into `public.raw_table_versions` and mark prior versions
     of the same `resource_identity` as superseded.
 
     Idempotent on `(resource_identity, version)` — re-running with the same
@@ -4903,7 +4903,7 @@ def _register_raw_version(
         conn.execute(
             text(
                 """
-                INSERT INTO raw_table_versions (
+                INSERT INTO public.raw_table_versions (
                     resource_identity, version, schema_name, table_name,
                     row_count, size_bytes, source_url, source_file_hash,
                     parser_version, normalization_version, collector_version, is_truncated
@@ -4935,7 +4935,7 @@ def _register_raw_version(
         conn.execute(
             text(
                 """
-                UPDATE raw_table_versions
+                UPDATE public.raw_table_versions
                 SET superseded_at = NOW()
                 WHERE resource_identity = :rid
                   AND version < :v
@@ -4984,7 +4984,7 @@ def _apply_cached_outcome(
     now: datetime | None = None,
     # MASTERPLAN Fase 1.5 — raw-layer destination metadata. When `raw_schema`
     # is "raw" and the outcome is `ready`, this function ALSO registers the
-    # new version in `raw_table_versions` and updates
+    # new version in `public.raw_table_versions` and updates
     # `catalog_resources.materialized_table_name` to the qualified `raw.<name>`
     # form. All four fields default to None so legacy callers are unchanged.
     raw_schema: str | None = None,
@@ -5221,15 +5221,15 @@ def _apply_cached_outcome(
                 # an older version of THIS resource. `_prune_open_cached_entries`
                 # only purges `downloading/pending/error` by design, so when v2
                 # lands the v1 row stays as `ready` and shows up as an orphan
-                # in the catalog (raw_table_versions live ≠ cached_datasets
+                # in the catalog (public.raw_table_versions live ≠ cached_datasets
                 # row's table_name). This DELETE is scoped to rows that are
                 # provably superseded — never touches legacy public.cache_*
-                # `ready` rows that have no raw_table_versions entry.
+                # `ready` rows that have no public.raw_table_versions entry.
                 conn.execute(
                     text(
                         """
                         DELETE FROM raw.cached_datasets cd
-                        USING raw_table_versions rtv
+                        USING public.raw_table_versions rtv
                         WHERE cd.dataset_id = CAST(:did AS uuid)
                           AND cd.status = 'ready'
                           AND cd.table_name <> :current_table
@@ -6907,7 +6907,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     "tn": member_table_name,
                                 },
                             )
-                    # Register each ZIP member in `raw_table_versions` so the
+                    # Register each ZIP member in `public.raw_table_versions` so the
                     # Serving Port and mart auto-refresh can discover them.
                     # Each member becomes its own identity (sub-path = member
                     # table_name) so version stays at 1 — idempotent on
@@ -8047,7 +8047,7 @@ def consolidate_group_tables(self, title: str, portal: str):
     time_limit=2700,
 )
 def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: int = 50):
-    """Reconcile `raw_table_versions.row_count` against the actual row count
+    """Reconcile `public.raw_table_versions.row_count` against the actual row count
     of every live table.
 
     The (resource_identity, version) tuple is by design immutable, but the
@@ -8074,7 +8074,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                 text(
                     """
                     SELECT rtv.schema_name, rtv.table_name
-                    FROM raw_table_versions rtv
+                    FROM public.raw_table_versions rtv
                     JOIN pg_class c ON c.relname = rtv.table_name
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                                        AND n.nspname = rtv.schema_name
@@ -8097,7 +8097,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
             res = conn.execute(
                 text(
                     """
-                    UPDATE raw_table_versions rtv
+                    UPDATE public.raw_table_versions rtv
                     SET row_count = GREATEST(0, c.reltuples::bigint)
                     FROM pg_class c
                     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -8125,7 +8125,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                     """
                     SELECT rtv.schema_name, rtv.table_name, rtv.row_count AS reported,
                            GREATEST(0, c.reltuples::bigint) AS estimated
-                    FROM raw_table_versions rtv
+                    FROM public.raw_table_versions rtv
                     JOIN pg_class c ON c.relname = rtv.table_name
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                                        AND n.nspname = rtv.schema_name
@@ -8150,7 +8150,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                     ).scalar()
                     conn.execute(
                         text(
-                            "UPDATE raw_table_versions SET row_count = :rc "
+                            "UPDATE public.raw_table_versions SET row_count = :rc "
                             "WHERE schema_name = :s AND table_name = :t "
                             "AND superseded_at IS NULL"
                         ),
