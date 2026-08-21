@@ -394,3 +394,49 @@ produced a phase of work aimed at the wrong thing.
 - That the archived bytes correspond to the parsed table. They do not, wherever
   archival ran later than ingest — which today is all of them. FR-007.
 
+---
+
+## 11. Discovered while executing Phase 1
+
+### The registry is not one table in production
+
+`raw_table_versions` exists in both schemas there. `public` holds the live
+registry — 27,855 rows, written today. `raw` holds a shadow: 166 rows, last
+written 2026-07-15, 92 of them duplicating rows in `public`.
+
+That alone would be an untidiness. What makes it a defect is the pooler. The
+application connects through PGBouncer in transaction pooling, where a
+session-level `SET search_path` does not survive the connection returning to the
+pool. Measured over twelve consecutive connections from the same engine: one
+resolved `public, raw`, eleven resolved `raw, public`.
+
+**So an unqualified reference to that table returns one of two different tables,
+chosen by whichever backend was free.** The cost was already on disk before it
+was noticed: of the 23,609 snapshots the production baseline captured, 23,445
+carried no `resource_identity`, because the identity lookup mostly landed on the
+166-row shadow. Those snapshots could never have been paired by version. They
+were recovered by a targeted UPDATE against `public.raw_table_versions`, which
+brought identity coverage to 23,609 of 23,609.
+
+Every reference in this feature's SQL now names its schema, and a test pins it.
+
+**The wider defect is not this feature's, and is not fixed.** Anything that reads
+or writes the raw registry unqualified in production has the same problem — the
+collector's own registration, and the cleanup tasks that decide what to drop by
+reading `rtv`. `cleanup_raw_orphans` deciding against a 166-row view of a
+27,855-row registry would consider almost everything an orphan. It currently
+reports zero candidates, so nothing has come of it, but the reason it reports
+zero has not been established and should not be assumed benign.
+
+Recorded as **[DEBT-025-004]**. Two ways out, and the choice is not this spec's
+to make: drop the shadow, or qualify every reference in the codebase. Neither is
+safe to do while the other is outstanding.
+
+### What this says about measuring production
+
+Every ad-hoc measurement in this document taken with a direct `psycopg`
+connection read the shadow, because the role's default `search_path` is
+`raw, public` while the application engine sets `public, raw`. Several figures
+were wrong on the first pass for exactly that reason. Measure production through
+`get_sync_engine`, or qualify the schema, or both.
+
