@@ -4406,6 +4406,45 @@ def _classify_error_category(
     return "unknown"
 
 
+def _schema_snapshots_enabled() -> bool:
+    """Feature flag for pre-drop schema snapshots (mig 0056). Default ON.
+
+    Set `OPENARG_SCHEMA_SNAPSHOTS=0` to disable. Rollback is an env var and a
+    worker restart — no code change — because this runs on the drop path and
+    an operator has to be able to take it out of the way quickly.
+    """
+    raw = os.getenv("OPENARG_SCHEMA_SNAPSHOTS", "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _capture_schema_snapshot(
+    engine,
+    *,
+    table_name: str,
+    reason: str,
+    actor: str,
+    extra: dict | None = None,
+) -> str | None:
+    """Preserve a table's shape before it is dropped. Never raises.
+
+    Thin wrapper so `_record_cache_drop` does not need to know about the
+    flag or the import. The import is local because `collector_tasks` is
+    loaded by every worker and the application layer should not be pulled
+    in when the feature is off.
+    """
+    if not _schema_snapshots_enabled():
+        return None
+    try:
+        from app.application.catalog.schema_snapshot import capture_table_snapshot
+
+        return capture_table_snapshot(
+            engine, table_name=table_name, reason=reason, actor=actor, extra=extra
+        )
+    except Exception:
+        logger.debug("schema snapshot hook failed for %s", table_name, exc_info=True)
+        return None
+
+
 def _record_cache_drop(
     engine,
     *,
@@ -4421,9 +4460,36 @@ def _record_cache_drop(
     DROP TABLE so we still capture the operationally-driven drops. Drops
     issued manually (psql admin) are not captured here — fall back to RDS
     audit logs / CloudTrail for those.
+
+    Since mig 0056 this also preserves the table's *shape* — columns, types
+    and the value profile PostgreSQL already computed — into
+    `raw.raw_schema_snapshots`. Every audited drop path funnels through
+    here, so hooking the snapshot at this single point covers all four
+    (`schema_mismatch_recreate`, `retain_raw_versions`, `raw_orphan_cleanup`,
+    `empty_raw_bloat`) and any future one for free. That matters most for
+    `schema_mismatch_recreate`: it is the collector's response to an
+    incompatible re-ingest, so without a snapshot the evidence of a format
+    change is destroyed by the act of handling the format change.
     """
     if not table_name:
         return
+
+    # Before the audit row, because a snapshot of a table that has already
+    # been dropped is worth nothing.
+    #
+    # Guarded here as well as inside the helper. That is not redundant: this
+    # runs on the path of a `DROP TABLE` that has to happen, and the helper's
+    # own guard cannot cover a failure in its import. Two guards is the price
+    # of never turning a bookkeeping problem into a stuck collector.
+    try:
+        _capture_schema_snapshot(
+            engine, table_name=table_name, reason=reason, actor=actor, extra=extra
+        )
+    except Exception:
+        logger.warning(
+            "schema snapshot raised for %s; continuing with the drop", table_name, exc_info=True
+        )
+
     try:
         with engine.begin() as conn:
             conn.execute(

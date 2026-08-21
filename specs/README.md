@@ -48,6 +48,7 @@ The top-level modules are ordered roughly by architectural depth. Modules with �
 | 020 | [`020-legacy-pipeline-tests-migration/`](020-legacy-pipeline-tests-migration/) | — | Retirement of `smart_query_service` and its test suite once the LangGraph pipeline became the only path. |
 | 021 | [`021-parser-hardening/`](021-parser-hardening/) | — | Parser fixes applied in-place over already-ingested tables (`parse_repair`), plus the PDF parser. |
 | 022 | [`022-mart-quality/`](022-mart-quality/) | — | Nightly quality audit over every built mart + the `serving_blocked` switch. |
+| 023 | [`023-schema-snapshots/`](023-schema-snapshots/) | — | Preserve a table's shape and value profile before any audited drop, so a format change leaves evidence. |
 
 Cross-cutting artifacts:
 

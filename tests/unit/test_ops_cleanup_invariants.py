@@ -168,11 +168,71 @@ def test_drops_empty_orphans():
             "app.infrastructure.celery.tasks.ops_fixes.get_sync_engine",
             lambda: engine,
         )
+        # Each drop is now audited (and snapshotted) via `_record_cache_drop`,
+        # which opens its own connection. Stub it out so this test keeps
+        # counting only the invariant work it is about; the audit itself is
+        # covered by `test_empty_orphan_drops_are_audited` below.
+        mp.setattr(
+            "app.infrastructure.celery.tasks.collector_tasks._record_cache_drop",
+            lambda *a, **kw: None,
+        )
         summary = cleanup_invariants.run()
 
     assert summary["dropped_empty_orphans"] == 2
     # 8 rowcount + 1 SELECT + 2 DROPs + 1 double_cd_ready + 1 dataset row_count = 13.
     assert conn.execute.call_count == 13
+
+
+def test_empty_orphan_drops_are_audited():
+    """This drop used to leave no trace.
+
+    It was the one `DROP TABLE` in the codebase that never called
+    `_record_cache_drop`, so `cache_drop_audit` was silently incomplete —
+    "nothing was dropped" and "something was dropped unaudited" looked the
+    same from the outside. Since mig 0056 the audit call also carries the
+    pre-drop schema snapshot, so skipping it loses the table's shape too.
+    """
+    from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
+
+    fake_orphan = MagicMock()
+    fake_orphan.table_name = "energia__broken_a__deadbeef__v1"
+
+    engine, _conn = _build_engine_with_results(
+        [
+            _FakeResult(rowcount=0),  # classifier
+            _FakeResult(rowcount=0),  # retry clamp
+            _FakeResult(rowcount=0),  # zombie errors
+            _FakeResult(rowcount=0),  # zero-retry zombies
+            _FakeResult(rowcount=0),  # canonical orphan registration
+            _FakeResult(rowcount=0),  # fallback orphan registration
+            _FakeResult(rowcount=0),  # is_cached drift
+            _FakeResult(rowcount=0),  # mart row_count drift
+            _FakeResult(rows=[fake_orphan]),  # SELECT
+            _FakeResult(rowcount=0),  # DROP
+            _FakeResult(rowcount=0),  # double_cd_ready purge
+            _FakeResult(rowcount=0),  # dataset row_count drift
+        ]
+    )
+    recorded = MagicMock()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "app.infrastructure.celery.tasks.ops_fixes.get_sync_engine",
+            lambda: engine,
+        )
+        mp.setattr(
+            "app.infrastructure.celery.tasks.collector_tasks._record_cache_drop",
+            recorded,
+        )
+        cleanup_invariants.run()
+
+    recorded.assert_called_once()
+    kwargs = recorded.call_args.kwargs
+    # Qualified, so the snapshot reader resolves the right schema — production
+    # holds tables of the same name in both `public` and `raw`.
+    assert kwargs["table_name"] == "raw.energia__broken_a__deadbeef__v1"
+    assert kwargs["reason"] == "empty_orphan_invariant"
+    assert kwargs["actor"] == "ops_fixes.cleanup_invariants"
 
 
 def test_idempotent_after_first_run():

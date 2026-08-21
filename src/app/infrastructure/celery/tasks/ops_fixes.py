@@ -947,6 +947,8 @@ def cleanup_invariants(self) -> dict[str, int]:
 
     Returns a dict with counts of rows modified per category.
     """
+    from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
+
     engine = get_sync_engine()
     fixed_unknown = 0
     fixed_retry = 0
@@ -1179,6 +1181,17 @@ def cleanup_invariants(self) -> dict[str, int]:
         dropped_empty_orphans = 0
         for row in empty_orphans_rows:
             try:
+                # This drop used to leave no trace at all: it is the one
+                # `DROP TABLE` in the codebase that never called
+                # `_record_cache_drop`, so `cache_drop_audit` was silently
+                # incomplete and nobody could tell "nothing was dropped"
+                # from "something was dropped unaudited".
+                _record_cache_drop(
+                    engine,
+                    table_name=f"raw.{row.table_name}",
+                    reason="empty_orphan_invariant",
+                    actor="ops_fixes.cleanup_invariants",
+                )
                 conn.execute(text(f'DROP TABLE IF EXISTS raw."{row.table_name}"'))
                 dropped_empty_orphans += 1
             except Exception:
