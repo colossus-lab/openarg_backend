@@ -830,6 +830,23 @@ def cleanup_raw_orphans(
           )
           AND (:no_exact OR rtv.resource_identity NOT IN :exact)
           AND (:no_tables OR rtv.table_name NOT IN :protected_tables)
+          -- A live version holding data is not a leftover. This task exists
+          -- for tables abandoned by a reprocess, and the absence of a
+          -- cached_datasets row was standing in for "abandoned" — but a row
+          -- is also absent when the dataset itself disappeared from the
+          -- catalog, which is what happens every time a portal regenerates
+          -- its source_ids. Measured on staging 2026-08-21: 652 of the 706
+          -- candidates were live, holding 99.2M rows between them, orphaned
+          -- only because their `datasets` row had been re-keyed upstream.
+          -- Superseded versions stay in scope; so do empty live ones.
+          AND (
+              rtv.superseded_at IS NOT NULL
+              OR COALESCE((
+                  SELECT c.reltuples FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'raw' AND c.relname = rtv.table_name
+              ), 0) <= 0
+          )
         ORDER BY rtv.created_at ASC
         LIMIT :limit
         """

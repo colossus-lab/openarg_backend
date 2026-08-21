@@ -214,3 +214,32 @@ def test_empty_result_returns_zero_summary():
     assert result["candidates"] == 0
     assert result["dropped"] == 0
     write_conn.execute.assert_not_called()
+
+
+def test_live_tables_holding_data_are_out_of_scope():
+    """A live version with rows is not a leftover, and must not be a candidate.
+
+    The task used the absence of a `cached_datasets` row as its definition of
+    "abandoned". That holds when a reprocess moves a dataset to a new physical
+    name — but the row is equally absent when the *dataset* disappears from the
+    catalog, which happens every time a portal regenerates its source_ids.
+
+    Measured on staging 2026-08-21, immediately after `raw.cached_datasets` was
+    restored: 700 candidates, of which 652 were live and held 99.2M rows between
+    them — orphaned only because their `datasets` row had been re-keyed
+    upstream. With the guard the same query returns 91.
+
+    The engine is mocked in this suite, so what is pinned here is the contract:
+    superseded versions stay in scope, empty live ones stay in scope, and a live
+    table with rows is excluded before it ever reaches the drop loop.
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    source = ops_fixes.cleanup_raw_orphans.__wrapped__.__code__.co_consts
+    sql = next(
+        (c for c in source if isinstance(c, str) and "raw_table_versions rtv" in c),
+        None,
+    )
+    assert sql is not None, "candidate SELECT not found"
+    assert "rtv.superseded_at IS NOT NULL" in sql
+    assert "reltuples" in sql
