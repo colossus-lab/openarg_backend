@@ -31,6 +31,9 @@ class _Row:
             "layout_profile": "simple_tabular",
             "header_quality": "good",
             "is_truncated": False,
+            "source_url": "https://portal/f.csv",
+            "p_source_url": "https://portal/f.csv",
+            "reason": "baseline",
         }
         defaults.update(kw)
         for k, v in defaults.items():
@@ -105,6 +108,7 @@ def test_prev_row_adapter_exposes_the_prefixed_half():
         p_layout_profile = None
         p_header_quality = None
         p_is_truncated = None
+        p_source_url = None
 
     prev = _PrevRow(_Pair())
     snap = snapshot_from_row(prev)
@@ -116,14 +120,16 @@ def test_prev_row_adapter_exposes_the_prefixed_half():
 # ── el reporte ─────────────────────────────────────────────────
 
 
-def _run_report(pair_rows, coverage=None):
+def _run_report(pair_rows, version_rows=None, coverage=None):
     from app.infrastructure.celery.tasks import drift_report_tasks
 
+    version_rows = version_rows or []
+    total = len(pair_rows) + len(version_rows)
     cov = coverage or MagicMock(
-        snapshots=len(pair_rows) * 2,
-        tables=len(pair_rows),
-        with_stats=len(pair_rows),
-        with_provenance=len(pair_rows),
+        snapshots=total * 2,
+        tables=total,
+        with_stats=total,
+        with_provenance=total,
         first_seen=None,
         last_seen=None,
     )
@@ -132,6 +138,7 @@ def _run_report(pair_rows, coverage=None):
     conn.execute.side_effect = [
         MagicMock(fetchone=lambda: cov),
         MagicMock(fetchall=lambda: pair_rows),
+        MagicMock(fetchall=lambda: version_rows),
     ]
     drift_report_tasks.get_sync_engine = lambda: engine
     return drift_report_tasks.report_schema_drift.run()
@@ -170,6 +177,7 @@ def test_report_counts_an_exoneration_by_gate():
         "p_layout_profile": None,
         "p_header_quality": None,
         "p_is_truncated": None,
+        "p_source_url": "https://portal/f.csv",
     }.items():
         setattr(pair, k, v)
 
@@ -197,6 +205,7 @@ def test_one_unparseable_row_does_not_sink_the_report():
         "p_layout_profile",
         "p_header_quality",
         "p_is_truncated",
+        "p_source_url",
     ):
         setattr(broken, k, None)
 
@@ -229,6 +238,7 @@ def test_actionable_cases_are_included_inline():
         "p_layout_profile": "simple_tabular",
         "p_header_quality": "good",
         "p_is_truncated": False,
+        "p_source_url": "https://portal/f.csv",
     }.items():
         setattr(pair, k, v)
 
@@ -238,6 +248,112 @@ def test_actionable_cases_are_included_inline():
     assert result["actionable_by_class"] == {"additive": 1}
     assert result["examples"][0]["added"] == ["nueva"]
     assert result["examples"][0]["reason_dropped"] == "schema_mismatch_recreate"
-    # G0 and G2 abstain until something produces their input — the report has
-    # to show that, or a reader would assume they passed.
+    assert result["examples"][0]["pair_kind"] == "same_table"
+    # G0 and G2 used to abstain on every call. The pair now carries both facts
+    # — matching resource_identity and matching source_url — so neither gate
+    # has to guess, and both actually run.
+    assert result["examples"][0]["gates_not_evaluated"] == []
+
+
+# ── los dos tipos de par ───────────────────────────────────────
+
+
+def _pair(cur_table, prev_table, cur_cols, prev_cols, **over):
+    row = _Row(table_name=cur_table, columns_profile=cur_cols, **over)
+    for k, v in {
+        "p_schema_name": "raw",
+        "p_table_name": prev_table,
+        "p_resource_identity": over.get("p_resource_identity", "portal::x"),
+        "p_version": 1,
+        "p_row_count_estimate": 90,
+        "p_stats_available": True,
+        "p_columns_profile": prev_cols,
+        "p_parser_version": "phase4-v1",
+        "p_normalization_version": "phase4-v1",
+        "p_layout_profile": "simple_tabular",
+        "p_header_quality": "good",
+        "p_is_truncated": False,
+        "p_source_url": over.get("p_source_url", "https://portal/f.csv"),
+    }.items():
+        setattr(row, k, v)
+    return row
+
+
+def test_version_pairs_are_counted_and_labelled_separately():
+    """A version pair compares two *different* physical tables the registry
+    calls the same resource. That is the retroactive evidence — it must not be
+    collapsed into the same-table rate."""
+    v = _pair(
+        "t__v2",
+        "t__v1",
+        [_profile("a", mcv=["A", "B", "C", "D", "E"]), _profile("nueva", mcv=["1", "2", "3"])],
+        [_profile("a", mcv=["A", "B", "C", "D", "E"])],
+    )
+    result = _run_report([], version_rows=[v])
+
+    assert result["pairs_by_kind"] == {"same_table": 0, "version": 1}
+    assert result["by_kind"]["version"]["evaluated"] == 1
+    assert "same_table" not in result["by_kind"]
+    assert result["examples"][0]["pair_kind"] == "version"
+    assert result["examples"][0]["compared_against"] == "t__v1"
+
+
+def test_a_reused_table_name_is_exonerated_by_G0():
+    """The same physical name can be handed to a different resource. Comparing
+    those two says nothing about format, and the gate must catch it."""
+    row = _pair(
+        "t",
+        "t",
+        [_profile("totalmente", mcv=["X"])],
+        [_profile("distinto", mcv=["Y"])],
+        resource_identity="portal::NUEVO",
+        p_resource_identity="portal::VIEJO",
+    )
+    result = _run_report([row])
+
+    assert result["actionable"] == 0
+    assert result["exonerated_by_gate"] == {"G0_identity": 1}
+
+
+def test_a_different_file_of_the_same_dataset_is_exonerated_by_G2():
+    """Two files of one dataset differing from each other is heterogeneity."""
+    row = _pair(
+        "t",
+        "t",
+        [_profile("a", mcv=["X"])],
+        [_profile("b", mcv=["Y"])],
+        source_url="https://portal/2024.csv",
+        p_source_url="https://portal/2023.csv",
+    )
+    result = _run_report([row])
+
+    assert result["actionable"] == 0
+    assert result["exonerated_by_gate"] == {"G2_sibling": 1}
+
+
+def test_gates_still_abstain_when_the_registry_row_is_gone():
+    """The registry row is deleted when a table is dropped. Missing facts must
+    produce abstention, never an assumed answer."""
+    row = _pair(
+        "t",
+        "t",
+        [_profile("a", mcv=["X"]), _profile("nueva", mcv=["1"])],
+        [_profile("a", mcv=["X"])],
+        resource_identity=None,
+        p_resource_identity=None,
+        source_url=None,
+        p_source_url=None,
+    )
+    result = _run_report([row])
+
     assert set(result["examples"][0]["gates_not_evaluated"]) == {"G0_identity", "G2_sibling"}
+
+
+def test_a_version_pair_is_the_same_resource_by_construction():
+    """Version pairs are built by partitioning on resource_identity, so G0 is
+    satisfied without consulting the row."""
+    from app.infrastructure.celery.tasks.drift_report_tasks import _context_for
+
+    row = _pair("t__v2", "t__v1", [], [], resource_identity=None, p_resource_identity=None)
+    assert _context_for("version", row).same_identity is True
+    assert _context_for("same_table", row).same_identity is None

@@ -11,11 +11,12 @@ from unittest.mock import MagicMock
 
 
 class _Row:
-    def __init__(self, table_name, schema_name="raw", version=1):
+    def __init__(self, table_name, schema_name="raw", version=1, is_live=True):
         self.table_name = table_name
         self.schema_name = schema_name
         self.resource_identity = f"portal::{table_name}"
         self.version = version
+        self.is_live = is_live
 
 
 def _run(rows, capture_side_effect, remaining=0):
@@ -66,15 +67,19 @@ def test_a_table_that_cannot_be_captured_costs_only_itself():
     assert result["skipped"] == 1
 
 
-def test_the_snapshot_is_marked_as_taken_from_a_living_table():
+def test_the_snapshot_records_whether_the_table_was_still_live():
     """A reader must be able to tell 'this is how it looked while alive' from
-    'this is how it looked the moment before it died'."""
-    _, calls, _ = _run([_Row("t")], lambda kw: "snap-id")
+    'this is how it looked the moment before it died' — and, now that
+    superseded versions are captured too, which of the two a row describes."""
+    _, calls, _ = _run([_Row("t"), _Row("t_old", is_live=False)], lambda kw: "snap-id")
 
     assert calls[0]["reason"] == "baseline"
     assert calls[0]["extra"]["alive"] is True
     assert calls[0]["extra"]["resource_identity"] == "portal::t"
     assert calls[0]["schema_name"] == "raw"
+    # The superseded sibling is captured too: together the pair IS a format
+    # change that already happened, comparable without waiting for a drop.
+    assert calls[1]["extra"]["alive"] is False
 
 
 def test_nothing_destructive_is_issued():
