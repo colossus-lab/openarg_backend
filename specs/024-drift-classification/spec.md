@@ -165,8 +165,22 @@ that they **abstained**, rather than silently assuming they passed.
   and detecting it needs distribution comparison — which needs a richer profile
   than `pg_stats` gives.
 
-- **[DEBT-024-003] — Nothing calls this yet.** Same shape as
-  [DEBT-023-001](../023-schema-snapshots/spec.md) and stated with the same
-  bluntness: the module is complete, tested and unused. The consumer — a job
-  that pairs consecutive snapshots per resource, classifies, and reports — is
-  the next thing, and until it exists this produces nothing.
+- **[DEBT-024-003] — RESOLVED 2026-08-21.** The consumer is
+  `openarg.report_schema_drift` (weekly, Mondays 06:15 ART), which pairs
+  consecutive snapshots, calls `classify_change` on each pair and reports
+  `summarize()` broken down per gate. It ran for the first time on staging the
+  same day and returned honestly: two snapshots, no consecutive pair, nothing
+  comparable yet.
+
+- **[DEBT-024-004] — The gate that would matter most is the one we cannot
+  build yet.** G1 (provenance) is the only gate with a real producer today, and
+  it can only exonerate a change when the parser version moved. The upstream
+  case this project actually cares about — a portal regenerating its
+  `source_id` and re-publishing the same data under a new identity — is exactly
+  what G0 would catch, and G0 abstains on every call. Measured on staging on
+  2026-08-21 while restoring collection: 652 live tables holding 99.2M rows had
+  been orphaned by precisely that re-keying, and nothing in this module or
+  anywhere else in the system recognised them as the same resource. Until an
+  identity-resolution producer exists, this classifier's verdicts on a re-keyed
+  resource will read UNEXPLAINED when the honest verdict is "we never knew it
+  was the same thing".
