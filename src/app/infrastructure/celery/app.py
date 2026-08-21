@@ -104,6 +104,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.mart_tasks",
             "app.infrastructure.celery.tasks.mart_audit_tasks",
             "app.infrastructure.celery.tasks.drift_report_tasks",
+            "app.infrastructure.celery.tasks.schema_baseline_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -168,6 +169,7 @@ def create_celery() -> Celery:
         "openarg.refresh_via_b_marts": {"queue": "ingest"},
         "openarg.audit_marts": {"queue": "ingest"},
         "openarg.report_schema_drift": {"queue": "ingest"},
+        "openarg.baseline_schema_snapshots": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -393,6 +395,22 @@ def create_celery() -> Celery:
                 # edit, since a DB-only flag is erased by the next build.
                 "task": "openarg.audit_marts",
                 "schedule": crontab(hour=3, minute=45),  # 03:45 ART daily
+                "options": {"queue": "ingest"},
+            },
+            "baseline-schema-snapshots-daily": {
+                # Snapshots tables that are still alive. The drop hook records
+                # a shape as it is destroyed, which means a resource only
+                # becomes comparable after being dropped twice — and prod has
+                # recorded no drop since 2026-05-20. A baseline removes one of
+                # those two waits: the first drop of a baselined table already
+                # lands beside a stored "before".
+                #
+                # Runs before the drift report so a Monday report reads a
+                # corpus the Sunday run had already widened. Walks forward in
+                # batches; tables that already carry a baseline are skipped.
+                "task": "openarg.baseline_schema_snapshots",
+                "schedule": crontab(hour=5, minute=30),  # 05:30 ART daily
+                "kwargs": {"limit": 2000},
                 "options": {"queue": "ingest"},
             },
             "report-schema-drift-weekly": {
