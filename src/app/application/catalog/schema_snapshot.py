@@ -90,6 +90,47 @@ class ColumnProfile:
         }
 
 
+@dataclass(frozen=True)
+class Provenance:
+    """Which of *our* versions produced this shape.
+
+    Without it, a snapshot diff cannot tell an upstream format change from one
+    of our own parser improvements — and we ship those constantly (~9.500
+    `parse_repair` operations, five schema-rewriting transforms in the
+    collector). A diff across differing provenance is our change, not theirs,
+    and that is a proof rather than a heuristic.
+    """
+
+    parser_version: str | None = None
+    normalization_version: str | None = None
+    layout_profile: str | None = None
+    header_quality: str | None = None
+    is_truncated: bool | None = None
+
+    def differs_from(self, other: Provenance) -> list[str]:
+        """Which provenance fields disagree. Empty means same pipeline.
+
+        A field that is unknown on either side is NOT counted as a difference:
+        absence of evidence would otherwise exonerate every diff involving a
+        legacy table, which is most of production.
+        """
+        changed = []
+        for field_name in (
+            "parser_version",
+            "normalization_version",
+            "layout_profile",
+            "header_quality",
+            "is_truncated",
+        ):
+            mine = getattr(self, field_name)
+            theirs = getattr(other, field_name)
+            if mine is None or theirs is None:
+                continue
+            if mine != theirs:
+                changed.append(field_name)
+        return changed
+
+
 @dataclass
 class TableSnapshot:
     """Everything worth keeping about a table that is about to be dropped."""
@@ -101,6 +142,7 @@ class TableSnapshot:
     stats_available: bool
     resource_identity: str | None = None
     version: int | None = None
+    provenance: Provenance = field(default_factory=Provenance)
 
     @property
     def schema_hash(self) -> str:
@@ -173,20 +215,37 @@ _RELTUPLES_SQL = text(
 )
 
 _IDENTITY_SQL = text(
-    "SELECT resource_identity, version FROM raw_table_versions "
+    "SELECT resource_identity, version, is_truncated FROM raw_table_versions "
     "WHERE table_name = :tbl AND schema_name = :sch "
     "ORDER BY version DESC LIMIT 1"
+)
+
+# Provenance lives in two places and neither is guaranteed to have a row:
+# `catalog_resources` carries the parser versions, `cached_datasets` the parse
+# path. Both are keyed by the physical table name. LEFT JOIN so a missing
+# catalog row still yields whatever `cached_datasets` knows.
+_PROVENANCE_SQL = text(
+    "SELECT cr.parser_version, cr.normalization_version, "
+    "       COALESCE(cr.layout_profile, cd.layout_profile) AS layout_profile, "
+    "       COALESCE(cr.header_quality, cd.header_quality) AS header_quality "
+    "FROM (SELECT :tbl AS tn) k "
+    "LEFT JOIN catalog_resources cr ON cr.materialized_table_name = k.tn "
+    "LEFT JOIN cached_datasets cd ON cd.table_name = k.tn "
+    "LIMIT 1"
 )
 
 _INSERT_SQL = text(
     "INSERT INTO raw.raw_schema_snapshots ("
     "  schema_name, table_name, resource_identity, version, reason, actor, "
     "  column_count, row_count_estimate, schema_hash, columns_profile, "
-    "  stats_available, extra"
+    "  stats_available, extra, "
+    "  parser_version, normalization_version, layout_profile, header_quality, "
+    "  is_truncated"
     ") VALUES ("
     "  :sch, :tbl, :rid, :ver, :reason, :actor, "
     "  :ncols, :rows, :hash, CAST(:profile AS jsonb), "
-    "  :stats, CAST(:extra AS jsonb)"
+    "  :stats, CAST(:extra AS jsonb), "
+    "  :pver, :nver, :layout, :hquality, :trunc"
     ") RETURNING id"
 )
 
@@ -238,14 +297,38 @@ def collect_snapshot(
         # failure here is informational, never fatal.
         resource_identity: str | None = None
         version: int | None = None
+        is_truncated: bool | None = None
         try:
             identity_row = conn.execute(_IDENTITY_SQL, params).fetchone()
             if identity_row is not None:
                 resource_identity = identity_row.resource_identity
                 version = int(identity_row.version)
+                is_truncated = identity_row.is_truncated
         except Exception:
             logger.debug(
                 "schema snapshot: could not resolve identity for %s.%s",
+                schema_name,
+                table_name,
+                exc_info=True,
+            )
+
+        # Provenance is what lets a later diff tell "they changed the file"
+        # from "we changed the parser". Its absence degrades the verdict to
+        # "cannot exonerate", never to a wrong one.
+        provenance = Provenance(is_truncated=is_truncated)
+        try:
+            prov_row = conn.execute(_PROVENANCE_SQL, params).fetchone()
+            if prov_row is not None:
+                provenance = Provenance(
+                    parser_version=prov_row.parser_version,
+                    normalization_version=prov_row.normalization_version,
+                    layout_profile=prov_row.layout_profile,
+                    header_quality=prov_row.header_quality,
+                    is_truncated=is_truncated,
+                )
+        except Exception:
+            logger.debug(
+                "schema snapshot: could not resolve provenance for %s.%s",
                 schema_name,
                 table_name,
                 exc_info=True,
@@ -278,6 +361,7 @@ def collect_snapshot(
         stats_available=bool(stats_by_column),
         resource_identity=resource_identity,
         version=version,
+        provenance=provenance,
     )
 
 
@@ -326,6 +410,11 @@ def capture_table_snapshot(
                     "profile": payload,
                     "stats": snapshot.stats_available,
                     "extra": json.dumps(extra, ensure_ascii=False) if extra else None,
+                    "pver": snapshot.provenance.parser_version,
+                    "nver": snapshot.provenance.normalization_version,
+                    "layout": snapshot.provenance.layout_profile,
+                    "hquality": snapshot.provenance.header_quality,
+                    "trunc": snapshot.provenance.is_truncated,
                 },
             ).scalar()
         return str(snapshot_id) if snapshot_id else None
@@ -366,17 +455,44 @@ def diff_snapshots(before: TableSnapshot, after: TableSnapshot) -> dict[str, Any
             )
 
     renamed: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
     if added and removed:
         after_by_name = {c.name: c for c in after.columns}
         for gone in removed:
             old = before_by_name[gone]
-            best_name, best_score = None, 0.0
-            for candidate in added:
-                score = profile_similarity(old, after_by_name[candidate])
-                if score > best_score:
-                    best_name, best_score = candidate, score
-            if best_name is not None and best_score >= 0.6:
-                renamed.append({"from": gone, "to": best_name, "similarity": round(best_score, 3)})
+            if not is_identifiable(old):
+                # Gate 5 — sufficiency. A column of two values looks like every
+                # other column of two values. Argentine public data is full of
+                # them, and of columns whose sampled values are all `""`. Left
+                # in the matching they manufacture a rename for every pair.
+                continue
+            scored = [
+                (name, profile_similarity(old, after_by_name[name]))
+                for name in added
+                if is_identifiable(after_by_name[name])
+            ]
+            over_threshold = [(n, s) for n, s in scored if s >= RENAME_THRESHOLD]
+            if not over_threshold:
+                continue
+            over_threshold.sort(key=lambda pair: pair[1], reverse=True)
+            if len(over_threshold) > 1:
+                # Gate 6 — uniqueness. `provincia_origen` and `provincia_destino`
+                # share the same 24 values, so both score ~1.0 against a removed
+                # `provincia`. A high score is not evidence when several
+                # candidates share it; requiring a single match is what makes
+                # this usable. Reported separately so the ambiguity is visible
+                # rather than silently dropped.
+                ambiguous.append(
+                    {
+                        "from": gone,
+                        "candidates": [
+                            {"to": n, "similarity": round(s, 3)} for n, s in over_threshold
+                        ],
+                    }
+                )
+                continue
+            best_name, best_score = over_threshold[0]
+            renamed.append({"from": gone, "to": best_name, "similarity": round(best_score, 3)})
 
     return {
         "schema_changed": before.schema_hash != after.schema_hash,
@@ -384,7 +500,44 @@ def diff_snapshots(before: TableSnapshot, after: TableSnapshot) -> dict[str, Any
         "removed": removed,
         "type_changed": type_changed,
         "renamed_candidates": renamed,
+        "ambiguous_renames": ambiguous,
+        "provenance_changed": after.provenance.differs_from(before.provenance),
     }
+
+
+# A column has to carry enough signal to be recognised across a rename.
+# Below these it is indistinguishable from any other column of the same
+# trivial shape — `sexo` (M/F), `activo` (S/N), or one whose sampled values
+# are all empty, which is extremely common in Argentine public data:
+# `most_common_vals` starting with `""` and `-` shows up throughout the
+# production `pg_stats`.
+MIN_IDENTIFIABLE_VALUES = 4
+MAX_IDENTIFIABLE_NULL_FRAC = 0.95
+
+# A single candidate must clear this to be reported as a rename. Not
+# calibrated against real diffs yet — see spec 023 CL-023-001. Chosen so
+# identical value sets clear it comfortably.
+RENAME_THRESHOLD = 0.6
+
+# Values that carry no identity: they appear in every mostly-empty column.
+_EMPTY_MARKERS = frozenset({"", "-", "s/d", "sd", "n/a", "na", "null", "none", "."})
+
+
+def is_identifiable(column: ColumnProfile) -> bool:
+    """Gate 5 — can this column be recognised from its values at all?
+
+    Excludes a column from rename matching rather than from the diff: its
+    disappearance is still reported under `removed`, we just refuse to guess
+    what it became.
+    """
+    if column.null_frac is not None and column.null_frac > MAX_IDENTIFIABLE_NULL_FRAC:
+        return False
+    meaningful = {
+        v
+        for v in set(column.most_common_vals) | set(column.histogram_sample)
+        if v.strip().lower() not in _EMPTY_MARKERS
+    }
+    return len(meaningful) >= MIN_IDENTIFIABLE_VALUES
 
 
 def profile_similarity(left: ColumnProfile, right: ColumnProfile) -> float:

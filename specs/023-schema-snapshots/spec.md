@@ -6,6 +6,7 @@
 **Hexagonal scope**: Application (capture + diff) + Infrastructure (hook on the drop path)
 **Related plan**: [./plan.md](./plan.md)
 **Sister specs**: [017-raw-layer](../017-raw-layer/spec.md) (what gets dropped),
+[024-drift-classification](../024-drift-classification/spec.md) (what reads this evidence),
 [013-ingestion-validation](../013-ingestion-validation/spec.md) (where findings will land),
 [021-parser-hardening](../021-parser-hardening/spec.md) (`parse_repair`, the same
 record-before-you-mutate pattern)
