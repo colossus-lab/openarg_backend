@@ -51,6 +51,7 @@ The top-level modules are ordered roughly by architectural depth. Modules with �
 | 023 | [`023-schema-snapshots/`](023-schema-snapshots/) | — | Preserve a table's shape and value profile before any audited drop, so a format change leaves evidence. |
 | 024 | [`024-drift-classification/`](024-drift-classification/) | — | The exoneration cascade: gates that can only prove a shape change was *not* upstream drift. |
 | 025 | [`025-self-repair/`](025-self-repair/) | — | Routing a failure to the artefact that is actually wrong: reinduction repairs one table, APR only ever proposes a parser change. |
+| 026 | [`026-dataset-refresh/`](026-dataset-refresh/) | — | Reading a source more than once. A dataset is collected once and never again, which makes drift undetectable and answers three months old. |
 
 Cross-cutting artifacts:
 
