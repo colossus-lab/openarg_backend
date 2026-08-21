@@ -141,7 +141,7 @@ def register_via_b_table(
     normalization_version: str | None = None,
 ) -> None:
     """Register a vía-B table (transparency / senado / staff / bcra ingest)
-    in `raw_table_versions` so the medallion mart layer can `live_table()`
+    in `public.raw_table_versions` so the medallion mart layer can `live_table()`
     it and the Serving Port can find it.
 
     Vía-B tables are populated by specialized connectors (`staff_tasks`,
@@ -168,12 +168,12 @@ def register_via_b_table(
             conn.execute(
                 text(
                     """
-                    INSERT INTO raw_table_versions (
+                    INSERT INTO public.raw_table_versions (
                         resource_identity, version, schema_name, table_name,
                         row_count, parser_version, normalization_version
                     ) VALUES (:rid, :v, :sch, :tn, :rc, :pv, :nv)
                     ON CONFLICT (resource_identity, version) DO UPDATE SET
-                        row_count = COALESCE(EXCLUDED.row_count, raw_table_versions.row_count),
+                        row_count = COALESCE(EXCLUDED.row_count, public.raw_table_versions.row_count),
                         schema_name = EXCLUDED.schema_name,
                         table_name = EXCLUDED.table_name,
                         parser_version = EXCLUDED.parser_version,
@@ -385,7 +385,7 @@ def register_via_b_with_state(
     `_apply_cached_outcome` so the same metadata pipeline applies. The
     caller is still responsible for the actual `df.to_sql(...)` write
     AND for calling `register_via_b_table()` separately if it wants the
-    row in `raw_table_versions` (most do).
+    row in `public.raw_table_versions` (most do).
 
     Lazy-imports collector_tasks to avoid an import cycle: that module
     imports back from `_db` for `get_sync_engine` and `safe_truncate_table`.

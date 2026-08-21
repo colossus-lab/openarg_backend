@@ -255,3 +255,20 @@ def test_snapshot_hook_is_on_by_default(monkeypatch):
 
     monkeypatch.delenv("OPENARG_SCHEMA_SNAPSHOTS", raising=False)
     assert collector_tasks._schema_snapshots_enabled() is True
+
+
+def test_registry_reads_name_their_schema():
+    """`raw_table_versions` exists in both schemas in production, and the
+    connection reaches Postgres through PGBouncer in transaction pooling, where
+    a session-level `SET search_path` does not stick. Measured 2026-08-21: of
+    twelve connections, one resolved `public, raw` and eleven `raw, public` —
+    so an unqualified reference is a coin flip between the live registry
+    (27,855 rows) and a stale shadow (166). It is what left 23,445 of 23,609
+    production snapshots with no `resource_identity`.
+    """
+    import app.application.catalog.schema_snapshot as mod
+
+    for name in ("_IDENTITY_SQL", "_PROVENANCE_SQL"):
+        sql = str(getattr(mod, name))
+        assert "raw_table_versions" in sql, name
+        assert "public.raw_table_versions" in sql, f"{name} must name its schema"

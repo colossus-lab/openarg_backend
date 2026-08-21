@@ -54,7 +54,7 @@ _CANDIDATES_SQL = text(
     """
     SELECT rtv.schema_name, rtv.table_name, rtv.resource_identity, rtv.version,
            (rtv.superseded_at IS NULL) AS is_live
-    FROM raw_table_versions rtv
+    FROM public.raw_table_versions rtv
     WHERE EXISTS (
           SELECT 1 FROM information_schema.tables t
           WHERE t.table_schema = rtv.schema_name AND t.table_name = rtv.table_name
@@ -67,7 +67,7 @@ _CANDIDATES_SQL = text(
         -- Resources that already hold more than one physical version come
         -- first: each one completes a pair the moment its siblings are
         -- captured, so they turn into measurable drift immediately.
-        (SELECT count(*) FROM raw_table_versions sib
+        (SELECT count(*) FROM public.raw_table_versions sib
          WHERE sib.resource_identity = rtv.resource_identity) DESC,
         rtv.created_at DESC
     LIMIT :limit
@@ -121,7 +121,7 @@ def baseline_schema_snapshots(self, *, limit: int = 2000) -> dict[str, Any]:
         remaining = conn.execute(
             text(
                 """
-                SELECT count(*) FROM raw_table_versions rtv
+                SELECT count(*) FROM public.raw_table_versions rtv
                 WHERE EXISTS (SELECT 1 FROM information_schema.tables t
                               WHERE t.table_schema = rtv.schema_name
                                 AND t.table_name = rtv.table_name)

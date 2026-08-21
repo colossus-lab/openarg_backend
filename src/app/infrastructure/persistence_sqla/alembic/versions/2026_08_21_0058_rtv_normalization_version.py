@@ -31,10 +31,25 @@ depends_on: str | Sequence[str] | None = None
 
 _TABLE = "raw_table_versions"
 _COLUMN = "normalization_version"
+# Qualified explicitly, and this is not defensive style.
+#
+# Production carries `raw_table_versions` in BOTH schemas: `public` holds the
+# live registry (27,855 rows, written today) and `raw` holds a stale shadow
+# (166 rows, last written 2026-07-15). The connection reaches Postgres through
+# PGBouncer in transaction pooling, where a session-level `SET search_path` does
+# not stick — measured 2026-08-21: of twelve connections, one resolved
+# `public, raw` and eleven resolved `raw, public`.
+#
+# An unqualified `op.add_column` would therefore add this column to whichever
+# table the pooler happened to hand over. Naming the schema is the difference
+# between a migration and a coin flip.
+_SCHEMA = "public"
 
 
 def upgrade() -> None:
-    op.add_column(_TABLE, sa.Column(_COLUMN, sa.String(length=64), nullable=True))
+    op.add_column(
+        _TABLE, sa.Column(_COLUMN, sa.String(length=64), nullable=True), schema=_SCHEMA
+    )
     # Partial: the rows worth finding are the ones that carry provenance, and
     # they are the minority for as long as the backlog of unattributable
     # versions dominates.
@@ -43,10 +58,11 @@ def upgrade() -> None:
         _TABLE,
         ["parser_version", _COLUMN],
         unique=False,
+        schema=_SCHEMA,
         postgresql_where=sa.text("parser_version IS NOT NULL"),
     )
 
 
 def downgrade() -> None:
-    op.drop_index(f"ix_{_TABLE}_provenance", table_name=_TABLE)
-    op.drop_column(_TABLE, _COLUMN)
+    op.drop_index(f"ix_{_TABLE}_provenance", table_name=_TABLE, schema=_SCHEMA)
+    op.drop_column(_TABLE, _COLUMN, schema=_SCHEMA)

@@ -86,9 +86,9 @@ _PAIRS_SQL = text(
     -- source_url feeds G2. The registry row is deleted when a table is
     -- dropped, so it is often absent — LEFT JOIN, and the gate abstains
     -- rather than guessing.
-    LEFT JOIN raw_table_versions curv
+    LEFT JOIN public.raw_table_versions curv
            ON curv.schema_name = cur.schema_name AND curv.table_name = cur.table_name
-    LEFT JOIN raw_table_versions prevv
+    LEFT JOIN public.raw_table_versions prevv
            ON prevv.schema_name = prev.schema_name AND prevv.table_name = prev.table_name
     ORDER BY cur.captured_at DESC
     LIMIT :limit
@@ -134,9 +134,9 @@ _VERSION_PAIRS_SQL = text(
     -- source_url feeds G2. The registry row is deleted when a table is
     -- dropped, so it is often absent — LEFT JOIN, and the gate abstains
     -- rather than guessing.
-    LEFT JOIN raw_table_versions curv
+    LEFT JOIN public.raw_table_versions curv
            ON curv.schema_name = cur.schema_name AND curv.table_name = cur.table_name
-    LEFT JOIN raw_table_versions prevv
+    LEFT JOIN public.raw_table_versions prevv
            ON prevv.schema_name = prev.schema_name AND prevv.table_name = prev.table_name
     -- Only across distinct tables: a same-table progression is already covered
     -- by _PAIRS_SQL, and counting it twice would inflate every rate.
