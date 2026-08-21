@@ -151,6 +151,17 @@ Detecting it requires no model — only that the profile was stored.
   not, which made `cache_drop_audit` silently incomplete.
 - **FR-013**: `diff_snapshots` MUST be pure — no database access — so it can run
   over stored rows long after both tables are gone.
+- **FR-015**: A baseline pass MUST be able to snapshot tables that are still
+  alive, so that the *first* drop of a table produces a comparable pair instead
+  of the second. Without it the module answers nothing until a resource has been
+  destroyed twice, and production has recorded no drop since 2026-05-20.
+- **FR-016**: A baseline snapshot MUST be distinguishable from a pre-drop one.
+  It carries `reason='baseline'` and `extra.alive=true`. `diff_snapshots` treats
+  them identically — the distinction exists for the operator reading the row.
+- **FR-017**: The baseline pass MUST be read-only and MUST skip tables that
+  already carry a snapshot, so repeated runs walk forward through the backlog
+  rather than re-snapshotting the head.
+
 - **FR-014**: `profile_similarity` MUST return `0.0` when neither column has
   sampled values. No evidence is not the same as no similarity, and returning a
   high score there would manufacture a rename for every unanalysed table.
@@ -171,6 +182,12 @@ Detecting it requires no model — only that the profile was stored.
 - **SC-005**: Capturing a snapshot issues no query against the table's data,
   observable as no sequential scan in `pg_stat_statements` attributable to the
   capture.
+- **SC-008 — met 2026-08-21.** The baseline pass captured 300 tables in 3.95s
+  with none skipped, and 84.5% of captures carried `pg_stats`. The remaining
+  15.5% still record columns and types, which is the part that answers "did the
+  format change"; only rename detection degrades. Storage measured at ~4KB per
+  snapshot, matching SC-006.
+
 - **SC-007 — met 2026-08-21.** Validated end to end on staging: two real
   `raw_orphan_cleanup` drops produced two snapshots, each with 13 columns
   profiled, `stats_available=true`, and row estimates (3,507 / 4,363) captured
