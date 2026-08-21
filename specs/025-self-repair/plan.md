@@ -8,6 +8,45 @@ repairs the wrong thing.
 
 ---
 
+## Starting state (verified 2026-08-21, not assumed)
+
+Everything below was checked against the running systems, because the first
+draft of this plan was written on inference and six of its claims were wrong.
+
+**Staging** — alembic 0057; running CI images with **no hot-patches** (confirmed
+by reading the files inside the containers); 27,578 snapshots over 27,487 tables;
+203 pairs classified (91 same-table, 112 version); 5 actionable, all of them ours;
+0 exonerated by any gate.
+
+**Production** — alembic 0057; baseline complete (23,609 captured, 0 skipped);
+running images built locally at `d8fd152`, so it **lacks `663003e`**: version
+pairing, the superseded-inclusive baseline, and the G0/G2 context. No operational
+effect there today — production holds 0 version pairs, because
+`retain_raw_versions` removed 19,906 superseded tables in May — but the code
+diverges and that should not be left standing.
+
+**`main`** is still at `cb19f5e` (2026-08-01). Production runs `:latest` tags
+applied locally, so a routine `docker compose pull` would revert them.
+
+**What is already true and needs no work**
+
+- The evidence store runs. `retry_s3_uploads` resumed the day
+  `raw.cached_datasets` was restored and is uploading raw files.
+- `uq_raw_table_versions_table_name` is UNIQUE on `(schema_name, table_name)`, so
+  the report's LEFT JOIN onto the registry cannot multiply pairs. Checked because
+  it was a real risk in code shipped the same day, not because it was obvious.
+- `profile_similarity` returns `0.0` with no sampled values, so the verifier
+  cannot be fed a manufactured score.
+
+**What was fixed while auditing this plan**
+
+- The report counted `legacy:unknown` as provenance, so coverage read 26,435 when
+  the figure G1 could use was **0**. Both numbers are now reported.
+- `024` DEBT-024-001 and DEBT-024-005, and `023` DEBT-023-005, described a world
+  that no longer holds. Corrected in place.
+
+---
+
 ## Phase 1 — Attribution
 
 *Blocks everything. Without it the system cannot tell our regressions from the
@@ -284,3 +323,30 @@ router ends up routing by whatever the first ten examples happened to look like.
 - It does not apply an LLM proposal that has not passed the same verifier as a
   deterministic one.
 - It does not raise an autonomy level on confidence. Only on a number.
+
+---
+
+## Ready to execute
+
+In order, in one pass:
+
+1. **Phase 1.1** — `parser_fingerprint.py`, AST-based so a comment edit does not
+   move it.
+2. **Phase 1.3** — all four write paths record it, including
+   `_db.register_via_b_table`, which accepts no provenance argument today.
+3. **Phase 1.2** — migration 0058 adds `normalization_version`, shipped together
+   with 1.1 so the column has a producer from its first day.
+4. **Phase 1.4** — snapshots read provenance from `raw_table_versions` first.
+5. **Phase 1.5** — `Verdict.UNATTRIBUTABLE`, excluded from actionable.
+6. **Phase 4.0** — `revert_repair`, which must exist before anything applies
+   automatically.
+7. Re-run the report on staging and confirm SC-002: the five findings of
+   2026-08-21 re-report as `UNATTRIBUTABLE` rather than `UNEXPLAINED`.
+8. Deploy staging, then bring production to the same commit — it is a version
+   behind and there is no reason to leave it there.
+
+Not in this pass, and deliberately: the change signature (Phase 3). It is the
+one component with no verified basis, and designing it before real signatures are
+observed is how a router ends up encoding whatever the first ten examples looked
+like.
+

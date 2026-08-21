@@ -248,13 +248,18 @@ Detecting it requires no model — only that the profile was stored.
   the false-positive rate of the cascade is still unmeasured and two of its
   gates abstain on every call. See DEBT-023-005 for what shadow mode leaves open.
 
-- **[DEBT-023-005] — The report is only as good as the drop rate.** A table needs
-  two audited drops before anything is comparable, and the second one arrives
-  only when the table is dropped again. Staging was restored to collecting on
-  2026-08-21 and produced its first two snapshots the same day; production has
-  recorded no drop at all since 2026-05-20. Neither environment will yield a
-  comparable pair quickly, and no threshold in this spec or in
-  [024](../024-drift-classification/spec.md) can be calibrated until they do.
+- **[DEBT-023-005] — RESOLVED 2026-08-21, by not waiting for drops at all.**
+  The concern was real: a table needed two audited drops before anything was
+  comparable, and production has recorded none since 2026-05-20. Two changes
+  removed the wait. The baseline pass (FR-015) snapshots what is alive, so the
+  *first* drop already lands beside a stored "before"; and the report pairs
+  consecutive **versions** of a resource, so two physical tables that both still
+  exist are comparable immediately. Staging went from 2 snapshots to 203
+  classified pairs the same day.
+
+  What replaces it is narrower and is recorded as
+  [024](../024-drift-classification/spec.md) DEBT-024-005: pairs are now
+  plentiful, and G1 cannot attribute them.
 
 - **[DEBT-023-006] — The evidence exists because something deletes the table,
   and the deleters are not trustworthy.** Restoring `raw.cached_datasets`

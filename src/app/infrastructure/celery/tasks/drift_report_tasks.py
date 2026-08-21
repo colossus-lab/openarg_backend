@@ -153,7 +153,16 @@ _COVERAGE_SQL = text(
         count(*)                                        AS snapshots,
         count(DISTINCT (schema_name, table_name))       AS tables,
         count(*) FILTER (WHERE stats_available)         AS with_stats,
-        count(*) FILTER (WHERE parser_version IS NOT NULL) AS with_provenance,
+        -- `legacy:unknown` and a bare date are placeholders, not provenance.
+        -- Counting them made the coverage number read 26,435 when the figure
+        -- G1 can actually use was zero, which is the kind of comfortable
+        -- statistic this whole module exists to stop producing.
+        count(*) FILTER (
+            WHERE parser_version IS NOT NULL
+              AND parser_version <> 'legacy:unknown'
+              AND parser_version !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+        ) AS with_provenance,
+        count(*) FILTER (WHERE parser_version IS NOT NULL) AS with_provenance_incl_placeholder,
         min(captured_at)                                AS first_seen,
         max(captured_at)                                AS last_seen
     FROM raw.raw_schema_snapshots
@@ -258,6 +267,9 @@ def report_schema_drift(self, *, days: int = 30, limit: int = 5000) -> dict[str,
         "tables": int(coverage_row.tables or 0),
         "with_stats": int(coverage_row.with_stats or 0),
         "with_provenance": int(coverage_row.with_provenance or 0),
+        "with_provenance_incl_placeholder": int(
+            coverage_row.with_provenance_incl_placeholder or 0
+        ),
         "first_seen": coverage_row.first_seen.isoformat() if coverage_row.first_seen else None,
         "last_seen": coverage_row.last_seen.isoformat() if coverage_row.last_seen else None,
     }

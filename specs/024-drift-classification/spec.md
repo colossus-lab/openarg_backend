@@ -188,11 +188,20 @@ rather than a vague "needs tuning": see DEBT-024-005.
 
 ## 8. Tech Debt Discovered
 
-- **[DEBT-024-001] — G0 and G2 have no producer.** The two gates that would
-  eliminate the largest measured sources of noise (5.485 duplicate identities,
-  366 sibling variants) abstain on every call, because nothing computes a
-  content-derived identity or resolves a snapshot back to its source URL. The
-  cascade works without them and is materially weaker.
+- **[DEBT-024-001] — PARTLY RESOLVED 2026-08-21.** Both gates now have a
+  producer. A pair carries `resource_identity` on both sides (G0), and the drift
+  report LEFT JOINs `raw_table_versions` for `source_url` (G2); a version pair
+  satisfies G0 by construction, since it is built by partitioning on identity.
+  Where the registry row is gone — it is deleted when a table is dropped — the
+  fact is absent and the gate abstains rather than assuming.
+
+  What remains open is the harder half: **content-derived** identity. G0 can
+  today confirm that two snapshots carry the same recorded identity, but not that
+  two *different* identities are the same resource re-keyed upstream. That is the
+  case behind the 5,485 duplicate identities, and behind the 652 live tables
+  holding 99.2M rows that were orphaned on staging on 2026-08-21 because their
+  `datasets` row had been re-keyed. Nothing in the system recognises those as the
+  same thing.
 
 - **[DEBT-024-002] — Semantic change is undetectable here.** Same columns,
   same types, values that moved (pesos → thousands of pesos). The shape is
@@ -236,8 +245,17 @@ rather than a vague "needs tuning": see DEBT-024-005.
      a `None` as *not* a difference — the right rule, since the alternative is
      inventing exonerations — so the gate abstains.
 
-  The fix is to stamp the parser and normalization versions onto
-  `raw_table_versions` at write time, so a version carries the provenance of
-  the run that produced it rather than of whenever someone looked. Until then
+  **Corrected 2026-08-21 after checking rather than inferring.**
+  `raw_table_versions.parser_version` already exists and is already written — the
+  stamping mechanism is not missing. `OPENARG_PARSER_VERSION` is set to the
+  literal string `2026-05-04` in the staging environment, and the collector has
+  faithfully recorded it 21,989 times. Two of the four write paths pass it; the
+  other two forward a parameter defaulting to `None` that callers do not supply,
+  which accounts exactly for the 6,089 NULLs.
+
+  So the fix is two separable things, both smaller than "add provenance":
+  a value that derives from the parser sources instead of an environment file
+  nobody edits, and the two write paths that record nothing. Until both,
   G1 is decorative on anything but a pair captured across a deploy, and the
-  cascade will keep returning UNEXPLAINED for changes that are ours.
+  cascade will keep returning UNEXPLAINED for changes that are ours. Planned as
+  [025-self-repair](../025-self-repair/plan.md) Phase 1.

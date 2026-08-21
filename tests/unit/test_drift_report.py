@@ -130,6 +130,7 @@ def _run_report(pair_rows, version_rows=None, coverage=None):
         tables=total,
         with_stats=total,
         with_provenance=total,
+        with_provenance_incl_placeholder=total,
         first_seen=None,
         last_seen=None,
     )
@@ -357,3 +358,22 @@ def test_a_version_pair_is_the_same_resource_by_construction():
     row = _pair("t__v2", "t__v1", [], [], resource_identity=None, p_resource_identity=None)
     assert _context_for("version", row).same_identity is True
     assert _context_for("same_table", row).same_identity is None
+
+
+def test_placeholder_provenance_is_not_counted_as_provenance():
+    """`legacy:unknown` and a bare date are placeholders, not provenance.
+
+    Counting them made coverage read 26,435 while the figure G1 could actually
+    use was zero. A coverage number that flatters is worse than none — it is
+    the kind of comfortable statistic this module exists to stop producing.
+    """
+    from app.infrastructure.celery.tasks import drift_report_tasks as mod
+
+    sql = str(mod._COVERAGE_SQL)
+    assert "legacy:unknown" in sql
+    assert "with_provenance_incl_placeholder" in sql
+    # Both numbers are reported, so the gap between them is visible rather than
+    # resolved silently in either direction.
+    result = _run_report([])
+    assert "with_provenance" in result["coverage"]
+    assert "with_provenance_incl_placeholder" in result["coverage"]
