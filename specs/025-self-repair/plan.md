@@ -355,7 +355,43 @@ behind it, exactly as shadow mode is being held today on a measured 0/5.
 | 5 Code lane | 2, 3, 4 | The corpus is the oracle; it does not exist yet |
 | 6 Autonomy | 4 | A level needs a measurement, and 4 produces the first |
 
-**Next**: 1.6, the registry reconciliation. It is the only thing standing between
+## Measured 2026-08-21, after Phase 1 shipped
+
+```
+snapshots by provenance class     pairs the router could route
+  legacy:unknown   26,435            0
+  NULL              1,143
+  REAL (fingerprint)    0
+```
+
+**The router has nothing to route, and will not until resources are collected
+twice after today.** Every existing snapshot carries a placeholder, so every pair
+is `UNATTRIBUTABLE` — correctly. A fingerprint reaches a snapshot only through a
+new registration, and a *pair* needs two of them for the same resource.
+
+That reorders what is worth doing next, and it is a change to the plan rather
+than a note on it:
+
+- **Phase 3 cannot be designed yet.** Its whole premise is observing real change
+  signatures and setting a threshold from their distribution. With zero
+  attributable findings there is nothing to observe, and a signature designed now
+  would encode whatever its author imagined.
+- **Phase 4.1, the verifier, is not actually blocked on Phase 3.** It is a pure
+  function over two snapshots: apply, profile, compare, roll back unless it
+  improves. It can be built and tested now, and it is the gate everything else
+  waits behind — so building it early costs nothing and removes the temptation to
+  ship a repair without it.
+- **Seeding attribution becomes the critical path.** Nothing produces signal on
+  its own: `bulk_collect_all` only collects what is uncached, so a resource
+  already on disk is never re-registered. A bounded forced re-collect, run twice
+  a few days apart, is what turns the first pairs attributable.
+  `force_recollect_separator_mismatches` is the only forced-recollect task that
+  exists and it is scoped to one defect; a general bounded one does not.
+
+**Next**: seed attribution and build the verifier. Then 1.6's destructive half
+and Phase 3, in that order, once there are signatures to look at.
+
+**Deferred, not blocking**: 1.6, the registry reconciliation. It is the only thing standing between
 Phase 1 working on staging and Phase 1 working at all, and it needs a decision
 that is not the implementer's to take. Phase 1 is the blocker for correctness; 4.0 is the blocker for safety and is
 small; 2.1 needs observation rather than code now that the archival is running
