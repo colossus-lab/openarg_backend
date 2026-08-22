@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.presentation.http.controllers.admin.data_health_router import (
+    router as admin_data_health_router,
+)
 from app.presentation.http.controllers.admin.monitoring_router import (
     router as admin_monitoring_router,
 )
@@ -78,6 +81,7 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(data_router)
     api_v1.include_router(admin_tasks_router)
     api_v1.include_router(admin_monitoring_router)
+    api_v1.include_router(admin_data_health_router)
     api_v1.include_router(admin_query_analytics_router)
     api_v1.include_router(admin_parse_repair_router)
 
