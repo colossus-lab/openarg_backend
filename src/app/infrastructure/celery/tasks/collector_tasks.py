@@ -5173,6 +5173,18 @@ def _apply_cached_outcome(
                     """
                     UPDATE raw.cached_datasets
                     SET status = CASE
+                            -- A refresh that fails must not cost the data it was
+                            -- refreshing (026 FR-005). A row that is `ready` and
+                            -- points at a table that still exists holds working
+                            -- data; the *refresh* failed, and conflating the two
+                            -- would flip a serving resource to a terminal state
+                            -- it can never leave. First collections are
+                            -- unaffected — there is no `ready` row to protect.
+                            WHEN status = 'ready' AND EXISTS (
+                                SELECT 1 FROM information_schema.tables t
+                                WHERE t.table_name = raw.cached_datasets.table_name
+                                  AND t.table_type = 'BASE TABLE'
+                            ) THEN 'ready'
                             WHEN :status = 'permanently_failed' THEN 'permanently_failed'
                             WHEN retry_count + :retry >= :max THEN 'permanently_failed'
                             ELSE :status

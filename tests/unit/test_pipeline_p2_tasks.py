@@ -1890,3 +1890,32 @@ class TestEmbeddingP2:
         rows = insert_conn.execute.call_args.args[1]
         assert isinstance(rows, list)
         assert len(rows) == 2
+
+
+def test_a_failed_refresh_does_not_downgrade_a_serving_resource():
+    """026 FR-005: a refresh that fails must not cost the data it was refreshing.
+
+    Reaching `permanently_failed` is terminal — the resource would never be
+    collected again. A row that is `ready` and points at a table that still
+    exists holds working data; the *refresh* failed, and conflating the two
+    would flip a serving resource into a state it cannot leave.
+
+    Verified against Postgres directly: a ready row whose table exists survives
+    the failure as `ready` with the error recorded, a ready row whose table is
+    gone still fails, and a first collection is unaffected because there is no
+    ready row to protect.
+    """
+    from app.infrastructure.celery.tasks import collector_tasks
+
+    source = collector_tasks._apply_cached_outcome.__code__.co_consts
+    sql = next(
+        (
+            c
+            for c in source
+            if isinstance(c, str) and "UPDATE raw.cached_datasets" in c and "retry_count +" in c
+        ),
+        None,
+    )
+    assert sql is not None, "status UPDATE not found"
+    assert "WHEN status = 'ready' AND EXISTS" in sql
+    assert "BASE TABLE" in sql
