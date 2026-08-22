@@ -1224,11 +1224,99 @@ def detect_unsplit_csv(columns: list[str]) -> str | None:
     return None
 
 
+def split_csv_row(value: str, delim: str) -> list[str]:
+    """Split one CSV record, honouring quotes.
+
+    `string_to_array` in Postgres does not: a quoted value containing the
+    delimiter — `Rosario,"Santa Fe, Argentina",1300000` — splits into four
+    fields instead of three and shifts everything after it. That silent
+    corruption is why `repair_unsplit_csv_table` declines those tables, and it
+    is 87 of the 209 in production.
+
+    Python's `csv` module already implements the quoting rules correctly, so
+    this is a thin wrapper rather than a parser: reimplementing RFC 4180 by hand
+    is exactly how the shifted-field bug gets reintroduced one edge case at a
+    time.
+    """
+    import csv
+    import io
+
+    reader = csv.reader(io.StringIO(value), delimiter=delim)
+    for row in reader:
+        return row
+    return []
+
+
 def propose_unsplit_csv_columns(header: str, delim: str) -> list[str]:
     """Turn the header line back into column names."""
-    names = [h.strip().strip('"').strip("'") for h in header.split(delim)]
+    # Quote-aware for the header too: a header can carry a quoted field with a
+    # comma in it just as a row can, and splitting it naively would name the
+    # columns wrongly before a single row is read.
+    names = [h.strip().strip('"').strip("'") for h in split_csv_row(header, delim)]
     names = [n if n else f"col_{i}" for i, n in enumerate(names)]
     return _dedupe_identifiers([_normalize_header_to_identifier(n) for n in names])
+
+
+def _apply_quote_aware_split(
+    engine: Engine,
+    *,
+    outcome: RepairOutcome,
+    qualified: str,
+    quoted: str,
+    new_names: list[str],
+    delim: str,
+    run_id: uuid.UUID,
+) -> RepairOutcome:
+    """Split in Python, because SQL cannot do it correctly for these tables.
+
+    `string_to_array` has no notion of quoting, so the rows that need this path
+    are exactly the ones it would corrupt. The work moves into the application:
+    read the column, split each record with the `csv` module, write the fields
+    back.
+
+    One transaction, and the original column is dropped last. If anything fails
+    the table is untouched rather than half-populated with the source column
+    already gone.
+    """
+    try:
+        with engine.begin() as conn:
+            for name in new_names:
+                conn.execute(
+                    text(f"ALTER TABLE {qualified} ADD COLUMN {_quote_ident(name)} text")  # noqa: S608
+                )
+            rows = conn.execute(
+                text(f"SELECT ctid, {quoted}::text AS raw FROM {qualified}")  # noqa: S608
+            ).fetchall()
+            assignments = ", ".join(
+                f"{_quote_ident(n)} = :f{i}" for i, n in enumerate(new_names)
+            )
+            for row in rows:
+                fields = split_csv_row(row.raw, delim) if row.raw is not None else []
+                if len(fields) != len(new_names):
+                    # Verification sampled; a row beyond the sample can still
+                    # differ. Raising rolls the whole table back rather than
+                    # leaving some rows split and others not.
+                    raise ValueError(
+                        f"row splits into {len(fields)} fields, expected {len(new_names)}"
+                    )
+                params = {f"f{i}": v for i, v in enumerate(fields)}
+                params["ctid"] = row.ctid
+                conn.execute(
+                    text(f"UPDATE {qualified} SET {assignments} WHERE ctid = :ctid"),  # noqa: S608
+                    params,
+                )
+            conn.execute(text(f"ALTER TABLE {qualified} DROP COLUMN {quoted}"))  # noqa: S608
+        outcome.ok = True
+        outcome.reason = "split_quote_aware"
+    except Exception as exc:  # noqa: BLE001 — recorded, then reported
+        outcome.error_message = str(exc)[:500]
+        outcome.reason = "quote_aware_split_failed"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+        logger.warning("quote-aware split failed for %s", qualified, exc_info=True)
+        return outcome
+
+    _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+    return outcome
 
 
 def repair_unsplit_csv_table(
@@ -1315,19 +1403,47 @@ def repair_unsplit_csv_table(
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
         return outcome
 
+    quote_aware = False
     if check.shapes != 1 or check.lo != len(new_names):
-        # The delimiter appears inside quoted values, so a split would shift
-        # every field after it. Declining is the only safe answer; this needs a
-        # CSV reader that honours quoting.
-        outcome.reason = f"inconsistent_field_count:header={len(new_names)},rows={check.lo}"
-        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
-        return outcome
+        # Postgres split unevenly, which means the delimiter appears inside
+        # quoted values. Rather than decline — 87 of 209 production tables land
+        # here — re-verify with a reader that honours quoting. If *that* is
+        # consistent the table is repairable after all, just not in SQL.
+        with engine.connect() as conn:
+            rows = [
+                r[0]
+                for r in conn.execute(
+                    text(f"SELECT {quoted}::text FROM {qualified} LIMIT :lim"),  # noqa: S608
+                    {"lim": sample_rows},
+                ).fetchall()
+            ]
+            conn.rollback()
+        shapes = {len(split_csv_row(r, delim)) for r in rows if r is not None}
+        if shapes != {len(new_names)}:
+            outcome.reason = (
+                f"inconsistent_field_count:header={len(new_names)},"
+                f"rows={sorted(shapes)[:3] if shapes else 'none'}"
+            )
+            _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+            return outcome
+        quote_aware = True
 
     if dry_run:
         outcome.ok = True
         outcome.reason = "dry_run"
         _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="unsplit_csv")
         return outcome
+
+    if quote_aware:
+        return _apply_quote_aware_split(
+            engine,
+            outcome=outcome,
+            qualified=qualified,
+            quoted=quoted,
+            new_names=new_names,
+            delim=delim,
+            run_id=run_id,
+        )
 
     try:
         with engine.begin() as conn:

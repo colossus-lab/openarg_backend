@@ -102,13 +102,12 @@ def test_it_splits_a_clean_csv_back_into_columns(table):
     assert tuple(row) == ("2003", "m", "1", "0 - 4")
 
 
-def test_it_refuses_when_the_delimiter_appears_inside_a_value(table):
-    """The dangerous case, and the reason this repair verifies before writing.
+def test_a_genuinely_malformed_table_is_still_refused(table):
+    """Quoting is now handled, so a refusal has to mean the rows really do not
+    agree with the header — not merely that SQL could not split them.
 
-    A quoted value containing the delimiter shifts every field after it. The
-    result looks like a properly split table and is wrong in every row — the
-    failure mode that is worse than not repairing at all. 96 of the 210
-    production tables land here.
+    The dangerous case remains the same: a proposal that looks like a properly
+    split table and is wrong in every row is worse than no repair at all.
     """
     from app.application.repair.parse_repair import repair_unsplit_csv_table
 
@@ -117,7 +116,7 @@ def test_it_refuses_when_the_delimiter_appears_inside_a_value(table):
         engine,
         name,
         "ciudad,provincia,poblacion",
-        ["Buenos Aires,CABA,3000000", 'Rosario,"Santa Fe, Argentina",1300000'],
+        ["Buenos Aires,CABA,3000000", "Rosario,Santa Fe", "Córdoba,Córdoba,1400000,extra"],
     )
 
     out = repair_unsplit_csv_table(
@@ -181,3 +180,58 @@ def test_the_repair_is_audited_and_therefore_reversible(table):
     assert row.phase == "unsplit_csv"
     assert row.operation == "apply" and row.ok
     assert row.new_columns == ["x", "y"]
+
+
+def test_it_now_splits_a_quoted_csv_correctly(table):
+    """The 87 production tables the SQL path had to decline.
+
+    `Rosario,"Santa Fe, Argentina",1300000` splits into four fields under
+    string_to_array and three under a reader that honours quoting. The first
+    shifts every field after the quoted one and produces a table that looks
+    correctly split and is wrong in every row.
+    """
+    from app.application.repair.parse_repair import repair_unsplit_csv_table
+
+    engine, name = table
+    _make(
+        engine,
+        name,
+        "ciudad,provincia,poblacion",
+        [
+            "Buenos Aires,CABA,3000000",
+            'Rosario,"Santa Fe, Argentina",1300000',
+            'Córdoba,"Córdoba, Argentina",1400000',
+        ],
+    )
+
+    out = repair_unsplit_csv_table(
+        engine, table_schema=SCHEMA, table_name=name, dry_run=False
+    )
+
+    assert out.ok, out.reason
+    assert out.reason == "split_quote_aware"
+    assert _columns(engine, name) == ["ciudad", "provincia", "poblacion"]
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(f'SELECT * FROM {SCHEMA}."{name}" WHERE ciudad = \'Rosario\'')
+        ).fetchone()
+    assert tuple(row) == ("Rosario", "Santa Fe, Argentina", "1300000"), (
+        "the quoted comma must stay inside its field"
+    )
+
+
+def test_a_row_beyond_the_sample_that_does_not_fit_rolls_the_whole_table_back(table):
+    """Verification samples. A row past the sample can still be malformed, and
+    leaving half the table split is worse than leaving none of it."""
+    from app.application.repair.parse_repair import repair_unsplit_csv_table
+
+    engine, name = table
+    rows = ['a,"b,c",d'] * 3 + ["only,three,fields,plus,extra"]
+    _make(engine, name, "one,two,three", rows)
+
+    out = repair_unsplit_csv_table(
+        engine, table_schema=SCHEMA, table_name=name, dry_run=False, sample_rows=3
+    )
+
+    assert not out.ok
+    assert _columns(engine, name) == ["one,two,three"], "table must be untouched"
