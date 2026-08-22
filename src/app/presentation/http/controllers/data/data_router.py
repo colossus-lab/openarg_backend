@@ -172,7 +172,7 @@ async def data_query(
                     with engine.connect() as _conn:
                         rows = _conn.execute(
                             _sql_text(
-                                "SELECT table_name FROM raw_table_versions "
+                                "SELECT table_name FROM public.raw_table_versions "
                                 "WHERE is_truncated = TRUE "
                                 "  AND superseded_at IS NULL "
                                 "  AND table_name = ANY(:names)"
@@ -289,7 +289,7 @@ async def data_tables(
                 row.table_name: True
                 for row in _conn.execute(
                     _sql_text(
-                        "SELECT table_name FROM raw_table_versions "
+                        "SELECT table_name FROM public.raw_table_versions "
                         "WHERE is_truncated = TRUE AND superseded_at IS NULL"
                     )
                 ).fetchall()

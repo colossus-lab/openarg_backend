@@ -555,7 +555,7 @@ class PgSandboxAdapter(ISQLSandbox):
                            cd.row_count,
                            cd.columns_json
                     FROM raw.cached_datasets cd
-                    LEFT JOIN raw_table_versions rtv
+                    LEFT JOIN public.raw_table_versions rtv
                       ON rtv.table_name = cd.table_name
                      AND rtv.superseded_at IS NULL
                     WHERE cd.status = 'ready'
@@ -603,7 +603,7 @@ class PgSandboxAdapter(ISQLSandbox):
                     """
                     SELECT rtv.schema_name, rtv.table_name,
                            COALESCE(rtv.row_count, s.n_live_tup::bigint, 0) AS row_count
-                    FROM raw_table_versions rtv
+                    FROM public.raw_table_versions rtv
                     LEFT JOIN pg_stat_user_tables s
                       ON s.schemaname = rtv.schema_name
                      AND s.relname = rtv.table_name

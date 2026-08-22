@@ -94,7 +94,7 @@ def _load_batch(engine, *, offset: int, limit: int, portals: list[str] | None) -
         "         rtv.source_url AS download_url, "
         "         NULL::text AS format, "
         "         rtv.created_at AS updated_at "
-        "  FROM raw_table_versions rtv "
+        "  FROM public.raw_table_versions rtv "
         "  LEFT JOIN raw.cached_datasets cd ON cd.table_name = rtv.table_name "
         "  WHERE rtv.superseded_at IS NULL "
         "    AND rtv.schema_name = 'raw' "

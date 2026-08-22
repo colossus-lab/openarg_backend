@@ -222,7 +222,7 @@ _QUERY_SQL = text(
                cd.layout_profile, cd.header_quality,
                rtv.schema_name AS materialized_schema
         FROM raw.cached_datasets cd
-        LEFT JOIN raw_table_versions rtv
+        LEFT JOIN public.raw_table_versions rtv
           ON rtv.table_name = cd.table_name
          AND rtv.superseded_at IS NULL
         WHERE cd.dataset_id = d.id
