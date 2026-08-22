@@ -242,3 +242,92 @@ def verify_against_previous_version(
             reason="no_earlier_snapshot_can_serve_as_a_reference",
         )
     return verify_rename(current=current, proposed_names=proposed_names, reference=usable[0])
+
+
+# ── verification without a reference ───────────────────────────
+#
+# `verify_rename` compares a proposal against a snapshot held to be correct.
+# Measured on production 2026-08-22, that reference does not exist for the
+# tables that most need repairing: of 1,118 tables carrying `col_N` or a
+# title-row header, **26** have another version of the same resource and
+# **none** have a second snapshot. They were parsed badly the first time and
+# there is no correct past to compare with.
+#
+# So this class needs a verifier that judges a proposal on its own merits.
+# The question stops being "does it match what was right before" and becomes
+# "is it measurably less broken than what is there now" — answerable from the
+# project's own definition of a bad column name, which the parser already owns.
+
+# A repair must clear most of the garbage, not shuffle it. Set below 1.0 because
+# a table can legitimately keep one odd name; set high because a proposal that
+# only half-works on a header row is usually a proposal that misread it.
+MIN_GARBAGE_CLEARED = 0.8
+
+
+def _garbage_ratio(names: list[str]) -> float:
+    from app.application.pipeline.parsers.column_normalization import is_garbage_column
+
+    if not names:
+        return 0.0
+    return sum(1 for n in names if is_garbage_column(n)) / len(names)
+
+
+def verify_intrinsic(
+    *, current_names: list[str], proposed_names: list[str]
+) -> VerificationOutcome:
+    """Is the proposal measurably less broken than what the table has now?
+
+    No reference, because for this class there is none. What it checks instead:
+
+    - the proposal covers the table
+    - it introduces no garbage of its own — inventing `col_1` to replace
+      `Unnamed: 1` is motion, not repair
+    - it clears most of the garbage that was there
+    - the names stay distinct, since two columns that collapse to one name lose
+      a column's worth of meaning
+    - and the table was actually broken to begin with
+
+    Deliberately strict. A repair that runs unattended on 1,118 tables should
+    decline the ambiguous ones and leave them for a person, because the cost of
+    a wrong rename is a column that silently means something else.
+    """
+    if len(proposed_names) != len(current_names):
+        return VerificationOutcome(
+            accepted=False, reason="proposal_does_not_cover_the_table"
+        )
+
+    before = _garbage_ratio(current_names)
+    if before == 0.0:
+        # Nothing to fix. Renaming a healthy table is how a repair sweep turns
+        # into damage.
+        return VerificationOutcome(
+            accepted=False, reason="nothing_wrong_with_the_current_names"
+        )
+
+    after = _garbage_ratio(proposed_names)
+    outcome = VerificationOutcome(
+        accepted=False, reason="", score_before=1.0 - before, score_after=1.0 - after
+    )
+
+    if after > 0.0:
+        # Not "fewer garbage names" but "none". A proposal that still contains a
+        # placeholder did not recover the header; it rearranged it.
+        outcome.reason = "proposal_still_contains_garbage_names"
+        return outcome
+
+    if len(set(proposed_names)) != len(proposed_names):
+        outcome.reason = "proposal_collapses_two_columns_into_one_name"
+        return outcome
+
+    if any(not n or not n.strip() for n in proposed_names):
+        outcome.reason = "proposal_contains_an_empty_name"
+        return outcome
+
+    cleared = (before - after) / before
+    if cleared < MIN_GARBAGE_CLEARED:
+        outcome.reason = f"only_cleared_{cleared:.0%}_of_the_bad_names"
+        return outcome
+
+    outcome.accepted = True
+    outcome.reason = "removes_all_garbage_names"
+    return outcome

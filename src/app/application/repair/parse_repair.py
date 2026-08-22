@@ -34,6 +34,7 @@ from app.application.pipeline.parsers import (
     is_garbage_column,
     promote_buried_headers,
 )
+from app.application.repair.verify import verify_intrinsic
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +573,21 @@ def repair_col_n_table(
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip")
         return outcome
 
+    # ── the verifier stands between a proposal and the table ──────
+    # These repairs applied 543 times over three months, every one of them
+    # because a person asked. Running them unattended needs something between
+    # "the heuristic produced names" and "the table is rewritten", and this is
+    # it. `verify_intrinsic` rather than `verify_rename` because the reference
+    # a comparison would need does not exist here: of 1,118 tables carrying
+    # these defects in production, 26 have another version of the resource and
+    # none have a second snapshot.
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
+        outcome.new_columns = proposed_cols
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="col_n")
+        return outcome
+
     rename_pairs = [(old, new) for old, new in zip(old_cols, proposed_cols) if old != new]
     outcome.new_columns = proposed_cols
     outcome.rows_deleted = rows_to_delete
@@ -835,6 +851,17 @@ def repair_title_as_columns_table(
 
     if reason != "applied":
         outcome.reason = reason
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="title_as_columns")
+        return outcome
+
+    # Same gate as `repair_col_n_table`, same reason: this heuristic reads a
+    # buried header row out of the data, and a misread produces confident,
+    # plausible names for the wrong columns. `verify_intrinsic` because there is
+    # no correct earlier snapshot to compare against — 971 tables in production
+    # carry this defect and were parsed badly the first time.
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="title_as_columns")
         return outcome
 

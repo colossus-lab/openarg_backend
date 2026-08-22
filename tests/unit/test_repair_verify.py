@@ -195,3 +195,81 @@ def test_the_outcome_carries_the_evidence_for_its_answer():
     assert log["improvement"] > 0
     assert result.columns[0].current_name == "col_0"
     assert result.columns[0].proposed_name == "provincia"
+
+
+# ── verificación sin referencia ────────────────────────────────
+
+
+def test_intrinsic_accepts_recovering_real_names_from_placeholders():
+    """The `col_N` case: the heuristic found the buried header row."""
+    from app.application.repair.verify import verify_intrinsic
+
+    result = verify_intrinsic(
+        current_names=["col_0", "col_1", "col_2"],
+        proposed_names=["provincia", "monto", "anio"],
+    )
+
+    assert result.accepted
+    assert result.reason == "removes_all_garbage_names"
+
+
+def test_intrinsic_refuses_to_touch_a_healthy_table():
+    """Renaming a table that was fine is how a repair sweep becomes damage.
+    It runs unattended over 1,118 tables, so this is the guard that matters."""
+    from app.application.repair.verify import verify_intrinsic
+
+    result = verify_intrinsic(
+        current_names=["provincia", "monto"], proposed_names=["a", "b"]
+    )
+
+    assert not result.accepted
+    assert result.reason == "nothing_wrong_with_the_current_names"
+
+
+def test_intrinsic_refuses_a_proposal_that_still_contains_placeholders():
+    """Inventing `col_9` to replace `Unnamed: 1` is motion, not repair. The bar
+    is none left, not fewer."""
+    from app.application.repair.verify import verify_intrinsic
+
+    result = verify_intrinsic(
+        current_names=["col_0", "col_1"], proposed_names=["provincia", "col_9"]
+    )
+
+    assert not result.accepted
+    assert result.reason == "proposal_still_contains_garbage_names"
+
+
+def test_intrinsic_refuses_a_proposal_that_collapses_two_columns():
+    """Two columns sharing a name lose a column's worth of meaning, and the
+    rename would fail or shadow one of them."""
+    from app.application.repair.verify import verify_intrinsic
+
+    result = verify_intrinsic(
+        current_names=["col_0", "col_1"], proposed_names=["provincia", "provincia"]
+    )
+
+    assert not result.accepted
+    assert "collapses" in result.reason
+
+
+def test_intrinsic_refuses_a_proposal_that_does_not_cover_the_table():
+    from app.application.repair.verify import verify_intrinsic
+
+    result = verify_intrinsic(current_names=["col_0", "col_1"], proposed_names=["x"])
+
+    assert not result.accepted
+    assert result.reason == "proposal_does_not_cover_the_table"
+
+
+def test_intrinsic_needs_no_reference_which_is_the_whole_point():
+    """`verify_rename` compares against a snapshot held to be correct. Measured
+    on production: of 1,118 tables carrying these defects, 26 have another
+    version of the resource and none have a second snapshot. There is no correct
+    past to compare with, so the question has to be answerable from the names
+    alone."""
+    import inspect
+
+    from app.application.repair.verify import verify_intrinsic
+
+    params = set(inspect.signature(verify_intrinsic).parameters)
+    assert params == {"current_names", "proposed_names"}
