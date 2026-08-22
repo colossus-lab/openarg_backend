@@ -1112,6 +1112,21 @@ async def repair_with_llm_assist(
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
         return outcome
 
+    # The gate matters more here than anywhere else. A deterministic heuristic
+    # that misreads produces obvious nonsense; a model that misreads produces
+    # confident, plausible, well-formed names for the wrong columns — the
+    # failure the repair literature calls patch overfitting, and the one nobody
+    # notices because the result looks like a correct table.
+    #
+    # The same verifier the heuristics answer to, deliberately: a proposal does
+    # not earn a lower bar for having come from a model.
+    outcome.new_columns = proposed_cols
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
+        return outcome
+
     if dry_run:
         outcome.ok = True
         outcome.reason = "dry_run_proposal"

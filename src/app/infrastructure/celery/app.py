@@ -107,6 +107,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.schema_baseline_tasks",
             "app.infrastructure.celery.tasks.refresh_tasks",
             "app.infrastructure.celery.tasks.parse_repair_tasks",
+            "app.infrastructure.celery.tasks.llm_repair_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -174,6 +175,7 @@ def create_celery() -> Celery:
         "openarg.baseline_schema_snapshots": {"queue": "ingest"},
         "openarg.refresh_stale_datasets": {"queue": "orchestrator"},
         "openarg.repair_unsplit_csv_tables": {"queue": "ingest"},
+        "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
