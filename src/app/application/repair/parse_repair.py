@@ -1243,8 +1243,8 @@ def repair_unsplit_csv_table(
             text(
                 f"""
                 SELECT count(*) AS n,
-                       count(DISTINCT array_length(string_to_array({quoted}, :d), 1)) AS shapes,
-                       min(array_length(string_to_array({quoted}, :d), 1)) AS lo
+                       count(DISTINCT array_length(string_to_array({quoted}::text, :d), 1)) AS shapes,
+                       min(array_length(string_to_array({quoted}::text, :d), 1)) AS lo
                 FROM (SELECT {quoted} FROM {qualified} LIMIT :lim) s
                 """  # noqa: S608 — identifiers come from information_schema
             ),
@@ -1279,8 +1279,12 @@ def repair_unsplit_csv_table(
                 )
                 conn.execute(
                     text(
+                        # Cast: not every one-column table stores text. Some
+                        # arrived as bigint because the single "value" happened
+                        # to be numeric, and string_to_array has no overload for
+                        # it — found by the first production dry run.
                         f"UPDATE {qualified} SET {_quote_ident(name)} = "  # noqa: S608
-                        f"(string_to_array({quoted}, :d))[:i]".replace(":i", str(i))
+                        f"(string_to_array({quoted}::text, :d))[:i]".replace(":i", str(i))
                     ),
                     {"d": delim},
                 )
