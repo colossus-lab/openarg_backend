@@ -111,5 +111,8 @@ def test_a_table_recreated_under_the_same_name_is_captured_again():
 
     sql = str(mod._CANDIDATES_SQL)
     assert "columns_profile" in sql, "must compare against the stored shape"
-    assert sql.count('COLLATE "C"') == 2, "both sides must share a collation"
+    # Assert the two ORDER BY clauses specifically — counting occurrences would
+    # also match the comment that explains them.
+    assert 'ORDER BY x COLLATE "C"' in sql
+    assert 'ORDER BY c.column_name::text COLLATE "C"' in sql
     assert "max(s2.captured_at)" in sql, "must compare against the LATEST snapshot"
