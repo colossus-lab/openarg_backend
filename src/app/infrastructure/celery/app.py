@@ -419,15 +419,23 @@ def create_celery() -> Celery:
                 "options": {"queue": "orchestrator"},
             },
             "repair-columns-with-llm-daily": {
-                # The model tier. Doubly off: this entry runs it in dry_run, and
-                # the task itself refuses to do anything unless
-                # OPENARG_LLM_REPAIR is set. So switching the env var on gives
-                # a daily report of what it *would* propose and what the
-                # verifier would refuse — which is the number that says whether
-                # the tier earns its cost — without spending a write.
+                # The model tier, now writing. It stays gated on
+                # OPENARG_LLM_REPAIR, so an environment that has not opted in
+                # still does nothing.
+                #
+                # Enabled on evidence rather than confidence: 20 tables repaired
+                # across staging and production, zero refused by the verifier,
+                # zero collector columns touched, and every result read by hand
+                # — `Unnamed: 0` became `fecha`, `jurisdiccion` and `indicador`
+                # correctly per table, and `Total` became `esperanza_vida_total`
+                # by reading the values around it.
+                #
+                # 25 a run against a population of 393 is roughly two weeks to
+                # drain, which is deliberate: slow enough that a bad pattern
+                # shows up in `refused_by_verifier` before it has spread.
                 "task": "openarg.repair_columns_with_llm",
                 "schedule": crontab(hour=5, minute=15),  # 05:15 ART
-                "kwargs": {"dry_run": True, "limit": 25},
+                "kwargs": {"dry_run": False, "limit": 25},
                 "options": {"queue": "analyst"},
             },
             "repair-unsplit-csv-daily": {
