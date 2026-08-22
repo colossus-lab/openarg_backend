@@ -273,3 +273,39 @@ def test_intrinsic_needs_no_reference_which_is_the_whole_point():
 
     params = set(inspect.signature(verify_intrinsic).parameters)
     assert params == {"current_names", "proposed_names"}
+
+
+def test_intrinsic_refuses_to_rename_the_collectors_own_columns():
+    """`_source_dataset_id` is how a table links back to its dataset.
+
+    The model tier's first production dry run proposed renaming all five
+    `_source_*` / `_parser_version` columns to `metadata_<i>` — the prompt tells
+    it to do exactly that for columns with no semantic value, and from the
+    values alone they look like precisely that. Applying it would have cut every
+    repaired table loose from its origin.
+
+    The proposer holds them out now, and this refuses the proposal outright. A
+    second line of defence on a data-integrity invariant is worth more than the
+    duplication costs.
+    """
+    from app.application.repair.verify import verify_intrinsic
+
+    result = verify_intrinsic(
+        current_names=["col_0", "_source_dataset_id", "_source_url"],
+        proposed_names=["tipo_caso", "metadata_0", "metadata_1"],
+    )
+
+    assert not result.accepted
+    assert result.reason.startswith("proposal_renames_collector_columns")
+    assert "_source_dataset_id" in result.reason
+
+
+def test_intrinsic_allows_a_repair_that_leaves_the_internal_columns_alone():
+    from app.application.repair.verify import verify_intrinsic
+
+    result = verify_intrinsic(
+        current_names=["col_0", "_source_dataset_id"],
+        proposed_names=["tipo_caso", "_source_dataset_id"],
+    )
+
+    assert result.accepted

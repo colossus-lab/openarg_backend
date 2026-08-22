@@ -978,6 +978,14 @@ async def propose_llm_assisted_rename(
     """
     if not old_cols:
         return old_cols, 0, "no_columns"
+
+    # The collector's own columns are never candidates. `_source_dataset_id` is
+    # how a table links back to its dataset, and the prompt's "call metadata
+    # columns metadata_<i>" rule reads them as exactly that — the first
+    # production dry run proposed renaming all five, which would have cut every
+    # repaired table loose from its origin. Held out of the proposal entirely
+    # rather than corrected afterwards, so the model is never asked about them.
+    protected = {c for c in old_cols if c.startswith("_")}
     if len(old_cols) > 100:
         # LLM context cost grows with col count; cap at a reasonable
         # ceiling. Tables with 100+ cols are usually mega-wide pivots
@@ -1048,6 +1056,14 @@ async def propose_llm_assisted_rename(
     if proposed_final == old_cols:
         return old_cols, 0, "llm_no_change"
 
+    # Whatever the model said about them, the collector's own columns keep their
+    # names. The first production dry run proposed renaming all five
+    # `_source_*` / `_parser_version` columns to `metadata_<i>`, which would
+    # have cut every repaired table loose from its dataset.
+    proposed_final = [
+        old if old in protected else new
+        for old, new in zip(old_cols, proposed_final, strict=True)
+    ]
     return proposed_final, 0, "applied"
 
 

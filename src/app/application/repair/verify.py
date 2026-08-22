@@ -323,6 +323,22 @@ def verify_intrinsic(
         outcome.reason = "proposal_contains_an_empty_name"
         return outcome
 
+    # The collector's own columns are not the parser's to rename.
+    # `_source_dataset_id` is how a table links back to its dataset, and the
+    # model tier's first production dry run proposed renaming all five of them
+    # to `metadata_<i>` — which would have cut every repaired table loose from
+    # its origin. The proposer holds them out now; this refuses the proposal
+    # outright, because a second line of defence on a data-integrity invariant
+    # is worth more than the duplication costs.
+    renamed_internal = [
+        old
+        for old, new in zip(current_names, proposed_names, strict=True)
+        if old.startswith("_") and old != new
+    ]
+    if renamed_internal:
+        outcome.reason = f"proposal_renames_collector_columns:{','.join(renamed_internal[:3])}"
+        return outcome
+
     cleared = (before - after) / before
     if cleared < MIN_GARBAGE_CLEARED:
         outcome.reason = f"only_cleared_{cleared:.0%}_of_the_bad_names"
