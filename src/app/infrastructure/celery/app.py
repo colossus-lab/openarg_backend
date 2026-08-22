@@ -106,6 +106,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.drift_report_tasks",
             "app.infrastructure.celery.tasks.schema_baseline_tasks",
             "app.infrastructure.celery.tasks.refresh_tasks",
+            "app.infrastructure.celery.tasks.parse_repair_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -172,6 +173,7 @@ def create_celery() -> Celery:
         "openarg.report_schema_drift": {"queue": "ingest"},
         "openarg.baseline_schema_snapshots": {"queue": "ingest"},
         "openarg.refresh_stale_datasets": {"queue": "orchestrator"},
+        "openarg.repair_unsplit_csv_tables": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -397,6 +399,22 @@ def create_celery() -> Celery:
                 # edit, since a DB-only flag is erased by the next build.
                 "task": "openarg.audit_marts",
                 "schedule": crontab(hour=3, minute=45),  # 03:45 ART daily
+                "options": {"queue": "ingest"},
+            },
+            "repair-unsplit-csv-daily": {
+                # The first place this system repairs itself rather than
+                # reporting. When a portal changes its delimiter the collector
+                # stores the file unsplit — 211 tables were in that state on
+                # 2026-08-22 — and this finds it within a day.
+                #
+                # `dry_run=False` is stated here rather than defaulted in the
+                # task, so the decision to write is visible in the schedule.
+                # Safe to run unattended only because the repair verifies
+                # itself: every row must split into exactly as many fields as
+                # the header names, and a table that fails that is declined.
+                "task": "openarg.repair_unsplit_csv_tables",
+                "schedule": crontab(hour=4, minute=45),  # 04:45 ART, before the baseline
+                "kwargs": {"dry_run": False},
                 "options": {"queue": "ingest"},
             },
             "baseline-schema-snapshots-daily": {
