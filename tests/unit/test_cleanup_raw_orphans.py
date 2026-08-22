@@ -243,3 +243,27 @@ def test_live_tables_holding_data_are_out_of_scope():
     assert sql is not None, "candidate SELECT not found"
     assert "rtv.superseded_at IS NOT NULL" in sql
     assert "reltuples" in sql
+
+
+def test_views_are_never_drop_candidates():
+    """`information_schema.tables` lists views, and `DROP TABLE` on one fails
+    with WrongObjectType.
+
+    Production carries 13 views named `cache_*` in the `raw` schema. The sweep
+    orders oldest-first and caps at ten, so it selected the same ten views on
+    every run, failed on all of them, and never reached a real orphan behind
+    them — which is why production recorded no drop at all between 2026-05-20
+    and 2026-08-22. Verified against production: the candidate query returns 11
+    without the filter and 1 with it.
+
+    The failure was invisible for three months because the task reports
+    `{'dropped': 0, 'failed': 10}` and succeeds.
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    source = ops_fixes.cleanup_raw_orphans.__wrapped__.__code__.co_consts
+    sql = next(
+        (c for c in source if isinstance(c, str) and "information_schema.tables" in c), None
+    )
+    assert sql is not None, "candidate SELECT not found"
+    assert "BASE TABLE" in sql, "the candidate query must exclude views"

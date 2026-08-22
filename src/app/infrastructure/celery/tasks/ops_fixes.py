@@ -827,6 +827,14 @@ def cleanup_raw_orphans(
           AND EXISTS (
               SELECT 1 FROM information_schema.tables t
               WHERE t.table_schema = 'raw' AND t.table_name = rtv.table_name
+                -- Views live in information_schema.tables too, and DROP TABLE
+                -- on one fails with WrongObjectType. Production carries 13
+                -- views named `cache_*` in `raw`; this sweep orders
+                -- oldest-first and caps at 10, so it had been stuck on the
+                -- same views since 2026-05-20 — every run selecting them,
+                -- failing on all ten, and never reaching a real orphan behind
+                -- them. It is why production recorded no drop for three months.
+                AND t.table_type = 'BASE TABLE'
           )
           AND (:no_exact OR rtv.resource_identity NOT IN :exact)
           AND (:no_tables OR rtv.table_name NOT IN :protected_tables)
@@ -1094,6 +1102,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                     ON rtv.schema_name = 'raw'
                     AND rtv.table_name = t.table_name
                 WHERE t.table_schema = 'raw'
+                  AND t.table_type = 'BASE TABLE'  -- never a view: DROP TABLE fails on one
                   AND rtv.table_name IS NULL
                 ON CONFLICT (resource_identity, version) DO UPDATE SET
                     schema_name = EXCLUDED.schema_name,
@@ -1121,6 +1130,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                     ON rtv.schema_name = 'raw'
                     AND rtv.table_name = t.table_name
                 WHERE t.table_schema = 'raw'
+                  AND t.table_type = 'BASE TABLE'  -- never a view: DROP TABLE fails on one
                   AND rtv.table_name IS NULL
                 ON CONFLICT (resource_identity, version) DO NOTHING
                 """
@@ -1191,6 +1201,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                         SELECT oid FROM pg_namespace WHERE nspname = 'raw'
                     )
                 WHERE t.table_schema = 'raw'
+                  AND t.table_type = 'BASE TABLE'  -- never a view: DROP TABLE fails on one
                   AND rtv.table_name IS NULL
                   AND cd.table_name IS NULL
                   AND COALESCE(c.reltuples, 0) = 0
@@ -1409,6 +1420,14 @@ def cleanup_empty_raw_tables(
           AND EXISTS (
               SELECT 1 FROM information_schema.tables t
               WHERE t.table_schema = 'raw' AND t.table_name = rtv.table_name
+                -- Views live in information_schema.tables too, and DROP TABLE
+                -- on one fails with WrongObjectType. Production carries 13
+                -- views named `cache_*` in `raw`; this sweep orders
+                -- oldest-first and caps at 10, so it had been stuck on the
+                -- same views since 2026-05-20 — every run selecting them,
+                -- failing on all ten, and never reaching a real orphan behind
+                -- them. It is why production recorded no drop for three months.
+                AND t.table_type = 'BASE TABLE'
           )
           AND (
               lv.max_version IS NOT NULL AND rtv.version < lv.max_version
