@@ -1,19 +1,32 @@
-"""How old a resource's data may be before it should be read again.
+"""When a resource should be read again.
 
-A single global TTL is the obvious design and it is wrong in both directions at
-once. Too short and the platform re-downloads a decennial census every week for
-nothing; too long and BCRA indicators go stale in a system built to report them.
-The cadence has to come from what the resource *is*.
+The obvious design is a time-to-live, and measuring the catalogue ruled it out.
+`datasets.last_updated_at` — the modification date the portal itself declares —
+is populated for 32,565 of 32,566 rows, and it says most of this catalogue is
+static:
 
-So this module holds a policy, not a number, and it ships **disabled**. Every
-cadence is `None` until someone who knows these sources says otherwise — see
-CL-026-001. Shipping a default would be inventing an answer, and the difference
-between a mechanism that takes a policy and one that hardcodes a guess is the
-whole point of separating them.
+| Last declared modification | Datasets |
+|---|---|
+| under a week | 493 |
+| under a month | 1,889 |
+| 1–3 months | 2,420 |
+| 3–12 months | 2,866 |
+| **over a year** | **24,897** |
 
-Disabled is a real state, not a placeholder: `None` also means "this resource
-genuinely does not change", which is the correct answer for a closed historical
-series and one that should survive whatever defaults get chosen later.
+Medians per portal run from 89 days (`neuquen_legislatura`) to 3,021
+(`cordoba_estadistica` — eight years). Any TTL short enough to keep `energia`
+current would re-download Córdoba's static series hundreds of times for nothing.
+
+So the primary signal is not age, it is **the portal saying it changed**:
+`last_updated_at > cd.updated_at`. That is exact rather than guessed, free —
+the scraper already fetches it daily — and it names a finite queue: 3,431 of
+29,012 ready resources, against 25,580 that have not moved since we read them.
+
+Age survives only as a **backstop**, because portals lie about this field: some
+never update it, some touch it without changing the file. Ninety days is long
+enough to cost little and short enough that a silent change is not invisible
+forever. It is the one number here that is chosen rather than measured, and it
+is deliberately the one that matters least.
 """
 
 from __future__ import annotations
@@ -24,107 +37,112 @@ from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Per-portal cadences. Empty on purpose (CL-026-001): the numbers are a judgement
-# about the data, not about the code, and this file is the wrong place to decide
-# them. Populating one entry switches refresh on for that portal and nothing
-# else, which is also how Phase E wants to start.
-_PORTAL_CADENCE: dict[str, timedelta] = {}
+# Which portals participate. Empty means refresh is off everywhere — Phase E of
+# 026 wants to start with one portal and watch it, not with the catalogue.
+#
+# `energia` is the natural first choice: 251 resources with a declared change
+# pending, a 243-day median so it genuinely moves, and small enough that a week
+# of watching says something.
+_ENABLED_PORTALS: set[str] = set()
 
-# Overrides for a single resource, by `resource_identity`. Wins over the portal
-# entry, including to *disable* refresh for one resource in an otherwise
-# refreshed portal — a closed series in a live catalogue is common enough to be
-# worth expressing.
-_RESOURCE_CADENCE: dict[str, timedelta | None] = {}
+# Resources exempted from refresh even inside an enabled portal. A closed
+# historical series in a live catalogue is common enough to be worth expressing.
+_NEVER_REFRESH: set[str] = set()
 
-# A floor, so that no policy — configured, overridden, or mistyped — can ask for
-# a resource to be re-read more often than this. It is a guard against a typo
-# costing a download storm, not a cadence.
-MIN_CADENCE = timedelta(hours=6)
+# The backstop, for when the portal's metadata is wrong or absent. Not the
+# mechanism — see the module docstring.
+BACKSTOP_MAX_AGE = timedelta(days=90)
 
-_ENV_DEFAULT = "OPENARG_REFRESH_DEFAULT_DAYS"
+# No policy may ask for a resource to be re-read more often than this. A guard
+# against a typo costing a download storm, not a cadence.
+MIN_BACKSTOP = timedelta(hours=6)
+
+_ENV_PORTALS = "OPENARG_REFRESH_PORTALS"
+_ENV_BACKSTOP_DAYS = "OPENARG_REFRESH_BACKSTOP_DAYS"
 
 
-def _default_cadence() -> timedelta | None:
-    """The fallback cadence, off unless an operator sets one.
+def enabled_portals() -> set[str]:
+    """Portals participating in refresh, from config or the environment.
 
-    Read from the environment rather than a constant so that turning refresh on
-    globally is a deploy-free decision, and so that the value that ends up in
-    production is visible in configuration instead of buried in a module.
+    Read at call time rather than import time so that turning a portal on is a
+    restart rather than a deploy — which matters while the answer is being
+    tuned.
     """
-    raw = os.getenv(_ENV_DEFAULT)
+    from_env = os.getenv(_ENV_PORTALS, "")
+    env_portals = {p.strip() for p in from_env.split(",") if p.strip()}
+    return _ENABLED_PORTALS | env_portals
+
+
+def backstop_age() -> timedelta:
+    """How long we may go without re-reading a resource the portal calls static."""
+    raw = os.getenv(_ENV_BACKSTOP_DAYS)
     if not raw:
-        return None
+        return BACKSTOP_MAX_AGE
     try:
         days = float(raw)
     except ValueError:
-        logger.warning("%s is not a number: %r — refresh stays off", _ENV_DEFAULT, raw)
-        return None
-    if days <= 0:
-        return None
-    return timedelta(days=days)
-
-
-def refresh_age_for(portal: str | None, resource_identity: str | None = None) -> timedelta | None:
-    """How old this resource's data may get. `None` means never refresh it.
-
-    Resolution order is most-specific-first: the resource override, then the
-    portal, then the environment default. An explicit `None` at any level stops
-    the search, so a resource can be exempted from a portal that is otherwise
-    refreshed.
-    """
-    if resource_identity is not None and resource_identity in _RESOURCE_CADENCE:
-        cadence = _RESOURCE_CADENCE[resource_identity]
-        return _clamp(cadence)
-
-    if portal and portal in _PORTAL_CADENCE:
-        return _clamp(_PORTAL_CADENCE[portal])
-
-    return _clamp(_default_cadence())
-
-
-def _clamp(cadence: timedelta | None) -> timedelta | None:
-    if cadence is None:
-        return None
-    if cadence < MIN_CADENCE:
-        # Loud, because a cadence below the floor is almost always a typo, and a
-        # typo here costs a download storm rather than a wrong number.
         logger.warning(
-            "refresh cadence %s is below the %s floor; using the floor", cadence, MIN_CADENCE
+            "%s is not a number: %r — using the %s default",
+            _ENV_BACKSTOP_DAYS,
+            raw,
+            BACKSTOP_MAX_AGE,
         )
-        return MIN_CADENCE
-    return cadence
-
-
-def is_stale(
-    *,
-    last_collected_at: datetime | None,
-    portal: str | None,
-    resource_identity: str | None = None,
-    now: datetime | None = None,
-) -> bool:
-    """Is this resource past its policy age?
-
-    A resource with no recorded collection time is **not** stale. It is unknown,
-    and treating unknown as stale would make the first run of this sweep eligible
-    to re-read the entire catalogue at once — which is the load pattern that
-    restarted the database in May.
-    """
-    cadence = refresh_age_for(portal, resource_identity)
-    if cadence is None:
-        return False
-    if last_collected_at is None:
-        return False
-
-    reference = now or datetime.now(UTC)
-    if last_collected_at.tzinfo is None:
-        last_collected_at = last_collected_at.replace(tzinfo=UTC)
-    return (reference - last_collected_at) > cadence
+        return BACKSTOP_MAX_AGE
+    candidate = timedelta(days=days)
+    if candidate < MIN_BACKSTOP:
+        logger.warning("refresh backstop %s is below the %s floor; using the floor", candidate, MIN_BACKSTOP)
+        return MIN_BACKSTOP
+    return candidate
 
 
 def is_enabled() -> bool:
-    """Is refresh switched on for anything at all?
+    """Is refresh on for anything at all?
 
-    Lets a caller skip the eligibility query entirely rather than run it and find
-    nothing, which matters while the answer is "no" for every resource.
+    Lets a caller skip the eligibility query rather than run it and find nothing,
+    which matters while the answer is "no" for every portal.
     """
-    return bool(_PORTAL_CADENCE) or bool(_RESOURCE_CADENCE) or _default_cadence() is not None
+    return bool(enabled_portals())
+
+
+def should_refresh(
+    *,
+    portal: str | None,
+    resource_identity: str | None = None,
+    portal_last_updated_at: datetime | None,
+    last_collected_at: datetime | None,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Should this resource be read again, and on what grounds?
+
+    Returns the decision and the reason for it, because "the portal says it
+    changed" and "we have not looked in three months" are different claims that
+    deserve to be counted separately — one is evidence and the other is a
+    precaution.
+    """
+    if not portal or portal not in enabled_portals():
+        return False, "portal_not_enabled"
+    if resource_identity and resource_identity in _NEVER_REFRESH:
+        return False, "resource_exempt"
+    if last_collected_at is None:
+        # Unknown is not old. Treating it as stale would make the first sweep
+        # eligible to re-read the whole catalogue at once, which is the load
+        # pattern that restarted the database in May.
+        return False, "never_collected"
+
+    reference = now or datetime.now(UTC)
+    last_collected_at = _as_utc(last_collected_at)
+
+    if portal_last_updated_at is not None:
+        if _as_utc(portal_last_updated_at) > last_collected_at:
+            return True, "portal_declares_change"
+
+    if (reference - last_collected_at) > backstop_age():
+        return True, "backstop_age"
+
+    return False, "current"
+
+
+def _as_utc(value: datetime) -> datetime:
+    """The columns are timestamptz, but a driver or a fixture can hand back a
+    naive value, and a comparison error here would take out the whole sweep."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)

@@ -1,8 +1,8 @@
 """Tests for the refresh sweep.
 
-Two things carry the risk. It must stay inert until a cadence exists, and it
-must never dispatch more than its budget — that cap is what separates this from
-the load that restarted the database in May.
+Two things carry the risk: it must stay inert until a portal is switched on, and
+it must never dispatch more than its budget — that cap is what separates this
+from the load that restarted the database in May.
 """
 
 from __future__ import annotations
@@ -14,120 +14,115 @@ import pytest
 
 from app.application.collection import freshness
 
-NOW = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+NOW = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
 
 
 class _Row:
-    def __init__(self, i, days_old, portal="caba"):
+    def __init__(self, i, declared=True, portal="energia", days_old=10):
         self.dataset_id = f"d{i}"
         self.portal = portal
         self.source_id = f"s{i}"
         self.last_collected_at = NOW - timedelta(days=days_old)
-        self.table_name = f"t{i}"
+        self.portal_last_updated_at = NOW - timedelta(days=1 if declared else 900)
+        self.portal_declares_change = declared
 
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    monkeypatch.setattr(freshness, "_PORTAL_CADENCE", {})
-    monkeypatch.setattr(freshness, "_RESOURCE_CADENCE", {})
-    monkeypatch.delenv("OPENARG_REFRESH_DEFAULT_DAYS", raising=False)
+    monkeypatch.setattr(freshness, "_ENABLED_PORTALS", set())
+    monkeypatch.setattr(freshness, "_NEVER_REFRESH", set())
+    monkeypatch.delenv("OPENARG_REFRESH_PORTALS", raising=False)
+    monkeypatch.delenv("OPENARG_REFRESH_BACKSTOP_DAYS", raising=False)
 
 
 def _run(rows, *, mart_busy=False, **kw):
     from app.infrastructure.celery.tasks import collector_tasks, refresh_tasks
 
     engine = MagicMock()
-    conn = engine.connect.return_value.__enter__.return_value
-    conn.execute.return_value = MagicMock(fetchall=lambda: rows)
+    engine.connect.return_value.__enter__.return_value.execute.return_value = MagicMock(
+        fetchall=lambda: rows
+    )
     refresh_tasks.get_sync_engine = lambda: engine
     collector_tasks._mart_rebuild_in_progress = lambda _e: mart_busy
-    dispatched: list[str] = []
-    collector_tasks.collect_dataset.delay = lambda did: dispatched.append(did)
-    return refresh_tasks.refresh_stale_datasets.run(**kw), dispatched
+    sent: list[str] = []
+    collector_tasks.collect_dataset.delay = lambda did: sent.append(did)
+    return refresh_tasks.refresh_stale_datasets.run(**kw), sent, engine
 
 
-# ── inerte hasta que exista una cadencia ───────────────────────
-
-
-def test_it_does_nothing_while_no_cadence_is_configured():
-    """The expected state today. Reporting zeros without saying why would read
-    like 'nothing is stale', which is a different claim."""
-    result, dispatched = _run([_Row(1, 400)], dry_run=False)
+def test_it_does_nothing_while_no_portal_is_enabled():
+    """The expected state today. Zeros without that context would read like
+    'nothing is stale' while 3,431 resources are."""
+    result, sent, _ = _run([_Row(1)], dry_run=False)
 
     assert result["enabled"] is False
-    assert result["reason"] == "no_cadence_configured"
-    assert dispatched == []
-
-
-# ── el presupuesto ─────────────────────────────────────────────
+    assert result["reason"] == "no_portal_enabled"
+    assert sent == []
 
 
 def test_it_never_dispatches_more_than_its_budget():
-    """152 concurrent collects and a 52M-row matview restarted RDS in May. The
-    cap is the design, not a safety valve."""
-    freshness._PORTAL_CADENCE["caba"] = timedelta(days=7)
-    rows = [_Row(i, 400) for i in range(500)]
+    """The cap is the design. 152 concurrent collects and a 52M-row matview
+    restarted RDS in May."""
+    freshness._ENABLED_PORTALS.add("energia")
+    # The query applies LIMIT, so the sweep must not exceed what it asked for.
+    result, sent, engine = _run([_Row(i) for i in range(10)], limit=10, dry_run=False)
 
-    result, dispatched = _run(rows, limit=10, dry_run=False)
-
-    assert result["stale_found"] == 10
-    assert len(dispatched) == 10
+    assert len(sent) == 10
+    params = engine.connect.return_value.__enter__.return_value.execute.call_args.args[1]
+    assert params["limit"] == 10
 
 
 def test_a_mart_rebuild_defers_the_whole_cycle():
-    freshness._PORTAL_CADENCE["caba"] = timedelta(days=7)
+    freshness._ENABLED_PORTALS.add("energia")
 
-    result, dispatched = _run([_Row(1, 400)], mart_busy=True, dry_run=False)
+    result, sent, _ = _run([_Row(1)], mart_busy=True, dry_run=False)
 
     assert result["dispatched"] == 0
     assert result["reason"] == "mart_rebuild_in_progress"
-    assert dispatched == []
+    assert sent == []
 
 
-# ── selección ──────────────────────────────────────────────────
+def test_only_enabled_portals_reach_the_query():
+    freshness._ENABLED_PORTALS.update({"energia", "caba"})
+
+    _, _, engine = _run([_Row(1)], dry_run=True)
+
+    params = engine.connect.return_value.__enter__.return_value.execute.call_args.args[1]
+    assert params["portals"] == ["caba", "energia"]
+    assert params["backstop_days"] == 90
 
 
-def test_only_resources_past_their_policy_are_dispatched():
-    freshness._PORTAL_CADENCE["caba"] = timedelta(days=30)
-    rows = [_Row(1, 400), _Row(2, 5), _Row(3, 90), _Row(4, 1)]
+def test_the_two_reasons_are_counted_apart():
+    """One is the portal telling us the file moved; the other is us admitting we
+    have not looked. A run that is mostly backstop means the metadata is not
+    carrying its weight, and that is worth seeing."""
+    freshness._ENABLED_PORTALS.add("energia")
+    rows = [_Row(1), _Row(2), _Row(3, declared=False), _Row(4, declared=False)]
 
-    result, dispatched = _run(rows, dry_run=False)
+    result, _, _ = _run(rows, dry_run=False)
 
-    assert result["stale_found"] == 2
-    assert set(dispatched) == {"d1", "d3"}
-
-
-def test_a_portal_without_a_cadence_is_left_alone():
-    """Switching one portal on must not switch on the rest."""
-    freshness._PORTAL_CADENCE["caba"] = timedelta(days=7)
-    rows = [_Row(1, 400, portal="caba"), _Row(2, 400, portal="otro")]
-
-    _, dispatched = _run(rows, dry_run=False)
-
-    assert dispatched == ["d1"]
+    assert result["by_reason"] == {"portal_declares_change": 2, "backstop_age": 2}
+    assert result["eligible"] == 4
 
 
-def test_dry_run_dispatches_nothing_but_still_reports_what_it_found():
+def test_dry_run_dispatches_nothing_but_still_reports():
     """A sweep that re-reads sources is not something to switch on by deploying
     it, so the default has to be observable without acting."""
-    freshness._PORTAL_CADENCE["caba"] = timedelta(days=7)
+    freshness._ENABLED_PORTALS.add("energia")
 
-    result, dispatched = _run([_Row(1, 400), _Row(2, 400)], dry_run=True)
+    result, sent, _ = _run([_Row(1), _Row(2)], dry_run=True)
 
-    assert result["stale_found"] == 2
+    assert result["eligible"] == 2
     assert result["dispatched"] == 0
-    assert dispatched == []
+    assert sent == []
 
 
 def test_one_failed_dispatch_does_not_cost_the_batch():
-    """The resource stays stale and the next cycle picks it up, which is the
-    whole shape of this sweep."""
     from app.infrastructure.celery.tasks import collector_tasks, refresh_tasks
 
-    freshness._PORTAL_CADENCE["caba"] = timedelta(days=7)
+    freshness._ENABLED_PORTALS.add("energia")
     engine = MagicMock()
     engine.connect.return_value.__enter__.return_value.execute.return_value = MagicMock(
-        fetchall=lambda: [_Row(1, 400), _Row(2, 400), _Row(3, 400)]
+        fetchall=lambda: [_Row(1), _Row(2), _Row(3)]
     )
     refresh_tasks.get_sync_engine = lambda: engine
     collector_tasks._mart_rebuild_in_progress = lambda _e: False

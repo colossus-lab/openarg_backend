@@ -86,16 +86,45 @@ drift detection is a consequence of having it.
 
 ## 4. Design decisions worth stating
 
-### 4.1 Age is not one number
+### 4.1 Age is the wrong signal, and the right one was already in the table
 
-A single global TTL is the obvious design and it is wrong in both directions at
-once: too short and the platform re-downloads a census every week for nothing;
-too long and BCRA indicators go stale in a system built to report them.
+The obvious design is a time-to-live. Measuring the catalogue ruled it out.
 
-The cadence should derive from what the resource is. The first cut can be crude —
-a per-portal default with per-resource override — because crude and stated beats
-uniform and wrong. What matters is that the mechanism takes a policy rather than
-a constant.
+`datasets.last_updated_at` — the modification date the portal itself declares —
+is populated for **32,565 of 32,566** rows and nothing was reading it. It says
+this catalogue is mostly static:
+
+| Last declared modification | Datasets |
+|---|---|
+| under a week | 493 |
+| under a month | 1,889 |
+| 1–3 months | 2,420 |
+| 3–12 months | 2,866 |
+| **over a year** | **24,897** (76 %) |
+
+Per-portal medians run from 89 days (`neuquen_legislatura`) to **3,021**
+(`cordoba_estadistica` — eight years), with `datos_gob_ar` at 1,075 and `magyp`
+at 2,552. No single TTL survives that spread: one short enough to keep `energia`
+current re-downloads Córdoba's static series hundreds of times for nothing.
+
+So the primary signal is the portal saying it changed —
+`last_updated_at > cd.updated_at` — which is exact rather than guessed, free
+(the scraper already fetches it daily), and names a finite queue:
+
+| | |
+|---|---|
+| Ready resources the portal declares changed | **3,431** |
+| Ready resources that have not moved since we read them | 25,580 |
+
+Age survives only as a **backstop**, because portals lie about this field: some
+never update it, some touch it without changing the file. Ninety days is long
+enough to cost little and short enough that a silent change is not invisible
+forever. It is the one number here that is chosen rather than measured, and
+deliberately the one that matters least.
+
+Verified against production: `energia` alone yields 585 eligible resources, 251
+of them portal-declared — a first portal small enough to watch for a week and
+real enough to learn from.
 
 ### 4.2 A refresh must not be able to lose the current data
 
@@ -137,8 +166,13 @@ the honest thing to do while a backlog of 24,097 stale resources drains.
 - **FR-005**: A failed refresh MUST NOT mark the resource as failed. The resource
   has data; the *refresh* failed, and those are different states with different
   consequences.
-- **FR-006**: Refresh cadence MUST be expressible per portal with a per-resource
-  override, and MUST have a documented default.
+- **FR-006**: Eligibility MUST be driven by the portal's declared modification
+  date, with age as a backstop and not as the mechanism. Participation MUST be
+  expressible per portal, with a per-resource exemption for a closed series
+  inside a live catalogue.
+- **FR-006b**: The two grounds MUST be counted apart. "The portal says it
+  changed" is evidence; "we have not looked in ninety days" is a precaution, and
+  a run that is mostly the second means the metadata is not carrying its weight.
 - **FR-007**: A refresh MUST record provenance exactly as a first collection
   does, so the pair it creates is attributable
   ([025](../025-self-repair/spec.md) FR-001).
@@ -187,9 +221,11 @@ the honest thing to do while a backlog of 24,097 stale resources drains.
 
 ## 8. Open Questions
 
-- **[NEEDS CLARIFICATION CL-026-001]** — The default cadence. Nothing in the
-  system implies one, and picking it here would be inventing an answer that
-  belongs to whoever knows what these datasets are.
+- **[RESOLVED CL-026-001]** — There is no default cadence, because there should
+  not be one. The portal's own `last_updated_at` answers the question exactly,
+  for 99.997 % of rows, and it was already being collected. The only chosen
+  number left is the 90-day backstop, and it applies to the case where the
+  metadata is wrong rather than to the normal path.
 - **[NEEDS CLARIFICATION CL-026-002]** — Whether to drain the 24,097-resource
   backlog on a schedule, or leave it to the ordinary cadence and accept that the
   oldest data takes longest to come back. The first is faster and is exactly the
