@@ -1136,3 +1136,166 @@ __all__ = [
     "propose_llm_assisted_rename",
     "is_garbage_column",
 ]
+
+
+# ── unsplit CSV ────────────────────────────────────────────────
+
+_DELIMITERS = (";", ",", "\t", "|")
+
+
+def detect_unsplit_csv(columns: list[str]) -> str | None:
+    """Is this table a CSV that was never split? Returns the delimiter, or None.
+
+    The signature is unmistakable: one data column whose *name* is the entire
+    header line with the delimiter still in it — `anio,sexo,casos_SIDA` — while
+    each row holds a whole record as a single string. pandas read the file with
+    the wrong separator and produced a one-column table.
+
+    Measured on production 2026-08-22: 210 tables, 112 semicolon-separated, 97
+    comma, 1 tab. Nothing about this needs a prior snapshot to see; the table is
+    self-evidently wrong from its current state alone, which is why it survived
+    unnoticed since the day it was collected.
+    """
+    payload = [c for c in columns if not c.startswith("_")]
+    if len(payload) != 1:
+        return None
+    header = payload[0]
+    for delim in _DELIMITERS:
+        if delim in header and len(header.split(delim)) > 1:
+            return delim
+    return None
+
+
+def propose_unsplit_csv_columns(header: str, delim: str) -> list[str]:
+    """Turn the header line back into column names."""
+    names = [h.strip().strip('"').strip("'") for h in header.split(delim)]
+    names = [n if n else f"col_{i}" for i, n in enumerate(names)]
+    return _dedupe_identifiers([_normalize_header_to_identifier(n) for n in names])
+
+
+def repair_unsplit_csv_table(
+    engine: Engine,
+    *,
+    table_schema: str,
+    table_name: str,
+    run_id: uuid.UUID | None = None,
+    dry_run: bool = True,
+    sample_rows: int = 500,
+) -> RepairOutcome:
+    """Split a one-column table back into the columns its header describes.
+
+    In place, without re-downloading: everything needed is already stored. The
+    header is the column's name, the records are its values, and both split on
+    the same delimiter.
+
+    **It verifies before it writes, and the check is objective.** Every sampled
+    row must split into exactly as many fields as the header has. A row that
+    yields a different count means the delimiter also appears inside a quoted
+    value, and a naive split would silently shift every field after it — the
+    kind of repair that looks successful and corrupts the data. Those tables are
+    declined here and need a real CSV reader, not a split. Measured on
+    production: 113 of 210 pass this check.
+
+    Defaults to `dry_run=True`. The proposal is worth reading before it runs.
+    """
+    run_id = run_id or uuid.uuid4()
+    outcome = RepairOutcome(
+        table_schema=table_schema, table_name=table_name, ok=False, dry_run=dry_run
+    )
+
+    with engine.connect() as conn:
+        columns = [
+            r.column_name
+            for r in conn.execute(
+                text(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = :s AND table_name = :t
+                    ORDER BY ordinal_position
+                    """
+                ),
+                {"s": table_schema, "t": table_name},
+            ).fetchall()
+        ]
+        conn.rollback()
+
+    if not columns:
+        outcome.reason = "table_not_found"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+        return outcome
+
+    delim = detect_unsplit_csv(columns)
+    if delim is None:
+        outcome.reason = "not_an_unsplit_csv"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+        return outcome
+
+    header = next(c for c in columns if not c.startswith("_"))
+    new_names = propose_unsplit_csv_columns(header, delim)
+    outcome.old_columns = list(columns)
+    outcome.new_columns = list(new_names)
+
+    quoted = _quote_ident(header)
+    qualified = f"{_quote_ident(table_schema)}.{_quote_ident(table_name)}"
+
+    with engine.connect() as conn:
+        check = conn.execute(
+            text(
+                f"""
+                SELECT count(*) AS n,
+                       count(DISTINCT array_length(string_to_array({quoted}, :d), 1)) AS shapes,
+                       min(array_length(string_to_array({quoted}, :d), 1)) AS lo
+                FROM (SELECT {quoted} FROM {qualified} LIMIT :lim) s
+                """  # noqa: S608 — identifiers come from information_schema
+            ),
+            {"d": delim, "lim": sample_rows},
+        ).fetchone()
+        conn.rollback()
+
+    if not check or not check.n:
+        outcome.reason = "no_rows_to_verify"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+        return outcome
+
+    if check.shapes != 1 or check.lo != len(new_names):
+        # The delimiter appears inside quoted values, so a split would shift
+        # every field after it. Declining is the only safe answer; this needs a
+        # CSV reader that honours quoting.
+        outcome.reason = f"inconsistent_field_count:header={len(new_names)},rows={check.lo}"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+        return outcome
+
+    if dry_run:
+        outcome.ok = True
+        outcome.reason = "dry_run"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="unsplit_csv")
+        return outcome
+
+    try:
+        with engine.begin() as conn:
+            for i, name in enumerate(new_names, start=1):
+                conn.execute(
+                    text(f"ALTER TABLE {qualified} ADD COLUMN {_quote_ident(name)} text")  # noqa: S608
+                )
+                conn.execute(
+                    text(
+                        f"UPDATE {qualified} SET {_quote_ident(name)} = "  # noqa: S608
+                        f"(string_to_array({quoted}, :d))[:i]".replace(":i", str(i))
+                    ),
+                    {"d": delim},
+                )
+            # Dropped last, and inside the same transaction: if anything above
+            # fails the original column is still there and the table is
+            # unchanged. The reverse order would leave the data nowhere.
+            conn.execute(text(f"ALTER TABLE {qualified} DROP COLUMN {quoted}"))  # noqa: S608
+        outcome.ok = True
+        outcome.reason = "split"
+    except Exception as exc:  # noqa: BLE001 — recorded, then reported
+        outcome.error_message = str(exc)[:500]
+        outcome.reason = "split_failed"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+        logger.warning("unsplit-csv repair failed for %s", qualified, exc_info=True)
+        return outcome
+
+    _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+    return outcome
