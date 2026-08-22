@@ -309,3 +309,85 @@ def test_intrinsic_allows_a_repair_that_leaves_the_internal_columns_alone():
     )
 
     assert result.accepted
+
+
+# ── rechazar una re-lectura que parsea peor ────────────────────
+
+
+def test_the_energia_case_is_blocked():
+    """The one that happened, on 2026-08-22, in production.
+
+    The May parse had `sigla`, `idpozo`, `area`, `empresa`. The refresh brought
+    back a data row promoted to the header — a company name, a well identifier,
+    a PostGIS hex geometry. The collector dropped and recreated, and a working
+    table stopped existing. 47 resources went that way in one run.
+    """
+    from app.application.repair.verify import is_parse_regression
+
+    assert is_parse_regression(
+        current_names=["sigla", "idpozo", "area", "empresa"],
+        incoming_names=[
+            "YPF.SC.EH-1165 / YPF.SC.EH-1166",
+            "EL HUEMUL - KOLUEL KAIKE",
+            "ELH",
+            "COMPAÑÍA GENERAL DE COMBUSTIBLES S.A.",
+        ],
+    )
+
+
+def test_a_portal_that_has_always_published_prose_headers_is_not_blocked():
+    """The false positive that would matter most.
+
+    Plenty of portals publish honest human-readable headers — `Precio
+    (USD/MMBTU)`, `Año`, `Cuenca`. Testing style absolutely would freeze every
+    re-read from half the catalogue, so the signal is relative: only a table
+    that *was* identifier-styled and now is not counts as a regression.
+    """
+    from app.application.repair.verify import is_parse_regression
+
+    assert not is_parse_regression(
+        current_names=["Precio (USD/MMBTU)", "Año", "Cuenca"],
+        incoming_names=["Precio (USD/MMBTU)", "Año", "Cuenca", "Mes"],
+    )
+
+
+def test_placeholders_appearing_where_there_were_none_is_a_regression():
+    from app.application.repair.verify import is_parse_regression
+
+    assert is_parse_regression(
+        current_names=["sigla", "idpozo"], incoming_names=["col_0", "col_1"]
+    )
+
+
+def test_a_first_collection_is_never_a_regression():
+    """Nothing to compare against, and nothing to destroy."""
+    from app.application.repair.verify import is_parse_regression
+
+    assert not is_parse_regression(current_names=[], incoming_names=["col_0", "col_1"])
+
+
+def test_a_table_that_is_already_broken_is_not_frozen_by_this():
+    """Blocking a differently-broken re-read of an already-broken table would
+    mean bad tables could never be replaced at all."""
+    from app.application.repair.verify import is_parse_regression
+
+    assert not is_parse_regression(
+        current_names=["col_0", "col_1"], incoming_names=["Unnamed: 0", "Unnamed: 1"]
+    )
+
+
+def test_an_improvement_is_never_blocked():
+    from app.application.repair.verify import is_parse_regression
+
+    assert not is_parse_regression(
+        current_names=["col_0", "col_1"], incoming_names=["provincia", "monto"]
+    )
+
+
+def test_a_clean_re_read_that_adds_a_column_is_not_blocked():
+    """The ordinary upstream change the whole system exists to accommodate."""
+    from app.application.repair.verify import is_parse_regression
+
+    assert not is_parse_regression(
+        current_names=["sigla", "idpozo"], incoming_names=["sigla", "idpozo", "cuenca"]
+    )

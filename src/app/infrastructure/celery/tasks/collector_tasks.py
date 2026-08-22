@@ -3322,6 +3322,38 @@ def _detect_schema_drift(
     return {"added": added, "removed": removed, "type_changed": type_changed}
 
 
+class _ParseRegression(RuntimeError):
+    """Raised when a re-read would replace a good table with a worse parse.
+
+    A distinct type so the caller can tell it from a genuine parse failure: the
+    resource is fine, the *reading* was not, and the right outcome is to keep
+    serving what we have rather than to mark anything failed.
+    """
+
+
+def _existing_columns(engine, schema: str | None, table_name: str) -> list[str]:
+    """Column names of the table as it stands, or empty if it does not exist."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = :s AND table_name = :t
+                    ORDER BY ordinal_position
+                    """
+                ),
+                {"s": schema or "public", "t": table_name},
+            ).fetchall()
+            conn.rollback()
+        return [r.column_name for r in rows]
+    except Exception:
+        # Never block a collect because this lookup failed; an empty list means
+        # "nothing to protect" and the old behaviour applies.
+        logger.warning("could not read current columns for %s", table_name, exc_info=True)
+        return []
+
+
 def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | None = None, **kwargs):
     """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs.
 
@@ -3396,6 +3428,39 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                     "specified more than once",
                 )
                 if any(kw in exc_str for kw in schema_keywords):
+                    # Before destroying what is there: is the new reading worse?
+                    #
+                    # Found by causing it on 2026-08-22. A refresh re-read a
+                    # production resource whose May parse had `sigla`, `idpozo`,
+                    # `area`, `empresa`, and got back a data row promoted to the
+                    # header — `COMPAÑÍA GENERAL DE COMBUSTIBLES S.A.` and a
+                    # PostGIS hex geometry among the column names. This path did
+                    # what it always does, dropped and recreated, and a working
+                    # table stopped existing. 47 resources went that way in one
+                    # run.
+                    #
+                    # Refusing costs one stale table until the next cycle.
+                    # Accepting costs the table and its rows, with nothing left
+                    # but a snapshot of what the columns used to be.
+                    from app.application.repair.verify import is_parse_regression
+
+                    existing_cols = _existing_columns(engine, schema, table_name)
+                    incoming_cols = [str(c) for c in df.columns]
+                    if is_parse_regression(
+                        current_names=existing_cols, incoming_names=incoming_cols
+                    ):
+                        logger.warning(
+                            "Refusing to replace %s: the new parse is worse "
+                            "(had %d identifier-like columns, got %s...)",
+                            table_name,
+                            sum(1 for c in existing_cols if c.islower()),
+                            incoming_cols[:3],
+                        )
+                        raise _ParseRegression(
+                            f"incoming parse is worse than the stored table: "
+                            f"{incoming_cols[:3]}"
+                        ) from exc
+
                     logger.warning(
                         "Schema mismatch on table %s, dropping and retrying: %s",
                         table_name,

@@ -30,6 +30,7 @@ damage. So the reference is an explicit argument with no default, and
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -347,3 +348,75 @@ def verify_intrinsic(
     outcome.accepted = True
     outcome.reason = "removes_all_garbage_names"
     return outcome
+
+
+# ── refusing a re-read that parses worse ───────────────────────
+#
+# The gap this closes was found in production on 2026-08-22, by causing it.
+# A refresh re-read 68 resources; one of them came back with a data row promoted
+# to the header — column names like `COMPAÑÍA GENERAL DE COMBUSTIBLES S.A.` and
+# a PostGIS hex geometry, where the May parse had `sigla`, `idpozo`, `area`,
+# `empresa`. The collector saw a column mismatch, did what it always does —
+# drop and recreate — and a working table became 47 broken ones across the run.
+#
+# FR-005 was not enough. It protects a resource whose refresh *fails*; this is a
+# refresh that *succeeds* and is worse. Nothing in the pipeline could say "this
+# reading is worse than the one we have, keep the old one", because nothing
+# compared them.
+
+
+# A column name that came from a data row does not look like a column name, and
+# `is_garbage_column` does not catch it — it knows `col_N`, `Unnamed:` and URLs,
+# none of which describe `COMPAÑÍA GENERAL DE COMBUSTIBLES S.A.` or a PostGIS
+# hex geometry.
+#
+# Absolute style is the wrong test: plenty of portals publish honest
+# human-readable headers like `Precio (USD/MMBTU)`, and flagging those would
+# block every legitimate re-read from half the catalogue. The signal is
+# **relative** — a table whose names looked like identifiers and now looks like
+# a row of data has had its header eaten, and a table that always used prose
+# keeps using prose.
+_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _identifier_ratio(names: list[str]) -> float:
+    payload = [n for n in names if not n.startswith("_")]
+    if not payload:
+        return 0.0
+    return sum(1 for n in payload if _IDENTIFIER_RE.match(n.strip())) / len(payload)
+
+
+def is_parse_regression(*, current_names: list[str], incoming_names: list[str]) -> bool:
+    """Would accepting `incoming_names` make this table worse than it is?
+
+    True when the table we hold parses cleanly and the new reading does not.
+    Deliberately narrow: it does not ask whether the new parse is *good*, only
+    whether it is materially worse than what would be destroyed to make room for
+    it. A first collection has nothing to compare against and is never a
+    regression.
+
+    Asymmetric on purpose. Refusing a good re-read costs one stale table until
+    the next cycle; accepting a bad one destroys a working table and the data in
+    it, and the only trace left is a snapshot of what the columns used to be.
+    """
+    if not current_names or not incoming_names:
+        return False
+
+    before_garbage = _garbage_ratio(current_names)
+    after_garbage = _garbage_ratio(incoming_names)
+
+    # The table we hold is already broken — a different broken is not a
+    # regression worth blocking, and blocking it would freeze bad tables forever.
+    if before_garbage >= MIN_GARBAGE_CLEARED:
+        return False
+
+    # Placeholders appearing where there were none.
+    if after_garbage > before_garbage and after_garbage >= MIN_GARBAGE_CLEARED:
+        return True
+
+    # Or the header turning into a row of data. Requires the table to have been
+    # clearly identifier-styled before, so a portal that has always published
+    # prose headers is never blocked from re-reading.
+    before_ident = _identifier_ratio(current_names)
+    after_ident = _identifier_ratio(incoming_names)
+    return before_ident >= 0.8 and after_ident <= 0.2
