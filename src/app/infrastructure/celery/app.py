@@ -403,6 +403,33 @@ def create_celery() -> Celery:
                 "schedule": crontab(hour=3, minute=45),  # 03:45 ART daily
                 "options": {"queue": "ingest"},
             },
+            "refresh-stale-datasets": {
+                # The second reading. Inert until a portal is named in
+                # OPENARG_REFRESH_PORTALS — the task reports "no portal
+                # enabled" rather than zeros, because zeros would read like
+                # "nothing is stale" while 3,431 resources are.
+                #
+                # Every six hours rather than daily: the queue is driven by what
+                # the portals declare changed, so checking often costs little
+                # and finds a change sooner. The budget, not the frequency, is
+                # what bounds the load.
+                "task": "openarg.refresh_stale_datasets",
+                "schedule": crontab(minute=15, hour="*/6"),
+                "kwargs": {"dry_run": False, "limit": 50},
+                "options": {"queue": "orchestrator"},
+            },
+            "repair-columns-with-llm-daily": {
+                # The model tier. Doubly off: this entry runs it in dry_run, and
+                # the task itself refuses to do anything unless
+                # OPENARG_LLM_REPAIR is set. So switching the env var on gives
+                # a daily report of what it *would* propose and what the
+                # verifier would refuse — which is the number that says whether
+                # the tier earns its cost — without spending a write.
+                "task": "openarg.repair_columns_with_llm",
+                "schedule": crontab(hour=5, minute=15),  # 05:15 ART
+                "kwargs": {"dry_run": True, "limit": 25},
+                "options": {"queue": "analyst"},
+            },
             "repair-unsplit-csv-daily": {
                 # The first place this system repairs itself rather than
                 # reporting. When a portal changes its delimiter the collector
