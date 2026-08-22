@@ -38,7 +38,7 @@ empty-shape subquery (`SELECT WHERE FALSE`), so the mart still builds
 with a known shape and stays empty until upstream lands.
 
 The resolver is pure-Python (no Postgres function side effects). It
-reads `raw_table_versions` once per `resolve_macros` call. When a
+reads `public.raw_table_versions` once per `resolve_macros` call. When a
 caller passes `expected_columns`, an additional cheap query inspects
 `information_schema.columns` for the matched table_names so the
 intersection can be computed.
@@ -113,7 +113,15 @@ def _query_lives(engine) -> list[_LiveRow]:
         rows = conn.execute(
             text(
                 "SELECT resource_identity, schema_name, table_name "
-                "FROM raw_table_versions "
+                # Qualified, and this is load-bearing. Production carries
+                # raw_table_versions in both schemas — `public` with the live
+                # 27,855 rows and `raw` with a stale 166 — and the connection
+                # goes through PGBouncer in transaction pooling, where a
+                # session-level search_path does not stick. Measured
+                # 2026-08-22: `live_table('senado::decretos_presidenciales')`
+                # resolved to the empty placeholder 9 times out of 10, which is
+                # why three marts had been failing on a column that exists.
+                "FROM public.raw_table_versions "
                 "WHERE superseded_at IS NULL"
             )
         ).fetchall()
@@ -140,7 +148,7 @@ def _query_live_identities(engine, identities: list[str]) -> dict[str, _LiveRow]
         rows = conn.execute(
             text(
                 "SELECT resource_identity, schema_name, table_name "
-                "FROM raw_table_versions "
+                "FROM public.raw_table_versions "
                 "WHERE superseded_at IS NULL AND resource_identity = ANY(:ids)"
             ),
             {"ids": unique_identities},
@@ -168,7 +176,7 @@ def _query_live_by_portals(engine, portals: list[str]) -> list[_LiveRow]:
         params[key] = f"{portal}::%"
     sql = (
         "SELECT resource_identity, schema_name, table_name "
-        "FROM raw_table_versions "
+        "FROM public.raw_table_versions "
         "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
     )
     with engine.connect() as conn:
@@ -196,7 +204,7 @@ def _query_live_by_identity_patterns(engine, patterns: list[str]) -> list[_LiveR
         params[key] = _glob_to_like(pattern)
     sql = (
         "SELECT resource_identity, schema_name, table_name "
-        "FROM raw_table_versions "
+        "FROM public.raw_table_versions "
         "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
     )
     with engine.connect() as conn:
@@ -224,7 +232,7 @@ def _query_live_by_table_patterns(engine, patterns: list[str]) -> list[_LiveRow]
         params[key] = _glob_to_like(pattern)
     sql = (
         "SELECT resource_identity, schema_name, table_name "
-        "FROM raw_table_versions "
+        "FROM public.raw_table_versions "
         "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
     )
     with engine.connect() as conn:
@@ -476,7 +484,7 @@ def _collect_macro_calls(sql: str) -> list[_MacroCall]:
 def resolve_macros(sql: str, engine) -> str:
     """Replace every `{{ macro(...) }}` in `sql` with its concrete SQL.
 
-    Reads `raw_table_versions` ONCE for the lifetime of this call.
+    Reads `public.raw_table_versions` ONCE for the lifetime of this call.
     Unknown macros or bad args raise `MacroResolutionError` so build_mart
     can record the failure in `mart_definitions.last_refresh_error`.
     """
