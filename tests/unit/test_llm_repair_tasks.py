@@ -122,3 +122,25 @@ def test_a_failing_model_call_costs_only_its_own_table(monkeypatch):
 
     assert result["repaired"] == 2
     assert result["by_reason"]["raised"] == 1
+
+
+def test_it_does_not_spend_a_slot_on_a_table_the_proposer_will_refuse(monkeypatch):
+    """`propose_llm_assisted_rename` declines past 100 columns, and the first
+    ordering sent it exactly those.
+
+    Ordering by the lowest broken ratio put the 841-column tables at the front —
+    the widest ones, which are precisely the ones refused. The first production
+    run returned three candidates and three `too_many_cols`, so the tier would
+    have done nothing forever while looking like it ran.
+    """
+    monkeypatch.setenv("OPENARG_LLM_REPAIR", "1")
+    _, _, engine = _run([_Row(1)], [_Outcome()], monkeypatch, dry_run=False)
+
+    params = engine.connect.return_value.__enter__.return_value.execute.call_args.args[1]
+    assert params["max_cols"] == 100
+
+    from app.infrastructure.celery.tasks import llm_repair_tasks as mod
+
+    sql = str(mod._CANDIDATES_SQL)
+    assert "total <= :max_cols" in sql
+    assert "ORDER BY broken ASC" in sql, "fewest broken columns first, not widest table"

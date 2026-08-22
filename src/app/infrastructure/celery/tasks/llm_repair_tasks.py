@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 _MIN_BROKEN = 1
 _MAX_BROKEN_RATIO = 0.40
 
+# The proposer's own ceiling, mirrored here so the query never spends a slot on
+# a table it will refuse.
+_MAX_COLS = 100
+
 _CANDIDATES_SQL = text(
     r"""
     WITH cols AS (
@@ -78,7 +82,16 @@ _CANDIDATES_SQL = text(
     WHERE broken >= :min_broken
       AND total > broken
       AND broken::float / total <= :max_ratio
-    ORDER BY broken::float / total ASC, table_name
+      -- `propose_llm_assisted_rename` declines anything past 100 columns: a
+      -- table that wide is usually a pivot needing an unpivot, and the prompt
+      -- cost grows with the column list. Selecting them anyway is how the first
+      -- production run returned three candidates and three `too_many_cols`.
+      AND total <= :max_cols
+    -- Widest-first was the bug. Ordering by the lowest broken ratio put the
+    -- 841-column tables at the front — precisely the ones the proposer refuses.
+    -- Fewest broken columns first instead: those are the cheapest calls and the
+    -- easiest inferences, which is where a tier being evaluated should start.
+    ORDER BY broken ASC, total ASC, table_name
     LIMIT :limit
     """
 )
@@ -119,7 +132,12 @@ def repair_columns_with_llm(
     with engine.connect() as conn:
         rows = conn.execute(
             _CANDIDATES_SQL,
-            {"min_broken": _MIN_BROKEN, "max_ratio": _MAX_BROKEN_RATIO, "limit": cap},
+            {
+                "min_broken": _MIN_BROKEN,
+                "max_ratio": _MAX_BROKEN_RATIO,
+                "max_cols": _MAX_COLS,
+                "limit": cap,
+            },
         ).fetchall()
         conn.rollback()
 
