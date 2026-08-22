@@ -90,3 +90,26 @@ def test_nothing_destructive_is_issued():
     issued = " ".join(str(c.args[0]) for c in conn.execute.call_args_list).upper()
     for verb in ("DROP ", "DELETE ", "ALTER ", "TRUNCATE ", "UPDATE ", "INSERT "):
         assert verb not in issued, f"baseline pass issued {verb.strip()}"
+
+
+def test_a_table_recreated_under_the_same_name_is_captured_again():
+    """The case the whole subsystem exists for, and it was being skipped.
+
+    `schema_mismatch_recreate` drops and recreates under the SAME table name.
+    Skipping on "already has a snapshot" left the new shape uncaptured until the
+    next drop — so a resource's FIRST format change produced one snapshot and no
+    pair, and only the SECOND became detectable. The sweep now compares the
+    stored column names against the ones the table has now.
+
+    COLLATE "C" on both sides is load-bearing: `column_name` is a
+    `sql_identifier` and sorts under C, while text out of jsonb sorts under the
+    server's collation. Without it the arrays disagree on order for identical
+    sets, and the predicate reported 23,781 production tables as changed when
+    the true number — cross-checked against column counts — is 7.
+    """
+    from app.infrastructure.celery.tasks import schema_baseline_tasks as mod
+
+    sql = str(mod._CANDIDATES_SQL)
+    assert "columns_profile" in sql, "must compare against the stored shape"
+    assert sql.count('COLLATE "C"') == 2, "both sides must share a collation"
+    assert "max(s2.captured_at)" in sql, "must compare against the LATEST snapshot"

@@ -47,9 +47,11 @@ logger = logging.getLogger(__name__)
 # versions` removed 19,906 superseded tables in May, which is why staging is
 # the environment that can calibrate this.)
 #
-# Newest first, so a partial run covers the most recently active resources.
-# Tables already carrying a snapshot are skipped, so repeated runs walk forward
-# through the backlog instead of re-snapshotting the head.
+# Newest first, so a partial run covers the most recently active resources. A
+# table is skipped only when its latest snapshot still describes the shape it
+# currently has, so repeated runs walk the backlog without re-snapshotting what
+# has not moved — and a table that WAS recreated under the same name is picked
+# up rather than passed over.
 _CANDIDATES_SQL = text(
     """
     SELECT rtv.schema_name, rtv.table_name, rtv.resource_identity, rtv.version,
@@ -59,9 +61,43 @@ _CANDIDATES_SQL = text(
           SELECT 1 FROM information_schema.tables t
           WHERE t.table_schema = rtv.schema_name AND t.table_name = rtv.table_name
       )
+      -- Capture when the table's CURRENT columns differ from its most recent
+      -- snapshot — not merely when no snapshot exists.
+      --
+      -- The difference is the whole point. `schema_mismatch_recreate` drops and
+      -- recreates under the SAME table name, so after a real format change the
+      -- table holds a shape nothing has recorded, while a snapshot of the
+      -- *previous* shape already exists. Skipping on "has a snapshot" left that
+      -- new shape uncaptured until the next drop, which meant the system would
+      -- have detected a resource's SECOND format change and missed its first —
+      -- exactly the case it was built for.
       AND NOT EXISTS (
-          SELECT 1 FROM raw.raw_schema_snapshots s
-          WHERE s.schema_name = rtv.schema_name AND s.table_name = rtv.table_name
+          SELECT 1
+          FROM raw.raw_schema_snapshots s
+          WHERE s.schema_name = rtv.schema_name
+            AND s.table_name = rtv.table_name
+            AND s.captured_at = (
+                SELECT max(s2.captured_at) FROM raw.raw_schema_snapshots s2
+                WHERE s2.schema_name = s.schema_name AND s2.table_name = s.table_name
+            )
+            -- Same column-name set as the table has now.
+            --
+            -- COLLATE "C" on both sides is not decoration. `column_name` is a
+            -- `sql_identifier`, which sorts under the C collation, while text
+            -- pulled out of jsonb sorts under the server's. Without forcing a
+            -- common one the two arrays disagree on ORDER for identical sets,
+            -- and this predicate reported 23,781 tables as changed when the
+            -- true number — confirmed against column counts — is 7.
+            AND (
+                SELECT array_agg(x ORDER BY x COLLATE "C")
+                FROM jsonb_array_elements(s.columns_profile) e,
+                     LATERAL (SELECT e->>'name' AS x) q
+            ) IS NOT DISTINCT FROM (
+                SELECT array_agg(c.column_name::text ORDER BY c.column_name::text COLLATE "C")
+                FROM information_schema.columns c
+                WHERE c.table_schema = rtv.schema_name
+                  AND c.table_name = rtv.table_name
+            )
       )
     ORDER BY
         -- Resources that already hold more than one physical version come
