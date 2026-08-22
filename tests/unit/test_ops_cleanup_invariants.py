@@ -7,6 +7,22 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _registry_is_healthy(monkeypatch):
+    """These tests exercise the sweep's logic, not its precondition.
+
+    `_require_registry` reads the live `raw.cached_datasets` before a sweep may
+    delete anything, which a mocked engine cannot answer — and answering it with
+    a mock would test the mock. The guard has its own tests against a real
+    Postgres in `tests/integration/test_sweeps_fail_closed.py`, including one
+    that asserts every sweep calls it.
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
+
+
+
 class _FakeResult:
     """Mocks a SQLAlchemy `Result` for `cleanup_invariants` exec calls.
 
