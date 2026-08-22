@@ -30,6 +30,54 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 
 
+class _RegistryUnavailable(RuntimeError):
+    """The registry a deletion sweep reasons from is missing or implausible."""
+
+
+# How far below the recent norm `cached_datasets` may fall before a sweep
+# refuses to run. Not a round number by taste: the table lost 100% of its rows
+# on 2026-08-03 and nothing noticed, so anything short of "most of it vanished"
+# would not have caught that, and anything tighter would fire on an ordinary
+# cleanup of failed rows.
+_REGISTRY_MIN_ROWS = 1000
+
+
+def _require_registry(engine, *, task: str) -> None:
+    """Refuse to run a deletion sweep when the registry cannot be trusted.
+
+    Every sweep here decides what to delete by asking what `cached_datasets`
+    does *not* claim. That predicate is vacuously true for the entire catalogue
+    when the table is missing, and nearly so when it is mostly empty — which is
+    exactly what happened on 2026-08-03: `raw.cached_datasets` was dropped as an
+    orphan, and the sweeps that consult it went on running against a catalogue
+    they now considered entirely unclaimed.
+
+    The sweeps failed loudly then, by accident, because the SQL referenced a
+    missing relation. Had the table existed and been empty they would have
+    succeeded and deleted everything. This turns that accident into a rule.
+
+    Raises rather than returning a flag: a deletion sweep that cannot verify its
+    own premise has no safe partial behaviour.
+    """
+    with engine.connect() as conn:
+        present = conn.execute(text("SELECT to_regclass('raw.cached_datasets')")).scalar()
+        if not present:
+            conn.rollback()
+            raise _RegistryUnavailable(
+                f"{task}: raw.cached_datasets does not exist; refusing to delete "
+                "anything, because every table would look unclaimed"
+            )
+        rows = conn.execute(text("SELECT count(*) FROM raw.cached_datasets")).scalar() or 0
+        conn.rollback()
+
+    if rows < _REGISTRY_MIN_ROWS:
+        raise _RegistryUnavailable(
+            f"{task}: raw.cached_datasets holds {rows} rows, below the "
+            f"{_REGISTRY_MIN_ROWS} floor; refusing to delete against a registry "
+            "that looks truncated"
+        )
+
+
 def _mart_dependency_guards(engine) -> tuple[set[str], list[str], set[str]]:
     """Return mart-protected identities/patterns/raw tables.
 
@@ -534,6 +582,8 @@ def cleanup_orphan_cache_tables(self, *, dry_run: bool = True, max_drops: int = 
     from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
 
     engine = get_sync_engine()
+
+    _require_registry(engine, task="cleanup_orphan_cache_tables")
     select_sql = text(
         r"""
         SELECT t.tablename
@@ -802,6 +852,8 @@ def cleanup_raw_orphans(
 
     engine = get_sync_engine()
 
+    _require_registry(engine, task="cleanup_raw_orphans")
+
     # SAFETY NET: marts reference raw tables via `live_table('portal::source_id')`
     # macros expanded to physical names at refresh time. If we drop a raw
     # table whose `resource_identity` is referenced by any mart's SQL,
@@ -977,6 +1029,8 @@ def cleanup_invariants(self) -> dict[str, int]:
     from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
 
     engine = get_sync_engine()
+
+    _require_registry(engine, task="cleanup_invariants")
     fixed_unknown = 0
     fixed_retry = 0
     fixed_orphans = 0
