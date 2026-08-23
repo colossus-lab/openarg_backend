@@ -72,6 +72,25 @@ class _ScalarResult:
         return self._value
 
 
+@pytest.fixture(autouse=True)
+def _no_unchanged_shortcut(monkeypatch):
+    """These tests mock the database wholesale, so every query returns a row.
+
+    `_unchanged_since_last_collect` asks the registry whether this exact file is
+    already loaded, and against a blanket mock the answer is always yes — which
+    would short-circuit the collection each of these tests is about. Forcing it
+    to None reproduces the real situation for them: a resource with no prior
+    version carrying this digest.
+
+    The shortcut has its own tests in `test_source_file_hash.py`, where the
+    connection is stubbed per case rather than blanket-mocked.
+    """
+    monkeypatch.setattr(
+        "app.infrastructure.celery.tasks.collector_tasks._unchanged_since_last_collect",
+        lambda *a, **k: None,
+    )
+
+
 class TestCollectorP2:
     @patch("app.infrastructure.celery.tasks.collector_tasks._try_advisory_lock")
     @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")

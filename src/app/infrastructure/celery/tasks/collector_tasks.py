@@ -1300,7 +1300,15 @@ def _unchanged_since_last_collect(
         logger.debug("unchanged-check failed for %s", resource_identity, exc_info=True)
         return None
 
-    if not present or not (row.row_count or 0) > 0:
+    # Coerced rather than compared directly: `row_count` arrives as an int, a
+    # Decimal or None depending on the driver, and a comparison that assumes one
+    # of those raises inside a path whose whole job is to fail quietly.
+    try:
+        rows_held = int(row.row_count or 0)
+    except (TypeError, ValueError):
+        return None
+
+    if not present or rows_held <= 0:
         return None
     return str(row.table_name)
 
