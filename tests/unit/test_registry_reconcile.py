@@ -154,3 +154,36 @@ def test_phantoms_are_retired_not_deleted():
     assert out.by_reason.get("retired") == 1
     assert any("SET superseded_at = now()" in s for s in conn.executed)
     assert not any("DELETE FROM public.raw_table_versions" in s for s in conn.executed)
+
+
+def test_embedding_signature_ignores_the_portal_timestamp():
+    """A timestamp the chunks never mention must not buy new embeddings.
+
+    Production, 2026-08-23: 21,729 chunks in the hour the scrape runs, 20,113
+    datasets, 1,807 of them actually re-collected. The other ~18,300 paid for an
+    embedding of text that had not changed, because the portals moved
+    `last_updated_at` and the signature was watching it.
+    """
+    from app.infrastructure.celery.tasks.scraper_tasks import _embedding_signature
+
+    fields = dict(
+        title="Pobreza",
+        description="Serie",
+        organization="INDEC",
+        portal="indec",
+        download_url="https://x/y.csv",
+        fmt="csv",
+        columns=["a", "b"],
+        tags="social",
+    )
+    # The signature takes no timestamp at all any more — passing one is an error
+    # rather than something silently ignored.
+    import inspect
+
+    assert "last_updated" not in inspect.signature(_embedding_signature).parameters
+
+    base = _embedding_signature(**fields)
+    assert base == _embedding_signature(**fields)
+    # Fields that DO reach the chunk text must still move it.
+    assert _embedding_signature(**{**fields, "title": "Otra"}) != base
+    assert _embedding_signature(**{**fields, "columns": ["a", "c"]}) != base

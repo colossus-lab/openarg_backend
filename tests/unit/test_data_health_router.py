@@ -7,6 +7,7 @@ three months of a cleanup sweep doing nothing while reporting success.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,7 +26,8 @@ class _Repair:
 def health(monkeypatch):
     from app.presentation.http.controllers.admin import data_health_router as mod
 
-    def _make(repairs, fresh=None, parse=None, drift=None, attributable=0):
+    def _make(repairs, fresh=None, parse=None, drift=None, attributable=0,
+              registry_pairs=0):
         engine = MagicMock()
         conn = engine.connect.return_value.__enter__.return_value
         conn.execute.side_effect = [
@@ -38,7 +40,10 @@ def health(monkeypatch):
             MagicMock(fetchall=lambda: repairs),
             MagicMock(fetchone=lambda: drift or MagicMock(
                 snapshots=500, tables=490, with_real_provenance=0, last_capture=None)),
-            MagicMock(scalar=lambda: attributable),
+            # Two provenance populations now: snapshots and the registry.
+            # The endpoint sums them, so the fixture must offer both.
+            MagicMock(fetchone=lambda: SimpleNamespace(
+                from_snapshots=attributable, from_registry=registry_pairs)),
         ]
         monkeypatch.setattr(mod, "get_sync_engine", lambda: engine)
         return mod.data_health()
@@ -101,3 +106,20 @@ def test_the_endpoint_requires_an_admin_key():
 
     deps = [d.dependency.__name__ for d in mod.router.routes[0].dependencies]
     assert "verify_admin_key" in deps
+
+
+def test_registry_pairs_count_toward_attributable(health):
+    """The snapshots are not the only place provenance lives.
+
+    On 2026-08-23 this endpoint answered `attributable_pairs: 0` while the drift
+    report it summarises had evaluated 245 pairs and exonerated 59. The
+    snapshots genuinely had no pairs yet; the registry had ten. Reporting only
+    the first told the reader the machinery was blind on the day it started
+    seeing, which is the exact failure this page exists to prevent.
+    """
+    result = health([], attributable=0, registry_pairs=10)
+    assert result["drift_observability"]["attributable_pairs"] == 10
+    assert result["drift_observability"]["attributable_pairs_by_source"] == {
+        "snapshots": 0,
+        "registry": 10,
+    }

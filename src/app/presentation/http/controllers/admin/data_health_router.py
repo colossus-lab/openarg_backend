@@ -59,20 +59,27 @@ _FRESHNESS_SQL = text(
     """
 )
 
+# `information_schema` is a set of views over `pg_catalog` that apply permission
+# filters row by row, and over 27,000 tables that turned this one query into a
+# 90-second wait — long enough that the endpoint timed out before answering, so
+# the page built to make the machinery visible was itself unreadable. Reading
+# `pg_catalog` directly uses the indexes and asks the same question.
 _PARSE_SQL = text(
     r"""
     WITH cols AS (
-        SELECT c.table_name, c.column_name,
-               count(*) OVER (PARTITION BY c.table_name) AS n_cols
-        FROM information_schema.columns c
-        JOIN information_schema.tables t
-          ON t.table_schema = c.table_schema
-         AND t.table_name = c.table_name
-         AND t.table_type = 'BASE TABLE'
-        WHERE c.table_schema = 'raw' AND c.column_name NOT LIKE '\_%'
+        SELECT c.oid AS tbl, a.attname AS column_name,
+               count(*) OVER (PARTITION BY c.oid) AS n_cols
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid
+        WHERE n.nspname = 'raw'
+          AND c.relkind = 'r'          -- ordinary tables only, as before
+          AND a.attnum > 0             -- skip system columns
+          AND NOT a.attisdropped
+          AND a.attname NOT LIKE '\_%'
     ),
     flags AS (
-        SELECT table_name, n_cols,
+        SELECT tbl, n_cols,
                bool_or(column_name ~ '^col_[0-9]+$')  AS col_n,
                bool_or(column_name ~ '^[Uu]nnamed')   AS unnamed,
                bool_or(length(column_name) > 60)      AS long_name
@@ -118,12 +125,25 @@ _DRIFT_SQL = text(
     """
 )
 
+# Two populations carry provenance and the cascade reads both, so counting one
+# of them understates what drift can see. On 2026-08-23 this endpoint reported
+# zero attributable pairs while the report it is supposed to summarise had
+# evaluated 245 and exonerated 59 — the snapshots had no pairs yet, the registry
+# had ten. A dashboard that says the machinery is blind on the day it starts
+# seeing is worse than no dashboard.
 _ATTRIBUTABLE_SQL = text(
     """
-    SELECT count(*) FROM raw.raw_schema_snapshots a
-    JOIN raw.raw_schema_snapshots b
-      ON b.resource_identity = a.resource_identity AND b.version = a.version + 1
-    WHERE a.parser_version LIKE 'p:%' AND b.parser_version LIKE 'p:%'
+    SELECT
+        (SELECT count(*) FROM raw.raw_schema_snapshots a
+         JOIN raw.raw_schema_snapshots b
+           ON b.resource_identity = a.resource_identity AND b.version = a.version + 1
+         WHERE a.parser_version LIKE 'p:%' AND b.parser_version LIKE 'p:%')
+        AS from_snapshots,
+        (SELECT count(*) FROM public.raw_table_versions a
+         JOIN public.raw_table_versions b
+           ON b.resource_identity = a.resource_identity AND b.version = a.version + 1
+         WHERE a.parser_version LIKE 'p:%' AND b.parser_version LIKE 'p:%')
+        AS from_registry
     """
 )
 
@@ -142,7 +162,7 @@ def data_health(repair_window_days: int = 7) -> dict[str, Any]:
             parse = conn.execute(_PARSE_SQL).fetchone()
             repairs = conn.execute(_REPAIRS_SQL, {"days": repair_window_days}).fetchall()
             drift = conn.execute(_DRIFT_SQL).fetchone()
-            attributable = conn.execute(_ATTRIBUTABLE_SQL).scalar()
+            attributable = conn.execute(_ATTRIBUTABLE_SQL).fetchone()
             conn.rollback()
     finally:
         engine.dispose()
@@ -197,6 +217,11 @@ def data_health(repair_window_days: int = 7) -> dict[str, Any]:
             # Zero here means the cascade cannot yet say whose change anything
             # was, and a drift report of zeros means "nothing comparable" rather
             # than "nothing wrong". The distinction is the whole point.
-            "attributable_pairs": int(attributable or 0),
+            "attributable_pairs": int(attributable.from_snapshots or 0)
+            + int(attributable.from_registry or 0),
+            "attributable_pairs_by_source": {
+                "snapshots": int(attributable.from_snapshots or 0),
+                "registry": int(attributable.from_registry or 0),
+            },
         },
     }
