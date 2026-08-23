@@ -1885,7 +1885,7 @@ def prewarm_query_plan_cache(
                 text(
                     """
                     SELECT DISTINCT sample_text
-                    FROM mart_sample_queries
+                    FROM public.mart_sample_queries
                     WHERE sample_text IS NOT NULL
                     LIMIT :n
                     """

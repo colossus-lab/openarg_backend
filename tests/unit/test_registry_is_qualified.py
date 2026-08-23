@@ -72,3 +72,39 @@ def test_both_schemas_are_spelled_out_somewhere(schema):
     )
     if schema == "public":
         assert found, "the live registry must be addressed explicitly"
+
+
+def test_mart_sample_queries_is_qualified_too():
+    """The same shadow, found the same way — by accident, on 2026-08-23.
+
+    `mart_sample_queries` lives in both `public` (508 rows, 60 marts covered)
+    and `raw` (469 rows, 68 covered), and every SQL reference was unqualified.
+    Eight consecutive pooled connections all resolved to `raw`, which is how the
+    problem stays invisible: it looks deterministic right up until it isn't, and
+    then a mart silently loses its routing boost.
+
+    `mart_definitions` lives only in `public`, so `public` is where the metadata
+    belongs and where these references have to point.
+    """
+    import re
+    from pathlib import Path
+
+    sql_pos = re.compile(
+        r"\b(FROM|JOIN|INTO|UPDATE|DELETE FROM)\s+mart_sample_queries\b"
+    )
+    offenders = []
+    for path in Path("src").rglob("*.py"):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if sql_pos.search(line):
+                offenders.append(f"{path}:{i}")
+    assert not offenders, (
+        "SQL referencing mart_sample_queries without a schema: " + ", ".join(offenders)
+    )
+
+
+def test_the_sample_queries_blocklists_keep_the_bare_name():
+    """Qualifying a blocklist entry would defeat it: those lists match what a
+    user might type, and `mart_sample_queries` typed bare must still be caught."""
+    from app.application.common.sql_safety import INTERNAL_TABLE_BLOCKLIST
+
+    assert "mart_sample_queries" in INTERNAL_TABLE_BLOCKLIST

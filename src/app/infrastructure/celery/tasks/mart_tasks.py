@@ -234,7 +234,7 @@ def _upsert_sample_queries(engine, mart: Mart) -> int:
                 conn.execute(
                     text(
                         """
-                        INSERT INTO mart_sample_queries (mart_id, sample_text, embedding)
+                        INSERT INTO public.mart_sample_queries (mart_id, sample_text, embedding)
                         VALUES (:mid, :st, CAST(:emb AS vector))
                         ON CONFLICT (mart_id, sample_text) DO UPDATE
                         SET embedding = EXCLUDED.embedding, created_at = NOW()
