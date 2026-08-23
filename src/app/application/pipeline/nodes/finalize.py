@@ -155,6 +155,30 @@ async def finalize_node(state: OpenArgState) -> dict:
     else:
         analytics_success = answer_ok
         analytics_error = None if answer_ok else "empty_answer"
+    # Dante's §5.5: a metric without a consumer is decoration. This is the
+    # consumer — the one place where a person actually reads the number.
+    #
+    # 78.5 % of the resources we serve were last read more than 90 days ago and
+    # the reader has no way to know it. The answer is not wrong; it is the best
+    # reading of what we hold. Presenting it undated is what lets someone assume
+    # a currency nobody promised.
+    #
+    # In a thread and wrapped, because a freshness lookup must never cost the
+    # user their answer: worst case the line is absent, which is today's state.
+    try:
+        import asyncio as _asyncio
+
+        from app.application.quality.data_age import staleness_warning
+        from app.infrastructure.celery.tasks._db import get_sync_engine
+
+        stale_line = await _asyncio.to_thread(
+            staleness_warning, get_sync_engine(), served_table
+        )
+        if stale_line and stale_line not in all_warnings:
+            all_warnings.append(stale_line)
+    except Exception:
+        logger.debug("finalize_node: freshness notice skipped", exc_info=True)
+
     try:
         await record_terminal_analytics(
             question=question,

@@ -481,6 +481,40 @@ def _collect_macro_calls(sql: str) -> list[_MacroCall]:
     return calls
 
 
+def resolved_source_tables(sql: str, engine) -> list[tuple[str, str]]:
+    """The `(schema, table)` pairs the macros in `sql` resolve to right now.
+
+    `resolve_macros` already computes this set and then throws it away, keeping
+    only the SQL it produced. The build is the one moment the system knows
+    exactly which tables a mart reads — afterwards the mart is a matview and the
+    link is gone — so exposing the set lets `build_mart` record how old its
+    sources were, which is what a reader actually needs to know and what
+    `last_refreshed_at` cannot tell them.
+
+    Reuses the same queries as the resolution rather than re-deriving them, so
+    the two can never disagree about what a mart reads.
+    """
+    macro_calls = _collect_macro_calls(sql)
+    if not macro_calls:
+        return []
+    rows: list[_LiveRow] = [
+        *_query_live_identities(
+            engine, [c.arg for c in macro_calls if c.name == "live_table"]
+        ).values(),
+        *_query_live_by_portals(
+            engine, [c.arg for c in macro_calls if c.name == "live_tables_by_portal"]
+        ),
+        *_query_live_by_identity_patterns(
+            engine, [c.arg for c in macro_calls if c.name == "live_tables_by_pattern"]
+        ),
+        *_query_live_by_table_patterns(
+            engine,
+            [c.arg for c in macro_calls if c.name == "live_tables_by_table_pattern"],
+        ),
+    ]
+    return sorted({(r.schema_name, r.table_name) for r in rows})
+
+
 def resolve_macros(sql: str, engine) -> str:
     """Replace every `{{ macro(...) }}` in `sql` with its concrete SQL.
 

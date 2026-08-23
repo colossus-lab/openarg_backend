@@ -170,6 +170,41 @@ def _compute_mart_embedding(payload_text: str) -> list[float] | None:
         return None
 
 
+def _source_data_span(engine, mart_sql: str) -> tuple[object, object]:
+    """How old were the tables this mart just read?
+
+    Taken at build time because that is the only moment the link exists: once
+    the mart is a matview, nothing records which tables produced it. Returns
+    `(oldest, newest)` from the registry, or `(None, None)` when the mart reads
+    no macro-resolved table or the lookup fails.
+
+    Never raises. A mart must not fail to build because its freshness could not
+    be measured — that would trade a working mart for a label.
+    """
+    try:
+        from app.application.marts.sql_macros import resolved_source_tables
+
+        pairs = resolved_source_tables(mart_sql, engine)
+        if not pairs:
+            return (None, None)
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT min(created_at) AS oldest, max(created_at) AS newest
+                    FROM public.raw_table_versions
+                    WHERE superseded_at IS NULL AND table_name = ANY(:names)
+                    """
+                ),
+                {"names": [t for _, t in pairs]},
+            ).fetchone()
+            conn.rollback()
+        return (row.oldest, row.newest) if row else (None, None)
+    except Exception:
+        logger.debug("could not measure source data span", exc_info=True)
+        return (None, None)
+
+
 def _upsert_mart_definition(
     engine,
     mart: Mart,
@@ -260,6 +295,11 @@ def _upsert_mart_definition(
         if embedding_vec is not None
         else None
     )
+    # `mart.sql`, not `resolved_sql`. The resolved form has already had its
+    # macros replaced by concrete table names, so asking it which macros it
+    # contains returns nothing and every mart would report an unknown age.
+    sd_oldest, sd_newest = _source_data_span(engine, mart.sql)
+
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -270,14 +310,16 @@ def _upsert_mart_definition(
                     refresh_policy, unique_index_columns,
                     last_refreshed_at, last_refresh_status, last_refresh_error,
                     last_row_count, yaml_version, embedding, updated_at,
-                    serving_blocked, serving_blocked_reason
+                    serving_blocked, serving_blocked_reason,
+                    source_data_oldest, source_data_newest
                 ) VALUES (
                     :id, :sch, :vn, :desc, :dom,
                     CAST(:portals AS text[]), :sql, CAST(:canonical AS jsonb),
                     :rp, CAST(:uniq AS text[]),
                     NOW(), :st, :err,
                     :lrc, :yv, CAST(:emb AS vector), NOW(),
-                    :sblocked, :sreason
+                    :sblocked, :sreason,
+                    :sd_old, :sd_new
                 )
                 ON CONFLICT (mart_id) DO UPDATE SET
                     mart_schema = EXCLUDED.mart_schema,
@@ -298,6 +340,14 @@ def _upsert_mart_definition(
                     embedding = COALESCE(EXCLUDED.embedding, mart_definitions.embedding),
                     serving_blocked = EXCLUDED.serving_blocked,
                     serving_blocked_reason = EXCLUDED.serving_blocked_reason,
+                    -- COALESCE, not overwrite: a refresh that could not measure
+                    -- its sources must leave the last known date standing
+                    -- rather than blank it. A missing date makes the answer
+                    -- silent about age, which is the state this replaced.
+                    source_data_oldest = COALESCE(EXCLUDED.source_data_oldest,
+                                                  mart_definitions.source_data_oldest),
+                    source_data_newest = COALESCE(EXCLUDED.source_data_newest,
+                                                  mart_definitions.source_data_newest),
                     updated_at = NOW()
                 """
             ),
@@ -315,6 +365,8 @@ def _upsert_mart_definition(
                 "st": status,
                 "err": error,
                 "lrc": last_row_count,
+                "sd_old": sd_oldest,
+                "sd_new": sd_newest,
                 "yv": mart.version,
                 "emb": embedding_literal,
                 "sblocked": mart.serving_blocked,
