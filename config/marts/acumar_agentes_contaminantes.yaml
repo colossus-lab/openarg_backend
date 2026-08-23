@@ -92,4 +92,4 @@ sample_queries:
   - "establecimientos que contaminan en ACUMAR"
 
 expectations:
-  min_rows: 100
+  min_rows: 2586

@@ -87,4 +87,4 @@ refresh:
   unique_index: []
 
 expectations:
-  min_rows: 100
+  min_rows: 292

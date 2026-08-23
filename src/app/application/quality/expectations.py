@@ -10,8 +10,15 @@ So expectations come from two places, and the split is deliberate:
 
 - **Declared**, in the mart's YAML beside its SQL. For facts a person knows and
   the data cannot say: this column is an identifier and must never be null,
-  this mart is meaningless below a thousand rows. Versioned with the query they
-  describe, so a rewrite that invalidates them shows up in the same diff.
+  this mart is meaningless below N rows. Versioned with the query they describe,
+  so a rewrite that invalidates them shows up in the same diff.
+
+  The declared floors are set at half of what each mart actually held when the
+  expectation was written, not at a round number someone liked. The first run of
+  this check flagged `presupuesto_nacional_ejecutado` at 91,299 rows against a
+  floor of 100,000 — and the floor was the thing that was wrong, invented rather
+  than measured. A threshold nobody measured produces findings nobody can act
+  on, and the second one of those teaches the reader to skim.
 - **Derived**, from `mart_build_history`. For the question no human should have
   to answer per mart: *is this build normal for this mart?* A mart that has held
   two million rows for three months and now holds four hundred is a finding

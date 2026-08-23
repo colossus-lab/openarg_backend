@@ -113,4 +113,4 @@ sample_queries:
   - "qué tipo societario es más común en Argentina"
 
 expectations:
-  min_rows: 100000
+  min_rows: 2992153

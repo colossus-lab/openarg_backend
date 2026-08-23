@@ -141,4 +141,4 @@ sample_queries:
   - "evolución de la criminalidad en Argentina"
 
 expectations:
-  min_rows: 50000
+  min_rows: 500000

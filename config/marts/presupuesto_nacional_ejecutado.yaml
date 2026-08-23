@@ -251,4 +251,4 @@ serving:
     caracterizar cada sub-shape antes de unir. Usar presupuesto_consolidado.
 
 expectations:
-  min_rows: 100000
+  min_rows: 45649

@@ -67,4 +67,4 @@ refresh:
   policy: on_upstream_change
 
 expectations:
-  min_rows: 50
+  min_rows: 414

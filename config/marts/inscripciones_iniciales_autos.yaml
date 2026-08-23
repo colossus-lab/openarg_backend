@@ -116,4 +116,4 @@ sample_queries:
   - "qué provincia registra más autos nuevos"
 
 expectations:
-  min_rows: 100000
+  min_rows: 2175093

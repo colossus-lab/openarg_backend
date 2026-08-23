@@ -145,4 +145,4 @@ sample_queries:
   - "mapa del delito de CABA por comuna"
 
 expectations:
-  min_rows: 100000
+  min_rows: 1387622

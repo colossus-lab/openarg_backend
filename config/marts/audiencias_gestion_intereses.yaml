@@ -136,4 +136,4 @@ sample_queries:
   - "quién se reunió con un ministro y para qué"
 
 expectations:
-  min_rows: 1000
+  min_rows: 14366
