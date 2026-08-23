@@ -108,3 +108,9 @@ sql: |
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "cuántos autos 0km se patentaron este año"
+  - "patentamientos de vehículos por provincia"
+  - "venta de autos nuevos en Argentina por mes"
+  - "qué provincia registra más autos nuevos"

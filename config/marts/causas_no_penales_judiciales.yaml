@@ -83,3 +83,8 @@ sql: |
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "cuántas causas civiles hay en la justicia provincial"
+  - "causas laborales por provincia"
+  - "expedientes no penales por materia"

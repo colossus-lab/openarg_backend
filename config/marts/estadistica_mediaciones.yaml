@@ -73,3 +73,8 @@ sql: |
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "cuántas mediaciones prejudiciales hubo"
+  - "resultados de las mediaciones por fuero"
+  - "cuántos acuerdos se lograron en mediación"

@@ -119,3 +119,43 @@ def test_dry_run_rebuilds_nothing():
     assert not bm.called
     assert out["candidates"] == 1
     assert out["recovered"] == 0
+
+
+def test_sample_queries_are_read_from_the_yaml():
+    """Samples were populated once by a hand-run script, which is why marts added
+    afterwards had none — nothing in the build path knew about them.
+
+    Measured in production 2026-08-23: nine marts had zero samples, and they were
+    the largest ones (5.9M, 4.3M, 2.8M rows). The biggest marts were the ones the
+    router was least able to find, because a mart with no samples can never earn
+    the +0.17 boost.
+    """
+    from pathlib import Path
+
+    from app.application.marts.mart import load_all_marts
+
+    marts = load_all_marts(Path("config/marts"))
+    by_id = {m.id: m for m in marts}
+    # The nine that had none now carry questions a person would actually ask.
+    for mid in (
+        "sociedades_registro_nacional",
+        "inscripciones_iniciales_autos",
+        "delitos_caba",
+        "delitos_argentina_snic",
+        "audiencias_gestion_intereses",
+        "acumar_agentes_contaminantes",
+    ):
+        assert by_id[mid].sample_queries, f"{mid} sigue sin muestras"
+        assert all(isinstance(q, str) and q.strip() for q in by_id[mid].sample_queries)
+
+
+def test_a_mart_without_samples_still_loads():
+    """Samples are optional: a mart that has none must not fail to parse."""
+    from app.application.marts.mart import Mart
+
+    m = Mart(
+        id="x", version="1", description="d", domain=None, source_portals=[],
+        source_resource_patterns=[], canonical_columns=[], sql="SELECT 1",
+        refresh=None,  # type: ignore[arg-type]
+    )
+    assert m.sample_queries == []

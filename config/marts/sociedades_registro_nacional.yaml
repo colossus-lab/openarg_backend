@@ -105,3 +105,9 @@ sql: |
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "cuántas sociedades anónimas se registraron en Argentina"
+  - "empresas SAS creadas por año"
+  - "buscar una empresa por CUIT en el registro de sociedades"
+  - "qué tipo societario es más común en Argentina"

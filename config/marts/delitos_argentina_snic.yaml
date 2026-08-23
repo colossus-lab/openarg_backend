@@ -133,3 +133,9 @@ sql: |
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "tasa de homicidios por provincia en Argentina"
+  - "estadísticas de delitos del SNIC por departamento"
+  - "cuántos robos se registraron por provincia"
+  - "evolución de la criminalidad en Argentina"

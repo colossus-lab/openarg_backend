@@ -205,6 +205,49 @@ def _source_data_span(engine, mart_sql: str) -> tuple[object, object]:
         return (None, None)
 
 
+def _upsert_sample_queries(engine, mart: Mart) -> int:
+    """Persist the mart's sample questions so the router can earn its boost.
+
+    A mart gets +0.17 when any of its samples sits within cosine 0.45 of the
+    user's question, and a mart with no samples can never earn it. Measured in
+    production on 2026-08-23: nine marts had none, and they were the largest —
+    `sociedades_registro_nacional` at 5.9M rows, `inscripciones_iniciales_autos`
+    at 4.3M, `delitos_caba` at 2.8M. The biggest marts were the ones the router
+    was least able to find.
+
+    Samples were populated once by a hand-run script, which is why marts added
+    afterwards have none: nothing in the build path knew about them. Reading
+    them from the YAML at build time is what makes that impossible to repeat.
+
+    Never raises. An embedding outage must not fail a mart build — the samples
+    simply are not refreshed this round, and the mart keeps whatever it had.
+    """
+    if not mart.sample_queries:
+        return 0
+    written = 0
+    try:
+        for sample in mart.sample_queries:
+            emb = _compute_mart_embedding(sample)
+            if emb is None:
+                continue
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO mart_sample_queries (mart_id, sample_text, embedding)
+                        VALUES (:mid, :st, CAST(:emb AS vector))
+                        ON CONFLICT (mart_id, sample_text) DO UPDATE
+                        SET embedding = EXCLUDED.embedding, created_at = NOW()
+                        """
+                    ),
+                    {"mid": mart.id, "st": sample, "emb": "[" + ",".join(map(str, emb)) + "]"},
+                )
+            written += 1
+    except Exception:
+        logger.warning("could not upsert sample queries for %s", mart.id, exc_info=True)
+    return written
+
+
 def _upsert_mart_definition(
     engine,
     mart: Mart,
@@ -486,6 +529,7 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
                 last_row_count=row_count,
                 resolved_sql=resolved_sql,
             )
+            _upsert_sample_queries(engine, mart)
             invalidate_query_plan_cache(
                 engine,
                 reason=f"build_mart:{mart_id}",
