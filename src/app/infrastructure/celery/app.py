@@ -350,6 +350,18 @@ def create_celery() -> Celery:
                 "kwargs": {"dry_run": False, "limit": 10, "min_age_hours": 6},
                 "options": {"queue": "ingest"},
             },
+            "backfill-dataset-columns": {
+                # Drains ~29,000 rows a batch at a time rather than in one
+                # sweep. Filling `datasets.columns` changes the embedding
+                # signature, so doing it all at once would re-embed the whole
+                # catalogue in a single hour — the exact storm that the
+                # signature fix was for. Hourly and bounded, it lands over a
+                # couple of days without anyone noticing the load.
+                "task": "openarg.backfill_dataset_columns",
+                "schedule": crontab(minute=20),
+                "kwargs": {"dry_run": False, "limit": 1000, "reindex": True},
+                "options": {"queue": "ingest"},
+            },
             "check-mart-expectations": {
                 # Between the retry (08:30) and the alert (09:00), so a mart
                 # that a rebuild could fix is already fixed by the time its
