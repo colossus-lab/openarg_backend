@@ -1,7 +1,8 @@
 """Send a person a message when something needs a person.
 
-Dante's §5.5 asks for one human alert per new CRITICAL, and that half stayed
-open for a reason that was never about code: **there was nowhere to send it**.
+The data-quality plan asks for one human alert per new CRITICAL, and that half
+stayed open for a reason that was never about code: **there was nowhere to send
+it**.
 The drift report has run in shadow since 2026-08-21 producing verdicts nobody
 reads, and the three broken marts were found by someone poking at a database on
 an unrelated errand, weeks after they broke.

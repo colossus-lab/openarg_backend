@@ -155,8 +155,8 @@ async def finalize_node(state: OpenArgState) -> dict:
     else:
         analytics_success = answer_ok
         analytics_error = None if answer_ok else "empty_answer"
-    # Dante's §5.5: a metric without a consumer is decoration. This is the
-    # consumer — the one place where a person actually reads the number.
+    # A metric without a consumer is decoration. This is the consumer — the
+    # one place where a person actually reads the number.
     #
     # 78.5 % of the resources we serve were last read more than 90 days ago and
     # the reader has no way to know it. The answer is not wrong; it is the best
