@@ -248,6 +248,21 @@ _UNREGISTERED_SQL = text(
           SELECT 1 FROM public.raw_table_versions v2
           WHERE v2.resource_identity = d.portal || '::' || d.source_id
       )
+      -- Two resources in the candidate set map to two different tables each.
+      -- `ON CONFLICT DO NOTHING` would let one in and drop the other silently,
+      -- picking by result order — an arbitrary choice made invisibly. Deciding
+      -- which table is version 1 of that resource needs both looked at, so they
+      -- are excluded here rather than resolved by luck.
+      AND NOT EXISTS (
+          SELECT 1
+          FROM raw.cached_datasets c2
+          JOIN datasets d2 ON d2.id = c2.dataset_id
+          WHERE d2.portal = d.portal
+            AND d2.source_id = d.source_id
+            AND c2.status = 'ready'
+            AND c2.row_count > 0
+            AND c2.table_name <> cd.table_name
+      )
     ORDER BY cd.table_name
     LIMIT :limit
     """
