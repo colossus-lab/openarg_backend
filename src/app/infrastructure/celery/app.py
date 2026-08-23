@@ -108,6 +108,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.refresh_tasks",
             "app.infrastructure.celery.tasks.parse_repair_tasks",
             "app.infrastructure.celery.tasks.registry_reconcile_tasks",
+            "app.infrastructure.celery.tasks.quality_alert_tasks",
             "app.infrastructure.celery.tasks.llm_repair_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
@@ -178,6 +179,7 @@ def create_celery() -> Celery:
         "openarg.repair_unsplit_csv_tables": {"queue": "ingest"},
         "openarg.reconcile_registry_locations": {"queue": "ingest"},
         "openarg.backfill_mart_source_ages": {"queue": "ingest"},
+        "openarg.alert_on_quality_signals": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
@@ -330,6 +332,16 @@ def create_celery() -> Celery:
                 "task": "openarg.cleanup_raw_orphans",
                 "schedule": crontab(minute=30, hour="*/6"),
                 "kwargs": {"dry_run": False, "max_drops": 100, "min_age_hours": 24},
+                "options": {"queue": "ingest"},
+            },
+            "quality-alerts": {
+                # Twice a day, not hourly. Everything watched here fails for
+                # days rather than minutes — three marts sat broken for weeks —
+                # so the useful cadence is "before someone would have noticed
+                # anyway", and a channel checked twice a day is one people still
+                # read.
+                "task": "openarg.alert_on_quality_signals",
+                "schedule": crontab(hour="9,21", minute=0),
                 "options": {"queue": "ingest"},
             },
             "reconcile-registry-locations": {

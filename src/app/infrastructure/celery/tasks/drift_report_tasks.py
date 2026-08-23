@@ -355,11 +355,39 @@ def report_schema_drift(self, *, days: int = 30, limit: int = 5000) -> dict[str,
 
     logger.info("drift report (shadow): %s", {k: v for k, v in report.items() if k != "examples"})
     if report.get("actionable"):
-        # Loud, because these are the cases nothing could explain away — and
-        # in shadow mode this log line is the only place they surface.
+        # Loud, because these are the cases nothing could explain away.
         logger.warning(
             "drift report: %d change(s) survived every gate — %s",
             report["actionable"],
             report.get("actionable_by_class"),
         )
+        # §5.5: one human alert per new CRITICAL. This log line used to be the
+        # only place an unexplained change surfaced, in a file nobody tails —
+        # which is how three marts stayed broken for weeks and were found by
+        # accident. Shadow mode still governs whether the report *acts*; it was
+        # never a reason not to tell a person.
+        try:
+            from app.application.quality.alerting import Alert, notify
+
+            alerts = [
+                Alert(
+                    kind="drift",
+                    # Identity of the resource, not of this sighting: the weekly
+                    # report re-derives the same finding from the same pair, and
+                    # keying on the run would alert every Monday forever.
+                    key=str(ex.get("resource_identity") or ex.get("table")),
+                    title=f"Cambio sin explicación en {ex.get('table')}",
+                    detail=(
+                        f"clase: {ex.get('change_class')} · "
+                        f"agregadas: {ex.get('added')} · vs {ex.get('compared_against')}"
+                    ),
+                )
+                for ex in report.get("examples", [])
+            ]
+            report["alerting"] = notify(
+                engine, alerts, heading="OpenArg · deriva sin explicación"
+            )
+        except Exception:
+            # Never let the notification cost the report.
+            logger.warning("drift report: alerting skipped", exc_info=True)
     return report
