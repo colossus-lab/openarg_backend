@@ -243,3 +243,67 @@ def check_mart_expectations(self) -> dict[str, Any]:
     result["findings"] = len(findings)
     logger.info("mart expectations: %s", result)
     return result
+
+
+# One resource per portal: the smallest one that collected cleanly, because a
+# canary should be the cheapest possible question. Ordered by row count so the
+# probe hits a small file, and restricted to resources we have actually read —
+# probing a URL that never worked would report a portal as broken on the
+# strength of our own failure.
+_CANARY_TARGETS_SQL = text(
+    """
+    SELECT DISTINCT ON (d.portal)
+           d.portal, d.download_url, d.format
+    FROM datasets d
+    JOIN raw.cached_datasets cd ON cd.dataset_id = d.id
+    WHERE cd.status = 'ready'
+      AND d.download_url IS NOT NULL
+      AND d.download_url <> ''
+      AND cd.row_count > 0
+    ORDER BY d.portal, cd.row_count ASC
+    """
+)
+
+
+@celery_app.task(
+    name="openarg.portal_canary",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=2400,
+)
+def portal_canary(self, *, limit: int | None = None) -> dict[str, Any]:
+    """Ask every portal one small question, and report the ones that answer wrong."""
+    from app.application.quality.alerting import Alert, notify
+    from app.application.quality.portal_canary import probe
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        targets = conn.execute(_CANARY_TARGETS_SQL).fetchall()
+        conn.rollback()
+    if limit:
+        targets = targets[:limit]
+
+    by_verdict: dict[str, int] = {}
+    alerts: list[Alert] = []
+    for t in targets:
+        res = probe(str(t.download_url), fmt=t.format)
+        by_verdict[res.verdict] = by_verdict.get(res.verdict, 0) + 1
+        if res.verdict == "ok":
+            continue
+        alerts.append(
+            Alert(
+                kind=f"portal_{res.verdict}",
+                # Keyed on the portal and the kind of wrongness: a portal that
+                # goes from unreachable to serving HTML is a new fact, and one
+                # that stays unreachable is not.
+                key=str(t.portal),
+                title=f"Portal {t.portal}: {res.verdict}",
+                detail=f"{res.detail} · {str(t.download_url)[:70]}",
+            )
+        )
+
+    result = notify(engine, alerts, heading="OpenArg · canario de portales")
+    result["probed"] = len(targets)
+    result["by_verdict"] = by_verdict
+    logger.info("portal canary: %s", result)
+    return result

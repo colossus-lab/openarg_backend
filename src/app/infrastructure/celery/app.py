@@ -185,6 +185,7 @@ def create_celery() -> Celery:
         "openarg.retry_degraded_marts": {"queue": "ingest"},
         "openarg.check_mart_expectations": {"queue": "ingest"},
         "openarg.backfill_dataset_columns": {"queue": "ingest"},
+        "openarg.portal_canary": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
@@ -368,6 +369,15 @@ def create_celery() -> Celery:
                 # expectations are judged.
                 "task": "openarg.check_mart_expectations",
                 "schedule": crontab(hour=8, minute=50),
+                "options": {"queue": "ingest"},
+            },
+            "portal-canary": {
+                # Daily and before the alert, like the rest of this group. One
+                # small request per portal — 38 of them — which is the cheapest
+                # possible way to know a portal stopped serving before a person
+                # finds out by reading a list of failures.
+                "task": "openarg.portal_canary",
+                "schedule": crontab(hour=8, minute=40),
                 "options": {"queue": "ingest"},
             },
             "quality-alerts": {
