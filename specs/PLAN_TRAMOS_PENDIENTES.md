@@ -208,6 +208,57 @@ su estado.
 
 ---
 
+## Estado de los tramos de Dante, medido el 23-ago
+
+Cada celda sale de una consulta corrida hoy contra producción.
+
+| Tramo | Gate de Dante | Medido | Falta |
+|---|---|---|---|
+| **1 (a)(b)** | sweeps fallan cerrado, `cached_datasets` reconstruida | ✅ 26.781 filas, cuatro sweeps con piso | — |
+| **1 (c)** | `now()` fuera de la firma de embedding | ✅ **hoy** | — |
+| **1 (d)** | snapshots RDS, alarmas, retención ≥14 d | ❌ | de Dante |
+| **1 gate** | `index_dataset` ≈ 0/día salvo cambios reales | ⚠️ 21.729 chunks en una hora, corregido hoy — **falta confirmar mañana** | una medición |
+| **2** | #48 a prod, flag decidido, beat redesplegado | ✅ flag prendido hoy | — |
+| **2** | marts de presupuesto sirviendo | ✅ los 6 + `inflacion_argentina` + `mediaciones_prejudiciales` | — |
+| **2** | prod = staging en código | ✅ **hoy**, ambas con la misma imagen y deriva cero | — |
+| **2** | registro >90 % en prod | ❌ **86,4 %** (25.465 de 29.484) | 3,6 puntos |
+| **2** | cutover legacy→raw | ⚠️ el flag corta la fuente; quedan **4.167** `cache_*` en `public` | migración física |
+| **2** | e2e por UI en staging y prod | ❌ | pendiente |
+| **3** | reconciliación por `original_identifier` | ❌ **la columna no existe** | todo el tramo |
+| **3** | `columns` pobladas | ❌ vacías en el 98,5 % | todo el tramo |
+| **3** | canario por portal | ❌ | todo el tramo |
+| **4** | diff de esquema → perfil y drift | ✅ 245 pares evaluados, 59 exonerados por G1 | — |
+| **4** | expectativas manuales en marts | ❌ **0 tablas** de expectativas o puntaje | todo |
+| **4** | una alerta humana por cada CRITICAL | ❌ el informe sigue en sombra | el consumidor |
+| **4** | cada dataset servido con puntaje y huecos | ❌ | todo |
+| **5** | pentest, allowlist, Redis `noeviction` | ❌ sin medir | todo |
+
+### Lo que la medición encontró y el plan no anticipaba
+
+**8 tablas duplicadas entre `public` y `raw`, 6 divergiendo.** Tres son la
+memoria de las conversaciones:
+
+```
+checkpoints         public=18.013   raw=20.765
+checkpoint_writes   public=70.504   raw=84.256
+checkpoint_blobs    public=18.003   raw=19.994
+query_analytics     public=393      raw=837
+mart_sample_queries public=508      raw=469
+raw_table_versions  public=28.098   raw=166
+```
+
+De 1.268 hilos de conversación, **1 solo existe en los dos schemas**: cada
+conversación cae consistentemente de un lado, así que no se parten a la mitad.
+El riesgo es que una conversación retomada más tarde aterrice del otro lado y
+aparezca vacía — ya pasó una vez.
+
+**No se toca sin decisión explícita.** Calificar el checkpointer a un schema
+deja sin historial a 493 conversaciones o a 774, según cuál se elija. Es una
+decisión sobre datos de usuarios, no una de implementación.
+
+`mart_sample_queries` divergiendo significa que el impulso de +0,17 al ruteo ve
+un conjunto distinto según la conexión que le toque.
+
 ## Orden propuesto, y por qué — **revisado el 23-ago**
 
 1. **1.1 fallar cerrado** — hecho. Los cuatro sweeps abortan si el registro no
