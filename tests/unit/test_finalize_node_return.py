@@ -275,3 +275,51 @@ async def test_finalize_logs_no_data_deflection_as_failure(
     await finalize_node(state)  # type: ignore[arg-type]
     assert captured["success"] is True
     assert captured["error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_finalize_attaches_the_data_age_notice(
+    _deps: _StubDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dante's §5.5: a metric without a consumer is decoration.
+
+    `finalize_node` is the one place a person reads the number, so the
+    staleness line has to survive into the return dict — LangGraph's `updates`
+    stream forwards only what this node returns, which is the same trap FIX-008
+    documented for `chart_data`.
+    """
+    line = "Los datos de esta respuesta se leyeron por última vez en mayo de 2026."
+    monkeypatch.setattr(
+        "app.application.quality.data_age.staleness_warning",
+        lambda _engine, _served: line,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.celery.tasks._db.get_sync_engine", lambda: object()
+    )
+
+    result = await finalize_node(_make_state())  # type: ignore[arg-type]
+
+    assert line in result["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_a_freshness_lookup_failure_never_costs_the_answer(
+    _deps: _StubDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Worst case the line is absent — which is the state this replaced.
+
+    An answer must never be lost because the database could not be asked how old
+    its data was.
+    """
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("pg is down")
+
+    monkeypatch.setattr(
+        "app.application.quality.data_age.staleness_warning", _boom
+    )
+
+    result = await finalize_node(_make_state())  # type: ignore[arg-type]
+
+    assert result["clean_answer"]
+    assert isinstance(result["warnings"], list)
