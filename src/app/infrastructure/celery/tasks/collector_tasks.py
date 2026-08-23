@@ -1241,6 +1241,36 @@ def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
     return _ext_map.get(ext, metadata_fmt)
 
 
+def _file_sha256(path: str) -> str | None:
+    """Digest of the bytes we downloaded, so "did this change?" has an answer.
+
+    `raw_table_versions.source_file_hash` has existed since migration 0039 and
+    every registration function threads it through — and nothing ever computed
+    it. Measured on 2026-08-23: **0 of 31,266 live versions carry one.**
+
+    That absence is why the refresh keys on the portal's `last_updated_at`,
+    which is metadata: 68 re-collections produced zero files that were actually
+    different. The portal moved a timestamp and we re-read, re-parsed and
+    re-embedded a file identical to the one we held.
+
+    Streamed in chunks rather than read whole: these are files up to hundreds of
+    megabytes, and a digest that needs the file in memory would trade one
+    problem for a worse one.
+
+    Returns None on any failure. A hash is an optimisation and a piece of
+    evidence; a collection must not fail for want of one.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        logger.debug("could not hash %s", path, exc_info=True)
+        return None
+
+
 def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -> str:
     """Sube archivo crudo a S3, retorna la key."""
     import boto3
@@ -4891,6 +4921,7 @@ def _promote_to_raw_atomic(
     parser_version: str | None,
     collector_version: str | None,
     is_truncated: bool,
+    source_file_hash: str | None = None,
 ) -> None:
     """Promote a freshly materialised raw table to the medallion in a
     SINGLE transaction.
@@ -4917,6 +4948,7 @@ def _promote_to_raw_atomic(
             row_count=row_count,
             size_bytes=size_bytes,
             source_url=source_url,
+            source_file_hash=source_file_hash,
             parser_version=parser_version,
             collector_version=collector_version,
             is_truncated=is_truncated,
@@ -5056,6 +5088,7 @@ def _apply_cached_outcome(
     raw_version: int | None = None,
     resource_identity: str | None = None,
     source_url: str | None = None,
+    source_file_hash: str | None = None,
     is_truncated: bool = False,
 ) -> int:
     """Persist one explicit collector outcome and return the resulting retry_count."""
@@ -5100,6 +5133,7 @@ def _apply_cached_outcome(
                 row_count=row_count,
                 size_bytes=size_bytes,
                 source_url=source_url,
+                source_file_hash=source_file_hash,
                 parser_version=_default_parser_version(),
                 collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
                 is_truncated=is_truncated,
@@ -5430,6 +5464,7 @@ def _finalize_cached_dataset(
     raw_schema: str | None = None,
     raw_version: int | None = None,
     resource_identity: str | None = None,
+    source_file_hash: str | None = None,
     is_truncated: bool = False,
 ) -> dict[str, object]:
     """Apply the WS0 post-parse gate, then persist the final cached state."""
@@ -5524,6 +5559,7 @@ def _finalize_cached_dataset(
         raw_version=raw_version,
         resource_identity=resource_identity,
         source_url=download_url,
+        source_file_hash=source_file_hash,
         is_truncated=is_truncated,
     )
     with engine.begin() as conn:
@@ -6161,6 +6197,11 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 )
                 _set_error_status(engine, dataset_id, msg, table_name=table_name)
                 return {"error": msg}
+
+            # The digest of what we just downloaded. Computed here because this
+            # is where the file exists on disk and before anything can replace
+            # it — a hash taken later would describe a different file.
+            source_file_hash = _file_sha256(tmp_path)
 
             # Upload raw file to S3 (from disk, not memory)
             s3_key = None
@@ -7108,6 +7149,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 raw_schema=destination.schema if destination.schema != "public" else None,
                 raw_version=destination.version if destination.version > 0 else None,
                 resource_identity=destination.resource_identity,
+                source_file_hash=source_file_hash,
                 is_truncated=bool(sampled_note),
             )
             if not finalize_result["ok"]:
