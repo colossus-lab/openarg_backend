@@ -124,3 +124,16 @@ def test_missing_configuration_reads_as_not_set_up(monkeypatch):
     assert alerting._enabled() is None
     monkeypatch.setenv("OPENARG_TELEGRAM_CHAT_ID", "123")
     assert alerting._enabled() == ("t", "123")
+
+
+def test_an_empty_mart_is_its_own_alert_kind():
+    """`built` with zero rows is not `build_failed`, and it had no watcher.
+
+    The serving layer hides an empty mart correctly, which is what made it worse:
+    `pobreza_indec_aglomerados` was hidden for eight days while every question
+    about poverty fell through to a search, and nothing said so.
+    """
+    broken = Alert(kind="mart_failed", key="pobreza", title="x")
+    empty = Alert(kind="mart_empty", key="pobreza", title="y")
+    # Same mart, different failure — must not dedup against each other.
+    assert broken.fingerprint() != empty.fingerprint()

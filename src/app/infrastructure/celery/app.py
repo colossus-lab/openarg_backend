@@ -181,6 +181,7 @@ def create_celery() -> Celery:
         "openarg.backfill_mart_source_ages": {"queue": "ingest"},
         "openarg.alert_on_quality_signals": {"queue": "ingest"},
         "openarg.backfill_legacy_registry": {"queue": "ingest"},
+        "openarg.retry_degraded_marts": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
@@ -333,6 +334,17 @@ def create_celery() -> Celery:
                 "task": "openarg.cleanup_raw_orphans",
                 "schedule": crontab(minute=30, hour="*/6"),
                 "kwargs": {"dry_run": False, "max_drops": 100, "min_age_hours": 24},
+                "options": {"queue": "ingest"},
+            },
+            "retry-degraded-marts": {
+                # Before the 09:00 alert, deliberately: the ordinary case is a
+                # mart whose sources moved and which nobody rebuilt, and that
+                # one should be fixed rather than reported. What the alert
+                # then carries is what a rebuild could not fix, which is the
+                # only kind worth a person's attention.
+                "task": "openarg.retry_degraded_marts",
+                "schedule": crontab(hour=8, minute=30),
+                "kwargs": {"dry_run": False, "limit": 10, "min_age_hours": 6},
                 "options": {"queue": "ingest"},
             },
             "quality-alerts": {

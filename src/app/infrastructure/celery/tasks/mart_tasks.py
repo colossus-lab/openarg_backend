@@ -880,3 +880,102 @@ def backfill_mart_source_ages(self, *, dry_run: bool = True) -> dict[str, object
     }
     logger.info("mart source age backfill: %s", result)
     return result
+
+
+# A mart that fails or empties stays that way until something rebuilds it, and
+# nothing did. Both degraded marts found in production on 2026-08-23 —
+# `staff_estado` at `build_failed` for weeks, `pobreza_indec_aglomerados` at
+# zero rows since the 15th — were fixed by a plain rebuild. Their sources had
+# been fine the whole time; what was missing was the retry.
+_DEGRADED_MARTS_SQL = text(
+    """
+    SELECT mart_id, last_refresh_status, COALESCE(last_row_count, 0) AS rows
+    FROM mart_definitions
+    WHERE (
+            last_refresh_status = 'build_failed'
+            OR (COALESCE(last_row_count, 0) = 0
+                AND last_refresh_status IN ('built', 'refreshed'))
+          )
+      AND NOT COALESCE(serving_blocked, FALSE)
+      -- Not one that was just attempted. Without this a mart that fails fast
+      -- would be rebuilt on every pass, and a broken mart would cost more than
+      -- a working one.
+      AND (last_refreshed_at IS NULL
+           OR last_refreshed_at < now() - make_interval(hours => :min_age_hours))
+    -- Oldest attempt first, so a permanently broken mart cannot starve the
+    -- others by always sitting at the front of the queue.
+    ORDER BY last_refreshed_at NULLS FIRST
+    LIMIT :limit
+    """
+)
+
+
+@celery_app.task(
+    name="openarg.retry_degraded_marts",
+    bind=True,
+    soft_time_limit=2400,
+    time_limit=3000,
+)
+def retry_degraded_marts(
+    self, *, limit: int = 10, min_age_hours: int = 6, dry_run: bool = True
+) -> dict[str, object]:
+    """Rebuild marts that are failing or empty.
+
+    Bounded per run, because a rebuild is expensive and a systemic problem would
+    otherwise turn one sweep into an hours-long queue. A mart this cannot fix
+    stays in the list and gets alerted about — the retry is meant to absorb the
+    ordinary case, not to hide a real failure by grinding at it.
+
+    Reports what changed, including the marts it rebuilt and that stayed broken,
+    which is the number that says whether retrying is worth its cost.
+    """
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            _DEGRADED_MARTS_SQL, {"limit": limit, "min_age_hours": min_age_hours}
+        ).fetchall()
+        conn.rollback()
+
+    recovered: list[str] = []
+    still_broken: list[str] = []
+    for row in rows:
+        mid = str(row.mart_id)
+        if dry_run:
+            continue
+        try:
+            build_mart(mid)
+        except Exception:
+            # One mart must not cost the batch; it stays in the list and the
+            # alert channel reports it.
+            logger.warning("retry_degraded_marts: %s raised", mid, exc_info=True)
+            still_broken.append(mid)
+            continue
+        with engine.connect() as conn:
+            after = conn.execute(
+                text(
+                    """
+                    SELECT last_refresh_status AS st, COALESCE(last_row_count, 0) AS rows
+                    FROM mart_definitions WHERE mart_id = :m
+                    """
+                ),
+                {"m": mid},
+            ).fetchone()
+            conn.rollback()
+        # Recovered means it now holds rows. A rebuild that succeeds into zero
+        # rows has not recovered anything, and counting it as a win is how a
+        # retry sweep reports success while the mart stays invisible.
+        if after and after.st in ("built", "refreshed") and after.rows > 0:
+            recovered.append(mid)
+        else:
+            still_broken.append(mid)
+
+    result = {
+        "dry_run": dry_run,
+        "candidates": len(rows),
+        "recovered": len(recovered),
+        "still_broken": len(still_broken),
+        "samples_recovered": recovered[:5],
+        "samples_still_broken": still_broken[:5],
+    }
+    logger.info("retry degraded marts: %s", result)
+    return result

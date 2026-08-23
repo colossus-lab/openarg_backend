@@ -5,6 +5,16 @@ Every item here is a real incident that went unnoticed, not a hypothetical:
 - **Marts that stopped building.** Three sat in `build_failed` for weeks and
   were found by someone reading the database on an unrelated errand. The status
   was recorded correctly the whole time; nothing looked at it.
+- **Marts that build fine and hold nothing.** `pobreza_indec_aglomerados` —
+  poverty, one of the highest-value datasets there is — sat at `built` with zero
+  rows from 2026-08-15 until it was noticed on the 23rd. Its sources had data
+  the whole time; the mart simply had not been rebuilt since they changed.
+
+  The serving layer hides an empty mart correctly (`COALESCE(last_row_count,0)
+  > 0`, in three places), and that is what made it worse rather than better:
+  every question about poverty fell through to a search or a deflection for
+  eight days, the system was right to hide it, and it told nobody. A `built`
+  that holds nothing is a `built` that lies.
 - **A collection pipeline that stopped collecting.** After the 2026-08-03
   incident, sixteen days passed with no collection at all. The absence of work
   produces no error, which is exactly why it needs watching — a failure that
@@ -35,6 +45,19 @@ _BROKEN_MARTS_SQL = text(
     SELECT mart_id, last_refresh_error
     FROM mart_definitions
     WHERE last_refresh_status = 'build_failed'
+    ORDER BY mart_id
+    """
+)
+
+# Built, unblocked, and empty — so the serving filter hides it and nothing says
+# so. The twin of `build_failed`, and the one that had no watcher.
+_EMPTY_MARTS_SQL = text(
+    """
+    SELECT mart_id, last_refreshed_at
+    FROM mart_definitions
+    WHERE COALESCE(last_row_count, 0) = 0
+      AND last_refresh_status IN ('built', 'refreshed')
+      AND NOT COALESCE(serving_blocked, FALSE)
     ORDER BY mart_id
     """
 )
@@ -75,6 +98,20 @@ def alert_on_quality_signals(self) -> dict[str, Any]:
                         key=str(row.mart_id),
                         title=f"Mart caído: {row.mart_id}",
                         detail=(str(row.last_refresh_error) or "")[:180],
+                    )
+                )
+            for row_e in conn.execute(_EMPTY_MARTS_SQL).fetchall():
+                alerts.append(
+                    Alert(
+                        kind="mart_empty",
+                        key=str(row_e.mart_id),
+                        title=f"Mart vacío (construye pero no tiene filas): {row_e.mart_id}",
+                        detail=(
+                            "el filtro de servido lo oculta, así que nadie lo ve fallar · "
+                            f"último refresh: {row_e.last_refreshed_at:%Y-%m-%d %H:%M}"
+                            if row_e.last_refreshed_at
+                            else "el filtro de servido lo oculta, así que nadie lo ve fallar"
+                        ),
                     )
                 )
             row = conn.execute(_COLLECTION_STALLED_SQL).fetchone()
