@@ -187,3 +187,47 @@ def test_embedding_signature_ignores_the_portal_timestamp():
     # Fields that DO reach the chunk text must still move it.
     assert _embedding_signature(**{**fields, "title": "Otra"}) != base
     assert _embedding_signature(**{**fields, "columns": ["a", "c"]}) != base
+
+
+def test_backfill_registers_in_the_schema_the_table_is_actually_in():
+    """Writing `raw` because that is where new tables go is the defect that had
+    three marts failing on columns that existed. This sweep must not make more."""
+    from app.application.catalog.registry_reconcile import backfill_legacy_registry
+
+    conn = _Conn(
+        misplaced=[],
+        phantom=[],
+    )
+    conn.unregistered = [
+        _Row(table_name="cache_x", table_schema="public", row_count=42,
+             resource_identity="datos_gob_ar::abc")
+    ]
+
+    def _execute(stmt, params=None):
+        sql = str(stmt)
+        conn.executed.append(sql)
+        if "to_regclass" in sql:
+            return _Result(scalar="public.raw_table_versions")
+        if "count(*) FROM public.raw_table_versions" in sql:
+            return _Result(scalar=5000)
+        if "raw.cached_datasets" in sql and "NOT EXISTS" in sql:
+            return _Result(rows=conn.unregistered)
+        return _Result()
+
+    conn.execute = _execute
+    out = backfill_legacy_registry(_Engine(conn), run_id=uuid.uuid4(), dry_run=False)
+    assert out.by_reason.get("registered") == 1
+    inserts = [s for s in conn.executed if "INSERT INTO public.raw_table_versions" in s]
+    assert len(inserts) == 1
+    # The schema comes from the row, never hardcoded to 'raw'.
+    assert ":schema" in inserts[0]
+    # Provenance stays a placeholder so the drift cascade cannot be fed evidence
+    # nobody measured.
+    assert "'legacy:unknown'" in inserts[0]
+
+
+def test_backfill_refuses_a_truncated_registry():
+    from app.application.catalog.registry_reconcile import backfill_legacy_registry
+
+    with pytest.raises(RegistryUnavailable):
+        backfill_legacy_registry(_Engine(_Conn(registry_rows=5)), dry_run=True)

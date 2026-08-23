@@ -180,6 +180,7 @@ def create_celery() -> Celery:
         "openarg.reconcile_registry_locations": {"queue": "ingest"},
         "openarg.backfill_mart_source_ages": {"queue": "ingest"},
         "openarg.alert_on_quality_signals": {"queue": "ingest"},
+        "openarg.backfill_legacy_registry": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},

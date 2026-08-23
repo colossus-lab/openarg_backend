@@ -73,3 +73,31 @@ def retire_phantom_registry_rows(
     result = outcome.as_dict()
     logger.info("registry phantoms: %s", result)
     return result
+
+
+@celery_app.task(
+    name="openarg.backfill_legacy_registry",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=2400,
+)
+def backfill_legacy_registry_task(
+    self, *, limit: int = 5000, dry_run: bool = True
+) -> dict[str, Any]:
+    """Register served tables the registry never learned about."""
+    from app.application.catalog.registry_reconcile import (
+        RegistryUnavailable,
+        backfill_legacy_registry,
+    )
+
+    engine = get_sync_engine()
+    try:
+        outcome = backfill_legacy_registry(
+            engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit
+        )
+    except RegistryUnavailable as exc:
+        logger.error("backfill_legacy_registry refused: %s", exc)
+        return {"refused": str(exc), "registered": 0}
+    result = outcome.as_dict()
+    logger.info("registry backfill: %s", result)
+    return result

@@ -215,6 +215,136 @@ def _audit(
         logger.warning("registry reconcile: could not audit %s.%s", schema, table, exc_info=True)
 
 
+# Resources the catalogue serves whose table exists but was never registered.
+# Everything the registry needs is already known: the table, its schema, its row
+# count, and the identity from `datasets`.
+_UNREGISTERED_SQL = text(
+    r"""
+    SELECT cd.table_name,
+           t.table_schema,
+           cd.row_count,
+           d.portal || '::' || d.source_id AS resource_identity
+    FROM raw.cached_datasets cd
+    JOIN datasets d ON d.id = cd.dataset_id
+    JOIN information_schema.tables t
+      ON t.table_name = cd.table_name
+     AND t.table_type = 'BASE TABLE'
+     AND t.table_schema IN ('raw', 'public')
+    WHERE cd.status = 'ready'
+      -- Registering a table with no rows is worse than leaving a gap:
+      -- `live_table()` would resolve to it and serve nothing.
+      AND cd.row_count > 0
+      AND d.portal IS NOT NULL
+      AND d.source_id IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM public.raw_table_versions v
+          WHERE v.table_name = cd.table_name
+      )
+      -- An identity already in the registry needs a decision this sweep is not
+      -- equipped to make: is the unregistered table a newer version of that
+      -- resource, or a duplicate to drop? Answering needs both tables looked
+      -- at. They are counted and skipped rather than guessed.
+      AND NOT EXISTS (
+          SELECT 1 FROM public.raw_table_versions v2
+          WHERE v2.resource_identity = d.portal || '::' || d.source_id
+      )
+    ORDER BY cd.table_name
+    LIMIT :limit
+    """
+)
+
+_INSERT_SQL = text(
+    """
+    INSERT INTO public.raw_table_versions
+        (resource_identity, version, schema_name, table_name, row_count,
+         parser_version, created_at)
+    VALUES
+        (:ri, 1, :schema, :tbl, :rows, 'legacy:unknown', now())
+    ON CONFLICT DO NOTHING
+    """
+)
+
+
+def backfill_legacy_registry(
+    engine: Engine,
+    *,
+    run_id: uuid.UUID | None = None,
+    dry_run: bool = True,
+    limit: int = 5000,
+) -> ReconcileOutcome:
+    """Register tables the catalogue serves that the registry never learned about.
+
+    Measured in production on 2026-08-23: 4,019 `ready` resources whose table
+    exists, holds rows, and is identifiable — but has no registry row. All of
+    them carry legacy `cache_*` names and live in `public`. They are sediment
+    from before the raw layer, not a collection failure, and they are the whole
+    of the gap between 86.4 % coverage and the 90 % the plan asks for.
+
+    **Registered in the schema they are actually in, which is `public`.**
+    Writing `raw` because that is where new tables go is exactly the defect that
+    had three marts failing on columns that existed, and that
+    `reconcile_locations` above exists to repair. This sweep must not
+    manufacture more of them.
+
+    **Provenance is `legacy:unknown`, deliberately.** `is_real_provenance`
+    rejects that value, so these rows raise coverage without becoming eligible
+    for the drift cascade. We do not know which parser read them, and writing a
+    fingerprint we did not measure would feed the cascade false evidence — a
+    worse outcome than the gap.
+
+    Version 1 for every row: there is no earlier version to be second to.
+    """
+    run_id = run_id or uuid.uuid4()
+    require_registry(engine, task="backfill_legacy_registry")
+    outcome = ReconcileOutcome(run_id=run_id, dry_run=dry_run)
+
+    with engine.connect() as conn:
+        rows = conn.execute(_UNREGISTERED_SQL, {"limit": limit}).fetchall()
+        conn.rollback()
+
+    for row in rows:
+        table = str(row.table_name)
+        if table in _NEVER_TOUCH:
+            outcome.note("protected_table")
+            continue
+        if dry_run:
+            outcome.note("would_register")
+            outcome.moved.append(f"{row.table_schema}.{table}")
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    _INSERT_SQL,
+                    {
+                        "ri": row.resource_identity,
+                        "schema": row.table_schema,
+                        "tbl": table,
+                        "rows": int(row.row_count or 0),
+                    },
+                )
+        except Exception as exc:
+            outcome.note("register_failed")
+            _audit(
+                engine, run_id=run_id, phase="registry_backfill",
+                schema=str(row.table_schema), table=table, operation="apply",
+                ok=False, err=str(exc)[:500], dry_run=False,
+            )
+            continue
+        outcome.note("registered")
+        outcome.moved.append(f"{row.table_schema}.{table}")
+
+    # One audit row for the run rather than 4,019 — the reversal is "delete the
+    # rows this run inserted", which is a single statement keyed on run_id, not
+    # a per-table undo.
+    if not dry_run:
+        _audit(
+            engine, run_id=run_id, phase="registry_backfill", schema="public",
+            table=f"<{len(outcome.moved)} tables>", operation="apply",
+            ok=True, err=None, dry_run=False,
+        )
+    return outcome
+
+
 def reconcile_locations(
     engine: Engine,
     *,
