@@ -215,7 +215,7 @@ Cada celda sale de una consulta corrida hoy contra producción.
 | Tramo | Gate de Dante | Medido | Falta |
 |---|---|---|---|
 | **1 (a)(b)** | sweeps fallan cerrado, `cached_datasets` reconstruida | ✅ 26.781 filas, cuatro sweeps con piso | — |
-| **1 (c)** | `now()` fuera de la firma de embedding | ✅ **hoy** | — |
+| **1 (c)** | `now()` fuera de la firma de embedding | ✅ **23-ago** | confirmar mañana 08h |
 | **1 (d)** | snapshots RDS, alarmas, retención ≥14 d | ❌ | de Dante |
 | **1 gate** | `index_dataset` ≈ 0/día salvo cambios reales | ⚠️ 21.729 chunks en una hora, corregido hoy — **falta confirmar mañana** | una medición |
 | **2** | #48 a prod, flag decidido, beat redesplegado | ✅ flag prendido hoy | — |
@@ -229,7 +229,8 @@ Cada celda sale de una consulta corrida hoy contra producción.
 | **3** | canario por portal | ❌ | todo el tramo |
 | **4** | diff de esquema → perfil y drift | ✅ 245 pares evaluados, 59 exonerados por G1 | — |
 | **4** | expectativas manuales en marts | ❌ **0 tablas** de expectativas o puntaje | todo |
-| **4** | una alerta humana por cada CRITICAL | ❌ el informe sigue en sombra | el consumidor |
+| **4** | aviso de edad del dato en el chat | ✅ **23-ago** — los **69 de 69** marts sirven datos de mayo y ahora se dice | — |
+| **4** | una alerta humana por cada CRITICAL | ❌ el informe sigue en sombra | falta canal a quién avisar |
 | **4** | cada dataset servido con puntaje y huecos | ❌ | todo |
 | **5** | pentest, allowlist, Redis `noeviction` | ❌ sin medir | todo |
 
