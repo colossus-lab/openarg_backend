@@ -126,6 +126,11 @@ class Mart:
     # rather than in a one-shot script, so a mart cannot be added without its
     # samples and a DROP+CREATE rebuild cannot silently lose them.
     sample_queries: list[str] = field(default_factory=list)
+    # Facts a person knows and the data cannot say: this column is an
+    # identifier and must never be null, this mart is meaningless below N rows.
+    # Beside the SQL they describe, so a rewrite that invalidates them shows up
+    # in the same diff.
+    expectations: dict = field(default_factory=dict)
 
     @property
     def view_name(self) -> str:
@@ -250,6 +255,10 @@ def load_mart(path: Path | str) -> Mart:
         raise MartParseError(f"{p}: 'sample_queries' must be a list of strings")
     sample_queries = [str(q).strip() for q in raw_samples if str(q).strip()]
 
+    expectations = data.get("expectations") or {}
+    if not isinstance(expectations, dict):
+        raise MartParseError(f"{p}: 'expectations' must be a mapping")
+
     return Mart(
         id=id_,
         version=version,
@@ -265,6 +274,7 @@ def load_mart(path: Path | str) -> Mart:
             str(serving_blocked_reason) if serving_blocked_reason is not None else None
         ),
         sample_queries=sample_queries,
+        expectations=expectations,
     )
 
 

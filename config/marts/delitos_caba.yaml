@@ -143,3 +143,6 @@ sample_queries:
   - "delitos por barrio en CABA"
   - "en qué franja horaria hay más hurtos en Buenos Aires"
   - "mapa del delito de CABA por comuna"
+
+expectations:
+  min_rows: 100000

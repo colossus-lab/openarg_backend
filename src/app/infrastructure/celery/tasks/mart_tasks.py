@@ -530,6 +530,26 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
                 resolved_sql=resolved_sql,
             )
             _upsert_sample_queries(engine, mart)
+            # History, so that "this mart collapsed" becomes provable. The
+            # current row count alone cannot tell a mart that was always small
+            # from one that just lost its rows.
+            from app.application.quality.expectations import record_build
+
+            # Read back rather than recompute: the upsert just measured the
+            # source span, and asking it again would be a second answer to a
+            # question already answered.
+            with engine.connect() as _c:
+                _sd = _c.execute(
+                    text(
+                        "SELECT source_data_oldest FROM mart_definitions WHERE mart_id = :m"
+                    ),
+                    {"m": mart_id},
+                ).scalar()
+                _c.rollback()
+            record_build(
+                engine, mart_id=mart_id, status="built", row_count=row_count,
+                source_data_oldest=_sd,
+            )
             invalidate_query_plan_cache(
                 engine,
                 reason=f"build_mart:{mart_id}",

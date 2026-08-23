@@ -114,3 +114,6 @@ sample_queries:
   - "patentamientos de vehículos por provincia"
   - "venta de autos nuevos en Argentina por mes"
   - "qué provincia registra más autos nuevos"
+
+expectations:
+  min_rows: 100000

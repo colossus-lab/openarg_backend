@@ -143,3 +143,64 @@ def alert_on_quality_signals(self) -> dict[str, Any]:
     result = notify(engine, alerts, heading="OpenArg · señales de calidad")
     logger.info("quality alerts: %s", result)
     return result
+
+
+@celery_app.task(
+    name="openarg.check_mart_expectations",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=2400,
+)
+def check_mart_expectations(self) -> dict[str, Any]:
+    """Evaluate every mart's expectations and alert on what fails.
+
+    Runs after the retry sweep, for the same reason the alert does: a mart whose
+    sources moved should be rebuilt, not reported, and what survives a rebuild is
+    what a person needs to see.
+
+    Silence when everything holds. A daily "69 marts fine" is the furniture that
+    trains people to stop reading the channel.
+    """
+    from app.application.marts.mart import load_all_marts
+    from app.application.quality.alerting import Alert, notify
+    from app.application.quality.expectations import check_mart
+    from app.infrastructure.celery.tasks.mart_tasks import _DEFAULT_MARTS_DIR
+
+    engine = get_sync_engine()
+    if not _DEFAULT_MARTS_DIR.exists():
+        return {"error": "marts_dir_missing", "sent": 0}
+
+    with engine.connect() as conn:
+        counts = {
+            str(r.mart_id): int(r.n or 0)
+            for r in conn.execute(
+                text("SELECT mart_id, COALESCE(last_row_count, 0) AS n FROM mart_definitions")
+            )
+        }
+        conn.rollback()
+
+    findings = []
+    for mart in load_all_marts(_DEFAULT_MARTS_DIR):
+        if mart.id not in counts:
+            continue
+        try:
+            findings.extend(check_mart(engine, mart, counts[mart.id]))
+        except Exception:
+            # One mart's check must not cost the sweep.
+            logger.warning("expectations: check failed for %s", mart.id, exc_info=True)
+
+    alerts = [
+        Alert(
+            kind=f"expectation:{f.rule}",
+            # Keyed on mart and rule, so a mart failing two different
+            # expectations is two findings and a repeat of the same one is not.
+            key=f"{f.mart_id}:{f.rule}",
+            title=f"{f.mart_id}: {f.rule}",
+            detail=f.detail,
+        )
+        for f in findings
+    ]
+    result = notify(engine, alerts, heading="OpenArg · expectativas de marts")
+    result["findings"] = len(findings)
+    logger.info("mart expectations: %s", result)
+    return result

@@ -90,3 +90,6 @@ sample_queries:
   - "qué empresas contaminan el Riachuelo"
   - "agentes contaminantes de la cuenca Matanza-Riachuelo"
   - "establecimientos que contaminan en ACUMAR"
+
+expectations:
+  min_rows: 100

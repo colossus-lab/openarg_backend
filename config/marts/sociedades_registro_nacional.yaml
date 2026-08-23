@@ -111,3 +111,6 @@ sample_queries:
   - "empresas SAS creadas por año"
   - "buscar una empresa por CUIT en el registro de sociedades"
   - "qué tipo societario es más común en Argentina"
+
+expectations:
+  min_rows: 100000

@@ -249,3 +249,6 @@ serving:
     jurisdicciones. Sumar entre sus tablas no tiene sentido: produjo un
     ranking de transferencias incorrecto por ordenes de magnitud. Requiere
     caracterizar cada sub-shape antes de unir. Usar presupuesto_consolidado.
+
+expectations:
+  min_rows: 100000

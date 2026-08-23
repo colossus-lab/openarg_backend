@@ -134,3 +134,6 @@ sample_queries:
   - "audiencias de gestión de intereses por funcionario"
   - "reuniones de lobby registradas en Argentina"
   - "quién se reunió con un ministro y para qué"
+
+expectations:
+  min_rows: 1000
