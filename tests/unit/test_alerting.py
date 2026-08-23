@@ -137,3 +137,20 @@ def test_an_empty_mart_is_its_own_alert_kind():
     empty = Alert(kind="mart_empty", key="pobreza", title="y")
     # Same mart, different failure — must not dedup against each other.
     assert broken.fingerprint() != empty.fingerprint()
+
+
+def test_redis_pressure_is_keyed_by_percentage_not_by_the_hour():
+    """A sustained condition should say so once a day, not once an hour.
+
+    Redis holds the Celery broker. Under `allkeys-lru` it would evict whatever
+    was least recently used to make room — including a queued task message,
+    which is a task silently ceasing to exist. `noeviction` makes that a refused
+    write instead, and a refused write nobody hears about is the same as a
+    silent eviction.
+    """
+    a = Alert(kind="redis_pressure", key="redis:80pct", title="x")
+    b = Alert(kind="redis_pressure", key="redis:80pct", title="x, visto una hora después")
+    assert a.fingerprint() == b.fingerprint()
+    # A worse level is a new finding.
+    c = Alert(kind="redis_pressure", key="redis:90pct", title="x")
+    assert c.fingerprint() != a.fingerprint()

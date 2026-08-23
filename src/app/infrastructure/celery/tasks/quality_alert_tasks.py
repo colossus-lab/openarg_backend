@@ -22,6 +22,12 @@ Every item here is a real incident that went unnoticed, not a hypothetical:
 - **Sweeps that succeed while doing nothing.** `cleanup_raw_orphans` returned
   `{'dropped': 0, 'failed': 10}` and reported success every hour for three
   months.
+- **Redis filling up.** The instance holds the Celery broker, the results
+  backend and the caches, and it ran with `allkeys-lru` — under pressure it
+  would evict whatever was least recently used, including queued task messages,
+  which is a task silently ceasing to exist. Switching to `noeviction` makes
+  that a loud failure instead, and a loud failure nobody hears is the same as a
+  quiet one. Hence this watch.
 
 Each check answers one question with one query, and stays quiet when the answer
 is fine.
@@ -30,6 +36,7 @@ is fine.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC
 from typing import Any
 
@@ -71,6 +78,12 @@ _COLLECTION_STALLED_SQL = text(
 )
 
 _STALL_HOURS = 36
+
+# Well below the point where writes would start failing. `noeviction` turns a
+# full Redis into refused writes — the right trade against silently dropping a
+# queued task, but only if the warning arrives with room to act on it. Measured
+# 2026-08-23: 38 MB of 512, and zero evictions in the instance's history.
+_REDIS_WARN_RATIO = 0.75
 
 
 @celery_app.task(
@@ -139,6 +152,32 @@ def alert_on_quality_signals(self) -> dict[str, Any]:
                     detail=f"última colecta: {last:%Y-%m-%d %H:%M} UTC",
                 )
             )
+
+    # Redis is not in the database, so it needs its own look.
+    try:
+        import redis as _redis
+
+        url = os.getenv("REDIS_CACHE_URL") or os.getenv("CELERY_BROKER_URL") or ""
+        if url:
+            info = _redis.from_url(url).info("memory")
+            used = int(info.get("used_memory", 0))
+            cap = int(info.get("maxmemory", 0))
+            if cap and used / cap >= _REDIS_WARN_RATIO:
+                alerts.append(
+                    Alert(
+                        kind="redis_pressure",
+                        # By day: a sustained condition should say so once a day,
+                        # not once an hour.
+                        key=f"redis:{used * 100 // cap}pct",
+                        title=f"Redis al {used * 100 // cap} % de su techo",
+                        detail=(
+                            f"{used // (1024 * 1024)} MB de {cap // (1024 * 1024)} MB · "
+                            "con noeviction, llenarse significa escrituras rechazadas"
+                        ),
+                    )
+                )
+    except Exception:
+        logger.debug("quality alerts: could not read redis memory", exc_info=True)
 
     result = notify(engine, alerts, heading="OpenArg · señales de calidad")
     logger.info("quality alerts: %s", result)
