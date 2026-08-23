@@ -822,3 +822,61 @@ def backfill_mart_embeddings(
         "updated": updated,
         "failed": failed,
     }
+
+
+@celery_app.task(
+    name="openarg.backfill_mart_source_ages",
+    bind=True,
+    soft_time_limit=900,
+    time_limit=1200,
+)
+def backfill_mart_source_ages(self, *, dry_run: bool = True) -> dict[str, object]:
+    """Fill in `source_data_oldest/newest` without rebuilding anything.
+
+    The span is recorded at build time, so on the deploy that introduced it
+    every existing mart reads as unknown age and the chat stays silent about
+    marts until each one happens to rebuild — 69 of them, on their own
+    schedules. That is a long time for a feature to be invisible.
+
+    Nothing here touches a matview. The span comes from resolving the mart's
+    macros against the registry and reading `created_at`, which is a read-only
+    question about tables that already exist.
+    """
+    engine = get_sync_engine()
+    marts_dir = _DEFAULT_MARTS_DIR
+    if not marts_dir.exists() or not marts_dir.is_dir():
+        logger.warning("marts dir missing: %s", marts_dir)
+        return {"dry_run": dry_run, "filled": 0, "reason": "marts_dir_missing"}
+
+    filled = 0
+    unknown: list[str] = []
+    for mart in load_all_marts(marts_dir):
+        oldest, newest = _source_data_span(engine, mart.sql)
+        if oldest is None:
+            # A mart whose macros resolve to nothing has no age to report, and
+            # saying so beats writing a date it did not measure.
+            unknown.append(mart.id)
+            continue
+        filled += 1
+        if dry_run:
+            continue
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE mart_definitions
+                       SET source_data_oldest = :o, source_data_newest = :n
+                     WHERE mart_id = :m
+                    """
+                ),
+                {"o": oldest, "n": newest, "m": mart.id},
+            )
+
+    result = {
+        "dry_run": dry_run,
+        "filled": filled,
+        "unknown": len(unknown),
+        "unknown_samples": unknown[:5],
+    }
+    logger.info("mart source age backfill: %s", result)
+    return result

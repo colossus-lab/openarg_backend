@@ -177,6 +177,7 @@ def create_celery() -> Celery:
         "openarg.refresh_stale_datasets": {"queue": "orchestrator"},
         "openarg.repair_unsplit_csv_tables": {"queue": "ingest"},
         "openarg.reconcile_registry_locations": {"queue": "ingest"},
+        "openarg.backfill_mart_source_ages": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
