@@ -107,6 +107,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.schema_baseline_tasks",
             "app.infrastructure.celery.tasks.refresh_tasks",
             "app.infrastructure.celery.tasks.parse_repair_tasks",
+            "app.infrastructure.celery.tasks.registry_reconcile_tasks",
             "app.infrastructure.celery.tasks.llm_repair_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
@@ -175,6 +176,8 @@ def create_celery() -> Celery:
         "openarg.baseline_schema_snapshots": {"queue": "ingest"},
         "openarg.refresh_stale_datasets": {"queue": "orchestrator"},
         "openarg.repair_unsplit_csv_tables": {"queue": "ingest"},
+        "openarg.reconcile_registry_locations": {"queue": "ingest"},
+        "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
@@ -326,6 +329,35 @@ def create_celery() -> Celery:
                 "task": "openarg.cleanup_raw_orphans",
                 "schedule": crontab(minute=30, hour="*/6"),
                 "kwargs": {"dry_run": False, "max_drops": 100, "min_age_hours": 24},
+                "options": {"queue": "ingest"},
+            },
+            "reconcile-registry-locations": {
+                # Runs before the 06:30 orphan sweep, and that order is the
+                # point: a table sitting in the wrong schema is a table the
+                # registry cannot find, and a sweep that cannot find a table
+                # is one step from deciding nothing claims it.
+                #
+                # Moves the table to the schema its live registry row already
+                # names — it never edits the row to match the table, so it
+                # cannot invent a location. In production on 2026-08-23 this
+                # was 82 tables holding 14M rows, 81 of them legacy `cache_*`
+                # names, and it is the same defect that had three marts down.
+                "task": "openarg.reconcile_registry_locations",
+                "schedule": crontab(hour=4, minute=10),
+                "kwargs": {"dry_run": False, "limit": 500},
+                "options": {"queue": "ingest"},
+            },
+            "retire-phantom-registry-rows": {
+                # Live rows naming a table that exists in neither schema. They
+                # are retired (`superseded_at`), never deleted: the row is the
+                # only surviving record that the table existed at all, and the
+                # drift work is built on exactly that evidence.
+                #
+                # Skips any row `cached_datasets` still points at — that is a
+                # broken reference someone should see, not one to close quietly.
+                "task": "openarg.retire_phantom_registry_rows",
+                "schedule": crontab(hour=4, minute=25),
+                "kwargs": {"dry_run": False, "limit": 500},
                 "options": {"queue": "ingest"},
             },
             "cleanup-empty-raw-tables": {

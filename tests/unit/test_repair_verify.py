@@ -391,3 +391,20 @@ def test_a_clean_re_read_that_adds_a_column_is_not_blocked():
     assert not is_parse_regression(
         current_names=["sigla", "idpozo"], incoming_names=["sigla", "idpozo", "cuenca"]
     )
+
+
+def test_revert_refuses_acts_that_are_not_column_renames():
+    """A schema move is audited in the same table but is not a rename.
+
+    `revert_repair` restores column names from the audit row's two lists. The
+    reconciliation writes rows with NULL lists, which would already be refused
+    as incomplete — but refusing by phase says *why*, and stays correct if a
+    later act records columns for context rather than for reverting.
+    """
+    from app.application.repair.revert import _NOT_COLUMN_REPAIRS
+
+    assert "registry_location" in _NOT_COLUMN_REPAIRS
+    assert "registry_phantom" in _NOT_COLUMN_REPAIRS
+    # The column-repair phases must not be caught by the guard.
+    for phase in ("col_n", "title_as_columns", "trailing_garbage", "llm_assisted"):
+        assert phase not in _NOT_COLUMN_REPAIRS

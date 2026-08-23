@@ -99,6 +99,11 @@ class RevertOutcome:
         }
 
 
+# Audited acts that are not column renames. `revert_repair` restores column
+# names and has no meaning for these.
+_NOT_COLUMN_REPAIRS = frozenset({"registry_location", "registry_phantom"})
+
+
 def _as_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -142,6 +147,16 @@ def revert_repair(
         ok=False,
         dry_run=dry_run,
     )
+
+    # A revert here means: put the old column names back. Not every audited act
+    # is a rename — `registry_location` moves a table between schemas and
+    # `registry_phantom` retires a registry row, and neither touches a column.
+    # Those rows carry NULL column lists, so this would already refuse them as
+    # incomplete; refusing by phase says why, and keeps the refusal correct if a
+    # future act records columns for context.
+    if row.phase in _NOT_COLUMN_REPAIRS:
+        outcome.reason = f"phase_not_revertible_here:{row.phase}"
+        return outcome
 
     if row.dry_run or not row.ok or row.operation != "apply":
         # Nothing was changed, so there is nothing to undo. Worth distinguishing
