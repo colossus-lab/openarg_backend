@@ -67,26 +67,50 @@ recuperación dependió de que S3 tuviera los crudos— vale subirlo de priorida
 
 ## Tramo 2 — Cerrar la promoción
 
-### 2.1 Decidir `OPENARG_USE_RAW_LAYER` — **la decisión que más cuesta postergar**
+### 2.1 Decidir `OPENARG_USE_RAW_LAYER` — **corregido el 23-ago**
 
-**Medido hoy**:
+Lo que este apartado decía el 22-ago era erróneo en su parte consecuente, y la
+corrección importa porque la versión errónea es la que sostuvo la decisión
+durante semanas. Decía: *"sin capa raw, un recurso no tiene versiones, y sin
+versiones no hay pares que comparar; la detección de deriva en prod está
+estructuralmente limitada mientras el flag esté apagado."*
+
+**Medido el 23-ago, con el flag confirmado apagado en prod** (`_use_raw_layer()`
+devuelve `False` en el contenedor colector):
 
 ```
-STAGING  OPENARG_USE_RAW_LAYER=1     4.386 tablas legacy · 22.722 versionadas
-PROD     (no seteada → legacy)       6.232 tablas legacy · 20.466 versionadas
+                                    staging (ON)   prod (OFF)
+recursos con 2+ versiones                5.604        5.019
+pares consecutivos comparables             765          676
+filas vivas del registro en `raw`       27.588       27.348
+  ...que están físicamente en `raw`      27.581       27.147   (99,3 %)
 ```
 
-Prod corre el camino legacy: cada colecta nueva crea `cache_<portal>_<slug>__<hash>`
-en vez de `<portal>__<titulo>__<hash>__vN`. **La divergencia crece todos los
-días** — prod ya tiene 1.846 tablas legacy más que staging.
+Prod ya está versionado. La capa raw llegó por la migración física de mayo y por
+los conectores vía-B, que registran en `raw` sin consultar el flag. La deriva en
+prod **no** está bloqueada: tiene 676 pares comparables contra 765 de staging.
 
-Consecuencia concreta para el trabajo de deriva: sin capa raw, un recurso no
-tiene versiones, y sin versiones **no hay pares que comparar**. La detección de
-deriva en prod está estructuralmente limitada mientras el flag esté apagado.
+La cifra que acompañaba al párrafo —"prod tiene 1.846 tablas legacy más y la
+divergencia crece todos los días"— contaba nombres de tablas, no capacidad. Las
+4.248 `cache_*` que quedan en `public` son sedimento de la migración de mayo.
 
-Es tuya la decisión. Las dos salidas son prenderlo (y planificar el cutover de
-lo legacy) o declarar legacy como definitivo y adaptar el trabajo de deriva a
-comparar snapshots de la misma tabla en el tiempo.
+**Lo que el flag sí sigue causando**, que es real y mucho más acotado:
+
+- **82 tablas vivas** que el registro ubica en `raw` y están en `public`.
+  `live_table()` resuelve a `raw`, no las encuentra, y el mart falla por una
+  tabla que existe — la misma causa que tuvo tres marts caídos.
+- Ritmo actual **~24 por mes**: energía (28 acumuladas), rosario_dkan (11),
+  entre_ríos (11), datos_gob_ar (10).
+- Staging, tres meses con el flag prendido: **cero** `cache_*` en `public`.
+
+Y una anomalía aparte, que el flag no explica: **111 filas vivas del registro
+apuntan a tablas inexistentes** (100 de mayo, 11 de agosto). Un mart que dependa
+de una de ellas falla igual, y el registro no se contradice a sí mismo, así que
+nada lo detecta.
+
+La decisión, entonces, no es un cutover de 6.232 tablas: es parar una fuga de 24
+al mes. El flag se evalúa por colecta, no migra nada al prenderse, y apagarlo lo
+revierte.
 
 ### 2.2 Marts caídos — **3 son deriva real, no deuda**
 
@@ -184,20 +208,29 @@ su estado.
 
 ---
 
-## Orden propuesto, y por qué
+## Orden propuesto, y por qué — **revisado el 23-ago**
 
-1. **1.1 fallar cerrado** — cinco líneas, y es lo único que separa a producción
-   de un segundo 3 de agosto. Nada más debería ir antes.
-2. **2.2 los tres marts caídos** — están caídos ahora, son deriva real, y
-   arreglarlos valida que el trabajo de la spec 024 sirve para algo concreto.
-3. **2.1 decidir `USE_RAW_LAYER`** — es tuya, y la divergencia crece mientras
-   tanto. También determina si la detección de deriva en prod puede funcionar.
-4. **4.x el consumidor** — una alerta y la edad del dato en el chat. Barato,
-   y convierte todo lo construido en algo que alguien ve.
+1. **1.1 fallar cerrado** — hecho. Los cuatro sweeps abortan si el registro no
+   está o está implausiblemente vacío.
+2. **~~2.2 los tres marts caídos~~** — hecho, y **no eran deriva**. Este
+   documento los llamó "el primer ejemplo de deriva afectando producción" y se
+   equivocó: era `sql_macros.py` leyendo `raw_table_versions` sin calificar el
+   schema, con lo que PGBouncer resolvía `raw` primero y el macro devolvía su
+   marcador vacío 9 de cada 10 veces. Las columnas nunca faltaron. Calificado el
+   22-ago; 68 de 69 marts sanos.
+3. **Las 82 mal ubicadas y las 111 inexistentes** — sube al primer lugar. Son la
+   misma falla que tuvo los marts caídos, siguen ocurriendo a ~24 por mes, y
+   ninguna es visible hasta que un mart falla. Prender el flag corta la fuente;
+   reconciliar las 193 filas limpia lo acumulado. Ambas cosas son acotadas.
+4. **4.x el consumidor** — una alerta y la edad del dato en el chat. Es lo que
+   convierte todo lo anterior en algo que alguien ve sin que se lo pidan; nada
+   de esta lista se descubrió por una alerta, todo por leer una consulta a mano.
 5. **1.2 la firma de embedding** — acotado, ahorro directo.
-6. **3.x CKAN** — el más grande, y el que más se beneficia de decidir 2.1 antes.
+6. **3.x CKAN** — el más grande.
 7. **5 deuda** — después de medirlo.
 
-**Regla del plan que conviene retomar**: *cada tramo cierra con una medición en
-uso, no con un merge*. Hoy tenemos las mediciones; lo que falta es que alguien
-las mire sin que se las pidan.
+**Regla que conviene retomar**: *cada tramo cierra con una medición en uso, no
+con un merge*. Y una segunda, que este documento se ganó a pulso: **una
+consecuencia afirmada sin medir vale menos que no afirmar nada**, porque decide
+prioridades igual. Los dos errores corregidos hoy —la deriva que no era deriva y
+el bloqueo estructural que no bloqueaba— fueron los dos afirmados, no medidos.
