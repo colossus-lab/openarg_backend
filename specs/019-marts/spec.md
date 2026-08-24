@@ -142,6 +142,19 @@ assumption that all 19 shared the defect, which a crude test
 (`len(name) > 40 or '@' in name`) appeared to confirm because it also flagged
 the healthy `Establecimiento - Localización_Jurisdicción`.
 
+**Uneven reporting coverage makes cross-entity comparison a trap, and the
+mart has to say so.** A mart can be complete, correct and additive and still
+mislead, because what the source *covers* varies by the dimension people most
+want to compare on. `egresos_hospitalarios_pba` counts discharges from
+establishments that report to the provincial system: in 2022, against
+`censo_poblacion_radios`, Malvinas Argentinas shows 319,5 discharges per
+thousand inhabitants and La Matanza 20,5 — fifteen times fewer, in the
+province's most populous municipality, because care there is largely
+municipal. Nothing about the data is wrong; ranking municipalities with it
+measures who reports to the province, not who is hospitalised. When coverage
+is uneven along a dimension, say which comparisons hold (over time within one
+entity, and province-wide aggregates) and which do not.
+
 **Snapshot clusters need one snapshot, not the union.** The same dataset
 published 19 resources under an identical title with 59.435-64.691 rows each:
 successive cuts of one registry, not different jurisdictions. Unioning them

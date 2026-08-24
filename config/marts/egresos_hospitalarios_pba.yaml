@@ -1,0 +1,152 @@
+id: egresos_hospitalarios_pba
+version: 0.1.0
+description: |
+  Egresos hospitalarios de establecimientos públicos de la provincia de Buenos
+  Aires, 2016-2022. Cada fila es un recuento por año, región sanitaria,
+  municipio, sexo, grupo de edad, causa (capítulo y agrupamiento CIE-10) y
+  tipo de egreso.
+
+  Es el mayor conjunto de datos de salud colectado y no había ningún mart
+  sobre él: el único que existe, `salud_establecimientos`, sirve el registro
+  de establecimientos (farmacias, droguerías, efectores), no lo que pasa
+  adentro. Salud es el cuarto tema por demanda medida — 22 de 1.232 preguntas
+  de usuarios (1,8 %) — contra 4,5 M de filas colectadas en 11 portales.
+
+  **Cobertura: sólo provincia de Buenos Aires.** Es la jurisdicción que
+  publica la serie; no hay equivalente nacional colectado. Los 133 municipios
+  bonaerenses están presentes en todos los años salvo 2016 y 2017, con 132.
+
+  **Deduplica por año.** El portal publica cada año en dos recursos con las
+  mismas filas, y además un recurso combinado 2021-2022 que subsume a los dos
+  individuales. La unión cruda de las 15 tablas vivas da 2.743.270 filas
+  contra 1.178.851 reales: **133 % inflado**. La dedup se hace por `anio`:
+  para cada año se toma entero el recurso que más filas trae, con desempate
+  determinístico sobre el marcador de origen. Para 2016 eso además elige el
+  recurso más completo de los dos (152.288 contra 149.995).
+
+  **El origen escribe `muncipio_id` sin la `i` en cuatro de los recursos.**
+  No es un defecto de parseo: el error está en el archivo publicado, en los
+  recursos de 2016 y 2019. Se resuelve con `COALESCE` sobre las dos grafías,
+  así que la columna del mart es una sola y correcta.
+
+  **No es actividad hospitalaria total del municipio, y la diferencia es
+  grande.** La serie cubre los establecimientos que reportan al sistema
+  provincial, y esa cobertura varía muchísimo entre municipios: en 2022,
+  cruzando con `censo_poblacion_radios`, Malvinas Argentinas da 319,5 egresos
+  por cada mil habitantes y La Matanza 20,5 — quince veces menos, siendo La
+  Matanza el municipio más poblado de la provincia. No es un defecto del dato:
+  donde la atención es mayormente municipal, el hospital no aparece acá.
+  **Comparar municipios entre sí con este mart mide quién reporta a provincia,
+  no quién se interna.** Las comparaciones sólidas son a lo largo del tiempo
+  dentro de un mismo municipio, y los agregados provinciales.
+
+  Los 133 municipios cruzan por nombre con `censo_poblacion_radios` sin una
+  sola excepción, así que la tasa por habitante se puede calcular — con la
+  advertencia de arriba sobre qué significa.
+
+  **`cantidad` es un recuento y es aditivo**: sumar sobre municipios, edades o
+  causas da totales válidos. Lo que no es aditivo es nada acá — no hay tasas
+  ni promedios en este mart.
+domain: salud
+
+sources:
+  portals: [buenos_aires_prov]
+  resource_patterns:
+    - "buenos_aires_prov::*"
+
+canonical_columns:
+  - name: anio
+    type: text
+    description: Año del egreso (2016-2022)
+  - name: region_sanitaria
+    type: text
+    description: Región sanitaria de la provincia de Buenos Aires
+  - name: municipio_id
+    type: text
+    description: Código de municipio. Resuelto sobre las dos grafías del origen (`municipio_id` y `muncipio_id`)
+  - name: municipio_nombre
+    type: text
+    description: Nombre del municipio o partido
+  - name: sexo
+    type: text
+    description: Sexo declarado del paciente
+  - name: grupo_edad
+    type: text
+    description: Grupo etario del paciente
+  - name: causa_capitulo
+    type: text
+    description: Capítulo CIE-10 de la causa del egreso
+  - name: causa_agrupamiento
+    type: text
+    description: Agrupamiento CIE-10 de la causa del egreso
+  - name: tipo_egreso
+    type: text
+    description: Tipo de egreso (alta, defunción, traslado, ...)
+  - name: cantidad
+    type: bigint
+    description: Cantidad de egresos con esa combinación. Aditivo
+
+sql: |
+  WITH u AS (
+    SELECT
+      NULLIF(TRIM(anio), '')                                    AS anio,
+      NULLIF(TRIM(region_sanitaria), '')                        AS region_sanitaria,
+      -- El origen escribe la columna sin la `i` en los recursos de 2016 y
+      -- 2019. Sólo una de las dos existe por tabla; el macro proyecta la
+      -- ausente como NULL, así que el COALESCE deja una sola columna correcta.
+      NULLIF(TRIM(COALESCE(municipio_id, muncipio_id)), '')     AS municipio_id,
+      NULLIF(TRIM(COALESCE(municipio_nombre, muncipio_nombre)), '') AS municipio_nombre,
+      NULLIF(TRIM(sexo), '')                                    AS sexo,
+      NULLIF(TRIM(grupo_edad), '')                              AS grupo_edad,
+      NULLIF(TRIM(causa_egreso_capitulo), '')                   AS causa_capitulo,
+      NULLIF(TRIM(causa_egreso_agrupamiento), '')               AS causa_agrupamiento,
+      NULLIF(TRIM(tipo_egreso), '')                             AS tipo_egreso,
+      CASE WHEN cantidad ~ '^-?[0-9]+$' THEN cantidad::bigint END AS cantidad,
+      "__src"                                                   AS src
+    FROM {{ live_tables_by_table_pattern(
+        '*egresos_hospitalarios*',
+        expected_columns=['anio', 'region_sanitaria', 'municipio_id', 'municipio_nombre',
+                          'muncipio_id', 'muncipio_nombre', 'sexo', 'grupo_edad',
+                          'causa_egreso_capitulo', 'causa_egreso_agrupamiento',
+                          'tipo_egreso', 'cantidad'],
+        require_columns=['anio', 'region_sanitaria', 'sexo', 'grupo_edad',
+                         'causa_egreso_capitulo', 'causa_egreso_agrupamiento',
+                         'tipo_egreso', 'cantidad'],
+        source_marker='__src'
+    ) }} sub
+    -- Un egreso sin año no sirve para nada de lo que este mart responde, y
+    -- además formaría su propia partición en la dedup.
+    WHERE NULLIF(TRIM(anio), '') IS NOT NULL
+  ),
+  -- Un solo recurso por año. Los dos recursos gemelos de cada año traen las
+  -- mismas filas y el combinado 2021-2022 subsume a los individuales, así que
+  -- quedarse con el origen más completo de cada año los descarta enteros.
+  ranked AS (
+    SELECT anio, src,
+           row_number() OVER (PARTITION BY anio ORDER BY count(*) DESC, src) AS rn
+    FROM u
+    GROUP BY anio, src
+  )
+  SELECT
+    u.anio, u.region_sanitaria, u.municipio_id, u.municipio_nombre,
+    u.sexo, u.grupo_edad, u.causa_capitulo, u.causa_agrupamiento,
+    u.tipo_egreso, u.cantidad
+  FROM u
+  JOIN ranked k ON k.anio = u.anio AND k.src = u.src AND k.rn = 1
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []
+
+sample_queries:
+  - "cuántos egresos hospitalarios hubo por año"
+  - "principales causas de internación en la provincia de Buenos Aires"
+  - "egresos hospitalarios por municipio"
+  - "internaciones por grupo de edad y sexo"
+  - "defunciones hospitalarias por causa"
+
+expectations:
+  # La mitad de las 1.178.851 filas observadas al escribir esto. Un piso, no
+  # una expectativa de tamaño. Si la dedup se rompe el conteo SUBE, no baja,
+  # así que este piso no la cubre — de eso se ocupa `mart_build_history`.
+  min_rows: 589425
