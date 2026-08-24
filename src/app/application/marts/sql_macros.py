@@ -91,36 +91,93 @@ _MAX_UNION_TABLES = int(os.getenv("OPENARG_MART_MAX_UNION_TABLES", "200"))
 
 
 # `datos_gob_ar` re-publishes other portals' resources under a derived
-# identity: `datos_gob_ar::<portal>_<uuid>` is the same resource as
-# `<portal>::<uuid>`, collected twice into two tables with the same rows.
-# Measured 2026-08-24: **425 live mirror pairs**, concentrated in `energia`
-# (262), `justicia` (260), `produccion` (84) and `acumar` (43). A pattern that
-# matches a cluster picks up both halves, and the mart then serves every row
-# twice — the single largest contributor to duplicate rows across the
-# catalogue.
+# identity: `datos_gob_ar::<portal>_<uuid>` is the same upstream resource as
+# `<portal>::<uuid>`. Measured 2026-08-24: **404 live mirror pairs**,
+# concentrated in `energia` (262), `justicia` (260), `produccion` (84) and
+# `acumar` (43), and 79 of them sit inside a single mart's match set, where the
+# pattern picks up both halves and the mart serves those rows twice.
+#
+# **The two copies are the same resource but not the same data.** Comparing 60
+# pairs on their common columns: 35 identical, 25 different, and some differ in
+# row count (1.433 against 1.438). They are collected at different moments, so
+# neither side is reliably the current one. That is why this keeps the larger
+# copy instead of always dropping the `datos_gob_ar` one: whichever is picked,
+# serving a single copy beats serving both — the union double-counts
+# unconditionally — but silently preferring the smaller one would lose rows.
 _FEDERATED_MIRROR_RE = re.compile(
     r"^datos_gob_ar::(?P<portal>[a-z_]+)_"
     r"(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
 
 
-def _drop_federated_mirrors(lives: list[_LiveRow]) -> tuple[list[_LiveRow], int]:
-    """Drop `datos_gob_ar` copies whose original is in the same match set.
+def _estimated_rows(engine, pairs: list[tuple[str, str]]) -> dict[tuple[str, str], float]:
+    """`pg_class.reltuples` per table. An estimate on purpose — deciding which
+    of two copies is larger does not need an exact count, and this runs inside
+    every mart build."""
+    if not pairs or engine is None:
+        return {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT n.nspname AS schema_name, c.relname AS table_name, c.reltuples
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE (n.nspname, c.relname) IN (
+                        SELECT s, t FROM unnest(CAST(:schemas AS text[]),
+                                                CAST(:tables AS text[])) AS u(s, t))
+                    """
+                ),
+                {"schemas": [p[0] for p in pairs], "tables": [p[1] for p in pairs]},
+            ).fetchall()
+            conn.rollback()
+    except Exception:  # pragma: no cover — environmental
+        logger.warning("could not estimate row counts for mirror selection", exc_info=True)
+        return {}
+    return {(r.schema_name, r.table_name): float(r.reltuples or 0) for r in rows}
 
-    Only when the original is present: a mirror the pattern found on its own
-    is the only copy there is, and dropping it would lose the resource rather
-    than deduplicate it.
+
+def _drop_federated_mirrors(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
+    """Keep one copy per upstream resource: the larger of the two.
+
+    Only acts when both halves are in the same match set. A mirror the pattern
+    found on its own is the only copy there is, and dropping it would lose the
+    resource rather than deduplicate it.
+
+    Size decides because the two copies are collected at different moments and
+    genuinely differ (25 of 60 pairs measured), so neither identity is reliably
+    the fresher one. Ties break on `resource_identity`, without which the same
+    inputs could produce different marts on different builds.
     """
-    present = {row.resource_identity for row in lives}
-    kept: list[_LiveRow] = []
-    dropped = 0
+    by_identity = {row.resource_identity: row for row in lives}
+    counts = _estimated_rows(engine, [(r.schema_name, r.table_name) for r in lives])
+
+    drop: set[str] = set()
     for row in lives:
         match = _FEDERATED_MIRROR_RE.match(row.resource_identity)
-        if match and f"{match.group('portal')}::{match.group('uuid')}" in present:
-            dropped += 1
+        if not match:
             continue
-        kept.append(row)
-    return kept, dropped
+        original = f"{match.group('portal')}::{match.group('uuid')}"
+        twin = by_identity.get(original)
+        if twin is None:
+            continue
+        mine = counts.get((row.schema_name, row.table_name), 0.0)
+        theirs = counts.get((twin.schema_name, twin.table_name), 0.0)
+        if mine > theirs:
+            loser = twin.resource_identity
+        elif theirs > mine:
+            loser = row.resource_identity
+        else:
+            # Same size, or no estimate available: keep the originating
+            # portal's copy. `datos_gob_ar` is republishing it, so the portal
+            # of record is the more defensible default — and a fixed rule is
+            # what keeps two builds of the same mart identical.
+            loser = row.resource_identity
+        drop.add(loser)
+
+    kept = [row for row in lives if row.resource_identity not in drop]
+    return kept, len(lives) - len(kept)
 
 
 class MacroResolutionError(ValueError):
@@ -343,10 +400,11 @@ def _build_union(
       2017 while reporting a healthy row count.
 
     With `drop_federated_mirrors=True`:
-      Discards `datos_gob_ar::<portal>_<uuid>` rows when `<portal>::<uuid>` is
-      also in the match set — the same resource collected twice. Off by
-      default: turning it on changes what a mart contains, so each mart opts
-      in after its own count is checked.
+      Keeps one copy per upstream resource when both `<portal>::<uuid>` and
+      `datos_gob_ar::<portal>_<uuid>` are in the match set — the larger one,
+      because the two are collected at different moments and 25 of 60 measured
+      pairs differ. Off by default: turning it on changes what a mart contains,
+      so each mart opts in after its own count is checked.
 
     Without `expected_columns`:
       - Empty list → `SELECT NULL::text AS dummy WHERE FALSE` (legacy).
@@ -356,7 +414,7 @@ def _build_union(
 
     mirrors_dropped = 0
     if drop_federated_mirrors:
-        lives_list, mirrors_dropped = _drop_federated_mirrors(lives_list)
+        lives_list, mirrors_dropped = _drop_federated_mirrors(lives_list, engine)
         if mirrors_dropped:
             logger.info(
                 "%s: dropped %d federated mirror(s) whose original is in the same match set",

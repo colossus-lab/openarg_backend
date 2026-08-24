@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -334,7 +335,8 @@ def test_federated_mirrors_are_dropped_when_the_original_is_present(monkeypatch)
     sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors=True) }} s"
     resolved = resolve_macros(sql, engine=object())
     assert 'raw."p_full"' in resolved
-    # The mirror of p_full goes...
+    # The mirror of p_full goes. With no row estimate available the tie breaks
+    # towards the originating portal, which is the publisher of record.
     assert 'raw."p_sin_finalidad"' not in resolved
     # ...but the justicia mirror stays: its original is not in this match set,
     # so it is the only copy there is and dropping it would lose the resource.
@@ -356,3 +358,45 @@ def test_drop_federated_mirrors_rejects_a_non_bool(monkeypatch) -> None:
     sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors='yes') }} s"
     with pytest.raises(MacroResolutionError, match="must be a bool"):
         resolve_macros(sql, engine=object())
+
+
+def test_federated_mirrors_keep_the_larger_copy(monkeypatch) -> None:
+    """The two copies are the same upstream resource but not the same data:
+    collected at different moments, 25 of 60 measured pairs differ and some
+    differ in row count. Whichever is kept, one copy beats two — the union
+    double-counts unconditionally — but preferring the smaller one loses rows.
+    """
+    _patch(monkeypatch, _mirror_rows())
+
+    class _Engine:
+        """Reports the mirror as the larger of the pair."""
+
+        def connect(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def rollback(self):
+            return None
+
+        def execute(self, *_args, **_kwargs):
+            class _R:
+                def fetchall(self):
+                    return [
+                        SimpleNamespace(schema_name="raw", table_name="p_full", reltuples=10),
+                        SimpleNamespace(
+                            schema_name="raw", table_name="p_sin_finalidad", reltuples=99
+                        ),
+                    ]
+
+            return _R()
+
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors=True) }} s"
+    resolved = resolve_macros(sql, engine=_Engine())
+    # The mirror is bigger here, so the original is the one that goes.
+    assert 'raw."p_sin_finalidad"' in resolved
+    assert 'raw."p_full"' not in resolved
