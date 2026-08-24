@@ -5942,7 +5942,26 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
         task_id = getattr(getattr(self, "request", None), "id", None)
         if not task_id:
             return
-        self.update_state(state=state, meta=meta)
+        try:
+            self.update_state(state=state, meta=meta)
+        except Exception:
+            # Reporting progress is telemetry, and it writes to the result
+            # backend. When that backend is briefly unreachable the collection
+            # itself is usually fine — but letting the error escape gets it
+            # caught by the outer `except Exception` and classified as a
+            # transient *collection* failure, so the dataset is rerouted to the
+            # retry queue and marked pending because Redis blinked.
+            #
+            # Measured: with no backend running, `collect_dataset` reported
+            # `transient_retry:ConnectionError` from
+            # `redis.exceptions.ConnectionError` without ever reaching the
+            # download. The name of this function already promised otherwise.
+            logger.debug(
+                "update_state failed for %s (state=%s); continuing",
+                dataset_id,
+                state,
+                exc_info=True,
+            )
 
     def _is_heavy_execution() -> bool:
         delivery = getattr(getattr(self, "request", None), "delivery_info", None) or {}
