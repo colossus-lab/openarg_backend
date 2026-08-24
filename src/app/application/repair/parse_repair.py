@@ -1477,3 +1477,119 @@ def repair_unsplit_csv_table(
 
     _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
     return outcome
+
+
+def _year_or_identifier(value: object) -> str:
+    """Name a header cell, giving years a name a person would choose.
+
+    `_normalize_header_to_identifier` turns `2018.0` into `col_2018_0` and
+    `2017` into `col_2017` — two spellings of the same idea, and neither is
+    what the column holds. A year axis is common enough in these tables to be
+    worth naming properly: `anio_2018`, which reads as a year and sorts as one.
+    """
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    if raw.isdigit() and 1900 <= int(raw) <= 2100:
+        return f"anio_{raw}"
+    return _normalize_header_to_identifier(value)
+
+
+def propose_smeared_title_rename(
+    old_cols: list[str],
+    sample_rows_data: list[tuple],
+    *,
+    min_cols: int = 3,
+    min_common_prefix_len: int = 20,
+    min_alpha_cells: int = 2,
+) -> tuple[list[str], int, str]:
+    """Recover a header that pandas smeared across the columns.
+
+    The sibling of `propose_title_as_columns_rename`, and a different shape.
+    That one expects a separator row: the title became the header, row 0 is
+    blank, and the real header waits in row 1. This one has **no separator** —
+    the title became the header and the real header is row 0 itself.
+
+    Measured in production on 2026-08-23: **116 servable tables** carry this,
+    holding 291,436 rows, and they are not obscure —
+    `caba__acceso_de_mujeres_a_la_salud`,
+    `caba__casos_penales_contravencionales_violencia`,
+    `caba__educacion_sexual_integral`. Their columns read
+    `['DEFUNCIONES MATERNAS (ocurridas durante el embarazo o dentro de',
+      '... dentro _2', '... dentro _3', ...]` while row 0 holds
+    `['DEFUNCIONES MATERNAS', '2017', '2018.0', '2019.0', ...]`.
+
+    **Three columns is enough.** The May heuristic requires thirty before it
+    will act, on the reasoning that a wide table is where this happens. These
+    are eight columns wide and just as unusable, and the width was never what
+    made the defect.
+
+    The prefix must be a phrase rather than a word: `fecha_inicio` and
+    `fecha_fin` share seven characters and are both real names.
+    """
+    n_cols = len(old_cols)
+    if n_cols < min_cols:
+        return old_cols, 0, "too_few_cols"
+    if not sample_rows_data:
+        return old_cols, 0, "not_enough_sample_rows"
+
+    business_cols = [c for c in old_cols if not c.startswith("_")]
+    if len(business_cols) < min_cols:
+        return old_cols, 0, "too_few_business_cols"
+    if len(_common_prefix(business_cols)) < min_common_prefix_len:
+        return old_cols, 0, "no_common_prefix"
+
+    row0 = sample_rows_data[0]
+    alpha = sum(1 for v in row0 if v is not None and _ASCII_ALPHA_RE.search(str(v)))
+
+    # The shape these tables actually have: one label column and a column per
+    # year. Only the first cell carries letters, so a plain alpha count reads
+    # `['DEFUNCIONES MATERNAS', '2017', '2018.0', …]` as data and refuses a real
+    # header. `_looks_like_year_header_row` already knows this row when it sees
+    # it — it was written for the same family of statistical tables.
+    from app.application.pipeline.parsers.header_recovery import (
+        _looks_like_year_header_row,
+    )
+
+    as_str = [("" if v is None else str(v)) for v in row0]
+    year_axis = _looks_like_year_header_row(as_str)
+
+    if not year_axis:
+        # That detector needs three numeric cells, which a narrow table does not
+        # have: `['Departamento', '2020', '2021']` has two. Loosening the shared
+        # threshold would change the parser's behaviour for everyone, so the
+        # weaker evidence is judged here instead — and it has to be stronger to
+        # compensate: *every* numeric cell must be a year, not most of them.
+        nums = [v.strip().rstrip("0").rstrip(".") if v.strip().endswith(".0")
+                else v.strip() for v in as_str if v.strip()]
+        numeric = [v for v in nums if v.replace(",", "").isdigit()]
+        years = [v for v in numeric if 1900 <= int(v.replace(",", "")) <= 2100]
+        year_axis = len(numeric) >= 2 and len(years) == len(numeric) and alpha >= 1
+
+    if alpha < min_alpha_cells and not year_axis:
+        # A row of plain numbers is data, not a header. Promoting it would name
+        # the columns after one observation and lose that row.
+        return old_cols, 0, "row0_not_header_like"
+
+    filled = sum(1 for v in row0 if v is not None and str(v).strip())
+    if filled < n_cols * 0.5:
+        return old_cols, 0, "row0_too_sparse"
+
+    new_cols: list[str] = []
+    for i, (old, hdr_val) in enumerate(zip(old_cols, row0)):
+        if old.startswith("_"):
+            # Collector lineage columns are ours and keep their names.
+            new_cols.append(old)
+            continue
+        new = _year_or_identifier(hdr_val)
+        if not new:
+            new = f"col_{i + 1}"
+        new_cols.append(new)
+    new_cols = _dedupe_identifiers(new_cols)
+
+    if new_cols == old_cols:
+        return old_cols, 0, "no_renames_needed"
+    renamed = sum(1 for a, b in zip(old_cols, new_cols) if a != b)
+    return new_cols, renamed, "ok"
