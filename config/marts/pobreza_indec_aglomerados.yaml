@@ -86,7 +86,7 @@ sql: |
     ('1er. semestre 2025',     src."1er. semestre 2025")
   ) AS v(periodo, valor)
   WHERE NULLIF(TRIM("Indicador"), '') IS NOT NULL
-    AND NULLIF(TRIM(v.valor::text), '') IS NOT NULL
+    AND {{ to_numeric('v.valor') }} IS NOT NULL
 
 refresh:
   policy: on_upstream_change

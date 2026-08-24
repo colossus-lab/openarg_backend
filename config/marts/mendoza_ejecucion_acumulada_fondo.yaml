@@ -112,7 +112,7 @@ sql: |
     ('pagado',    'ejercicios_anteriores', src.pagado_ejercicios_anteriores)
   ) AS v(categoria, mes, valor)
   WHERE NULLIF(TRIM("Concepto"), '') IS NOT NULL
-    AND NULLIF(TRIM(v.valor::text), '') IS NOT NULL
+    AND {{ to_numeric('v.valor') }} IS NOT NULL
 
 refresh:
   policy: on_upstream_change

@@ -47,7 +47,7 @@ sql: |
   SELECT
     NULLIF(TRIM(fecha::text), '')             AS fecha,
     NULLIF(TRIM(clae3::text), '')             AS clae3,
-    NULLIF(TRIM(total_fob::text), '')         AS total_fob
+    {{ to_numeric('total_fob') }}         AS total_fob
   FROM {{ live_tables_by_table_pattern(
       'datos_gob_ar__exportaciones_de_bienes_valores*',
       expected_columns=['fecha', 'clae3', 'total_fob']

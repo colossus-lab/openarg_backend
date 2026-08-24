@@ -173,7 +173,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM porcinos
   CROSS JOIN LATERAL (VALUES
     ('padrillo_porcino', padrillo_porcino), ('cerda', cerda),
@@ -197,7 +197,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM avicolas
   CROSS JOIN LATERAL (VALUES
     ('pollos_parrilleros', pollos_parrilleros),
@@ -219,7 +219,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM equinos
   CROSS JOIN LATERAL (VALUES
     ('padrillo_equino', padrillo_equino), ('caballo', caballo),
@@ -241,7 +241,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM ovinos
   CROSS JOIN LATERAL (VALUES
     ('carnero', carnero), ('oveja', oveja),

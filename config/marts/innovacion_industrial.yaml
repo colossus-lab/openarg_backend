@@ -71,7 +71,7 @@ sql: |
                         'TEC_EMERG', 'RANGO_FUENTE_INFO', 'VARIABLE',
                         'U_MED', 'VALOR']
   ) }} sub
-  WHERE NULLIF(TRIM("VALOR"::text), '') IS NOT NULL
+  WHERE {{ to_numeric('"VALOR"') }} IS NOT NULL
 
 refresh:
   policy: manual
