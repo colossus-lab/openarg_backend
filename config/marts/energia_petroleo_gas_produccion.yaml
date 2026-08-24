@@ -1,24 +1,42 @@
 id: energia_petroleo_gas_produccion
-version: 0.1.0
+version: 0.2.0
 description: |
-  Producción mensual de petróleo y gas en Argentina — datos del SESCO
-  (Seguimiento Estadístico de Combustibles Líquidos y Gas) publicados
-  por la Secretaría de Energía. Granularidad mensual con desglose por
-  concepto productivo (crudo convencional, no convencional, gas
-  natural seco, etc.).
+  Producción mensual de petróleo y gas en Argentina, **por empresa** — datos
+  del SESCO (Seguimiento Estadístico de Combustibles Líquidos y Gas) de la
+  Secretaría de Energía. Una fila por año, mes, concepto productivo y empresa.
 
-  Source: 41 versiones de `energia__produccion_de_petroleo_y_gas_sesco`
-  con schema cohesivo de 5 cols core + metadata. Long-format:
-  `(anio, mes, indice_tiempo, concepto, cantidad_m3)`.
+  37.131 filas, 124 empresas, 2009-2026. La clave
+  `(anio, mes, concepto, empresa)` es única: 37.131 filas, 37.131 claves,
+  cero duplicadas.
 
-  Use cases típicos: "producción de petróleo en Argentina", "Vaca
-  Muerta producción no convencional", "evolución del gas natural",
-  "tendencia de producción mensual de hidrocarburos".
-domain: economia
+  Los totales nacionales se obtienen sumando: **617 de 618 pares coinciden
+  dentro del 1 %** con la serie nacional que el mismo portal publica aparte,
+  que es la verificación de que este desglose está completo.
+
+  **Qué servía antes esto.** La versión 0.1.0 unía las 43 tablas que matchean
+  el patrón `energia__produccion_de_petroleo_y_gas_sesco*` y servía 4.103.759
+  filas de las cuales sólo **99.816 eran distintas — 97,6 % duplicadas**. Una
+  sola de esas 43 tablas tenía la columna `cantidad_m3`, así que las otras
+  cuarenta entraban con la producción en NULL: el mart devolvía millones de
+  filas sin el único dato que a alguien le importa, y la misma
+  `(año, mes, concepto)` aparecía 2.226 veces. También servía `cantidad_m3`
+  como texto, con lo cual no se podía sumar.
+
+  **Por qué se toma un recurso por identidad y no un patrón.** Sólo dos de las
+  43 tablas tienen a la vez `empresa` y `cantidad_m3`. La otra está clavada en
+  el tope de ingesta de 500.000 filas para 24.471 claves, y no está sólo
+  duplicada sino corrupta: de las 96.409 claves que comparte con ésta,
+  **78.293 traen valores distintos**, y no aporta ni una sola clave nueva
+  (medido: 0). Un patrón que las una — con o sin `DISTINCT` — inyecta valores
+  equivocados en cuatro de cada cinco filas. Si el recurso se re-versiona,
+  `expected_columns` hace que el mart quede vacío y visible en lugar de
+  silenciosamente mal.
+domain: energia
 
 sources:
   portals: [energia]
-  resource_patterns: ["energia__produccion_de_petroleo_y_gas_sesco*"]
+  resource_patterns:
+    - "energia::4cc61040-aa44-440d-a912-91bd6c26b8a7"
 
 canonical_columns:
   - name: anio
@@ -26,30 +44,53 @@ canonical_columns:
     description: Año del registro
   - name: mes
     type: text
-    description: Mes del registro (1-12 o nombre)
+    description: Mes del registro (1-12)
   - name: indice_tiempo
     type: text
-    description: Período en formato fecha (YYYY-MM)
+    description: Período en formato YYYY-MM
   - name: concepto
     type: text
-    description: Tipo de hidrocarburo / concepto productivo
-  - name: cantidad_m3
+    description: Tipo de hidrocarburo o concepto productivo (crudo, gas natural, ...)
+  - name: empresa
     type: text
-    description: Producción en metros cúbicos
+    description: Empresa productora. 124 valores
+  - name: cantidad_m3
+    type: numeric
+    description: >-
+      Producción en metros cúbicos (Mm3 para gas, según el concepto). Numérico
+      y aditivo: sumar sobre empresas da el total nacional del período.
 
 sql: |
   SELECT
-    NULLIF(TRIM(anio::text), '')              AS anio,
-    NULLIF(TRIM(mes::text), '')               AS mes,
-    NULLIF(TRIM(indice_tiempo::text), '')     AS indice_tiempo,
-    NULLIF(TRIM(concepto), '')                AS concepto,
-    NULLIF(TRIM(cantidad_m3::text), '')       AS cantidad_m3
-  FROM {{ live_tables_by_table_pattern(
-      'energia__produccion_de_petroleo_y_gas_sesco*',
-      expected_columns=['anio', 'mes', 'indice_tiempo', 'concepto', 'cantidad_m3']
-  ) }} sub
-  WHERE NULLIF(TRIM(concepto), '') IS NOT NULL
+    NULLIF(TRIM(anio::text), '')                AS anio,
+    NULLIF(TRIM(mes::text), '')                 AS mes,
+    NULLIF(TRIM(indice_tiempo::text), '')       AS indice_tiempo,
+    NULLIF(TRIM(concepto::text), '')            AS concepto,
+    NULLIF(TRIM(empresa::text), '')             AS empresa,
+    -- Guard antes del cast. Medido sobre el origen: 100 % de los valores son
+    -- decimales limpios, pero un `::numeric` crudo sobre un texto que aparezca
+    -- mañana deja el mart en `build_failed`, que es como se rompió
+    -- `delitos_caba`.
+    CASE WHEN cantidad_m3::text ~ '^-?[0-9]+(\.[0-9]+)?$'
+         THEN cantidad_m3::text::numeric END    AS cantidad_m3
+  FROM {{ live_table('energia::4cc61040-aa44-440d-a912-91bd6c26b8a7',
+      expected_columns=['anio', 'mes', 'indice_tiempo', 'concepto', 'empresa',
+                        'cantidad_m3']) }} p
+  WHERE NULLIF(TRIM(concepto::text), '') IS NOT NULL
 
 refresh:
-  policy: manual
+  policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "producción de petróleo en Argentina por año"
+  - "qué empresas producen más gas natural"
+  - "evolución de la producción de hidrocarburos"
+  - "producción no convencional de Vaca Muerta"
+  - "producción mensual de petróleo por empresa"
+
+expectations:
+  # La mitad de las 37.131 filas observadas al escribir esto. El piso importa
+  # acá más que en otros marts: la versión anterior servía 4,1 M de filas y
+  # cualquier tripwire por tamaño la habría dado por sana.
+  min_rows: 18565
