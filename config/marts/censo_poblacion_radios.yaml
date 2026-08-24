@@ -1,0 +1,194 @@
+id: censo_poblacion_radios
+version: 0.1.0
+description: |
+  Población y viviendas por radio censal en los cuatro censos nacionales
+  (1991, 2001, 2010, 2022), con nombre de provincia y departamento resueltos.
+  Una fila por radio y por censo.
+
+  Es el **denominador que le faltaba al resto de los marts**: hasta ahora no
+  se podía responder "delitos por cada 100 mil habitantes" ni ninguna tasa per
+  cápita, porque no había ninguna fuente de población servida. Censo/población
+  era además el único tema con demanda medida y cero marts: 50 de 1.232
+  preguntas de usuarios (4,1 %).
+
+  **Validado contra las cifras oficiales**, que es la razón por la que este
+  mart sale de las tablas de radios y no de la tabla larga del censo:
+
+  | censo | radios | población del mart | oficial | |
+  |---|---|---|---|---|
+  | 2022 | 66.502 | 45.618.784 | 45.892.285 | 99,4 % |
+  | 2010 | 52.406 | 40.114.872 | 40.117.096 | 100,0 % |
+  | 2001 | 46.582 | 36.259.324 | 36.260.130 | 100,0 % |
+  | 1991 | 40.099 | 32.609.206 | 32.615.528 | 100,0 % |
+
+  **Por qué NO se usó el recurso principal del Censo 2022.** El cluster
+  `Censo Nacional de Población, Hogares y Viviendas 2022` trae 24 tablas
+  (una por provincia, 11,4 M filas) en formato largo
+  `radio × variable × categoría`. Está incompleto de un modo que no se ve
+  desde afuera: siete provincias entraron truncadas — CABA conserva 119.548
+  filas de 1.035.358 (−88 %), Mendoza 76.986 de 854.096 (−91 %) — y Buenos
+  Aires quedó clavada en el tope de ingesta de 1.000.000 con 43 variables de
+  las 76. Peor todavía, las provincias que **sí** están completas tampoco
+  suman: en Córdoba Capital la variable `PERSONA_EDAD` cubre 1.308 de los
+  2.069 radios y da 930.548 habitantes contra 1.330.023 reales. Tres
+  variables distintas devuelven exactamente el mismo número, así que el dato
+  es coherente consigo mismo y consistentemente bajo — la forma más
+  peligrosa de estar mal. Un mart de población que subdeclara 30 % en el
+  mejor caso y 90 % en el peor es peor que no tener mart.
+
+  El detalle por variable y categoría sigue disponible en el sandbox sobre
+  las tablas `raw`, para quien lo pida sabiendo lo que hay.
+
+  **Cobertura geográfica.** El censo 2022 resuelve los 529 departamentos
+  contra `georef::departamentos`, sin huérfanos. Los censos históricos no:
+  1991 deja 13,2 % de los radios sin nombre de departamento, 2001 el 7,0 % y
+  2010 el 6,2 %. No es un defecto de datos sino un cambio de nomenclatura —
+  CABA reemplazó su vieja división por las 15 comunas en 2005 y concentra
+  9.028 de los huérfanos, y varios partidos bonaerenses se subdividieron
+  entre censos. **La población de esas filas está completa**: `poblacion` no
+  es NULL en ninguna fila del mart, y por eso los totales nacionales validan
+  igual. `provincia_nombre` se resuelve aparte, contra `georef::provincias`,
+  así que nunca falta; el único campo afectado es `departamento_nombre`.
+domain: social
+
+sources:
+  portals: [datos_gob_ar, georef]
+  resource_patterns:
+    - "datos_gob_ar::*radios_censales*"
+    - "georef::departamentos"
+    - "georef::provincias"
+
+canonical_columns:
+  - name: censo_anio
+    type: int
+    description: Año del censo nacional (1991, 2001, 2010, 2022)
+  - name: codigo
+    type: text
+    description: Código INDEC del radio censal (provincia + departamento + fracción + radio)
+  - name: provincia_id
+    type: text
+    description: Código INDEC de provincia (2 dígitos)
+  - name: provincia_nombre
+    type: text
+    description: Nombre de la provincia
+  - name: departamento_id
+    type: text
+    description: Código INDEC de departamento (5 dígitos, provincia + departamento)
+  - name: departamento_nombre
+    type: text
+    description: >-
+      Nombre del departamento o partido. NULL en 6-13 % de los radios de los
+      censos históricos, cuyos códigos preceden a la nomenclatura actual
+      (comunas de CABA desde 2005, partidos bonaerenses subdivididos). Completo
+      en 2022. La población de esas filas no se pierde.
+  - name: fraccion
+    type: text
+    description: Fracción censal dentro del departamento
+  - name: radio
+    type: text
+    description: Radio censal dentro de la fracción
+  - name: poblacion
+    type: bigint
+    description: Población total del radio en ese censo
+  - name: viviendas_total
+    type: bigint
+    description: Viviendas totales del radio en ese censo
+  - name: viviendas_particulares
+    type: bigint
+    description: Viviendas particulares. Sólo 1991 y 2010; NULL en 2001 y 2022, que no lo publican
+  - name: viviendas_colectivas
+    type: bigint
+    description: Viviendas colectivas. Sólo 1991 y 2010; NULL en 2001 y 2022, que no lo publican
+
+sql: |
+  WITH provincias AS (
+    SELECT
+      NULLIF(TRIM(id), '')     AS provincia_id,
+      NULLIF(TRIM(nombre), '') AS provincia_nombre
+    FROM {{ live_table('georef::provincias',
+        expected_columns=['id', 'nombre']) }} gp
+  ),
+  deptos AS (
+    SELECT
+      NULLIF(TRIM(id), '')     AS departamento_id,
+      NULLIF(TRIM(nombre), '') AS departamento_nombre
+    FROM {{ live_table('georef::departamentos',
+        expected_columns=['id', 'nombre']) }} g
+  ),
+  -- Un `live_table` por censo, con la identidad del recurso. Es deliberado:
+  -- 1991 y 2010 publican la MISMA columna `B_POB_TOT` y sólo se distinguen por
+  -- cuál recurso son, así que ningún patrón sobre nombres de columna puede
+  -- separarlos. Además cada censo existe por duplicado en el portal — una
+  -- copia con `geom` y otra con `wkt`, mismas filas — y elegir la identidad
+  -- exacta descarta el espejo por construcción, sin necesidad de deduplicar.
+  -- Si una identidad desaparece, `expected_columns` hace que esa rama quede
+  -- vacía y el mart pierde un censo en lugar de dejar de construir.
+  radios AS (
+    SELECT 2022 AS censo_anio, codigo, cod_prov, cod_dep, fraccion, radio,
+           "POB_TOT_P"::text AS pob, "VIV_TOT_P"::text AS viv,
+           NULL::text AS viv_p, NULL::text AS viv_c
+    FROM {{ live_table('datos_gob_ar::cac5bf79-1de9-5adb-acf4-6a7daf3b2ae1',
+        expected_columns=['codigo', 'cod_prov', 'cod_dep', 'fraccion', 'radio',
+                          'POB_TOT_P', 'VIV_TOT_P']) }} r2022
+
+    UNION ALL
+    SELECT 2010, codigo, cod_prov, cod_dep, fraccion, radio,
+           "B_POB_TOT"::text, "B_VIV_TOT"::text, "B_VIV_P"::text, "B_VIV_C"::text
+    FROM {{ live_table('datos_gob_ar::2558a681-34cc-5490-bbff-49c35ebacca0',
+        expected_columns=['codigo', 'cod_prov', 'cod_dep', 'fraccion', 'radio',
+                          'B_POB_TOT', 'B_VIV_TOT', 'B_VIV_P', 'B_VIV_C']) }} r2010
+
+    UNION ALL
+    SELECT 2001, codigo, cod_prov, cod_dep, fraccion, radio,
+           "POB_TOT"::text, "VIV_TOT"::text, NULL::text, NULL::text
+    FROM {{ live_table('datos_gob_ar::c363739d-88a9-57e6-b0c4-90f8837372e1',
+        expected_columns=['codigo', 'cod_prov', 'cod_dep', 'fraccion', 'radio',
+                          'POB_TOT', 'VIV_TOT']) }} r2001
+
+    UNION ALL
+    SELECT 1991, codigo, cod_prov, cod_dep, fraccion, radio,
+           "B_POB_TOT"::text, "B_VIV_TOT"::text, "B_VIV_P"::text, "B_VIV_C"::text
+    FROM {{ live_table('datos_gob_ar::b2bd16df-82fa-5c8d-958c-026ab1ab77eb',
+        expected_columns=['codigo', 'cod_prov', 'cod_dep', 'fraccion', 'radio',
+                          'B_POB_TOT', 'B_VIV_TOT', 'B_VIV_P', 'B_VIV_C']) }} r1991
+  )
+  SELECT
+    r.censo_anio,
+    NULLIF(TRIM(r.codigo::text), '')                          AS codigo,
+    lpad(r.cod_prov::text, 2, '0')                            AS provincia_id,
+    p.provincia_nombre,
+    lpad(r.cod_prov::text, 2, '0')
+      || lpad(r.cod_dep::text, 3, '0')                        AS departamento_id,
+    d.departamento_nombre,
+    NULLIF(TRIM(r.fraccion::text), '')                        AS fraccion,
+    NULLIF(TRIM(r.radio::text), '')                           AS radio,
+    -- Guard antes de cada cast. Las cuatro fuentes llegan con tipos distintos
+    -- según cómo las haya parseado el collector, y un `::bigint` crudo sobre
+    -- un valor con texto deja el mart en `build_failed`.
+    CASE WHEN r.pob   ~ '^-?[0-9]+$' THEN r.pob::bigint   END AS poblacion,
+    CASE WHEN r.viv   ~ '^-?[0-9]+$' THEN r.viv::bigint   END AS viviendas_total,
+    CASE WHEN r.viv_p ~ '^-?[0-9]+$' THEN r.viv_p::bigint END AS viviendas_particulares,
+    CASE WHEN r.viv_c ~ '^-?[0-9]+$' THEN r.viv_c::bigint END AS viviendas_colectivas
+  FROM radios r
+  LEFT JOIN provincias p
+    ON p.provincia_id = lpad(r.cod_prov::text, 2, '0')
+  LEFT JOIN deptos d
+    ON d.departamento_id = lpad(r.cod_prov::text, 2, '0') || lpad(r.cod_dep::text, 3, '0')
+  WHERE NULLIF(TRIM(r.codigo::text), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []
+
+sample_queries:
+  - "cuántos habitantes tiene un departamento según el censo"
+  - "población por provincia en el censo 2022"
+  - "cómo creció la población entre 1991 y 2022"
+  - "cuántas viviendas hay en un partido"
+  - "población de Argentina por departamento"
+
+expectations:
+  # La mitad de lo observado al escribir esto (205.589 = 66.502 + 52.406 +
+  # 46.582 + 40.099). Un piso, no una expectativa de tamaño: si una identidad
+  # de recurso se regenera, esa rama cae a cero y el conteo baja de acá.
+  min_rows: 102794
