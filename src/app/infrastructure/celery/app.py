@@ -111,6 +111,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.quality_alert_tasks",
             "app.infrastructure.celery.tasks.columns_backfill",
             "app.infrastructure.celery.tasks.identity_reconcile",
+            "app.infrastructure.celery.tasks.retry_our_failures",
             "app.infrastructure.celery.tasks.llm_repair_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
@@ -189,6 +190,7 @@ def create_celery() -> Celery:
         "openarg.portal_canary": {"queue": "ingest"},
         "openarg.reconcile_dataset_identities": {"queue": "ingest"},
         "openarg.cleanup_duplicate_tables": {"queue": "ingest"},
+        "openarg.retry_our_own_failures": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
@@ -372,6 +374,15 @@ def create_celery() -> Celery:
                 # expectations are judged.
                 "task": "openarg.check_mart_expectations",
                 "schedule": crontab(hour=8, minute=50),
+                "options": {"queue": "ingest"},
+            },
+            "retry-our-own-failures": {
+                # Daily and bounded. 1,031 resources had been dead since May
+                # for no reason but a retry counter, and nothing was ever going
+                # to look at them again.
+                "task": "openarg.retry_our_own_failures",
+                "schedule": crontab(hour=7, minute=10),
+                "kwargs": {"dry_run": False, "limit": 200},
                 "options": {"queue": "ingest"},
             },
             "portal-canary": {
