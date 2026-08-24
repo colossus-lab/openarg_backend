@@ -283,6 +283,33 @@ def portal_canary(self, *, limit: int | None = None) -> dict[str, Any]:
     if limit:
         targets = targets[:limit]
 
+    # Which portals this cannot ask anything of. Five of them — series_tiempo,
+    # georef, mapa_estado, bcra, gobernaciones — are API connectors with no
+    # download URL at all, so a file probe has nothing to fetch. They are not
+    # dead; `bcra` collected today. But a canary that quietly covers 33 of 38
+    # portals reports coverage it does not have, which is the same shape as
+    # every other gap this system has grown: something looks watched because
+    # nothing said otherwise.
+    with engine.connect() as conn:
+        uncovered = [
+            str(r.portal)
+            for r in conn.execute(
+                text(
+                    """
+                    SELECT DISTINCT d.portal FROM datasets d
+                    WHERE d.portal NOT IN (
+                        SELECT DISTINCT d2.portal FROM datasets d2
+                        JOIN raw.cached_datasets cd2 ON cd2.dataset_id = d2.id
+                        WHERE cd2.status = 'ready' AND cd2.row_count > 0
+                          AND d2.download_url IS NOT NULL AND d2.download_url <> ''
+                    )
+                    ORDER BY d.portal
+                    """
+                )
+            )
+        ]
+        conn.rollback()
+
     by_verdict: dict[str, int] = {}
     alerts: list[Alert] = []
     for t in targets:
@@ -305,5 +332,8 @@ def portal_canary(self, *, limit: int | None = None) -> dict[str, Any]:
     result = notify(engine, alerts, heading="OpenArg · canario de portales")
     result["probed"] = len(targets)
     result["by_verdict"] = by_verdict
+    # Named, not counted: "5 uncovered" invites the reader to assume they are
+    # the harmless ones.
+    result["uncovered_portals"] = uncovered
     logger.info("portal canary: %s", result)
     return result

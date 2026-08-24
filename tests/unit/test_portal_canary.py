@@ -100,3 +100,24 @@ def test_a_csv_whose_body_merely_mentions_html_is_still_data():
     login page."""
     body = b"id,html_url\n1,https://x\n" + b"z" * 1000
     assert _probe(_Resp(body=body)).verdict == "ok"
+
+
+def test_the_canary_names_what_it_cannot_probe():
+    """A canary that quietly covers 33 of 38 portals reports coverage it does
+    not have.
+
+    Five portals — series_tiempo, georef, mapa_estado, bcra, gobernaciones —
+    are API connectors with no download URL, so a file probe has nothing to
+    fetch. They are not dead; `bcra` collected the same day this was written.
+    But leaving them out of the result makes them look watched, which is the
+    same shape as every other gap this system has grown.
+    """
+    import inspect
+
+    from app.infrastructure.celery.tasks import quality_alert_tasks as q
+
+    src = inspect.getsource(q.portal_canary)
+    assert "uncovered_portals" in src
+    # Named rather than counted: a bare number invites the reader to assume the
+    # missing ones are the harmless ones.
+    assert "uncovered" in src and "len(uncovered)" not in src
