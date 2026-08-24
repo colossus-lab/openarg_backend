@@ -302,3 +302,57 @@ def test_source_marker_rejects_collision_with_an_expected_column(monkeypatch) ->
     )
     with pytest.raises(MacroResolutionError, match="collides"):
         resolve_macros(sql, engine=object())
+
+
+def _mirror_rows():
+    """A cluster where `datos_gob_ar` re-publishes two of three resources."""
+    return [
+        _LiveRow(
+            resource_identity="produccion::72328162-97f6-4015-ba07-945485d8dc9f",
+            schema_name="raw",
+            table_name="p_full",
+        ),
+        _LiveRow(
+            resource_identity="datos_gob_ar::produccion_72328162-97f6-4015-ba07-945485d8dc9f",
+            schema_name="raw",
+            table_name="p_sin_finalidad",
+        ),
+        _LiveRow(
+            resource_identity="datos_gob_ar::justicia_249b3214-411f-4fe5-9600-59b44ef7ec06",
+            schema_name="raw",
+            table_name="p_dimension",
+        ),
+    ]
+
+
+def test_federated_mirrors_are_dropped_when_the_original_is_present(monkeypatch) -> None:
+    """`datos_gob_ar::<portal>_<uuid>` is the same resource as `<portal>::<uuid>`,
+    collected twice. 425 such pairs are live, so a pattern over a cluster serves
+    those rows twice — the largest single source of duplicate rows across the
+    marts."""
+    _patch(monkeypatch, _mirror_rows())
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors=True) }} s"
+    resolved = resolve_macros(sql, engine=object())
+    assert 'raw."p_full"' in resolved
+    # The mirror of p_full goes...
+    assert 'raw."p_sin_finalidad"' not in resolved
+    # ...but the justicia mirror stays: its original is not in this match set,
+    # so it is the only copy there is and dropping it would lose the resource.
+    assert 'raw."p_dimension"' in resolved
+
+
+def test_federated_mirrors_are_kept_by_default(monkeypatch) -> None:
+    """Off unless asked. Turning it on changes what a mart contains, and 59
+    marts union a pattern — flipping them all at once without checking each
+    count is how a dedup becomes an incident."""
+    _patch(monkeypatch, _mirror_rows())
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*') }} s"
+    resolved = resolve_macros(sql, engine=object())
+    assert 'raw."p_sin_finalidad"' in resolved
+
+
+def test_drop_federated_mirrors_rejects_a_non_bool(monkeypatch) -> None:
+    _patch(monkeypatch, _mirror_rows())
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors='yes') }} s"
+    with pytest.raises(MacroResolutionError, match="must be a bool"):
+        resolve_macros(sql, engine=object())

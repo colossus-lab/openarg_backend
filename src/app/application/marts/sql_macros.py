@@ -90,6 +90,39 @@ _RESOURCE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.\-:* ]+$")
 _MAX_UNION_TABLES = int(os.getenv("OPENARG_MART_MAX_UNION_TABLES", "200"))
 
 
+# `datos_gob_ar` re-publishes other portals' resources under a derived
+# identity: `datos_gob_ar::<portal>_<uuid>` is the same resource as
+# `<portal>::<uuid>`, collected twice into two tables with the same rows.
+# Measured 2026-08-24: **425 live mirror pairs**, concentrated in `energia`
+# (262), `justicia` (260), `produccion` (84) and `acumar` (43). A pattern that
+# matches a cluster picks up both halves, and the mart then serves every row
+# twice — the single largest contributor to duplicate rows across the
+# catalogue.
+_FEDERATED_MIRROR_RE = re.compile(
+    r"^datos_gob_ar::(?P<portal>[a-z_]+)_"
+    r"(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _drop_federated_mirrors(lives: list[_LiveRow]) -> tuple[list[_LiveRow], int]:
+    """Drop `datos_gob_ar` copies whose original is in the same match set.
+
+    Only when the original is present: a mirror the pattern found on its own
+    is the only copy there is, and dropping it would lose the resource rather
+    than deduplicate it.
+    """
+    present = {row.resource_identity for row in lives}
+    kept: list[_LiveRow] = []
+    dropped = 0
+    for row in lives:
+        match = _FEDERATED_MIRROR_RE.match(row.resource_identity)
+        if match and f"{match.group('portal')}::{match.group('uuid')}" in present:
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, dropped
+
+
 class MacroResolutionError(ValueError):
     """Raised when a macro cannot be resolved (bad syntax, bad arg)."""
 
@@ -267,6 +300,7 @@ def _build_union(
     require_all_columns: bool = False,
     require_columns: list[str] | None = None,
     source_marker: str | None = None,
+    drop_federated_mirrors: bool = False,
     engine=None,
 ) -> str:
     """Build a UNION ALL subquery from N live rows.
@@ -308,11 +342,27 @@ def _build_union(
       a dedup built on it passed every row through — the mart double-counted
       2017 while reporting a healthy row count.
 
+    With `drop_federated_mirrors=True`:
+      Discards `datos_gob_ar::<portal>_<uuid>` rows when `<portal>::<uuid>` is
+      also in the match set — the same resource collected twice. Off by
+      default: turning it on changes what a mart contains, so each mart opts
+      in after its own count is checked.
+
     Without `expected_columns`:
       - Empty list → `SELECT NULL::text AS dummy WHERE FALSE` (legacy).
       - N matches → `SELECT * FROM <each>` UNION ALL (legacy).
     """
     lives_list = list(lives)
+
+    mirrors_dropped = 0
+    if drop_federated_mirrors:
+        lives_list, mirrors_dropped = _drop_federated_mirrors(lives_list)
+        if mirrors_dropped:
+            logger.info(
+                "%s: dropped %d federated mirror(s) whose original is in the same match set",
+                macro_name or "live_tables_by_*",
+                mirrors_dropped,
+            )
 
     filter_set: set[str] | None = None
     if require_columns:
@@ -618,6 +668,9 @@ def resolve_macros(sql: str, engine) -> str:
                 raise MacroResolutionError(
                     f"Macro {name}(): require_columns not in expected_columns: {sorted(missing)}"
                 )
+        drop_federated_mirrors = kwargs.get("drop_federated_mirrors", False)
+        if not isinstance(drop_federated_mirrors, bool):
+            raise MacroResolutionError(f"Macro {name}(): drop_federated_mirrors must be a bool")
         source_marker = kwargs.get("source_marker")
         if source_marker is not None:
             if not isinstance(source_marker, str) or not source_marker:
@@ -672,6 +725,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
                 source_marker=source_marker,
+                drop_federated_mirrors=drop_federated_mirrors,
                 engine=engine,
             )
 
@@ -687,6 +741,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
                 source_marker=source_marker,
+                drop_federated_mirrors=drop_federated_mirrors,
                 engine=engine,
             )
 
@@ -702,6 +757,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
                 source_marker=source_marker,
+                drop_federated_mirrors=drop_federated_mirrors,
                 engine=engine,
             )
 
