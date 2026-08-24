@@ -74,7 +74,7 @@ def test_real_column_names_are_left_alone():
 
 
 def test_collector_lineage_columns_keep_their_names():
-    old = ["Muy largo titulo repetido en cada columna aca", 
+    old = ["Muy largo titulo repetido en cada columna aca",
            "Muy largo titulo repetido en cada columna _2",
            "Muy largo titulo repetido en cada columna _3", "_source_dataset_id"]
     cols, _, why = propose_smeared_title_rename(old, [("Depto", "2020", "2021", "x")])
