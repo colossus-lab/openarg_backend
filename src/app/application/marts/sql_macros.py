@@ -33,6 +33,13 @@ that this module resolves at build time. Supported macros:
         With 0 matches, falls back to `SELECT NULL::text AS c1, ...
         WHERE FALSE`.
 
+  {{ live_tables_by_table_pattern('ddjj__*', expected_columns=[...],
+                                   source_marker='__src') }}
+      → each union branch also projects `'<schema>.<table>'::text AS __src`,
+        so a mart can deduplicate by which physical table a row came from.
+        The ingest columns cannot answer that: `_source_dataset_id` names
+        the CKAN dataset, and one dataset routinely lands in several tables.
+
 When a macro resolves to ZERO live tables, the result is a deterministic
 empty-shape subquery (`SELECT WHERE FALSE`), so the mart still builds
 with a known shape and stays empty until upstream lands.
@@ -259,6 +266,7 @@ def _build_union(
     expected_columns: list[str] | None = None,
     require_all_columns: bool = False,
     require_columns: list[str] | None = None,
+    source_marker: str | None = None,
     engine=None,
 ) -> str:
     """Build a UNION ALL subquery from N live rows.
@@ -288,6 +296,17 @@ def _build_union(
       absent from a matched table are still projected as NULL, so the
       outer SELECT is unaffected.
       Takes precedence over `require_all_columns` when both are given.
+
+    With `source_marker='<col>'`:
+      Each branch of the union also projects a literal naming the physical
+      table it came from. Needed whenever a mart must deduplicate by
+      provenance: the ingest columns cannot do it, because
+      `_source_dataset_id` identifies the CKAN *dataset* and one dataset
+      routinely publishes several resources into several tables. Measured on
+      the DDJJ cluster: three physically distinct tables share a single
+      `_source_dataset_id`, so grouping by it merged them into one group and
+      a dedup built on it passed every row through — the mart double-counted
+      2017 while reporting a healthy row count.
 
     Without `expected_columns`:
       - Empty list → `SELECT NULL::text AS dummy WHERE FALSE` (legacy).
@@ -344,7 +363,10 @@ def _build_union(
 
     if expected_columns:
         if not lives_list:
-            return _typed_empty_select(expected_columns, coverage_note=coverage_note)
+            cols_for_empty = (
+                [*expected_columns, source_marker] if source_marker else expected_columns
+            )
+            return _typed_empty_select(cols_for_empty, coverage_note=coverage_note)
         # Inspect the actual schema of each matched table and project the
         # intersection that's also in `expected_columns`. Tables missing
         # a particular column emit `NULL::text AS col` to keep the union
@@ -368,11 +390,23 @@ def _build_union(
                 (f'"{c}"::text AS "{c}"' if c in cols_present else f'NULL::text AS "{c}"')
                 for c in expected_columns
             ]
+            if source_marker:
+                # A literal, not a column: it must differ per physical table
+                # even when every ingest column is identical across mirrors.
+                literal = f"{r.schema_name}.{r.table_name}".replace("'", "''")
+                projected.append(f"'{literal}'::text AS \"{source_marker}\"")
             selects.append(f"SELECT {', '.join(projected)} FROM {_qualified(r)}")
         return "(" + coverage_note + " UNION ALL ".join(selects) + ")"
 
     # Legacy path (no expected_columns).
-    selects = [f"SELECT * FROM {_qualified(r)}" for r in lives_list]
+    if source_marker:
+        selects = [
+            f"""SELECT *, '{f"{r.schema_name}.{r.table_name}".replace("'", "''")}'::text """
+            f'AS "{source_marker}" FROM {_qualified(r)}'
+            for r in lives_list
+        ]
+    else:
+        selects = [f"SELECT * FROM {_qualified(r)}" for r in lives_list]
     if not selects:
         return f"({coverage_note}SELECT NULL::text AS dummy WHERE FALSE)"
     return "(" + coverage_note + " UNION ALL ".join(selects) + ")"
@@ -584,6 +618,17 @@ def resolve_macros(sql: str, engine) -> str:
                 raise MacroResolutionError(
                     f"Macro {name}(): require_columns not in expected_columns: {sorted(missing)}"
                 )
+        source_marker = kwargs.get("source_marker")
+        if source_marker is not None:
+            if not isinstance(source_marker, str) or not source_marker:
+                raise MacroResolutionError(
+                    f"Macro {name}(): source_marker must be a non-empty string"
+                )
+            if expected_columns and source_marker in expected_columns:
+                raise MacroResolutionError(
+                    f"Macro {name}(): source_marker {source_marker!r} collides with "
+                    f"an expected column"
+                )
         if require_all_columns and not expected_columns:
             raise MacroResolutionError(
                 f"Macro {name}(): require_all_columns=True requires expected_columns"
@@ -626,6 +671,7 @@ def resolve_macros(sql: str, engine) -> str:
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
+                source_marker=source_marker,
                 engine=engine,
             )
 
@@ -640,6 +686,7 @@ def resolve_macros(sql: str, engine) -> str:
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
+                source_marker=source_marker,
                 engine=engine,
             )
 
@@ -654,6 +701,7 @@ def resolve_macros(sql: str, engine) -> str:
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
+                source_marker=source_marker,
                 engine=engine,
             )
 

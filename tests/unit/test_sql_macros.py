@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from app.application.marts.sql_macros import _LiveRow, resolve_macros
+import re
+
+import pytest
+
+from app.application.marts.sql_macros import (
+    MacroResolutionError,
+    _LiveRow,
+    resolve_macros,
+)
 
 
 def test_resolve_macros_live_table_uses_targeted_lookup(monkeypatch) -> None:
@@ -245,3 +253,52 @@ def test_no_coverage_marker_when_nothing_was_filtered(monkeypatch) -> None:
     sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*') }} s"
     resolved = resolve_macros(sql, engine=object())
     assert "macro_coverage" not in resolved
+
+
+def test_source_marker_distinguishes_tables_sharing_a_dataset_id(monkeypatch) -> None:
+    """The marker must differ per physical table, not per ingest column.
+
+    Regression guard for the DDJJ bug: `ddjj_patrimonio_declarado` deduplicated
+    on `_source_dataset_id`, three of its seven source tables carried the same
+    value, and every row of the year they shared passed through twice. The
+    build reported `success` with a plausible row count, so nothing caught it —
+    only counting one declaration's rows against each source did.
+    """
+    _patch(monkeypatch, _rows())
+    sql = (
+        "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', "
+        f"expected_columns={_CORE!r}, source_marker='__src') }}}} s"
+    )
+    resolved = resolve_macros(sql, engine=object())
+
+    markers = re.findall(r"'([^']+)'::text AS \"__src\"", resolved)
+    assert markers == ["raw.p_full", "raw.p_sin_finalidad", "raw.p_dimension"]
+    # One literal per branch, all distinct — the property the dedup rests on.
+    assert len(set(markers)) == len(markers)
+
+
+def test_source_marker_survives_zero_matches(monkeypatch) -> None:
+    """An empty cluster must still expose the marker column.
+
+    Without it the outer dedup references `__src` against a shape that lacks
+    it and the mart fails to build instead of building empty — which is the
+    whole point of the typed-empty fallback.
+    """
+    _patch(monkeypatch, [])
+    sql = (
+        "SELECT 1 FROM {{ live_tables_by_table_pattern('nomatch*', "
+        f"expected_columns={_CORE!r}, source_marker='__src') }}}} s"
+    )
+    resolved = resolve_macros(sql, engine=object())
+    assert 'NULL::text AS "__src"' in resolved
+    assert "WHERE FALSE" in resolved
+
+
+def test_source_marker_rejects_collision_with_an_expected_column(monkeypatch) -> None:
+    _patch(monkeypatch, _rows())
+    sql = (
+        "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', "
+        f"expected_columns={_CORE!r}, source_marker={_CORE[0]!r}) }}}} s"
+    )
+    with pytest.raises(MacroResolutionError, match="collides"):
+        resolve_macros(sql, engine=object())
