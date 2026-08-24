@@ -193,6 +193,7 @@ def create_celery() -> Celery:
         "openarg.cleanup_duplicate_tables": {"queue": "ingest"},
         "openarg.retry_our_own_failures": {"queue": "ingest"},
         "openarg.rescue_rejected_resources": {"queue": "ingest"},
+        "openarg.repair_smeared_title_tables": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
@@ -376,6 +377,14 @@ def create_celery() -> Celery:
                 # expectations are judged.
                 "task": "openarg.check_mart_expectations",
                 "schedule": crontab(hour=8, minute=50),
+                "options": {"queue": "ingest"},
+            },
+            "repair-smeared-titles": {
+                # These tables are `ready` and their data is fine — only the
+                # names are wrong, which is why no status ever flagged them.
+                "task": "openarg.repair_smeared_title_tables",
+                "schedule": crontab(hour=6, minute=30),
+                "kwargs": {"dry_run": False, "limit": 300},
                 "options": {"queue": "ingest"},
             },
             "rescue-rejected-resources": {

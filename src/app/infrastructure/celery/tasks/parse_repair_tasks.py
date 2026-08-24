@@ -134,3 +134,95 @@ def repair_unsplit_csv_tables(
     }
     logger.info("unsplit-csv repair: %s", result)
     return result
+
+
+# Tables whose columns are one title copied across them. The SQL narrows to
+# plausible candidates — several long names ending in `_N` — and the proposer
+# decides; asking Postgres for a common-prefix test across 24,000 tables would
+# cost more than reading the few hundred that could possibly match.
+_SMEARED_CANDIDATES_SQL = text(
+    r"""
+    WITH cols AS (
+        SELECT c.table_schema, c.table_name, c.column_name
+        FROM information_schema.columns c
+        JOIN information_schema.tables t
+          ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+         AND t.table_type = 'BASE TABLE'
+        WHERE c.table_schema IN ('raw', 'public')
+          AND c.column_name NOT LIKE '\_%'
+          AND length(c.column_name) >= 25
+    )
+    SELECT table_schema, table_name
+    FROM cols
+    WHERE column_name ~ '_[0-9]+$'
+    GROUP BY table_schema, table_name
+    HAVING count(*) >= 2
+    ORDER BY table_name
+    LIMIT :limit
+    """
+)
+
+
+@celery_app.task(
+    name="openarg.repair_smeared_title_tables",
+    bind=True,
+    soft_time_limit=1800,
+    time_limit=2400,
+)
+def repair_smeared_title_tables(
+    self, *, limit: int = 300, dry_run: bool = True
+) -> dict[str, Any]:
+    """Recover headers pandas smeared across the columns.
+
+    Measured on 2026-08-23: 116 **servable** tables carry this, holding 291,436
+    rows — `acceso_de_mujeres_a_la_salud`,
+    `casos_penales_contravencionales_violencia`,
+    `educacion_sexual_integral`. They are served today with every column named
+    after the same sentence, so a person asking about maternal mortality gets a
+    table they cannot read.
+
+    Unlike the other sweeps here, this one targets tables that are *working* —
+    the resource is `ready` and the data is fine. Only the names are wrong,
+    which is why nothing ever flagged them: no status was ever bad.
+    """
+    import uuid
+
+    from app.application.repair.parse_repair import repair_smeared_title_table
+
+    engine = get_sync_engine()
+    run_id = uuid.uuid4()
+
+    with engine.connect() as conn:
+        rows = conn.execute(_SMEARED_CANDIDATES_SQL, {"limit": limit}).fetchall()
+        conn.rollback()
+
+    by_reason: dict[str, int] = {}
+    repaired: list[str] = []
+    for row in rows:
+        try:
+            outcome = repair_smeared_title_table(
+                engine,
+                table_schema=row.table_schema,
+                table_name=row.table_name,
+                run_id=run_id,
+                dry_run=dry_run,
+            )
+        except Exception:
+            by_reason["raised"] = by_reason.get("raised", 0) + 1
+            logger.warning("smeared repair raised for %s", row.table_name, exc_info=True)
+            continue
+        key = (outcome.reason or "").split(":")[0]
+        by_reason[key] = by_reason.get(key, 0) + 1
+        if outcome.ok and not dry_run:
+            repaired.append(str(row.table_name))
+
+    result = {
+        "run_id": str(run_id),
+        "candidates": len(rows),
+        "dry_run": dry_run,
+        "by_reason": by_reason,
+        "repaired": len(repaired),
+        "samples": repaired[:5],
+    }
+    logger.info("smeared-title repair: %s", result)
+    return result

@@ -1593,3 +1593,110 @@ def propose_smeared_title_rename(
         return old_cols, 0, "no_renames_needed"
     renamed = sum(1 for a, b in zip(old_cols, new_cols) if a != b)
     return new_cols, renamed, "ok"
+
+
+def repair_smeared_title_table(
+    engine: Engine,
+    *,
+    table_schema: str,
+    table_name: str,
+    run_id: uuid.UUID | None = None,
+    sample_rows: int = 5,
+    dry_run: bool = True,
+) -> RepairOutcome:
+    """Rename the columns of a smeared-title table and drop the header row.
+
+    The header lived in row 0, so promoting it to the column names leaves that
+    row behind as a duplicate of the header — it goes with the rename, in the
+    same transaction. A rename that succeeded while the delete failed would
+    leave `anio_2018` holding the literal string `2018`.
+
+    Same verification gate as its siblings, and for the same reason: this reads
+    a header out of the data, and a misread produces confident, plausible names
+    for the wrong columns.
+    """
+    run_id = run_id or uuid.uuid4()
+    outcome = RepairOutcome(
+        table_schema=table_schema, table_name=table_name, ok=False, dry_run=dry_run
+    )
+
+    with engine.connect() as conn:
+        old_cols = [
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :s AND table_name = :t ORDER BY ordinal_position"
+                ),
+                {"s": table_schema, "t": table_name},
+            ).fetchall()
+        ]
+    outcome.old_columns = old_cols
+    if not old_cols:
+        outcome.reason = "table_not_found_or_no_columns"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="smeared_title")
+        return outcome
+
+    qident_table = f"{_quote_ident(table_schema)}.{_quote_ident(table_name)}"
+    select_cols = ", ".join(_quote_ident(c) for c in old_cols)
+    with engine.connect() as conn:
+        sample = [
+            list(r)
+            for r in conn.execute(
+                text(f"SELECT {select_cols} FROM {qident_table} LIMIT :n"),  # noqa: S608
+                {"n": sample_rows},
+            ).fetchall()
+        ]
+
+    proposed_cols, renamed, reason = propose_smeared_title_rename(old_cols, sample)
+    outcome.new_columns = proposed_cols
+    if reason != "ok":
+        outcome.reason = reason
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="smeared_title")
+        return outcome
+
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="smeared_title")
+        return outcome
+
+    if dry_run:
+        outcome.ok = True
+        outcome.reason = "dry_run_proposal"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="smeared_title")
+        return outcome
+
+    try:
+        with engine.begin() as conn:
+            for old, new in zip(old_cols, proposed_cols):
+                if old != new:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {qident_table} "
+                            f"RENAME COLUMN {_quote_ident(old)} TO {_quote_ident(new)}"
+                        )
+                    )
+            # The header row, now redundant. In the same transaction as the
+            # rename: a rename that landed without the delete would leave
+            # `anio_2018` holding the literal string `2018`.
+            conn.execute(
+                text(
+                    f"DELETE FROM {qident_table} WHERE ctid IN "  # noqa: S608
+                    f"(SELECT ctid FROM {qident_table} ORDER BY ctid LIMIT 1)"
+                )
+            )
+        outcome.rows_deleted = 1
+        outcome.ok = True
+        outcome.reason = "applied"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="smeared_title")
+        logger.info(
+            "parse_repair (smeared_title): %s.%s renamed %d cols",
+            table_schema, table_name, renamed,
+        )
+    except Exception as exc:
+        outcome.reason = f"apply_failed:{str(exc)[:120]}"
+        outcome.error_message = str(exc)[:500]
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="smeared_title")
+        logger.warning("smeared_title repair failed for %s", table_name, exc_info=True)
+    return outcome
