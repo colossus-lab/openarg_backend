@@ -671,7 +671,11 @@ def _normalize_header_to_identifier(raw: object) -> str:
         return ""
     s = str(raw).strip().lower()
     s = _ARROW_BAD_TOKENS_RE.sub("", s)
-    table = str.maketrans("áàäéèëíìïóòöúùüñ", "aaaeeeiiioooouun")
+    # Three targets per vowel, in order. The previous table had four `o`s
+    # and two `u`s, so `ú` mapped to `o`: `Común` normalised to `comon`
+    # and `Número` to `nomero`. Every repair that renames a column shares
+    # this function.
+    table = str.maketrans("áàäéèëíìïóòöúùüñ", "aaaeeeiiiooouuun")
     s = s.translate(table)
     s = re.sub(r"[^a-z0-9]+", "_", s)
     s = s.strip("_")

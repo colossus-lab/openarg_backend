@@ -296,3 +296,24 @@ async def test_propose_llm_normalizes_and_dedupes_response():
     assert new_cols[0] == "estado"
     assert new_cols[1] == "estado_2"
     assert new_cols[2] == "estado_3"
+
+
+def test_accented_u_normalises_to_u_not_o() -> None:
+    """Regression guard for a shifted accent-translation table.
+
+    `_normalize_header_to_identifier` is shared by every repair that renames a
+    column (`col_n`, `title_as_columns`, `smeared_title`, the LLM tier). Its
+    table had six accented vowels mapping onto four `o` targets and two `u`
+    targets, so `ú` resolved to `o`: `Común` normalised to `comon` and `Número`
+    to `nomero`. Nothing failed loudly — the names were merely wrong, in every
+    rename applied since May.
+    """
+    from app.application.repair.parse_repair import _normalize_header_to_identifier as norm
+
+    assert norm("Común") == "comun"
+    assert norm("Número") == "numero"
+    assert norm("Múltiple") == "multiple"
+    # The vowels that were already correct must stay correct.
+    assert norm("Ámbito") == "ambito"
+    assert norm("Jurisdicción") == "jurisdiccion"
+    assert norm("Título") == "titulo"

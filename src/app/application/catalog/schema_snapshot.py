@@ -179,7 +179,7 @@ def _parse_pg_array(raw: Any) -> list[str]:
     """
     if raw is None:
         return []
-    if isinstance(raw, (list, tuple)):
+    if isinstance(raw, list | tuple):
         return [_clip(v) for v in raw[:MAX_PROFILE_VALUES]]
     text_form = str(raw).strip()
     if text_form.startswith("{") and text_form.endswith("}"):
