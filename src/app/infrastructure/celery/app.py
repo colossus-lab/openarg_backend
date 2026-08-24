@@ -112,6 +112,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.columns_backfill",
             "app.infrastructure.celery.tasks.identity_reconcile",
             "app.infrastructure.celery.tasks.retry_our_failures",
+            "app.infrastructure.celery.tasks.rescue_rejected",
             "app.infrastructure.celery.tasks.llm_repair_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
@@ -191,6 +192,7 @@ def create_celery() -> Celery:
         "openarg.reconcile_dataset_identities": {"queue": "ingest"},
         "openarg.cleanup_duplicate_tables": {"queue": "ingest"},
         "openarg.retry_our_own_failures": {"queue": "ingest"},
+        "openarg.rescue_rejected_resources": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
@@ -374,6 +376,16 @@ def create_celery() -> Celery:
                 # expectations are judged.
                 "task": "openarg.check_mart_expectations",
                 "schedule": crontab(hour=8, minute=50),
+                "options": {"queue": "ingest"},
+            },
+            "rescue-rejected-resources": {
+                # Before the retry sweep: a resource whose table can be repaired
+                # should be repaired, not re-downloaded. 546 sat rejected with
+                # their tables intact and fixes for their exact shape sitting
+                # unused since May.
+                "task": "openarg.rescue_rejected_resources",
+                "schedule": crontab(hour=6, minute=50),
+                "kwargs": {"dry_run": False, "limit": 100},
                 "options": {"queue": "ingest"},
             },
             "retry-our-own-failures": {
