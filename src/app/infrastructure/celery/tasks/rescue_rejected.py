@@ -50,6 +50,46 @@ _REJECTED_SQL = text(
 )
 
 
+def _is_smeared_title(names: list[str]) -> bool:
+    """Are these one long title copied across the columns with suffixes?
+
+    `is_garbage_column` knows `col_3`, `Unnamed:` and URLs. It does not know
+    this shape, and this shape is what most of the rejected tables actually
+    have: a title row read as a header, so every column is the same sentence
+    with `_2`, `_3`, `_4` glued on.
+
+    Found the hard way. The first run promoted
+    `cordoba_estadistica__departamento_san_alberto_mapas` on the strength of
+    `is_garbage_column` alone, and its columns were
+    `['Conformación Cartográfica de Localidades Censales 2008 por De',
+      '... por _2', '... por _3', ...]` — precisely the thing the gate exists to
+    refuse. A gate that passes what it was built to stop is worse than no gate,
+    because it launders the result.
+
+    Deliberately independent of column count: `repair_title_as_columns_table`
+    requires thirty columns before it will act, and a six-column table with the
+    same defect is just as unusable.
+    """
+    real = [n for n in names if not n.startswith("_")]
+    if len(real) < 3:
+        return False
+
+    # Longest common prefix, not identical stems. Postgres truncates identifiers
+    # at 63 bytes, so the first column of a smeared title often ends mid-word
+    # while its siblings end in `_2`, `_3` — stems that never match. The prefix
+    # is what they actually share, which is also what
+    # `repair_title_as_columns_table` looks for.
+    first, last = min(real), max(real)
+    i = 0
+    while i < min(len(first), len(last)) and first[i] == last[i]:
+        i += 1
+    prefix = first[:i].strip()
+
+    # A shared prefix is only damning when it is a phrase rather than a word:
+    # `fecha_inicio` and `fecha_fin` share seven characters and are both real.
+    return len(prefix) >= 20
+
+
 def _column_names(conn, schema: str, table: str) -> list[str]:
     return [
         str(r.column_name)
@@ -114,7 +154,11 @@ def rescue_rejected_resources(
         with engine.connect() as conn:
             names = _column_names(conn, schema, table)
             conn.rollback()
-        if not names or any(is_garbage_column(n) for n in names):
+        if (
+            not names
+            or any(is_garbage_column(n) for n in names)
+            or _is_smeared_title(names)
+        ):
             by_reason["still_unusable"] = by_reason.get("still_unusable", 0) + 1
             continue
 
