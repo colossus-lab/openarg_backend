@@ -157,7 +157,13 @@ _SMEARED_CANDIDATES_SQL = text(
     WHERE column_name ~ '_[0-9]+$'
     GROUP BY table_schema, table_name
     HAVING count(*) >= 2
-    ORDER BY table_name
+    -- Widest first. The SQL can only narrow to "several long names ending in
+    -- `_N`" — 1,064 tables — and roughly a tenth of those actually carry the
+    -- defect. Ordering by name spent the whole budget on the alphabet: a first
+    -- run of 300 refused all 300 while the table it was written for sorted
+    -- outside the window. Column count is the one signal available here that
+    -- correlates with the shape.
+    ORDER BY count(*) DESC, table_name
     LIMIT :limit
     """
 )
@@ -170,7 +176,7 @@ _SMEARED_CANDIDATES_SQL = text(
     time_limit=2400,
 )
 def repair_smeared_title_tables(
-    self, *, limit: int = 300, dry_run: bool = True
+    self, *, limit: int = 1200, dry_run: bool = True
 ) -> dict[str, Any]:
     """Recover headers pandas smeared across the columns.
 

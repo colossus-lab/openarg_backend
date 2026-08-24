@@ -109,3 +109,20 @@ def test_numbers_that_are_not_years_are_not_a_header():
            "Superficie sembrada por departamento y campaña agrícola_3"]
     _, _, why = propose_smeared_title_rename(old, [("Buenos Aires", "1500", "1600")])
     assert why == "row0_not_header_like"
+
+
+def test_the_sweep_orders_by_width_not_by_name():
+    """The SQL can only narrow to "several long names ending in `_N`" — 1,064
+    tables — and roughly a tenth carry the defect.
+
+    A first production run of 300 refused all 300 while the table the repair was
+    written for sorted outside the alphabetical window. Column count is the one
+    signal available in SQL that correlates with the shape.
+    """
+    from app.infrastructure.celery.tasks.parse_repair_tasks import (
+        _SMEARED_CANDIDATES_SQL,
+    )
+
+    sql = str(_SMEARED_CANDIDATES_SQL)
+    assert "ORDER BY count(*) DESC" in sql
+    assert "ORDER BY table_name\n" not in sql

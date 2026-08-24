@@ -384,7 +384,7 @@ def create_celery() -> Celery:
                 # names are wrong, which is why no status ever flagged them.
                 "task": "openarg.repair_smeared_title_tables",
                 "schedule": crontab(hour=6, minute=30),
-                "kwargs": {"dry_run": False, "limit": 300},
+                "kwargs": {"dry_run": False, "limit": 1200},
                 "options": {"queue": "ingest"},
             },
             "rescue-rejected-resources": {
