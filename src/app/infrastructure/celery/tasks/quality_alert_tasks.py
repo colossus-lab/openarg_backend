@@ -86,6 +86,29 @@ _STALL_HOURS = 36
 _REDIS_WARN_RATIO = 0.75
 
 
+# The mart audit writes its findings to `ingestion_findings` and stops there.
+# Four checks have been running against 74 marts and nobody was told: the two
+# defects found by hand on 2026-08-24 — `delitos_argentina_snic` inflating
+# every crime count by ~30 %, `energia_petroleo_gas_produccion` serving 97,6 %
+# duplicates — would have been reported by the sweep and still gone unread.
+# Detecting without telling anyone is the same as not detecting.
+#
+# Only CRITICAL, and only what is still unresolved: the sweep resolves a
+# finding when the mart comes back clean, so a fixed mart stops alerting on
+# its own.
+_MART_AUDIT_FINDINGS_SQL = text(
+    """
+    SELECT resource_id, detector_name, message
+    FROM ingestion_findings
+    WHERE mode = 'mart_audit'
+      AND severity = 'critical'
+      AND resolved_at IS NULL
+    ORDER BY found_at DESC
+    LIMIT 20
+    """
+)
+
+
 @celery_app.task(
     name="openarg.alert_on_quality_signals",
     bind=True,
@@ -111,6 +134,18 @@ def alert_on_quality_signals(self) -> dict[str, Any]:
                         key=str(row.mart_id),
                         title=f"Mart caído: {row.mart_id}",
                         detail=(str(row.last_refresh_error) or "")[:180],
+                    )
+                )
+            for row_a in conn.execute(_MART_AUDIT_FINDINGS_SQL).fetchall():
+                alerts.append(
+                    Alert(
+                        kind="mart_audit",
+                        # Keyed on mart + check, so a mart with two different
+                        # problems reports both, and the same problem reported
+                        # again after a rebuild does not re-alert.
+                        key=f"{row_a.resource_id}:{row_a.detector_name}",
+                        title=f"Auditoría de mart: {row_a.resource_id}",
+                        detail=(str(row_a.message) or "")[:180],
                     )
                 )
             for row_e in conn.execute(_EMPTY_MARTS_SQL).fetchall():

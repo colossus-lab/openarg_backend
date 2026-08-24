@@ -154,3 +154,27 @@ def test_redis_pressure_is_keyed_by_percentage_not_by_the_hour():
     # A worse level is a new finding.
     c = Alert(kind="redis_pressure", key="redis:90pct", title="x")
     assert c.fingerprint() != a.fingerprint()
+
+
+def test_an_audit_finding_is_its_own_alert_kind():
+    """The mart sweep wrote findings nobody read.
+
+    Four checks had been running nightly over 74 marts and their output stopped
+    at `ingestion_findings`: 34 unresolved CRITICAL findings were sitting there
+    on 2026-08-24 with no reader. The two defects found by hand that day —
+    `delitos_argentina_snic` inflating every crime count by ~30 %,
+    `energia_petroleo_gas_produccion` serving 97,6 % duplicates — were exactly
+    the sort the sweep reports. Detecting without telling anyone is the same as
+    not detecting.
+    """
+    failed = Alert(kind="mart_failed", key="delitos_argentina_snic", title="x")
+    audit = Alert(kind="mart_audit", key="delitos_argentina_snic:mart_duplicate_rows", title="y")
+    assert failed.fingerprint() != audit.fingerprint()
+
+
+def test_two_problems_on_one_mart_report_separately():
+    """The key carries the check, not just the mart: a mart can be duplicated
+    *and* mistyped, and collapsing them would hide whichever arrived second."""
+    dup = Alert(kind="mart_audit", key="m:mart_duplicate_rows", title="x")
+    typing = Alert(kind="mart_audit", key="m:mart_amount_column_is_text", title="y")
+    assert dup.fingerprint() != typing.fingerprint()
