@@ -10,11 +10,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.application.quality.expectations import _declared_findings
-
 from app.application.quality.expectations import (
     _COLLAPSE_RATIO,
     _MIN_HISTORY,
+    _declared_findings,
     _derived_findings,
     check_mart,
 )

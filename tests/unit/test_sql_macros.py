@@ -430,7 +430,7 @@ def test_to_numeric_accepts_the_column_shapes_real_marts_use(monkeypatch) -> Non
         ("v.valor", '"v"."valor"::text'),
         ('"awards/0/value/amount"', '"awards/0/value/amount"::text'),
     ):
-        resolved = resolve_macros("SELECT {{ to_numeric(%r) }}" % arg, engine=object())
+        resolved = resolve_macros(f"SELECT {{{{ to_numeric({arg!r}) }}}}", engine=object())
         assert expected in resolved
 
 
@@ -440,7 +440,7 @@ def test_to_numeric_refuses_anything_that_is_not_a_column_reference(monkeypatch)
     _patch(monkeypatch, _rows())
     for bad in ("importe || 1", "1; DROP TABLE x", 'importe"', "a.b.c", '"a"b"'):
         with pytest.raises(MacroResolutionError, match="column reference"):
-            resolve_macros("SELECT {{ to_numeric('%s') }}" % bad, engine=object())
+            resolve_macros(f"SELECT {{{{ to_numeric('{bad}') }}}}", engine=object())
 
 
 def test_to_numeric_takes_no_kwargs(monkeypatch) -> None:
