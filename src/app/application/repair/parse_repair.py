@@ -217,6 +217,7 @@ _BASE_COMPARISON_PREFIX = 40
 
 def _repeated_base_share(cols: list[str]) -> float:
     """Largest share of names collapsing to the same base once `_N` is stripped."""
+
     # `_SUFFIX_RE` is `^(?P<base>.*?)(?:_\d+)?$` — anchored, with an optional
     # tail and a lazy base that accepts the empty string, so it matches every
     # input. The guard is for the type checker, not for a case that happens.
@@ -1068,8 +1069,7 @@ async def propose_llm_assisted_rename(
     # `_source_*` / `_parser_version` columns to `metadata_<i>`, which would
     # have cut every repaired table loose from its dataset.
     proposed_final = [
-        old if old in protected else new
-        for old, new in zip(old_cols, proposed_final, strict=True)
+        old if old in protected else new for old, new in zip(old_cols, proposed_final, strict=True)
     ]
     return proposed_final, 0, "applied"
 
@@ -1294,9 +1294,7 @@ def _apply_quote_aware_split(
             rows = conn.execute(
                 text(f"SELECT ctid, {quoted}::text AS raw FROM {qualified}")  # noqa: S608
             ).fetchall()
-            assignments = ", ".join(
-                f"{_quote_ident(n)} = :f{i}" for i, n in enumerate(new_names)
-            )
+            assignments = ", ".join(f"{_quote_ident(n)} = :f{i}" for i, n in enumerate(new_names))
             for row in rows:
                 fields = split_csv_row(row.raw, delim) if row.raw is not None else []
                 if len(fields) != len(new_names):
@@ -1569,8 +1567,11 @@ def propose_smeared_title_rename(
         # threshold would change the parser's behaviour for everyone, so the
         # weaker evidence is judged here instead — and it has to be stronger to
         # compensate: *every* numeric cell must be a year, not most of them.
-        nums = [v.strip().rstrip("0").rstrip(".") if v.strip().endswith(".0")
-                else v.strip() for v in as_str if v.strip()]
+        nums = [
+            v.strip().rstrip("0").rstrip(".") if v.strip().endswith(".0") else v.strip()
+            for v in as_str
+            if v.strip()
+        ]
         numeric = [v for v in nums if v.replace(",", "").isdigit()]
         years = [v for v in numeric if 1900 <= int(v.replace(",", "")) <= 2100]
         year_axis = len(numeric) >= 2 and len(years) == len(numeric) and alpha >= 1
@@ -1701,7 +1702,9 @@ def repair_smeared_title_table(
         _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="smeared_title")
         logger.info(
             "parse_repair (smeared_title): %s.%s renamed %d cols",
-            table_schema, table_name, renamed,
+            table_schema,
+            table_name,
+            renamed,
         )
     except Exception as exc:
         outcome.reason = f"apply_failed:{str(exc)[:120]}"

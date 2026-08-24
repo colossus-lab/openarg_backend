@@ -97,7 +97,9 @@ def test_the_detector_ignores_column_count():
     six-column table with the same defect is just as unusable."""
     from app.application.pipeline.parsers.column_normalization import is_smeared_title
 
-    tres = ["Superficie sembrada por departamento y campaña agrícola",
-            "Superficie sembrada por departamento y campaña agrícola_2",
-            "Superficie sembrada por departamento y campaña agrícola_3"]
+    tres = [
+        "Superficie sembrada por departamento y campaña agrícola",
+        "Superficie sembrada por departamento y campaña agrícola_2",
+        "Superficie sembrada por departamento y campaña agrícola_3",
+    ]
     assert is_smeared_title(tres)

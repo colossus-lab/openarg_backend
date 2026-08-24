@@ -172,9 +172,7 @@ async def finalize_node(state: OpenArgState) -> dict:
         from app.application.quality.data_age import staleness_warning
         from app.infrastructure.celery.tasks._db import get_sync_engine
 
-        stale_line = await _asyncio.to_thread(
-            staleness_warning, get_sync_engine(), served_table
-        )
+        stale_line = await _asyncio.to_thread(staleness_warning, get_sync_engine(), served_table)
         if stale_line and stale_line not in all_warnings:
             all_warnings.append(stale_line)
     except Exception:

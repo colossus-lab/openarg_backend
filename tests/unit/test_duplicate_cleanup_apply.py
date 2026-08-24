@@ -67,16 +67,18 @@ class _Engine:
 
 def _cand(table="cache_dup", survivor="raw_survivor", rows=42):
     return SimpleNamespace(
-        oi="p::s", dataset_id="d1", cd_id=7, table_name=table,
-        row_count=rows, survivor=survivor,
+        oi="p::s",
+        dataset_id="d1",
+        cd_id=7,
+        table_name=table,
+        row_count=rows,
+        survivor=survivor,
     )
 
 
 def _run(**kw):
     conn = _Conn(**kw)
-    out = cleanup_duplicate_tables(
-        _Engine(conn), run_id=uuid.uuid4(), dry_run=False, limit=10
-    )
+    out = cleanup_duplicate_tables(_Engine(conn), run_id=uuid.uuid4(), dry_run=False, limit=10)
     return out, conn
 
 

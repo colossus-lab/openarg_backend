@@ -40,9 +40,7 @@ def table(request):
     def _cleanup():
         with engine.begin() as conn:
             conn.execute(text(f'DROP TABLE IF EXISTS {SCHEMA}."{name}" CASCADE'))
-            conn.execute(
-                text("DELETE FROM parse_repair_audit WHERE table_name = :t"), {"t": name}
-            )
+            conn.execute(text("DELETE FROM parse_repair_audit WHERE table_name = :t"), {"t": name})
 
     request.addfinalizer(_cleanup)
     return engine, name
@@ -50,13 +48,11 @@ def table(request):
 
 def _make(engine, name, header, rows):
     with engine.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS {SCHEMA}'))
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}"))
         conn.execute(text(f'DROP TABLE IF EXISTS {SCHEMA}."{name}" CASCADE'))
         conn.execute(text(f'CREATE TABLE {SCHEMA}."{name}" ("{header}" text)'))
         for r in rows:
-            conn.execute(
-                text(f'INSERT INTO {SCHEMA}."{name}" VALUES (:v)'), {"v": r}
-            )
+            conn.execute(text(f'INSERT INTO {SCHEMA}."{name}" VALUES (:v)'), {"v": r})
 
 
 def _columns(engine, name):
@@ -89,9 +85,7 @@ def test_it_splits_a_clean_csv_back_into_columns(table):
         ["2003,m,1,0 - 4", "2003,v,3,0 - 4", "2004,m,2,5 - 9"],
     )
 
-    out = repair_unsplit_csv_table(
-        engine, table_schema=SCHEMA, table_name=name, dry_run=False
-    )
+    out = repair_unsplit_csv_table(engine, table_schema=SCHEMA, table_name=name, dry_run=False)
 
     assert out.ok, out.reason
     assert _columns(engine, name) == ["anio", "sexo", "casos_sida", "grupo_edad"]
@@ -119,9 +113,7 @@ def test_a_genuinely_malformed_table_is_still_refused(table):
         ["Buenos Aires,CABA,3000000", "Rosario,Santa Fe", "Córdoba,Córdoba,1400000,extra"],
     )
 
-    out = repair_unsplit_csv_table(
-        engine, table_schema=SCHEMA, table_name=name, dry_run=False
-    )
+    out = repair_unsplit_csv_table(engine, table_schema=SCHEMA, table_name=name, dry_run=False)
 
     assert not out.ok
     assert out.reason.startswith("inconsistent_field_count")
@@ -148,9 +140,7 @@ def test_a_table_that_is_not_an_unsplit_csv_is_left_alone(table):
     with engine.begin() as conn:
         conn.execute(text(f'CREATE TABLE {SCHEMA}."{name}" (provincia text, monto text)'))
 
-    out = repair_unsplit_csv_table(
-        engine, table_schema=SCHEMA, table_name=name, dry_run=False
-    )
+    out = repair_unsplit_csv_table(engine, table_schema=SCHEMA, table_name=name, dry_run=False)
 
     assert not out.ok
     assert out.reason == "not_an_unsplit_csv"
@@ -204,16 +194,14 @@ def test_it_now_splits_a_quoted_csv_correctly(table):
         ],
     )
 
-    out = repair_unsplit_csv_table(
-        engine, table_schema=SCHEMA, table_name=name, dry_run=False
-    )
+    out = repair_unsplit_csv_table(engine, table_schema=SCHEMA, table_name=name, dry_run=False)
 
     assert out.ok, out.reason
     assert out.reason == "split_quote_aware"
     assert _columns(engine, name) == ["ciudad", "provincia", "poblacion"]
     with engine.connect() as conn:
         row = conn.execute(
-            text(f'SELECT * FROM {SCHEMA}."{name}" WHERE ciudad = \'Rosario\'')
+            text(f"SELECT * FROM {SCHEMA}.\"{name}\" WHERE ciudad = 'Rosario'")
         ).fetchone()
     assert tuple(row) == ("Rosario", "Santa Fe, Argentina", "1300000"), (
         "the quoted comma must stay inside its field"

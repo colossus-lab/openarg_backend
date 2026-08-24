@@ -23,9 +23,7 @@ import pytest
 # stripped. A first version matched the word anywhere and flagged a `SELECT`
 # whose comment explained when a table would be *dropped* — the test finding
 # itself rather than the code.
-_MUTATING = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE)\b", re.IGNORECASE
-)
+_MUTATING = re.compile(r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE)\b", re.IGNORECASE)
 _SQL_COMMENT = re.compile(r"--[^\n]*")
 
 
@@ -47,15 +45,16 @@ class _ReadOnlyConn:
     def execute(self, stmt, params=None):
         sql = str(stmt)
         if _is_mutating(sql):
-            if self.allow_audit and (
-                "parse_repair_audit" in sql or "cache_drop_audit" in sql
-            ):
+            if self.allow_audit and ("parse_repair_audit" in sql or "cache_drop_audit" in sql):
                 self.writes.append(sql)
             else:
                 raise _WriteRefused(sql[:120])
         return SimpleNamespace(
-            fetchall=lambda: [], fetchone=lambda: None, scalar=lambda: 5000,
-            rowcount=0, __iter__=lambda s: iter([]),
+            fetchall=lambda: [],
+            fetchone=lambda: None,
+            scalar=lambda: 5000,
+            rowcount=0,
+            __iter__=lambda s: iter([]),
         )
 
     def rollback(self):
@@ -99,12 +98,9 @@ def test_a_dry_run_writes_nothing_but_its_own_audit(module, func, kwargs):
 @pytest.mark.parametrize(
     "module,task,kwargs",
     [
-        ("app.infrastructure.celery.tasks.columns_backfill",
-         "backfill_dataset_columns", {}),
-        ("app.infrastructure.celery.tasks.retry_our_failures",
-         "retry_our_own_failures", {}),
-        ("app.infrastructure.celery.tasks.identity_reconcile",
-         "reconcile_dataset_identities", {}),
+        ("app.infrastructure.celery.tasks.columns_backfill", "backfill_dataset_columns", {}),
+        ("app.infrastructure.celery.tasks.retry_our_failures", "retry_our_own_failures", {}),
+        ("app.infrastructure.celery.tasks.identity_reconcile", "reconcile_dataset_identities", {}),
     ],
 )
 def test_a_dry_run_task_writes_nothing_at_all(module, task, kwargs):

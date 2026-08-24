@@ -155,9 +155,7 @@ def test_the_earliest_usable_version_is_chosen_as_reference():
     """The PAMI case: v1 was correct and v2 carried a title row promoted to
     headers. A verifier pointed at v2 would have confirmed the damage."""
     v1 = _snap([_col("destino", 1, PROVINCIAS), _col("monto", 2, MONTOS)], version=1)
-    v2 = _snap(
-        [_col("LISTADO / G_1", 1, PROVINCIAS), _col("LISTADO / G_2", 2, MONTOS)], version=2
-    )
+    v2 = _snap([_col("LISTADO / G_1", 1, PROVINCIAS), _col("LISTADO / G_2", 2, MONTOS)], version=2)
     current = _snap([_col("col_0", 1, PROVINCIAS), _col("col_1", 2, MONTOS)], version=3)
 
     result = verify_against_previous_version(
@@ -218,9 +216,7 @@ def test_intrinsic_refuses_to_touch_a_healthy_table():
     It runs unattended over 1,118 tables, so this is the guard that matters."""
     from app.application.repair.verify import verify_intrinsic
 
-    result = verify_intrinsic(
-        current_names=["provincia", "monto"], proposed_names=["a", "b"]
-    )
+    result = verify_intrinsic(current_names=["provincia", "monto"], proposed_names=["a", "b"])
 
     assert not result.accepted
     assert result.reason == "nothing_wrong_with_the_current_names"
@@ -354,9 +350,7 @@ def test_a_portal_that_has_always_published_prose_headers_is_not_blocked():
 def test_placeholders_appearing_where_there_were_none_is_a_regression():
     from app.application.repair.verify import is_parse_regression
 
-    assert is_parse_regression(
-        current_names=["sigla", "idpozo"], incoming_names=["col_0", "col_1"]
-    )
+    assert is_parse_regression(current_names=["sigla", "idpozo"], incoming_names=["col_0", "col_1"])
 
 
 def test_a_first_collection_is_never_a_regression():
@@ -448,9 +442,11 @@ def test_the_detector_is_shared_rather_than_copied():
     """It was invisible in two places at once because it lived in neither."""
     from app.application.pipeline.parsers.column_normalization import is_smeared_title
 
-    assert is_smeared_title([
-        "Un titulo largo repetido en cada columna de la tabla",
-        "Un titulo largo repetido en cada columna de la tabla_2",
-        "Un titulo largo repetido en cada columna de la tabla_3",
-    ])
+    assert is_smeared_title(
+        [
+            "Un titulo largo repetido en cada columna de la tabla",
+            "Un titulo largo repetido en cada columna de la tabla_2",
+            "Un titulo largo repetido en cada columna de la tabla_3",
+        ]
+    )
     assert not is_smeared_title(["fecha_inicio", "fecha_fin", "fecha_alta"])

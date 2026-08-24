@@ -175,9 +175,7 @@ _SMEARED_CANDIDATES_SQL = text(
     soft_time_limit=1800,
     time_limit=2400,
 )
-def repair_smeared_title_tables(
-    self, *, limit: int = 1200, dry_run: bool = True
-) -> dict[str, Any]:
+def repair_smeared_title_tables(self, *, limit: int = 1200, dry_run: bool = True) -> dict[str, Any]:
     """Recover headers pandas smeared across the columns.
 
     Measured on 2026-08-23: 116 **servable** tables carry this, holding 291,436

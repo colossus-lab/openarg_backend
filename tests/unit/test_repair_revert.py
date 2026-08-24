@@ -120,9 +120,7 @@ def test_it_restores_the_original_names():
 def test_extra_columns_added_later_do_not_block_the_revert():
     """A re-ingest can append the collector's own metadata columns. Those are
     not part of what the repair renamed, so they must not look like tampering."""
-    engine = _engine(
-        _Audit(), ["LISTADO / G_1", "LISTADO / G_2", "_source_url", "_ingested_at"]
-    )
+    engine = _engine(_Audit(), ["LISTADO / G_1", "LISTADO / G_2", "_source_url", "_ingested_at"])
     result = revert_repair(engine, audit_id=7, dry_run=False)
 
     assert result.ok

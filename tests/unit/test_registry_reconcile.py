@@ -103,8 +103,13 @@ def test_refuses_when_registry_looks_truncated():
 def test_dry_run_moves_nothing():
     conn = _Conn(
         misplaced=[
-            _Row(resource_identity="p::s", version=1, table_name="cache_x",
-                 declared="raw", actual="public")
+            _Row(
+                resource_identity="p::s",
+                version=1,
+                table_name="cache_x",
+                declared="raw",
+                actual="public",
+            )
         ]
     )
     out = reconcile_locations(_Engine(conn), run_id=uuid.uuid4(), dry_run=True)
@@ -116,8 +121,13 @@ def test_apply_moves_to_the_schema_the_registry_names():
     """It agrees with the registry; it never edits the registry to agree."""
     conn = _Conn(
         misplaced=[
-            _Row(resource_identity="p::s", version=1, table_name="cache_x",
-                 declared="raw", actual="public")
+            _Row(
+                resource_identity="p::s",
+                version=1,
+                table_name="cache_x",
+                declared="raw",
+                actual="public",
+            )
         ]
     )
     out = reconcile_locations(_Engine(conn), run_id=uuid.uuid4(), dry_run=False)
@@ -130,8 +140,13 @@ def test_apply_moves_to_the_schema_the_registry_names():
 def test_protected_tables_are_never_moved():
     conn = _Conn(
         misplaced=[
-            _Row(resource_identity="p::s", version=1, table_name="users",
-                 declared="raw", actual="public")
+            _Row(
+                resource_identity="p::s",
+                version=1,
+                table_name="users",
+                declared="raw",
+                actual="public",
+            )
         ]
     )
     out = reconcile_locations(_Engine(conn), run_id=uuid.uuid4(), dry_run=False)
@@ -147,8 +162,9 @@ def test_user_and_conversation_tables_are_in_the_protected_set():
 def test_phantoms_are_retired_not_deleted():
     """The row is the only record the table ever existed. Keep it."""
     conn = _Conn(
-        phantom=[_Row(resource_identity="p::s", version=3,
-                      table_name="gone_tbl", schema_name="raw")]
+        phantom=[
+            _Row(resource_identity="p::s", version=3, table_name="gone_tbl", schema_name="raw")
+        ]
     )
     out = retire_phantom_rows(_Engine(conn), run_id=uuid.uuid4(), dry_run=False)
     assert out.by_reason.get("retired") == 1
@@ -199,8 +215,12 @@ def test_backfill_registers_in_the_schema_the_table_is_actually_in():
         phantom=[],
     )
     conn.unregistered = [
-        _Row(table_name="cache_x", table_schema="public", row_count=42,
-             resource_identity="datos_gob_ar::abc")
+        _Row(
+            table_name="cache_x",
+            table_schema="public",
+            row_count=42,
+            resource_identity="datos_gob_ar::abc",
+        )
     ]
 
     def _execute(stmt, params=None):

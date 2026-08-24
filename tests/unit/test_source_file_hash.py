@@ -159,18 +159,27 @@ def test_an_unchanged_file_over_an_EMPTY_table_is_not_skipped():
 
 
 def test_a_first_collection_has_nothing_to_compare_against():
-    assert _unchanged_since_last_collect(
-        _Eng(_Conn(version=None)), resource_identity="p::s", file_hash="abc"
-    ) is None
+    assert (
+        _unchanged_since_last_collect(
+            _Eng(_Conn(version=None)), resource_identity="p::s", file_hash="abc"
+        )
+        is None
+    )
     # And with no hash at all — the state of every row before this shipped.
-    assert _unchanged_since_last_collect(
-        _Eng(_Conn(version=_live())), resource_identity="p::s", file_hash=None
-    ) is None
+    assert (
+        _unchanged_since_last_collect(
+            _Eng(_Conn(version=_live())), resource_identity="p::s", file_hash=None
+        )
+        is None
+    )
 
 
 def test_uncertainty_resolves_toward_re_collecting():
     """Re-parsing an unchanged file costs one collection. Skipping a changed one
     costs correctness."""
-    assert _unchanged_since_last_collect(
-        _Eng(_Conn(raises=True)), resource_identity="p::s", file_hash="abc"
-    ) is None
+    assert (
+        _unchanged_since_last_collect(
+            _Eng(_Conn(raises=True)), resource_identity="p::s", file_hash="abc"
+        )
+        is None
+    )

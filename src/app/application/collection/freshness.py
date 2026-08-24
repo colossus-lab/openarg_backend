@@ -90,7 +90,9 @@ def backstop_age() -> timedelta:
         return BACKSTOP_MAX_AGE
     candidate = timedelta(days=days)
     if candidate < MIN_BACKSTOP:
-        logger.warning("refresh backstop %s is below the %s floor; using the floor", candidate, MIN_BACKSTOP)
+        logger.warning(
+            "refresh backstop %s is below the %s floor; using the floor", candidate, MIN_BACKSTOP
+        )
         return MIN_BACKSTOP
     return candidate
 

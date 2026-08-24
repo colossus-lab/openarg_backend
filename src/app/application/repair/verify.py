@@ -273,9 +273,7 @@ def _garbage_ratio(names: list[str]) -> float:
     return sum(1 for n in names if is_garbage_column(n)) / len(names)
 
 
-def verify_intrinsic(
-    *, current_names: list[str], proposed_names: list[str]
-) -> VerificationOutcome:
+def verify_intrinsic(*, current_names: list[str], proposed_names: list[str]) -> VerificationOutcome:
     """Is the proposal measurably less broken than what the table has now?
 
     No reference, because for this class there is none. What it checks instead:
@@ -293,9 +291,7 @@ def verify_intrinsic(
     a wrong rename is a column that silently means something else.
     """
     if len(proposed_names) != len(current_names):
-        return VerificationOutcome(
-            accepted=False, reason="proposal_does_not_cover_the_table"
-        )
+        return VerificationOutcome(accepted=False, reason="proposal_does_not_cover_the_table")
 
     from app.application.pipeline.parsers.column_normalization import is_smeared_title
 
@@ -309,9 +305,7 @@ def verify_intrinsic(
     if before == 0.0:
         # Nothing to fix. Renaming a healthy table is how a repair sweep turns
         # into damage.
-        return VerificationOutcome(
-            accepted=False, reason="nothing_wrong_with_the_current_names"
-        )
+        return VerificationOutcome(accepted=False, reason="nothing_wrong_with_the_current_names")
 
     after = _garbage_ratio(proposed_names)
     outcome = VerificationOutcome(

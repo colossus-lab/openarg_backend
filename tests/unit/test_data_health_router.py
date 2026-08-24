@@ -26,24 +26,53 @@ class _Repair:
 def health(monkeypatch):
     from app.presentation.http.controllers.admin import data_health_router as mod
 
-    def _make(repairs, fresh=None, parse=None, drift=None, attributable=0,
-              registry_pairs=0):
+    def _make(repairs, fresh=None, parse=None, drift=None, attributable=0, registry_pairs=0):
         engine = MagicMock()
         conn = engine.connect.return_value.__enter__.return_value
         conn.execute.side_effect = [
-            MagicMock(fetchone=lambda: fresh or MagicMock(
-                total=100, week=5, month=10, quarter=20, older=80,
-                oldest=None, portal_says_changed=30)),
-            MagicMock(fetchone=lambda: parse or MagicMock(
-                tables=1000, col_n=10, unnamed=20, long_names=30,
-                one_or_two_columns=40, any_symptom=90)),
+            MagicMock(
+                fetchone=lambda: (
+                    fresh
+                    or MagicMock(
+                        total=100,
+                        week=5,
+                        month=10,
+                        quarter=20,
+                        older=80,
+                        oldest=None,
+                        portal_says_changed=30,
+                    )
+                )
+            ),
+            MagicMock(
+                fetchone=lambda: (
+                    parse
+                    or MagicMock(
+                        tables=1000,
+                        col_n=10,
+                        unnamed=20,
+                        long_names=30,
+                        one_or_two_columns=40,
+                        any_symptom=90,
+                    )
+                )
+            ),
             MagicMock(fetchall=lambda: repairs),
-            MagicMock(fetchone=lambda: drift or MagicMock(
-                snapshots=500, tables=490, with_real_provenance=0, last_capture=None)),
+            MagicMock(
+                fetchone=lambda: (
+                    drift
+                    or MagicMock(
+                        snapshots=500, tables=490, with_real_provenance=0, last_capture=None
+                    )
+                )
+            ),
             # Two provenance populations now: snapshots and the registry.
             # The endpoint sums them, so the fixture must offer both.
-            MagicMock(fetchone=lambda: SimpleNamespace(
-                from_snapshots=attributable, from_registry=registry_pairs)),
+            MagicMock(
+                fetchone=lambda: SimpleNamespace(
+                    from_snapshots=attributable, from_registry=registry_pairs
+                )
+            ),
         ]
         monkeypatch.setattr(mod, "get_sync_engine", lambda: engine)
         return mod.data_health()

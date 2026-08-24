@@ -267,9 +267,7 @@ def report_schema_drift(self, *, days: int = 30, limit: int = 5000) -> dict[str,
         "tables": int(coverage_row.tables or 0),
         "with_stats": int(coverage_row.with_stats or 0),
         "with_provenance": int(coverage_row.with_provenance or 0),
-        "with_provenance_incl_placeholder": int(
-            coverage_row.with_provenance_incl_placeholder or 0
-        ),
+        "with_provenance_incl_placeholder": int(coverage_row.with_provenance_incl_placeholder or 0),
         "first_seen": coverage_row.first_seen.isoformat() if coverage_row.first_seen else None,
         "last_seen": coverage_row.last_seen.isoformat() if coverage_row.last_seen else None,
     }
@@ -384,9 +382,7 @@ def report_schema_drift(self, *, days: int = 30, limit: int = 5000) -> dict[str,
                 )
                 for ex in report.get("examples", [])
             ]
-            report["alerting"] = notify(
-                engine, alerts, heading="OpenArg · deriva sin explicación"
-            )
+            report["alerting"] = notify(engine, alerts, heading="OpenArg · deriva sin explicación")
         except Exception:
             # Never let the notification cost the report.
             logger.warning("drift report: alerting skipped", exc_info=True)

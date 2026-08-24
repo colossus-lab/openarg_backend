@@ -205,9 +205,7 @@ def data_health(repair_window_days: int = 7) -> dict[str, Any]:
         "repairs": {
             "window_days": repair_window_days,
             "by_phase": by_phase,
-            "last_activity": max(
-                (r.last_seen for r in repairs if r.last_seen), default=None
-            ),
+            "last_activity": max((r.last_seen for r in repairs if r.last_seen), default=None),
         },
         "drift_observability": {
             "snapshots": int(drift.snapshots or 0),

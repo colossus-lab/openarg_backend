@@ -67,8 +67,7 @@ def test_the_blocklists_still_use_the_bare_name():
 def test_both_schemas_are_spelled_out_somewhere(schema):
     """A sanity check on the premise: the codebase knows both exist."""
     found = any(
-        f"{schema}.raw_table_versions" in p.read_text(encoding="utf-8")
-        for p in _python_files()
+        f"{schema}.raw_table_versions" in p.read_text(encoding="utf-8") for p in _python_files()
     )
     if schema == "public":
         assert found, "the live registry must be addressed explicitly"
@@ -89,16 +88,14 @@ def test_mart_sample_queries_is_qualified_too():
     import re
     from pathlib import Path
 
-    sql_pos = re.compile(
-        r"\b(FROM|JOIN|INTO|UPDATE|DELETE FROM)\s+mart_sample_queries\b"
-    )
+    sql_pos = re.compile(r"\b(FROM|JOIN|INTO|UPDATE|DELETE FROM)\s+mart_sample_queries\b")
     offenders = []
     for path in Path("src").rglob("*.py"):
         for i, line in enumerate(path.read_text().splitlines(), 1):
             if sql_pos.search(line):
                 offenders.append(f"{path}:{i}")
-    assert not offenders, (
-        "SQL referencing mart_sample_queries without a schema: " + ", ".join(offenders)
+    assert not offenders, "SQL referencing mart_sample_queries without a schema: " + ", ".join(
+        offenders
     )
 
 

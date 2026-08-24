@@ -260,6 +260,7 @@ _HEAVY_WIDTH_COLUMN_THRESHOLD = int(os.getenv("OPENARG_HEAVY_WIDTH_COLUMN_THRESH
 # is no longer "simple".
 _WIDE_LAYOUT_COLUMN_THRESHOLD = int(os.getenv("OPENARG_WIDE_LAYOUT_COLUMN_THRESHOLD", "50"))
 
+
 # Default parser version persisted to `public.raw_table_versions.parser_version`.
 # Derived from the parser sources, not declared. The env var is kept as an
 # explicit override for a deploy that needs to pin a value, but it is no longer
@@ -282,6 +283,8 @@ def _default_normalization_version() -> str:
     from app.application.catalog.parser_fingerprint import normalization_fingerprint
 
     return os.getenv("OPENARG_NORMALIZATION_VERSION") or normalization_fingerprint()
+
+
 _HEAVY_METADATA_PORTAL_FORMATS: dict[str, frozenset[str]] = {
     "datos_gob_ar": frozenset({"zip"}),
     "diputados": frozenset({"json"}),
@@ -3559,8 +3562,7 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                             incoming_cols[:3],
                         )
                         raise _ParseRegression(
-                            f"incoming parse is worse than the stored table: "
-                            f"{incoming_cols[:3]}"
+                            f"incoming parse is worse than the stored table: {incoming_cols[:3]}"
                         ) from exc
 
                     logger.warning(

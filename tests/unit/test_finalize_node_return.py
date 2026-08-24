@@ -293,9 +293,7 @@ async def test_finalize_attaches_the_data_age_notice(
         "app.application.quality.data_age.staleness_warning",
         lambda _engine, _served: line,
     )
-    monkeypatch.setattr(
-        "app.infrastructure.celery.tasks._db.get_sync_engine", lambda: object()
-    )
+    monkeypatch.setattr("app.infrastructure.celery.tasks._db.get_sync_engine", lambda: object())
 
     result = await finalize_node(_make_state())  # type: ignore[arg-type]
 
@@ -315,9 +313,7 @@ async def test_a_freshness_lookup_failure_never_costs_the_answer(
     def _boom(*_a: Any, **_k: Any) -> None:
         raise RuntimeError("pg is down")
 
-    monkeypatch.setattr(
-        "app.application.quality.data_age.staleness_warning", _boom
-    )
+    monkeypatch.setattr("app.application.quality.data_age.staleness_warning", _boom)
 
     result = await finalize_node(_make_state())  # type: ignore[arg-type]
 

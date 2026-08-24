@@ -86,9 +86,7 @@ def _structural_digest(source: str) -> str:
     """
     tree = ast.parse(source)
     for node in ast.walk(tree):
-        if not isinstance(
-            node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
-        ):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
             continue
         body = node.body
         if (

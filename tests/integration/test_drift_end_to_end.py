@@ -48,9 +48,7 @@ def _engine_or_skip():
 
 def _skip_unless_snapshots_exist(engine) -> None:
     with engine.connect() as conn:
-        present = conn.execute(
-            text("SELECT to_regclass('raw.raw_schema_snapshots')")
-        ).scalar()
+        present = conn.execute(text("SELECT to_regclass('raw.raw_schema_snapshots')")).scalar()
     if not present:
         pytest.skip("migration 0056 has not run on this DB")
 
@@ -175,9 +173,7 @@ def test_a_first_format_change_is_captured_and_classified(resource):
         actor="test",
     )
     assert pre_drop is not None, "the old shape must survive the drop"
-    _create_with(
-        engine, table, {"provincia": PROVINCIAS, "monto": MONTOS, "anio": AÑOS}
-    )
+    _create_with(engine, table, {"provincia": PROVINCIAS, "monto": MONTOS, "anio": AÑOS})
     # No new version row. `uq_raw_table_versions_table_name` is UNIQUE on
     # (schema_name, table_name), so a recreate under the same name cannot
     # register a second version — the registry keeps one row and the two shapes
@@ -238,9 +234,7 @@ def test_a_first_format_change_is_captured_and_classified(resource):
         ).fetchall()
 
     before, after = snapshot_from_row(rows[1]), snapshot_from_row(rows[2])
-    verdict = classify_change(
-        before, after, DriftContext(same_identity=True, same_source_url=True)
-    )
+    verdict = classify_change(before, after, DriftContext(same_identity=True, same_source_url=True))
 
     assert verdict.diff["schema_changed"], "the shapes differ and the diff must say so"
     assert verdict.diff["added"] == ["anio"]
@@ -346,9 +340,7 @@ def test_a_change_we_cannot_attribute_is_not_reported_as_drift(resource):
     capture_table_snapshot(
         engine, table_name=table, schema_name=SCHEMA, reason="baseline", actor="test"
     )
-    _create_with(
-        engine, table, {"provincia": PROVINCIAS, "monto": MONTOS, "anio": AÑOS}
-    )
+    _create_with(engine, table, {"provincia": PROVINCIAS, "monto": MONTOS, "anio": AÑOS})
     capture_table_snapshot(
         engine, table_name=table, schema_name=SCHEMA, reason="baseline", actor="test"
     )

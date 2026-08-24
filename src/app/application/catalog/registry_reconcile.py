@@ -340,9 +340,15 @@ def backfill_legacy_registry(
         except Exception as exc:
             outcome.note("register_failed")
             _audit(
-                engine, run_id=run_id, phase="registry_backfill",
-                schema=str(row.table_schema), table=table, operation="apply",
-                ok=False, err=str(exc)[:500], dry_run=False,
+                engine,
+                run_id=run_id,
+                phase="registry_backfill",
+                schema=str(row.table_schema),
+                table=table,
+                operation="apply",
+                ok=False,
+                err=str(exc)[:500],
+                dry_run=False,
             )
             continue
         outcome.note("registered")
@@ -353,9 +359,15 @@ def backfill_legacy_registry(
     # a per-table undo.
     if not dry_run:
         _audit(
-            engine, run_id=run_id, phase="registry_backfill", schema="public",
-            table=f"<{len(outcome.moved)} tables>", operation="apply",
-            ok=True, err=None, dry_run=False,
+            engine,
+            run_id=run_id,
+            phase="registry_backfill",
+            schema="public",
+            table=f"<{len(outcome.moved)} tables>",
+            operation="apply",
+            ok=True,
+            err=None,
+            dry_run=False,
         )
     return outcome
 
@@ -409,8 +421,15 @@ def reconcile_locations(
             outcome.note("would_move")
             outcome.moved.append(f"{row.actual}.{table} -> {row.declared}")
             _audit(
-                engine, run_id=run_id, phase="registry_location", schema=str(row.actual),
-                table=table, operation="dry_run", ok=True, err=None, dry_run=True,
+                engine,
+                run_id=run_id,
+                phase="registry_location",
+                schema=str(row.actual),
+                table=table,
+                operation="dry_run",
+                ok=True,
+                err=None,
+                dry_run=True,
             )
             continue
 
@@ -422,8 +441,15 @@ def reconcile_locations(
         except Exception as exc:
             outcome.note("move_failed")
             _audit(
-                engine, run_id=run_id, phase="registry_location", schema=str(row.actual),
-                table=table, operation="apply", ok=False, err=str(exc)[:500], dry_run=False,
+                engine,
+                run_id=run_id,
+                phase="registry_location",
+                schema=str(row.actual),
+                table=table,
+                operation="apply",
+                ok=False,
+                err=str(exc)[:500],
+                dry_run=False,
             )
             logger.warning("registry reconcile: could not move %s", table, exc_info=True)
             continue
@@ -431,8 +457,15 @@ def reconcile_locations(
         outcome.note("moved")
         outcome.moved.append(f"{row.actual}.{table} -> {row.declared}")
         _audit(
-            engine, run_id=run_id, phase="registry_location", schema=str(row.actual),
-            table=table, operation="apply", ok=True, err=None, dry_run=False,
+            engine,
+            run_id=run_id,
+            phase="registry_location",
+            schema=str(row.actual),
+            table=table,
+            operation="apply",
+            ok=True,
+            err=None,
+            dry_run=False,
         )
 
     return outcome
@@ -470,8 +503,15 @@ def retire_phantom_rows(
             outcome.note("would_retire")
             outcome.retired.append(f"{row.schema_name}.{table}")
             _audit(
-                engine, run_id=run_id, phase="registry_phantom", schema=str(row.schema_name),
-                table=table, operation="dry_run", ok=True, err=None, dry_run=True,
+                engine,
+                run_id=run_id,
+                phase="registry_phantom",
+                schema=str(row.schema_name),
+                table=table,
+                operation="dry_run",
+                ok=True,
+                err=None,
+                dry_run=True,
             )
             continue
 
@@ -492,16 +532,30 @@ def retire_phantom_rows(
         except Exception as exc:
             outcome.note("retire_failed")
             _audit(
-                engine, run_id=run_id, phase="registry_phantom", schema=str(row.schema_name),
-                table=table, operation="apply", ok=False, err=str(exc)[:500], dry_run=False,
+                engine,
+                run_id=run_id,
+                phase="registry_phantom",
+                schema=str(row.schema_name),
+                table=table,
+                operation="apply",
+                ok=False,
+                err=str(exc)[:500],
+                dry_run=False,
             )
             continue
 
         outcome.note("retired")
         outcome.retired.append(f"{row.schema_name}.{table}")
         _audit(
-            engine, run_id=run_id, phase="registry_phantom", schema=str(row.schema_name),
-            table=table, operation="apply", ok=True, err=None, dry_run=False,
+            engine,
+            run_id=run_id,
+            phase="registry_phantom",
+            schema=str(row.schema_name),
+            table=table,
+            operation="apply",
+            ok=True,
+            err=None,
+            dry_run=False,
         )
 
     return outcome

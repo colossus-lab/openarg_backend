@@ -92,7 +92,9 @@ def test_it_targets_tables_that_are_mostly_healthy(monkeypatch):
 
 def test_it_stays_within_its_budget(monkeypatch):
     monkeypatch.setenv("OPENARG_LLM_REPAIR", "1")
-    _, _, engine = _run([_Row(i) for i in range(3)], [_Outcome()] * 3, monkeypatch, limit=3, dry_run=False)
+    _, _, engine = _run(
+        [_Row(i) for i in range(3)], [_Outcome()] * 3, monkeypatch, limit=3, dry_run=False
+    )
 
     params = engine.connect.return_value.__enter__.return_value.execute.call_args.args[1]
     assert params["limit"] == 3

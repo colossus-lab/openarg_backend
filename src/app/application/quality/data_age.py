@@ -38,8 +38,18 @@ logger = logging.getLogger(__name__)
 STALE_AFTER_DAYS = 90
 
 _MONTHS_ES = (
-    "enero", "febrero", "marzo", "abril", "mayo", "junio",
-    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
 )
 
 
@@ -58,7 +68,9 @@ class DataAge:
     def phrase_es(self) -> str:
         """A sentence a reader can act on, not a machine timestamp."""
         mes = _MONTHS_ES[self.as_of.month - 1]
-        return f"Los datos de esta respuesta se leyeron por última vez en {mes} de {self.as_of.year}."
+        return (
+            f"Los datos de esta respuesta se leyeron por última vez en {mes} de {self.as_of.year}."
+        )
 
 
 # A served table is either a raw table the registry knows, or a mart. Ask the

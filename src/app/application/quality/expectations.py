@@ -170,9 +170,7 @@ def _derived_findings(engine: Engine, mart_id: str, current_rows: int) -> list[F
 
 def check_mart(engine: Engine, mart: Any, current_rows: int) -> list[Finding]:
     """Every expectation for one mart, declared and derived."""
-    return _declared_findings(engine, mart) + _derived_findings(
-        engine, mart.id, current_rows
-    )
+    return _declared_findings(engine, mart) + _derived_findings(engine, mart.id, current_rows)
 
 
 def record_build(

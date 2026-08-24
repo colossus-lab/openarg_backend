@@ -47,9 +47,7 @@ _SCHEMA = "public"
 
 
 def upgrade() -> None:
-    op.add_column(
-        _TABLE, sa.Column(_COLUMN, sa.String(length=64), nullable=True), schema=_SCHEMA
-    )
+    op.add_column(_TABLE, sa.Column(_COLUMN, sa.String(length=64), nullable=True), schema=_SCHEMA)
     # Partial: the rows worth finding are the ones that carry provenance, and
     # they are the minority for as long as the backlog of unattributable
     # versions dominates.

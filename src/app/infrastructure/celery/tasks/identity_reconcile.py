@@ -142,9 +142,7 @@ def cleanup_duplicate_tables_task(
     from app.application.catalog.duplicate_cleanup import cleanup_duplicate_tables
 
     engine = get_sync_engine()
-    outcome = cleanup_duplicate_tables(
-        engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit
-    )
+    outcome = cleanup_duplicate_tables(engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit)
     result = outcome.as_dict()
     logger.info("duplicate cleanup: %s", result)
     return result

@@ -111,10 +111,13 @@ def test_it_skips_marts_attempted_recently():
 def test_dry_run_rebuilds_nothing():
     degraded = [SimpleNamespace(mart_id="x", last_refresh_status="build_failed", rows=0)]
     conn = _Conn(degraded, {})
-    with patch(
-        "app.infrastructure.celery.tasks.mart_tasks.get_sync_engine",
-        return_value=_Engine(conn),
-    ), patch("app.infrastructure.celery.tasks.mart_tasks.build_mart") as bm:
+    with (
+        patch(
+            "app.infrastructure.celery.tasks.mart_tasks.get_sync_engine",
+            return_value=_Engine(conn),
+        ),
+        patch("app.infrastructure.celery.tasks.mart_tasks.build_mart") as bm,
+    ):
         out = retry_degraded_marts(dry_run=True)
     assert not bm.called
     assert out["candidates"] == 1
@@ -154,8 +157,14 @@ def test_a_mart_without_samples_still_loads():
     from app.application.marts.mart import Mart
 
     m = Mart(
-        id="x", version="1", description="d", domain=None, source_portals=[],
-        source_resource_patterns=[], canonical_columns=[], sql="SELECT 1",
+        id="x",
+        version="1",
+        description="d",
+        domain=None,
+        source_portals=[],
+        source_resource_patterns=[],
+        canonical_columns=[],
+        sql="SELECT 1",
         refresh=None,  # type: ignore[arg-type]
     )
     assert m.sample_queries == []

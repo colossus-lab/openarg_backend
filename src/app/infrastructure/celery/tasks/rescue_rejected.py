@@ -73,9 +73,7 @@ def _column_names(conn, schema: str, table: str) -> list[str]:
     soft_time_limit=2400,
     time_limit=3000,
 )
-def rescue_rejected_resources(
-    self, *, limit: int = 100, dry_run: bool = True
-) -> dict[str, Any]:
+def rescue_rejected_resources(self, *, limit: int = 100, dry_run: bool = True) -> dict[str, Any]:
     """Repair rejected tables and promote the ones that came out clean."""
     from app.application.pipeline.parsers.column_normalization import (
         is_garbage_column,
@@ -102,8 +100,11 @@ def rescue_rejected_resources(
             for repair in (repair_title_as_columns_table, repair_col_n_table):
                 try:
                     out = repair(
-                        engine, table_schema=schema, table_name=table,
-                        run_id=run_id, dry_run=False,
+                        engine,
+                        table_schema=schema,
+                        table_name=table,
+                        run_id=run_id,
+                        dry_run=False,
                     )
                     key = (out.reason or "").split(":")[0] or "ok"
                     by_reason[key] = by_reason.get(key, 0) + 1
@@ -117,11 +118,7 @@ def rescue_rejected_resources(
         with engine.connect() as conn:
             names = _column_names(conn, schema, table)
             conn.rollback()
-        if (
-            not names
-            or any(is_garbage_column(n) for n in names)
-            or is_smeared_title(names)
-        ):
+        if not names or any(is_garbage_column(n) for n in names) or is_smeared_title(names):
             by_reason["still_unusable"] = by_reason.get("still_unusable", 0) + 1
             continue
 

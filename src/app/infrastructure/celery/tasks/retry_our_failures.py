@@ -99,16 +99,12 @@ _CANDIDATES_SQL = text(
     soft_time_limit=1800,
     time_limit=2400,
 )
-def retry_our_own_failures(
-    self, *, limit: int = 200, dry_run: bool = True
-) -> dict[str, Any]:
+def retry_our_own_failures(self, *, limit: int = 200, dry_run: bool = True) -> dict[str, Any]:
     """Clear the retry ceiling on our own failures and collect them again."""
     engine = get_sync_engine()
 
     with engine.connect() as conn:
-        rows = conn.execute(
-            _CANDIDATES_SQL, {"cats": list(OUR_FAULT), "limit": limit}
-        ).fetchall()
+        rows = conn.execute(_CANDIDATES_SQL, {"cats": list(OUR_FAULT), "limit": limit}).fetchall()
         conn.rollback()
 
     by_portal: dict[str, int] = {}
@@ -116,8 +112,12 @@ def retry_our_own_failures(
         by_portal[str(r.portal)] = by_portal.get(str(r.portal), 0) + 1
 
     if dry_run or not rows:
-        return {"dry_run": dry_run, "candidates": len(rows), "dispatched": 0,
-                "by_portal": dict(sorted(by_portal.items(), key=lambda x: -x[1])[:6])}
+        return {
+            "dry_run": dry_run,
+            "candidates": len(rows),
+            "dispatched": 0,
+            "by_portal": dict(sorted(by_portal.items(), key=lambda x: -x[1])[:6]),
+        }
 
     from app.infrastructure.celery.tasks.collector_tasks import collect_dataset
 

@@ -31,7 +31,6 @@ def _registry_is_healthy(monkeypatch):
     monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
 
 
-
 class _FakeRow:
     def __init__(self, table_name: str, version: int = 1) -> None:
         self.resource_identity = f"portal::{table_name}"
@@ -278,8 +277,6 @@ def test_views_are_never_drop_candidates():
     from app.infrastructure.celery.tasks import ops_fixes
 
     source = ops_fixes.cleanup_raw_orphans.__wrapped__.__code__.co_consts
-    sql = next(
-        (c for c in source if isinstance(c, str) and "information_schema.tables" in c), None
-    )
+    sql = next((c for c in source if isinstance(c, str) and "information_schema.tables" in c), None)
     assert sql is not None, "candidate SELECT not found"
     assert "BASE TABLE" in sql, "the candidate query must exclude views"

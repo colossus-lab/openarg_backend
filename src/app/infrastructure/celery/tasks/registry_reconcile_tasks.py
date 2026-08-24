@@ -24,9 +24,7 @@ logger = logging.getLogger(__name__)
     soft_time_limit=900,
     time_limit=1200,
 )
-def reconcile_registry_locations(
-    self, *, limit: int = 500, dry_run: bool = True
-) -> dict[str, Any]:
+def reconcile_registry_locations(self, *, limit: int = 500, dry_run: bool = True) -> dict[str, Any]:
     """Move tables to the schema their live registry row already names."""
     from app.application.catalog.registry_reconcile import (
         RegistryUnavailable,
@@ -35,9 +33,7 @@ def reconcile_registry_locations(
 
     engine = get_sync_engine()
     try:
-        outcome = reconcile_locations(
-            engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit
-        )
+        outcome = reconcile_locations(engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit)
     except RegistryUnavailable as exc:
         # Refusing is the result, not an error to retry into.
         logger.error("reconcile_registry_locations refused: %s", exc)
@@ -53,9 +49,7 @@ def reconcile_registry_locations(
     soft_time_limit=900,
     time_limit=1200,
 )
-def retire_phantom_registry_rows(
-    self, *, limit: int = 500, dry_run: bool = True
-) -> dict[str, Any]:
+def retire_phantom_registry_rows(self, *, limit: int = 500, dry_run: bool = True) -> dict[str, Any]:
     """Mark live rows superseded when their table no longer exists anywhere."""
     from app.application.catalog.registry_reconcile import (
         RegistryUnavailable,
@@ -64,9 +58,7 @@ def retire_phantom_registry_rows(
 
     engine = get_sync_engine()
     try:
-        outcome = retire_phantom_rows(
-            engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit
-        )
+        outcome = retire_phantom_rows(engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit)
     except RegistryUnavailable as exc:
         logger.error("retire_phantom_registry_rows refused: %s", exc)
         return {"refused": str(exc), "retired": 0}

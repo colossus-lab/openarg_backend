@@ -66,7 +66,9 @@ def probe(url: str, *, fmt: str | None = None, timeout: float = _TIMEOUT) -> Can
                     break
     except Exception as exc:
         return CanaryResult(
-            portal="", verdict="unreachable", detail=f"{type(exc).__name__}: {str(exc)[:120]}",
+            portal="",
+            verdict="unreachable",
+            detail=f"{type(exc).__name__}: {str(exc)[:120]}",
             url=url,
         )
 
@@ -80,7 +82,8 @@ def probe(url: str, *, fmt: str | None = None, timeout: float = _TIMEOUT) -> Can
         # maintenance notice, a "resource moved" — all of them healthy to a
         # status check and useless as data.
         return CanaryResult(
-            portal="", verdict="serving_html",
+            portal="",
+            verdict="serving_html",
             detail=f"HTTP {status} pero devolvió HTML (content-type: {ctype[:40] or 'sin declarar'})",
             url=url,
         )
@@ -88,4 +91,6 @@ def probe(url: str, *, fmt: str | None = None, timeout: float = _TIMEOUT) -> Can
     if not head and (fmt or "").lower() not in _BINARY_FORMATS:
         return CanaryResult(portal="", verdict="unreachable", detail="respuesta vacía", url=url)
 
-    return CanaryResult(portal="", verdict="ok", detail=f"HTTP {status} · {len(head)} bytes", url=url)
+    return CanaryResult(
+        portal="", verdict="ok", detail=f"HTTP {status} · {len(head)} bytes", url=url
+    )

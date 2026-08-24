@@ -30,8 +30,7 @@ HEADER_ROW = [("DEFUNCIONES MATERNAS", "2017", "2018.0", "2019.0", "2020.0")]
 def test_it_recovers_the_real_header_from_row_zero():
     cols, renamed, why = propose_smeared_title_rename(SMEARED, HEADER_ROW)
     assert why == "ok"
-    assert cols == ["defunciones_maternas", "anio_2017", "anio_2018",
-                    "anio_2019", "anio_2020"]
+    assert cols == ["defunciones_maternas", "anio_2017", "anio_2018", "anio_2019", "anio_2020"]
     assert renamed == 5
 
 
@@ -57,9 +56,11 @@ def test_three_columns_is_enough():
     """The May heuristic requires thirty, on the reasoning that a wide table is
     where this happens. These are eight wide and just as unusable; the width was
     never what made the defect."""
-    old = ["Superficie sembrada por departamento y campaña agrícola",
-           "Superficie sembrada por departamento y campaña agrícola_2",
-           "Superficie sembrada por departamento y campaña agrícola_3"]
+    old = [
+        "Superficie sembrada por departamento y campaña agrícola",
+        "Superficie sembrada por departamento y campaña agrícola_2",
+        "Superficie sembrada por departamento y campaña agrícola_3",
+    ]
     cols, _, why = propose_smeared_title_rename(old, [("Departamento", "2020", "2021")])
     assert why == "ok"
     assert cols == ["departamento", "anio_2020", "anio_2021"]
@@ -74,9 +75,12 @@ def test_real_column_names_are_left_alone():
 
 
 def test_collector_lineage_columns_keep_their_names():
-    old = ["Muy largo titulo repetido en cada columna aca",
-           "Muy largo titulo repetido en cada columna _2",
-           "Muy largo titulo repetido en cada columna _3", "_source_dataset_id"]
+    old = [
+        "Muy largo titulo repetido en cada columna aca",
+        "Muy largo titulo repetido en cada columna _2",
+        "Muy largo titulo repetido en cada columna _3",
+        "_source_dataset_id",
+    ]
     cols, _, why = propose_smeared_title_rename(old, [("Depto", "2020", "2021", "x")])
     assert why == "ok"
     assert "_source_dataset_id" in cols
@@ -104,9 +108,11 @@ def test_numbers_that_are_not_years_are_not_a_header():
     `['Buenos Aires', '1500', '1600']` is a row of observations and naming the
     columns after it would lose that row.
     """
-    old = ["Superficie sembrada por departamento y campaña agrícola",
-           "Superficie sembrada por departamento y campaña agrícola_2",
-           "Superficie sembrada por departamento y campaña agrícola_3"]
+    old = [
+        "Superficie sembrada por departamento y campaña agrícola",
+        "Superficie sembrada por departamento y campaña agrícola_2",
+        "Superficie sembrada por departamento y campaña agrícola_3",
+    ]
     _, _, why = propose_smeared_title_rename(old, [("Buenos Aires", "1500", "1600")])
     assert why == "row0_not_header_like"
 

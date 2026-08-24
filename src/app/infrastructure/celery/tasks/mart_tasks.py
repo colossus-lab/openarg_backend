@@ -540,14 +540,15 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
             # question already answered.
             with engine.connect() as _c:
                 _sd = _c.execute(
-                    text(
-                        "SELECT source_data_oldest FROM mart_definitions WHERE mart_id = :m"
-                    ),
+                    text("SELECT source_data_oldest FROM mart_definitions WHERE mart_id = :m"),
                     {"m": mart_id},
                 ).scalar()
                 _c.rollback()
             record_build(
-                engine, mart_id=mart_id, status="built", row_count=row_count,
+                engine,
+                mart_id=mart_id,
+                status="built",
+                row_count=row_count,
                 source_data_oldest=_sd,
             )
             invalidate_query_plan_cache(

@@ -22,7 +22,6 @@ def _registry_is_healthy(monkeypatch):
     monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
 
 
-
 class _FakeResult:
     """Mocks a SQLAlchemy `Result` for `cleanup_invariants` exec calls.
 

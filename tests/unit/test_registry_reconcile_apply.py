@@ -40,9 +40,7 @@ class _Conn:
             return SimpleNamespace(fetchall=lambda: self.unregistered)
         if "WHERE table_name = :t AND table_schema = :s" in s:
             return SimpleNamespace(fetchone=lambda: (1,) if self.taken else None)
-        return SimpleNamespace(
-            fetchall=lambda: [], fetchone=lambda: None, scalar=lambda: None
-        )
+        return SimpleNamespace(fetchall=lambda: [], fetchone=lambda: None, scalar=lambda: None)
 
     def rollback(self):
         pass
@@ -66,8 +64,9 @@ class _Engine:
 
 
 def _row(**kw):
-    base = dict(resource_identity="p::s", version=1, table_name="cache_x",
-                declared="raw", actual="public")
+    base = dict(
+        resource_identity="p::s", version=1, table_name="cache_x", declared="raw", actual="public"
+    )
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -90,8 +89,13 @@ def test_a_name_already_taken_in_the_destination_blocks_the_move():
 
 
 def test_a_phantom_row_is_retired_and_not_deleted():
-    conn = _Conn(phantom=[SimpleNamespace(
-        resource_identity="p::s", version=3, table_name="gone", schema_name="raw")])
+    conn = _Conn(
+        phantom=[
+            SimpleNamespace(
+                resource_identity="p::s", version=3, table_name="gone", schema_name="raw"
+            )
+        ]
+    )
     out = retire_phantom_rows(_Engine(conn), run_id=uuid.uuid4(), dry_run=False)
     assert out.by_reason.get("retired") == 1
     assert any("SET superseded_at = now()" in s for s in conn.sql)
@@ -101,9 +105,16 @@ def test_a_phantom_row_is_retired_and_not_deleted():
 def test_a_backfilled_row_lands_in_the_schema_the_table_is_in():
     """Writing `raw` because that is where new tables go is the defect the
     location sweep exists to repair. This must not manufacture more."""
-    conn = _Conn(unregistered=[SimpleNamespace(
-        table_name="cache_y", table_schema="public", row_count=42,
-        resource_identity="datos_gob_ar::abc")])
+    conn = _Conn(
+        unregistered=[
+            SimpleNamespace(
+                table_name="cache_y",
+                table_schema="public",
+                row_count=42,
+                resource_identity="datos_gob_ar::abc",
+            )
+        ]
+    )
     out = backfill_legacy_registry(_Engine(conn), run_id=uuid.uuid4(), dry_run=False)
     assert out.by_reason.get("registered") == 1
     ins = [s for s in conn.sql if "INSERT INTO public.raw_table_versions" in s]
@@ -130,9 +141,19 @@ def test_a_failed_move_is_recorded_and_the_batch_continues():
 def test_protected_tables_survive_every_sweep():
     for fn, kw in (
         (reconcile_locations, {"misplaced": [_row(table_name="users")]}),
-        (retire_phantom_rows, {"phantom": [SimpleNamespace(
-            resource_identity="p::s", version=1, table_name="conversations",
-            schema_name="public")]}),
+        (
+            retire_phantom_rows,
+            {
+                "phantom": [
+                    SimpleNamespace(
+                        resource_identity="p::s",
+                        version=1,
+                        table_name="conversations",
+                        schema_name="public",
+                    )
+                ]
+            },
+        ),
     ):
         conn = _Conn(**kw)
         out = fn(_Engine(conn), run_id=uuid.uuid4(), dry_run=False)
@@ -141,6 +162,4 @@ def test_protected_tables_survive_every_sweep():
         # SELECT that finds candidates. A looser assertion here would fail on
         # the query rather than on a mutation, which is how a test ends up
         # testing itself.
-        assert not any(
-            "SET SCHEMA" in s or "SET superseded_at" in s for s in conn.sql
-        )
+        assert not any("SET SCHEMA" in s or "SET superseded_at" in s for s in conn.sql)

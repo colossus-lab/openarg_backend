@@ -38,9 +38,7 @@ def registry(request):
     with engine.begin() as conn:
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS raw"))
         conn.execute(text("DROP TABLE IF EXISTS raw.cached_datasets CASCADE"))
-        conn.execute(
-            text("CREATE TABLE raw.cached_datasets (table_name text, status text)")
-        )
+        conn.execute(text("CREATE TABLE raw.cached_datasets (table_name text, status text)"))
 
     def _cleanup():
         with engine.begin() as conn:

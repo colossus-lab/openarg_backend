@@ -56,12 +56,13 @@ class _Eng:
 
 def _run(rows, **kw):
     conn = _Conn(rows)
-    with patch(
-        "app.infrastructure.celery.tasks.columns_backfill.get_sync_engine",
-        return_value=_Eng(conn),
-    ), patch(
-        "app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding"
-    ) as idx:
+    with (
+        patch(
+            "app.infrastructure.celery.tasks.columns_backfill.get_sync_engine",
+            return_value=_Eng(conn),
+        ),
+        patch("app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding") as idx,
+    ):
         out = backfill_dataset_columns(dry_run=False, **kw)
     return out, conn, idx
 
@@ -125,9 +126,12 @@ def test_one_bad_row_does_not_cost_the_batch():
         SimpleNamespace(id="bueno", columns_json='["b"]'),
     ]
     conn = _Flaky(rows)
-    with patch(
-        "app.infrastructure.celery.tasks.columns_backfill.get_sync_engine",
-        return_value=_Eng(conn),
-    ), patch("app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding"):
+    with (
+        patch(
+            "app.infrastructure.celery.tasks.columns_backfill.get_sync_engine",
+            return_value=_Eng(conn),
+        ),
+        patch("app.infrastructure.celery.tasks.scraper_tasks.index_dataset_embedding"),
+    ):
         out = backfill_dataset_columns(dry_run=False)
     assert out["filled"] == 1

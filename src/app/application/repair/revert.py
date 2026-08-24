@@ -234,9 +234,7 @@ def revert_repair(
     return outcome
 
 
-def _record(
-    engine: Engine, outcome: RevertOutcome, run_id: uuid.UUID, *, error: str = ""
-) -> None:
+def _record(engine: Engine, outcome: RevertOutcome, run_id: uuid.UUID, *, error: str = "") -> None:
     """Write the reversal as its own audit row.
 
     A revert is a mutation like any other. Leaving it out of the log would make
