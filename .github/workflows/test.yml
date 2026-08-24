@@ -102,21 +102,15 @@ jobs:
     name: Integration Tests
     timeout-minutes: 20
 
+    # Postgres is NOT a `services:` container here. The migrations need both
+    # `vector` and `postgis`, and no published image carries both: the
+    # `pgvector/pgvector` image has no PostGIS and the `postgis/postgis` one
+    # has no pgvector. `services:` cannot build, so the database is started as
+    # an ordinary container in a step below. Before this, CI ran the
+    # integration suite against a migrated-but-empty database and 45 of its 80
+    # tests skipped themselves — coverage that looked green and protected
+    # nothing.
     services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: openarg_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
       redis:
         image: redis:7
         ports:
@@ -144,6 +138,30 @@ jobs:
       run: |
         uv pip install -e '.[dev,test]' --system
 
+    - name: Start Postgres with pgvector + PostGIS
+      run: |
+        docker build -t openarg-ci-db - <<'DOCKERFILE'
+        FROM pgvector/pgvector:pg16
+        RUN apt-get update \
+         && apt-get install -y --no-install-recommends postgresql-16-postgis-3 \
+         && rm -rf /var/lib/apt/lists/*
+        DOCKERFILE
+        docker run -d --name openarg-ci-db \
+          -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+          -e POSTGRES_DB=openarg_test -p 5432:5432 openarg-ci-db
+        for _ in $(seq 1 40); do
+          docker exec openarg-ci-db pg_isready -U postgres >/dev/null 2>&1 && break
+          sleep 2
+        done
+        docker exec openarg-ci-db pg_isready -U postgres
+
+    - name: Apply migrations
+      env:
+        APP_ENV: test
+        DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/openarg_test
+      run: |
+        alembic -c alembic.ini upgrade head
+
     - name: Run integration tests
       env:
         APP_ENV: test
@@ -152,7 +170,20 @@ jobs:
         CELERY_RESULT_BACKEND: redis://localhost:6379/1
         REDIS_CACHE_URL: redis://localhost:6379/2
       run: |
-        pytest tests/integration/ -q --no-header --maxfail=5 --tb=short
+        # Re-emit each failure as a workflow annotation. Job logs need a token
+        # to read through the API, so a red run used to say only "exit code 1"
+        # to anyone without one — which is how this job stayed red for days
+        # without anybody being able to see what broke.
+        # `pipefail` so the pipeline carries pytest's status and not tee's —
+        # without it a failing run reports success.
+        set -o pipefail
+        status=0
+        pytest tests/integration/ -q --no-header --maxfail=5 --tb=short \
+          2>&1 | tee /tmp/integration.log || status=$?
+        grep -E '^(FAILED|ERROR)' /tmp/integration.log | while read -r line; do
+          echo "::error::${line}"
+        done
+        exit "${status}"
 
   type-check:
     runs-on: ubuntu-latest
