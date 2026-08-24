@@ -67,3 +67,10 @@ sql: |
 
 refresh:
   policy: on_upstream_change
+
+expectations:
+  # Las columnas que identifican una fila. Convierte "estas filas se
+  # repiten" —que es una sospecha— en una afirmación verificable. Vivía
+  # en tests/integration/test_mart_invariants.py, donde sólo corría contra
+  # una base con marts construidos y nadie la corría.
+  business_key: [organismo, nombre]

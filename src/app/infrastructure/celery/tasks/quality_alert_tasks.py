@@ -286,7 +286,7 @@ def check_mart_expectations(self) -> dict[str, Any]:
     """
     from app.application.marts.mart import load_all_marts
     from app.application.quality.alerting import Alert, notify
-    from app.application.quality.expectations import check_mart
+    from app.application.quality.expectations import check_mart, check_source_coverage
     from app.infrastructure.celery.tasks.mart_tasks import _DEFAULT_MARTS_DIR
 
     engine = get_sync_engine()
@@ -295,9 +295,12 @@ def check_mart_expectations(self) -> dict[str, Any]:
 
     with engine.connect() as conn:
         counts = {
-            str(r.mart_id): int(r.n or 0)
+            str(r.mart_id): (int(r.n or 0), r.sql_definition)
             for r in conn.execute(
-                text("SELECT mart_id, COALESCE(last_row_count, 0) AS n FROM mart_definitions")
+                text(
+                    "SELECT mart_id, COALESCE(last_row_count, 0) AS n, sql_definition "
+                    "FROM mart_definitions"
+                )
             )
         }
         conn.rollback()
@@ -307,7 +310,11 @@ def check_mart_expectations(self) -> dict[str, Any]:
         if mart.id not in counts:
             continue
         try:
-            findings.extend(check_mart(engine, mart, counts[mart.id]))
+            filas, stored_sql = counts[mart.id]
+            findings.extend(check_mart(engine, mart, filas))
+            # El cruce que faltaba: qué va a perder este mart la próxima vez
+            # que se reconstruya, dicho antes de que lo pierda.
+            findings.extend(check_source_coverage(engine, mart, stored_sql))
         except Exception:
             # One mart's check must not cost the sweep.
             logger.warning("expectations: check failed for %s", mart.id, exc_info=True)

@@ -24,6 +24,12 @@ So expectations come from two places, and the split is deliberate:
   two million rows for three months and now holds four hundred is a finding
   regardless of what anyone declared.
 
+  `business_key` is the sharpest of the declared rules: it names the columns
+  that identify one row, so `count(*) == count(DISTINCT key)` is a verifiable
+  assertion rather than a heuristic. The duplicate-row check in the mart audit
+  can only report that rows repeat and leave a person to judge whether that is
+  wrong; a declared key settles it.
+
 The derived side stays quiet until it has ground to stand on. With fewer than
 `_MIN_HISTORY` builds recorded there is no such thing as normal yet, and a check
 that fires on the second build ever would be measuring its own youth.
@@ -35,6 +41,7 @@ Every check answers with a reason a person can act on. "row_count 412 vs median
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -115,6 +122,53 @@ def _declared_findings(engine: Engine, mart: Any) -> list[Finding]:
                     mart_id=mart.id,
                     rule="not_null",
                     detail=f"'{col}' tiene {nulls} nulos y el yaml dice que no debería",
+                )
+            )
+
+    # `business_key`: the columns that identify one row. Declaring it turns a
+    # suspicion into an assertion — `mart_duplicate_rows` can only say "these
+    # rows repeat", and whether that is a defect depends on what a row means.
+    # A declared key answers exactly that, and Postgres can check it.
+    #
+    # Six marts already carried this knowledge in
+    # `tests/integration/test_mart_invariants.py`, where it only ran against a
+    # live database that nobody ran it against. It belongs beside the SQL it
+    # describes, so a rewrite that invalidates it shows up in the same diff.
+    key = rules.get("business_key") or []
+    if key:
+        cols = ", ".join(f'"{c}"' for c in key)
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(  # noqa: S608
+                        f"SELECT count(*) AS filas, count(DISTINCT ({cols})) AS claves "
+                        f"FROM {qualified}"
+                    )
+                ).fetchone()
+                conn.rollback()
+        except Exception:
+            out.append(
+                Finding(
+                    mart_id=mart.id,
+                    rule="business_key",
+                    detail=f"no se pudo revisar la clave ({', '.join(key)}): ¿cambiaron las columnas?",
+                )
+            )
+            return out
+        if row is None:  # pragma: no cover — defensive
+            return out
+        filas, claves = int(row.filas or 0), int(row.claves or 0)
+        if filas and claves < filas:
+            sobran = filas - claves
+            out.append(
+                Finding(
+                    mart_id=mart.id,
+                    rule="business_key",
+                    detail=(
+                        f"{sobran} filas de más sobre ({', '.join(key)}): "
+                        f"{filas} filas para {claves} claves. El yaml dice que "
+                        f"esa combinación identifica una fila"
+                    ),
                 )
             )
     return out
@@ -203,3 +257,76 @@ def record_build(
             )
     except Exception:
         logger.debug("expectations: could not record build of %s", mart_id, exc_info=True)
+
+
+# ── Cobertura: lo que el mart tiene contra lo que resolvería hoy ──────────────
+#
+# Un mart no consulta `raw` cuando alguien pregunta. Al construirse,
+# `resolve_macros` mira `raw_table_versions`, expande `{{ live_table(...) }}` a
+# nombres de tabla concretos, y esa lista queda congelada dentro de
+# `mart_definitions.sql_definition`. La vista materializada es una copia. O sea
+# que **un mart es una foto de una foto**, y no se entera de nada hasta que se
+# reconstruye.
+#
+# El subsistema de drift, mientras tanto, captura la forma de las tablas `raw`
+# antes de cada DROP y clasifica los cambios. Nunca pregunta quién consume esa
+# tabla. Los dos subsistemas no se hablan, y ese silencio es el que dejó a
+# `pobreza_indec_aglomerados` sirviendo cero filas durante meses: sus 17 tablas
+# cambiaron de encabezado, `require_all_columns` dejó de matchear
+# (`macro_coverage: kept 0 of 17`), el mart se reconstruyó vacío con estado
+# `built`, y nadie cruzó una cosa con la otra.
+#
+# Esto lo cruza sin datos nuevos: resuelve los macros del YAML **ahora** y
+# compara contra las tablas que el mart guardó. Si hoy resuelve a menos, el
+# próximo rebuild lo va a encoger — y avisa **antes** del daño, no tres meses
+# después cuando alguien pregunta y recibe silencio.
+_SOURCE_REF_RE = re.compile(r'FROM\s+([A-Za-z_][A-Za-z0-9_]*)\."([^"]+)"')
+
+
+def _source_tables(sql: str) -> set[tuple[str, str]]:
+    return set(_SOURCE_REF_RE.findall(sql or ""))
+
+
+def check_source_coverage(engine: Engine, mart: Any, stored_sql: str | None) -> list[Finding]:
+    """Compare the tables the mart holds against the ones it would resolve now.
+
+    Only reports a **loss**. Gaining tables is a mart picking up new data, which
+    is the system working; losing them silently is how a mart empties out.
+    """
+    if not stored_sql:
+        return []
+    from app.application.marts.sql_macros import MacroResolutionError, resolve_macros
+
+    try:
+        fresh = resolve_macros(mart.sql, engine)
+    except MacroResolutionError as exc:
+        # The macros themselves stopped resolving: the mart cannot be rebuilt at
+        # all, and the materialised view is now the only copy of its data.
+        return [
+            Finding(
+                mart_id=mart.id,
+                rule="source_coverage",
+                detail=f"los macros ya no resuelven, el mart no se puede reconstruir: {str(exc)[:120]}",
+            )
+        ]
+    except Exception:  # pragma: no cover — environmental
+        logger.debug("coverage: could not resolve %s", mart.id, exc_info=True)
+        return []
+
+    antes, ahora = _source_tables(stored_sql), _source_tables(fresh)
+    if not antes:
+        return []
+    perdidas = antes - ahora
+    if not perdidas:
+        return []
+
+    detalle = f"el próximo rebuild pierde {len(perdidas)} de {len(antes)} tablas fuente"
+    if not ahora:
+        detalle += " — resolvería a CERO tablas y el mart quedaría vacío"
+    return [
+        Finding(
+            mart_id=mart.id,
+            rule="source_coverage",
+            detail=detalle + f". Ej: {sorted(perdidas)[0][1][:44]}",
+        )
+    ]
