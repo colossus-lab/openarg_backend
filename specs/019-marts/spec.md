@@ -239,3 +239,41 @@ when no curated mart has data. `_get_mart_schema` resolves
 - **DEBT-019-009 (CLOSED 2026-05-19, `delitos_caba` v0.1.2)**: la columna `franja` del mart era texto `"0"..."23"` y NL2SQL no podía traducir "horario nocturno" / "madrugada" / "tarde" a un rango. El YAML ahora documenta el formato + los 4 rangos canónicos (madrugada 0-5, mañana 6-11, tarde 12-19, nocturno 20-23 OR 0-5) y la receta de filtro con `CAST AS NUMERIC` + regex guard `^[0-9]+$`. Acompañado por un ejemplo en `nl2sql.txt` ("robos en horario nocturno → COUNT GROUP BY barrio"). Round v4.2 F3 ahora hit el mart y devuelve "Palermo 4.454, Balvanera 3.368, Flores 2.398" en lugar de 0 filas + deflección. Patrón aplicable a cualquier mart con columnas enum-como-texto-numérico.
 
 - **DEBT-019-010 (CLOSED 2026-05-16, `delitos_argentina_snic` v0.1.1)**: la descripción original del mart decía *"equivalente a nivel provincial vía agregación"* — verdadero para `cantidad_*` pero falso para `tasa_*` (las tasas por 100K hab son no-aditivas; sumar la tasa de cada departamento de una provincia da basura inflada). El YAML ahora distingue explícitamente las dos clases de columnas y desactiva la agregación equivocada — el LLM en v4.2 cambió `SUM(tasa_hechos)` por `SUM(cantidad_hechos)` correctamente. Acompañado por la regla `non-additive metrics` en `nl2sql.txt` y el flag `nonadditive_warning` que el analyst recibe (ver spec `001-query-pipeline`).
+
+---
+
+## Unificar fuentes cuyas columnas cambian de nombre entre años
+
+Escrito el 2026-08-24 al construir `pauta_oficial`, porque el patrón se va a
+repetir: es la forma normal de las series estadísticas argentinas, no una
+anomalía de esa fuente.
+
+Las 179 tablas de pauta oficial nombran los mismos tres campos de quince
+maneras: `MEDIO` / `medio` / `Medio`; `IMPORTE` / `Importe` / `importe` /
+`importe_pesos_ars` / `MONTO` / `Monto total`; `FECHA` / `fecha` / `Fecha` /
+`FECHA_PUBLICACION` / `FECHA-PUBLICACION`. No es que las fuentes sean
+descuidadas: cada año lo publica un equipo distinto.
+
+**La forma que funciona** es declarar *todas* las variantes en
+`expected_columns` de un solo macro y unirlas con `COALESCE`. El macro emite
+`NULL::text` para la columna que una tabla no tiene, así que la unión mantiene
+su forma y `COALESCE` se queda con la que exista:
+
+```sql
+COALESCE("MEDIO", "medio", "Medio")::text AS medio
+```
+
+Una rama de UNION por variante también funciona y envejece peor: cada año nuevo
+agrega una rama, y la n-ésima se olvida.
+
+**Lo que esta forma no resuelve**: una fuente con otra *estructura*, no otro
+nombre. Ciudad de Mendoza publica su pauta como tabla cruzada por mes —las
+columnas son `ENERO / DIARIOS DIGITALES`, `FEBRERO / …`— y eso necesita un
+unpivot. Quedó fuera del mart y dicho en su descripción: declarar una fuente que
+aporta cero filas es reclamar una cobertura que no existe.
+
+**Y el importe casi nunca es un número.** El formato argentino `1.234.567,89`
+usa el punto como separador de miles, así que un `::numeric` crudo falla sobre
+buena parte de las filas. El `CASE` que discrimina los tres encodings ya se
+escribió dos veces —`delitos_caba` y ahora éste—; la tercera vez conviene que
+sea una macro.

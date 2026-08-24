@@ -1,0 +1,170 @@
+id: pauta_oficial
+version: 0.1.0
+description: |
+  Pauta oficial — gasto público en publicidad, unificado entre la Ciudad de
+  Buenos Aires, la Ciudad de Mendoza y el Estado nacional.
+
+  Este mart existe porque la pregunta se hizo y no se pudo responder:
+  "Listado detallado de proveedores pauta oficial de PBA 2024" falló **cinco
+  veces** en `query_analytics`, la pregunta de datos más repetida entre las
+  fallidas. Los datos estaban colectados —179 tablas, más de 1,2 millones de
+  filas— y ningún mart los servía.
+
+  Fuentes: `caba__pauta_publicitaria` (147 versiones),
+  `cache_datos_gob_ar_publicidad_oficial` (14),
+  `cache_caba_pauta_publicitaria` (8), `ciudad_mendoza__pauta_publicitaria` (6),
+  `cache_ciudad_mendo_pauta_publicitaria` (4).
+
+  **Los nombres de columna cambian entre años y entre jurisdicciones**, que es
+  la forma normal de las series estadísticas argentinas y no una anomalía de
+  estas fuentes: `MEDIO` / `medio` / `Medio`; `IMPORTE` / `Importe` /
+  `importe_pesos_ars`; `FECHA` / `fecha` / `FECHA_PUBLICACION` /
+  `FECHA-PUBLICACION`. Declarar cada variante en `expected_columns` y unirlas
+  con COALESCE resuelve las tres formas en una sola pasada: el macro emite
+  `NULL::text` para la columna que una tabla no tiene, y COALESCE se queda con
+  la que existe.
+
+  **Las jurisdicciones no aportan lo mismo, y el mart lo dice.** CABA y Mendoza
+  publican cuatro campos (fecha, medio, tipo, importe); la nación publica
+  además anunciante, proveedor, campaña y rubro. Las columnas que una
+  jurisdicción no tiene quedan en NULL en vez de inventarse. Un mart que
+  declara qué le falta vale más que uno que finge homogeneidad — y la pregunta
+  que lo motivó era justamente sobre proveedores, que sólo la nación publica.
+
+  **Ciudad de Mendoza queda afuera a propósito.** Sus tablas son una tabla
+  cruzada por mes —las columnas son `ENERO / DIARIOS DIGITALES`,
+  `FEBRERO / DIARIOS DIGITALES`— y eso no se unifica con COALESCE: necesita un
+  unpivot, que es otro trabajo. Declararla como fuente y aportar cero filas
+  sería reclamar una cobertura que no existe.
+
+  Nueve tablas de CABA tienen su CSV sin separar (`FECHA_PUBLICACION;TIPO;
+  MEDIO;IMPORTE` como un solo nombre de columna). El barrido de las 04:45 las
+  repara; el mart las tomará en su siguiente reconstrucción sin cambiar nada
+  acá.
+
+  Use cases: "cuánto gastó el gobierno en pauta oficial", "qué medios reciben
+  más publicidad oficial", "proveedores de pauta oficial", "evolución del
+  gasto en publicidad por año".
+domain: gobierno
+
+sources:
+  portals: [caba, datos_gob_ar]
+  resource_patterns:
+    - "caba__pauta_publicitaria*"
+    - "cache_caba_pauta_publicitaria*"
+    - "cache_datos_gob_ar_publicidad_oficial*"
+
+canonical_columns:
+  - name: jurisdiccion
+    type: text
+  - name: periodo
+    type: text
+  - name: medio
+    type: text
+  - name: tipo
+    type: text
+  - name: anunciante
+    type: text
+  - name: proveedor
+    type: text
+  - name: campania
+    type: text
+  - name: rubro
+    type: text
+  - name: importe
+    type: numeric
+
+sql: |
+  WITH caba AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'caba__pauta_publicitaria*',
+        expected_columns=['MEDIO', 'medio', 'Medio', 'IMPORTE', 'Importe',
+                          'importe', 'importe_pesos_ars', 'MONTO', 'Monto total',
+                          'monto', 'FECHA', 'fecha',
+                          'Fecha', 'FECHA_PUBLICACION', 'TIPO', 'tipo',
+                          'Tipo', 'TIPO_DE_MEDIO']
+    ) }}
+  ),
+  caba_legacy AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'cache_caba_pauta_publicitaria*',
+        expected_columns=['MEDIO', 'medio', 'Medio', 'IMPORTE', 'Importe',
+                          'importe', 'importe_pesos_ars', 'MONTO', 'Monto total',
+                          'monto', 'FECHA', 'fecha',
+                          'Fecha', 'FECHA_PUBLICACION', 'TIPO', 'tipo',
+                          'Tipo', 'TIPO_DE_MEDIO']
+    ) }}
+  ),
+  nacion AS (
+    SELECT * FROM {{ live_tables_by_table_pattern(
+        'cache_datos_gob_ar_publicidad_oficial*',
+        expected_columns=['medio', 'total', 'total_neto', 'total_con_iva',
+                          'periodo', 'descripcion_anunciante', 'campania',
+                          'rubro', 'nombre_o_denominacion_proveedor',
+                          'tipo_de_orden', 'provincia_medio']
+    ) }}
+  ),
+  unificado AS (
+    SELECT 'CABA'::text AS jurisdiccion,
+           COALESCE("FECHA", "fecha", "Fecha", "FECHA_PUBLICACION")::text AS periodo,
+           COALESCE("MEDIO", "medio", "Medio")::text AS medio,
+           COALESCE("TIPO", "tipo", "Tipo", "TIPO_DE_MEDIO")::text AS tipo,
+           NULL::text AS anunciante, NULL::text AS proveedor,
+           NULL::text AS campania, NULL::text AS rubro,
+           COALESCE("IMPORTE", "Importe", "importe", "importe_pesos_ars",
+                    "MONTO", "Monto total", "monto")::text AS importe_raw
+    FROM caba
+    UNION ALL
+    SELECT 'CABA'::text,
+           COALESCE("FECHA", "fecha", "Fecha", "FECHA_PUBLICACION")::text,
+           COALESCE("MEDIO", "medio", "Medio")::text,
+           COALESCE("TIPO", "tipo", "Tipo", "TIPO_DE_MEDIO")::text,
+           NULL::text, NULL::text, NULL::text, NULL::text,
+           COALESCE("IMPORTE", "Importe", "importe", "importe_pesos_ars",
+                    "MONTO", "Monto total", "monto")::text
+    FROM caba_legacy
+    UNION ALL
+    SELECT 'Nación'::text,
+           "periodo"::text,
+           "medio"::text,
+           "tipo_de_orden"::text,
+           "descripcion_anunciante"::text,
+           "nombre_o_denominacion_proveedor"::text,
+           "campania"::text,
+           "rubro"::text,
+           COALESCE("total", "total_neto", "total_con_iva")::text
+    FROM nacion
+  )
+  SELECT jurisdiccion, periodo, medio, tipo, anunciante, proveedor, campania, rubro,
+         -- Formato argentino: `1.234.567,89`. El mismo CASE que `delitos_caba`
+         -- necesitó — el punto es separador de miles y la coma es decimal, así
+         -- que un `::numeric` crudo falla sobre la mitad de las filas.
+         CASE
+           WHEN importe_raw IS NULL OR TRIM(importe_raw) = '' THEN NULL
+           WHEN importe_raw ~ '^-?[0-9]+([.,][0-9]+)?$'
+             THEN REPLACE(importe_raw, ',', '.')::numeric
+           WHEN importe_raw ~ '^-?[0-9.]+,[0-9]+$'
+             THEN REPLACE(REPLACE(importe_raw, '.', ''), ',', '.')::numeric
+           WHEN importe_raw ~ '^-?[0-9,]+\.[0-9]+$'
+             THEN REPLACE(importe_raw, ',', '')::numeric
+           ELSE NULL
+         END AS importe
+  FROM unificado
+  WHERE NULLIF(TRIM(COALESCE(medio, '')), '') IS NOT NULL
+     OR NULLIF(TRIM(COALESCE(proveedor, '')), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+
+sample_queries:
+  - "cuánto gastó el gobierno en pauta oficial"
+  - "listado de proveedores de pauta oficial"
+  - "qué medios reciben más publicidad oficial"
+  - "evolución del gasto en publicidad oficial por año"
+  - "pauta publicitaria de la Ciudad de Buenos Aires"
+
+expectations:
+  # La mitad de lo observado al escribir esto (446.940). Un piso, no una
+  # expectativa de tamaño: dice "esto está roto si baja de acá". De la
+  # variación normal se ocupa la parte derivada de `mart_build_history`.
+  min_rows: 223470
