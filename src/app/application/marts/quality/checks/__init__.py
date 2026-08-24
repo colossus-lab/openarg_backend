@@ -8,12 +8,14 @@ by instantiating it here.
 from __future__ import annotations
 
 from app.application.marts.quality.check import MartCheck
+from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
 from app.application.marts.quality.checks.numeric_typing import NumericTypingCheck
 from app.application.marts.quality.checks.row_count_drift import RowCountDriftCheck
 from app.application.marts.quality.checks.row_filter import RowFilterCheck
 from app.application.marts.quality.checks.source_coverage import SourceCoverageCheck
 
 __all__ = [
+    "DuplicateRowsCheck",
     "NumericTypingCheck",
     "RowCountDriftCheck",
     "RowFilterCheck",
@@ -32,4 +34,7 @@ def build_default_mart_checks() -> list[MartCheck]:
         SourceCoverageCheck(),
         RowFilterCheck(),
         NumericTypingCheck(),
+        # Last because it is the least conclusive: a duplicate share is
+        # evidence about the mart's grain, not a verdict on it.
+        DuplicateRowsCheck(),
     ]

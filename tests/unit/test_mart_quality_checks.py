@@ -188,6 +188,7 @@ class TestCheckRegistry:
             "mart_source_coverage",
             "mart_amount_filter_before_aggregation",
             "mart_amount_column_is_text",
+            "mart_duplicate_rows",
         }
 
     def test_every_check_is_a_mart_check(self) -> None:
@@ -203,3 +204,82 @@ class TestCheckRegistry:
         """A finding nobody knows how to act on is noise."""
         ctx = _ctx(columns=_cols(("monto", "text")))
         assert NumericTypingCheck().run(ctx)[0].payload["remediation"]
+
+
+# ── DuplicateRowsCheck ───────────────────────────────────────────────────────
+# Generalises two defects found on 2026-08-24, both of which built `success`
+# and reported a healthy row count.
+
+
+def test_duplicate_rows_flags_the_snic_shape() -> None:
+    """`delitos_argentina_snic`: 348.933 of 1.000.000 rows were exact copies of
+    four overlapping SNIC resources, so every crime count ran ~30 % high."""
+    from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
+
+    ctx = _ctx(
+        mart_id="delitos_argentina_snic",
+        scanned_row_count=1_000_000,
+        distinct_row_count=651_067,
+        kept_table_count=4,
+    )
+    findings = DuplicateRowsCheck().run(ctx)
+    assert len(findings) == 1
+    assert findings[0].payload["duplicate_rows"] == 348_933
+    assert findings[0].payload["duplicate_share"] == 0.3489
+    assert findings[0].mode is Mode.MART_AUDIT
+
+
+def test_duplicate_rows_escalates_when_the_mart_is_mostly_copies() -> None:
+    """`energia_petroleo_gas_produccion`: 4.103.759 rows, 99.816 distinct."""
+    from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
+
+    ctx = _ctx(scanned_row_count=4_103_759, distinct_row_count=99_816, kept_table_count=43)
+    findings = DuplicateRowsCheck().run(ctx)
+    assert len(findings) == 1
+    assert findings[0].severity is Severity.CRITICAL
+
+
+def test_duplicate_rows_stays_quiet_on_ordinary_repetition() -> None:
+    """A mart projecting few columns from a detailed source repeats rows by
+    design. Below the threshold this must say nothing, or the sweep becomes
+    noise nobody reads."""
+    from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
+
+    ctx = _ctx(scanned_row_count=100_000, distinct_row_count=95_000)
+    assert DuplicateRowsCheck().run(ctx) == []
+
+
+def test_duplicate_rows_says_nothing_when_it_could_not_measure() -> None:
+    """The scan times out or the view is gone. A check that cannot measure has
+    to stay silent rather than report zero duplicates as health."""
+    from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
+
+    check = DuplicateRowsCheck()
+    ctx = _ctx(scanned_row_count=None, distinct_row_count=None)
+    assert check.applicable_to(ctx) is False
+    assert check.run(ctx) == []
+
+
+def test_duplicate_rows_skips_tiny_marts() -> None:
+    """On 64 rows a handful of repeats crosses any percentage without meaning
+    anything — `mujer_centros_atencion` measures 75 % and is 48 rows."""
+    from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
+
+    assert DuplicateRowsCheck().applicable_to(_ctx(scanned_row_count=64)) is False
+
+
+def test_duplicate_rows_reports_whether_it_sampled() -> None:
+    """A share measured on a sample is a signal, not a count, and the finding
+    has to say which it is."""
+    from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
+
+    ctx = _ctx(scanned_row_count=400_000, distinct_row_count=591, duplicate_scan_sampled=True)
+    finding = DuplicateRowsCheck().run(ctx)[0]
+    assert finding.payload["sampled"] is True
+    assert "sample" in finding.message
+
+
+def test_duplicate_rows_is_in_the_default_sweep() -> None:
+    from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
+
+    assert any(isinstance(c, DuplicateRowsCheck) for c in build_default_mart_checks())

@@ -62,6 +62,14 @@ class MartAuditContext:
     # normalised to None here — unknown, not zero.
     approx_row_count: int | None = None
 
+    # Exact-duplicate measurement: rows scanned and how many of them were
+    # distinct across every column. Sampled above a size threshold, which
+    # `duplicate_scan_sampled` records — a share measured on a sample is a
+    # signal, not a count.
+    scanned_row_count: int | None = None
+    distinct_row_count: int | None = None
+    duplicate_scan_sampled: bool = False
+
     # --- the universe the mart was built from ---
     source_tables: tuple[SourceTable, ...] = ()
     # How many tables the macro considered before its column filter, and how
