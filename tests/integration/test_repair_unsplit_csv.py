@@ -27,6 +27,17 @@ def _engine_or_skip():
         engine = create_engine(url, pool_pre_ping=True)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1")).scalar()
+            # These tests write to the repair audit, so a reachable database is
+            # not enough — it has to be a migrated one. The CI service is
+            # `pgvector/pgvector:pg16` with no migrations applied, and they
+            # cannot be applied there: `alembic upgrade head` runs
+            # `CREATE EXTENSION postgis`, which that image does not carry. So
+            # the audit table is absent and every test in this file errored in
+            # its fixture. Detect it and skip, the same way the mart invariants
+            # do — silent in CI, live against a real environment.
+            audit = conn.execute(text("SELECT to_regclass('parse_repair_audit')")).scalar()
+        if not audit:
+            pytest.skip("parse_repair_audit not present — DB is not migrated (CI default)")
         return engine
     except Exception as exc:  # pragma: no cover — environmental
         pytest.skip(f"DB unreachable: {exc}")

@@ -161,6 +161,23 @@ def _skip_if_mart_missing(engine, mart_id: str) -> None:
         pytest.skip(f"mart.{mart_id} not built in this DB (CI default)")
 
 
+def _skip_if_relation_missing(engine, relation: str) -> None:
+    """Skip when an ordinary table the invariant reads isn't in this DB.
+
+    Same reasoning as `_skip_if_mart_missing`, for the invariants that read
+    operational tables instead of curated views. Without it these fail on the
+    CI database, which is a migrated-but-empty Postgres — the suite is meant
+    to be silent there and loud against staging.
+    """
+    try:
+        with engine.connect() as conn:
+            exists = conn.execute(text("SELECT to_regclass(:rel)"), {"rel": relation}).scalar()
+    except Exception as exc:  # pragma: no cover — environmental
+        pytest.skip(f"Could not probe relation existence: {exc}")
+    if not exists:
+        pytest.skip(f"{relation} not present in this DB (CI default)")
+
+
 @pytest.fixture(scope="module")
 def engine():
     return _engine_or_skip()
@@ -231,6 +248,7 @@ def test_escuelas_covers_at_least_4_provinces(engine):
     mart promises BA + CABA + Mendoza + Corrientes. If a UNION block
     silently drops out (e.g. live_table macro can't resolve), the count
     drops and the user gets a half-truth."""
+    _skip_if_mart_missing(engine, "escuelas_argentina")
     with engine.connect() as conn:
         n = conn.execute(
             text("SELECT COUNT(DISTINCT provincia) FROM mart.escuelas_argentina")
@@ -245,6 +263,7 @@ def test_legislatura_has_both_chambers(engine):
     and Senado after Sprint 1.5. Without this, a regression that drops
     the Senado UNION block would silently halve the mart and the LLM
     would only ever recommend HCDN."""
+    _skip_if_mart_missing(engine, "legislatura_actividad")
     with engine.connect() as conn:
         n = conn.execute(
             text("SELECT COUNT(DISTINCT organismo) FROM mart.legislatura_actividad")
@@ -259,6 +278,7 @@ def test_escuelas_geo_within_valid_range(engine):
     [-90,90]/[-180,180] envelope. Mendoza upstream had `lati`↔`longitud`
     swapped + decimal-comma quirks; the v0.3.2 parser swaps + filters.
     Any future regression that re-introduces invalid geo trips this."""
+    _skip_if_mart_missing(engine, "escuelas_argentina")
     with engine.connect() as conn:
         invalid = conn.execute(
             text(
@@ -281,6 +301,7 @@ def test_presupuesto_devengado_never_exceeds_vigente(engine):
     Sprint 1.7 audit caught 1 row violating this; the v0.2.1 mart
     filters them out at SQL level. If a future API change ever
     re-introduces over-execution rows, this test catches it."""
+    _skip_if_mart_missing(engine, "presupuesto_consolidado")
     with engine.connect() as conn:
         violations = conn.execute(
             text(
@@ -306,6 +327,7 @@ def test_no_dataset_has_double_ready_cd(engine):
     Drift back into double-ready means the cleanup didn't catch up
     or a writer is creating extra rows without going through the
     state machine."""
+    _skip_if_relation_missing(engine, "cached_datasets")
     with engine.connect() as conn:
         n = conn.execute(
             text(
@@ -335,6 +357,7 @@ def test_mart_definitions_metadata_in_sync(engine):
     aligned). Drift means the discovery filter
     `COALESCE(last_row_count,0) > 0` could hide a healthy mart from the
     serving port — see DEBT-019-002 history."""
+    _skip_if_relation_missing(engine, "mart_definitions")
     with engine.connect() as conn:
         rows = conn.execute(
             text(
