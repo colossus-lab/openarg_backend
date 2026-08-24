@@ -56,23 +56,79 @@ def _fetch_all_records() -> list[dict]:
     return records
 
 
+def _pick(fields: dict, *names: str) -> str:
+    """First of `names` present in the record, already lowercased by the caller."""
+    for name in names:
+        if name in fields:
+            return _safe_str(fields[name])
+    return ""
+
+
 def _normalize_record(raw: dict) -> dict:
-    """Map CKAN field names to our schema."""
+    """Map CKAN field names to our schema, whatever case the portal is using.
+
+    Matched case-insensitively because the portal changed its mind. Until
+    2026-08-03 it shipped `Apellido` / `Área de Desempeño`; from 2026-08-10 it
+    ships `APELLIDO` / `ESTRUCTURA`. The old lookup asked for two exact spellings
+    of each name, got neither, and mapped every field to the empty string — so
+    3,743 employees became 3,743 identical blank rows, which
+    `ON CONFLICT (legajo, snapshot_date) DO NOTHING` collapsed into **one**.
+
+    The mart served that one row as the payroll of the Chamber of Deputies for
+    three weeks, and nothing failed: the download succeeded, the insert
+    succeeded, the mart built. See `_degenerate_reason` for the guard that now
+    refuses to write this shape.
+    """
+    fields = {str(k).strip().lower(): v for k, v in raw.items()}
     return {
-        "legajo": _safe_str(raw.get("Legajo") or raw.get("legajo")),
-        "apellido": _safe_str(raw.get("Apellido") or raw.get("apellido")),
-        "nombre": _safe_str(raw.get("Nombre") or raw.get("nombre")),
-        "escalafon": _safe_str(
-            raw.get("Escalafón") or raw.get("Escalafon") or raw.get("escalafon")
+        "legajo": _pick(fields, "legajo"),
+        "apellido": _pick(fields, "apellido"),
+        "nombre": _pick(fields, "nombre"),
+        "escalafon": _pick(fields, "escalafón", "escalafon"),
+        "area_desempeno": _pick(
+            fields,
+            "área de desempeño",
+            "area de desempeño",
+            "area_desempeno",
+            "estructura_desempeno",
+            # The 2026-08-10 rename. Kept alongside the old names rather than
+            # replacing them: the portal has changed this field twice and may
+            # change it back.
+            "estructura",
         ),
-        "area_desempeno": _safe_str(
-            raw.get("Área de Desempeño")
-            or raw.get("Area de Desempeño")
-            or raw.get("area_desempeno")
-            or raw.get("estructura_desempeno")
-        ),
-        "convenio": _safe_str(raw.get("Convenio") or raw.get("convenio")),
+        "convenio": _pick(fields, "convenio"),
     }
+
+
+# Half. Below that it is a bad batch; above it, the mapping stopped matching the
+# source and writing the result would destroy the last good snapshot's meaning.
+_DEGENERATE_SHARE = 0.5
+
+
+def _degenerate_reason(records: list[dict]) -> str | None:
+    """Why this batch must not be written, or `None` if it is fine.
+
+    The failure this exists for is not a download that breaks — that one raises
+    and retries and somebody sees it. It is a download that **succeeds and means
+    nothing**: every field empty because the source renamed its columns. That
+    shape costs weeks precisely because every step reports success.
+
+    `legajo` is checked on its own because it is the identity: with it empty the
+    upsert key collapses and a whole payroll becomes one row.
+    """
+    if not records:
+        return None
+    total = len(records)
+    sin_legajo = sum(1 for r in records if not r.get("legajo"))
+    if sin_legajo > total * _DEGENERATE_SHARE:
+        return (
+            f"{sin_legajo} de {total} registros vienen sin legajo — el upsert los "
+            f"colapsaría en una fila. Campos recibidos: {sorted(records[0].keys())}"
+        )
+    vacios = sum(1 for r in records if not any(str(v).strip() for v in r.values()))
+    if vacios > total * _DEGENERATE_SHARE:
+        return f"{vacios} de {total} registros quedaron completamente vacíos al mapear"
+    return None
 
 
 # FIX-008 / FR-006 / FR-009: tracked fields for update detection. Only
@@ -200,6 +256,34 @@ def snapshot_staff(self):
 
     current = [_normalize_record(r) for r in raw_records]
     logger.info("Downloaded %d staff records from HCDN", len(current))
+
+    # Refuse to write a snapshot that parsed to nothing. Writing it is worse
+    # than writing nothing: the mart reads the newest snapshot, so a degenerate
+    # batch silently replaces a good payroll with a blank row.
+    degenerate = _degenerate_reason(current)
+    if degenerate:
+        logger.error("HCDN staff snapshot looks degenerate, not writing — %s", degenerate)
+        try:
+            from app.application.quality.alerting import Alert, notify
+
+            notify(
+                engine,
+                [
+                    Alert(
+                        kind="staff_source_changed",
+                        # Keyed on the source, not the run: the portal stays
+                        # changed until somebody fixes the mapping, and a weekly
+                        # repeat of the same message trains people to ignore it.
+                        key="staff_hcdn::snapshots",
+                        title="El padrón de Diputados dejó de mapear",
+                        detail=degenerate[:300],
+                    )
+                ],
+                heading="OpenArg · la fuente cambió de forma",
+            )
+        except Exception:
+            logger.warning("staff snapshot: alerting skipped", exc_info=True)
+        return {"status": "degenerate", "records": len(current), "reason": degenerate}
 
     # 2. Get legajos from previous snapshot
     try:
