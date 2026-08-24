@@ -180,9 +180,22 @@ jobs:
         status=0
         pytest tests/integration/ -q --no-header --maxfail=5 --tb=short \
           2>&1 | tee /tmp/integration.log || status=$?
-        grep -E '^(FAILED|ERROR)' /tmp/integration.log | while read -r line; do
+        # `|| true` matters: with `pipefail` on and the runner's `set -e`, a
+        # grep that finds nothing returns 1 and kills the step — which turned
+        # a green suite into a red job and cost a run to notice.
+        grep -E '^(FAILED|ERROR)' /tmp/integration.log > /tmp/failures.txt || true
+        while read -r line; do
           echo "::error::${line}"
-        done
+        done < /tmp/failures.txt
+        # When pytest fails without naming a test — a collection error, a
+        # crash, a usage error — the lines above are empty and the annotation
+        # would say nothing. Emit the tail so the run is never mute.
+        if [ "${status}" -ne 0 ] && [ ! -s /tmp/failures.txt ]; then
+          echo "::error::pytest exited ${status} without naming a test; last lines follow"
+          tail -n 15 /tmp/integration.log | while read -r line; do
+            echo "::error::${line}"
+          done
+        fi
         exit "${status}"
 
   type-check:
