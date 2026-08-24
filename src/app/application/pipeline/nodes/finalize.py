@@ -149,6 +149,7 @@ async def finalize_node(state: OpenArgState) -> dict:
     # A no-data deflection has a non-empty answer but served no data —
     # log it as a failure with a distinct marker so /admin/analytics
     # surfaces it instead of counting it as a success.
+    analytics_error: str | None
     if no_data_deflection:
         analytics_success = False
         analytics_error = "no_data_deflection"

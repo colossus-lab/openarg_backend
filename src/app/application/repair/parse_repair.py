@@ -217,12 +217,15 @@ _BASE_COMPARISON_PREFIX = 40
 
 def _repeated_base_share(cols: list[str]) -> float:
     """Largest share of names collapsing to the same base once `_N` is stripped."""
-    bases = [
-        (_SUFFIX_RE.match(str(c) or "").group("base") or "")
-        .strip()
-        .lower()[:_BASE_COMPARISON_PREFIX]
-        for c in cols
-    ]
+    # `_SUFFIX_RE` is `^(?P<base>.*?)(?:_\d+)?$` — anchored, with an optional
+    # tail and a lazy base that accepts the empty string, so it matches every
+    # input. The guard is for the type checker, not for a case that happens.
+    def _base(name: object) -> str:
+        m = _SUFFIX_RE.match(str(name) or "")
+        raw = (m.group("base") or "") if m else ""
+        return raw.strip().lower()[:_BASE_COMPARISON_PREFIX]
+
+    bases = [_base(c) for c in cols]
     bases = [b for b in bases if b]
     if not bases:
         return 0.0
@@ -1645,7 +1648,9 @@ def repair_smeared_title_table(
     select_cols = ", ".join(_quote_ident(c) for c in old_cols)
     with engine.connect() as conn:
         sample = [
-            list(r)
+            # `propose_smeared_title_rename` types rows as tuples and only
+            # indexes them, so this costs nothing and keeps the types honest.
+            tuple(r)
             for r in conn.execute(
                 text(f"SELECT {select_cols} FROM {qident_table} LIMIT :n"),  # noqa: S608
                 {"n": sample_rows},
