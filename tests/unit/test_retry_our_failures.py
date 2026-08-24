@@ -56,3 +56,16 @@ def test_the_oldest_go_first():
 def test_it_only_takes_resources_that_have_somewhere_to_download_from():
     sql = str(_CANDIDATES_SQL)
     assert "d.download_url IS NOT NULL" in sql
+
+
+def test_permanently_failed_is_never_made_to_wait():
+    """It is terminal by definition: nothing else will ever pick it up, so an
+    age guard on it means waiting forever.
+
+    The first version guarded both statuses and matched 4 rows out of 952 —
+    `updated_at` is not "when this last failed", it is when anything last wrote
+    the row, and sweeps touch these constantly.
+    """
+    sql = str(_CANDIDATES_SQL)
+    assert "cd.status = 'permanently_failed'" in sql
+    assert "OR cd.updated_at < now() - interval '24 hours'" in sql

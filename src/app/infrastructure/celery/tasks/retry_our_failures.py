@@ -19,6 +19,24 @@ Re-collecting recovers everything a datastore query would and more: the rows,
 the header, the hash, the embeddings. It is portal-agnostic, and it works for
 the next portal too.
 
+**What the first run actually found, which was not what this expected.** Of 150
+retried, 2 succeeded and 147 failed again — 134 of them at
+`ingestion_validation_failed:placeholder_headers`. The files download fine. The
+parser cannot name their columns, the validator refuses the result, and that is
+correct: `orchestration_recovery_loop` recorded how they died (reaped while
+stuck) rather than why. Retrying is not the fix for those; naming their columns
+is, which is what the repair tiers exist for.
+
+The sweep is still worth running, and self-limiting: a retry rewrites
+`error_category` to the real reason, and the real reasons are not in the list
+below. Of the 150, seven remain eligible. It converts an unusable label into a
+usable one even when it cannot collect the resource — which is most of the value
+here, because a population nobody can characterise is a population nobody fixes.
+
+Eight of the 147 failed at "incoming parse is worse than the stored table" —
+the regression guard, firing unprompted in production against the same shape as
+the 2026-08-22 degradation, protecting eight good tables.
+
 **The discrimination is the whole design.** Only categories that name our own
 orchestration are retried. A `download_http_error` is the source saying no, a
 `policy_non_tabular` is us deciding correctly, and retrying either would be a
@@ -56,9 +74,19 @@ _CANDIDATES_SQL = text(
     WHERE cd.status IN ('error', 'permanently_failed')
       AND cd.error_category = ANY(:cats)
       AND d.download_url IS NOT NULL AND d.download_url <> ''
-      -- Not one that just failed. These have been stuck for months; a resource
-      -- that failed an hour ago deserves the ordinary retry path, not this.
-      AND cd.updated_at < now() - interval '24 hours'
+      -- The age guard belongs only to `error`, which the ordinary retry path
+      -- still handles. `permanently_failed` is terminal by definition: nothing
+      -- else will ever pick it up, so making it wait means making it wait
+      -- forever.
+      --
+      -- The first version applied the guard to both and matched 4 rows out of
+      -- 952. `updated_at` is not "when this last failed" — it is when anything
+      -- last wrote the row, and sweeps touch these constantly. Filtering on it
+      -- was measuring the wrong thing.
+      AND (
+          cd.status = 'permanently_failed'
+          OR cd.updated_at < now() - interval '24 hours'
+      )
     ORDER BY cd.updated_at ASC
     LIMIT :limit
     """
