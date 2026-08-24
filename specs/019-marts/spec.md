@@ -110,6 +110,68 @@ predictable and easy to validate.
 **Optional kwargs supported (2026-05-04 / 2026-05-09)**:
 - `expected_columns=['c1','c2',...]` — Schema-intersection projection. With 0 matches → typed-empty `(SELECT NULL::text AS c1, ... WHERE FALSE)`. With N matches and heterogeneous schemas → emits `SELECT "c1"::text AS "c1", ... FROM <each>` with NULL fallback for cols not in that table. Prevents `each UNION query must have the same number of columns` errors.
 - `require_all_columns=True` (2026-05-09) — Filters out tables that do NOT have ALL `expected_columns` before the cap check. Useful when a pattern matches many sub-shapes (e.g. fact + dimension tables in the same slug cluster) and only the FULL shape is desired. Requires `expected_columns` non-empty.
+- `source_marker='<col>'` (2026-08-24) — Each branch of the union additionally projects `'<schema>.<table>'::text AS "<col>"`, a literal naming the physical table the row came from. Required whenever a mart must **deduplicate by provenance**, because no ingest column can do it: `_source_dataset_id` identifies the CKAN *dataset*, and one dataset routinely publishes several resources into several tables. Measured on the DDJJ cluster — 3 of 7 source tables share one `_source_dataset_id`, so a dedup grouped on it merged them into a single group and passed every row through. Validated against `expected_columns` at parse time (a marker colliding with a projected column is an error), and included in the typed-empty fallback so a zero-match cluster still exposes the column.
+
+**Duplicate-source clusters.** A pattern matching a whole cluster can match
+the *same data more than once*: year-slice tables subsumed by a wider table
+(a 2022-2024 table plus a 2024-only table with identical `dj_id`s) and exact
+portal mirrors (`datos_gob_ar` re-publishing a `justicia` resource). Neither
+is visible from row counts alone and `UNION ALL` double-counts both.
+`SELECT DISTINCT` is **not** the remedy — on DDJJ it would have collapsed
+161.119 legitimately repeated line items in the largest table alone. The
+pattern that works is per-entity source selection: group by
+`(<entity_key>, <source_marker>)`, keep the source with the most rows for
+that entity, break ties on the marker for reproducibility. See
+`config/marts/ddjj_patrimonio_declarado.yaml`.
+
+**Prefer a clean sibling resource over quoting corrupted column names.** A
+mart *can* quote broken names and alias them, and that is sometimes the only
+option — but check the rest of the cluster first. The national school registry
+publishes 19 resources of the same padrón; two of them arrived with a
+hierarchical header concatenated onto the first row of data, so their columns
+are named `<Group>_<Field>_<a data value>` truncated to Postgres's 63-byte
+identifier limit, and columns whose first cell was empty inherited the previous
+non-empty value — which put one school's contact detail inside 25 column names.
+The largest resource is one of the two. The other 17 are clean.
+`escuelas_padron_nacional` takes a clean one and gives up 85 rows of 64.691
+(0,13 %): quoting those names would have carried third-party contact data into
+a public repository and pushed it onto every consumer of the mart. **Measure
+the whole cluster before deciding a resource is the only one available** — the
+first version of this mart was written against the broken resource on the
+assumption that all 19 shared the defect, which a crude test
+(`len(name) > 40 or '@' in name`) appeared to confirm because it also flagged
+the healthy `Establecimiento - Localización_Jurisdicción`.
+
+**Snapshot clusters need one snapshot, not the union.** The same dataset
+published 19 resources under an identical title with 59.435-64.691 rows each:
+successive cuts of one registry, not different jurisdictions. Unioning them
+repeats the same schools nineteen times. Pick the resource the portal updated
+last, by identity.
+
+**Validate against an external ground truth before shipping a mart whose
+numbers people will trust.** Row counts, build status and `expectations`
+all measure internal consistency, and internal consistency is exactly what a
+partially-ingested source has. The Censo 2022 cluster
+(`Censo Nacional de Población, Hogares y Viviendas 2022`, 24 provincial tables,
+11,4 M rows) builds cleanly, reports a healthy count, and returns the *same*
+population figure from three different variables — while understating Córdoba
+Capital by 30 % (930.548 against 1.330.023) because the ingested file covers
+1.308 of the department's 2.069 radios. Seven provinces are worse: CABA
+retains 12 % of its rows, Mendoza 9 %, and Buenos Aires stopped at the
+1.000.000-row ingest cap with 43 of 76 variables. Nothing in the mart
+machinery can see any of this; only comparing a total to a published figure
+can. `censo_poblacion_radios` was therefore built from the census *radio
+geometry* resources instead, which reproduce all four official national totals
+to 99,4-100,0 % — and the long-format cluster was left unserved rather than
+served wrong. **A mart that is confidently and consistently low is more
+dangerous than one that fails to build.**
+
+**Identifier truncation is a pattern hazard.** Postgres truncates identifiers
+at 63 bytes, so a slug-derived table name can lose its tail: three DDJJ tables
+are named `..._patrimonia_<hash>` rather than `..._patrimoniales_<hash>`. A
+pattern spelling the full word silently matched 4 of 7 tables and the mart
+built `success` with 60 % of its data. Patterns over long slugs should stop
+short of the truncation boundary.
 
 When a macro resolves to **zero rows**, the placeholder is
 `(SELECT NULL::text AS dummy WHERE FALSE)` — a deterministic empty
