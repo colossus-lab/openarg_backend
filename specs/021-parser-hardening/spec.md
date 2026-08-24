@@ -381,13 +381,27 @@ it is self-limiting — a retry rewrites `error_category` to the real reason, an
 the real reasons are not retryable — and it converts an unusable label into a
 usable one. **A population nobody can characterise is a population nobody fixes.**
 
-### FR additions
+### R2.5 Acceptance criteria for this round
 
-- **FR-021-020** — A repaired table's resource MUST be re-evaluated and promoted
-  only when its column names pass the cleanliness gate.
-- **FR-021-021** — The cleanliness gate MUST reject a smeared title, detected by
-  longest common prefix, independent of column count.
-- **FR-021-022** — A header row promoted to column names MUST be deleted in the
-  same transaction as the rename.
-- **FR-021-023** — Only `error_category` values naming our own orchestration MAY
-  be retried; the source's refusals and our own correct policy decisions MUST NOT.
+Spec 021 states its requirements as measured criteria rather than FRs, so these
+follow that form. Baseline measured 2026-08-23 before any of round 2 ran.
+
+| Metric | Baseline (2026-08-23) | Target | Status |
+|---|---|---|---|
+| Rejected resources whose table is intact and unrepaired | 546 | < 50 | sweep scheduled 06:50 |
+| Servable tables with a smeared title | 116 (291,436 rows) | 0 | sweep scheduled 06:30 |
+| Resources stuck at `orchestration_recovery_loop` | 1,031 | < 100 | 653 eligible; self-limiting |
+| A promoted resource with unusable column names | — | 0 always | gate + test |
+
+Three rules this round adds, stated as invariants because they are what the
+sweeps must never violate:
+
+- A repaired table's resource is promoted **only** when its column names pass
+  the cleanliness gate — never on the strength of a repair having run.
+- The cleanliness gate rejects a smeared title by longest common prefix,
+  independent of column count.
+- A header row promoted to column names is deleted in the same transaction as
+  the rename; a rename that landed without the delete would leave `anio_2018`
+  holding the literal string `2018`.
+- Only `error_category` values naming our own orchestration may be retried. The
+  source's refusals and our own correct policy decisions must not.

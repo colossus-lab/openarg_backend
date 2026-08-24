@@ -281,11 +281,13 @@ fresh, and that asymmetry decides which way the function fails.
 `updated_at` still moves on a skip: it records when we last *checked*, and
 without it the refresh would re-select the same resource on every pass forever.
 
-### FR additions
+### Functional requirements added by this section
 
-- **FR-026-010** — Every collection MUST record the SHA-256 of the bytes it
+Continuing the numbering of section 4.
+
+- **FR-010** — Every collection MUST record the SHA-256 of the bytes it
   downloaded, streamed rather than buffered.
-- **FR-026-011** — A hashing failure MUST NOT fail the collection.
-- **FR-026-012** — A collection MUST skip parse, write and embedding when the
+- **FR-011** — A hashing failure MUST NOT fail the collection.
+- **FR-012** — A collection MUST skip parse, write and embedding when the
   digest matches the live version AND that version's table exists with rows.
-- **FR-026-013** — A skip MUST still advance `cached_datasets.updated_at`.
+- **FR-013** — A skip MUST still advance `cached_datasets.updated_at`.

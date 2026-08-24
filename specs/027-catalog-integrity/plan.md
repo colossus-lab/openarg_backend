@@ -52,6 +52,17 @@ coordinated transaction per table, no beat schedule.
 **3.2 The treadmill fix** — caught in production minutes before the next
 scheduled dispatch. See spec §3.7.
 
+**3.3 The audit that was missing** — found on the spec review pass, not while
+building. The sweep wrote nothing to `raw.cache_drop_audit`, so the ~5,470
+tables it removed left no record of which survivor each one deferred to. The
+table already existed and other drop paths already wrote to it; this one simply
+did not. Fixed and pinned with a test.
+
+The uncomfortable part: the drops that already happened have no trail and cannot
+retroactively acquire one. What can be reconstructed is the *rule* — the
+candidate query is deterministic and `original_identifier` still records every
+grouping — but not the per-table record.
+
 ## Phase 4 — Reclaim what is actually reclaimable
 
 `DROP TABLE` returns its files immediately, so the 270 GB is real data, not

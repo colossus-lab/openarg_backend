@@ -561,17 +561,19 @@ sources moved and which nobody rebuilt should be *fixed*, not reported. What the
 alert then carries is what a rebuild could not fix, which is the only kind worth
 a person's attention.
 
-### FR additions
+### Functional requirements added by this section
 
-- **FR-025-020** — An alert MUST be suppressed when its fingerprint has been
+Continuing the numbering of section 5.
+
+- **FR-020** — An alert MUST be suppressed when its fingerprint has been
   seen, and the fingerprint MUST exclude any timestamp.
-- **FR-025-021** — A run MUST send at most `MAX_PER_RUN` findings and state how
+- **FR-021** — A run MUST send at most `MAX_PER_RUN` findings and state how
   many it withheld.
-- **FR-025-022** — No findings MUST produce no message.
-- **FR-025-023** — A failure to alert MUST NOT fail the sweep that raised it.
-- **FR-025-024** — A mart's reported data age MUST derive from its sources, never
+- **FR-022** — No findings MUST produce no message.
+- **FR-023** — A failure to alert MUST NOT fail the sweep that raised it.
+- **FR-024** — A mart's reported data age MUST derive from its sources, never
   from `last_refreshed_at`.
-- **FR-025-025** — A freshness lookup failure MUST cost the notice, never the
+- **FR-025** — A freshness lookup failure MUST cost the notice, never the
   answer.
-- **FR-025-026** — Derived expectations MUST stay silent below `_MIN_HISTORY`
+- **FR-026** — Derived expectations MUST stay silent below `_MIN_HISTORY`
   recorded builds.

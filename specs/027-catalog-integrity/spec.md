@@ -119,34 +119,38 @@ already proved that twin exists and holds rows.
 
 ## 4. Functional Requirements
 
-- **FR-027-001** — A live registry row naming a table in another schema MUST
+- **FR-001** — A live registry row naming a table in another schema MUST
   result in the table being moved to the named schema, never the row edited.
-- **FR-027-002** — A live row naming a table that exists nowhere MUST be
+- **FR-002** — A live row naming a table that exists nowhere MUST be
   retired with `superseded_at`, never deleted.
-- **FR-027-003** — A served table with no registry row MUST be registered with
+- **FR-003** — A served table with no registry row MUST be registered with
   the schema it is physically in and `parser_version = 'legacy:unknown'`.
-- **FR-027-004** — Registration MUST refuse tables with zero rows: a registry
+- **FR-004** — Registration MUST refuse tables with zero rows: a registry
   row pointing at an empty table is worse than a gap, because `live_table()`
   would resolve to it.
-- **FR-027-005** — An identity group MUST require both URL and title to match.
-- **FR-027-006** — A resource whose identity is already registered MUST be
+- **FR-005** — An identity group MUST require both URL and title to match.
+- **FR-006** — A resource whose identity is already registered MUST be
   reported and skipped, never merged by guess.
-- **FR-027-007** — Duplicate removal MUST exclude groups with differing row
+- **FR-007** — Duplicate removal MUST exclude groups with differing row
   counts, tables named in any mart SQL, and any group whose survivor cannot be
   proved to exist with rows.
-- **FR-027-008** — Dropping a duplicate MUST retire its registry row and mark
+- **FR-008** — Dropping a duplicate MUST retire its registry row and mark
   `datasets.is_cached = true` in the same transaction as the `DROP`.
-- **FR-027-009** — Every sweep here MUST refuse to run when the registry is
+- **FR-008b** — Every drop MUST record, in `raw.cache_drop_audit`, which
+  survivor it deferred to. Knowing a table was dropped says nothing without
+  knowing what replaced it, and an irreversible operation that cannot be
+  reviewed is the one that most needs a trail.
+- **FR-009** — Every sweep here MUST refuse to run when the registry is
   absent or holds fewer than `_REGISTRY_MIN_ROWS` rows.
-- **FR-027-010** — Users, conversations, checkpoints and API keys MUST appear in
+- **FR-010** — Users, conversations, checkpoints and API keys MUST appear in
   an explicit never-touch list, and a test MUST assert it.
 
 ## 5. Success Criteria
 
-- **SC-027-001** — Registry coverage above the 90 % gate. *Achieved: 99.8 %.*
-- **SC-027-002** — Zero misplaced tables and zero phantom rows. *Achieved.*
-- **SC-027-003** — No mart regressed. *Achieved: 69 healthy before and after.*
-- **SC-027-004** — Users and conversations unchanged. *Achieved: 2,995 / 4,059
+- **SC-001** — Registry coverage above the 90 % gate. *Achieved: 99.8 %.*
+- **SC-002** — Zero misplaced tables and zero phantom rows. *Achieved.*
+- **SC-003** — No mart regressed. *Achieved: 69 healthy before and after.*
+- **SC-004** — Users and conversations unchanged. *Achieved: 2,995 / 4,059
   before and after.*
 
 ## 6. Out of scope

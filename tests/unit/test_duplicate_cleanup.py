@@ -109,3 +109,27 @@ def test_the_dropped_duplicate_is_marked_cached_so_nothing_rebuilds_it():
     drop_at = src.index("DROP TABLE")
     mark_at = src.index("SET is_cached = true")
     assert begin_at < drop_at < mark_at
+
+
+def test_every_drop_records_what_it_deferred_to():
+    """An irreversible operation that cannot be reviewed is the one that most
+    needs a trail.
+
+    The first version of this sweep wrote nothing: ~5,470 tables were removed
+    from production with no record of which survivor each one deferred to.
+    """
+    import inspect
+
+    from app.application.catalog import duplicate_cleanup
+
+    src = inspect.getsource(duplicate_cleanup.cleanup_duplicate_tables)
+    assert "_audit_drop(" in src
+    # The survivor is the part that makes the record reviewable: knowing a table
+    # was dropped says nothing without knowing what replaced it.
+    assert "survivor=str(row.survivor)" in src
+
+    audit_src = inspect.getsource(duplicate_cleanup._audit_drop)
+    assert "cache_drop_audit" in audit_src
+    # Best-effort: a failure to record must not abort a drop that has already
+    # committed, and the row would then be a lie about what happened.
+    assert "except Exception:" in audit_src

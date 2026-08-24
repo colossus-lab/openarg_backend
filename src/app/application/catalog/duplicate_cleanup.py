@@ -48,6 +48,7 @@ below says so out loud anyway.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -153,6 +154,43 @@ class CleanupOutcome:
         }
 
 
+_AUDIT_SQL = text(
+    """
+    INSERT INTO raw.cache_drop_audit (object_name, reason, actor, extra, dropped_at)
+    VALUES (:obj, :reason, :actor, CAST(:extra AS jsonb), now())
+    """
+)
+
+
+def _audit_drop(engine: Engine, *, obj: str, survivor: str, rows: int, run_id: uuid.UUID) -> None:
+    """Record what was dropped and what it was dropped in favour of.
+
+    `raw.cache_drop_audit` already exists and other drop paths write to it. The
+    first version of this sweep wrote nothing: ~5,470 tables were removed from
+    production with no record of which survivor each one deferred to, which
+    makes the operation unreviewable after the fact — and an irreversible
+    operation that cannot be reviewed is the one that most needs a trail.
+
+    Best-effort. A failure to record must not abort a drop that has already
+    committed, and the row would then be a lie about what happened.
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                _AUDIT_SQL,
+                {
+                    "obj": obj,
+                    "reason": "duplicate_identity",
+                    "actor": "catalog.duplicate_cleanup",
+                    "extra": json.dumps(
+                        {"survivor": survivor, "row_count": rows, "run_id": str(run_id)}
+                    ),
+                },
+            )
+    except Exception:
+        logger.warning("could not audit drop of %s", obj, exc_info=True)
+
+
 def cleanup_duplicate_tables(
     engine: Engine,
     *,
@@ -250,6 +288,13 @@ def cleanup_duplicate_tables(
             logger.warning("duplicate cleanup failed for %s", table, exc_info=True)
             continue
 
+        _audit_drop(
+            engine,
+            obj=f"{schema}.{table}",
+            survivor=str(row.survivor),
+            rows=int(row.row_count or 0),
+            run_id=run_id,
+        )
         outcome.note("dropped")
         outcome.rows_freed += int(row.row_count or 0)
         outcome.dropped.append(table)
