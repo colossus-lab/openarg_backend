@@ -14,6 +14,7 @@ from app.application.marts.quality.auditor import _coverage_counts, _source_refs
 from app.application.marts.quality.check import MartCheck
 from app.application.marts.quality.checks import build_default_mart_checks
 from app.application.marts.quality.checks.numeric_typing import NumericTypingCheck
+from app.application.marts.quality.checks.row_count_drift import RowCountDriftCheck
 from app.application.marts.quality.checks.row_filter import RowFilterCheck
 from app.application.marts.quality.checks.source_coverage import SourceCoverageCheck
 from app.application.marts.quality.context import MartAuditContext, MartColumn, SourceTable
@@ -283,3 +284,58 @@ def test_duplicate_rows_is_in_the_default_sweep() -> None:
     from app.application.marts.quality.checks.duplicate_rows import DuplicateRowsCheck
 
     assert any(isinstance(c, DuplicateRowsCheck) for c in build_default_mart_checks())
+
+
+# ── RowCountDriftCheck: el caso espejo ───────────────────────────────────────
+
+
+def test_an_empty_mart_with_a_stored_count_is_reported() -> None:
+    """`pobreza_indec_aglomerados` served zero rows while the registry said 864.
+
+    The count was left over from a build months earlier, when the sources still
+    parsed. The mart stayed discoverable, every poverty question routed to it,
+    and it answered with nothing. The `mart_empty` alert could not see it
+    either: that query reads `last_row_count`, and the registry was the thing
+    that was wrong.
+    """
+    ctx = _ctx(
+        mart_id="pobreza_indec_aglomerados",
+        last_row_count=864,
+        scanned_row_count=0,
+        approx_row_count=0,
+    )
+    findings = RowCountDriftCheck().run(ctx)
+    empty = [f for f in findings if f.payload.get("finding_key") == "empty_despite_stored_count"]
+    assert len(empty) == 1
+    assert empty[0].severity is Severity.CRITICAL
+    assert empty[0].payload["last_row_count"] == 864
+
+
+def test_a_sampled_scan_cannot_claim_the_mart_is_empty() -> None:
+    """Above the sampling threshold `scanned_row_count` counts a slice, not the
+    view. Reading a sample of zero as an empty mart would report every large
+    mart whose first rows happen to be skipped."""
+    ctx = _ctx(last_row_count=5_000_000, scanned_row_count=0, duplicate_scan_sampled=True)
+    findings = RowCountDriftCheck().run(ctx)
+    assert not [f for f in findings if f.payload.get("finding_key") == "empty_despite_stored_count"]
+
+
+def test_a_mart_that_is_empty_and_says_so_is_not_reported() -> None:
+    """Registry zero and view zero agree. There is nothing to report — the mart
+    is correctly hidden from discovery."""
+    ctx = _ctx(last_row_count=0, scanned_row_count=0, approx_row_count=0)
+    findings = RowCountDriftCheck().run(ctx)
+    assert not [f for f in findings if f.payload.get("finding_key") == "empty_despite_stored_count"]
+
+
+def test_the_two_drift_directions_do_not_collapse_into_one_finding() -> None:
+    """Hidden-despite-rows and empty-despite-count are opposite failures of the
+    same bookkeeping, and a mart reports at most one of them — but their keys
+    must differ so the persistence layer cannot overwrite one with the other."""
+    hidden = _ctx(last_row_count=0, approx_row_count=52_000_000, scanned_row_count=52_000_000)
+    empty = _ctx(last_row_count=864, approx_row_count=0, scanned_row_count=0)
+    keys = set()
+    for ctx in (hidden, empty):
+        for f in RowCountDriftCheck().run(ctx):
+            keys.add(f.payload.get("finding_key"))
+    assert {"hidden_despite_rows", "empty_despite_stored_count"} <= keys
