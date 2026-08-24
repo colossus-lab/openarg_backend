@@ -233,3 +233,59 @@ the honest thing to do while a backlog of 24,097 stale resources drains.
 - **[NEEDS CLARIFICATION CL-026-003]** — Whether a refresh that finds identical
   bytes should count as a read. It costs the download either way, and recording
   it is what makes "unchanged for six months" a statement rather than an absence.
+
+---
+
+## 7. Content-based change detection, built 2026-08-23
+
+### 7.1 The correction this spec needed
+
+This spec keys the refresh on the portal's `last_updated_at`. That is metadata,
+not content, and the measurement is unambiguous: **68 re-collections produced
+zero files that were actually different.** The portal moved a timestamp and we
+re-read, re-parsed and re-embedded a file identical to the one we held.
+
+The 2026 plan asked for detection by content and was right.
+
+### 7.2 The column existed and nobody wrote it
+
+`raw_table_versions.source_file_hash` has been there since migration 0039 and
+every registration function threads it through as a parameter. **Nothing ever
+computed it**: 0 of 31,266 live versions carried one.
+
+This spec previously asserted the hash "is already stored". That was wrong, and
+it was discovered by trying to use it.
+
+### 7.3 Where the digest is taken, and why there
+
+Where the file exists on disk and before anything can replace it — a hash taken
+later describes a different file. Streamed in 1 MB chunks: these run to hundreds
+of megabytes and a digest needing the file in memory trades one problem for a
+worse one.
+
+### 7.4 The skip, and the trap inside it
+
+Downloading is unavoidable — the digest is of those bytes — but the parse, the
+write and the embeddings are not, and that is where the cost is.
+
+**An unchanged file is not a reason to keep a broken table.** The skip applies
+only when the table the last parse produced still exists *and still holds rows*.
+Otherwise a resource whose parse failed, or whose table a sweep dropped, would be
+skipped forever on the grounds that its source never moved — which is how a gap
+becomes permanent.
+
+Uncertainty resolves toward re-collecting. Re-parsing an unchanged file costs one
+collection; skipping a changed one costs serving stale data while believing it
+fresh, and that asymmetry decides which way the function fails.
+
+`updated_at` still moves on a skip: it records when we last *checked*, and
+without it the refresh would re-select the same resource on every pass forever.
+
+### FR additions
+
+- **FR-026-010** — Every collection MUST record the SHA-256 of the bytes it
+  downloaded, streamed rather than buffered.
+- **FR-026-011** — A hashing failure MUST NOT fail the collection.
+- **FR-026-012** — A collection MUST skip parse, write and embedding when the
+  digest matches the live version AND that version's table exists with rows.
+- **FR-026-013** — A skip MUST still advance `cached_datasets.updated_at`.

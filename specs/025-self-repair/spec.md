@@ -486,3 +486,92 @@ connection read the shadow, because the role's default `search_path` is
 were wrong on the first pass for exactly that reason. Measure production through
 `get_sync_engine`, or qualify the schema, or both.
 
+
+---
+
+## 8. The consumer half, built 2026-08-23
+
+Section 5.5 of the 2026 plan calls a metric without a consumer decoration. This
+section records what was built to stop that being true, and the measurement that
+motivated each piece.
+
+### 8.1 There was nowhere to send an alert
+
+The half stayed open for a reason that was never about code. The drift report
+had run in shadow since 2026-08-21 producing verdicts nobody read, and the three
+broken marts were found by someone reading a database on an unrelated errand.
+
+A Telegram channel is now wired. Nothing depends on that choice beyond `_send`.
+
+**Sending is the easy half.** What decides whether anyone still reads the
+channel in a month is what it refuses to send:
+
+- **Only new findings.** The fingerprint identifies *the problem*, not *the
+  sighting*. The weekly report re-derives the same pairs; without this the first
+  Monday produces N alerts and every Monday after produces the same N. Novelty
+  is decided by Postgres (`xmax = 0`), not by a read-then-write two workers
+  could both win.
+- **Five per run.** Something systemic produces hundreds at once, and the count
+  communicates more than the list.
+- **Silence is an answer.** No findings, no message. A daily "all clear" is the
+  furniture that trains people to stop looking.
+
+### 8.2 The reader could not tell how old an answer was
+
+78.5 % of served resources were last read over 90 days ago, and every mart in
+production serves data from May. The answer is not wrong — it is the best
+reading of what we hold — but presented undated it lets the reader assume a
+currency nobody promised.
+
+**A mart's rebuild time is not its data's date.** `acumar_agentes_contaminantes`
+rebuilt at 19:49 on 2026-08-23 over sources last read on 9 May: 106 days.
+Reporting `last_refreshed_at` as freshness would reassure about something nobody
+measured. Migration 0059 records `source_data_oldest`, taken at build time from
+the tables the macros actually resolved to.
+
+The notice is deliberately quiet — muted text, not the amber of `.errored-bar`.
+This is a fact about the answer, not a failure, and dressing it as an alert
+either alarms the reader or teaches them to ignore the amber that does matter.
+
+**The backend had emitted `warnings` on the `complete` event all along and
+nothing read them.** The wire was missing in five places.
+
+### 8.3 Expectations come from two places, and the split is deliberate
+
+Neither mart found degraded on 2026-08-23 would have been caught by a
+hand-written rule, because nobody had written one and nobody was going to write
+sixty-nine and keep them current.
+
+- **Declared**, in the mart's YAML beside its SQL, for what a person knows and
+  the data cannot say. The floors are half of what each mart actually held when
+  the expectation was written — **not a round number**. The first run flagged
+  `presupuesto_nacional_ejecutado` at 91,299 against a floor of 100,000 and the
+  floor was the thing that was wrong.
+- **Derived**, from `mart_build_history` (migration 0060), for the question
+  nobody should answer per mart: *is this build normal for this mart?* Silent
+  below three recorded builds — a rule that fires on the second build ever is
+  measuring its own youth. Median, not mean: one bad build would drag an average
+  and quietly raise the bar for calling the next one a collapse.
+
+### 8.4 Repair before report
+
+The sweeps run in order — repair 06:30, rescue 06:50, retry 07:10, canary 08:40,
+expectations 08:50, alert 09:00 — and the order is the argument. A mart whose
+sources moved and which nobody rebuilt should be *fixed*, not reported. What the
+alert then carries is what a rebuild could not fix, which is the only kind worth
+a person's attention.
+
+### FR additions
+
+- **FR-025-020** — An alert MUST be suppressed when its fingerprint has been
+  seen, and the fingerprint MUST exclude any timestamp.
+- **FR-025-021** — A run MUST send at most `MAX_PER_RUN` findings and state how
+  many it withheld.
+- **FR-025-022** — No findings MUST produce no message.
+- **FR-025-023** — A failure to alert MUST NOT fail the sweep that raised it.
+- **FR-025-024** — A mart's reported data age MUST derive from its sources, never
+  from `last_refreshed_at`.
+- **FR-025-025** — A freshness lookup failure MUST cost the notice, never the
+  answer.
+- **FR-025-026** — Derived expectations MUST stay silent below `_MIN_HISTORY`
+  recorded builds.
