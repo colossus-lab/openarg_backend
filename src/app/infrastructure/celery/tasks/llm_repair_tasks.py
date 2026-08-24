@@ -122,7 +122,10 @@ def repair_columns_with_llm(
         logger.info("llm repair: OPENARG_LLM_REPAIR is not set, so nothing runs")
         return {"enabled": False, "reason": "not_enabled", "repaired": 0}
 
-    from app.application.repair.parse_repair import repair_with_llm_assist
+    from app.application.repair.parse_repair import (
+        propose_llm_assisted_rename,
+        repair_with_llm_assist,
+    )
     from app.infrastructure.adapters.llm.bedrock_llm_adapter import BedrockLLMAdapter
 
     engine = get_sync_engine()
@@ -142,6 +145,25 @@ def repair_columns_with_llm(
         conn.rollback()
 
     llm = BedrockLLMAdapter()
+
+    # Ask the model something we know the answer to before letting it rename
+    # anything. `verify_intrinsic` checks that a proposal is identifier-like,
+    # distinct and less broken than what it replaces — it checks shape, not
+    # meaning, and a column of CUITs named `fecha` passes every structural test
+    # there is. A degraded model keeps producing well-formed names for the
+    # wrong columns, which is the failure this catches and the verifier cannot.
+    from app.application.quality.model_canary import run_canary
+
+    canary = asyncio.run(run_canary(llm, propose_llm_assisted_rename))
+    if not canary.ok:
+        logger.warning("llm repair: canary failed, writing nothing — %s", canary.detail)
+        return {
+            "enabled": True,
+            "reason": "canary_failed",
+            "canary": canary.detail,
+            "repaired": 0,
+        }
+
     by_reason: dict[str, int] = {}
     repaired: list[str] = []
 
@@ -172,6 +194,7 @@ def repair_columns_with_llm(
 
     result = {
         "enabled": True,
+        "canary": canary.detail,
         "candidates": len(rows),
         "dry_run": dry_run,
         "by_reason": by_reason,

@@ -54,6 +54,17 @@ def _run(rows, outcomes, monkeypatch, **kw):
         return result
 
     monkeypatch.setattr(parse_repair, "repair_with_llm_assist", _repair)
+
+    # El canario corre antes de escribir y llama al modelo de verdad. Estos
+    # tests son sobre el bucle de reparación, no sobre el modelo, así que se lo
+    # da por sano. Que haya que mockearlo es la señal de que la compuerta está
+    # puesta: sin este stub, ninguna de estas pruebas escribiría nada.
+    from app.application.quality import model_canary
+
+    async def _canary_ok(llm, proposer):
+        return model_canary.CanaryResult(ok=True, reason="ok")
+
+    monkeypatch.setattr(model_canary, "run_canary", _canary_ok)
     return mod.repair_columns_with_llm.run(**kw), calls, engine
 
 
@@ -146,3 +157,36 @@ def test_it_does_not_spend_a_slot_on_a_table_the_proposer_will_refuse(monkeypatc
     sql = str(mod._CANDIDATES_SQL)
     assert "total <= :max_cols" in sql
     assert "ORDER BY broken ASC" in sql, "fewest broken columns first, not widest table"
+
+
+def test_a_degraded_model_writes_nothing(monkeypatch):
+    """La compuerta que faltaba.
+
+    `verify_intrinsic` revisa la *forma* de una propuesta —que sea un
+    identificador, distinto, menos roto que lo que reemplaza— y no su
+    *significado*. Una columna de CUITs nombrada `fecha` pasa todos los
+    chequeos estructurales que hay. Un modelo degradado sigue produciendo
+    nombres bien formados para las columnas equivocadas, y eso el verificador
+    no lo puede ver.
+    """
+    from app.application.quality import model_canary
+    from app.infrastructure.adapters.llm import bedrock_llm_adapter
+    from app.infrastructure.celery.tasks import llm_repair_tasks as mod
+
+    monkeypatch.setenv("OPENARG_LLM_REPAIR", "1")
+    engine = MagicMock()
+    engine.connect.return_value.__enter__.return_value.execute.return_value = MagicMock(
+        fetchall=lambda: [_Row(1)]
+    )
+    mod.get_sync_engine = lambda: engine
+    monkeypatch.setattr(bedrock_llm_adapter, "BedrockLLMAdapter", lambda *a, **k: MagicMock())
+
+    async def _canary_mal(llm, proposer):
+        return model_canary.CanaryResult(ok=False, reason="2 de 3 columnas mal nombradas")
+
+    monkeypatch.setattr(model_canary, "run_canary", _canary_mal)
+
+    result = mod.repair_columns_with_llm.run(dry_run=False)
+    assert result["reason"] == "canary_failed"
+    assert result["repaired"] == 0
+    assert "mal nombradas" in result["canary"]
