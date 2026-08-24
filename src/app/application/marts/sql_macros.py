@@ -40,6 +40,12 @@ that this module resolves at build time. Supported macros:
         The ingest columns cannot answer that: `_source_dataset_id` names
         the CKAN dataset, and one dataset routinely lands in several tables.
 
+  {{ to_numeric('importe') }}
+      → a CASE that parses `1234.56`, `1.234.567,89` and `1234,56`, and
+        yields NULL for anything else. One canonical parser for amounts held
+        as text — 44 such columns are still served across 30 marts, and
+        nothing can SUM() a text amount.
+
 When a macro resolves to ZERO live tables, the result is a deterministic
 empty-shape subquery (`SELECT WHERE FALSE`), so the mart still builds
 with a known shape and stays empty until upstream lands.
@@ -71,6 +77,7 @@ logger = logging.getLogger(__name__)
 # Match the entire `{{ ... }}` payload — content parsed afterward by `ast`.
 _MACRO_RE = re.compile(r"\{\{\s*(?P<call>.+?)\s*\}\}", re.DOTALL)
 _VALID_MACRO_NAMES = {
+    "to_numeric",
     "live_table",
     "live_tables_by_portal",
     "live_tables_by_pattern",
@@ -78,6 +85,76 @@ _VALID_MACRO_NAMES = {
 }
 
 _RESOURCE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.\-:* ]+$")
+
+# `to_numeric` interpolates its argument into SQL, so it accepts only a column
+# reference — never an expression. Three shapes, because real mart sources use
+# all three: a bare name, a qualified `alias.column`, and a quoted name (CKAN
+# ships columns called `awards/0/value/amount`). A quoted form may not contain
+# a quote of its own, which is what would let it close the identifier and run
+# something else.
+_BARE_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_QUALIFIED_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
+_QUOTED_COLUMN_RE = re.compile(r'^"[^"]+"$')
+
+
+def _column_reference(raw: str) -> str | None:
+    """Quote a column reference, or None when it is not one."""
+    if _BARE_COLUMN_RE.match(raw):
+        return f'"{raw}"'
+    if _QUOTED_COLUMN_RE.match(raw):
+        return raw
+    if _QUALIFIED_COLUMN_RE.match(raw):
+        alias, column = raw.split(".", 1)
+        return f'"{alias}"."{column}"'
+    return None
+
+
+def _to_numeric_sql(column: str) -> str:
+    """Parse an Argentine amount held as text, or NULL when it is not one.
+
+    Written six times by hand on 2026-08-24 alone — in the energy, crime,
+    mediation, DDJJ, census and school marts — which is five times too many for
+    an expression this easy to get subtly wrong.
+
+    The audit finds 44 amount columns still typed `text` across 30 marts, and a
+    text amount is not a cosmetic problem: nothing can `SUM()` it. The model
+    writing SQL either refuses or casts blindly, and a blind `::numeric` over a
+    single stray value fails the whole query.
+
+    Three shapes, in order, because they are mutually exclusive:
+
+      `1234.56`       a clean decimal
+      `1.234.567,89`  Argentine thousands separator with a decimal comma
+      `1234,56`       a decimal comma without separators
+
+    Anything else yields NULL rather than raising: a mart that refuses to build
+    over one malformed cell serves nothing, which is worse than serving the
+    other rows and admitting the gap. `delitos_caba` spent time in
+    `build_failed` for exactly that.
+
+    **`1.234` is ambiguous and this reads it as a decimal.** A single group of
+    three digits after a dot is either one-point-two-three-four or one
+    thousand two hundred thirty-four, and the value alone cannot say which.
+    Both readings are wrong a thousandfold when they are wrong, so neither is
+    safe; reading it as a decimal at least matches what a plain `::numeric`
+    would have done, so adopting this macro changes no existing number. A
+    column where that case is common needs its own rule, not this one —
+    `delitos_caba` carries coordinates in three encodings and has one.
+    """
+    col = _column_reference(column)
+    if col is None:  # pragma: no cover — the caller validates first
+        raise MacroResolutionError(f"to_numeric(): {column!r} is not a column reference")
+    return (
+        "CASE\n"
+        f"    WHEN {col}::text ~ '^\\s*-?[0-9]+(\\.[0-9]+)?\\s*$'\n"
+        f"      THEN btrim({col}::text)::numeric\n"
+        f"    WHEN {col}::text ~ '^\\s*-?[0-9]{{1,3}}(\\.[0-9]{{3}})+(,[0-9]+)?\\s*$'\n"
+        f"      THEN replace(replace(btrim({col}::text), '.', ''), ',', '.')::numeric\n"
+        f"    WHEN {col}::text ~ '^\\s*-?[0-9]+,[0-9]+\\s*$'\n"
+        f"      THEN replace(btrim({col}::text), ',', '.')::numeric\n"
+        "  END"
+    )
+
 
 # Cap on the number of tables a `live_tables_by_*` macro can expand to.
 # Without this, a permissive pattern like `*` would generate one
@@ -744,6 +821,13 @@ def resolve_macros(sql: str, engine) -> str:
             raise MacroResolutionError(
                 f"Macro {name}(): require_all_columns=True requires expected_columns"
             )
+
+        if name == "to_numeric":
+            if _column_reference(arg) is None:
+                raise MacroResolutionError(f"Macro to_numeric(): {arg!r} is not a column reference")
+            if kwargs:
+                raise MacroResolutionError("Macro to_numeric() takes no keyword arguments")
+            return _to_numeric_sql(arg)
 
         if not _RESOURCE_IDENTITY_RE.match(arg):
             raise MacroResolutionError(f"Macro {name}(): invalid arg {arg!r} (charset)")

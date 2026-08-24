@@ -400,3 +400,50 @@ def test_federated_mirrors_keep_the_larger_copy(monkeypatch) -> None:
     # The mirror is bigger here, so the original is the one that goes.
     assert 'raw."p_sin_finalidad"' in resolved
     assert 'raw."p_full"' not in resolved
+
+
+def test_to_numeric_parses_the_three_argentine_amount_shapes(monkeypatch) -> None:
+    """One canonical parser instead of six hand-written CASEs.
+
+    Written by hand six times on 2026-08-24 — energy, crime, mediation, DDJJ,
+    census, schools. The audit still finds 44 amount columns typed `text`
+    across 30 marts, and nothing can SUM() a text amount: the model writing SQL
+    either refuses or casts blindly, and one stray value fails the query.
+    """
+    _patch(monkeypatch, _rows())
+    resolved = resolve_macros("SELECT {{ to_numeric('importe') }} AS x", engine=object())
+    # Clean decimal, Argentine thousands + decimal comma, and bare comma decimal.
+    assert resolved.count("WHEN") == 3
+    assert '"importe"::text' in resolved
+    assert "replace(replace(btrim" in resolved
+    # No ELSE: an unparseable cell becomes NULL instead of failing the build.
+    assert "ELSE" not in resolved
+
+
+def test_to_numeric_accepts_the_column_shapes_real_marts_use(monkeypatch) -> None:
+    """A bare name, a qualified `alias.column`, and a quoted name — CKAN ships
+    columns called `awards/0/value/amount`, so restricting this to bare
+    identifiers would have left the marts that need it most unable to use it."""
+    _patch(monkeypatch, _rows())
+    for arg, expected in (
+        ("importe", '"importe"::text'),
+        ("v.valor", '"v"."valor"::text'),
+        ('"awards/0/value/amount"', '"awards/0/value/amount"::text'),
+    ):
+        resolved = resolve_macros("SELECT {{ to_numeric(%r) }}" % arg, engine=object())
+        assert expected in resolved
+
+
+def test_to_numeric_refuses_anything_that_is_not_a_column_reference(monkeypatch) -> None:
+    """The argument is interpolated into SQL, so it accepts a column name and
+    nothing that could carry an expression."""
+    _patch(monkeypatch, _rows())
+    for bad in ("importe || 1", "1; DROP TABLE x", 'importe"', "a.b.c", '"a"b"'):
+        with pytest.raises(MacroResolutionError, match="column reference"):
+            resolve_macros("SELECT {{ to_numeric('%s') }}" % bad, engine=object())
+
+
+def test_to_numeric_takes_no_kwargs(monkeypatch) -> None:
+    _patch(monkeypatch, _rows())
+    with pytest.raises(MacroResolutionError, match="no keyword arguments"):
+        resolve_macros("SELECT {{ to_numeric('importe', foo=1) }}", engine=object())

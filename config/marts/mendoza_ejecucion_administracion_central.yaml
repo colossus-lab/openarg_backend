@@ -66,7 +66,7 @@ canonical_columns:
     type: text
     description: Monto efectivamente pagado
   - name: credito_vigente
-    type: text
+    type: numeric
     description: Crédito vigente
   - name: aumentos
     type: text
@@ -91,7 +91,7 @@ sql: |
     NULLIF(TRIM(devengado::text), '')                                        AS devengado,
     NULLIF(TRIM(liquidado::text), '')                                        AS liquidado,
     NULLIF(TRIM(pagado::text), '')                                           AS pagado,
-    NULLIF(TRIM(credito_vigente::text), '')                                  AS credito_vigente,
+    {{ to_numeric('credito_vigente') }}                                      AS credito_vigente,
     NULLIF(TRIM(aumentos::text), '')                                         AS aumentos,
     NULLIF(TRIM(disminuciones::text), '')                                    AS disminuciones
   FROM {{ live_tables_by_table_pattern(

@@ -50,7 +50,7 @@ canonical_columns:
     type: text
     description: Precio dólar por m²
   - name: precio_pesos
-    type: text
+    type: numeric
     description: Precio en pesos
   - name: cotizacion
     type: text
@@ -70,7 +70,7 @@ sql: |
     NULLIF(TRIM(COALESCE("M2"::text, m2::text)), '')                      AS m2,
     NULLIF(TRIM(COALESCE("DOLARES"::text, dolares::text)), '')            AS precio_dolares,
     NULLIF(TRIM(COALESCE("U_S_M2"::text, u_s_m2::text)), '')              AS precio_m2_dolares,
-    NULLIF(TRIM(COALESCE("PESOS"::text, pesos::text)), '')                AS precio_pesos,
+    COALESCE({{ to_numeric('"PESOS"') }}, {{ to_numeric('pesos') }})      AS precio_pesos,
     NULLIF(TRIM(COALESCE("COTIZ"::text, cotiz::text)), '')                AS cotizacion,
     NULLIF(TRIM(COALESCE("FOT"::text, fot::text)), '')                    AS fot
   FROM {{ live_tables_by_table_pattern(
