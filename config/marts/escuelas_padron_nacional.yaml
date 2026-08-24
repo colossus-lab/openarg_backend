@@ -1,0 +1,220 @@
+id: escuelas_padron_nacional
+version: 0.2.0
+description: |
+  Padrón Oficial de Establecimientos Educativos — el registro nacional
+  autoritativo del Ministerio de Educación: 64.606 localizaciones educativas
+  de las 24 jurisdicciones, identificadas por CUE-anexo.
+
+  Educación era el segundo tema con más demanda medida (64 de 1.232 preguntas,
+  5,2 %) y el único mart que había, `escuelas_argentina`, sirve 23.529 filas de
+  cuatro portales provinciales (Buenos Aires, CABA, Mendoza, Corrientes) con
+  campos locales. Éste es la contraparte nacional: cubre las 24
+  jurisdicciones, 528 departamentos y 8.777 localidades. Los dos conviven —
+  la pregunta por una escuela concreta de la provincia de Buenos Aires se
+  sirve mejor desde el provincial, la agregada por país desde acá.
+
+  **Se sirve un solo recurso, no los 19.** El dataset publica 19 recursos con
+  el mismo título y entre 59.435 y 64.691 filas: son cortes sucesivos del
+  mismo registro, no jurisdicciones distintas, así que unirlos repetiría las
+  mismas escuelas diecinueve veces. Se toma por identidad
+  `datos_gob_ar::educacion_30.16`, el que el portal actualizó último
+  (2026-07-24).
+
+  **Por qué ese recurso y no el más grande.** Dos de los 19 recursos llegaron
+  con los nombres de columna arruinados: el collector concatenó las dos filas
+  del encabezado jerárquico con la primera fila de datos, así que sus columnas
+  se llaman `<Grupo>_<Campo>_<un valor de datos>` recortado a los 63 bytes que
+  Postgres admite como identificador — y en las columnas cuya primera celda
+  venía vacía quedó pegado el valor anterior, que es un dato de contacto de
+  una escuela. Uno de esos dos es el recurso de 64.691 filas, 85 más que
+  éste (0,13 %). Los otros 17 están sanos. Se elige uno sano: 85 filas no
+  valen citar literalmente nombres de columna que arrastran datos de terceros,
+  ni pedirle a cada consumidor que los escriba.
+
+  Los datos de los recursos afectados están intactos — el defecto es sólo de
+  nombres — y siguen accesibles desde el sandbox para quien los necesite.
+domain: educacion
+
+sources:
+  portals: [datos_gob_ar]
+  resource_patterns:
+    - "datos_gob_ar::educacion_30.*"
+
+canonical_columns:
+  - name: cueanexo
+    type: text
+    description: CUE-anexo, identificador único del establecimiento (uno por fila)
+  - name: nombre
+    type: text
+    description: Nombre del establecimiento
+  - name: jurisdiccion
+    type: text
+    description: Jurisdicción (provincia o CABA). 24 valores
+  - name: sector
+    type: text
+    description: Estatal, Privado o Social/cooperativa
+  - name: ambito
+    type: text
+    description: Urbano o Rural
+  - name: departamento
+    type: text
+    description: Nombre del departamento o partido
+  - name: departamento_id
+    type: text
+    description: >-
+      Código INDEC de departamento (5 dígitos). Joinea con
+      `censo_poblacion_radios.departamento_id`, que es lo que permite tasas
+      por habitante — escuelas por cada 10 mil personas, por ejemplo.
+  - name: localidad
+    type: text
+    description: Nombre de la localidad
+  - name: localidad_id
+    type: text
+    description: Código de localidad
+  - name: domicilio
+    type: text
+    description: Domicilio declarado
+  - name: codigo_postal
+    type: text
+    description: Código postal
+  - name: telefono
+    type: text
+    description: Teléfono declarado
+  - name: mail
+    type: text
+    description: Correo electrónico declarado por el establecimiento
+  - name: modalidad_comun
+    type: bool
+    description: Ofrece modalidad común
+  - name: modalidad_especial
+    type: bool
+    description: Ofrece modalidad especial
+  - name: modalidad_adultos
+    type: bool
+    description: Ofrece modalidad de adultos
+  - name: tiene_inicial
+    type: bool
+    description: Ofrece nivel inicial en alguna modalidad (jardín maternal, jardín de infantes, educación temprana, hospitalaria)
+  - name: tiene_primario
+    type: bool
+    description: Ofrece primario en alguna modalidad (común, especial, adultos, hospitalaria)
+  - name: tiene_secundario
+    type: bool
+    description: Ofrece secundario en alguna modalidad (común, INET, especial, adultos, hospitalaria, artística, servicios complementarios)
+  - name: tiene_superior
+    type: bool
+    description: Ofrece nivel superior no universitario (SNU, SNU-INET, SNU-cursos)
+  - name: tiene_formacion_profesional
+    type: bool
+    description: Ofrece formación profesional de adultos (incluye INET)
+  - name: tiene_alfabetizacion
+    type: bool
+    description: Ofrece alfabetización de adultos
+
+sql: |
+  SELECT
+    -- identidad y geografia
+    NULLIF(TRIM("Establecimiento - Localización_Jurisdicción"), '')             AS jurisdiccion,
+    NULLIF(TRIM("Establecimiento - Localización_Sector"), '')                   AS sector,
+    NULLIF(TRIM("Establecimiento - Localización_Ámbito"), '')                   AS ambito,
+    NULLIF(TRIM("Establecimiento - Localización_Departamento"), '')             AS departamento,
+    NULLIF(TRIM("Establecimiento - Localización_Código de departamento"), '')   AS departamento_id,
+    NULLIF(TRIM("Establecimiento - Localización_Localidad"), '')                AS localidad,
+    NULLIF(TRIM("Establecimiento - Localización_Código de localidad"), '')      AS localidad_id,
+    NULLIF(TRIM("Establecimiento - Localización_Cueanexo"), '')                 AS cueanexo,
+    NULLIF(TRIM("Establecimiento - Localización_Nombre"), '')                   AS nombre,
+    NULLIF(TRIM("Establecimiento - Localización_Domicilio"), '')                AS domicilio,
+    NULLIF(TRIM("Establecimiento - Localización_C. P."), '')                    AS codigo_postal,
+    NULLIF(TRIM("Establecimiento - Localización_Teléfono"), '')                 AS telefono,
+    NULLIF(TRIM("Establecimiento - Localización_Mail"), '')                     AS mail,
+    -- modalidades: el origen marca '1' cuando el establecimiento la ofrece
+    (NULLIF(TRIM("Modalidad_Común"), '') IS NOT NULL)                       AS modalidad_comun,
+    (NULLIF(TRIM("Modalidad_Especial"), '') IS NOT NULL)                    AS modalidad_especial,
+    (NULLIF(TRIM("Modalidad_Adultos"), '') IS NOT NULL)                     AS modalidad_adultos,
+    -- niveles, por OR sobre los flags de cada modalidad
+    (NULLIF(TRIM("Común_Nivel inicial - Jardín maternal"), '') IS NOT NULL
+       OR NULLIF(TRIM("Común_Nivel inicial - Jardín de infantes"), '') IS NOT NULL
+       OR NULLIF(TRIM("Especial_Nivel inicial - Educación temprana"), '') IS NOT NULL
+       OR NULLIF(TRIM("Especial_Nivel inicial - Jardín de infantes"), '') IS NOT NULL
+       OR NULLIF(TRIM("Hospitalaria_Inicial"), '') IS NOT NULL)
+      AS tiene_inicial,
+    (NULLIF(TRIM("Común_Primario"), '') IS NOT NULL
+       OR NULLIF(TRIM("Especial_Primario"), '') IS NOT NULL
+       OR NULLIF(TRIM("Adultos_Primario"), '') IS NOT NULL
+       OR NULLIF(TRIM("Hospitalaria_Primario"), '') IS NOT NULL)
+      AS tiene_primario,
+    (NULLIF(TRIM("Común_Secundario"), '') IS NOT NULL
+       OR NULLIF(TRIM("Común_Secundario - INET"), '') IS NOT NULL
+       OR NULLIF(TRIM("Especial_Secundario"), '') IS NOT NULL
+       OR NULLIF(TRIM("Adultos_Secundario"), '') IS NOT NULL
+       OR NULLIF(TRIM("Hospitalaria_Secundario"), '') IS NOT NULL
+       OR NULLIF(TRIM("Talleres - Artística"), '') IS NOT NULL
+       OR NULLIF(TRIM("Servicios complementarios"), '') IS NOT NULL)
+      AS tiene_secundario,
+    (NULLIF(TRIM("Común_SNU"), '') IS NOT NULL
+       OR NULLIF(TRIM("Común_SNU - INET"), '') IS NOT NULL
+       OR NULLIF(TRIM("Común_SNU - Cursos"), '') IS NOT NULL)
+      AS tiene_superior,
+    (NULLIF(TRIM("Adultos_Formación Profesional"), '') IS NOT NULL
+       OR NULLIF(TRIM("Adultos_Formación Profesional - INET"), '') IS NOT NULL)
+      AS tiene_formacion_profesional,
+    (NULLIF(TRIM("Adultos_Alfabetización"), '') IS NOT NULL)
+      AS tiene_alfabetizacion
+  FROM {{ live_table('datos_gob_ar::educacion_30.16',
+      expected_columns=['Establecimiento - Localización_Jurisdicción',
+                        'Establecimiento - Localización_Sector',
+                        'Establecimiento - Localización_Ámbito',
+                        'Establecimiento - Localización_Departamento',
+                        'Establecimiento - Localización_Código de departamento',
+                        'Establecimiento - Localización_Localidad',
+                        'Establecimiento - Localización_Código de localidad',
+                        'Establecimiento - Localización_Cueanexo',
+                        'Establecimiento - Localización_Nombre',
+                        'Establecimiento - Localización_Domicilio',
+                        'Establecimiento - Localización_C. P.',
+                        'Establecimiento - Localización_Teléfono',
+                        'Establecimiento - Localización_Mail',
+                        'Modalidad_Común',
+                        'Modalidad_Especial',
+                        'Modalidad_Adultos',
+                        'Común_Nivel inicial - Jardín maternal',
+                        'Común_Nivel inicial - Jardín de infantes',
+                        'Común_Primario',
+                        'Común_Secundario',
+                        'Común_Secundario - INET',
+                        'Común_SNU',
+                        'Común_SNU - INET',
+                        'Común_SNU - Cursos',
+                        'Especial_Nivel inicial - Educación temprana',
+                        'Especial_Nivel inicial - Jardín de infantes',
+                        'Especial_Primario',
+                        'Especial_Secundario',
+                        'Adultos_Primario',
+                        'Adultos_Secundario',
+                        'Adultos_Formación Profesional',
+                        'Adultos_Formación Profesional - INET',
+                        'Adultos_Alfabetización',
+                        'Hospitalaria_Inicial',
+                        'Hospitalaria_Primario',
+                        'Hospitalaria_Secundario',
+                        'Talleres - Artística',
+                        'Servicios complementarios']) }} p
+  WHERE NULLIF(TRIM("Establecimiento - Localización_Cueanexo"), '') IS NOT NULL
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []
+
+sample_queries:
+  - "cuántas escuelas hay en una provincia"
+  - "listado de establecimientos educativos por departamento"
+  - "cuántas escuelas secundarias estatales hay"
+  - "escuelas rurales por jurisdicción"
+  - "padrón oficial de establecimientos educativos"
+
+expectations:
+  # La mitad de las 64.606 localizaciones observadas al escribir esto. Un piso,
+  # no una expectativa de tamaño: si la identidad del recurso cambia, la rama
+  # cae a cero por `expected_columns` y el conteo baja de acá, con lo cual el
+  # mart queda vacío y visible en lugar de silenciosamente incompleto.
+  min_rows: 32303
