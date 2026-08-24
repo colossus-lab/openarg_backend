@@ -47,7 +47,7 @@ canonical_columns:
     type: text
     description: Resultado (acuerdo, sin acuerdo, etc.)
   - name: cantidad_de_audiencias
-    type: text
+    type: numeric
     description: Cantidad de audiencias realizadas
   - name: fecha_ultima_audiencia
     type: text
@@ -65,7 +65,7 @@ sql: |
     NULLIF(TRIM(honorarios_pagos::text), '')       AS honorarios_pagos,
     NULLIF(TRIM(mediador::text), '')               AS mediador_id,
     NULLIF(TRIM(resultado_mediacion::text), '')    AS resultado_mediacion,
-    NULLIF(TRIM(cantidad_de_audiencias::text), '') AS cantidad_de_audiencias,
+    {{ to_numeric('cantidad_de_audiencias') }} AS cantidad_de_audiencias,
     NULLIF(TRIM(fecha_ultima_audiencia::text), '') AS fecha_ultima_audiencia
   FROM {{ live_tables_by_table_pattern(
       '*__listado_de_mediaciones*',

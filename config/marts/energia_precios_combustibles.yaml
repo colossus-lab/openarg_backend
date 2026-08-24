@@ -44,10 +44,10 @@ canonical_columns:
     type: text
     description: Tipo de combustible (nafta súper, premium, gasoil, diésel premium, GNC)
   - name: precio_con_impuestos
-    type: text
+    type: numeric
     description: Precio al público con impuestos
   - name: precio_sin_impuestos
-    type: text
+    type: numeric
     description: Precio sin impuestos (cuando disponible)
   - name: volumen
     type: text
@@ -72,8 +72,8 @@ sql: |
     NULLIF(TRIM(provincia), '')                                    AS provincia,
     NULLIF(TRIM(bandera), '')                                      AS bandera,
     NULLIF(TRIM(producto), '')                                     AS producto,
-    NULLIF(TRIM(precio_con_impuestos::text), '')                   AS precio_con_impuestos,
-    NULLIF(TRIM(precio_sin_impuestos::text), '')                   AS precio_sin_impuestos,
+    {{ to_numeric('precio_con_impuestos') }}                   AS precio_con_impuestos,
+    {{ to_numeric('precio_sin_impuestos') }}                   AS precio_sin_impuestos,
     NULLIF(TRIM(COALESCE(
         volumen::text,
         vol_m3::text

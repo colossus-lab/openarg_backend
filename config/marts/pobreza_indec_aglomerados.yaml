@@ -31,7 +31,7 @@ canonical_columns:
     type: text
     description: Semestre del registro (e.g. `2do. semestre 2016`, `1er. semestre 2025`)
   - name: valor
-    type: text
+    type: numeric
     description: Valor publicado por INDEC para ese (indicador, período). Texto porque el upstream mezcla números y notas como `(1)` o `s/d`.
 
 sql: |
@@ -63,7 +63,7 @@ sql: |
   SELECT
     NULLIF(TRIM("Indicador"), '')        AS indicador,
     v.periodo                            AS periodo,
-    NULLIF(TRIM(v.valor::text), '')      AS valor
+    {{ to_numeric('v.valor') }}      AS valor
   FROM src
   CROSS JOIN LATERAL (VALUES
     ('2do. semestre 2016',     src."2do. semestre 2016"),

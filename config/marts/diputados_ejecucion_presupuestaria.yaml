@@ -34,7 +34,7 @@ canonical_columns:
     type: text
     description: Descripción del concepto / partida
   - name: credito_vigente
-    type: text
+    type: numeric
     description: Crédito presupuestario vigente
   - name: compromiso_preventivo
     type: text
@@ -52,7 +52,7 @@ sql: |
     NULLIF(TRIM("in"::text), '')                        AS inciso,
     NULLIF(TRIM(pp::text), '')                          AS pp,
     NULLIF(TRIM(leyenda), '')                           AS leyenda,
-    NULLIF(TRIM(credito_vigente::text), '')             AS credito_vigente,
+    {{ to_numeric('credito_vigente') }}             AS credito_vigente,
     NULLIF(TRIM(compromiso_preventivo::text), '')       AS compromiso_preventivo,
     NULLIF(TRIM(compromiso_consumido::text), '')        AS compromiso_consumido,
     NULLIF(TRIM(devengado_consumido::text), '')         AS devengado_consumido

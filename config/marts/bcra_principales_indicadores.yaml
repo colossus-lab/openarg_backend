@@ -38,7 +38,7 @@ canonical_columns:
     type: text
     description: Fecha de la observación (`indice_tiempo` en raw)
   - name: valor
-    type: text
+    type: numeric
     description: Valor publicado por BCRA. Texto porque mezcla decimales argentinos y nulos.
 
 sql: |
@@ -77,7 +77,7 @@ sql: |
       'reservas_y_pasivos'::text       AS categoria,
       v.indicador                      AS indicador,
       NULLIF(TRIM(indice_tiempo::text), '') AS fecha,
-      NULLIF(TRIM(v.valor::text), '')       AS valor
+      {{ to_numeric('v.valor') }}       AS valor
     FROM reservas
     CROSS JOIN LATERAL (VALUES
       ('reservas_internacionales_dolares',   reservas_internacionales_dolares),
@@ -97,7 +97,7 @@ sql: |
       'tasas_de_interes'::text         AS categoria,
       v.indicador                      AS indicador,
       NULLIF(TRIM(indice_tiempo::text), '') AS fecha,
-      NULLIF(TRIM(v.valor::text), '')       AS valor
+      {{ to_numeric('v.valor') }}       AS valor
     FROM tasas
     CROSS JOIN LATERAL (VALUES
       ('cajas_ahorro',                       tasas_interes_cajas_ahorro),

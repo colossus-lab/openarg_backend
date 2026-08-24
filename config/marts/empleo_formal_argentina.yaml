@@ -26,13 +26,13 @@ canonical_columns:
     type: text
     description: ID del departamento dentro de la provincia
   - name: cantidad_trabajadores
-    type: text
+    type: numeric
     description: Cantidad total de trabajadores formales
   - name: cantidad_trabajadores_hombres
-    type: text
+    type: numeric
     description: Cantidad de trabajadores hombres
   - name: cantidad_trabajadores_mujeres
-    type: text
+    type: numeric
     description: Cantidad de trabajadores mujeres
   - name: remuneracion_media
     type: text
@@ -63,9 +63,9 @@ sql: |
   SELECT DISTINCT
     NULLIF(TRIM(provincia_id::text), '')                       AS provincia_id,
     NULLIF(TRIM(departamento_id::text), '')                    AS departamento_id,
-    NULLIF(TRIM("Cantidad_trabajadores"::text), '')            AS cantidad_trabajadores,
-    NULLIF(TRIM("Cantidad_trabajadores_Hombres"::text), '')    AS cantidad_trabajadores_hombres,
-    NULLIF(TRIM("Cantidad_trabajadores_Mujeres"::text), '')    AS cantidad_trabajadores_mujeres,
+    {{ to_numeric('"Cantidad_trabajadores"') }}            AS cantidad_trabajadores,
+    {{ to_numeric('"Cantidad_trabajadores_Hombres"') }}    AS cantidad_trabajadores_hombres,
+    {{ to_numeric('"Cantidad_trabajadores_Mujeres"') }}    AS cantidad_trabajadores_mujeres,
     NULLIF(TRIM("Remuneracion_media"::text), '')               AS remuneracion_media,
     NULLIF(TRIM("Remuneracion_media_Hombres"::text), '')       AS remuneracion_media_hombres,
     NULLIF(TRIM("Remuneracion_media_Mujeres"::text), '')       AS remuneracion_media_mujeres,
