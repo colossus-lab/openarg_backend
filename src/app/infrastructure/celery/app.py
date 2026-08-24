@@ -114,6 +114,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.retry_our_failures",
             "app.infrastructure.celery.tasks.rescue_rejected",
             "app.infrastructure.celery.tasks.llm_repair_tasks",
+            "app.infrastructure.celery.tasks.self_repair_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -196,6 +197,9 @@ def create_celery() -> Celery:
         "openarg.repair_smeared_title_tables": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
+        # On `analyst` because the ladder's last rung is a model call, and the
+        # `ingest` workers must not block on Bedrock latency.
+        "openarg.repair_mart_sources": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -579,6 +583,27 @@ def create_celery() -> Celery:
                 "schedule": crontab(hour=4, minute=45),  # 04:45 ART, before the baseline
                 "kwargs": {"dry_run": False},
                 "options": {"queue": "ingest"},
+            },
+            "repair-mart-sources-daily": {
+                # The whole ladder in one place: detect → 5 heuristics → model →
+                # rebuild the marts → say what happened. Runs after the two
+                # single-shape sweeps so it inherits whatever they already fixed
+                # and spends its budget on what they refused.
+                #
+                # Scoped to the tables that feed a mart. Measured 2026-08-24:
+                # 3,160 tables in `raw` carry a parse defect and 105 of them are
+                # read by a mart — the rest belong to the scheduled sweeps and
+                # nobody is served by them today.
+                #
+                # `dry_run=False` stated here, not defaulted in the task, so the
+                # decision to write lives in the schedule. Safe unattended only
+                # because every rung is guarded: a repair that would rename a
+                # column some mart names by hand is refused and reported instead
+                # of applied.
+                "task": "openarg.repair_mart_sources",
+                "schedule": crontab(hour=5, minute=5),  # 05:05 ART, after the sweeps
+                "kwargs": {"dry_run": False, "limit": 40},
+                "options": {"queue": "analyst"},
             },
             "baseline-schema-snapshots-daily": {
                 # Snapshots tables that are still alive. The drop hook records
