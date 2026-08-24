@@ -57,6 +57,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.application.catalog.registry_reconcile import require_registry
+
 logger = logging.getLogger(__name__)
 
 # Belt and braces, the same list the reconciliation sweep carries. Nothing in
@@ -200,6 +202,14 @@ def cleanup_duplicate_tables(
 ) -> CleanupOutcome:
     """Drop redundant copies, one coordinated transaction at a time."""
     run_id = run_id or uuid.uuid4()
+    # The same floor the reconciliation sweeps carry, and this is the sweep that
+    # most needs it. Without it the safety is accidental: the candidate query
+    # joins `cached_datasets`, so a missing registry yields no candidates and
+    # nothing is dropped — the right outcome for the wrong reason. On
+    # 2026-08-03 a sweep did exactly what it was told against a premise that had
+    # stopped being true, and "it happens to return nothing" is not a premise.
+    require_registry(engine, task="cleanup_duplicate_tables")
+
     outcome = CleanupOutcome(run_id=run_id, dry_run=dry_run)
 
     with engine.connect() as conn:
