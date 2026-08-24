@@ -86,12 +86,26 @@ def test_it_rechecks_the_survivor_inside_the_transaction():
     assert "survivor_vanished" in src
 
 
-def test_is_cached_is_left_alone_so_nothing_re_collects_the_duplicate():
-    """The dispatcher selects on `is_cached = false`. Flipping it would rebuild
-    exactly what this removed — a treadmill rather than a cleanup."""
+def test_the_dropped_duplicate_is_marked_cached_so_nothing_rebuilds_it():
+    """The bug this test replaces, and the reason it is worth stating twice.
+
+    The first version asserted the code does not *touch* `is_cached`. That was
+    true and useless: the rows were already `false`, the dispatcher selects on
+    `false`, and the sweep therefore dropped 5,344 tables and left every one of
+    them queued to be collected again. A cleanup that rebuilds what it removed
+    is a treadmill, and the test said it was fine.
+
+    Assert the value, not the absence of a write.
+    """
     import inspect
 
     from app.application.catalog import duplicate_cleanup
 
     src = inspect.getsource(duplicate_cleanup.cleanup_duplicate_tables)
-    assert "is_cached" not in src
+    assert "UPDATE datasets SET is_cached = true" in src
+    # In the same transaction as the drop, so a crash cannot leave a dropped
+    # table with a row still queued for collection.
+    begin_at = src.index("with engine.begin() as conn:")
+    drop_at = src.index("DROP TABLE")
+    mark_at = src.index("SET is_cached = true")
+    assert begin_at < drop_at < mark_at

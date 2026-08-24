@@ -23,11 +23,19 @@ was measured before it ran.
 
 **What happens to the catalogue row.** `cached_datasets.table_name` is UNIQUE,
 so the duplicate cannot simply be pointed at the survivor's table. Its row is
-deleted instead, and `datasets.is_cached` is deliberately left `true`: the
-dispatcher selects on `is_cached = false`, so flipping it would re-collect the
-duplicate and rebuild what this just removed. The `datasets` row itself is kept
-— it carries `original_identifier`, which is the record of what this resource
-really is.
+deleted, and `datasets.is_cached` is set to `true` in the same transaction.
+
+That last part is not bookkeeping. The dispatcher selects on
+`is_cached = false`, and these rows were false — so the first version of this
+sweep was a treadmill: it dropped 5,344 tables and left every one of them
+queued to be collected again. It was caught in production minutes before the
+next scheduled run, by checking what the value actually was rather than
+trusting that nothing had written it. The test that was supposed to cover this
+asserted the code does not *touch* `is_cached`, which was true and useless.
+
+`true` is honest: the resource is cached, under the canonical twin that this
+row's `original_identifier` names, and the candidate query has already proved
+that twin exists and holds rows.
 
 Its embedding chunks go too. A dataset with no table that still answers vector
 searches is worse than one that was never indexed: it competes for a slot and
@@ -215,6 +223,21 @@ def cleanup_duplicate_tables(
                 )
                 conn.execute(
                     text("DELETE FROM raw.cached_datasets WHERE id = :i"), {"i": row.cd_id}
+                )
+                # Without this the cleanup is a treadmill. The dispatcher
+                # selects on `is_cached = false`, and these rows were false —
+                # so the next bulk collection would rebuild every duplicate
+                # that was just dropped. Caught in production minutes before
+                # the 01:45 run, by checking the value rather than trusting
+                # that nothing had written it.
+                #
+                # `true` is honest here: the resource IS cached, under the
+                # canonical twin this row's `original_identifier` names. The
+                # candidate query already proved that twin exists and holds
+                # rows, so this cannot strand a dataset with nowhere to look.
+                conn.execute(
+                    text("UPDATE datasets SET is_cached = true WHERE id = :d"),
+                    {"d": row.dataset_id},
                 )
                 # A dataset with no table that still answers vector searches
                 # competes for a slot and has nothing behind it.
