@@ -118,7 +118,20 @@ the *same data more than once*: year-slice tables subsumed by a wider table
 portal mirrors (`datos_gob_ar` re-publishing a `justicia` resource). Neither
 is visible from row counts alone and `UNION ALL` double-counts both.
 `SELECT DISTINCT` is **not** the remedy — on DDJJ it would have collapsed
-161.119 legitimately repeated line items in the largest table alone. The
+161.119 legitimately repeated line items in the largest table alone.
+
+**But sometimes it is exactly the remedy, and the deciding question is
+whether the source has a true natural key.** `delitos_argentina_snic` shipped
+in May unioning four overlapping SNIC resources with no dedup, and 348.933 of
+its 1.000.000 rows were exact copies — every crime count it served was
+inflated by about a third, on the joint most-asked topic in the corpus. There
+the key `(anio, departamento_id, cod_delito)` is genuinely unique: SNIC
+publishes one record per department, year and offence, so a second row with
+that triple can only be a copy, and it was — 0 duplicated keys carried
+conflicting values. `DISTINCT ON` with an explicit `ORDER BY` (without it the
+build is not reproducible) is correct there and wrong on DDJJ, where a
+declaration may legitimately list two identical assets. Ask what one row
+means before choosing. The
 pattern that works is per-entity source selection: group by
 `(<entity_key>, <source_marker>)`, keep the source with the most rows for
 that entity, break ties on the marker for reproducibility. See

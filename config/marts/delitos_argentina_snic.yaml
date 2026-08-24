@@ -1,5 +1,5 @@
 id: delitos_argentina_snic
-version: 0.1.1
+version: 0.2.0
 description: |
   Sistema Nacional de Información Criminal (SNIC) — estadísticas de
   delitos en formato departamental largo: cada fila es un cruce
@@ -99,7 +99,24 @@ canonical_columns:
     description: Tasa víctimas femeninas
 
 sql: |
-  SELECT
+  -- `DISTINCT ON` sobre la clave natural del SNIC: una fila por
+  -- departamento, año y tipo de delito. El patrón matchea cuatro recursos
+  -- que se superponen, y unirlos sin deduplicar repetía 348.933 de cada
+  -- 1.000.000 de filas — el 35 % — inflando cualquier conteo de delitos en
+  -- un tercio. Ninguna clave repetida traía valores distintos (medido: 0 en
+  -- conflicto), así que quedarse con una fila por clave no pierde nada.
+  --
+  -- Acá `DISTINCT` es correcto y en `ddjj_patrimonio_declarado` no lo era.
+  -- La diferencia es la clave: una declaración jurada puede listar dos
+  -- bienes idénticos y ambos cuentan, así que allá hubo que deduplicar por
+  -- procedencia. El SNIC publica un único registro por
+  -- (departamento, año, delito) y una segunda fila con ese trío sólo puede
+  -- ser una copia.
+  --
+  -- El `ORDER BY` es lo que hace el build reproducible: sin él Postgres
+  -- puede devolver cualquiera de las copias y el mart cambia de contenido
+  -- entre reconstrucciones sin que nada lo reporte.
+  SELECT DISTINCT ON (anio, departamento_id, cod_delito)
     NULLIF(TRIM(provincia_id::text), '')                    AS provincia_id,
     NULLIF(TRIM(provincia_nombre::text), '')                AS provincia_nombre,
     NULLIF(TRIM(departamento_id::text), '')                 AS departamento_id,
@@ -129,6 +146,7 @@ sql: |
       require_all_columns=True
   ) }} sub
   WHERE NULLIF(TRIM(provincia_nombre::text), '') IS NOT NULL
+  ORDER BY anio, departamento_id, cod_delito, cantidad_hechos
 
 refresh:
   policy: on_upstream_change
@@ -141,4 +159,8 @@ sample_queries:
   - "evolución de la criminalidad en Argentina"
 
 expectations:
-  min_rows: 500000
+  # La mitad de las 651.067 filas que quedan tras deduplicar. El piso
+  # anterior era 500.000, por debajo del millón inflado que servía el mart,
+  # así que no habría detectado nada. Si la dedup se rompe el conteo SUBE,
+  # no baja — de eso se ocupa `mart_build_history`, no este piso.
+  min_rows: 325533
