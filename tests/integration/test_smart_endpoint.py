@@ -19,20 +19,26 @@ class TestSmartQueryEndpoint:
         )
         assert response.status_code == 422
 
-    async def test_smart_query_route_is_post_only(self, app):
-        # `next()` without a default raises StopIteration when the route is
-        # absent, and inside a coroutine Python re-raises that as
-        # `RuntimeError: coroutine raised StopIteration` — which says nothing
-        # about what went wrong. It cost a CI run to work out that the message
-        # meant "the route is not mounted". Name the failure instead.
-        wanted = "/api/v1/query/smart"
-        route = next((r for r in app.routes if getattr(r, "path", None) == wanted), None)
-        assert route is not None, (
-            f"{wanted} is not mounted. Routes under /api/v1/query: "
-            f"{sorted(p for r in app.routes if (p := getattr(r, 'path', '')) and p.startswith('/api/v1/query'))}"
+    async def test_smart_query_route_is_post_only(self, client):
+        """A GET on the chat endpoint must be refused as a wrong method.
+
+        This used to assert on `app.routes`, looking the route up with
+        `next()` and reading `.methods`. Two problems: `next()` without a
+        default raises `StopIteration`, which inside a coroutine surfaces as
+        `RuntimeError: coroutine raised StopIteration` and explains nothing;
+        and the lookup assumed `include_router` flattens every route into
+        `app.routes` with a full `.path`, which does not hold across FastAPI
+        versions — in CI the same endpoint answers requests correctly while
+        `[r.path for r in app.routes]` has nothing under `/api/v1/query`.
+
+        Asserting through the interface says the same thing and cannot drift
+        with the framework's internals: 405 is the router refusing the method,
+        and it is decided before any dependency runs, so no API key is needed.
+        """
+        response = await client.get("/api/v1/query/smart")
+        assert response.status_code == 405, (
+            f"expected 405 Method Not Allowed for GET, got {response.status_code}"
         )
-        assert "POST" in route.methods
-        assert "GET" not in route.methods
 
     # CONTRACT-02 (round v46): extra='forbid' means any unrecognised
     # field surfaces as a 422 instead of being silently dropped. Pre-fix
