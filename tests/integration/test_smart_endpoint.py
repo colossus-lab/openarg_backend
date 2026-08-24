@@ -20,7 +20,17 @@ class TestSmartQueryEndpoint:
         assert response.status_code == 422
 
     async def test_smart_query_route_is_post_only(self, app):
-        route = next(r for r in app.routes if getattr(r, "path", None) == "/api/v1/query/smart")
+        # `next()` without a default raises StopIteration when the route is
+        # absent, and inside a coroutine Python re-raises that as
+        # `RuntimeError: coroutine raised StopIteration` — which says nothing
+        # about what went wrong. It cost a CI run to work out that the message
+        # meant "the route is not mounted". Name the failure instead.
+        wanted = "/api/v1/query/smart"
+        route = next((r for r in app.routes if getattr(r, "path", None) == wanted), None)
+        assert route is not None, (
+            f"{wanted} is not mounted. Routes under /api/v1/query: "
+            f"{sorted(p for r in app.routes if (p := getattr(r, 'path', '')) and p.startswith('/api/v1/query'))}"
+        )
         assert "POST" in route.methods
         assert "GET" not in route.methods
 
