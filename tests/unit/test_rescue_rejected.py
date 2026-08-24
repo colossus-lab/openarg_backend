@@ -46,7 +46,7 @@ def test_an_empty_column_list_is_not_clean():
     """A table we cannot read the columns of is not a table we can promote."""
     src = inspect.getsource(rescue_rejected.rescue_rejected_resources)
     assert "not names" in src
-    assert "_is_smeared_title(names)" in src
+    assert "is_smeared_title(names)" in src
 
 
 def test_the_cheaper_repair_is_tried_first():
@@ -71,33 +71,33 @@ def test_a_smeared_title_is_not_clean():
       '... por _2', '... por _3', ...]` — precisely what the gate exists to
     refuse. A gate that passes what it was built to stop launders the result.
     """
-    from app.infrastructure.celery.tasks.rescue_rejected import _is_smeared_title
+    from app.application.pipeline.parsers.column_normalization import is_smeared_title
 
     smeared = [
         "Conformación Cartográfica de Localidades Censales 2008 por De",
         "Conformación Cartográfica de Localidades Censales 2008 por _2",
         "Conformación Cartográfica de Localidades Censales 2008 por _3",
     ]
-    assert _is_smeared_title(smeared)
+    assert is_smeared_title(smeared)
 
 
 def test_real_column_names_are_not_mistaken_for_a_smeared_title():
-    from app.infrastructure.celery.tasks.rescue_rejected import _is_smeared_title
+    from app.application.pipeline.parsers.column_normalization import is_smeared_title
 
-    assert not _is_smeared_title(["Apellido", "Nombre", "Cargo", "Tipo"])
-    assert not _is_smeared_title(["Departamento", "Población", "Nacidos vivos"])
+    assert not is_smeared_title(["Apellido", "Nombre", "Cargo", "Tipo"])
+    assert not is_smeared_title(["Departamento", "Población", "Nacidos vivos"])
     # A legitimately repeated short name is odd, not this defect.
-    assert not _is_smeared_title(["valor", "valor_2", "valor_3"])
+    assert not is_smeared_title(["valor", "valor_2", "valor_3"])
     # And real names that share a short prefix must survive.
-    assert not _is_smeared_title(["fecha_inicio", "fecha_fin", "fecha_alta"])
+    assert not is_smeared_title(["fecha_inicio", "fecha_fin", "fecha_alta"])
 
 
 def test_the_detector_ignores_column_count():
     """`repair_title_as_columns_table` needs thirty columns before it acts. A
     six-column table with the same defect is just as unusable."""
-    from app.infrastructure.celery.tasks.rescue_rejected import _is_smeared_title
+    from app.application.pipeline.parsers.column_normalization import is_smeared_title
 
     tres = ["Superficie sembrada por departamento y campaña agrícola",
             "Superficie sembrada por departamento y campaña agrícola_2",
             "Superficie sembrada por departamento y campaña agrícola_3"]
-    assert _is_smeared_title(tres)
+    assert is_smeared_title(tres)

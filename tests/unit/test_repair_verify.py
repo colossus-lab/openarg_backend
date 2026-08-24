@@ -408,3 +408,49 @@ def test_revert_refuses_acts_that_are_not_column_renames():
     # The column-repair phases must not be caught by the guard.
     for phase in ("col_n", "title_as_columns", "trailing_garbage", "llm_assisted"):
         assert phase not in _NOT_COLUMN_REPAIRS
+
+
+def test_the_verifier_knows_a_smeared_title_is_a_defect():
+    """The same blind spot, found in a second place.
+
+    `verify_intrinsic` measures "garbage before" with `is_garbage_column`, which
+    judges one name at a time. Every column of a smeared title is a perfectly
+    ordinary string on its own, so the ratio came out zero and the verifier
+    refused every proposal to repair one — **143 of 147 valid proposals in
+    production** — on the grounds that nothing was wrong with the current names.
+    """
+    from app.application.repair.verify import verify_intrinsic
+
+    smeared = [
+        "Conformación Cartográfica de Localidades Censales 2008 por De",
+        "Conformación Cartográfica de Localidades Censales 2008 por _2",
+        "Conformación Cartográfica de Localidades Censales 2008 por _3",
+    ]
+    v = verify_intrinsic(
+        current_names=smeared, proposed_names=["departamento", "anio_2020", "anio_2021"]
+    )
+    assert v.accepted, v.reason
+
+
+def test_the_verifier_still_refuses_to_rename_good_names():
+    """Loosening the gate must not turn it into a rubber stamp."""
+    from app.application.repair.verify import verify_intrinsic
+
+    v = verify_intrinsic(
+        current_names=["fecha_inicio", "fecha_fin", "fecha_alta"],
+        proposed_names=["a", "b", "c"],
+    )
+    assert not v.accepted
+    assert v.reason == "nothing_wrong_with_the_current_names"
+
+
+def test_the_detector_is_shared_rather_than_copied():
+    """It was invisible in two places at once because it lived in neither."""
+    from app.application.pipeline.parsers.column_normalization import is_smeared_title
+
+    assert is_smeared_title([
+        "Un titulo largo repetido en cada columna de la tabla",
+        "Un titulo largo repetido en cada columna de la tabla_2",
+        "Un titulo largo repetido en cada columna de la tabla_3",
+    ])
+    assert not is_smeared_title(["fecha_inicio", "fecha_fin", "fecha_alta"])

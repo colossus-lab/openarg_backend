@@ -297,7 +297,15 @@ def verify_intrinsic(
             accepted=False, reason="proposal_does_not_cover_the_table"
         )
 
+    from app.application.pipeline.parsers.column_normalization import is_smeared_title
+
     before = _garbage_ratio(current_names)
+    # A smeared title is a defect the per-name test cannot see: every column is
+    # the same sentence, and each one on its own is a perfectly ordinary string.
+    # Without this, the verifier refused every proposal to repair one — 143 of
+    # 147 valid proposals in production — on the grounds that nothing was wrong.
+    if before == 0.0 and is_smeared_title(current_names):
+        before = 1.0
     if before == 0.0:
         # Nothing to fix. Renaming a healthy table is how a repair sweep turns
         # into damage.

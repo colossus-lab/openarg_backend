@@ -341,6 +341,17 @@ Detection is by **longest common prefix**, not identical stems: Postgres
 truncates identifiers at 63 bytes, so the first column often ends mid-word while
 its siblings end in `_N`, and the stems never match.
 
+**The same blind spot lived in a second place, and that is why the detector is
+shared.** `verify_intrinsic` measures "garbage before" with `is_garbage_column`,
+which judges one name at a time — and every column of a smeared title is a
+perfectly ordinary string on its own. The ratio came out zero, so the verifier
+refused every proposal to repair one: **143 of 147 valid proposals** were turned
+away on the grounds that nothing was wrong with the current names.
+
+`is_smeared_title` now lives beside `is_garbage_column` in
+`column_normalization.py`. It cannot live *inside* it: that one judges a name,
+this one judges a set. Because it belonged to neither, it was invisible in both.
+
 ### R2.3 A sibling repair, and the `.0` that hid a family of tables
 
 `propose_title_as_columns_rename` expects a separator row: title as header, row 0
