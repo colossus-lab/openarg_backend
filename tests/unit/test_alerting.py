@@ -178,3 +178,27 @@ def test_two_problems_on_one_mart_report_separately():
     dup = Alert(kind="mart_audit", key="m:mart_duplicate_rows", title="x")
     typing = Alert(kind="mart_audit", key="m:mart_amount_column_is_text", title="y")
     assert dup.fingerprint() != typing.fingerprint()
+
+
+def test_empty_tables_claiming_rows_is_its_own_alert_kind():
+    """98 live tables registered with 9.935.815 rows between them held none.
+
+    Found by asking why `sube_uso_transporte_publico` served nothing. The
+    collection registry is what every mart trusts to decide what exists, so a
+    table emptied behind its back becomes a mart that builds successfully and
+    answers nothing — the only symptom being a person asking a question and
+    getting silence.
+    """
+    stalled = Alert(kind="collection_stalled", key="2026-08-24", title="x")
+    empty = Alert(kind="empty_tables_claiming_rows", key="98", title="y")
+    assert stalled.fingerprint() != empty.fingerprint()
+
+
+def test_a_growing_count_of_empty_tables_alerts_again():
+    """Keyed by count: 98 today and 140 next week are different problems, while
+    a steady 98 stays quiet instead of repeating every hour."""
+    before = Alert(kind="empty_tables_claiming_rows", key="98", title="x")
+    after = Alert(kind="empty_tables_claiming_rows", key="140", title="x")
+    same = Alert(kind="empty_tables_claiming_rows", key="98", title="x")
+    assert before.fingerprint() != after.fingerprint()
+    assert before.fingerprint() == same.fingerprint()

@@ -109,6 +109,37 @@ _MART_AUDIT_FINDINGS_SQL = text(
 )
 
 
+# A live table the registry says holds rows, that holds none.
+#
+# Found 2026-08-24 by asking why `sube_uso_transporte_publico` served nothing:
+# its seven source tables are registered with 177.000 to 500.000 rows each and
+# are empty. Widening the question found **98 such tables holding a claimed
+# 9.935.815 rows** — transport, but also the professional-provider registry,
+# the tumour registry, the paediatric-oncology registry and nursing.
+#
+# Nothing reported it. The collection registry is what every mart trusts to
+# decide what exists, so a table emptied behind its back turns into a mart that
+# builds successfully and answers nothing, and the only symptom is a person
+# asking a question and getting silence.
+#
+# `reltuples` is an estimate and a fresh table can read 0 before ANALYZE, so
+# this is a candidate list rather than a verdict — the alert says how many and
+# names a few, and confirming one is a `SELECT 1 ... LIMIT 1` away.
+_EMPTY_TABLES_SQL = text(
+    """
+    SELECT count(*) AS tables, COALESCE(sum(cd.row_count), 0) AS claimed_rows,
+           min(v.table_name) AS sample
+    FROM public.raw_table_versions v
+    JOIN raw.cached_datasets cd ON cd.table_name = v.table_name
+    JOIN pg_class pc ON pc.relname = v.table_name
+    JOIN pg_namespace n ON n.oid = pc.relnamespace AND n.nspname = v.schema_name
+    WHERE v.superseded_at IS NULL
+      AND cd.row_count > 1000
+      AND pc.reltuples = 0
+    """
+)
+
+
 @celery_app.task(
     name="openarg.alert_on_quality_signals",
     bind=True,
@@ -134,6 +165,24 @@ def alert_on_quality_signals(self) -> dict[str, Any]:
                         key=str(row.mart_id),
                         title=f"Mart caído: {row.mart_id}",
                         detail=(str(row.last_refresh_error) or "")[:180],
+                    )
+                )
+            row_t = conn.execute(_EMPTY_TABLES_SQL).fetchone()
+            if row_t is not None and int(row_t.tables or 0) > 0:
+                alerts.append(
+                    Alert(
+                        kind="empty_tables_claiming_rows",
+                        # Keyed by count so a growing problem alerts again while
+                        # a steady one stays quiet.
+                        key=str(int(row_t.tables)),
+                        title=(
+                            f"{int(row_t.tables)} tablas vivas están vacías y el "
+                            f"registro dice que tienen filas"
+                        ),
+                        detail=(
+                            f"{int(row_t.claimed_rows or 0):,} filas declaradas que no "
+                            f"existen. Ej: {row_t.sample}"
+                        ),
                     )
                 )
             for row_a in conn.execute(_MART_AUDIT_FINDINGS_SQL).fetchall():
