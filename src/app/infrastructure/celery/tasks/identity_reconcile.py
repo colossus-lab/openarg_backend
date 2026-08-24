@@ -25,6 +25,7 @@ this task is to make that decision answerable rather than to make it.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from sqlalchemy import text
@@ -119,4 +120,31 @@ def reconcile_dataset_identities(self, *, dry_run: bool = True) -> dict[str, Any
         "distinct_resources": int(row.recursos or 0) if row else 0,
     }
     logger.info("identity reconcile: %s", result)
+    return result
+
+
+@celery_app.task(
+    name="openarg.cleanup_duplicate_tables",
+    bind=True,
+    soft_time_limit=2400,
+    time_limit=3000,
+)
+def cleanup_duplicate_tables_task(
+    self, *, limit: int = 200, dry_run: bool = True
+) -> dict[str, Any]:
+    """Drop the redundant copies CKAN's re-identification left behind.
+
+    Deliberately not on the beat schedule. A sweep that drops tables should be
+    started by a person who decided to start it — the 2026-08-03 incident was a
+    scheduled sweep doing exactly what it was told against a premise that had
+    stopped being true.
+    """
+    from app.application.catalog.duplicate_cleanup import cleanup_duplicate_tables
+
+    engine = get_sync_engine()
+    outcome = cleanup_duplicate_tables(
+        engine, run_id=uuid.uuid4(), dry_run=dry_run, limit=limit
+    )
+    result = outcome.as_dict()
+    logger.info("duplicate cleanup: %s", result)
     return result

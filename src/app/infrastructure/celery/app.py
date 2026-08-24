@@ -188,6 +188,7 @@ def create_celery() -> Celery:
         "openarg.backfill_dataset_columns": {"queue": "ingest"},
         "openarg.portal_canary": {"queue": "ingest"},
         "openarg.reconcile_dataset_identities": {"queue": "ingest"},
+        "openarg.cleanup_duplicate_tables": {"queue": "ingest"},
         "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
         "openarg.repair_columns_with_llm": {"queue": "analyst"},
         "openarg.dbt_run": {"queue": "ingest"},
