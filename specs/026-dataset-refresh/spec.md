@@ -291,3 +291,47 @@ Continuing the numbering of section 4.
 - **FR-012** — A collection MUST skip parse, write and embedding when the
   digest matches the live version AND that version's table exists with rows.
 - **FR-013** — A skip MUST still advance `cached_datasets.updated_at`.
+
+---
+
+## 8. Tramo 3 closed out, 2026-08-24 — with two items that were never open
+
+The 2026 plan lists six things under CKAN 2.11 ingestion. Measuring each before
+building found that two of them describe a problem this system does not have,
+and a third names the wrong formats.
+
+| Item | Verdict |
+|---|---|
+| Reconciliation by `original_identifier` | Built. See spec 027 §3.4. |
+| Content-based change detection | Built. See §7 above. |
+| Canary per portal | Built. Found three broken portals on its first run. |
+| `columns` via `datastore_search` | **Mostly the wrong route.** 29,001 of 32,086 empty columns were already in `cached_datasets.columns_json` — parsed by us, sitting in a different table from the one that uses them. Probing ten of the remainder against CKAN returned fields for **one** and 404 for eight: they are not in the DataStore. The plan's own §2.5 says as much — "DataStore con columnas tipadas en 199 recursos", about 3 % of the catalogue. |
+| Harvest sources nuevas | **Already covered, by construction.** datos.gob.ar publishes 45 organizations; we hold datasets from **58** distinct organizations of that portal, INDEC and IGN among them. Scraping the aggregated catalogue includes whatever the harvest feeds into it. Nothing to add. |
+| PDF / DTA / SAV | **None of the three exist in the catalogue** — zero rows each. The format the plan omits is the one that matters: **geojson, 4,135 resources, third-largest after csv and zip**, and it already collects at 98 %. |
+
+### Where the format work actually is
+
+Not in new format support. Measured by absolute losses:
+
+```
+csv    1,905 failures    (83.4 % success)
+zip      689             (90.4 %)
+xlsx     364             (85.7 %)
+xls      118             (92.6 %)
+```
+
+Those are parser failures on formats already supported, which belongs to spec
+021, not here. A new decoder would add nothing; `csv` alone loses more resources
+than DTA and SAV would ever have contributed.
+
+### The plan's warning, checked
+
+§2.5 says: *"migración upstream incompleta (presupuesto, producción, defensa sin
+gemelo nuevo → **no borrar era vieja sin gemelo**)"*.
+
+Verified after the duplicate cleanup ran: **17,113 single-identity resources are
+intact and servable**, and a group needs two members before any of it becomes a
+candidate, so a resource without a twin was never eligible. The 461 identity
+groups with no servable member hold 1,014 rows, all `error` or
+`permanently_failed`, and **none** in the state the cleanup produces. Those
+groups failed to collect; they were not emptied.
