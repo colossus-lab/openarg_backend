@@ -45,7 +45,7 @@ canonical_columns:
     type: text
     description: Antigüedad en años
   - name: precio_dolares
-    type: text
+    type: numeric
     description: Precio en dólares
   - name: precio_m2_dolares
     type: text
@@ -75,7 +75,8 @@ sql: |
     NULLIF(TRIM(COALESCE("M2"::text, m2::text, "M2TOTAL"::text)), '')         AS m2,
     NULLIF(TRIM(COALESCE("AMBIENTES"::text, ambientes::text)), '')            AS ambientes,
     NULLIF(TRIM(COALESCE("ANTIGUEDAD"::text, antiguedad::text, "ANTIG"::text, "AGE"::text)), '') AS antiguedad,
-    NULLIF(TRIM(COALESCE("DOLARES"::text, dolares::text, "PRECIOUSD"::text)), '') AS precio_dolares,
+    COALESCE({{ to_numeric('"DOLARES"') }}, {{ to_numeric('dolares') }},
+             {{ to_numeric('"PRECIOUSD"') }})                                AS precio_dolares,
     NULLIF(TRIM(COALESCE("U_S_M2"::text, u_s_m2::text, "PRECIOUSDM"::text)), '') AS precio_m2_dolares,
     NULLIF(TRIM(COALESCE("COCHERA"::text, cochera::text)), '')                AS cochera,
     NULLIF(TRIM(COALESCE("BAULERA"::text, baulera::text)), '')                AS baulera,
