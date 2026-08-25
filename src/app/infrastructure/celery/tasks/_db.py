@@ -129,6 +129,51 @@ def _default_normalization_version() -> str:
     return os.getenv("OPENARG_NORMALIZATION_VERSION") or normalization_fingerprint()
 
 
+def _report_if_degenerate(
+    engine: Engine,
+    *,
+    resource_identity: str,
+    schema_name: str,
+    table_name: str,
+    version: int,
+    row_count: int | None,
+) -> None:
+    """Tell a person when a connector just published nothing. Never raises."""
+    try:
+        from app.application.collection.batch_guard import check_after_write
+
+        verdict = check_after_write(
+            engine,
+            resource_identity=resource_identity,
+            schema_name=schema_name,
+            table_name=table_name,
+            version=version,
+            row_count=row_count,
+        )
+        if verdict.ok:
+            return
+
+        _logger.error("vía-B batch looks degenerate: %s — %s", verdict.table, verdict.reason)
+        from app.application.quality.alerting import Alert, notify
+
+        notify(
+            engine,
+            [
+                Alert(
+                    kind="via_b_degenerate",
+                    # Identity of the resource, so a source that stays broken is
+                    # reported once rather than on every ingest.
+                    key=resource_identity,
+                    title=f"{resource_identity[:60]} publicó algo vacío",
+                    detail=verdict.reason[:300],
+                )
+            ],
+            heading="OpenArg · un conector publicó algo vacío",
+        )
+    except Exception:
+        _logger.debug("batch guard: skipped for %s", table_name, exc_info=True)
+
+
 def register_via_b_table(
     engine: Engine,
     *,
@@ -208,6 +253,20 @@ def register_via_b_table(
         )
 
     if registered:
+        # Look at what was just published, for every vía-B connector at once.
+        # The thirteen of them are too different to share a schema, but they all
+        # end here — and by this point the registry knows what the previous
+        # version held and the table can be sampled. Reports only: the write has
+        # already happened, so this buys seconds instead of weeks, not a veto.
+        _report_if_degenerate(
+            engine,
+            resource_identity=resource_identity,
+            schema_name=schema_name,
+            table_name=table_name,
+            version=version,
+            row_count=row_count,
+        )
+
         # Reconcile the canonical `catalog_resources` row.
         #
         # Vía-B writers (BCRA, presupuesto, senado) register the rtv under
