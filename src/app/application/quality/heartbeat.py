@@ -51,6 +51,12 @@ FLOOR_HOURS = 36.0
 # within a few cycles.
 _ALPHA = 0.3
 
+# Scheduled tasks live in the same table under this prefix. They have exactly
+# the property the resources do — an own cadence, learned rather than declared —
+# and the failure being watched for is the same one: something that used to
+# happen stopped happening and the silence looks identical to success.
+TASK_PREFIX = "task:"
+
 _ENSURE_SQL = text(
     """
     CREATE TABLE IF NOT EXISTS public.ingest_heartbeat (
@@ -113,10 +119,30 @@ class Late:
     cadence_days: float
     times_seen: int
 
+    @property
+    def is_task(self) -> bool:
+        """A scheduled task rather than a data source. Same table, same maths."""
+        return self.resource_identity.startswith(TASK_PREFIX)
+
     def phrase_es(self) -> str:
-        return (
-            f"llega cada ~{self.cadence_days:.1f} día(s) y hace {self.days_late:.1f} que no llega"
-        )
+        verbo = "corre" if self.is_task else "llega"
+        negado = "que no corre" if self.is_task else "que no llega"
+        return f"{verbo} cada ~{self.cadence_days:.1f} día(s) y hace {self.days_late:.1f} {negado}"
+
+
+def record_task_run(engine: Any, task_name: str) -> None:
+    """Mark that a scheduled task completed. The dead man's switch.
+
+    **What it catches**: one task dying while the rest of the system lives —
+    `cleanup_raw_orphans` sat stuck for three months reporting success, and a
+    later variant cost sixteen days of collection. A crashed run and a clean run
+    produce byte-identical silence, and this is what tells them apart.
+
+    **What it does not catch**: the scheduler itself being dead, because then
+    nothing records and nothing checks. That needs a watcher outside this
+    system, and saying so is better than implying a guarantee this cannot give.
+    """
+    record_ingest(engine, f"{TASK_PREFIX}{task_name}")
 
 
 def record_ingest(engine: Any, resource_identity: str) -> None:

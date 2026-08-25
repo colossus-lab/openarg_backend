@@ -117,6 +117,8 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.self_repair_tasks",
             "app.infrastructure.celery.tasks.empty_content_tasks",
             "app.infrastructure.celery.tasks.staleness_tasks",
+            # Conecta la señal que registra que cada tarea agendada corrió.
+            "app.infrastructure.celery.heartbeat_signals",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )

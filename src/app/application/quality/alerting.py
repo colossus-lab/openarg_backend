@@ -25,6 +25,22 @@ this carries three constraints the send path cannot bypass:
 - **Silence is a real answer.** No findings means no message. A daily "all
   clear" is exactly the furniture that trains people to stop looking.
 
+Three more, added after a review measured what this design would actually do:
+
+- **Not every kind deserves a line.** "Repaired automatically" is the highest
+  volume and the lowest actionability — a textbook dead-end alert. With
+  thousands of broken tables it would spend the whole weekly attention budget in
+  one run and collapse engagement for the kinds that do need a person. It is
+  counted, not listed.
+- **A problem that keeps coming back is news again.** Fingerprinting by the
+  identity of the thing means a table that breaks, gets repaired and breaks again
+  is silently deduped — and a repair loop is the *most* actionable signal there
+  is. Crossing a repeat threshold re-opens it.
+- **The cap must not let chronic findings squat.** Capping a single ordered list
+  meant the same long-standing items filled the slots every run and genuinely new
+  breakage never surfaced. New keys go first, and the cap is per kind so one
+  noisy kind cannot crowd out the others.
+
 Failing to alert must never fail the job that raised the alert. Every send is
 wrapped, and a channel that is down costs the notification, not the sweep.
 """
@@ -45,8 +61,23 @@ from sqlalchemy.engine import Engine
 logger = logging.getLogger(__name__)
 
 # Enough to show the shape of a problem; past that the count says more than the
-# list does.
+# list does. Applied **per kind**, so a hundred repairs cannot crowd out the one
+# mart that broke.
 MAX_PER_RUN = 5
+
+# Counted, never listed. Non-actionable by construction: nothing is expected of
+# the reader, and at this system's volume these would be every message.
+DIGEST_KINDS = frozenset({"repaired"})
+
+# Never capped, never digested. This is the one that says a repair was withheld
+# because applying it would break something a person built, and it is the single
+# most actionable line this channel can carry.
+ALWAYS_SHOW_KINDS = frozenset({"repair_would_break_mart"})
+
+# A finding seen this many times is not the same finding being re-reported — it
+# is a loop, and a loop is news. Sparse on purpose: re-opening on every sighting
+# would undo the deduplication entirely.
+REOPEN_AT = (3, 10, 30, 100)
 
 _TELEGRAM_TIMEOUT = 15
 
@@ -59,6 +90,10 @@ class Alert:
     key: str  # stable identity of the thing, NOT of this sighting
     title: str
     detail: str = ""
+
+    @property
+    def digest_only(self) -> bool:
+        return self.kind in DIGEST_KINDS
 
     def fingerprint(self) -> str:
         """Identity of the problem, so the same one is not reported twice.
@@ -137,14 +172,21 @@ _CLAIM_SQL = text(
     VALUES (:fp, :kind, :key, :title)
     ON CONFLICT (fingerprint) DO UPDATE
         SET last_seen = now(), times_seen = public.alert_log.times_seen + 1
-    RETURNING (xmax = 0) AS is_new
+    RETURNING (xmax = 0) AS is_new, times_seen
     """
 )
 
 
-def _claim_new(engine: Engine, alerts: list[Alert]) -> list[Alert]:
-    """Which of these has never been reported? Records the sighting either way."""
+def _claim(engine: Engine, alerts: list[Alert]) -> tuple[list[Alert], list[tuple[Alert, int]]]:
+    """Which are new, and which have come back often enough to be news again.
+
+    Records the sighting either way. The second list is the one that did not
+    exist before: a table that breaks, gets repaired and breaks again dedups to
+    silence under a stable fingerprint, and that oscillation is the most
+    actionable thing this channel can report.
+    """
     fresh: list[Alert] = []
+    reopened: list[tuple[Alert, int]] = []
     try:
         with engine.begin() as conn:
             conn.execute(_ENSURE_SQL)
@@ -153,38 +195,86 @@ def _claim_new(engine: Engine, alerts: list[Alert]) -> list[Alert]:
                     _CLAIM_SQL,
                     {"fp": a.fingerprint(), "kind": a.kind, "key": a.key, "title": a.title},
                 ).fetchone()
-                if row and row.is_new:
+                if not row:
+                    continue
+                if row.is_new:
                     fresh.append(a)
+                elif row.times_seen in REOPEN_AT:
+                    reopened.append((a, int(row.times_seen)))
     except Exception:
         # Cannot tell new from old, so send nothing. The alternative is
         # re-sending everything the dedup was there to suppress, which is how a
         # channel gets muted.
         logger.warning("alerting: could not claim alerts; staying quiet", exc_info=True)
-        return []
-    return fresh
+        return [], []
+    return fresh, reopened
+
+
+def _select_shown(fresh: list[Alert]) -> tuple[list[Alert], int]:
+    """What to list, capped per kind, with the exempt kind never trimmed.
+
+    Ordering matters as much as the cap. A single global list let the same
+    long-standing findings fill every slot, so genuinely new breakage in a
+    quieter kind never reached anyone.
+    """
+    shown: list[Alert] = []
+    por_tipo: dict[str, int] = {}
+    for a in fresh:
+        if a.kind in ALWAYS_SHOW_KINDS:
+            shown.append(a)
+            continue
+        n = por_tipo.get(a.kind, 0)
+        if n < MAX_PER_RUN:
+            shown.append(a)
+            por_tipo[a.kind] = n + 1
+    return shown, len(fresh) - len(shown)
 
 
 def notify(engine: Engine, alerts: list[Alert], *, heading: str) -> dict[str, object]:
-    """Report what is new, at most `MAX_PER_RUN`, or say nothing at all."""
+    """Report what is new, what came back, and a count of the rest."""
     if not alerts:
         # Silence is the answer. A daily "all clear" is furniture.
         return {"considered": 0, "new": 0, "sent": 0}
 
-    fresh = _claim_new(engine, alerts)
-    if not fresh:
+    fresh, reopened = _claim(engine, alerts)
+    if not fresh and not reopened:
         return {"considered": len(alerts), "new": 0, "sent": 0}
 
-    shown = fresh[:MAX_PER_RUN]
+    listables = [a for a in fresh if not a.digest_only]
+    shown, resto = _select_shown(listables)
+    digested = [a for a in fresh if a.digest_only]
+
     lines = [f"<b>{heading}</b>", ""]
     for a in shown:
         lines.append(f"• {a.title}")
         if a.detail:
             lines.append(f"  <i>{a.detail}</i>")
-    if len(fresh) > len(shown):
+
+    for a, veces in reopened:
+        # Said differently on purpose: this is not a new problem, it is one that
+        # will not stay fixed, and that distinction is the point of reporting it.
+        lines.append(f"🔁 <b>{a.title}</b> — vuelve por {veces}ª vez")
+        if a.detail:
+            lines.append(f"  <i>{a.detail}</i>")
+
+    if resto:
         # The count, not the list. Something systemic produces hundreds and the
         # number is the finding.
         lines.append("")
-        lines.append(f"…y {len(fresh) - len(shown)} más sin listar.")
+        lines.append(f"…y {resto} más sin listar.")
+
+    if digested:
+        # One line for the whole class. Nothing is expected of the reader, so
+        # listing them would spend the attention budget on the least actionable
+        # thing this channel carries.
+        lines.append("")
+        lines.append(f"<i>Además, {len(digested)} arreglo(s) automático(s).</i>")
 
     sent = _send("\n".join(lines))
-    return {"considered": len(alerts), "new": len(fresh), "sent": len(shown) if sent else 0}
+    return {
+        "considered": len(alerts),
+        "new": len(fresh),
+        "reopened": len(reopened),
+        "digested": len(digested),
+        "sent": (len(shown) + len(reopened)) if sent else 0,
+    }

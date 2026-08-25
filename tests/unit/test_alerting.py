@@ -202,3 +202,85 @@ def test_a_growing_count_of_empty_tables_alerts_again():
     same = Alert(kind="empty_tables_claiming_rows", key="98", title="x")
     assert before.fingerprint() != after.fingerprint()
     assert before.fingerprint() == same.fingerprint()
+
+
+# ── política de ruido, medida contra lo que este canal haría de verdad ──
+
+
+def _fake_engine():
+    from unittest.mock import MagicMock
+
+    return MagicMock()
+
+
+def _lote(kind, n, prefix="k"):
+    from app.application.quality.alerting import Alert
+
+    return [Alert(kind=kind, key=f"{prefix}{i}", title=f"t{i}") for i in range(n)]
+
+
+def test_repairs_are_counted_not_listed(monkeypatch):
+    # La alerta de mayor volumen y menor accionabilidad. Listarla gastaría todo
+    # el presupuesto de atención del canal en lo que nadie tiene que hacer.
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: (list(a), []))
+
+    r = alerting.notify(_fake_engine(), _lote("repaired", 40), heading="h")
+
+    assert r["digested"] == 40
+    assert "40 arreglo(s) automático(s)" in enviados[0]
+    assert "• t0" not in enviados[0]
+
+
+def test_the_cap_is_per_kind_so_one_noisy_kind_cannot_crowd_out_another(monkeypatch):
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    todos = _lote("ruidoso", 30, "a") + _lote("importante", 2, "b")
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: (todos, []))
+
+    alerting.notify(_fake_engine(), todos, heading="h")
+
+    # Los 2 de la clase silenciosa llegan igual, con 30 de la ruidosa al lado.
+    assert enviados[0].count("• ") == alerting.MAX_PER_RUN + 2
+
+
+def test_the_mart_breaking_kind_is_never_trimmed(monkeypatch):
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    todos = _lote("repair_would_break_mart", 12)
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: (todos, []))
+
+    alerting.notify(_fake_engine(), todos, heading="h")
+
+    assert enviados[0].count("• ") == 12, "es la línea más accionable del canal"
+
+
+def test_a_problem_that_keeps_coming_back_is_news_again(monkeypatch):
+    # Un bucle de reparación dedupea a silencio bajo huella estable, y es la
+    # señal más accionable que hay.
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    a = _lote("roto", 1)[0]
+    monkeypatch.setattr(alerting, "_claim", lambda e, alerts: ([], [(a, 10)]))
+
+    r = alerting.notify(_fake_engine(), [a], heading="h")
+
+    assert r["reopened"] == 1
+    assert "vuelve por 10ª vez" in enviados[0]
+
+
+def test_a_repeat_below_the_threshold_stays_quiet(monkeypatch):
+    from app.application.quality import alerting
+
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: ([], []))
+    r = alerting.notify(_fake_engine(), _lote("roto", 1), heading="h")
+    assert r["sent"] == 0

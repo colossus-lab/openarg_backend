@@ -25,6 +25,16 @@ from app.infrastructure.celery.tasks._llm_gate import model_if_it_answers
 
 logger = logging.getLogger(__name__)
 
+
+def _model_id(llm: object) -> str | None:
+    """Which model produced a mapping, when the adapter says so."""
+    for attr in ("model_id", "model", "model_name"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 # CKAN datastore_search endpoint for the HCDN staff resource
 _CKAN_BASE = "https://datos.hcdn.gob.ar"
 _RESOURCE_ID = "6e49506e-6757-44cd-94e9-0e75f3bd8c38"
@@ -341,7 +351,7 @@ def snapshot_staff(self):
     # The batch is good, so whatever the model contributed to reading it has now
     # earned its place. Recorded here and not at resolution time: a mapping that
     # produced nothing must not be remembered as one that worked.
-    remember_mapping(engine, _CONNECTOR, mapping)
+    remember_mapping(engine, _CONNECTOR, mapping, model_id=_model_id(llm))
 
     # 2. Get legajos from previous snapshot
     try:

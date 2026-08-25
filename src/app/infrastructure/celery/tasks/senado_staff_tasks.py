@@ -23,6 +23,16 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
 
+
+def _model_id(llm: object) -> str | None:
+    """Which model produced a mapping, when the adapter says so."""
+    for attr in ("model_id", "model", "model_name"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 # `senator_id` is the identity: without it every senator is skipped and the
 # scrape finishes with zero staff while reporting success.
 _SENATOR_FIELDS: tuple[FieldSpec, ...] = (
@@ -85,7 +95,7 @@ def _resolve_senator_mapping(senators: list[dict]):
     if mapping.usable:
         # Only once the identity resolved: a mapping that cannot key the scrape
         # is not one worth remembering.
-        remember_mapping(engine, _CONNECTOR, mapping)
+        remember_mapping(engine, _CONNECTOR, mapping, model_id=_model_id(llm))
     return mapping
 
 
