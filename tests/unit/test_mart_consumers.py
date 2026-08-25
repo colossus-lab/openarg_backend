@@ -24,10 +24,28 @@ class _Row:
         self.sql_definition = sql_definition
 
 
-def _engine(rows):
+class _CatRow:
+    """A `pg_depend` row: which mart view reads which table, and which column."""
+
+    def __init__(self, mart_view, schema_name, table_name, column_name=None):
+        self.mart_view = mart_view
+        self.schema_name = schema_name
+        self.table_name = table_name
+        self.column_name = column_name
+
+
+def _engine(rows, catalog=()):
+    """Two queries, in order: the catalog, then the marts the catalog missed."""
     engine = MagicMock()
     conn = engine.connect.return_value.__enter__.return_value
-    conn.execute.return_value.fetchall.return_value = rows
+    respuestas = [list(catalog), list(rows)]
+
+    def _execute(stmt, params=None):
+        res = MagicMock()
+        res.fetchall.return_value = respuestas.pop(0) if respuestas else []
+        return res
+
+    conn.execute.side_effect = _execute
     return engine
 
 
@@ -153,3 +171,56 @@ def test_a_mart_that_does_not_read_the_table_is_never_blocking():
 
 def test_an_empty_index_blocks_nothing():
     assert ConsumerIndex().marts_referencing_column("raw", "a", "col_1") == ()
+
+
+# ── el catálogo ────────────────────────────────────────────────
+
+
+def test_the_catalog_is_used_when_it_has_an_answer():
+    index = build_consumer_index(_engine([], catalog=[_CatRow("mi_mart", "raw", "a", "monto")]))
+    assert index.marts_for("raw", "a") == ("mi_mart",)
+    assert index.marts_referencing_column("raw", "a", "monto") == ("mi_mart",)
+
+
+def test_the_catalog_saying_no_is_a_fact_not_a_guess():
+    # Ese es el punto de usar pg_depend: para una tabla que el catálogo conoce,
+    # "ningún mart lee esa columna" es verdad, y una reparación deja de
+    # rechazarse por las dudas.
+    index = build_consumer_index(_engine([], catalog=[_CatRow("mi_mart", "raw", "a", "monto")]))
+    assert index.marts_referencing_column("raw", "a", "col_1") == ()
+
+
+def test_a_whole_relation_dependency_carries_no_column():
+    # `refobjsubid = 0`: el mart depende de la tabla entera (SELECT *), no de
+    # una columna. Frena por tabla y no dice nada por columna.
+    index = build_consumer_index(_engine([], catalog=[_CatRow("m", "raw", "a", None)]))
+    assert index.marts_for("raw", "a") == ("m",)
+    assert index.marts_referencing_column("raw", "a", "lo_que_sea") == ()
+
+
+def test_a_mart_that_never_built_still_brakes_through_its_sql():
+    # El catálogo no puede saber de un mart sin vista, y sus fuentes merecen el
+    # freno igual.
+    index = build_consumer_index(
+        _engine([_Row("roto", 'SELECT col_1 FROM raw."b"')], catalog=[_CatRow("ok", "raw", "a")])
+    )
+    assert index.marts_for("raw", "b") == ("roto",)
+    assert index.marts_referencing_column("raw", "b", "col_1") == ("roto",)
+
+
+def test_a_catalog_that_cannot_be_read_degrades_instead_of_breaking():
+    engine = MagicMock()
+    conn = engine.connect.return_value.__enter__.return_value
+    respuestas = [RuntimeError("sin permisos"), [_Row("m1", 'FROM raw."a"')]]
+
+    def _execute(stmt, params=None):
+        r = respuestas.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        res = MagicMock()
+        res.fetchall.return_value = r
+        return res
+
+    conn.execute.side_effect = _execute
+    index = build_consumer_index(engine)
+    assert index.marts_for("raw", "a") == ("m1",)

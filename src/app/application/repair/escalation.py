@@ -31,9 +31,13 @@ Two rungs, two ways of asking the guard, for a reason:
   `dry_run=True`, the guard sees exactly the columns that would change, and the
   repair is applied only if none of them is spoken for. Precise.
 - **The model** sees every column and may rename any of them, and a second call
-  need not repeat the first. Asking the guard about the specific proposal would
-  be checking one answer and applying another, so the model rung is guarded
-  against **every** column instead. Blunter, and blunt in the safe direction.
+  need not repeat the first, so asking the guard about one specific proposal
+  would mean checking one answer and applying another. Instead the guard is
+  asked about **every** column, and the ones it claims are held out of the
+  proposal rather than used to refuse the table. `pg_depend` makes this precise:
+  it knows the two columns a view actually reads out of thirty-three, so the
+  other thirty-one still get repaired. Refusing the whole table was the right
+  move only while we could not tell which columns mattered.
 """
 
 from __future__ import annotations
@@ -168,6 +172,28 @@ def _guarded(guard: Guard | None, columns: Sequence[str]) -> tuple[str, ...]:
     except Exception:
         logger.warning("escalation: guard failed, refusing the repair", exc_info=True)
         return ("<guard-no-disponible>",)
+
+
+def _guarded_columns(guard: Guard | None, columns: Sequence[str]) -> tuple[str, ...]:
+    """Which of these columns some mart reads, one at a time.
+
+    The guard answers "which marts break", not "which columns are spoken for",
+    so this asks per column. It is `len(columns)` dictionary lookups against an
+    index already in memory — the alternative is refusing a whole table because
+    one of its columns is read.
+    """
+    if guard is None:
+        return ()
+    spoken: list[str] = []
+    for col in columns:
+        try:
+            if tuple(guard([col])):
+                spoken.append(col)
+        except Exception:
+            # Unknown reads as spoken for, same as everywhere else here.
+            logger.warning("escalation: guard failed on %r", col, exc_info=True)
+            spoken.append(col)
+    return tuple(spoken)
 
 
 def escalate_table(
@@ -307,10 +333,15 @@ def _llm_rung(
 
     from app.application.repair.parse_repair import repair_with_llm_assist
 
-    columns = [c for c in current_columns(engine, table_schema, table_name)]
+    columns = list(current_columns(engine, table_schema, table_name))
     candidates = [c for c in columns if not c.startswith(_PROTECTED_PREFIX)]
-    blocking = _guarded(guard, candidates)
-    if blocking:
+    spoken_for = set(_guarded_columns(guard, candidates))
+    libres = [c for c in candidates if c not in spoken_for]
+
+    if not libres:
+        # Every column is read by something. Nothing left to repair, so this is
+        # a refusal and is reported as one.
+        blocking = _guarded(guard, candidates)
         attempts.append(Attempt(tier="llm", ok=False, reason="would_break_marts"))
         return Escalation(
             table_schema=table_schema,
@@ -320,6 +351,14 @@ def _llm_rung(
             attempts=tuple(attempts),
             blocked_by_marts=blocking,
             changed_columns=tuple(candidates),
+        )
+    if spoken_for:
+        logger.info(
+            "escalation: %s.%s — %d columna(s) reservadas por marts, se reparan %d",
+            table_schema,
+            table_name,
+            len(spoken_for),
+            len(libres),
         )
 
     try:
@@ -331,6 +370,7 @@ def _llm_rung(
                 table_name=table_name,
                 run_id=run_id,
                 dry_run=dry_run,
+                protected_columns=frozenset(spoken_for),
             )
         )
     except Exception as exc:

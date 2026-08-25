@@ -20,7 +20,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -985,6 +985,7 @@ async def propose_llm_assisted_rename(
     llm: Any,
     max_sample_rows: int = 5,
     max_cell_chars: int = 80,
+    protected_columns: Collection[str] = (),
 ) -> tuple[list[str], int, str]:
     """LLM-backed proposer. Returns `(new_cols, rows_to_delete, reason)`.
 
@@ -1003,7 +1004,12 @@ async def propose_llm_assisted_rename(
     # production dry run proposed renaming all five, which would have cut every
     # repaired table loose from its origin. Held out of the proposal entirely
     # rather than corrected afterwards, so the model is never asked about them.
-    protected = {c for c in old_cols if c.startswith("_")}
+    # Two kinds of column the model never gets to rename. The collector's own
+    # `_`-prefixed ones, and whatever the caller says is spoken for downstream:
+    # `pg_depend` knows exactly which columns each mart reads, so a table feeding
+    # a mart no longer has to be refused wholesale. The two columns a view
+    # actually depends on are held back and the other thirty get repaired.
+    protected = {c for c in old_cols if c.startswith("_")} | set(protected_columns)
     if len(old_cols) > 100:
         # LLM context cost grows with col count; cap at a reasonable
         # ceiling. Tables with 100+ cols are usually mega-wide pivots
@@ -1093,8 +1099,13 @@ async def repair_with_llm_assist(
     run_id: uuid.UUID | None = None,
     dry_run: bool = True,
     sample_rows: int = 5,
+    protected_columns: Collection[str] = (),
 ) -> RepairOutcome:
     """Repair a table using LLM proposal when heuristics couldn't.
+
+    `protected_columns` are held out of the proposal entirely. The caller uses
+    this to hand over the columns some mart depends on, which turns a refusal
+    into a partial repair.
 
     Default `dry_run=True` because LLM proposals are best reviewed before
     being applied. Audited under `phase='llm_assisted'`.
@@ -1136,7 +1147,10 @@ async def repair_with_llm_assist(
         ]
 
     proposed_cols, _rows_to_delete, reason = await propose_llm_assisted_rename(
-        old_cols, sample, llm=llm
+        old_cols,
+        sample,
+        llm=llm,
+        protected_columns=protected_columns,
     )
     outcome.new_columns = proposed_cols
 

@@ -226,7 +226,7 @@ def _no_heuristics(monkeypatch):
 def test_the_model_is_asked_only_after_every_heuristic_declined(_no_heuristics, monkeypatch):
     called: list[str] = []
 
-    async def _fake(engine, *, llm, table_schema, table_name, run_id, dry_run):
+    async def _fake(engine, *, llm, table_schema, table_name, run_id, dry_run, **kw):
         called.append(table_name)
         return _outcome(reason="applied")
 
@@ -240,21 +240,63 @@ def test_the_model_is_asked_only_after_every_heuristic_declined(_no_heuristics, 
     assert called == ["t"]
 
 
-def test_the_model_rung_is_guarded_against_every_column(_no_heuristics, monkeypatch):
-    # The model sees all columns and may rename any of them, so the guard is
-    # asked about all of them — minus the collector's own `_`-prefixed ones.
-    seen: list[list[str]] = []
+def test_columns_a_mart_reads_are_held_back_not_used_to_refuse(_no_heuristics, monkeypatch):
+    # `pg_depend` knows which columns a view actually reads, so a table feeding a
+    # mart no longer has to be refused wholesale: the spoken-for columns are kept
+    # out of the proposal and the rest still get repaired.
+    visto: dict = {}
 
+    async def _fake(engine, **kw):
+        visto.update(kw)
+        return _outcome(reason="applied")
+
+    monkeypatch.setattr("app.application.repair.parse_repair.repair_with_llm_assist", _fake)
+
+    r = esc.escalate_table(
+        _engine(columns=("col_1", "empresa", "_source_dataset_id")),
+        table_schema="raw",
+        table_name="t",
+        guard=lambda cols: ["mart_x"] if "empresa" in cols else [],
+        llm=object(),
+        dry_run=False,
+    )
+
+    assert r.fixed, "una columna reservada no cancela la reparación de las otras"
+    assert visto["protected_columns"] == frozenset({"empresa"})
+
+
+def test_a_table_whose_every_column_is_read_is_still_refused(_no_heuristics, monkeypatch):
     async def _fake(engine, **kw):  # pragma: no cover — must not be reached
-        raise AssertionError("no debería llegar al modelo")
+        raise AssertionError("no queda nada que reparar")
+
+    monkeypatch.setattr("app.application.repair.parse_repair.repair_with_llm_assist", _fake)
+
+    r = esc.escalate_table(
+        _engine(columns=("a", "b", "_source_dataset_id")),
+        table_schema="raw",
+        table_name="t",
+        guard=lambda cols: ["mart_x"],
+        llm=object(),
+        dry_run=False,
+    )
+
+    assert not r.fixed
+    assert r.blocked_by_marts == ("mart_x",)
+
+
+def test_the_collector_own_columns_are_never_offered(_no_heuristics, monkeypatch):
+    vistas: list[list[str]] = []
+
+    async def _fake(engine, **kw):
+        return _outcome(reason="applied")
 
     monkeypatch.setattr("app.application.repair.parse_repair.repair_with_llm_assist", _fake)
 
     def guard(cols):
-        seen.append(list(cols))
-        return ["mart_x"]
+        vistas.append(list(cols))
+        return []
 
-    r = esc.escalate_table(
+    esc.escalate_table(
         _engine(columns=("col_1", "b", "_source_dataset_id")),
         table_schema="raw",
         table_name="t",
@@ -263,9 +305,7 @@ def test_the_model_rung_is_guarded_against_every_column(_no_heuristics, monkeypa
         dry_run=False,
     )
 
-    assert not r.fixed
-    assert r.blocked_by_marts == ("mart_x",)
-    assert seen == [["col_1", "b"]], "las columnas del colector nunca se ofrecen"
+    assert all("_source_dataset_id" not in v for v in vistas)
 
 
 def test_a_model_call_that_raises_is_recorded_not_swallowed(_no_heuristics, monkeypatch):
