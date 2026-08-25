@@ -8332,6 +8332,48 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                 )
             ).fetchall()
 
+        # Correct first, refresh second. This used to ANALYZE all 27,757 live
+        # tables before touching a single row_count, and the docstring's own
+        # estimate — "~30 min for ~25k tables on staging" — is most of a
+        # `soft_time_limit` of 2400s on a machine that is not busy. Whenever it
+        # overran, the entire point of the task was lost: 347 rows in production
+        # still claimed 0 over tables holding more than 100 rows each, 293 of
+        # them older than the last scheduled run.
+        #
+        # The UPDATE below is one statement over statistics Postgres already
+        # keeps. It costs nothing and fixes what is already knowable, so it runs
+        # first and a timeout can no longer swallow it — the ANALYZE pass only
+        # improves what the *next* run will see.
+        def _bulk_update_from_reltuples() -> int:
+            with engine.begin() as conn:
+                return conn.execute(
+                    text(
+                        """
+                        UPDATE public.raw_table_versions rtv
+                        SET row_count = GREATEST(0, c.reltuples::bigint)
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        -- `n.nspname = rtv.schema_name` used to live in the JOIN
+                        -- above. Postgres does not allow the UPDATE target inside
+                        -- a FROM-clause JOIN condition, so the statement raised
+                        -- `invalid reference to FROM-clause entry for table "rtv"`
+                        -- every single time — which is why 347 rows still claimed
+                        -- zero over tables holding real data. It belongs here.
+                        WHERE n.nspname = rtv.schema_name
+                          AND c.relname = rtv.table_name
+                          AND rtv.superseded_at IS NULL
+                          AND c.reltuples >= 0
+                          AND rtv.row_count IS DISTINCT FROM c.reltuples::bigint
+                          AND abs(COALESCE(rtv.row_count, 0) - c.reltuples::bigint)::float
+                              / GREATEST(COALESCE(rtv.row_count, 0), c.reltuples::bigint, 1)
+                              > :threshold
+                        """
+                    ),
+                    {"threshold": drift_threshold},
+                ).rowcount
+
+        stats["updated_before_analyze"] = _bulk_update_from_reltuples()
+
         # Phase 1: ANALYZE all live tables (refresh planner stats)
         for schema, table in live:
             try:
@@ -8350,8 +8392,10 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                     SET row_count = GREATEST(0, c.reltuples::bigint)
                     FROM pg_class c
                     JOIN pg_namespace n ON n.oid = c.relnamespace
-                                       AND n.nspname = rtv.schema_name
-                    WHERE c.relname = rtv.table_name
+                    -- See the note above: the UPDATE target cannot be referenced
+                    -- from a FROM-clause JOIN condition.
+                    WHERE n.nspname = rtv.schema_name
+                      AND c.relname = rtv.table_name
                       AND rtv.superseded_at IS NULL
                       AND c.reltuples >= 0
                       AND rtv.row_count IS DISTINCT FROM c.reltuples::bigint

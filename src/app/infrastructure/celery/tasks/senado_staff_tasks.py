@@ -10,7 +10,14 @@ import httpx
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
-from app.application.collection.field_mapping import FieldSpec, resolve_mapping
+from app.application.collection.field_mapping import (
+    FieldSpec,
+    learned_aliases,
+    propose_mapping_with_llm,
+    remember_mapping,
+    resolve_mapping,
+    with_learned,
+)
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
@@ -31,6 +38,55 @@ _PROFILE_URL = "https://www.senado.gob.ar/senadores/senador/{senator_id}"
 _REQUEST_DELAY = 1.5  # seconds between requests
 
 _RE_STAFF_ENTRY = re.compile(r"<td>\s*([^<]+?)\s*</td>\s*<td>\s*([A-Z]-?\d+)\s*</td>")
+
+
+_CONNECTOR = "senado"
+
+
+def _resolve_senator_mapping(senators: list[dict]):
+    """Deterministic first, then what we learned, then the model.
+
+    Same ladder as the HCDN payroll and for the same reason: a portal that
+    renames a key should cost one model call once, not a broken scrape every
+    week. The model is skipped when the canary says it should not be trusted,
+    and the deterministic tiers carry on without it.
+    """
+    from app.infrastructure.celery.tasks._db import get_sync_engine
+    from app.infrastructure.celery.tasks._llm_gate import model_if_it_answers
+
+    engine = get_sync_engine()
+    specs = with_learned(_SENATOR_FIELDS, learned_aliases(engine, _CONNECTOR))
+    mapping = resolve_mapping(specs, list(senators[0].keys()))
+    if not mapping.unmapped:
+        return mapping
+
+    llm, detalle = model_if_it_answers()
+    if llm is None:
+        logger.warning("Senado: sin modelo para mapear %s (%s)", mapping.unmapped, detalle)
+        return mapping
+
+    import asyncio
+
+    mapping = asyncio.run(
+        propose_mapping_with_llm(
+            specs,
+            mapping,
+            senators,
+            llm=llm,
+            descriptions={
+                "senator_id": "identificador numérico del senador en el portal",
+                "apellido": "apellido del senador",
+                "nombre": "nombre de pila del senador",
+                "bloque": "bloque político al que pertenece",
+                "provincia": "provincia que representa",
+            },
+        )
+    )
+    if mapping.usable:
+        # Only once the identity resolved: a mapping that cannot key the scrape
+        # is not one worth remembering.
+        remember_mapping(engine, _CONNECTOR, mapping)
+    return mapping
 
 
 def _fetch_senators(client: httpx.Client) -> list[dict]:
@@ -120,7 +176,7 @@ def scrape_senado_staff(self):
             # skip every senator, and finish reporting success with zero staff.
             # Resolved once, case- and accent-insensitively, and refused outright
             # when the identity is gone.
-            mapping = resolve_mapping(_SENATOR_FIELDS, list(senators[0].keys()))
+            mapping = _resolve_senator_mapping(senators)
             logger.info("Senado senator mapping: %s", mapping.describe())
             if not mapping.usable:
                 logger.error(

@@ -211,3 +211,102 @@ async def test_a_model_that_fails_leaves_the_deterministic_result_intact():
 
 def test_an_empty_mapping_is_unusable_when_identity_is_required():
     assert Mapping(unmapped_identity=("legajo",)).usable is False
+
+
+# ── lo aprendido ───────────────────────────────────────────────
+
+
+class _Engine:
+    """An engine that records what was executed, without a database."""
+
+    def __init__(self, rows=(), raise_on_begin=False):
+        self.rows = list(rows)
+        self.raise_on_begin = raise_on_begin
+        self.statements: list[tuple[str, dict]] = []
+
+    def begin(self):
+        engine = self
+
+        class _Ctx:
+            def __enter__(self):
+                if engine.raise_on_begin:
+                    raise RuntimeError("db caída")
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, stmt, params=None):
+                engine.statements.append((str(stmt), params or {}))
+
+                class _Res:
+                    @staticmethod
+                    def fetchall():
+                        return engine.rows
+
+                return _Res()
+
+        return _Ctx()
+
+
+class _Row:
+    def __init__(self, field, source_key):
+        self.field = field
+        self.source_key = source_key
+
+
+def test_a_learned_key_is_used_on_the_next_run():
+    from app.application.collection.field_mapping import learned_aliases, with_learned
+
+    engine = _Engine(rows=[_Row("area_desempeno", "ESTRUCTURA")])
+    specs = with_learned(
+        (FieldSpec("area_desempeno"),), learned_aliases(engine, "staff_hcdn")
+    )
+    m = resolve_mapping(specs, ["ESTRUCTURA"])
+    assert m.by_field["area_desempeno"] == "ESTRUCTURA"
+    assert m.tier_by_field["area_desempeno"] == "exact", "ya no cuesta una llamada"
+
+
+def test_a_name_a_person_wrote_wins_over_one_a_model_proposed():
+    from app.application.collection.field_mapping import with_learned
+
+    specs = with_learned((FieldSpec("x", aliases=("DECLARADO",)),), {"x": ("APRENDIDO",)})
+    assert specs[0].aliases == ("DECLARADO", "APRENDIDO")
+
+
+def test_a_learned_key_already_declared_is_not_duplicated():
+    from app.application.collection.field_mapping import with_learned
+
+    specs = with_learned((FieldSpec("x", aliases=("A",)),), {"x": ("A",)})
+    assert specs[0].aliases == ("A",)
+
+
+def test_only_what_the_model_contributed_is_remembered():
+    from app.application.collection.field_mapping import remember_mapping
+
+    engine = _Engine()
+    m = Mapping(
+        by_field={"a": "A", "b": "B"},
+        tier_by_field={"a": "normalized", "b": "llm"},
+    )
+    assert remember_mapping(engine, "c", m) == 1
+    remembered = [p for _, p in engine.statements if p.get("field")]
+    assert [p["field"] for p in remembered] == ["b"], "lo determinista ya se resuelve solo"
+
+
+def test_nothing_to_remember_touches_no_database():
+    from app.application.collection.field_mapping import remember_mapping
+
+    engine = _Engine()
+    m = Mapping(by_field={"a": "A"}, tier_by_field={"a": "exact"})
+    assert remember_mapping(engine, "c", m) == 0
+    assert engine.statements == []
+
+
+def test_a_database_that_is_down_does_not_break_the_connector():
+    from app.application.collection.field_mapping import learned_aliases, remember_mapping
+
+    engine = _Engine(raise_on_begin=True)
+    assert learned_aliases(engine, "c") == {}
+    m = Mapping(by_field={"b": "B"}, tier_by_field={"b": "llm"})
+    assert remember_mapping(engine, "c", m) == 0

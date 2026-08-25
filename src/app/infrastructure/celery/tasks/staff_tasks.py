@@ -13,8 +13,11 @@ from sqlalchemy import text
 from app.application.collection.field_mapping import (
     FieldSpec,
     Mapping,
+    learned_aliases,
     propose_mapping_with_llm,
+    remember_mapping,
     resolve_mapping,
+    with_learned,
 )
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
@@ -93,7 +96,10 @@ _STAFF_DESCRIPTIONS = {
 }
 
 
-def _resolve_staff_mapping(records: list[dict], *, llm=None) -> Mapping:
+_CONNECTOR = "staff_hcdn"
+
+
+def _resolve_staff_mapping(records: list[dict], *, llm=None, engine=None) -> Mapping:
     """Work out which source key feeds each of our fields.
 
     Deterministic first — on the 2026-08-10 change that alone recovers five of
@@ -103,13 +109,17 @@ def _resolve_staff_mapping(records: list[dict], *, llm=None) -> Mapping:
     """
     if not records:
         return Mapping()
-    mapping = resolve_mapping(_STAFF_FIELDS, list(records[0].keys()))
+    specs = _STAFF_FIELDS
+    if engine is not None:
+        # Whatever the model worked out on a previous run resolves for free now.
+        specs = with_learned(specs, learned_aliases(engine, _CONNECTOR))
+    mapping = resolve_mapping(specs, list(records[0].keys()))
     if mapping.unmapped and llm is not None:
         import asyncio
 
         mapping = asyncio.run(
             propose_mapping_with_llm(
-                _STAFF_FIELDS,
+                specs,
                 mapping,
                 records,
                 llm=llm,
@@ -286,7 +296,7 @@ def snapshot_staff(self):
     # thing this connector can absorb; a source that stopped sending one is not,
     # and the guard below is what stops us writing the difference.
     llm, canary_detail = model_if_it_answers()
-    mapping = _resolve_staff_mapping(raw_records, llm=llm)
+    mapping = _resolve_staff_mapping(raw_records, llm=llm, engine=engine)
     logger.info("HCDN staff mapping (%s): %s", canary_detail, mapping.describe())
     current = [mapping.apply(r) for r in raw_records]
     logger.info("Downloaded %d staff records from HCDN", len(current))
@@ -327,6 +337,11 @@ def snapshot_staff(self):
         except Exception:
             logger.warning("staff snapshot: alerting skipped", exc_info=True)
         return {"status": "degenerate", "records": len(current), "reason": degenerate}
+
+    # The batch is good, so whatever the model contributed to reading it has now
+    # earned its place. Recorded here and not at resolution time: a mapping that
+    # produced nothing must not be remembered as one that worked.
+    remember_mapping(engine, _CONNECTOR, mapping)
 
     # 2. Get legajos from previous snapshot
     try:

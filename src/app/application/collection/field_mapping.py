@@ -38,6 +38,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import text
+
 logger = logging.getLogger(__name__)
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
@@ -251,3 +253,130 @@ async def propose_mapping_with_llm(
         unmapped_identity=tuple(s.name for s in specs if s.identity and s.name not in by_field),
         unused_source_keys=tuple(sorted(still_unused)),
     )
+
+
+# ── lo aprendido ───────────────────────────────────────────────
+#
+# A mapping the model worked out is worth exactly one call, and then it is worth
+# nothing again next week unless it is written down. Remembering it turns the
+# model tier from a recurring cost into a one-off: the next run resolves the
+# same field deterministically, for free, and keeps working even if Bedrock is
+# unreachable that morning.
+#
+# **The limitation, stated rather than hidden.** A learned alias is a guess that
+# happened to work once. So it is only recorded after the batch it produced has
+# been *used* — mapping resolved, identity present, content non-degenerate — and
+# never from the mapping alone. That makes it evidence rather than confidence,
+# and it is still weaker evidence than a name a person wrote in the spec: a
+# model that mapped the wrong column onto plausible-looking values would be
+# remembered as right. `forget_alias` exists for that, and the table records
+# which tier put each row there so the mistakes are findable.
+
+_ENSURE_ALIASES_SQL = text(
+    """
+    CREATE TABLE IF NOT EXISTS public.connector_field_aliases (
+        connector   TEXT NOT NULL,
+        field       TEXT NOT NULL,
+        source_key  TEXT NOT NULL,
+        tier        TEXT NOT NULL,
+        learned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        times_used  INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (connector, field, source_key)
+    )
+    """
+)
+
+_LOAD_ALIASES_SQL = text(
+    """
+    SELECT field, source_key
+    FROM public.connector_field_aliases
+    WHERE connector = :connector
+    ORDER BY times_used DESC, learned_at DESC
+    """
+)
+
+_REMEMBER_SQL = text(
+    """
+    INSERT INTO public.connector_field_aliases (connector, field, source_key, tier)
+    VALUES (:connector, :field, :source_key, :tier)
+    ON CONFLICT (connector, field, source_key) DO UPDATE
+        SET last_used_at = now(), times_used = public.connector_field_aliases.times_used + 1
+    """
+)
+
+
+def learned_aliases(engine: Any, connector: str) -> dict[str, tuple[str, ...]]:
+    """Source keys this connector has successfully used before, by field."""
+    out: dict[str, list[str]] = {}
+    try:
+        with engine.begin() as conn:
+            conn.execute(_ENSURE_ALIASES_SQL)
+            for row in conn.execute(_LOAD_ALIASES_SQL, {"connector": connector}).fetchall():
+                out.setdefault(row.field, []).append(row.source_key)
+    except Exception:
+        # Never let the memory break the connector. Without it the resolver
+        # simply falls back to the spec's own aliases, which is where it started.
+        logger.warning("field mapping: could not read learned aliases", exc_info=True)
+        return {}
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def with_learned(
+    specs: Sequence[FieldSpec], learned: dict[str, tuple[str, ...]]
+) -> tuple[FieldSpec, ...]:
+    """The specs, widened by what this connector has learned.
+
+    Learned keys go **after** the declared ones, so a name a person wrote always
+    wins over a name a model proposed.
+    """
+    return tuple(
+        FieldSpec(
+            name=s.name,
+            aliases=(*s.aliases, *(k for k in learned.get(s.name, ()) if k not in s.aliases)),
+            identity=s.identity,
+        )
+        for s in specs
+    )
+
+
+def remember_mapping(engine: Any, connector: str, mapping: Mapping) -> int:
+    """Record the mappings that were not already known. Returns how many.
+
+    Call this only once the batch has proved itself. Recording at resolution
+    time would remember a mapping that then turned out to produce nothing, which
+    is precisely the failure the whole module exists to stop.
+    """
+    nuevos = [(f, k) for f, k in mapping.by_field.items() if mapping.tier_by_field.get(f) == "llm"]
+    if not nuevos:
+        return 0
+    try:
+        with engine.begin() as conn:
+            conn.execute(_ENSURE_ALIASES_SQL)
+            for field_name, key in nuevos:
+                conn.execute(
+                    _REMEMBER_SQL,
+                    {
+                        "connector": connector,
+                        "field": field_name,
+                        "source_key": key,
+                        "tier": "llm",
+                    },
+                )
+    except Exception:
+        logger.warning("field mapping: could not remember the mapping", exc_info=True)
+        return 0
+    logger.info("field mapping: %s aprendió %s", connector, nuevos)
+    return len(nuevos)
+
+
+def forget_alias(engine: Any, connector: str, field_name: str, source_key: str) -> None:
+    """Undo a learned alias. The escape hatch for a mapping that was wrong."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM public.connector_field_aliases "
+                "WHERE connector = :c AND field = :f AND source_key = :k"
+            ),
+            {"c": connector, "f": field_name, "k": source_key},
+        )
