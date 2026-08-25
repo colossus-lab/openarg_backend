@@ -41,6 +41,18 @@ The top-level modules are ordered roughly by architectural depth. Modules with �
 | 013 | [`013-ingestion-validation/`](013-ingestion-validation/) | — | **WS0** — `IngestionValidator` + 14 detectors + 3 modes (pre/post/retro) + `ingestion_findings` audit trail. |
 | 014 | [`014-state-machine/`](014-state-machine/) | — | **WS0.5** — explicit `cached_datasets` state machine + invariant enforcer + `error_category` taxonomy. |
 | 015 | [`015-catalog-resources/`](015-catalog-resources/) | — | **WS2 / WS3 / WS4** — logical catalog (`catalog_resources`) + deterministic naming + hybrid serving. |
+| 016 | [`016-serving-port/`](016-serving-port/) | — | `IServingPort` — the medallion-aware discovery surface the pipeline reads instead of physical table names. |
+| 017 | [`017-raw-layer/`](017-raw-layer/) | — | The `raw` schema: one immutable table per ingest, `<portal>__<slug>__<hash>__v<N>`, tracked in `raw_table_versions`. |
+| 018 | [`018-contracts-staging/`](018-contracts-staging/) | — | **DEPRECATED 2026-05-06** — the contracts + staging layer (medallion L2). Superseded by 019; content kept for history. |
+| 019 | [`019-marts/`](019-marts/) | — | Marts: curated materialized views built from `raw.*` via SQL macros. The surface the chat actually serves. |
+| 020 | [`020-legacy-pipeline-tests-migration/`](020-legacy-pipeline-tests-migration/) | — | Retirement of `smart_query_service` and its test suite once the LangGraph pipeline became the only path. |
+| 021 | [`021-parser-hardening/`](021-parser-hardening/) | — | Parser fixes applied in-place over already-ingested tables (`parse_repair`), plus the PDF parser. |
+| 022 | [`022-mart-quality/`](022-mart-quality/) | — | Nightly quality audit over every built mart + the `serving_blocked` switch. |
+| 023 | [`023-schema-snapshots/`](023-schema-snapshots/) | — | Preserve a table's shape and value profile before any audited drop, so a format change leaves evidence. |
+| 024 | [`024-drift-classification/`](024-drift-classification/) | — | The exoneration cascade: gates that can only prove a shape change was *not* upstream drift. |
+| 025 | [`025-self-repair/`](025-self-repair/) | — | Routing a failure to the artefact that is actually wrong: reinduction repairs one table, APR only ever proposes a parser change. |
+| 026 | [`026-dataset-refresh/`](026-dataset-refresh/) | — | Reading a source more than once. A dataset is collected once and never again, which makes drift undetectable and answers three months old. |
+| 027 | [`027-catalog-integrity/`](027-catalog-integrity/) | — | Making the registry's answers true, and deciding what a resource is when a portal renames it. A registry that lies does not contradict itself. |
 
 Cross-cutting artifacts:
 

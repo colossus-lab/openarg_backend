@@ -33,12 +33,25 @@ that this module resolves at build time. Supported macros:
         With 0 matches, falls back to `SELECT NULL::text AS c1, ...
         WHERE FALSE`.
 
+  {{ live_tables_by_table_pattern('ddjj__*', expected_columns=[...],
+                                   source_marker='__src') }}
+      → each union branch also projects `'<schema>.<table>'::text AS __src`,
+        so a mart can deduplicate by which physical table a row came from.
+        The ingest columns cannot answer that: `_source_dataset_id` names
+        the CKAN dataset, and one dataset routinely lands in several tables.
+
+  {{ to_numeric('importe') }}
+      → a CASE that parses `1234.56`, `1.234.567,89` and `1234,56`, and
+        yields NULL for anything else. One canonical parser for amounts held
+        as text — 44 such columns are still served across 30 marts, and
+        nothing can SUM() a text amount.
+
 When a macro resolves to ZERO live tables, the result is a deterministic
 empty-shape subquery (`SELECT WHERE FALSE`), so the mart still builds
 with a known shape and stays empty until upstream lands.
 
 The resolver is pure-Python (no Postgres function side effects). It
-reads `raw_table_versions` once per `resolve_macros` call. When a
+reads `public.raw_table_versions` once per `resolve_macros` call. When a
 caller passes `expected_columns`, an additional cheap query inspects
 `information_schema.columns` for the matched table_names so the
 intersection can be computed.
@@ -64,6 +77,7 @@ logger = logging.getLogger(__name__)
 # Match the entire `{{ ... }}` payload — content parsed afterward by `ast`.
 _MACRO_RE = re.compile(r"\{\{\s*(?P<call>.+?)\s*\}\}", re.DOTALL)
 _VALID_MACRO_NAMES = {
+    "to_numeric",
     "live_table",
     "live_tables_by_portal",
     "live_tables_by_pattern",
@@ -71,6 +85,76 @@ _VALID_MACRO_NAMES = {
 }
 
 _RESOURCE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.\-:* ]+$")
+
+# `to_numeric` interpolates its argument into SQL, so it accepts only a column
+# reference — never an expression. Three shapes, because real mart sources use
+# all three: a bare name, a qualified `alias.column`, and a quoted name (CKAN
+# ships columns called `awards/0/value/amount`). A quoted form may not contain
+# a quote of its own, which is what would let it close the identifier and run
+# something else.
+_BARE_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_QUALIFIED_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$")
+_QUOTED_COLUMN_RE = re.compile(r'^"[^"]+"$')
+
+
+def _column_reference(raw: str) -> str | None:
+    """Quote a column reference, or None when it is not one."""
+    if _BARE_COLUMN_RE.match(raw):
+        return f'"{raw}"'
+    if _QUOTED_COLUMN_RE.match(raw):
+        return raw
+    if _QUALIFIED_COLUMN_RE.match(raw):
+        alias, column = raw.split(".", 1)
+        return f'"{alias}"."{column}"'
+    return None
+
+
+def _to_numeric_sql(column: str) -> str:
+    """Parse an Argentine amount held as text, or NULL when it is not one.
+
+    Written six times by hand on 2026-08-24 alone — in the energy, crime,
+    mediation, DDJJ, census and school marts — which is five times too many for
+    an expression this easy to get subtly wrong.
+
+    The audit finds 44 amount columns still typed `text` across 30 marts, and a
+    text amount is not a cosmetic problem: nothing can `SUM()` it. The model
+    writing SQL either refuses or casts blindly, and a blind `::numeric` over a
+    single stray value fails the whole query.
+
+    Three shapes, in order, because they are mutually exclusive:
+
+      `1234.56`       a clean decimal
+      `1.234.567,89`  Argentine thousands separator with a decimal comma
+      `1234,56`       a decimal comma without separators
+
+    Anything else yields NULL rather than raising: a mart that refuses to build
+    over one malformed cell serves nothing, which is worse than serving the
+    other rows and admitting the gap. `delitos_caba` spent time in
+    `build_failed` for exactly that.
+
+    **`1.234` is ambiguous and this reads it as a decimal.** A single group of
+    three digits after a dot is either one-point-two-three-four or one
+    thousand two hundred thirty-four, and the value alone cannot say which.
+    Both readings are wrong a thousandfold when they are wrong, so neither is
+    safe; reading it as a decimal at least matches what a plain `::numeric`
+    would have done, so adopting this macro changes no existing number. A
+    column where that case is common needs its own rule, not this one —
+    `delitos_caba` carries coordinates in three encodings and has one.
+    """
+    col = _column_reference(column)
+    if col is None:  # pragma: no cover — the caller validates first
+        raise MacroResolutionError(f"to_numeric(): {column!r} is not a column reference")
+    return (
+        "CASE\n"
+        f"    WHEN {col}::text ~ '^\\s*-?[0-9]+(\\.[0-9]+)?\\s*$'\n"
+        f"      THEN btrim({col}::text)::numeric\n"
+        f"    WHEN {col}::text ~ '^\\s*-?[0-9]{{1,3}}(\\.[0-9]{{3}})+(,[0-9]+)?\\s*$'\n"
+        f"      THEN replace(replace(btrim({col}::text), '.', ''), ',', '.')::numeric\n"
+        f"    WHEN {col}::text ~ '^\\s*-?[0-9]+,[0-9]+\\s*$'\n"
+        f"      THEN replace(btrim({col}::text), ',', '.')::numeric\n"
+        "  END"
+    )
+
 
 # Cap on the number of tables a `live_tables_by_*` macro can expand to.
 # Without this, a permissive pattern like `*` would generate one
@@ -81,6 +165,96 @@ _RESOURCE_IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.\-:* ]+$")
 # 533 in the cluster — pattern matches the whole cluster, post-filter is
 # fine) can override via `OPENARG_MART_MAX_UNION_TABLES`.
 _MAX_UNION_TABLES = int(os.getenv("OPENARG_MART_MAX_UNION_TABLES", "200"))
+
+
+# `datos_gob_ar` re-publishes other portals' resources under a derived
+# identity: `datos_gob_ar::<portal>_<uuid>` is the same upstream resource as
+# `<portal>::<uuid>`. Measured 2026-08-24: **404 live mirror pairs**,
+# concentrated in `energia` (262), `justicia` (260), `produccion` (84) and
+# `acumar` (43), and 79 of them sit inside a single mart's match set, where the
+# pattern picks up both halves and the mart serves those rows twice.
+#
+# **The two copies are the same resource but not the same data.** Comparing 60
+# pairs on their common columns: 35 identical, 25 different, and some differ in
+# row count (1.433 against 1.438). They are collected at different moments, so
+# neither side is reliably the current one. That is why this keeps the larger
+# copy instead of always dropping the `datos_gob_ar` one: whichever is picked,
+# serving a single copy beats serving both — the union double-counts
+# unconditionally — but silently preferring the smaller one would lose rows.
+_FEDERATED_MIRROR_RE = re.compile(
+    r"^datos_gob_ar::(?P<portal>[a-z_]+)_"
+    r"(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _estimated_rows(engine, pairs: list[tuple[str, str]]) -> dict[tuple[str, str], float]:
+    """`pg_class.reltuples` per table. An estimate on purpose — deciding which
+    of two copies is larger does not need an exact count, and this runs inside
+    every mart build."""
+    if not pairs or engine is None:
+        return {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT n.nspname AS schema_name, c.relname AS table_name, c.reltuples
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE (n.nspname, c.relname) IN (
+                        SELECT s, t FROM unnest(CAST(:schemas AS text[]),
+                                                CAST(:tables AS text[])) AS u(s, t))
+                    """
+                ),
+                {"schemas": [p[0] for p in pairs], "tables": [p[1] for p in pairs]},
+            ).fetchall()
+            conn.rollback()
+    except Exception:  # pragma: no cover — environmental
+        logger.warning("could not estimate row counts for mirror selection", exc_info=True)
+        return {}
+    return {(r.schema_name, r.table_name): float(r.reltuples or 0) for r in rows}
+
+
+def _drop_federated_mirrors(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
+    """Keep one copy per upstream resource: the larger of the two.
+
+    Only acts when both halves are in the same match set. A mirror the pattern
+    found on its own is the only copy there is, and dropping it would lose the
+    resource rather than deduplicate it.
+
+    Size decides because the two copies are collected at different moments and
+    genuinely differ (25 of 60 pairs measured), so neither identity is reliably
+    the fresher one. Ties break on `resource_identity`, without which the same
+    inputs could produce different marts on different builds.
+    """
+    by_identity = {row.resource_identity: row for row in lives}
+    counts = _estimated_rows(engine, [(r.schema_name, r.table_name) for r in lives])
+
+    drop: set[str] = set()
+    for row in lives:
+        match = _FEDERATED_MIRROR_RE.match(row.resource_identity)
+        if not match:
+            continue
+        original = f"{match.group('portal')}::{match.group('uuid')}"
+        twin = by_identity.get(original)
+        if twin is None:
+            continue
+        mine = counts.get((row.schema_name, row.table_name), 0.0)
+        theirs = counts.get((twin.schema_name, twin.table_name), 0.0)
+        if mine > theirs:
+            loser = twin.resource_identity
+        elif theirs > mine:
+            loser = row.resource_identity
+        else:
+            # Same size, or no estimate available: keep the originating
+            # portal's copy. `datos_gob_ar` is republishing it, so the portal
+            # of record is the more defensible default — and a fixed rule is
+            # what keeps two builds of the same mart identical.
+            loser = row.resource_identity
+        drop.add(loser)
+
+    kept = [row for row in lives if row.resource_identity not in drop]
+    return kept, len(lives) - len(kept)
 
 
 class MacroResolutionError(ValueError):
@@ -113,7 +287,15 @@ def _query_lives(engine) -> list[_LiveRow]:
         rows = conn.execute(
             text(
                 "SELECT resource_identity, schema_name, table_name "
-                "FROM raw_table_versions "
+                # Qualified, and this is load-bearing. Production carries
+                # raw_table_versions in both schemas — `public` with the live
+                # 27,855 rows and `raw` with a stale 166 — and the connection
+                # goes through PGBouncer in transaction pooling, where a
+                # session-level search_path does not stick. Measured
+                # 2026-08-22: `live_table('senado::decretos_presidenciales')`
+                # resolved to the empty placeholder 9 times out of 10, which is
+                # why three marts had been failing on a column that exists.
+                "FROM public.raw_table_versions "
                 "WHERE superseded_at IS NULL"
             )
         ).fetchall()
@@ -140,7 +322,7 @@ def _query_live_identities(engine, identities: list[str]) -> dict[str, _LiveRow]
         rows = conn.execute(
             text(
                 "SELECT resource_identity, schema_name, table_name "
-                "FROM raw_table_versions "
+                "FROM public.raw_table_versions "
                 "WHERE superseded_at IS NULL AND resource_identity = ANY(:ids)"
             ),
             {"ids": unique_identities},
@@ -168,7 +350,7 @@ def _query_live_by_portals(engine, portals: list[str]) -> list[_LiveRow]:
         params[key] = f"{portal}::%"
     sql = (
         "SELECT resource_identity, schema_name, table_name "
-        "FROM raw_table_versions "
+        "FROM public.raw_table_versions "
         "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
     )
     with engine.connect() as conn:
@@ -196,7 +378,7 @@ def _query_live_by_identity_patterns(engine, patterns: list[str]) -> list[_LiveR
         params[key] = _glob_to_like(pattern)
     sql = (
         "SELECT resource_identity, schema_name, table_name "
-        "FROM raw_table_versions "
+        "FROM public.raw_table_versions "
         "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
     )
     with engine.connect() as conn:
@@ -224,7 +406,7 @@ def _query_live_by_table_patterns(engine, patterns: list[str]) -> list[_LiveRow]
         params[key] = _glob_to_like(pattern)
     sql = (
         "SELECT resource_identity, schema_name, table_name "
-        "FROM raw_table_versions "
+        "FROM public.raw_table_versions "
         "WHERE superseded_at IS NULL AND (" + " OR ".join(clauses) + ")"
     )
     with engine.connect() as conn:
@@ -251,6 +433,8 @@ def _build_union(
     expected_columns: list[str] | None = None,
     require_all_columns: bool = False,
     require_columns: list[str] | None = None,
+    source_marker: str | None = None,
+    drop_federated_mirrors: bool = False,
     engine=None,
 ) -> str:
     """Build a UNION ALL subquery from N live rows.
@@ -281,11 +465,39 @@ def _build_union(
       outer SELECT is unaffected.
       Takes precedence over `require_all_columns` when both are given.
 
+    With `source_marker='<col>'`:
+      Each branch of the union also projects a literal naming the physical
+      table it came from. Needed whenever a mart must deduplicate by
+      provenance: the ingest columns cannot do it, because
+      `_source_dataset_id` identifies the CKAN *dataset* and one dataset
+      routinely publishes several resources into several tables. Measured on
+      the DDJJ cluster: three physically distinct tables share a single
+      `_source_dataset_id`, so grouping by it merged them into one group and
+      a dedup built on it passed every row through — the mart double-counted
+      2017 while reporting a healthy row count.
+
+    With `drop_federated_mirrors=True`:
+      Keeps one copy per upstream resource when both `<portal>::<uuid>` and
+      `datos_gob_ar::<portal>_<uuid>` are in the match set — the larger one,
+      because the two are collected at different moments and 25 of 60 measured
+      pairs differ. Off by default: turning it on changes what a mart contains,
+      so each mart opts in after its own count is checked.
+
     Without `expected_columns`:
       - Empty list → `SELECT NULL::text AS dummy WHERE FALSE` (legacy).
       - N matches → `SELECT * FROM <each>` UNION ALL (legacy).
     """
     lives_list = list(lives)
+
+    mirrors_dropped = 0
+    if drop_federated_mirrors:
+        lives_list, mirrors_dropped = _drop_federated_mirrors(lives_list, engine)
+        if mirrors_dropped:
+            logger.info(
+                "%s: dropped %d federated mirror(s) whose original is in the same match set",
+                macro_name or "live_tables_by_*",
+                mirrors_dropped,
+            )
 
     filter_set: set[str] | None = None
     if require_columns:
@@ -336,7 +548,10 @@ def _build_union(
 
     if expected_columns:
         if not lives_list:
-            return _typed_empty_select(expected_columns, coverage_note=coverage_note)
+            cols_for_empty = (
+                [*expected_columns, source_marker] if source_marker else expected_columns
+            )
+            return _typed_empty_select(cols_for_empty, coverage_note=coverage_note)
         # Inspect the actual schema of each matched table and project the
         # intersection that's also in `expected_columns`. Tables missing
         # a particular column emit `NULL::text AS col` to keep the union
@@ -360,11 +575,23 @@ def _build_union(
                 (f'"{c}"::text AS "{c}"' if c in cols_present else f'NULL::text AS "{c}"')
                 for c in expected_columns
             ]
+            if source_marker:
+                # A literal, not a column: it must differ per physical table
+                # even when every ingest column is identical across mirrors.
+                literal = f"{r.schema_name}.{r.table_name}".replace("'", "''")
+                projected.append(f"'{literal}'::text AS \"{source_marker}\"")
             selects.append(f"SELECT {', '.join(projected)} FROM {_qualified(r)}")
         return "(" + coverage_note + " UNION ALL ".join(selects) + ")"
 
     # Legacy path (no expected_columns).
-    selects = [f"SELECT * FROM {_qualified(r)}" for r in lives_list]
+    if source_marker:
+        selects = [
+            f"""SELECT *, '{f"{r.schema_name}.{r.table_name}".replace("'", "''")}'::text """
+            f'AS "{source_marker}" FROM {_qualified(r)}'
+            for r in lives_list
+        ]
+    else:
+        selects = [f"SELECT * FROM {_qualified(r)}" for r in lives_list]
     if not selects:
         return f"({coverage_note}SELECT NULL::text AS dummy WHERE FALSE)"
     return "(" + coverage_note + " UNION ALL ".join(selects) + ")"
@@ -473,10 +700,44 @@ def _collect_macro_calls(sql: str) -> list[_MacroCall]:
     return calls
 
 
+def resolved_source_tables(sql: str, engine) -> list[tuple[str, str]]:
+    """The `(schema, table)` pairs the macros in `sql` resolve to right now.
+
+    `resolve_macros` already computes this set and then throws it away, keeping
+    only the SQL it produced. The build is the one moment the system knows
+    exactly which tables a mart reads — afterwards the mart is a matview and the
+    link is gone — so exposing the set lets `build_mart` record how old its
+    sources were, which is what a reader actually needs to know and what
+    `last_refreshed_at` cannot tell them.
+
+    Reuses the same queries as the resolution rather than re-deriving them, so
+    the two can never disagree about what a mart reads.
+    """
+    macro_calls = _collect_macro_calls(sql)
+    if not macro_calls:
+        return []
+    rows: list[_LiveRow] = [
+        *_query_live_identities(
+            engine, [c.arg for c in macro_calls if c.name == "live_table"]
+        ).values(),
+        *_query_live_by_portals(
+            engine, [c.arg for c in macro_calls if c.name == "live_tables_by_portal"]
+        ),
+        *_query_live_by_identity_patterns(
+            engine, [c.arg for c in macro_calls if c.name == "live_tables_by_pattern"]
+        ),
+        *_query_live_by_table_patterns(
+            engine,
+            [c.arg for c in macro_calls if c.name == "live_tables_by_table_pattern"],
+        ),
+    ]
+    return sorted({(r.schema_name, r.table_name) for r in rows})
+
+
 def resolve_macros(sql: str, engine) -> str:
     """Replace every `{{ macro(...) }}` in `sql` with its concrete SQL.
 
-    Reads `raw_table_versions` ONCE for the lifetime of this call.
+    Reads `public.raw_table_versions` ONCE for the lifetime of this call.
     Unknown macros or bad args raise `MacroResolutionError` so build_mart
     can record the failure in `mart_definitions.last_refresh_error`.
     """
@@ -542,10 +803,31 @@ def resolve_macros(sql: str, engine) -> str:
                 raise MacroResolutionError(
                     f"Macro {name}(): require_columns not in expected_columns: {sorted(missing)}"
                 )
+        drop_federated_mirrors = kwargs.get("drop_federated_mirrors", False)
+        if not isinstance(drop_federated_mirrors, bool):
+            raise MacroResolutionError(f"Macro {name}(): drop_federated_mirrors must be a bool")
+        source_marker = kwargs.get("source_marker")
+        if source_marker is not None:
+            if not isinstance(source_marker, str) or not source_marker:
+                raise MacroResolutionError(
+                    f"Macro {name}(): source_marker must be a non-empty string"
+                )
+            if expected_columns and source_marker in expected_columns:
+                raise MacroResolutionError(
+                    f"Macro {name}(): source_marker {source_marker!r} collides with "
+                    f"an expected column"
+                )
         if require_all_columns and not expected_columns:
             raise MacroResolutionError(
                 f"Macro {name}(): require_all_columns=True requires expected_columns"
             )
+
+        if name == "to_numeric":
+            if _column_reference(arg) is None:
+                raise MacroResolutionError(f"Macro to_numeric(): {arg!r} is not a column reference")
+            if kwargs:
+                raise MacroResolutionError("Macro to_numeric() takes no keyword arguments")
+            return _to_numeric_sql(arg)
 
         if not _RESOURCE_IDENTITY_RE.match(arg):
             raise MacroResolutionError(f"Macro {name}(): invalid arg {arg!r} (charset)")
@@ -584,6 +866,8 @@ def resolve_macros(sql: str, engine) -> str:
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
+                source_marker=source_marker,
+                drop_federated_mirrors=drop_federated_mirrors,
                 engine=engine,
             )
 
@@ -598,6 +882,8 @@ def resolve_macros(sql: str, engine) -> str:
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
+                source_marker=source_marker,
+                drop_federated_mirrors=drop_federated_mirrors,
                 engine=engine,
             )
 
@@ -612,6 +898,8 @@ def resolve_macros(sql: str, engine) -> str:
                 expected_columns=expected_columns,
                 require_all_columns=require_all_columns,
                 require_columns=require_columns,
+                source_marker=source_marker,
+                drop_federated_mirrors=drop_federated_mirrors,
                 engine=engine,
             )
 

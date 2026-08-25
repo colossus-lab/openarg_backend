@@ -30,6 +30,54 @@ from app.infrastructure.celery.tasks._db import get_sync_engine
 logger = logging.getLogger(__name__)
 
 
+class _RegistryUnavailable(RuntimeError):
+    """The registry a deletion sweep reasons from is missing or implausible."""
+
+
+# How far below the recent norm `cached_datasets` may fall before a sweep
+# refuses to run. Not a round number by taste: the table lost 100% of its rows
+# on 2026-08-03 and nothing noticed, so anything short of "most of it vanished"
+# would not have caught that, and anything tighter would fire on an ordinary
+# cleanup of failed rows.
+_REGISTRY_MIN_ROWS = 1000
+
+
+def _require_registry(engine, *, task: str) -> None:
+    """Refuse to run a deletion sweep when the registry cannot be trusted.
+
+    Every sweep here decides what to delete by asking what `cached_datasets`
+    does *not* claim. That predicate is vacuously true for the entire catalogue
+    when the table is missing, and nearly so when it is mostly empty — which is
+    exactly what happened on 2026-08-03: `raw.cached_datasets` was dropped as an
+    orphan, and the sweeps that consult it went on running against a catalogue
+    they now considered entirely unclaimed.
+
+    The sweeps failed loudly then, by accident, because the SQL referenced a
+    missing relation. Had the table existed and been empty they would have
+    succeeded and deleted everything. This turns that accident into a rule.
+
+    Raises rather than returning a flag: a deletion sweep that cannot verify its
+    own premise has no safe partial behaviour.
+    """
+    with engine.connect() as conn:
+        present = conn.execute(text("SELECT to_regclass('raw.cached_datasets')")).scalar()
+        if not present:
+            conn.rollback()
+            raise _RegistryUnavailable(
+                f"{task}: raw.cached_datasets does not exist; refusing to delete "
+                "anything, because every table would look unclaimed"
+            )
+        rows = conn.execute(text("SELECT count(*) FROM raw.cached_datasets")).scalar() or 0
+        conn.rollback()
+
+    if rows < _REGISTRY_MIN_ROWS:
+        raise _RegistryUnavailable(
+            f"{task}: raw.cached_datasets holds {rows} rows, below the "
+            f"{_REGISTRY_MIN_ROWS} floor; refusing to delete against a registry "
+            "that looks truncated"
+        )
+
+
 def _mart_dependency_guards(engine) -> tuple[set[str], list[str], set[str]]:
     """Return mart-protected identities/patterns/raw tables.
 
@@ -534,12 +582,16 @@ def cleanup_orphan_cache_tables(self, *, dry_run: bool = True, max_drops: int = 
     from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
 
     engine = get_sync_engine()
+
+    _require_registry(engine, task="cleanup_orphan_cache_tables")
     select_sql = text(
         r"""
         SELECT t.tablename
         FROM pg_tables t
         WHERE t.schemaname = 'public'
-          AND t.tablename LIKE 'cache_%'
+          -- Escaped: `_` is a single-character wildcard unescaped, so the
+          -- pattern reached past the collector's own tables.
+          AND t.tablename LIKE 'cache\_%'
           AND t.tablename <> 'cache_drop_audit'
           AND (
               t.tablename ~ '_r[0-9a-f]{8,12}(_s[0-9a-f]{6,10})*$'
@@ -615,12 +667,12 @@ def retain_raw_versions(
 ) -> dict:
     """Drop superseded raw-schema tables beyond the per-resource retention window.
 
-    For each `resource_identity` in `raw_table_versions`, keep the latest
+    For each `resource_identity` in `public.raw_table_versions`, keep the latest
     `keep_last` versions; for older versions:
 
     1. `DROP TABLE raw."<table_name>"` (recorded via `_record_cache_drop` for
        audit consistency).
-    2. `DELETE FROM raw_table_versions` for that row.
+    2. `DELETE FROM public.raw_table_versions` for that row.
 
     Soak window (DEBT-017-002): a candidate is only eligible to be dropped
     when its `superseded_at` is older than `NOW() - soak_days` (default
@@ -665,7 +717,7 @@ def retain_raw_versions(
                 ROW_NUMBER() OVER (
                     PARTITION BY resource_identity ORDER BY version DESC
                 ) AS rn
-            FROM raw_table_versions
+            FROM public.raw_table_versions
         )
         SELECT resource_identity, version, schema_name, table_name
         FROM ranked
@@ -734,7 +786,7 @@ def retain_raw_versions(
                 )
                 conn.execute(
                     text(
-                        "DELETE FROM raw_table_versions "
+                        "DELETE FROM public.raw_table_versions "
                         "WHERE resource_identity = :rid AND version = :v"
                     ),
                     {"rid": c["resource_identity"], "v": c["version"]},
@@ -780,13 +832,13 @@ def cleanup_raw_orphans(
     that lands under a *different* resource_identity creates a fresh
     `rn=1` row — so the per-resource retention never kicks in. This task
     closes that loop by dropping any `raw.*` table whose `table_name` no
-    cd row claims and whose `raw_table_versions` row is older than
+    cd row claims and whose `public.raw_table_versions` row is older than
     `min_age_hours` (default 24h, to avoid races with in-flight collects).
 
     Each drop:
       1. Audited via `_record_cache_drop(reason='raw_orphan_cleanup')`
       2. `DROP TABLE raw."<name>" CASCADE`
-      3. `DELETE FROM raw_table_versions` row
+      3. `DELETE FROM public.raw_table_versions` row
 
     `max_drops` (default 50) caps drops per run to keep RDS IO bounded.
     `dry_run` (default False) reports candidates without touching DB.
@@ -799,6 +851,8 @@ def cleanup_raw_orphans(
         raise ValueError("min_age_hours must be >= 0")
 
     engine = get_sync_engine()
+
+    _require_registry(engine, task="cleanup_raw_orphans")
 
     # SAFETY NET: marts reference raw tables via `live_table('portal::source_id')`
     # macros expanded to physical names at refresh time. If we drop a raw
@@ -816,7 +870,7 @@ def cleanup_raw_orphans(
     select_sql = text(
         """
         SELECT rtv.resource_identity, rtv.version, rtv.schema_name, rtv.table_name
-        FROM raw_table_versions rtv
+        FROM public.raw_table_versions rtv
         WHERE rtv.schema_name = 'raw'
           AND rtv.created_at < NOW() - (:age_hours || ' hours')::interval
           AND NOT EXISTS (
@@ -825,9 +879,34 @@ def cleanup_raw_orphans(
           AND EXISTS (
               SELECT 1 FROM information_schema.tables t
               WHERE t.table_schema = 'raw' AND t.table_name = rtv.table_name
+                -- Views live in information_schema.tables too, and DROP TABLE
+                -- on one fails with WrongObjectType. Production carries 13
+                -- views named `cache_*` in `raw`; this sweep orders
+                -- oldest-first and caps at 10, so it had been stuck on the
+                -- same views since 2026-05-20 — every run selecting them,
+                -- failing on all ten, and never reaching a real orphan behind
+                -- them. It is why production recorded no drop for three months.
+                AND t.table_type = 'BASE TABLE'
           )
           AND (:no_exact OR rtv.resource_identity NOT IN :exact)
           AND (:no_tables OR rtv.table_name NOT IN :protected_tables)
+          -- A live version holding data is not a leftover. This task exists
+          -- for tables abandoned by a reprocess, and the absence of a
+          -- cached_datasets row was standing in for "abandoned" — but a row
+          -- is also absent when the dataset itself disappeared from the
+          -- catalog, which is what happens every time a portal regenerates
+          -- its source_ids. Measured on staging 2026-08-21: 652 of the 706
+          -- candidates were live, holding 99.2M rows between them, orphaned
+          -- only because their `datasets` row had been re-keyed upstream.
+          -- Superseded versions stay in scope; so do empty live ones.
+          AND (
+              rtv.superseded_at IS NOT NULL
+              OR COALESCE((
+                  SELECT c.reltuples FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'raw' AND c.relname = rtv.table_name
+              ), 0) <= 0
+          )
         ORDER BY rtv.created_at ASC
         LIMIT :limit
         """
@@ -902,7 +981,7 @@ def cleanup_raw_orphans(
                 )
                 conn.execute(
                     text(
-                        "DELETE FROM raw_table_versions "
+                        "DELETE FROM public.raw_table_versions "
                         "WHERE resource_identity = :rid AND version = :v"
                     ),
                     {"rid": c["resource_identity"], "v": c["version"]},
@@ -941,13 +1020,17 @@ def cleanup_invariants(self) -> dict[str, int]:
          deploys).
       2. `cached_datasets.retry_count > 5` (violates the trigger-enforced
          invariant; clamp back to 5).
-      3. Orphan tables in `raw.*` without entry in `raw_table_versions`
+      3. Orphan tables in `raw.*` without entry in `public.raw_table_versions`
          (registers them under `backfill_postauto::<table>` so the Serving
          Port can resolve them — better than dropping data).
 
     Returns a dict with counts of rows modified per category.
     """
+    from app.infrastructure.celery.tasks.collector_tasks import _record_cache_drop
+
     engine = get_sync_engine()
+
+    _require_registry(engine, task="cleanup_invariants")
     fixed_unknown = 0
     fixed_retry = 0
     fixed_orphans = 0
@@ -1044,13 +1127,23 @@ def cleanup_invariants(self) -> dict[str, int]:
         result_canonical = conn.execute(
             text(
                 """
-                INSERT INTO raw_table_versions (
+                INSERT INTO public.raw_table_versions (
                     resource_identity, version, schema_name, table_name, row_count
                 )
                 SELECT
                     d.portal || '::' || d.source_id,
+                    -- `substring(... from '__v([0-9]+)$')` returns NULL when the
+                    -- name carries no version suffix, which is what the COALESCE
+                    -- needs. `regexp_replace` did not: with no match it returns
+                    -- the *whole* name unchanged, so NULLIF never fired and the
+                    -- `::int` raised InvalidTextRepresentation on the first
+                    -- unversioned table it met. Since the whole task runs in one
+                    -- `engine.begin()`, that aborted all six invariant repairs —
+                    -- measured 2026-08-01 on prod: 6395 of 26862 `raw` tables
+                    -- have no `__vN` suffix (the legacy `cache_*_r<hex>` shape),
+                    -- so the task had been failing every hour since 2026-05-05.
                     COALESCE(
-                        NULLIF(regexp_replace(t.table_name, '^.*__v', ''), '')::int,
+                        NULLIF(substring(t.table_name from '__v([0-9]+)$'), '')::int,
                         1
                     ),
                     'raw',
@@ -1059,15 +1152,16 @@ def cleanup_invariants(self) -> dict[str, int]:
                 FROM information_schema.tables t
                 JOIN raw.cached_datasets cd ON cd.table_name = t.table_name
                 JOIN datasets d ON d.id = cd.dataset_id
-                LEFT JOIN raw_table_versions rtv
+                LEFT JOIN public.raw_table_versions rtv
                     ON rtv.schema_name = 'raw'
                     AND rtv.table_name = t.table_name
                 WHERE t.table_schema = 'raw'
+                  AND t.table_type = 'BASE TABLE'  -- never a view: DROP TABLE fails on one
                   AND rtv.table_name IS NULL
                 ON CONFLICT (resource_identity, version) DO UPDATE SET
                     schema_name = EXCLUDED.schema_name,
                     table_name = EXCLUDED.table_name,
-                    row_count = COALESCE(EXCLUDED.row_count, raw_table_versions.row_count)
+                    row_count = COALESCE(EXCLUDED.row_count, public.raw_table_versions.row_count)
                 """
             )
         )
@@ -1076,7 +1170,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         result_fallback = conn.execute(
             text(
                 """
-                INSERT INTO raw_table_versions (
+                INSERT INTO public.raw_table_versions (
                     resource_identity, version, schema_name, table_name, row_count
                 )
                 SELECT
@@ -1086,10 +1180,11 @@ def cleanup_invariants(self) -> dict[str, int]:
                     t.table_name,
                     NULL
                 FROM information_schema.tables t
-                LEFT JOIN raw_table_versions rtv
+                LEFT JOIN public.raw_table_versions rtv
                     ON rtv.schema_name = 'raw'
                     AND rtv.table_name = t.table_name
                 WHERE t.table_schema = 'raw'
+                  AND t.table_type = 'BASE TABLE'  -- never a view: DROP TABLE fails on one
                   AND rtv.table_name IS NULL
                 ON CONFLICT (resource_identity, version) DO NOTHING
                 """
@@ -1142,7 +1237,7 @@ def cleanup_invariants(self) -> dict[str, int]:
 
         # 6. Drop empty orphan raw tables (0 rows, no rtv entry, no
         # cached_datasets owner). These are leftovers from CREATE TABLE +
-        # INSERT raw_table_versions transactions that aborted between the
+        # INSERT public.raw_table_versions transactions that aborted between the
         # two statements. Keep orphans WITH data — those go through the
         # canonical/fallback registration path above so the data survives.
         empty_orphans_rows = conn.execute(
@@ -1150,7 +1245,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                 """
                 SELECT t.table_name
                 FROM information_schema.tables t
-                LEFT JOIN raw_table_versions rtv
+                LEFT JOIN public.raw_table_versions rtv
                     ON rtv.schema_name = 'raw'
                     AND rtv.table_name = t.table_name
                 LEFT JOIN raw.cached_datasets cd ON cd.table_name = t.table_name
@@ -1160,6 +1255,7 @@ def cleanup_invariants(self) -> dict[str, int]:
                         SELECT oid FROM pg_namespace WHERE nspname = 'raw'
                     )
                 WHERE t.table_schema = 'raw'
+                  AND t.table_type = 'BASE TABLE'  -- never a view: DROP TABLE fails on one
                   AND rtv.table_name IS NULL
                   AND cd.table_name IS NULL
                   AND COALESCE(c.reltuples, 0) = 0
@@ -1169,6 +1265,17 @@ def cleanup_invariants(self) -> dict[str, int]:
         dropped_empty_orphans = 0
         for row in empty_orphans_rows:
             try:
+                # This drop used to leave no trace at all: it is the one
+                # `DROP TABLE` in the codebase that never called
+                # `_record_cache_drop`, so `cache_drop_audit` was silently
+                # incomplete and nobody could tell "nothing was dropped"
+                # from "something was dropped unaudited".
+                _record_cache_drop(
+                    engine,
+                    table_name=f"raw.{row.table_name}",
+                    reason="empty_orphan_invariant",
+                    actor="ops_fixes.cleanup_invariants",
+                )
                 conn.execute(text(f'DROP TABLE IF EXISTS raw."{row.table_name}"'))
                 dropped_empty_orphans += 1
             except Exception:
@@ -1182,7 +1289,7 @@ def cleanup_invariants(self) -> dict[str, int]:
         # Sprint 1.7 audit detected 63 datasets carrying both a legacy
         # `cache_*` ready row AND a raw-promoted ready row. The
         # cleanup leaves the row that owns a current
-        # `raw_table_versions` entry (canonical source of truth) and
+        # `public.raw_table_versions` entry (canonical source of truth) and
         # demotes the legacy duplicate to `superseded` status. Without
         # this, `/data/tables` and downstream consumers count datasets
         # twice. The DELETE below is conservative — only touches
@@ -1191,15 +1298,18 @@ def cleanup_invariants(self) -> dict[str, int]:
         # a dataset.
         result_double_ready = conn.execute(
             text(
-                """
+                r"""
                 DELETE FROM raw.cached_datasets cd_legacy
                 USING cached_datasets cd_raw,
-                      raw_table_versions rtv
+                      public.raw_table_versions rtv
                 WHERE cd_legacy.dataset_id = cd_raw.dataset_id
                   AND cd_legacy.status = 'ready'
                   AND cd_raw.status = 'ready'
                   AND cd_legacy.table_name <> cd_raw.table_name
-                  AND cd_legacy.table_name LIKE 'cache_%'
+                  -- Escaped: an unescaped `_` is a single-character
+                  -- wildcard, so 'cache_%' also matches 'cached_datasets'
+                  -- and anything else beginning with five letters + one.
+                  AND cd_legacy.table_name LIKE 'cache\_%'
                   AND rtv.schema_name = 'raw'
                   AND rtv.table_name = cd_raw.table_name
                   AND rtv.superseded_at IS NULL
@@ -1309,7 +1419,7 @@ def cleanup_empty_raw_tables(
 
     Failed re-collects sometimes leave a fresh `raw.<...>__vN` table that
     received hundreds of `ALTER TABLE ADD COLUMN` calls (each producing
-    page bloat) but no INSERT. The version row in `raw_table_versions`
+    page bloat) but no INSERT. The version row in `public.raw_table_versions`
     has `row_count=0`, the table sits at >100MB on disk, and macros never
     pick it up because newer versions superseded it. `cleanup_raw_orphans`
     skips them because the row IS in the registry.
@@ -1326,7 +1436,7 @@ def cleanup_empty_raw_tables(
     Each drop:
       1. `_record_cache_drop(reason='empty_raw_bloat')`
       2. `DROP TABLE raw."<n>" CASCADE`
-      3. `DELETE FROM raw_table_versions` row
+      3. `DELETE FROM public.raw_table_versions` row
 
     `dry_run` (default True) reports candidates without touching DB.
     """
@@ -1345,7 +1455,7 @@ def cleanup_empty_raw_tables(
         """
         WITH live_versions AS (
             SELECT resource_identity, MAX(version) AS max_version
-            FROM raw_table_versions
+            FROM public.raw_table_versions
             WHERE schema_name = 'raw'
               AND COALESCE(row_count, 0) > 0
             GROUP BY resource_identity
@@ -1356,7 +1466,7 @@ def cleanup_empty_raw_tables(
                rtv.table_name,
                rtv.superseded_at IS NOT NULL AS already_superseded,
                pg_total_relation_size(format('%I.%I', rtv.schema_name, rtv.table_name)::regclass) AS bytes
-        FROM raw_table_versions rtv
+        FROM public.raw_table_versions rtv
         LEFT JOIN live_versions lv USING (resource_identity)
         WHERE rtv.schema_name = 'raw'
           AND COALESCE(rtv.row_count, 0) = 0
@@ -1364,6 +1474,14 @@ def cleanup_empty_raw_tables(
           AND EXISTS (
               SELECT 1 FROM information_schema.tables t
               WHERE t.table_schema = 'raw' AND t.table_name = rtv.table_name
+                -- Views live in information_schema.tables too, and DROP TABLE
+                -- on one fails with WrongObjectType. Production carries 13
+                -- views named `cache_*` in `raw`; this sweep orders
+                -- oldest-first and caps at 10, so it had been stuck on the
+                -- same views since 2026-05-20 — every run selecting them,
+                -- failing on all ten, and never reaching a real orphan behind
+                -- them. It is why production recorded no drop for three months.
+                AND t.table_type = 'BASE TABLE'
           )
           AND (
               lv.max_version IS NOT NULL AND rtv.version < lv.max_version
@@ -1440,7 +1558,7 @@ def cleanup_empty_raw_tables(
                 )
                 conn.execute(
                     text(
-                        "DELETE FROM raw_table_versions "
+                        "DELETE FROM public.raw_table_versions "
                         "WHERE resource_identity = :rid AND version = :v"
                     ),
                     {"rid": c["resource_identity"], "v": c["version"]},
@@ -1767,7 +1885,7 @@ def prewarm_query_plan_cache(
                 text(
                     """
                     SELECT DISTINCT sample_text
-                    FROM mart_sample_queries
+                    FROM public.mart_sample_queries
                     WHERE sample_text IS NOT NULL
                     LIMIT :n
                     """

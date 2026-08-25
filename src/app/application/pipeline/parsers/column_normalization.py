@@ -142,3 +142,35 @@ def garbage_column_ratio(cols: list[str]) -> float:
     if not cols:
         return 0.0
     return sum(1 for c in cols if is_garbage_column(c)) / len(cols)
+
+
+def is_smeared_title(names: list[str]) -> bool:
+    """Are these one long title copied across the columns with suffixes?
+
+    A companion to `is_garbage_column`, and deliberately a different shape of
+    question: that one judges a single name, this one judges the set. `col_3`
+    is garbage on its own; `'Conformación Cartográfica de Localidades Censales
+    2008 por De'` is a perfectly ordinary string and only becomes evidence
+    beside its siblings `'… por _2'`, `'… por _3'`.
+
+    Because it is set-level, it cannot live inside `is_garbage_column`, and
+    because it did not live anywhere it was invisible in **two** places at once:
+    the promotion gate in `rescue_rejected` passed a table whose columns were
+    exactly this, and `verify_intrinsic` refused every proposal to fix one on
+    the grounds that nothing was wrong with the current names.
+
+    Longest common prefix, not identical stems: Postgres truncates identifiers
+    at 63 bytes, so the first column often ends mid-word while its siblings end
+    in `_N`, and the stems never match.
+
+    A shared prefix only condemns when it is a phrase rather than a word:
+    `fecha_inicio` and `fecha_fin` share seven characters and are both real.
+    """
+    real = [n for n in names if not n.startswith("_")]
+    if len(real) < 3:
+        return False
+    first, last = min(real), max(real)
+    i = 0
+    while i < min(len(first), len(last)) and first[i] == last[i]:
+        i += 1
+    return len(first[:i].strip()) >= 20

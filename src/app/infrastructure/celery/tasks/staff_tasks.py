@@ -10,10 +10,30 @@ import httpx
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
+from app.application.collection.field_mapping import (
+    FieldSpec,
+    Mapping,
+    learned_aliases,
+    propose_mapping_with_llm,
+    remember_mapping,
+    resolve_mapping,
+    with_learned,
+)
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
+from app.infrastructure.celery.tasks._llm_gate import model_if_it_answers
 
 logger = logging.getLogger(__name__)
+
+
+def _model_id(llm: object) -> str | None:
+    """Which model produced a mapping, when the adapter says so."""
+    for attr in ("model_id", "model", "model_name"):
+        value = getattr(llm, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
 
 # CKAN datastore_search endpoint for the HCDN staff resource
 _CKAN_BASE = "https://datos.hcdn.gob.ar"
@@ -56,23 +76,106 @@ def _fetch_all_records() -> list[dict]:
     return records
 
 
+# What we need from the payroll, and the source spellings we already know.
+# `legajo` is the identity: it is the upsert key, and unmapped it collapses a
+# whole payroll into one row — which is exactly what happened on 2026-08-10.
+_STAFF_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec("legajo", identity=True),
+    FieldSpec("apellido"),
+    FieldSpec("nombre"),
+    FieldSpec("escalafon", aliases=("escalafón",)),
+    FieldSpec(
+        "area_desempeno",
+        # The 2026-08-10 rename kept alongside the old names rather than
+        # replacing them: this field has changed twice and may change back.
+        aliases=("Área de Desempeño", "Area de Desempeño", "estructura_desempeno", "estructura"),
+    ),
+    FieldSpec("convenio"),
+)
+
+# Read by the model tier when a name is new to us. Values, not names, are what
+# it decides on — but knowing what we are looking for is what makes the values
+# legible.
+_STAFF_DESCRIPTIONS = {
+    "legajo": "número de legajo del agente, entero",
+    "apellido": "apellido del agente",
+    "nombre": "nombre de pila del agente",
+    "escalafon": "categoría escalafonaria, ej. A-3-T",
+    "area_desempeno": "área, dirección o dependencia donde se desempeña",
+    "convenio": "régimen laboral, ej. PLANTA PERMANENTE (LEY 24.600)",
+}
+
+
+_CONNECTOR = "staff_hcdn"
+
+
+def _resolve_staff_mapping(records: list[dict], *, llm=None, engine=None) -> Mapping:
+    """Work out which source key feeds each of our fields.
+
+    Deterministic first — on the 2026-08-10 change that alone recovers five of
+    the six fields, because five were only a case change. The model is asked
+    only about what is left over, and only when one is available; see
+    `field_mapping` for why the two tiers are not interchangeable.
+    """
+    if not records:
+        return Mapping()
+    specs = _STAFF_FIELDS
+    if engine is not None:
+        # Whatever the model worked out on a previous run resolves for free now.
+        specs = with_learned(specs, learned_aliases(engine, _CONNECTOR))
+    mapping = resolve_mapping(specs, list(records[0].keys()))
+    if mapping.unmapped and llm is not None:
+        import asyncio
+
+        mapping = asyncio.run(
+            propose_mapping_with_llm(
+                specs,
+                mapping,
+                records,
+                llm=llm,
+                descriptions=_STAFF_DESCRIPTIONS,
+            )
+        )
+    return mapping
+
+
 def _normalize_record(raw: dict) -> dict:
-    """Map CKAN field names to our schema."""
-    return {
-        "legajo": _safe_str(raw.get("Legajo") or raw.get("legajo")),
-        "apellido": _safe_str(raw.get("Apellido") or raw.get("apellido")),
-        "nombre": _safe_str(raw.get("Nombre") or raw.get("nombre")),
-        "escalafon": _safe_str(
-            raw.get("Escalafón") or raw.get("Escalafon") or raw.get("escalafon")
-        ),
-        "area_desempeno": _safe_str(
-            raw.get("Área de Desempeño")
-            or raw.get("Area de Desempeño")
-            or raw.get("area_desempeno")
-            or raw.get("estructura_desempeno")
-        ),
-        "convenio": _safe_str(raw.get("Convenio") or raw.get("convenio")),
-    }
+    """Project one record, resolving its mapping deterministically.
+
+    Kept for the single-record case. The batch path in `snapshot_staff` resolves
+    once and can escalate to the model; this cannot, and says so.
+    """
+    return _resolve_staff_mapping([raw]).apply(raw)
+
+
+# Half. Below that it is a bad batch; above it, the mapping stopped matching the
+# source and writing the result would destroy the last good snapshot's meaning.
+_DEGENERATE_SHARE = 0.5
+
+
+def _degenerate_reason(records: list[dict]) -> str | None:
+    """Why this batch must not be written, or `None` if it is fine.
+
+    The last line of defence, after both mapping tiers. The failure it exists
+    for is not a download that breaks — that one raises and retries and somebody
+    sees it. It is a download that **succeeds and means nothing**.
+
+    `legajo` is checked on its own because it is the identity: with it empty the
+    upsert key collapses and a whole payroll becomes one row.
+    """
+    if not records:
+        return None
+    total = len(records)
+    sin_legajo = sum(1 for r in records if not r.get("legajo"))
+    if sin_legajo > total * _DEGENERATE_SHARE:
+        return (
+            f"{sin_legajo} de {total} registros vienen sin legajo — el upsert los "
+            f"colapsaría en una fila. Campos recibidos: {sorted(records[0].keys())}"
+        )
+    vacios = sum(1 for r in records if not any(str(v).strip() for v in r.values()))
+    if vacios > total * _DEGENERATE_SHARE:
+        return f"{vacios} de {total} registros quedaron completamente vacíos al mapear"
+    return None
 
 
 # FIX-008 / FR-006 / FR-009: tracked fields for update detection. Only
@@ -198,8 +301,57 @@ def snapshot_staff(self):
         logger.warning("HCDN staff download returned 0 records — aborting")
         return {"status": "empty", "records": 0}
 
-    current = [_normalize_record(r) for r in raw_records]
+    # Resolve the mapping once for the batch, escalating to the model only for
+    # names the strings could not place. A source that renamed a field is now a
+    # thing this connector can absorb; a source that stopped sending one is not,
+    # and the guard below is what stops us writing the difference.
+    llm, canary_detail = model_if_it_answers()
+    mapping = _resolve_staff_mapping(raw_records, llm=llm, engine=engine)
+    logger.info("HCDN staff mapping (%s): %s", canary_detail, mapping.describe())
+    current = [mapping.apply(r) for r in raw_records]
     logger.info("Downloaded %d staff records from HCDN", len(current))
+
+    if not mapping.usable:
+        # The identity field is gone. Not a partial success: writing this batch
+        # collapses the payroll, so nothing is written and a person is told.
+        degenerate: str | None = (
+            f"no se pudo mapear {', '.join(mapping.unmapped_identity)}. "
+            f"Campos recibidos: {sorted(raw_records[0].keys())}"
+        )
+    else:
+        degenerate = _degenerate_reason(current)
+
+    # Refuse to write a snapshot that parsed to nothing. Writing it is worse
+    # than writing nothing: the mart reads the newest snapshot, so a degenerate
+    # batch silently replaces a good payroll with a blank row.
+    if degenerate:
+        logger.error("HCDN staff snapshot looks degenerate, not writing — %s", degenerate)
+        try:
+            from app.application.quality.alerting import Alert, notify
+
+            notify(
+                engine,
+                [
+                    Alert(
+                        kind="staff_source_changed",
+                        # Keyed on the source, not the run: the portal stays
+                        # changed until somebody fixes the mapping, and a weekly
+                        # repeat of the same message trains people to ignore it.
+                        key="staff_hcdn::snapshots",
+                        title="El padrón de Diputados dejó de mapear",
+                        detail=degenerate[:300],
+                    )
+                ],
+                heading="OpenArg · la fuente cambió de forma",
+            )
+        except Exception:
+            logger.warning("staff snapshot: alerting skipped", exc_info=True)
+        return {"status": "degenerate", "records": len(current), "reason": degenerate}
+
+    # The batch is good, so whatever the model contributed to reading it has now
+    # earned its place. Recorded here and not at resolution time: a mapping that
+    # produced nothing must not be remembered as one that worked.
+    remember_mapping(engine, _CONNECTOR, mapping, model_id=_model_id(llm))
 
     # 2. Get legajos from previous snapshot
     try:

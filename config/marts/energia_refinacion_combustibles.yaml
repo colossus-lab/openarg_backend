@@ -52,7 +52,7 @@ canonical_columns:
     type: text
     description: Unidad de medida (m³, ton, etc.)
   - name: cantidad
-    type: text
+    type: numeric
     description: Volumen comercializado o total
 
 sql: |
@@ -65,7 +65,7 @@ sql: |
     NULLIF(TRIM(tipodecomercializacion), '')                        AS tipo_comercializacion,
     NULLIF(TRIM(sector), '')                                        AS sector,
     NULLIF(TRIM(unidad), '')                                        AS unidad,
-    NULLIF(TRIM(COALESCE(cantidad::text, total::text)), '')         AS cantidad
+    COALESCE({{ to_numeric('cantidad') }}, {{ to_numeric('total') }}) AS cantidad
   FROM {{ live_tables_by_table_pattern(
       'energia__refinacion_y_comercializacion_de_petrole*',
       expected_columns=['anio', 'mes', 'indice_tiempo', 'empresa',

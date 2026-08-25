@@ -40,7 +40,7 @@ canonical_columns:
     type: text
     description: Fecha de adjudicación
   - name: monto
-    type: text
+    type: numeric
     description: Monto adjudicado (numérico como text por origen)
   - name: moneda
     type: text
@@ -61,7 +61,7 @@ sql: |
     NULLIF(TRIM("awards/0/description"), '')           AS descripcion,
     NULLIF(TRIM("awards/0/status"), '')                AS estado,
     NULLIF(TRIM("awards/0/date"), '')                  AS fecha,
-    NULLIF(TRIM("awards/0/value/amount"), '')          AS monto,
+    {{ to_numeric('"awards/0/value/amount"') }}          AS monto,
     NULLIF(TRIM("awards/0/value/currency"), '')        AS moneda,
     NULLIF(TRIM("awards/0/contractPeriod/startDate"), '') AS fecha_inicio_contrato,
     NULLIF(TRIM("awards/0/contractPeriod/endDate"), '')   AS fecha_fin_contrato

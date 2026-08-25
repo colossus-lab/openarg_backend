@@ -1,0 +1,286 @@
+"""A channel people mute is worse than no channel.
+
+These tests are about restraint. Sending is the easy half; the half that decides
+whether anyone still reads the channel in a month is what it declines to send.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+from app.application.quality import alerting
+from app.application.quality.alerting import MAX_PER_RUN, Alert, notify
+
+
+class _Conn:
+    def __init__(self, new_for=None):
+        self.new_for = new_for  # set of fingerprints that are "new"
+        self.sent_claims: list[dict] = []
+
+    def execute(self, stmt, params=None):
+        if params and "fp" in params:
+            self.sent_claims.append(params)
+            is_new = self.new_for is None or params["fp"] in self.new_for
+            return SimpleNamespace(fetchone=lambda: SimpleNamespace(is_new=is_new))
+        return SimpleNamespace(fetchone=lambda: None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _Engine:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def begin(self):
+        return self._conn
+
+    def connect(self):
+        return self._conn
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    box: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda body: (box.append(body), True)[1])
+    return box
+
+
+def _alerts(n, kind="drift"):
+    return [Alert(kind=kind, key=f"r{i}", title=f"Problema {i}") for i in range(n)]
+
+
+def test_nothing_wrong_sends_nothing(sent):
+    """No message is the answer. A daily 'all clear' is furniture."""
+    out = notify(_Engine(_Conn()), [], heading="h")
+    assert out["sent"] == 0
+    assert sent == []
+
+
+def test_a_repeat_finding_stays_quiet(sent):
+    """The weekly report re-derives the same pairs every Monday.
+
+    Without this, the first run produces N alerts and every run after produces
+    the same N, which is how a channel gets muted.
+    """
+    conn = _Conn(new_for=set())  # nothing is new
+    out = notify(_Engine(conn), _alerts(3), heading="h")
+    assert out["considered"] == 3
+    assert out["new"] == 0
+    assert sent == []
+
+
+def test_the_fingerprint_identifies_the_problem_not_the_sighting():
+    """Two sightings of the same thing must collapse to one fingerprint."""
+    a = Alert(kind="drift", key="indec::pobreza", title="visto el lunes")
+    b = Alert(kind="drift", key="indec::pobreza", title="visto el lunes siguiente")
+    assert a.fingerprint() == b.fingerprint()
+    # A different problem is a different alert.
+    c = Alert(kind="drift", key="indec::empleo", title="visto el lunes")
+    assert c.fingerprint() != a.fingerprint()
+    # Same key, different kind, is also different.
+    d = Alert(kind="mart_failed", key="indec::pobreza", title="x")
+    assert d.fingerprint() != a.fingerprint()
+
+
+def test_a_flood_reports_the_count_not_the_flood(sent):
+    """Something systemic produces hundreds at once, and the number is the finding."""
+    out = notify(_Engine(_Conn()), _alerts(300), heading="h")
+    assert out["new"] == 300
+    assert out["sent"] == MAX_PER_RUN
+    body = sent[0]
+    assert body.count("• ") == MAX_PER_RUN
+    assert "295 más sin listar" in body
+
+
+def test_it_stays_quiet_when_it_cannot_tell_new_from_old(sent, monkeypatch):
+    """Losing the dedup must not mean re-sending everything it suppressed."""
+
+    class _Broken:
+        def begin(self):
+            raise RuntimeError("pg is down")
+
+    out = notify(_Broken(), _alerts(4), heading="h")
+    assert out["sent"] == 0
+    assert sent == []
+
+
+def test_a_dead_channel_never_raises(monkeypatch):
+    """Alerting must not break the sweep that raised the alert."""
+    monkeypatch.delenv("OPENARG_TELEGRAM_TOKEN", raising=False)
+    monkeypatch.delenv("OPENARG_TELEGRAM_CHAT_ID", raising=False)
+    out = notify(_Engine(_Conn()), _alerts(2), heading="h")
+    assert out["sent"] == 0  # nothing configured, and that is not an error
+
+
+def test_missing_configuration_reads_as_not_set_up(monkeypatch):
+    monkeypatch.setenv("OPENARG_TELEGRAM_TOKEN", "t")
+    monkeypatch.delenv("OPENARG_TELEGRAM_CHAT_ID", raising=False)
+    assert alerting._enabled() is None
+    monkeypatch.setenv("OPENARG_TELEGRAM_CHAT_ID", "123")
+    assert alerting._enabled() == ("t", "123")
+
+
+def test_an_empty_mart_is_its_own_alert_kind():
+    """`built` with zero rows is not `build_failed`, and it had no watcher.
+
+    The serving layer hides an empty mart correctly, which is what made it worse:
+    `pobreza_indec_aglomerados` was hidden for eight days while every question
+    about poverty fell through to a search, and nothing said so.
+    """
+    broken = Alert(kind="mart_failed", key="pobreza", title="x")
+    empty = Alert(kind="mart_empty", key="pobreza", title="y")
+    # Same mart, different failure — must not dedup against each other.
+    assert broken.fingerprint() != empty.fingerprint()
+
+
+def test_redis_pressure_is_keyed_by_percentage_not_by_the_hour():
+    """A sustained condition should say so once a day, not once an hour.
+
+    Redis holds the Celery broker. Under `allkeys-lru` it would evict whatever
+    was least recently used to make room — including a queued task message,
+    which is a task silently ceasing to exist. `noeviction` makes that a refused
+    write instead, and a refused write nobody hears about is the same as a
+    silent eviction.
+    """
+    a = Alert(kind="redis_pressure", key="redis:80pct", title="x")
+    b = Alert(kind="redis_pressure", key="redis:80pct", title="x, visto una hora después")
+    assert a.fingerprint() == b.fingerprint()
+    # A worse level is a new finding.
+    c = Alert(kind="redis_pressure", key="redis:90pct", title="x")
+    assert c.fingerprint() != a.fingerprint()
+
+
+def test_an_audit_finding_is_its_own_alert_kind():
+    """The mart sweep wrote findings nobody read.
+
+    Four checks had been running nightly over 74 marts and their output stopped
+    at `ingestion_findings`: 34 unresolved CRITICAL findings were sitting there
+    on 2026-08-24 with no reader. The two defects found by hand that day —
+    `delitos_argentina_snic` inflating every crime count by ~30 %,
+    `energia_petroleo_gas_produccion` serving 97,6 % duplicates — were exactly
+    the sort the sweep reports. Detecting without telling anyone is the same as
+    not detecting.
+    """
+    failed = Alert(kind="mart_failed", key="delitos_argentina_snic", title="x")
+    audit = Alert(kind="mart_audit", key="delitos_argentina_snic:mart_duplicate_rows", title="y")
+    assert failed.fingerprint() != audit.fingerprint()
+
+
+def test_two_problems_on_one_mart_report_separately():
+    """The key carries the check, not just the mart: a mart can be duplicated
+    *and* mistyped, and collapsing them would hide whichever arrived second."""
+    dup = Alert(kind="mart_audit", key="m:mart_duplicate_rows", title="x")
+    typing = Alert(kind="mart_audit", key="m:mart_amount_column_is_text", title="y")
+    assert dup.fingerprint() != typing.fingerprint()
+
+
+def test_empty_tables_claiming_rows_is_its_own_alert_kind():
+    """98 live tables registered with 9.935.815 rows between them held none.
+
+    Found by asking why `sube_uso_transporte_publico` served nothing. The
+    collection registry is what every mart trusts to decide what exists, so a
+    table emptied behind its back becomes a mart that builds successfully and
+    answers nothing — the only symptom being a person asking a question and
+    getting silence.
+    """
+    stalled = Alert(kind="collection_stalled", key="2026-08-24", title="x")
+    empty = Alert(kind="empty_tables_claiming_rows", key="98", title="y")
+    assert stalled.fingerprint() != empty.fingerprint()
+
+
+def test_a_growing_count_of_empty_tables_alerts_again():
+    """Keyed by count: 98 today and 140 next week are different problems, while
+    a steady 98 stays quiet instead of repeating every hour."""
+    before = Alert(kind="empty_tables_claiming_rows", key="98", title="x")
+    after = Alert(kind="empty_tables_claiming_rows", key="140", title="x")
+    same = Alert(kind="empty_tables_claiming_rows", key="98", title="x")
+    assert before.fingerprint() != after.fingerprint()
+    assert before.fingerprint() == same.fingerprint()
+
+
+# ── política de ruido, medida contra lo que este canal haría de verdad ──
+
+
+def _fake_engine():
+    from unittest.mock import MagicMock
+
+    return MagicMock()
+
+
+def _lote(kind, n, prefix="k"):
+    from app.application.quality.alerting import Alert
+
+    return [Alert(kind=kind, key=f"{prefix}{i}", title=f"t{i}") for i in range(n)]
+
+
+def test_repairs_are_counted_not_listed(monkeypatch):
+    # La alerta de mayor volumen y menor accionabilidad. Listarla gastaría todo
+    # el presupuesto de atención del canal en lo que nadie tiene que hacer.
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: (list(a), []))
+
+    r = alerting.notify(_fake_engine(), _lote("repaired", 40), heading="h")
+
+    assert r["digested"] == 40
+    assert "40 arreglo(s) automático(s)" in enviados[0]
+    assert "• t0" not in enviados[0]
+
+
+def test_the_cap_is_per_kind_so_one_noisy_kind_cannot_crowd_out_another(monkeypatch):
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    todos = _lote("ruidoso", 30, "a") + _lote("importante", 2, "b")
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: (todos, []))
+
+    alerting.notify(_fake_engine(), todos, heading="h")
+
+    # Los 2 de la clase silenciosa llegan igual, con 30 de la ruidosa al lado.
+    assert enviados[0].count("• ") == alerting.MAX_PER_RUN + 2
+
+
+def test_the_mart_breaking_kind_is_never_trimmed(monkeypatch):
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    todos = _lote("repair_would_break_mart", 12)
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: (todos, []))
+
+    alerting.notify(_fake_engine(), todos, heading="h")
+
+    assert enviados[0].count("• ") == 12, "es la línea más accionable del canal"
+
+
+def test_a_problem_that_keeps_coming_back_is_news_again(monkeypatch):
+    # Un bucle de reparación dedupea a silencio bajo huella estable, y es la
+    # señal más accionable que hay.
+    from app.application.quality import alerting
+
+    enviados: list[str] = []
+    monkeypatch.setattr(alerting, "_send", lambda t: enviados.append(t) or True)
+    a = _lote("roto", 1)[0]
+    monkeypatch.setattr(alerting, "_claim", lambda e, alerts: ([], [(a, 10)]))
+
+    r = alerting.notify(_fake_engine(), [a], heading="h")
+
+    assert r["reopened"] == 1
+    assert "vuelve por 10ª vez" in enviados[0]
+
+
+def test_a_repeat_below_the_threshold_stays_quiet(monkeypatch):
+    from app.application.quality import alerting
+
+    monkeypatch.setattr(alerting, "_claim", lambda e, a: ([], []))
+    r = alerting.notify(_fake_engine(), _lote("roto", 1), heading="h")
+    assert r["sent"] == 0

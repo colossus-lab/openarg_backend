@@ -149,7 +149,7 @@ def _resolve_resource_identity_for_table(engine, table_name: str) -> str | None:
                     text(
                         """
                         SELECT resource_identity
-                        FROM raw_table_versions
+                        FROM public.raw_table_versions
                         WHERE schema_name = :sch
                           AND table_name = :tn
                           AND superseded_at IS NULL

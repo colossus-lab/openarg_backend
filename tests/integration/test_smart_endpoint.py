@@ -19,10 +19,26 @@ class TestSmartQueryEndpoint:
         )
         assert response.status_code == 422
 
-    async def test_smart_query_route_is_post_only(self, app):
-        route = next(r for r in app.routes if getattr(r, "path", None) == "/api/v1/query/smart")
-        assert "POST" in route.methods
-        assert "GET" not in route.methods
+    async def test_smart_query_route_is_post_only(self, client):
+        """A GET on the chat endpoint must be refused as a wrong method.
+
+        This used to assert on `app.routes`, looking the route up with
+        `next()` and reading `.methods`. Two problems: `next()` without a
+        default raises `StopIteration`, which inside a coroutine surfaces as
+        `RuntimeError: coroutine raised StopIteration` and explains nothing;
+        and the lookup assumed `include_router` flattens every route into
+        `app.routes` with a full `.path`, which does not hold across FastAPI
+        versions — in CI the same endpoint answers requests correctly while
+        `[r.path for r in app.routes]` has nothing under `/api/v1/query`.
+
+        Asserting through the interface says the same thing and cannot drift
+        with the framework's internals: 405 is the router refusing the method,
+        and it is decided before any dependency runs, so no API key is needed.
+        """
+        response = await client.get("/api/v1/query/smart")
+        assert response.status_code == 405, (
+            f"expected 405 Method Not Allowed for GET, got {response.status_code}"
+        )
 
     # CONTRACT-02 (round v46): extra='forbid' means any unrecognised
     # field surfaces as a 422 instead of being silently dropped. Pre-fix

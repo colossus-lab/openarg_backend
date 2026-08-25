@@ -247,9 +247,14 @@ class TestScrapeIntegration:
         assert result["status"] == "ok"
         assert result["senators_scraped"] == 1
         assert result["staff_found"] == 2
-        # Verify DELETE + INSERT staff + register_via_b_table INSERT +
-        # the catalog_resources reconciliation UPDATE that ships in the
-        # vía-B writer. The 4th execute syncs `materialized_table_name`
-        # on the canonical catalog row so /data/search and the serving
-        # port resolve to the same physical table that the rtv registers.
-        assert mock_conn.execute.call_count == 4
+        # DELETE + INSERT del staff + el INSERT de `register_via_b_table` + el
+        # UPDATE de reconciliación de `catalog_resources` (que sincroniza
+        # `materialized_table_name` para que /data/search y el serving port
+        # resuelvan a la misma tabla física que registra el rtv), más los dos
+        # del latido de ingesta: sin ese registro no hay en ningún lado una
+        # marca de "esta fuente llegó bien", porque el registro es idempotente
+        # en (recurso, versión) y nunca toca `created_at`.
+        #
+        # Contar sentencias es frágil a propósito: este camino escribe a cuatro
+        # tablas distintas y una escritura de más merece que alguien la mire.
+        assert mock_conn.execute.call_count == 6

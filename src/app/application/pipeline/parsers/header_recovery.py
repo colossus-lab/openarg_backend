@@ -126,7 +126,15 @@ def _looks_like_year_header_row(values: list[str]) -> bool:
     year_count = 0
     for v in numeric_vals:
         try:
-            n = int(v.strip().replace(",", ""))
+            raw = v.strip().replace(",", "")
+            # pandas reads a year column as float, so a header row arrives as
+            # `2018.0` and `int()` refuses it. Measured 2026-08-23: this is why
+            # `['DEFUNCIONES MATERNAS', '2017', '2018.0', '2019.0']` was not
+            # recognised while the same row without the decimals was. A whole
+            # family of statistical tables turns on that `.0`.
+            if raw.endswith(".0"):
+                raw = raw[:-2]
+            n = int(raw)
             if 1900 <= n <= 2100:
                 year_count += 1
         except (ValueError, AttributeError):

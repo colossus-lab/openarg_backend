@@ -11,6 +11,7 @@ Specs/021-parser-hardening Phase 2.
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -296,3 +297,80 @@ async def test_propose_llm_normalizes_and_dedupes_response():
     assert new_cols[0] == "estado"
     assert new_cols[1] == "estado_2"
     assert new_cols[2] == "estado_3"
+
+
+def test_accented_u_normalises_to_u_not_o() -> None:
+    """Regression guard for a shifted accent-translation table.
+
+    `_normalize_header_to_identifier` is shared by every repair that renames a
+    column (`col_n`, `title_as_columns`, `smeared_title`, the LLM tier). Its
+    table had six accented vowels mapping onto four `o` targets and two `u`
+    targets, so `ú` resolved to `o`: `Común` normalised to `comon` and `Número`
+    to `nomero`. Nothing failed loudly — the names were merely wrong, in every
+    rename applied since May.
+    """
+    from app.application.repair.parse_repair import _normalize_header_to_identifier as norm
+
+    assert norm("Común") == "comun"
+    assert norm("Número") == "numero"
+    assert norm("Múltiple") == "multiple"
+    # The vowels that were already correct must stay correct.
+    assert norm("Ámbito") == "ambito"
+    assert norm("Jurisdicción") == "jurisdiccion"
+    assert norm("Título") == "titulo"
+
+
+def test_a_declined_repair_records_why_it_declined() -> None:
+    """5.509 declines in 30 days landed with a NULL reason.
+
+    `smeared_title` alone declined 4.397 times against 134 total applies across
+    every phase, and the audit could not say why even once — so there was no way
+    to tell a correctly conservative sweep from a misconfigured one. A repair
+    that fails sets `error_message`; one that declines sets `reason`, and only
+    the first was being written.
+    """
+    from unittest.mock import MagicMock
+
+    from app.application.repair.parse_repair import RepairOutcome, _audit
+
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    declined = RepairOutcome(
+        table_schema="raw",
+        table_name="t",
+        ok=False,
+        reason="garbage_ratio_below_threshold",
+    )
+    _audit(engine, run_id=uuid.uuid4(), outcome=declined, operation="skip")
+
+    params = conn.execute.call_args[0][1]
+    assert params["err"] == "garbage_ratio_below_threshold"
+
+
+def test_a_failed_repair_still_records_its_error_not_its_reason() -> None:
+    """When both are set the error wins: a repair that tried and broke is a
+    different event from one that declined, and the error is the more urgent
+    of the two."""
+    from unittest.mock import MagicMock
+
+    from app.application.repair.parse_repair import RepairOutcome, _audit
+
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    failed = RepairOutcome(
+        table_schema="raw",
+        table_name="t",
+        ok=False,
+        reason="applied",
+        error_message="deadlock detected",
+    )
+    _audit(engine, run_id=uuid.uuid4(), outcome=failed, operation="apply")
+
+    params = conn.execute.call_args[0][1]
+    assert params["err"] == "deadlock detected"

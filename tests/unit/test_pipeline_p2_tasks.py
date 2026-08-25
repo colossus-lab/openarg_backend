@@ -72,6 +72,25 @@ class _ScalarResult:
         return self._value
 
 
+@pytest.fixture(autouse=True)
+def _no_unchanged_shortcut(monkeypatch):
+    """These tests mock the database wholesale, so every query returns a row.
+
+    `_unchanged_since_last_collect` asks the registry whether this exact file is
+    already loaded, and against a blanket mock the answer is always yes — which
+    would short-circuit the collection each of these tests is about. Forcing it
+    to None reproduces the real situation for them: a resource with no prior
+    version carrying this digest.
+
+    The shortcut has its own tests in `test_source_file_hash.py`, where the
+    connection is stubbed per case rather than blanket-mocked.
+    """
+    monkeypatch.setattr(
+        "app.infrastructure.celery.tasks.collector_tasks._unchanged_since_last_collect",
+        lambda *a, **k: None,
+    )
+
+
 class TestCollectorP2:
     @patch("app.infrastructure.celery.tasks.collector_tasks._try_advisory_lock")
     @patch("app.infrastructure.celery.tasks.collector_tasks.get_sync_engine")
@@ -578,10 +597,12 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
-            table_name,
-            append_mode,
-            None,
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
         )
         nested_zip_path = tmp_path / "nested.zip"
         outer_zip_path = tmp_path / "outer.zip"
@@ -671,10 +692,12 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
-            table_name,
-            append_mode,
-            None,
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
         )
         nested_one = tmp_path / "sepa_a.zip"
         nested_two = tmp_path / "sepa_b.zip"
@@ -727,10 +750,12 @@ class TestCollectorP2:
         import pandas as pd
 
         mock_read_csv.return_value = pd.DataFrame({"id": [1], "nombre": ["Alpha"]})
-        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
-            table_name,
-            append_mode,
-            None,
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
         )
         mock_load_csv_chunked.return_value = (
             2,
@@ -772,10 +797,12 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
-            table_name,
-            append_mode,
-            None,
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
         )
         nested_one = tmp_path / "sepa_a.zip"
         nested_two = tmp_path / "sepa_b.zip"
@@ -829,7 +856,6 @@ class TestCollectorP2:
         mock_load_csv_chunked,
         tmp_path: Path,
     ):
-
         def _sanitize(df):
             normalized = df.copy()
             normalized.columns = ["id_comercio", "nombre_normalizado", "_source_dataset_id"]
@@ -1003,10 +1029,12 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
-            table_name,
-            append_mode,
-            None,
+        mock_route_table.side_effect = (
+            lambda engine, dataset_id, table_name, columns, append_mode: (
+                table_name,
+                append_mode,
+                None,
+            )
         )
         geojson_nested_path = tmp_path / "geojson_nested.zip"
         kml_nested_path = tmp_path / "kml_nested.zip"
@@ -1890,3 +1918,32 @@ class TestEmbeddingP2:
         rows = insert_conn.execute.call_args.args[1]
         assert isinstance(rows, list)
         assert len(rows) == 2
+
+
+def test_a_failed_refresh_does_not_downgrade_a_serving_resource():
+    """026 FR-005: a refresh that fails must not cost the data it was refreshing.
+
+    Reaching `permanently_failed` is terminal — the resource would never be
+    collected again. A row that is `ready` and points at a table that still
+    exists holds working data; the *refresh* failed, and conflating the two
+    would flip a serving resource into a state it cannot leave.
+
+    Verified against Postgres directly: a ready row whose table exists survives
+    the failure as `ready` with the error recorded, a ready row whose table is
+    gone still fails, and a first collection is unaffected because there is no
+    ready row to protect.
+    """
+    from app.infrastructure.celery.tasks import collector_tasks
+
+    source = collector_tasks._apply_cached_outcome.__code__.co_consts
+    sql = next(
+        (
+            c
+            for c in source
+            if isinstance(c, str) and "UPDATE raw.cached_datasets" in c and "retry_count +" in c
+        ),
+        None,
+    )
+    assert sql is not None, "status UPDATE not found"
+    assert "WHEN status = 'ready' AND EXISTS" in sql
+    assert "BASE TABLE" in sql

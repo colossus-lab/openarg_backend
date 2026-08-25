@@ -47,7 +47,7 @@ canonical_columns:
     type: text
     description: Unidad (% empresas, cantidad, etc.)
   - name: valor
-    type: text
+    type: numeric
     description: Valor numérico del indicador
 
 sql: |
@@ -62,7 +62,7 @@ sql: |
         "VARIABLE"
     )), '')                                                      AS dimension,
     NULLIF(TRIM("U_MED"), '')                                    AS unidad_medida,
-    NULLIF(TRIM("VALOR"::text), '')                              AS valor
+    {{ to_numeric('"VALOR"') }}                                  AS valor
   FROM {{ live_tables_by_table_pattern(
       'datos_gob_ar__innovacion_sector_manufacturero*',
       expected_columns=['NOMEN', 'PERIODO', 'ANIO', 'AGREG_INDUS', 'REGION',
@@ -71,7 +71,7 @@ sql: |
                         'TEC_EMERG', 'RANGO_FUENTE_INFO', 'VARIABLE',
                         'U_MED', 'VALOR']
   ) }} sub
-  WHERE NULLIF(TRIM("VALOR"::text), '') IS NOT NULL
+  WHERE {{ to_numeric('"VALOR"') }} IS NOT NULL
 
 refresh:
   policy: manual

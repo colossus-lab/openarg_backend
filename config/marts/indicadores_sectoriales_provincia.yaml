@@ -61,7 +61,7 @@ canonical_columns:
     type: text
     description: Período de la observación (formato fecha o año)
   - name: valor
-    type: text
+    type: numeric
     description: Valor numérico del indicador (texto para tolerar formatos)
 
 sql: |
@@ -79,7 +79,7 @@ sql: |
     NULLIF(TRIM(alcance_id::text), '')                AS alcance_id,
     NULLIF(TRIM(alcance_nombre), '')                  AS alcance_nombre,
     NULLIF(TRIM(indice_tiempo::text), '')             AS indice_tiempo,
-    NULLIF(TRIM(valor::text), '')                     AS valor
+    {{ to_numeric('valor') }}                     AS valor
   FROM {{ live_tables_by_table_pattern(
       'datos_gob_ar__indicadores_sectoriales_y_provincia*',
       expected_columns=['sector_id', 'sector_nombre', 'variable_id',

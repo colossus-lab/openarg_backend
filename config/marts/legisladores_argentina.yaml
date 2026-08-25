@@ -85,3 +85,6 @@ sql: |
 refresh:
   policy: manual
   unique_index: []
+
+expectations:
+  min_rows: 292

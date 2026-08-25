@@ -88,18 +88,33 @@ def _embedding_signature(
     fmt: str | None,
     columns: str | list[str] | None,
     tags: str | None,
-    last_updated,
 ) -> str:
-    """Build a stable signature for fields that affect retrieval chunks."""
+    """Build a stable signature for fields that affect retrieval chunks.
+
+    Every field here appears in the text that gets embedded. `last_updated_at`
+    used to be in this payload and does not: no chunk mentions it. The portals
+    move that timestamp on their own schedule, so the signature changed daily
+    for datasets whose text was identical, and each change bought a fresh set of
+    embeddings for the same words.
+
+    Measured in production on 2026-08-23: 21,729 chunks written in the hour the
+    catalogue scrape runs, across 20,113 datasets, of which 1,807 had actually
+    been re-collected. The rest paid for an embedding of text that had not
+    changed. On the two quiet days before, the figure was 18 a day.
+
+    Removing the field is safe to deploy: both sides of the comparison are
+    recomputed by this same function, the stored one and the incoming one, so a
+    narrower payload does not make everything look changed once.
+
+    `row_count` is the mirror case — it *is* in the chunk text and is *not*
+    here. That is deliberate: the catalogue scrape has no row count to offer,
+    and a collection already dispatches `index_dataset_embedding` itself, so
+    that path is covered without this one guessing.
+    """
     if isinstance(columns, list):
         columns_value = json.dumps([str(col) for col in columns], ensure_ascii=False)
     else:
         columns_value = columns or "[]"
-
-    if hasattr(last_updated, "isoformat"):
-        last_updated_value = last_updated.isoformat()
-    else:
-        last_updated_value = str(last_updated or "")
 
     payload = {
         "title": title or "",
@@ -110,7 +125,6 @@ def _embedding_signature(
         "format": fmt or "",
         "columns": columns_value,
         "tags": tags or "",
-        "last_updated_at": last_updated_value,
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -297,7 +311,6 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                             fmt=row.format,
                             columns=row.columns,
                             tags=row.tags,
-                            last_updated=row.last_updated_at,
                         )
                         for row in existing_rows
                     }
@@ -342,7 +355,6 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                         fmt=row["fmt"],
                         columns=row["cols"],
                         tags=row["tags"],
-                        last_updated=row["last_upd"],
                     )
                     if existing_signatures.get(row["sid"]) != new_signature:
                         dataset_id = dataset_ids_by_source.get(row["sid"])

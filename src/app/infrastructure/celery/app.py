@@ -103,6 +103,22 @@ def create_celery() -> Celery:
             # Medallion mart tasks (raw → mart, no staging layer).
             "app.infrastructure.celery.tasks.mart_tasks",
             "app.infrastructure.celery.tasks.mart_audit_tasks",
+            "app.infrastructure.celery.tasks.drift_report_tasks",
+            "app.infrastructure.celery.tasks.schema_baseline_tasks",
+            "app.infrastructure.celery.tasks.refresh_tasks",
+            "app.infrastructure.celery.tasks.parse_repair_tasks",
+            "app.infrastructure.celery.tasks.registry_reconcile_tasks",
+            "app.infrastructure.celery.tasks.quality_alert_tasks",
+            "app.infrastructure.celery.tasks.columns_backfill",
+            "app.infrastructure.celery.tasks.identity_reconcile",
+            "app.infrastructure.celery.tasks.retry_our_failures",
+            "app.infrastructure.celery.tasks.rescue_rejected",
+            "app.infrastructure.celery.tasks.llm_repair_tasks",
+            "app.infrastructure.celery.tasks.self_repair_tasks",
+            "app.infrastructure.celery.tasks.empty_content_tasks",
+            "app.infrastructure.celery.tasks.staleness_tasks",
+            # Conecta la señal que registra que cada tarea agendada corrió.
+            "app.infrastructure.celery.heartbeat_signals",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -166,6 +182,31 @@ def create_celery() -> Celery:
         "openarg.cleanup_invariants": {"queue": "ingest"},
         "openarg.refresh_via_b_marts": {"queue": "ingest"},
         "openarg.audit_marts": {"queue": "ingest"},
+        "openarg.report_schema_drift": {"queue": "ingest"},
+        "openarg.baseline_schema_snapshots": {"queue": "ingest"},
+        "openarg.refresh_stale_datasets": {"queue": "orchestrator"},
+        "openarg.repair_unsplit_csv_tables": {"queue": "ingest"},
+        "openarg.reconcile_registry_locations": {"queue": "ingest"},
+        "openarg.backfill_mart_source_ages": {"queue": "ingest"},
+        "openarg.alert_on_quality_signals": {"queue": "ingest"},
+        "openarg.backfill_legacy_registry": {"queue": "ingest"},
+        "openarg.retry_degraded_marts": {"queue": "ingest"},
+        "openarg.check_mart_expectations": {"queue": "ingest"},
+        "openarg.backfill_dataset_columns": {"queue": "ingest"},
+        "openarg.portal_canary": {"queue": "ingest"},
+        "openarg.reconcile_dataset_identities": {"queue": "ingest"},
+        "openarg.cleanup_duplicate_tables": {"queue": "ingest"},
+        "openarg.retry_our_own_failures": {"queue": "ingest"},
+        "openarg.rescue_rejected_resources": {"queue": "ingest"},
+        "openarg.repair_smeared_title_tables": {"queue": "ingest"},
+        "openarg.retire_phantom_registry_rows": {"queue": "ingest"},
+        "openarg.repair_columns_with_llm": {"queue": "analyst"},
+        # On `analyst` because the ladder's last rung is a model call, and the
+        # `ingest` workers must not block on Bedrock latency.
+        "openarg.repair_mart_sources": {"queue": "analyst"},
+        "openarg.find_empty_content_tables": {"queue": "ingest"},
+        "openarg.alert_stale_ingests": {"queue": "ingest"},
+        "openarg.apply_approved_repairs": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -318,6 +359,112 @@ def create_celery() -> Celery:
                 "kwargs": {"dry_run": False, "max_drops": 100, "min_age_hours": 24},
                 "options": {"queue": "ingest"},
             },
+            "retry-degraded-marts": {
+                # Before the 09:00 alert, deliberately: the ordinary case is a
+                # mart whose sources moved and which nobody rebuilt, and that
+                # one should be fixed rather than reported. What the alert
+                # then carries is what a rebuild could not fix, which is the
+                # only kind worth a person's attention.
+                "task": "openarg.retry_degraded_marts",
+                "schedule": crontab(hour=8, minute=30),
+                "kwargs": {"dry_run": False, "limit": 10, "min_age_hours": 6},
+                "options": {"queue": "ingest"},
+            },
+            "backfill-dataset-columns": {
+                # Drains ~29,000 rows a batch at a time rather than in one
+                # sweep. Filling `datasets.columns` changes the embedding
+                # signature, so doing it all at once would re-embed the whole
+                # catalogue in a single hour — the exact storm that the
+                # signature fix was for. Hourly and bounded, it lands over a
+                # couple of days without anyone noticing the load.
+                "task": "openarg.backfill_dataset_columns",
+                "schedule": crontab(minute=20),
+                "kwargs": {"dry_run": False, "limit": 1000, "reindex": True},
+                "options": {"queue": "ingest"},
+            },
+            "check-mart-expectations": {
+                # Between the retry (08:30) and the alert (09:00), so a mart
+                # that a rebuild could fix is already fixed by the time its
+                # expectations are judged.
+                "task": "openarg.check_mart_expectations",
+                "schedule": crontab(hour=8, minute=50),
+                "options": {"queue": "ingest"},
+            },
+            "repair-smeared-titles": {
+                # These tables are `ready` and their data is fine — only the
+                # names are wrong, which is why no status ever flagged them.
+                "task": "openarg.repair_smeared_title_tables",
+                "schedule": crontab(hour=6, minute=30),
+                "kwargs": {"dry_run": False, "limit": 1200},
+                "options": {"queue": "ingest"},
+            },
+            "rescue-rejected-resources": {
+                # Before the retry sweep: a resource whose table can be repaired
+                # should be repaired, not re-downloaded. 546 sat rejected with
+                # their tables intact and fixes for their exact shape sitting
+                # unused since May.
+                "task": "openarg.rescue_rejected_resources",
+                "schedule": crontab(hour=6, minute=50),
+                "kwargs": {"dry_run": False, "limit": 100},
+                "options": {"queue": "ingest"},
+            },
+            "retry-our-own-failures": {
+                # Daily and bounded. 1,031 resources had been dead since May
+                # for no reason but a retry counter, and nothing was ever going
+                # to look at them again.
+                "task": "openarg.retry_our_own_failures",
+                "schedule": crontab(hour=7, minute=10),
+                "kwargs": {"dry_run": False, "limit": 200},
+                "options": {"queue": "ingest"},
+            },
+            "portal-canary": {
+                # Daily and before the alert, like the rest of this group. One
+                # small request per portal — 38 of them — which is the cheapest
+                # possible way to know a portal stopped serving before a person
+                # finds out by reading a list of failures.
+                "task": "openarg.portal_canary",
+                "schedule": crontab(hour=8, minute=40),
+                "options": {"queue": "ingest"},
+            },
+            "quality-alerts": {
+                # Twice a day, not hourly. Everything watched here fails for
+                # days rather than minutes — three marts sat broken for weeks —
+                # so the useful cadence is "before someone would have noticed
+                # anyway", and a channel checked twice a day is one people still
+                # read.
+                "task": "openarg.alert_on_quality_signals",
+                "schedule": crontab(hour="9,21", minute=0),
+                "options": {"queue": "ingest"},
+            },
+            "reconcile-registry-locations": {
+                # Runs before the 06:30 orphan sweep, and that order is the
+                # point: a table sitting in the wrong schema is a table the
+                # registry cannot find, and a sweep that cannot find a table
+                # is one step from deciding nothing claims it.
+                #
+                # Moves the table to the schema its live registry row already
+                # names — it never edits the row to match the table, so it
+                # cannot invent a location. In production on 2026-08-23 this
+                # was 82 tables holding 14M rows, 81 of them legacy `cache_*`
+                # names, and it is the same defect that had three marts down.
+                "task": "openarg.reconcile_registry_locations",
+                "schedule": crontab(hour=4, minute=10),
+                "kwargs": {"dry_run": False, "limit": 500},
+                "options": {"queue": "ingest"},
+            },
+            "retire-phantom-registry-rows": {
+                # Live rows naming a table that exists in neither schema. They
+                # are retired (`superseded_at`), never deleted: the row is the
+                # only surviving record that the table existed at all, and the
+                # drift work is built on exactly that evidence.
+                #
+                # Skips any row `cached_datasets` still points at — that is a
+                # broken reference someone should see, not one to close quietly.
+                "task": "openarg.retire_phantom_registry_rows",
+                "schedule": crontab(hour=4, minute=25),
+                "kwargs": {"dry_run": False, "limit": 500},
+                "options": {"queue": "ingest"},
+            },
             "cleanup-empty-raw-tables": {
                 # Sprint Disk Bloat 2026-05-09: drops `raw.*` tables that
                 # were created by failed re-collects and left behind with
@@ -391,6 +538,145 @@ def create_celery() -> Celery:
                 # edit, since a DB-only flag is erased by the next build.
                 "task": "openarg.audit_marts",
                 "schedule": crontab(hour=3, minute=45),  # 03:45 ART daily
+                "options": {"queue": "ingest"},
+            },
+            "refresh-stale-datasets": {
+                # The second reading. Inert until a portal is named in
+                # OPENARG_REFRESH_PORTALS — the task reports "no portal
+                # enabled" rather than zeros, because zeros would read like
+                # "nothing is stale" while 3,431 resources are.
+                #
+                # Every six hours rather than daily: the queue is driven by what
+                # the portals declare changed, so checking often costs little
+                # and finds a change sooner. The budget, not the frequency, is
+                # what bounds the load.
+                "task": "openarg.refresh_stale_datasets",
+                "schedule": crontab(minute=15, hour="*/6"),
+                "kwargs": {"dry_run": False, "limit": 50},
+                "options": {"queue": "orchestrator"},
+            },
+            "repair-columns-with-llm-daily": {
+                # The model tier, now writing. It stays gated on
+                # OPENARG_LLM_REPAIR, so an environment that has not opted in
+                # still does nothing.
+                #
+                # Enabled on evidence rather than confidence: 20 tables repaired
+                # across staging and production, zero refused by the verifier,
+                # zero collector columns touched, and every result read by hand
+                # — `Unnamed: 0` became `fecha`, `jurisdiccion` and `indicador`
+                # correctly per table, and `Total` became `esperanza_vida_total`
+                # by reading the values around it.
+                #
+                # 25 a run against a population of 393 is roughly two weeks to
+                # drain, which is deliberate: slow enough that a bad pattern
+                # shows up in `refused_by_verifier` before it has spread.
+                "task": "openarg.repair_columns_with_llm",
+                "schedule": crontab(hour=5, minute=15),  # 05:15 ART
+                "kwargs": {"dry_run": False, "limit": 25},
+                "options": {"queue": "analyst"},
+            },
+            "repair-unsplit-csv-daily": {
+                # The first place this system repairs itself rather than
+                # reporting. When a portal changes its delimiter the collector
+                # stores the file unsplit — 211 tables were in that state on
+                # 2026-08-22 — and this finds it within a day.
+                #
+                # `dry_run=False` is stated here rather than defaulted in the
+                # task, so the decision to write is visible in the schedule.
+                # Safe to run unattended only because the repair verifies
+                # itself: every row must split into exactly as many fields as
+                # the header names, and a table that fails that is declined.
+                "task": "openarg.repair_unsplit_csv_tables",
+                "schedule": crontab(hour=4, minute=45),  # 04:45 ART, before the baseline
+                "kwargs": {"dry_run": False},
+                "options": {"queue": "ingest"},
+            },
+            "apply-approved-repairs-daily": {
+                # Decidir y ejecutar son actos separados a propósito: una
+                # decisión tomada con apuro no debería ser además una escritura
+                # hecha con apuro. Una propuesta aprobada ayer corre igual
+                # contra la tabla de hoy.
+                "task": "openarg.apply_approved_repairs",
+                "schedule": crontab(hour=6, minute=40),  # 06:40 ART
+                "options": {"queue": "ingest"},
+            },
+            "alert-stale-ingests-daily": {
+                # La contraparte de todo guardián que se niega a escribir.
+                # Negarse está bien —un padrón en blanco es peor que uno viejo—
+                # pero por sí solo cambia una falla ruidosa por una silenciosa:
+                # el mart sigue contestando y nada dice que el dato se congeló.
+                #
+                # Cada recurso se compara contra su propia cadencia aprendida,
+                # no contra un umbral fijo: un censo anual y una cotización
+                # horaria no comparten umbral, y una lista declarada de
+                # períodos esperados estaría desactualizada en un mes.
+                "task": "openarg.alert_stale_ingests",
+                "schedule": crontab(hour=7, minute=10),  # 07:10 ART diario
+                "options": {"queue": "ingest"},
+            },
+            "find-empty-content-weekly": {
+                # Tablas que tienen filas y no dicen nada — el padrón de
+                # Diputados pasó tres semanas así. Ninguna medida de vacío que
+                # teníamos lo veía: la tabla existía, las filas no eran cero,
+                # el estado era `ready` y el mart construía.
+                #
+                # Camina el corpus por ventanas; una pasada completa lleva
+                # varias semanas y eso está bien, porque el hallazgo no es
+                # urgente por hora sino invisible por meses.
+                "task": "openarg.find_empty_content_tables",
+                "schedule": crontab(hour=6, minute=20, day_of_week=2),  # martes 06:20 ART
+                "kwargs": {"limit": 3000},
+                "options": {"queue": "ingest"},
+            },
+            "repair-mart-sources-daily": {
+                # The whole ladder in one place: detect → 5 heuristics → model →
+                # rebuild the marts → say what happened. Runs after the two
+                # single-shape sweeps so it inherits whatever they already fixed
+                # and spends its budget on what they refused.
+                #
+                # Scoped to the tables that feed a mart. Measured 2026-08-24:
+                # 3,160 tables in `raw` carry a parse defect and 105 of them are
+                # read by a mart — the rest belong to the scheduled sweeps and
+                # nobody is served by them today.
+                #
+                # `dry_run=False` stated here, not defaulted in the task, so the
+                # decision to write lives in the schedule. Safe unattended only
+                # because every rung is guarded: a repair that would rename a
+                # column some mart names by hand is refused and reported instead
+                # of applied.
+                "task": "openarg.repair_mart_sources",
+                "schedule": crontab(hour=5, minute=5),  # 05:05 ART, after the sweeps
+                "kwargs": {"dry_run": False, "limit": 40},
+                "options": {"queue": "analyst"},
+            },
+            "baseline-schema-snapshots-daily": {
+                # Snapshots tables that are still alive. The drop hook records
+                # a shape as it is destroyed, which means a resource only
+                # becomes comparable after being dropped twice — and prod has
+                # recorded no drop since 2026-05-20. A baseline removes one of
+                # those two waits: the first drop of a baselined table already
+                # lands beside a stored "before".
+                #
+                # Runs before the drift report so a Monday report reads a
+                # corpus the Sunday run had already widened. Walks forward in
+                # batches; tables that already carry a baseline are skipped.
+                "task": "openarg.baseline_schema_snapshots",
+                "schedule": crontab(hour=5, minute=30),  # 05:30 ART daily
+                "kwargs": {"limit": 2000},
+                "options": {"queue": "ingest"},
+            },
+            "report-schema-drift-weekly": {
+                # Reads the snapshots that migrations 0056/0057 preserve and
+                # answers the question this project has never been able to
+                # answer: how often, and in what way, do our inputs change
+                # shape? Weekly, not daily — a table has to be dropped twice
+                # before anything is comparable, so a daily run would mostly
+                # re-report the same window.
+                #
+                # Shadow mode: it logs a summary and notifies nobody. The
+                # alert comes after the noise is measured, not before.
+                "task": "openarg.report_schema_drift",
+                "schedule": crontab(hour=6, minute=15, day_of_week=1),  # Monday 06:15 ART
                 "options": {"queue": "ingest"},
             },
             "snapshot-staff-weekly": {

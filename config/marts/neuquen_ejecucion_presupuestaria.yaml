@@ -80,19 +80,19 @@ canonical_columns:
     type: text
     description: Imputación contable
   - name: credito_inicial
-    type: text
+    type: numeric
     description: Crédito inicial asignado
   - name: credito_definitivo
-    type: text
+    type: numeric
     description: Crédito definitivo (post modificaciones)
   - name: ejecutado_del_mes
     type: text
     description: Monto ejecutado en el mes
   - name: ejecutado_total
-    type: text
+    type: numeric
     description: Monto ejecutado total acumulado
   - name: saldo_disponible
-    type: text
+    type: numeric
     description: Saldo disponible (crédito_definitivo − ejecutado_total)
 
 sql: |
@@ -116,11 +116,11 @@ sql: |
     NULLIF(TRIM("FUFI"::text), '')                AS fufi,
     NULLIF(TRIM("UBGE"::text), '')                AS ubge,
     NULLIF(TRIM("IMPUTACION"), '')                AS imputacion,
-    NULLIF(TRIM("CREDITO INICIAL"::text), '')     AS credito_inicial,
-    NULLIF(TRIM("CREDITO DEFINITIVO"::text), '')  AS credito_definitivo,
+    {{ to_numeric('"CREDITO INICIAL"') }}     AS credito_inicial,
+    {{ to_numeric('"CREDITO DEFINITIVO"') }}  AS credito_definitivo,
     NULLIF(TRIM("EJECUTADO DEL MES"::text), '')   AS ejecutado_del_mes,
-    NULLIF(TRIM("EJECUTADO TOTAL"::text), '')     AS ejecutado_total,
-    NULLIF(TRIM("SALDO DISPONIBLE"::text), '')    AS saldo_disponible
+    {{ to_numeric('"EJECUTADO TOTAL"') }}     AS ejecutado_total,
+    {{ to_numeric('"SALDO DISPONIBLE"') }}    AS saldo_disponible
   FROM {{ live_tables_by_table_pattern(
       'neuquen_legislatura__ejecucion_recursos_y_gastos*',
       expected_columns=['JURI', 'SA', 'UNOR', 'CPN1', 'CPN2', 'CPN3',

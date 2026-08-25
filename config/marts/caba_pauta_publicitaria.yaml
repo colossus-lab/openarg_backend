@@ -32,7 +32,7 @@ canonical_columns:
     type: text
     description: Medio donde se publicó (TV, radio, web, gráfica, etc.)
   - name: importe
-    type: text
+    type: numeric
     description: Monto en pesos
   - name: tipo
     type: text
@@ -49,10 +49,10 @@ sql: |
         "Medio",
         "MEDIO"
     )), '')                                          AS medio,
-    NULLIF(TRIM(COALESCE(
-        "Importe"::text,
-        "IMPORTE"::text
-    )), '')                                          AS importe,
+    COALESCE(
+        {{ to_numeric('"Importe"') }},
+        {{ to_numeric('"IMPORTE"') }}
+    )                                                AS importe,
     NULLIF(TRIM("TIPO"), '')                         AS tipo
   FROM {{ live_tables_by_table_pattern(
       'caba__pauta_publicitaria*',

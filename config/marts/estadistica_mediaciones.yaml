@@ -1,5 +1,5 @@
 id: estadistica_mediaciones
-version: 0.1.0
+version: 0.2.0
 description: |
   Estadística agregada de mediaciones prejudiciales y judiciales, agrupada
   por (año, mes, instancia, fuero, objeto, tema, tipo, estado, resultado).
@@ -9,13 +9,32 @@ description: |
   esta vista provee la métrica para análisis temporal/secorial sin
   necesidad de scanear 50M filas.
 
-  Combina `justicia` y `datos_gob_ar`. ~20 tablas live (~9M filas).
+  **Sirve la publicación vigente, no la unión de las 18 anteriores.** El
+  patrón matchea 22 tablas vivas que son snapshots sucesivos de la misma
+  serie: ocho tamaños distintos (44.115, 47.982, 54.139, 60.265, 66.620,
+  79.456 y 81.372 filas) cada uno duplicado como espejo entre `justicia` y
+  `datos_gob_ar`, más dos tablas de 620.554 filas que traen sólo 72.266
+  claves — 8,6 copias de cada una. La versión 0.1.0 las unía todas y servía
+  1.030.642 filas con **83.301 claves reales: 90,6 % duplicadas**, y peor,
+  **10.223 claves con cantidades en conflicto** porque los snapshots
+  sucesivos revisan los números. Cualquier conteo de mediaciones salía
+  inflado y, en 10.223 casos, indeterminado.
+
+  Ahora toma por identidad el snapshot que el portal actualizó último
+  (2026-08-03): 81.372 filas, 81.372 claves, cero duplicadas.
+
+  **Lo que se resigna al hacerlo.** Los snapshots viejos tienen entre 252 y
+  476 claves cada uno que el actual ya no incluye — categorizaciones que la
+  serie fusionó o renombró al revisarse. No son datos faltantes sino una
+  taxonomía anterior, y mezclarlas con la vigente es lo que producía los
+  conflictos. Si alguien necesita la serie histórica con sus categorías de
+  época, están en el sandbox sobre `raw`.
 domain: gobierno
 
 sources:
   portals: [datos_gob_ar, justicia]
   resource_patterns:
-    - "*::estadistica_de_mediaciones*"
+    - "justicia::249b3214-411f-4fe5-9600-59b44ef7ec06"
 
 canonical_columns:
   - name: anio
@@ -60,16 +79,28 @@ sql: |
     NULLIF(TRIM(tipo_mediacion::text), '') AS tipo_mediacion,
     NULLIF(TRIM(estado::text), '')         AS estado,
     NULLIF(TRIM(resultado::text), '')      AS resultado,
-    cantidad::numeric                      AS cantidad
-  FROM {{ live_tables_by_table_pattern(
-      '*__estadistica_de_mediaciones*',
+    -- Guard antes del cast: un `::numeric` crudo sobre un texto que aparezca
+    -- en una publicación futura deja el mart en `build_failed`.
+    CASE WHEN cantidad::text ~ '^-?[0-9]+(\.[0-9]+)?$'
+         THEN cantidad::text::numeric END       AS cantidad
+  FROM {{ live_table('justicia::249b3214-411f-4fe5-9600-59b44ef7ec06',
       expected_columns=['anio', 'mes', 'instancia', 'fuero', 'objeto',
                         'tema', 'tipo_mediacion', 'estado', 'resultado',
-                        'cantidad'],
-      require_all_columns=True
-  ) }} sub
+                        'cantidad']) }} sub
   WHERE NULLIF(TRIM(anio::text), '') IS NOT NULL
 
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "cuántas mediaciones prejudiciales hubo"
+  - "resultados de las mediaciones por fuero"
+  - "cuántos acuerdos se lograron en mediación"
+
+expectations:
+  # La mitad de las 81.372 filas de la publicación vigente. No existía piso, y
+  # ninguno por tamaño podría haber detectado el defecto anterior: 1.030.642
+  # filas parecen salud. Si la identidad del recurso se regenera, la rama cae a
+  # cero por `expected_columns` y el mart queda vacío y visible.
+  min_rows: 40686

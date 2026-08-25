@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from app.application.marts.sql_macros import _LiveRow, resolve_macros
+import re
+from types import SimpleNamespace
+
+import pytest
+
+from app.application.marts.sql_macros import (
+    MacroResolutionError,
+    _LiveRow,
+    resolve_macros,
+)
 
 
 def test_resolve_macros_live_table_uses_targeted_lookup(monkeypatch) -> None:
@@ -245,3 +254,196 @@ def test_no_coverage_marker_when_nothing_was_filtered(monkeypatch) -> None:
     sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*') }} s"
     resolved = resolve_macros(sql, engine=object())
     assert "macro_coverage" not in resolved
+
+
+def test_source_marker_distinguishes_tables_sharing_a_dataset_id(monkeypatch) -> None:
+    """The marker must differ per physical table, not per ingest column.
+
+    Regression guard for the DDJJ bug: `ddjj_patrimonio_declarado` deduplicated
+    on `_source_dataset_id`, three of its seven source tables carried the same
+    value, and every row of the year they shared passed through twice. The
+    build reported `success` with a plausible row count, so nothing caught it —
+    only counting one declaration's rows against each source did.
+    """
+    _patch(monkeypatch, _rows())
+    sql = (
+        "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', "
+        f"expected_columns={_CORE!r}, source_marker='__src') }}}} s"
+    )
+    resolved = resolve_macros(sql, engine=object())
+
+    markers = re.findall(r"'([^']+)'::text AS \"__src\"", resolved)
+    assert markers == ["raw.p_full", "raw.p_sin_finalidad", "raw.p_dimension"]
+    # One literal per branch, all distinct — the property the dedup rests on.
+    assert len(set(markers)) == len(markers)
+
+
+def test_source_marker_survives_zero_matches(monkeypatch) -> None:
+    """An empty cluster must still expose the marker column.
+
+    Without it the outer dedup references `__src` against a shape that lacks
+    it and the mart fails to build instead of building empty — which is the
+    whole point of the typed-empty fallback.
+    """
+    _patch(monkeypatch, [])
+    sql = (
+        "SELECT 1 FROM {{ live_tables_by_table_pattern('nomatch*', "
+        f"expected_columns={_CORE!r}, source_marker='__src') }}}} s"
+    )
+    resolved = resolve_macros(sql, engine=object())
+    assert 'NULL::text AS "__src"' in resolved
+    assert "WHERE FALSE" in resolved
+
+
+def test_source_marker_rejects_collision_with_an_expected_column(monkeypatch) -> None:
+    _patch(monkeypatch, _rows())
+    sql = (
+        "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', "
+        f"expected_columns={_CORE!r}, source_marker={_CORE[0]!r}) }}}} s"
+    )
+    with pytest.raises(MacroResolutionError, match="collides"):
+        resolve_macros(sql, engine=object())
+
+
+def _mirror_rows():
+    """A cluster where `datos_gob_ar` re-publishes two of three resources."""
+    return [
+        _LiveRow(
+            resource_identity="produccion::72328162-97f6-4015-ba07-945485d8dc9f",
+            schema_name="raw",
+            table_name="p_full",
+        ),
+        _LiveRow(
+            resource_identity="datos_gob_ar::produccion_72328162-97f6-4015-ba07-945485d8dc9f",
+            schema_name="raw",
+            table_name="p_sin_finalidad",
+        ),
+        _LiveRow(
+            resource_identity="datos_gob_ar::justicia_249b3214-411f-4fe5-9600-59b44ef7ec06",
+            schema_name="raw",
+            table_name="p_dimension",
+        ),
+    ]
+
+
+def test_federated_mirrors_are_dropped_when_the_original_is_present(monkeypatch) -> None:
+    """`datos_gob_ar::<portal>_<uuid>` is the same resource as `<portal>::<uuid>`,
+    collected twice. 425 such pairs are live, so a pattern over a cluster serves
+    those rows twice — the largest single source of duplicate rows across the
+    marts."""
+    _patch(monkeypatch, _mirror_rows())
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors=True) }} s"
+    resolved = resolve_macros(sql, engine=object())
+    assert 'raw."p_full"' in resolved
+    # The mirror of p_full goes. With no row estimate available the tie breaks
+    # towards the originating portal, which is the publisher of record.
+    assert 'raw."p_sin_finalidad"' not in resolved
+    # ...but the justicia mirror stays: its original is not in this match set,
+    # so it is the only copy there is and dropping it would lose the resource.
+    assert 'raw."p_dimension"' in resolved
+
+
+def test_federated_mirrors_are_kept_by_default(monkeypatch) -> None:
+    """Off unless asked. Turning it on changes what a mart contains, and 59
+    marts union a pattern — flipping them all at once without checking each
+    count is how a dedup becomes an incident."""
+    _patch(monkeypatch, _mirror_rows())
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*') }} s"
+    resolved = resolve_macros(sql, engine=object())
+    assert 'raw."p_sin_finalidad"' in resolved
+
+
+def test_drop_federated_mirrors_rejects_a_non_bool(monkeypatch) -> None:
+    _patch(monkeypatch, _mirror_rows())
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors='yes') }} s"
+    with pytest.raises(MacroResolutionError, match="must be a bool"):
+        resolve_macros(sql, engine=object())
+
+
+def test_federated_mirrors_keep_the_larger_copy(monkeypatch) -> None:
+    """The two copies are the same upstream resource but not the same data:
+    collected at different moments, 25 of 60 measured pairs differ and some
+    differ in row count. Whichever is kept, one copy beats two — the union
+    double-counts unconditionally — but preferring the smaller one loses rows.
+    """
+    _patch(monkeypatch, _mirror_rows())
+
+    class _Engine:
+        """Reports the mirror as the larger of the pair."""
+
+        def connect(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def rollback(self):
+            return None
+
+        def execute(self, *_args, **_kwargs):
+            class _R:
+                def fetchall(self):
+                    return [
+                        SimpleNamespace(schema_name="raw", table_name="p_full", reltuples=10),
+                        SimpleNamespace(
+                            schema_name="raw", table_name="p_sin_finalidad", reltuples=99
+                        ),
+                    ]
+
+            return _R()
+
+    sql = "SELECT 1 FROM {{ live_tables_by_table_pattern('p*', drop_federated_mirrors=True) }} s"
+    resolved = resolve_macros(sql, engine=_Engine())
+    # The mirror is bigger here, so the original is the one that goes.
+    assert 'raw."p_sin_finalidad"' in resolved
+    assert 'raw."p_full"' not in resolved
+
+
+def test_to_numeric_parses_the_three_argentine_amount_shapes(monkeypatch) -> None:
+    """One canonical parser instead of six hand-written CASEs.
+
+    Written by hand six times on 2026-08-24 — energy, crime, mediation, DDJJ,
+    census, schools. The audit still finds 44 amount columns typed `text`
+    across 30 marts, and nothing can SUM() a text amount: the model writing SQL
+    either refuses or casts blindly, and one stray value fails the query.
+    """
+    _patch(monkeypatch, _rows())
+    resolved = resolve_macros("SELECT {{ to_numeric('importe') }} AS x", engine=object())
+    # Clean decimal, Argentine thousands + decimal comma, and bare comma decimal.
+    assert resolved.count("WHEN") == 3
+    assert '"importe"::text' in resolved
+    assert "replace(replace(btrim" in resolved
+    # No ELSE: an unparseable cell becomes NULL instead of failing the build.
+    assert "ELSE" not in resolved
+
+
+def test_to_numeric_accepts_the_column_shapes_real_marts_use(monkeypatch) -> None:
+    """A bare name, a qualified `alias.column`, and a quoted name — CKAN ships
+    columns called `awards/0/value/amount`, so restricting this to bare
+    identifiers would have left the marts that need it most unable to use it."""
+    _patch(monkeypatch, _rows())
+    for arg, expected in (
+        ("importe", '"importe"::text'),
+        ("v.valor", '"v"."valor"::text'),
+        ('"awards/0/value/amount"', '"awards/0/value/amount"::text'),
+    ):
+        resolved = resolve_macros(f"SELECT {{{{ to_numeric({arg!r}) }}}}", engine=object())
+        assert expected in resolved
+
+
+def test_to_numeric_refuses_anything_that_is_not_a_column_reference(monkeypatch) -> None:
+    """The argument is interpolated into SQL, so it accepts a column name and
+    nothing that could carry an expression."""
+    _patch(monkeypatch, _rows())
+    for bad in ("importe || 1", "1; DROP TABLE x", 'importe"', "a.b.c", '"a"b"'):
+        with pytest.raises(MacroResolutionError, match="column reference"):
+            resolve_macros(f"SELECT {{{{ to_numeric('{bad}') }}}}", engine=object())
+
+
+def test_to_numeric_takes_no_kwargs(monkeypatch) -> None:
+    _patch(monkeypatch, _rows())
+    with pytest.raises(MacroResolutionError, match="no keyword arguments"):
+        resolve_macros("SELECT {{ to_numeric('importe', foo=1) }}", engine=object())

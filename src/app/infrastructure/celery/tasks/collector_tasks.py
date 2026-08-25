@@ -260,12 +260,31 @@ _HEAVY_WIDTH_COLUMN_THRESHOLD = int(os.getenv("OPENARG_HEAVY_WIDTH_COLUMN_THRESH
 # is no longer "simple".
 _WIDE_LAYOUT_COLUMN_THRESHOLD = int(os.getenv("OPENARG_WIDE_LAYOUT_COLUMN_THRESHOLD", "50"))
 
-# Default parser version persisted to `raw_table_versions.parser_version`.
-# Sprint 1.7 audit found 833 live rtv rows with NULL — the env var simply
-# wasn't set in some staging deploys, so the registration call passed
-# None to the column. Defaulting to the active parser tag here keeps the
-# observability column populated even when ops forgets to set the env.
-_DEFAULT_PARSER_VERSION = os.getenv("OPENARG_PARSER_VERSION", "phase4")
+
+# Default parser version persisted to `public.raw_table_versions.parser_version`.
+# Derived from the parser sources, not declared. The env var is kept as an
+# explicit override for a deploy that needs to pin a value, but it is no longer
+# the source of truth: staging had it set to the literal string `2026-05-04`,
+# which the collector then recorded 21,989 times. A provenance value that only
+# changes when someone edits an environment file cannot distinguish a parser
+# change from no change, and G1 — the gate that asks whether *our* parser
+# moved — is the only gate with a producer.
+#
+# Sprint 1.7 had already found 833 live rtv rows with NULL for the same reason,
+# and answered it by defaulting the env var. That kept the column populated
+# without making it mean anything.
+def _default_parser_version() -> str:
+    from app.application.catalog.parser_fingerprint import parser_fingerprint
+
+    return os.getenv("OPENARG_PARSER_VERSION") or parser_fingerprint()
+
+
+def _default_normalization_version() -> str:
+    from app.application.catalog.parser_fingerprint import normalization_fingerprint
+
+    return os.getenv("OPENARG_NORMALIZATION_VERSION") or normalization_fingerprint()
+
+
 _HEAVY_METADATA_PORTAL_FORMATS: dict[str, frozenset[str]] = {
     "datos_gob_ar": frozenset({"zip"}),
     "diputados": frozenset({"json"}),
@@ -1223,6 +1242,108 @@ def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
         ".pdf": "pdf",
     }
     return _ext_map.get(ext, metadata_fmt)
+
+
+def _unchanged_since_last_collect(
+    engine, *, resource_identity: str | None, file_hash: str | None
+) -> str | None:
+    """The name of the live table when this exact file is already loaded.
+
+    Downloading is unavoidable — the bytes are what the digest is of — but
+    parsing, writing and re-embedding are not. Measured on 2026-08-23: 68
+    re-collections produced zero files that were actually different, and each
+    one paid for a full parse and a fresh set of embeddings for content
+    identical to what we held.
+
+    Returns None when anything is uncertain, which is the safe direction: the
+    cost of re-parsing an unchanged file is one wasted collection, and the cost
+    of skipping a changed one is serving stale data while believing it fresh.
+
+    **An unchanged file is not a reason to keep a broken table.** The skip only
+    applies when the table the last parse produced still exists and still holds
+    rows. Otherwise a resource whose parse failed — or whose table was dropped
+    by a sweep — would be skipped forever on the grounds that its source never
+    moved, which is exactly how a gap becomes permanent.
+    """
+    if not resource_identity or not file_hash:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT v.schema_name, v.table_name, v.row_count
+                    FROM public.raw_table_versions v
+                    WHERE v.resource_identity = :ri
+                      AND v.superseded_at IS NULL
+                      AND v.source_file_hash = :h
+                    ORDER BY v.version DESC
+                    LIMIT 1
+                    """
+                ),
+                {"ri": resource_identity, "h": file_hash},
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return None
+            # The registry says this file is loaded. Verify the table it names
+            # is really there and really has rows before believing it.
+            present = conn.execute(
+                text(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = :s AND table_name = :t
+                      AND table_type = 'BASE TABLE'
+                    """
+                ),
+                {"s": row.schema_name, "t": row.table_name},
+            ).fetchone()
+            conn.rollback()
+    except Exception:
+        logger.debug("unchanged-check failed for %s", resource_identity, exc_info=True)
+        return None
+
+    # Coerced rather than compared directly: `row_count` arrives as an int, a
+    # Decimal or None depending on the driver, and a comparison that assumes one
+    # of those raises inside a path whose whole job is to fail quietly.
+    try:
+        rows_held = int(row.row_count or 0)
+    except (TypeError, ValueError):
+        return None
+
+    if not present or rows_held <= 0:
+        return None
+    return str(row.table_name)
+
+
+def _file_sha256(path: str) -> str | None:
+    """Digest of the bytes we downloaded, so "did this change?" has an answer.
+
+    `raw_table_versions.source_file_hash` has existed since migration 0039 and
+    every registration function threads it through — and nothing ever computed
+    it. Measured on 2026-08-23: **0 of 31,266 live versions carry one.**
+
+    That absence is why the refresh keys on the portal's `last_updated_at`,
+    which is metadata: 68 re-collections produced zero files that were actually
+    different. The portal moved a timestamp and we re-read, re-parsed and
+    re-embedded a file identical to the one we held.
+
+    Streamed in chunks rather than read whole: these are files up to hundreds of
+    megabytes, and a digest that needs the file in memory would trade one
+    problem for a worse one.
+
+    Returns None on any failure. A hash is an optimisation and a piece of
+    evidence; a collection must not fail for want of one.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        logger.debug("could not hash %s", path, exc_info=True)
+        return None
 
 
 def _upload_to_s3(content: bytes, portal: str, dataset_id: str, filename: str) -> str:
@@ -3306,6 +3427,38 @@ def _detect_schema_drift(
     return {"added": added, "removed": removed, "type_changed": type_changed}
 
 
+class _ParseRegression(RuntimeError):
+    """Raised when a re-read would replace a good table with a worse parse.
+
+    A distinct type so the caller can tell it from a genuine parse failure: the
+    resource is fine, the *reading* was not, and the right outcome is to keep
+    serving what we have rather than to mark anything failed.
+    """
+
+
+def _existing_columns(engine, schema: str | None, table_name: str) -> list[str]:
+    """Column names of the table as it stands, or empty if it does not exist."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = :s AND table_name = :t
+                    ORDER BY ordinal_position
+                    """
+                ),
+                {"s": schema or "public", "t": table_name},
+            ).fetchall()
+            conn.rollback()
+        return [r.column_name for r in rows]
+    except Exception:
+        # Never block a collect because this lookup failed; an empty list means
+        # "nothing to protect" and the old behaviour applies.
+        logger.warning("could not read current columns for %s", table_name, exc_info=True)
+        return []
+
+
 def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | None = None, **kwargs):
     """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs.
 
@@ -3380,6 +3533,38 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                     "specified more than once",
                 )
                 if any(kw in exc_str for kw in schema_keywords):
+                    # Before destroying what is there: is the new reading worse?
+                    #
+                    # Found by causing it on 2026-08-22. A refresh re-read a
+                    # production resource whose May parse had `sigla`, `idpozo`,
+                    # `area`, `empresa`, and got back a data row promoted to the
+                    # header — `COMPAÑÍA GENERAL DE COMBUSTIBLES S.A.` and a
+                    # PostGIS hex geometry among the column names. This path did
+                    # what it always does, dropped and recreated, and a working
+                    # table stopped existing. 47 resources went that way in one
+                    # run.
+                    #
+                    # Refusing costs one stale table until the next cycle.
+                    # Accepting costs the table and its rows, with nothing left
+                    # but a snapshot of what the columns used to be.
+                    from app.application.repair.verify import is_parse_regression
+
+                    existing_cols = _existing_columns(engine, schema, table_name)
+                    incoming_cols = [str(c) for c in df.columns]
+                    if is_parse_regression(
+                        current_names=existing_cols, incoming_names=incoming_cols
+                    ):
+                        logger.warning(
+                            "Refusing to replace %s: the new parse is worse "
+                            "(had %d identifier-like columns, got %s...)",
+                            table_name,
+                            sum(1 for c in existing_cols if c.islower()),
+                            incoming_cols[:3],
+                        )
+                        raise _ParseRegression(
+                            f"incoming parse is worse than the stored table: {incoming_cols[:3]}"
+                        ) from exc
+
                     logger.warning(
                         "Schema mismatch on table %s, dropping and retrying: %s",
                         table_name,
@@ -4406,6 +4591,45 @@ def _classify_error_category(
     return "unknown"
 
 
+def _schema_snapshots_enabled() -> bool:
+    """Feature flag for pre-drop schema snapshots (mig 0056). Default ON.
+
+    Set `OPENARG_SCHEMA_SNAPSHOTS=0` to disable. Rollback is an env var and a
+    worker restart — no code change — because this runs on the drop path and
+    an operator has to be able to take it out of the way quickly.
+    """
+    raw = os.getenv("OPENARG_SCHEMA_SNAPSHOTS", "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _capture_schema_snapshot(
+    engine,
+    *,
+    table_name: str,
+    reason: str,
+    actor: str,
+    extra: dict | None = None,
+) -> str | None:
+    """Preserve a table's shape before it is dropped. Never raises.
+
+    Thin wrapper so `_record_cache_drop` does not need to know about the
+    flag or the import. The import is local because `collector_tasks` is
+    loaded by every worker and the application layer should not be pulled
+    in when the feature is off.
+    """
+    if not _schema_snapshots_enabled():
+        return None
+    try:
+        from app.application.catalog.schema_snapshot import capture_table_snapshot
+
+        return capture_table_snapshot(
+            engine, table_name=table_name, reason=reason, actor=actor, extra=extra
+        )
+    except Exception:
+        logger.debug("schema snapshot hook failed for %s", table_name, exc_info=True)
+        return None
+
+
 def _record_cache_drop(
     engine,
     *,
@@ -4421,9 +4645,36 @@ def _record_cache_drop(
     DROP TABLE so we still capture the operationally-driven drops. Drops
     issued manually (psql admin) are not captured here — fall back to RDS
     audit logs / CloudTrail for those.
+
+    Since mig 0056 this also preserves the table's *shape* — columns, types
+    and the value profile PostgreSQL already computed — into
+    `raw.raw_schema_snapshots`. Every audited drop path funnels through
+    here, so hooking the snapshot at this single point covers all four
+    (`schema_mismatch_recreate`, `retain_raw_versions`, `raw_orphan_cleanup`,
+    `empty_raw_bloat`) and any future one for free. That matters most for
+    `schema_mismatch_recreate`: it is the collector's response to an
+    incompatible re-ingest, so without a snapshot the evidence of a format
+    change is destroyed by the act of handling the format change.
     """
     if not table_name:
         return
+
+    # Before the audit row, because a snapshot of a table that has already
+    # been dropped is worth nothing.
+    #
+    # Guarded here as well as inside the helper. That is not redundant: this
+    # runs on the path of a `DROP TABLE` that has to happen, and the helper's
+    # own guard cannot cover a failure in its import. Two guards is the price
+    # of never turning a bookkeeping problem into a stuck collector.
+    try:
+        _capture_schema_snapshot(
+            engine, table_name=table_name, reason=reason, actor=actor, extra=extra
+        )
+    except Exception:
+        logger.warning(
+            "schema snapshot raised for %s; continuing with the drop", table_name, exc_info=True
+        )
+
     try:
         with engine.begin() as conn:
             conn.execute(
@@ -4565,7 +4816,7 @@ def _resolve_collect_destination(
 ) -> _CollectDestination:
     """Decide where the next materialization for `dataset_id` should land.
 
-    Raw path (`OPENARG_USE_RAW_LAYER=1`): bumps `raw_table_versions` and returns
+    Raw path (`OPENARG_USE_RAW_LAYER=1`): bumps `public.raw_table_versions` and returns
     a versioned name in schema `raw`.
 
     Legacy path (default): returns the historical `cache_<portal>_<slug>__<hash>`
@@ -4608,7 +4859,7 @@ def _resolve_raw_table_for_dataset(
 ) -> RawPhysicalName:
     """Resolve the raw-schema table name for the next ingest of `dataset_id`.
 
-    Reads `raw_table_versions` to find the previous max version; bumps by 1.
+    Reads `public.raw_table_versions` to find the previous max version; bumps by 1.
     `portal` and `source_id` may be passed explicitly; if omitted, they are
     looked up from the `datasets` row.
 
@@ -4642,7 +4893,7 @@ def _resolve_raw_table_for_dataset(
         prev = conn.execute(
             text(
                 "SELECT COALESCE(MAX(version), 0) AS v "
-                "FROM raw_table_versions WHERE resource_identity = :rid"
+                "FROM public.raw_table_versions WHERE resource_identity = :rid"
             ),
             {"rid": resource_identity},
         ).fetchone()
@@ -4671,6 +4922,7 @@ def _register_raw_version_in_conn(
     source_url: str | None = None,
     source_file_hash: str | None = None,
     parser_version: str | None = None,
+    normalization_version: str | None = None,
     collector_version: str | None = None,
     is_truncated: bool = False,
 ) -> None:
@@ -4687,14 +4939,14 @@ def _register_raw_version_in_conn(
     conn.execute(
         text(
             """
-            INSERT INTO raw_table_versions (
+            INSERT INTO public.raw_table_versions (
                 resource_identity, version, schema_name, table_name,
                 row_count, size_bytes, source_url, source_file_hash,
-                parser_version, collector_version, is_truncated
+                parser_version, normalization_version, collector_version, is_truncated
             ) VALUES (
                 :rid, :v, :sch, :tn,
                 :rc, :sz, :url, :hash,
-                :pv, :cv, :trunc
+                :pv, :nv, :cv, :trunc
             )
             ON CONFLICT (resource_identity, version) DO NOTHING
             """
@@ -4708,7 +4960,10 @@ def _register_raw_version_in_conn(
             "sz": size_bytes,
             "url": source_url,
             "hash": source_file_hash,
-            "pv": parser_version,
+            # Never None: a write path that records nothing is how 6,089
+            # rows ended up unattributable, and G1 cannot speak about those.
+            "pv": parser_version or _default_parser_version(),
+            "nv": normalization_version or _default_normalization_version(),
             "cv": collector_version,
             "trunc": is_truncated,
         },
@@ -4716,7 +4971,7 @@ def _register_raw_version_in_conn(
     conn.execute(
         text(
             """
-            UPDATE raw_table_versions
+            UPDATE public.raw_table_versions
             SET superseded_at = NOW()
             WHERE resource_identity = :rid
               AND version < :v
@@ -4740,11 +4995,12 @@ def _promote_to_raw_atomic(
     parser_version: str | None,
     collector_version: str | None,
     is_truncated: bool,
+    source_file_hash: str | None = None,
 ) -> None:
     """Promote a freshly materialised raw table to the medallion in a
     SINGLE transaction.
 
-    Both writes (`raw_table_versions` insert + `catalog_resources` update)
+    Both writes (`public.raw_table_versions` insert + `catalog_resources` update)
     must be atomic: a half-promotion (rtv has the new version but the
     catalog still points at the old physical name) leaves `live_table()`
     and the serving port resolving to a stale row. The previous Sprint 0.6
@@ -4766,6 +5022,7 @@ def _promote_to_raw_atomic(
             row_count=row_count,
             size_bytes=size_bytes,
             source_url=source_url,
+            source_file_hash=source_file_hash,
             parser_version=parser_version,
             collector_version=collector_version,
             is_truncated=is_truncated,
@@ -4779,11 +5036,18 @@ def _promote_to_raw_atomic(
                     parser_version = COALESCE(:pv, parser_version),
                     updated_at = NOW()
                 WHERE resource_identity = :rid
+                  -- Una cuarentena no se deshace sola. Recolectar de nuevo no
+                  -- prueba que el recurso dejó de ser ilegible, y sin esta
+                  -- condición el retiro del servicio es decorativo: lo pone la
+                  -- escalera y lo levanta el siguiente ingest sin decir nada.
+                  AND materialization_status <> 'materialization_corrupted'
                 """
             ),
             {
                 "qn": qualified,
-                "pv": parser_version,
+                # Never None: a write path that records nothing is how 6,089
+                # rows ended up unattributable, and G1 cannot speak about those.
+                "pv": parser_version or _default_parser_version(),
                 "rid": resource_identity,
             },
         )
@@ -4801,10 +5065,11 @@ def _register_raw_version(
     source_url: str | None = None,
     source_file_hash: str | None = None,
     parser_version: str | None = None,
+    normalization_version: str | None = None,
     collector_version: str | None = None,
     is_truncated: bool = False,
 ) -> None:
-    """Insert a new entry into `raw_table_versions` and mark prior versions
+    """Insert a new entry into `public.raw_table_versions` and mark prior versions
     of the same `resource_identity` as superseded.
 
     Idempotent on `(resource_identity, version)` — re-running with the same
@@ -4814,14 +5079,14 @@ def _register_raw_version(
         conn.execute(
             text(
                 """
-                INSERT INTO raw_table_versions (
+                INSERT INTO public.raw_table_versions (
                     resource_identity, version, schema_name, table_name,
                     row_count, size_bytes, source_url, source_file_hash,
-                    parser_version, collector_version, is_truncated
+                    parser_version, normalization_version, collector_version, is_truncated
                 ) VALUES (
                     :rid, :v, :sch, :tn,
                     :rc, :sz, :url, :hash,
-                    :pv, :cv, :trunc
+                    :pv, :nv, :cv, :trunc
                 )
                 ON CONFLICT (resource_identity, version) DO NOTHING
                 """
@@ -4835,7 +5100,10 @@ def _register_raw_version(
                 "sz": size_bytes,
                 "url": source_url,
                 "hash": source_file_hash,
-                "pv": parser_version,
+                # Never None: a write path that records nothing is how 6,089
+                # rows ended up unattributable, and G1 cannot speak about those.
+                "pv": parser_version or _default_parser_version(),
+                "nv": normalization_version or _default_normalization_version(),
                 "cv": collector_version,
                 "trunc": is_truncated,
             },
@@ -4843,7 +5111,7 @@ def _register_raw_version(
         conn.execute(
             text(
                 """
-                UPDATE raw_table_versions
+                UPDATE public.raw_table_versions
                 SET superseded_at = NOW()
                 WHERE resource_identity = :rid
                   AND version < :v
@@ -4892,13 +5160,14 @@ def _apply_cached_outcome(
     now: datetime | None = None,
     # MASTERPLAN Fase 1.5 — raw-layer destination metadata. When `raw_schema`
     # is "raw" and the outcome is `ready`, this function ALSO registers the
-    # new version in `raw_table_versions` and updates
+    # new version in `public.raw_table_versions` and updates
     # `catalog_resources.materialized_table_name` to the qualified `raw.<name>`
     # form. All four fields default to None so legacy callers are unchanged.
     raw_schema: str | None = None,
     raw_version: int | None = None,
     resource_identity: str | None = None,
     source_url: str | None = None,
+    source_file_hash: str | None = None,
     is_truncated: bool = False,
 ) -> int:
     """Persist one explicit collector outcome and return the resulting retry_count."""
@@ -4943,7 +5212,8 @@ def _apply_cached_outcome(
                 row_count=row_count,
                 size_bytes=size_bytes,
                 source_url=source_url,
-                parser_version=_DEFAULT_PARSER_VERSION,
+                source_file_hash=source_file_hash,
+                parser_version=_default_parser_version(),
                 collector_version=os.getenv("OPENARG_COLLECTOR_VERSION") or None,
                 is_truncated=is_truncated,
             )
@@ -5081,6 +5351,18 @@ def _apply_cached_outcome(
                     """
                     UPDATE raw.cached_datasets
                     SET status = CASE
+                            -- A refresh that fails must not cost the data it was
+                            -- refreshing (026 FR-005). A row that is `ready` and
+                            -- points at a table that still exists holds working
+                            -- data; the *refresh* failed, and conflating the two
+                            -- would flip a serving resource to a terminal state
+                            -- it can never leave. First collections are
+                            -- unaffected — there is no `ready` row to protect.
+                            WHEN status = 'ready' AND EXISTS (
+                                SELECT 1 FROM information_schema.tables t
+                                WHERE t.table_name = raw.cached_datasets.table_name
+                                  AND t.table_type = 'BASE TABLE'
+                            ) THEN 'ready'
                             WHEN :status = 'permanently_failed' THEN 'permanently_failed'
                             WHEN retry_count + :retry >= :max THEN 'permanently_failed'
                             ELSE :status
@@ -5129,15 +5411,15 @@ def _apply_cached_outcome(
                 # an older version of THIS resource. `_prune_open_cached_entries`
                 # only purges `downloading/pending/error` by design, so when v2
                 # lands the v1 row stays as `ready` and shows up as an orphan
-                # in the catalog (raw_table_versions live ≠ cached_datasets
+                # in the catalog (public.raw_table_versions live ≠ cached_datasets
                 # row's table_name). This DELETE is scoped to rows that are
                 # provably superseded — never touches legacy public.cache_*
-                # `ready` rows that have no raw_table_versions entry.
+                # `ready` rows that have no public.raw_table_versions entry.
                 conn.execute(
                     text(
                         """
                         DELETE FROM raw.cached_datasets cd
-                        USING raw_table_versions rtv
+                        USING public.raw_table_versions rtv
                         WHERE cd.dataset_id = CAST(:did AS uuid)
                           AND cd.status = 'ready'
                           AND cd.table_name <> :current_table
@@ -5261,6 +5543,7 @@ def _finalize_cached_dataset(
     raw_schema: str | None = None,
     raw_version: int | None = None,
     resource_identity: str | None = None,
+    source_file_hash: str | None = None,
     is_truncated: bool = False,
 ) -> dict[str, object]:
     """Apply the WS0 post-parse gate, then persist the final cached state."""
@@ -5355,6 +5638,7 @@ def _finalize_cached_dataset(
         raw_version=raw_version,
         resource_identity=resource_identity,
         source_url=download_url,
+        source_file_hash=source_file_hash,
         is_truncated=is_truncated,
     )
     with engine.begin() as conn:
@@ -5665,7 +5949,26 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
         task_id = getattr(getattr(self, "request", None), "id", None)
         if not task_id:
             return
-        self.update_state(state=state, meta=meta)
+        try:
+            self.update_state(state=state, meta=meta)
+        except Exception:
+            # Reporting progress is telemetry, and it writes to the result
+            # backend. When that backend is briefly unreachable the collection
+            # itself is usually fine — but letting the error escape gets it
+            # caught by the outer `except Exception` and classified as a
+            # transient *collection* failure, so the dataset is rerouted to the
+            # retry queue and marked pending because Redis blinked.
+            #
+            # Measured: with no backend running, `collect_dataset` reported
+            # `transient_retry:ConnectionError` from
+            # `redis.exceptions.ConnectionError` without ever reaching the
+            # download. The name of this function already promised otherwise.
+            logger.debug(
+                "update_state failed for %s (state=%s); continuing",
+                dataset_id,
+                state,
+                exc_info=True,
+            )
 
     def _is_heavy_execution() -> bool:
         delivery = getattr(getattr(self, "request", None), "delivery_info", None) or {}
@@ -5992,6 +6295,48 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 )
                 _set_error_status(engine, dataset_id, msg, table_name=table_name)
                 return {"error": msg}
+
+            # The digest of what we just downloaded. Computed here because this
+            # is where the file exists on disk and before anything can replace
+            # it — a hash taken later would describe a different file.
+            source_file_hash = _file_sha256(tmp_path)
+
+            # If this exact file is already loaded and its table is intact,
+            # stop here. The download had to happen — the digest is of those
+            # bytes — but the parse, the write and the embeddings did not, and
+            # those are where the cost is.
+            _unchanged_table = _unchanged_since_last_collect(
+                engine,
+                resource_identity=destination.resource_identity,
+                file_hash=source_file_hash,
+            )
+            if _unchanged_table:
+                # `updated_at` still moves. It records when we last *checked*,
+                # and without it the refresh would pick this resource again on
+                # every pass forever, which is the opposite of the saving.
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                "UPDATE raw.cached_datasets SET updated_at = NOW() "
+                                "WHERE dataset_id = CAST(:d AS uuid)"
+                            ),
+                            {"d": dataset_id},
+                        )
+                except Exception:
+                    logger.warning("could not touch %s", dataset_id, exc_info=True)
+                logger.info(
+                    "Dataset %s unchanged (sha256 matches live version); "
+                    "skipped parse and embedding, table %s kept",
+                    dataset_id,
+                    _unchanged_table,
+                )
+                return {
+                    "dataset_id": dataset_id,
+                    "status": "unchanged",
+                    "table_name": _unchanged_table,
+                    "source_file_hash": source_file_hash,
+                }
 
             # Upload raw file to S3 (from disk, not memory)
             s3_key = None
@@ -6815,7 +7160,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     "tn": member_table_name,
                                 },
                             )
-                    # Register each ZIP member in `raw_table_versions` so the
+                    # Register each ZIP member in `public.raw_table_versions` so the
                     # Serving Port and mart auto-refresh can discover them.
                     # Each member becomes its own identity (sub-path = member
                     # table_name) so version stays at 1 — idempotent on
@@ -6841,7 +7186,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                                     row_count=int(member.get("row_count", 0) or 0),
                                     size_bytes=file_size,
                                     source_url=download_url,
-                                    parser_version=_DEFAULT_PARSER_VERSION,
+                                    parser_version=_default_parser_version(),
                                     collector_version=os.getenv("OPENARG_COLLECTOR_VERSION")
                                     or None,
                                 )
@@ -6939,6 +7284,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 raw_schema=destination.schema if destination.schema != "public" else None,
                 raw_version=destination.version if destination.version > 0 else None,
                 resource_identity=destination.resource_identity,
+                source_file_hash=source_file_hash,
                 is_truncated=bool(sampled_note),
             )
             if not finalize_result["ok"]:
@@ -7955,7 +8301,7 @@ def consolidate_group_tables(self, title: str, portal: str):
     time_limit=2700,
 )
 def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: int = 50):
-    """Reconcile `raw_table_versions.row_count` against the actual row count
+    """Reconcile `public.raw_table_versions.row_count` against the actual row count
     of every live table.
 
     The (resource_identity, version) tuple is by design immutable, but the
@@ -7982,7 +8328,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                 text(
                     """
                     SELECT rtv.schema_name, rtv.table_name
-                    FROM raw_table_versions rtv
+                    FROM public.raw_table_versions rtv
                     JOIN pg_class c ON c.relname = rtv.table_name
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                                        AND n.nspname = rtv.schema_name
@@ -7990,6 +8336,48 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                     """
                 )
             ).fetchall()
+
+        # Correct first, refresh second. This used to ANALYZE all 27,757 live
+        # tables before touching a single row_count, and the docstring's own
+        # estimate — "~30 min for ~25k tables on staging" — is most of a
+        # `soft_time_limit` of 2400s on a machine that is not busy. Whenever it
+        # overran, the entire point of the task was lost: 347 rows in production
+        # still claimed 0 over tables holding more than 100 rows each, 293 of
+        # them older than the last scheduled run.
+        #
+        # The UPDATE below is one statement over statistics Postgres already
+        # keeps. It costs nothing and fixes what is already knowable, so it runs
+        # first and a timeout can no longer swallow it — the ANALYZE pass only
+        # improves what the *next* run will see.
+        def _bulk_update_from_reltuples() -> int:
+            with engine.begin() as conn:
+                return conn.execute(
+                    text(
+                        """
+                        UPDATE public.raw_table_versions rtv
+                        SET row_count = GREATEST(0, c.reltuples::bigint)
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        -- `n.nspname = rtv.schema_name` used to live in the JOIN
+                        -- above. Postgres does not allow the UPDATE target inside
+                        -- a FROM-clause JOIN condition, so the statement raised
+                        -- `invalid reference to FROM-clause entry for table "rtv"`
+                        -- every single time — which is why 347 rows still claimed
+                        -- zero over tables holding real data. It belongs here.
+                        WHERE n.nspname = rtv.schema_name
+                          AND c.relname = rtv.table_name
+                          AND rtv.superseded_at IS NULL
+                          AND c.reltuples >= 0
+                          AND rtv.row_count IS DISTINCT FROM c.reltuples::bigint
+                          AND abs(COALESCE(rtv.row_count, 0) - c.reltuples::bigint)::float
+                              / GREATEST(COALESCE(rtv.row_count, 0), c.reltuples::bigint, 1)
+                              > :threshold
+                        """
+                    ),
+                    {"threshold": drift_threshold},
+                ).rowcount
+
+        stats["updated_before_analyze"] = _bulk_update_from_reltuples()
 
         # Phase 1: ANALYZE all live tables (refresh planner stats)
         for schema, table in live:
@@ -8005,12 +8393,14 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
             res = conn.execute(
                 text(
                     """
-                    UPDATE raw_table_versions rtv
+                    UPDATE public.raw_table_versions rtv
                     SET row_count = GREATEST(0, c.reltuples::bigint)
                     FROM pg_class c
                     JOIN pg_namespace n ON n.oid = c.relnamespace
-                                       AND n.nspname = rtv.schema_name
-                    WHERE c.relname = rtv.table_name
+                    -- See the note above: the UPDATE target cannot be referenced
+                    -- from a FROM-clause JOIN condition.
+                    WHERE n.nspname = rtv.schema_name
+                      AND c.relname = rtv.table_name
                       AND rtv.superseded_at IS NULL
                       AND c.reltuples >= 0
                       AND rtv.row_count IS DISTINCT FROM c.reltuples::bigint
@@ -8033,7 +8423,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                     """
                     SELECT rtv.schema_name, rtv.table_name, rtv.row_count AS reported,
                            GREATEST(0, c.reltuples::bigint) AS estimated
-                    FROM raw_table_versions rtv
+                    FROM public.raw_table_versions rtv
                     JOIN pg_class c ON c.relname = rtv.table_name
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                                        AND n.nspname = rtv.schema_name
@@ -8058,7 +8448,7 @@ def reconcile_row_counts(self, drift_threshold: float = 0.10, max_count_star: in
                     ).scalar()
                     conn.execute(
                         text(
-                            "UPDATE raw_table_versions SET row_count = :rc "
+                            "UPDATE public.raw_table_versions SET row_count = :rc "
                             "WHERE schema_name = :s AND table_name = :t "
                             "AND superseded_at IS NULL"
                         ),

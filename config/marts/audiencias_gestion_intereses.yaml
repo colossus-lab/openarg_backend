@@ -128,3 +128,12 @@ sql: |
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+sample_queries:
+  - "qué lobistas se reunieron con funcionarios del gobierno"
+  - "audiencias de gestión de intereses por funcionario"
+  - "reuniones de lobby registradas en Argentina"
+  - "quién se reunió con un ministro y para qué"
+
+expectations:
+  min_rows: 14366

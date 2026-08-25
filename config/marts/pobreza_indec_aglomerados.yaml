@@ -31,7 +31,7 @@ canonical_columns:
     type: text
     description: Semestre del registro (e.g. `2do. semestre 2016`, `1er. semestre 2025`)
   - name: valor
-    type: text
+    type: numeric
     description: Valor publicado por INDEC para ese (indicador, período). Texto porque el upstream mezcla números y notas como `(1)` o `s/d`.
 
 sql: |
@@ -57,13 +57,30 @@ sql: |
           '1er. semestre 2024', '2do semestre 2024',
           '1er. semestre 2025'
         ],
-        require_all_columns=True
+        # ESTE MART ESTÁ VACÍO Y NO ES POR ACÁ. Las 17 tablas que el patrón
+        # matchea perdieron su encabezado al colectarse: sus 24 columnas se
+        # llaman `Pobreza`, `Pobreza_2`, `Pobreza_3`… — el título del cuadro
+        # repetido con sufijos. Las etiquetas de semestre no están enterradas
+        # en una fila (la fila 0 ya es dato: `Hogares, 21.5, 20.4…`), así que
+        # no hay nada que reparar: se perdieron al parsear. **El mart no se
+        # puede reconstruir hasta que el recurso se re-colecte bien.**
+        #
+        # Mientras tanto figura `built` con 0 filas, que es como estuvo sin
+        # que nadie lo notara — el registro conservaba el conteo viejo de 864.
+        #
+        # Se relaja igual el requisito de columnas: exigir las 19 de semestre
+        # significaba que el día que INDEC publicara una nueva, ninguna tabla
+        # las tendría todas y el mart se vaciaría por esa segunda razón
+        # además de por ésta. `Indicador` es lo único que la serie no puede
+        # perder; los semestres ausentes se proyectan NULL y el `IS NOT NULL`
+        # de abajo los descarta.
+        require_columns=['Indicador']
     ) }} sub
   )
   SELECT
     NULLIF(TRIM("Indicador"), '')        AS indicador,
     v.periodo                            AS periodo,
-    NULLIF(TRIM(v.valor::text), '')      AS valor
+    {{ to_numeric('v.valor') }}      AS valor
   FROM src
   CROSS JOIN LATERAL (VALUES
     ('2do. semestre 2016',     src."2do. semestre 2016"),
@@ -86,8 +103,11 @@ sql: |
     ('1er. semestre 2025',     src."1er. semestre 2025")
   ) AS v(periodo, valor)
   WHERE NULLIF(TRIM("Indicador"), '') IS NOT NULL
-    AND NULLIF(TRIM(v.valor::text), '') IS NOT NULL
+    AND {{ to_numeric('v.valor') }} IS NOT NULL
 
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+expectations:
+  min_rows: 432

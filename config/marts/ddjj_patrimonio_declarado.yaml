@@ -1,0 +1,170 @@
+id: ddjj_patrimonio_declarado
+version: 0.1.0
+description: |
+  Bienes declarados en las declaraciones juradas patrimoniales integrales de
+  funcionarios del Estado nacional — Oficina Anticorrupción / Ministerio de
+  Justicia. Cada fila es un bien declarado (inmueble, vehículo, cuenta,
+  crédito, bien mueble) dentro de una declaración.
+
+  Complementa `ddjj_funcionarios_federales`, que sirve la faceta de DEUDAS del
+  mismo cluster. Los bienes son la faceta que responde "qué patrimonio declaró
+  X", medida como el tema con más demanda sin cubrir: 78 de 1.232 preguntas de
+  usuarios (6,3 %) mencionan patrimonio / DDJJ / bienes, contra 405 k filas
+  servidas sobre 29,4 M colectadas.
+
+  **Cobertura: 2016-2018 y 2022-2024.** Los años 2019-2021 no están publicados
+  como recurso de bienes en ninguno de los dos portales — el hueco es del
+  origen, no de la ingesta.
+
+  **Tres años están recortados en la ingesta, no en el origen.** 2017, 2022 y
+  2023 traen exactamente 500.000 filas cada uno porque la tabla de la que
+  salen se cortó en ese tope al colectarse. Un conteo de bienes para esos años
+  es un piso, no el total. 2016, 2018 y 2024 no tocan el tope.
+
+  **El patrón dice `patrimonia*`, no `patrimoniales*`, a propósito.** Postgres
+  trunca los identificadores a 63 bytes y tres de las siete tablas de bienes
+  quedaron como `..._patrimonia_<hash>`. Buscar el nombre completo las pierde:
+  la primera versión de este mart construyó 1.521.392 filas sobre 4 tablas en
+  vez de 3.021.392 sobre 7, y el build reportó `success` igual. Completar el
+  patrón vuelve a romperlo.
+
+  **Por qué deduplica.** El cluster publica el mismo dato en tramos que se
+  subsumen: una tabla 2022-2024 y otra sólo 2024 con los mismos `dj_id`, una
+  2016-2017 y otra sólo 2017, más espejos exactos entre los portales
+  `datos_gob_ar` y `justicia`. La unión cruda de las 7 tablas vivas da
+  4.911.504 filas contra 2.521.392 reales: **95 % inflado**. `DISTINCT` no
+  sirve — colapsa líneas legítimamente repetidas (alguien declara dos bienes
+  idénticos): 161.119 sólo en la tabla más grande. La dedup es por origen:
+  para cada declaración se toma
+  entera de una sola tabla, la que más líneas tiene para ese `dj_id`, con
+  desempate determinístico. Las tablas subsumidas traen los mismos `dj_id`,
+  así que caen solas sin tocar las líneas repetidas.
+
+  **La clave de dedup es `source_marker`, no `_source_dataset_id`.** La
+  primera versión usó la columna de ingesta y no funcionó: identifica el
+  *dataset* de CKAN, y tres de estas siete tablas comparten el mismo valor,
+  así que quedaban en un solo grupo y pasaban todas sus filas. El mart
+  construyó 3.021.392 filas — un conteo verosímil — mientras 2017 venía
+  duplicado entero.
+  `source_marker` proyecta el nombre de la tabla física, que es lo único
+  que distingue a dos espejos.
+domain: gobierno
+
+sources:
+  portals: [datos_gob_ar, justicia]
+  resource_patterns:
+    - "*::declaraciones_juradas_patrimoniales*"
+
+canonical_columns:
+  - name: dj_id
+    type: text
+    description: Identificador único de la declaración jurada
+  - name: cuit
+    type: text
+    description: CUIT del funcionario declarante
+  - name: anio
+    type: text
+    description: Año declarado (2016-2017, 2022-2024)
+  - name: tipo_dj_id
+    type: text
+    description: Identificador del tipo de declaración
+  - name: tipo_dj
+    type: text
+    description: Tipo de declaración (anual, inicial, baja, ...)
+  - name: rectificativa
+    type: text
+    description: Indicador de declaración rectificativa
+  - name: funcionario
+    type: text
+    description: Apellido y nombre del funcionario declarante
+  - name: periodo_inicio_cierre
+    type: text
+    description: Período cubierto por la declaración
+  - name: bien_tipo
+    type: text
+    description: Tipo de bien. NULL en los recursos 2016-2017, que no traen la columna
+  - name: bien_descripcion
+    type: text
+    description: Descripción del bien declarado
+  - name: bien_origen_fondos
+    type: text
+    description: Origen de los fondos con que se adquirió el bien
+  - name: bien_titularidad
+    type: text
+    description: Titularidad declarada sobre el bien
+  - name: bien_importe
+    type: numeric
+    description: >-
+      Importe declarado. NULL cuando el origen trae texto en el campo — unas 80
+      filas donde una coma sin escapar corrió las columnas del CSV y la
+      descripción cayó acá. Se anulan en vez de tumbar el build.
+
+sql: |
+  WITH u AS (
+    SELECT
+      NULLIF(TRIM(dj_id), '')                                AS dj_id,
+      NULLIF(TRIM(cuit), '')                                 AS cuit,
+      NULLIF(TRIM(anio), '')                                 AS anio,
+      NULLIF(TRIM(tipo_declaracion_jurada_id), '')           AS tipo_dj_id,
+      NULLIF(TRIM(tipo_declaracion_jurada_descripcion), '')  AS tipo_dj,
+      NULLIF(TRIM(rectificativa), '')                        AS rectificativa,
+      NULLIF(TRIM(funcionario_apellido_nombre), '')          AS funcionario,
+      NULLIF(TRIM(periodo_inicio_cierre), '')                AS periodo_inicio_cierre,
+      NULLIF(TRIM(bien_tipo), '')                            AS bien_tipo,
+      NULLIF(TRIM(bien_descripcion), '')                     AS bien_descripcion,
+      NULLIF(TRIM(bien_origen_fondos), '')                   AS bien_origen_fondos,
+      NULLIF(TRIM(bien_titularidad), '')                     AS bien_titularidad,
+      -- Guard antes del cast: el origen mete texto acá (columnas corridas por
+      -- comas sin escapar). Un `::numeric` crudo sobre esos 80 valores deja el
+      -- mart en build_failed, que es exactamente como se rompió `delitos_caba`.
+      CASE WHEN bien_importe ~ '^-?[0-9]+(\.[0-9]+)?$'
+           THEN bien_importe::numeric END                    AS bien_importe,
+      "__src"                                                AS src
+    FROM {{ live_tables_by_table_pattern(
+        '*declaraciones_juradas_patrimonia*',
+        expected_columns=['dj_id', 'cuit', 'anio', 'tipo_declaracion_jurada_id',
+                          'tipo_declaracion_jurada_descripcion', 'rectificativa',
+                          'funcionario_apellido_nombre', 'periodo_inicio_cierre',
+                          'bien_tipo', 'bien_descripcion', 'bien_origen_fondos',
+                          'bien_titularidad', 'bien_importe'],
+        require_columns=['dj_id', 'bien_descripcion', 'bien_titularidad',
+                         'bien_importe'],
+        source_marker='__src'
+    ) }} sub
+    WHERE NULLIF(TRIM(dj_id), '') IS NOT NULL
+  ),
+  -- Una sola tabla de origen por declaración. Las versiones subsumidas traen
+  -- los mismos `dj_id` con las mismas líneas, así que quedarse con el origen
+  -- más completo para cada `dj_id` las descarta enteras. El desempate por
+  -- `src` mantiene el build reproducible cuando dos orígenes empatan, que es
+  -- el caso del espejo datos_gob_ar / justicia.
+  ranked AS (
+    SELECT dj_id, src,
+           row_number() OVER (PARTITION BY dj_id ORDER BY count(*) DESC, src) AS rn
+    FROM u
+    GROUP BY dj_id, src
+  )
+  SELECT
+    u.dj_id, u.cuit, u.anio, u.tipo_dj_id, u.tipo_dj, u.rectificativa,
+    u.funcionario, u.periodo_inicio_cierre, u.bien_tipo, u.bien_descripcion,
+    u.bien_origen_fondos, u.bien_titularidad, u.bien_importe
+  FROM u
+  JOIN ranked k ON k.dj_id = u.dj_id AND k.src = u.src AND k.rn = 1
+
+refresh:
+  policy: on_upstream_change
+  unique_index: []
+
+sample_queries:
+  - "qué bienes declaró un funcionario en su declaración jurada"
+  - "patrimonio declarado por funcionarios públicos"
+  - "declaraciones juradas patrimoniales de funcionarios nacionales"
+  - "qué inmuebles y vehículos declaran los funcionarios"
+  - "cuánto patrimonio declararon los funcionarios por año"
+
+expectations:
+  # La mitad de lo observado al escribir esto (2.521.392). Un piso, no una
+  # expectativa de tamaño: dice "esto está roto si baja de acá". Si la dedup
+  # se rompe el conteo SUBE, no baja, así que este piso no la cubre — de eso
+  # se ocupa la parte derivada de `mart_build_history`.
+  min_rows: 1260696

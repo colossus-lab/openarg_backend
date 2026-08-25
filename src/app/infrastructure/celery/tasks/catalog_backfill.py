@@ -222,7 +222,7 @@ _QUERY_SQL = text(
                cd.layout_profile, cd.header_quality,
                rtv.schema_name AS materialized_schema
         FROM raw.cached_datasets cd
-        LEFT JOIN raw_table_versions rtv
+        LEFT JOIN public.raw_table_versions rtv
           ON rtv.table_name = cd.table_name
          AND rtv.superseded_at IS NULL
         WHERE cd.dataset_id = d.id
@@ -230,7 +230,11 @@ _QUERY_SQL = text(
                  cd.updated_at DESC NULLS LAST
         LIMIT 1
     ) cd ON true
-    WHERE :cursor_id IS NULL OR d.id > CAST(:cursor_id AS uuid)
+    -- Both sides are cast: a bare `:cursor_id IS NULL` gives Postgres no type
+    -- context for the parameter, and it refuses the statement with
+    -- AmbiguousParameter rather than guessing. Same failure the semantic
+    -- cache hit in March.
+    WHERE CAST(:cursor_id AS uuid) IS NULL OR d.id > CAST(:cursor_id AS uuid)
     ORDER BY d.id
     LIMIT :limit
     """

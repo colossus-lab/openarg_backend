@@ -18,8 +18,19 @@ from app.application.repair.parse_repair import (
     repair_col_n_table,
     repair_trailing_garbage_cols,
 )
+from app.application.repair.revert import RevertOutcome, revert_repair
+from app.application.repair.verify import (
+    VerificationOutcome,
+    verify_against_previous_version,
+    verify_rename,
+)
 
 __all__ = [
+    "VerificationOutcome",
+    "verify_against_previous_version",
+    "verify_rename",
+    "RevertOutcome",
+    "revert_repair",
     "RepairOutcome",
     "list_col_n_candidates",
     "list_trailing_garbage_candidates",

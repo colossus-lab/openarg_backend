@@ -70,7 +70,7 @@ canonical_columns:
     type: text
     description: ID del departamento de destino
   - name: cantidad
-    type: text
+    type: numeric
     description: Cantidad de animales movidos en esa categoría
 
 sql: |
@@ -149,7 +149,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), '') AS provincia_destino_id,
          NULLIF(TRIM(departamento_destino::text), '') AS departamento_destino,
          NULLIF(TRIM(departamento_destino_id::text), '') AS departamento_destino_id,
-         NULLIF(TRIM(v.cantidad::text), '') AS cantidad
+         {{ to_numeric('v.cantidad') }} AS cantidad
   FROM bovinos
   CROSS JOIN LATERAL (VALUES
     ('vaca', vaca), ('vaquillona', vaquillona),
@@ -173,7 +173,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM porcinos
   CROSS JOIN LATERAL (VALUES
     ('padrillo_porcino', padrillo_porcino), ('cerda', cerda),
@@ -197,7 +197,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM avicolas
   CROSS JOIN LATERAL (VALUES
     ('pollos_parrilleros', pollos_parrilleros),
@@ -219,7 +219,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM equinos
   CROSS JOIN LATERAL (VALUES
     ('padrillo_equino', padrillo_equino), ('caballo', caballo),
@@ -241,7 +241,7 @@ sql: |
          NULLIF(TRIM(provincia_destino_id::text), ''),
          NULLIF(TRIM(departamento_destino::text), ''),
          NULLIF(TRIM(departamento_destino_id::text), ''),
-         NULLIF(TRIM(v.cantidad::text), '')
+         {{ to_numeric('v.cantidad') }}
   FROM ovinos
   CROSS JOIN LATERAL (VALUES
     ('carnero', carnero), ('oveja', oveja),

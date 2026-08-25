@@ -105,6 +105,47 @@ def _coverage_counts(resolved_sql: str | None) -> tuple[int | None, int | None]:
     return int(match.group("kept")), int(match.group("of"))
 
 
+# Above this many rows the duplicate scan reads a sample instead of the whole
+# view. `count(DISTINCT t.*)` hashes every column of every row, and the sweep
+# runs nightly over marts holding tens of millions.
+_DUP_SCAN_FULL_LIMIT = 2_000_000
+_DUP_SCAN_SAMPLE = 400_000
+
+
+def _duplicate_counts(
+    engine: Engine, schema: str, view: str, approx_rows: int | None
+) -> tuple[int | None, int | None, bool]:
+    """Rows scanned, distinct rows among them, and whether it was a sample.
+
+    Returns `(None, None, False)` when the scan cannot run — a missing view, a
+    timeout. A check that cannot measure must say nothing rather than guess.
+    """
+    sampled = (approx_rows or 0) > _DUP_SCAN_FULL_LIMIT
+    target = (
+        f'(SELECT * FROM "{schema}"."{view}" LIMIT {_DUP_SCAN_SAMPLE}) t'
+        if sampled
+        else f'"{schema}"."{view}" t'
+    )
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SET LOCAL statement_timeout = '45s'"))
+            row = conn.execute(
+                text(
+                    f"SELECT count(*) AS scanned, count(DISTINCT t.*) AS distinct_rows FROM {target}"
+                )
+            ).fetchone()
+            conn.rollback()
+    except Exception as exc:
+        # One line, no traceback: over 74 marts a nightly sweep would print a
+        # stack for every missing view, and a mart registered without a view is
+        # already reported by the coverage checks.
+        logger.warning("duplicate scan skipped for %s.%s: %s", schema, view, str(exc)[:120])
+        return None, None, False
+    if row is None:
+        return None, None, False
+    return int(row.scanned), int(row.distinct_rows), sampled
+
+
 def collect_contexts(engine: Engine) -> list[MartAuditContext]:
     """One context per registered mart."""
     with engine.connect() as conn:
@@ -144,6 +185,9 @@ def collect_contexts(engine: Engine) -> list[MartAuditContext]:
             for schema, name in refs
         )
         hits, success_rate = traffic.get(row.mart_id, (0, None))
+        scanned, distinct_rows, dup_sampled = _duplicate_counts(
+            engine, row.mart_schema or "mart", view_name, approx_by_view.get(view_name)
+        )
         kept_count, candidate_count = _coverage_counts(row.sql_definition)
         contexts.append(
             MartAuditContext(
@@ -158,6 +202,9 @@ def collect_contexts(engine: Engine) -> list[MartAuditContext]:
                 yaml_version=row.yaml_version,
                 columns=tuple(columns_by_view.get(view_name, [])),
                 approx_row_count=approx_by_view.get(view_name),
+                scanned_row_count=scanned,
+                distinct_row_count=distinct_rows,
+                duplicate_scan_sampled=dup_sampled,
                 source_tables=sources,
                 candidate_table_count=candidate_count,
                 kept_table_count=kept_count,

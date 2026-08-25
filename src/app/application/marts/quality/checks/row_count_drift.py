@@ -12,8 +12,15 @@ zero, and the mart disappears from serving with nothing reporting it.
 2026-07-28, `mediaciones_prejudiciales` is in exactly that state right now —
 `refresh_failed`, `last_row_count = 0`, and 52.086.049 rows in the view.
 
-Both signals here are about the mart's own bookkeeping rather than its data,
-which is why they can be checked nightly for free.
+The mirror case costs a real count and is worth it. `pobreza_indec_aglomerados`
+served **zero rows while the registry said 864** — the count left over from a
+build months earlier, when the sources still parsed. The mart stayed
+discoverable, every question about poverty routed to it, and it answered with
+nothing. The `mart_empty` alert could not see it either, because that query
+reads `last_row_count` and the registry was the thing that was wrong.
+
+A stored count is a claim about the past. Believing it is how an empty mart
+stays invisible.
 """
 
 from __future__ import annotations
@@ -63,6 +70,39 @@ class RowCountDriftCheck(MartCheck):
                             "anterior y su frescura es desconocida: decidir "
                             "explícitamente entre repararlo o bloquearlo con razón "
                             "en el YAML, en vez de dejarlo desaparecido."
+                        ),
+                    },
+                )
+            )
+
+        # The mirror of the case above: the registry claims rows and the view
+        # has none. Only when the scan read the whole view — above the sampling
+        # threshold `scanned_row_count` is a sample and says nothing about the
+        # total.
+        scanned = ctx.scanned_row_count
+        if not ctx.duplicate_scan_sampled and scanned == 0 and stored > 0:
+            findings.append(
+                self._finding(
+                    severity=Severity.CRITICAL,
+                    key="empty_despite_stored_count",
+                    message=(
+                        f"{ctx.mart_id} no tiene ninguna fila pero el registro dice "
+                        f"{stored:,}: sigue siendo elegible para el routing y "
+                        f"responde vacío. El conteo guardado es de un build anterior"
+                    ),
+                    payload={
+                        "mart_id": ctx.mart_id,
+                        "last_row_count": ctx.last_row_count,
+                        "actual_rows": 0,
+                        "last_refresh_status": ctx.last_refresh_status,
+                        "hits_30d": ctx.hits_30d,
+                        "remediation": (
+                            "Rebuildear y mirar el `macro_coverage` del SQL "
+                            "resuelto: si dice `kept 0 of N`, el patrón dejó de "
+                            "matchear y el mart no se arregla reconstruyéndolo. "
+                            "Medido en `pobreza_indec_aglomerados`: sus 17 tablas "
+                            "perdieron el encabezado al colectarse y hay que "
+                            "re-colectar el recurso."
                         ),
                     },
                 )

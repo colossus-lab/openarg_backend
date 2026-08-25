@@ -30,14 +30,14 @@ canonical_columns:
     type: text
     description: Código CLAE 3 dígitos del sector económico exportador
   - name: total_fob
-    type: text
+    type: numeric
     description: Valor total en USD FOB (Free On Board)
 
 sql: |
   SELECT
     NULLIF(TRIM(fecha::text), '')             AS fecha,
     NULLIF(TRIM(clae3::text), '')             AS clae3,
-    NULLIF(TRIM(total_fob::text), '')         AS total_fob
+    {{ to_numeric('total_fob') }}         AS total_fob
   FROM {{ live_tables_by_table_pattern(
       'produccion__exportaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'clae3', 'total_fob']
@@ -47,7 +47,7 @@ sql: |
   SELECT
     NULLIF(TRIM(fecha::text), '')             AS fecha,
     NULLIF(TRIM(clae3::text), '')             AS clae3,
-    NULLIF(TRIM(total_fob::text), '')         AS total_fob
+    {{ to_numeric('total_fob') }}         AS total_fob
   FROM {{ live_tables_by_table_pattern(
       'datos_gob_ar__exportaciones_de_bienes_valores*',
       expected_columns=['fecha', 'clae3', 'total_fob']

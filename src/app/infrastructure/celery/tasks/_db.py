@@ -117,6 +117,63 @@ def get_sync_engine() -> Engine:
     return _engine
 
 
+def _default_parser_version() -> str:
+    from app.application.catalog.parser_fingerprint import parser_fingerprint
+
+    return os.getenv("OPENARG_PARSER_VERSION") or parser_fingerprint()
+
+
+def _default_normalization_version() -> str:
+    from app.application.catalog.parser_fingerprint import normalization_fingerprint
+
+    return os.getenv("OPENARG_NORMALIZATION_VERSION") or normalization_fingerprint()
+
+
+def _report_if_degenerate(
+    engine: Engine,
+    *,
+    resource_identity: str,
+    schema_name: str,
+    table_name: str,
+    version: int,
+    row_count: int | None,
+) -> None:
+    """Tell a person when a connector just published nothing. Never raises."""
+    try:
+        from app.application.collection.batch_guard import check_after_write
+
+        verdict = check_after_write(
+            engine,
+            resource_identity=resource_identity,
+            schema_name=schema_name,
+            table_name=table_name,
+            version=version,
+            row_count=row_count,
+        )
+        if verdict.ok:
+            return
+
+        _logger.error("vía-B batch looks degenerate: %s — %s", verdict.table, verdict.reason)
+        from app.application.quality.alerting import Alert, notify
+
+        notify(
+            engine,
+            [
+                Alert(
+                    kind="via_b_degenerate",
+                    # Identity of the resource, so a source that stays broken is
+                    # reported once rather than on every ingest.
+                    key=resource_identity,
+                    title=f"{resource_identity[:60]} publicó algo vacío",
+                    detail=verdict.reason[:300],
+                )
+            ],
+            heading="OpenArg · un conector publicó algo vacío",
+        )
+    except Exception:
+        _logger.debug("batch guard: skipped for %s", table_name, exc_info=True)
+
+
 def register_via_b_table(
     engine: Engine,
     *,
@@ -125,9 +182,11 @@ def register_via_b_table(
     schema_name: str = "public",
     version: int = 1,
     row_count: int | None = None,
+    parser_version: str | None = None,
+    normalization_version: str | None = None,
 ) -> None:
     """Register a vía-B table (transparency / senado / staff / bcra ingest)
-    in `raw_table_versions` so the medallion mart layer can `live_table()`
+    in `public.raw_table_versions` so the medallion mart layer can `live_table()`
     it and the Serving Port can find it.
 
     Vía-B tables are populated by specialized connectors (`staff_tasks`,
@@ -154,17 +213,26 @@ def register_via_b_table(
             conn.execute(
                 text(
                     """
-                    INSERT INTO raw_table_versions (
+                    INSERT INTO public.raw_table_versions (
                         resource_identity, version, schema_name, table_name,
-                        row_count
-                    ) VALUES (:rid, :v, :sch, :tn, :rc)
+                        row_count, parser_version, normalization_version
+                    ) VALUES (:rid, :v, :sch, :tn, :rc, :pv, :nv)
                     ON CONFLICT (resource_identity, version) DO UPDATE SET
-                        row_count = COALESCE(EXCLUDED.row_count, raw_table_versions.row_count),
+                        row_count = COALESCE(EXCLUDED.row_count, public.raw_table_versions.row_count),
                         schema_name = EXCLUDED.schema_name,
-                        table_name = EXCLUDED.table_name
+                        table_name = EXCLUDED.table_name,
+                        parser_version = EXCLUDED.parser_version,
+                        normalization_version = EXCLUDED.normalization_version
                     """
                 ),
                 {
+                    # Vía-B connectors do not run the collector's parser, but
+                    # they do run its normalisation, and a row with no
+                    # provenance is a row G1 can say nothing about. Recording
+                    # the fingerprints here is what stops those tables being
+                    # permanently unattributable.
+                    "pv": parser_version or _default_parser_version(),
+                    "nv": normalization_version or _default_normalization_version(),
                     "rid": resource_identity,
                     "v": version,
                     "sch": schema_name,
@@ -185,6 +253,33 @@ def register_via_b_table(
         )
 
     if registered:
+        # Mark that this resource arrived. Without it there is no record of a
+        # successful ingest anywhere: this function is idempotent on
+        # `(resource_identity, version)` and never touches `created_at`, so for
+        # the connectors that overwrite in place the registry's date is the day
+        # the resource was *first* seen. A source that quietly stops arriving —
+        # or that keeps being refused by a guard — is invisible without this.
+        try:
+            from app.application.quality.heartbeat import record_ingest
+
+            record_ingest(engine, resource_identity)
+        except Exception:
+            _logger.debug("heartbeat skipped for %s", resource_identity, exc_info=True)
+
+        # Look at what was just published, for every vía-B connector at once.
+        # The thirteen of them are too different to share a schema, but they all
+        # end here — and by this point the registry knows what the previous
+        # version held and the table can be sampled. Reports only: the write has
+        # already happened, so this buys seconds instead of weeks, not a veto.
+        _report_if_degenerate(
+            engine,
+            resource_identity=resource_identity,
+            schema_name=schema_name,
+            table_name=table_name,
+            version=version,
+            row_count=row_count,
+        )
+
         # Reconcile the canonical `catalog_resources` row.
         #
         # Vía-B writers (BCRA, presupuesto, senado) register the rtv under
@@ -212,6 +307,14 @@ def register_via_b_table(
                         JOIN datasets d ON d.id = cd.dataset_id
                         WHERE cd.table_name = :tn
                           AND cr.resource_identity = d.portal || '::' || d.source_id
+                          -- Una cuarentena no se deshace sola. Esta
+                          -- reconciliación y `repair/quarantine` escriben el
+                          -- mismo campo con intenciones opuestas, y sin esto
+                          -- gana siempre la que dice "está todo bien": las 5
+                          -- tablas retiradas del servicio volvieron a `ready`
+                          -- en minutos, sin que nada lo dijera. Sólo un arreglo
+                          -- exitoso (`release`) o una persona la levantan.
+                          AND cr.materialization_status <> 'materialization_corrupted'
                           AND (
                               cr.materialized_table_name IS DISTINCT FROM :qn
                               OR cr.materialization_status IS DISTINCT FROM 'ready'
@@ -362,7 +465,7 @@ def register_via_b_with_state(
     `_apply_cached_outcome` so the same metadata pipeline applies. The
     caller is still responsible for the actual `df.to_sql(...)` write
     AND for calling `register_via_b_table()` separately if it wants the
-    row in `raw_table_versions` (most do).
+    row in `public.raw_table_versions` (most do).
 
     Lazy-imports collector_tasks to avoid an import cycle: that module
     imports back from `_db` for `get_sync_engine` and `safe_truncate_table`.

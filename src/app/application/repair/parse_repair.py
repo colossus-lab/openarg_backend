@@ -20,7 +20,7 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +34,8 @@ from app.application.pipeline.parsers import (
     is_garbage_column,
     promote_buried_headers,
 )
+from app.application.repair.value_grounding import reject_contradicted
+from app.application.repair.verify import verify_intrinsic
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +138,15 @@ def _audit(
     phase: str = "col_n",
 ) -> None:
     """Write one row to `parse_repair_audit`. Best-effort: never raises so
-    audit failures don't block repair runs."""
+    audit failures don't block repair runs.
+
+    `error_message` carries whichever of the two the outcome has. A repair that
+    *failed* sets `error_message`; one that *declined* sets `reason`, and until
+    now only the first was written — so 5.509 declines in 30 days landed with a
+    NULL reason and nobody could tell a correctly conservative sweep from a
+    misconfigured one. `smeared_title` alone declined 4.397 times against 134
+    total applies, and the audit could not say why even once.
+    """
     try:
         with engine.begin() as conn:
             conn.execute(
@@ -162,7 +172,9 @@ def _audit(
                     "new_cols": json.dumps(outcome.new_columns),
                     "rows_deleted": outcome.rows_deleted,
                     "ok": outcome.ok,
-                    "err": outcome.error_message or None,
+                    # A decline is not an error, but it has a reason, and the
+                    # reason is the whole value of auditing a decline.
+                    "err": outcome.error_message or outcome.reason or None,
                     "dry": outcome.dry_run,
                 },
             )
@@ -216,12 +228,16 @@ _BASE_COMPARISON_PREFIX = 40
 
 def _repeated_base_share(cols: list[str]) -> float:
     """Largest share of names collapsing to the same base once `_N` is stripped."""
-    bases = [
-        (_SUFFIX_RE.match(str(c) or "").group("base") or "")
-        .strip()
-        .lower()[:_BASE_COMPARISON_PREFIX]
-        for c in cols
-    ]
+
+    # `_SUFFIX_RE` is `^(?P<base>.*?)(?:_\d+)?$` — anchored, with an optional
+    # tail and a lazy base that accepts the empty string, so it matches every
+    # input. The guard is for the type checker, not for a case that happens.
+    def _base(name: object) -> str:
+        m = _SUFFIX_RE.match(str(name) or "")
+        raw = (m.group("base") or "") if m else ""
+        return raw.strip().lower()[:_BASE_COMPARISON_PREFIX]
+
+    bases = [_base(c) for c in cols]
     bases = [b for b in bases if b]
     if not bases:
         return 0.0
@@ -572,6 +588,21 @@ def repair_col_n_table(
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip")
         return outcome
 
+    # ── the verifier stands between a proposal and the table ──────
+    # These repairs applied 543 times over three months, every one of them
+    # because a person asked. Running them unattended needs something between
+    # "the heuristic produced names" and "the table is rewritten", and this is
+    # it. `verify_intrinsic` rather than `verify_rename` because the reference
+    # a comparison would need does not exist here: of 1,118 tables carrying
+    # these defects in production, 26 have another version of the resource and
+    # none have a second snapshot.
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
+        outcome.new_columns = proposed_cols
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="col_n")
+        return outcome
+
     rename_pairs = [(old, new) for old, new in zip(old_cols, proposed_cols) if old != new]
     outcome.new_columns = proposed_cols
     outcome.rows_deleted = rows_to_delete
@@ -655,7 +686,11 @@ def _normalize_header_to_identifier(raw: object) -> str:
         return ""
     s = str(raw).strip().lower()
     s = _ARROW_BAD_TOKENS_RE.sub("", s)
-    table = str.maketrans("áàäéèëíìïóòöúùüñ", "aaaeeeiiioooouun")
+    # Three targets per vowel, in order. The previous table had four `o`s
+    # and two `u`s, so `ú` mapped to `o`: `Común` normalised to `comon`
+    # and `Número` to `nomero`. Every repair that renames a column shares
+    # this function.
+    table = str.maketrans("áàäéèëíìïóòöúùüñ", "aaaeeeiiiooouuun")
     s = s.translate(table)
     s = re.sub(r"[^a-z0-9]+", "_", s)
     s = s.strip("_")
@@ -838,6 +873,17 @@ def repair_title_as_columns_table(
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="title_as_columns")
         return outcome
 
+    # Same gate as `repair_col_n_table`, same reason: this heuristic reads a
+    # buried header row out of the data, and a misread produces confident,
+    # plausible names for the wrong columns. `verify_intrinsic` because there is
+    # no correct earlier snapshot to compare against — 971 tables in production
+    # carry this defect and were parsed badly the first time.
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="title_as_columns")
+        return outcome
+
     if dry_run:
         outcome.ok = True
         outcome.reason = "dry_run_proposal"
@@ -940,6 +986,7 @@ async def propose_llm_assisted_rename(
     llm: Any,
     max_sample_rows: int = 5,
     max_cell_chars: int = 80,
+    protected_columns: Collection[str] = (),
 ) -> tuple[list[str], int, str]:
     """LLM-backed proposer. Returns `(new_cols, rows_to_delete, reason)`.
 
@@ -951,6 +998,19 @@ async def propose_llm_assisted_rename(
     """
     if not old_cols:
         return old_cols, 0, "no_columns"
+
+    # The collector's own columns are never candidates. `_source_dataset_id` is
+    # how a table links back to its dataset, and the prompt's "call metadata
+    # columns metadata_<i>" rule reads them as exactly that — the first
+    # production dry run proposed renaming all five, which would have cut every
+    # repaired table loose from its origin. Held out of the proposal entirely
+    # rather than corrected afterwards, so the model is never asked about them.
+    # Two kinds of column the model never gets to rename. The collector's own
+    # `_`-prefixed ones, and whatever the caller says is spoken for downstream:
+    # `pg_depend` knows exactly which columns each mart reads, so a table feeding
+    # a mart no longer has to be refused wholesale. The two columns a view
+    # actually depends on are held back and the other thirty get repaired.
+    protected = {c for c in old_cols if c.startswith("_")} | set(protected_columns)
     if len(old_cols) > 100:
         # LLM context cost grows with col count; cap at a reasonable
         # ceiling. Tables with 100+ cols are usually mega-wide pivots
@@ -1021,6 +1081,13 @@ async def propose_llm_assisted_rename(
     if proposed_final == old_cols:
         return old_cols, 0, "llm_no_change"
 
+    # Whatever the model said about them, the collector's own columns keep their
+    # names. The first production dry run proposed renaming all five
+    # `_source_*` / `_parser_version` columns to `metadata_<i>`, which would
+    # have cut every repaired table loose from its dataset.
+    proposed_final = [
+        old if old in protected else new for old, new in zip(old_cols, proposed_final, strict=True)
+    ]
     return proposed_final, 0, "applied"
 
 
@@ -1033,8 +1100,13 @@ async def repair_with_llm_assist(
     run_id: uuid.UUID | None = None,
     dry_run: bool = True,
     sample_rows: int = 5,
+    protected_columns: Collection[str] = (),
 ) -> RepairOutcome:
     """Repair a table using LLM proposal when heuristics couldn't.
+
+    `protected_columns` are held out of the proposal entirely. The caller uses
+    this to hand over the columns some mart depends on, which turns a refusal
+    into a partial repair.
 
     Default `dry_run=True` because LLM proposals are best reviewed before
     being applied. Audited under `phase='llm_assisted'`.
@@ -1076,12 +1148,58 @@ async def repair_with_llm_assist(
         ]
 
     proposed_cols, _rows_to_delete, reason = await propose_llm_assisted_rename(
-        old_cols, sample, llm=llm
+        old_cols,
+        sample,
+        llm=llm,
+        protected_columns=protected_columns,
     )
     outcome.new_columns = proposed_cols
 
     if reason != "applied":
         outcome.reason = reason
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
+        return outcome
+
+    # Before the structural verifier: ask the values whether the names are true.
+    #
+    # `verify_intrinsic` checks that a proposal is identifier-like, distinct and
+    # less broken than what it replaces — shape, not meaning. The failure that
+    # actually happens is the semantically *adjacent* name: `latitud` on a
+    # longitude column, `fecha_fin` on a start date. Those are valid, distinct,
+    # correctly typed and completely wrong, so they pass every structural test
+    # there is. If a name claims the column holds CUITs, the check digits either
+    # work out or they do not — arithmetic, not judgement.
+    #
+    # A contradicted column keeps its old name and the rest of the proposal
+    # stands. Discarding a whole table over one wrong column throws away work
+    # that was right, and the table returns next run with the same odds.
+    proposed_cols, contradicciones = reject_contradicted(old_cols, proposed_cols, sample)
+    if contradicciones:
+        logger.warning(
+            "llm repair %s.%s: %d columna(s) refutadas por sus valores",
+            table_schema,
+            table_name,
+            len(contradicciones),
+        )
+    if proposed_cols == old_cols:
+        # Every rename it proposed was contradicted. Nothing left to apply.
+        outcome.new_columns = proposed_cols
+        outcome.reason = "value_grounding_refused_all"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
+        return outcome
+
+    # The gate matters more here than anywhere else. A deterministic heuristic
+    # that misreads produces obvious nonsense; a model that misreads produces
+    # confident, plausible, well-formed names for the wrong columns — the
+    # failure the repair literature calls patch overfitting, and the one nobody
+    # notices because the result looks like a correct table.
+    #
+    # The same verifier the heuristics answer to, deliberately: a proposal does
+    # not earn a lower bar for having come from a model.
+    outcome.new_columns = proposed_cols
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
         return outcome
 
@@ -1136,3 +1254,514 @@ __all__ = [
     "propose_llm_assisted_rename",
     "is_garbage_column",
 ]
+
+
+# ── unsplit CSV ────────────────────────────────────────────────
+
+_DELIMITERS = (";", ",", "\t", "|")
+
+
+def detect_unsplit_csv(columns: list[str]) -> str | None:
+    """Is this table a CSV that was never split? Returns the delimiter, or None.
+
+    The signature is unmistakable: one data column whose *name* is the entire
+    header line with the delimiter still in it — `anio,sexo,casos_SIDA` — while
+    each row holds a whole record as a single string. pandas read the file with
+    the wrong separator and produced a one-column table.
+
+    Measured on production 2026-08-22: 210 tables, 112 semicolon-separated, 97
+    comma, 1 tab. Nothing about this needs a prior snapshot to see; the table is
+    self-evidently wrong from its current state alone, which is why it survived
+    unnoticed since the day it was collected.
+    """
+    payload = [c for c in columns if not c.startswith("_")]
+    if len(payload) != 1:
+        return None
+    header = payload[0]
+    for delim in _DELIMITERS:
+        if delim in header and len(header.split(delim)) > 1:
+            return delim
+    return None
+
+
+def split_csv_row(value: str, delim: str) -> list[str]:
+    """Split one CSV record, honouring quotes.
+
+    `string_to_array` in Postgres does not: a quoted value containing the
+    delimiter — `Rosario,"Santa Fe, Argentina",1300000` — splits into four
+    fields instead of three and shifts everything after it. That silent
+    corruption is why `repair_unsplit_csv_table` declines those tables, and it
+    is 87 of the 209 in production.
+
+    Python's `csv` module already implements the quoting rules correctly, so
+    this is a thin wrapper rather than a parser: reimplementing RFC 4180 by hand
+    is exactly how the shifted-field bug gets reintroduced one edge case at a
+    time.
+    """
+    import csv
+    import io
+
+    reader = csv.reader(io.StringIO(value), delimiter=delim)
+    for row in reader:
+        return row
+    return []
+
+
+def propose_unsplit_csv_columns(header: str, delim: str) -> list[str]:
+    """Turn the header line back into column names."""
+    # Quote-aware for the header too: a header can carry a quoted field with a
+    # comma in it just as a row can, and splitting it naively would name the
+    # columns wrongly before a single row is read.
+    names = [h.strip().strip('"').strip("'") for h in split_csv_row(header, delim)]
+    names = [n if n else f"col_{i}" for i, n in enumerate(names)]
+    return _dedupe_identifiers([_normalize_header_to_identifier(n) for n in names])
+
+
+def _apply_quote_aware_split(
+    engine: Engine,
+    *,
+    outcome: RepairOutcome,
+    qualified: str,
+    quoted: str,
+    new_names: list[str],
+    delim: str,
+    run_id: uuid.UUID,
+) -> RepairOutcome:
+    """Split in Python, because SQL cannot do it correctly for these tables.
+
+    `string_to_array` has no notion of quoting, so the rows that need this path
+    are exactly the ones it would corrupt. The work moves into the application:
+    read the column, split each record with the `csv` module, write the fields
+    back.
+
+    One transaction, and the original column is dropped last. If anything fails
+    the table is untouched rather than half-populated with the source column
+    already gone.
+    """
+    try:
+        with engine.begin() as conn:
+            for name in new_names:
+                conn.execute(
+                    text(f"ALTER TABLE {qualified} ADD COLUMN {_quote_ident(name)} text")  # noqa: S608
+                )
+            rows = conn.execute(
+                text(f"SELECT ctid, {quoted}::text AS raw FROM {qualified}")  # noqa: S608
+            ).fetchall()
+            assignments = ", ".join(f"{_quote_ident(n)} = :f{i}" for i, n in enumerate(new_names))
+            for row in rows:
+                fields = split_csv_row(row.raw, delim) if row.raw is not None else []
+                if len(fields) != len(new_names):
+                    # Verification sampled; a row beyond the sample can still
+                    # differ. Raising rolls the whole table back rather than
+                    # leaving some rows split and others not.
+                    raise ValueError(
+                        f"row splits into {len(fields)} fields, expected {len(new_names)}"
+                    )
+                params = {f"f{i}": v for i, v in enumerate(fields)}
+                params["ctid"] = row.ctid
+                conn.execute(
+                    text(f"UPDATE {qualified} SET {assignments} WHERE ctid = :ctid"),  # noqa: S608
+                    params,
+                )
+            conn.execute(text(f"ALTER TABLE {qualified} DROP COLUMN {quoted}"))  # noqa: S608
+        outcome.ok = True
+        outcome.reason = "split_quote_aware"
+    except Exception as exc:  # noqa: BLE001 — recorded, then reported
+        outcome.error_message = str(exc)[:500]
+        outcome.reason = "quote_aware_split_failed"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+        logger.warning("quote-aware split failed for %s", qualified, exc_info=True)
+        return outcome
+
+    _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+    return outcome
+
+
+def repair_unsplit_csv_table(
+    engine: Engine,
+    *,
+    table_schema: str,
+    table_name: str,
+    run_id: uuid.UUID | None = None,
+    dry_run: bool = True,
+    sample_rows: int = 500,
+) -> RepairOutcome:
+    """Split a one-column table back into the columns its header describes.
+
+    In place, without re-downloading: everything needed is already stored. The
+    header is the column's name, the records are its values, and both split on
+    the same delimiter.
+
+    **It verifies before it writes, and the check is objective.** Every sampled
+    row must split into exactly as many fields as the header has. A row that
+    yields a different count means the delimiter also appears inside a quoted
+    value, and a naive split would silently shift every field after it — the
+    kind of repair that looks successful and corrupts the data. Those tables are
+    declined here and need a real CSV reader, not a split. Measured on
+    production: 113 of 210 pass this check.
+
+    Defaults to `dry_run=True`. The proposal is worth reading before it runs.
+    """
+    run_id = run_id or uuid.uuid4()
+    outcome = RepairOutcome(
+        table_schema=table_schema, table_name=table_name, ok=False, dry_run=dry_run
+    )
+
+    with engine.connect() as conn:
+        columns = [
+            r.column_name
+            for r in conn.execute(
+                text(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = :s AND table_name = :t
+                    ORDER BY ordinal_position
+                    """
+                ),
+                {"s": table_schema, "t": table_name},
+            ).fetchall()
+        ]
+        conn.rollback()
+
+    if not columns:
+        outcome.reason = "table_not_found"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+        return outcome
+
+    delim = detect_unsplit_csv(columns)
+    if delim is None:
+        outcome.reason = "not_an_unsplit_csv"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+        return outcome
+
+    header = next(c for c in columns if not c.startswith("_"))
+    new_names = propose_unsplit_csv_columns(header, delim)
+    outcome.old_columns = list(columns)
+    outcome.new_columns = list(new_names)
+
+    quoted = _quote_ident(header)
+    qualified = f"{_quote_ident(table_schema)}.{_quote_ident(table_name)}"
+
+    with engine.connect() as conn:
+        check = conn.execute(
+            text(
+                f"""
+                SELECT count(*) AS n,
+                       count(DISTINCT array_length(string_to_array({quoted}::text, :d), 1)) AS shapes,
+                       min(array_length(string_to_array({quoted}::text, :d), 1)) AS lo
+                FROM (SELECT {quoted} FROM {qualified} LIMIT :lim) s
+                """  # noqa: S608 — identifiers come from information_schema
+            ),
+            {"d": delim, "lim": sample_rows},
+        ).fetchone()
+        conn.rollback()
+
+    if not check or not check.n:
+        outcome.reason = "no_rows_to_verify"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+        return outcome
+
+    quote_aware = False
+    if check.shapes != 1 or check.lo != len(new_names):
+        # Postgres split unevenly, which means the delimiter appears inside
+        # quoted values. Rather than decline — 87 of 209 production tables land
+        # here — re-verify with a reader that honours quoting. If *that* is
+        # consistent the table is repairable after all, just not in SQL.
+        with engine.connect() as conn:
+            rows = [
+                r[0]
+                for r in conn.execute(
+                    text(f"SELECT {quoted}::text FROM {qualified} LIMIT :lim"),  # noqa: S608
+                    {"lim": sample_rows},
+                ).fetchall()
+            ]
+            conn.rollback()
+        shapes = {len(split_csv_row(r, delim)) for r in rows if r is not None}
+        if shapes != {len(new_names)}:
+            outcome.reason = (
+                f"inconsistent_field_count:header={len(new_names)},"
+                f"rows={sorted(shapes)[:3] if shapes else 'none'}"
+            )
+            _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="unsplit_csv")
+            return outcome
+        quote_aware = True
+
+    if dry_run:
+        outcome.ok = True
+        outcome.reason = "dry_run"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="unsplit_csv")
+        return outcome
+
+    if quote_aware:
+        return _apply_quote_aware_split(
+            engine,
+            outcome=outcome,
+            qualified=qualified,
+            quoted=quoted,
+            new_names=new_names,
+            delim=delim,
+            run_id=run_id,
+        )
+
+    try:
+        with engine.begin() as conn:
+            for i, name in enumerate(new_names, start=1):
+                conn.execute(
+                    text(f"ALTER TABLE {qualified} ADD COLUMN {_quote_ident(name)} text")  # noqa: S608
+                )
+                conn.execute(
+                    text(
+                        # Cast: not every one-column table stores text. Some
+                        # arrived as bigint because the single "value" happened
+                        # to be numeric, and string_to_array has no overload for
+                        # it — found by the first production dry run.
+                        f"UPDATE {qualified} SET {_quote_ident(name)} = "  # noqa: S608
+                        f"(string_to_array({quoted}::text, :d))[:i]".replace(":i", str(i))
+                    ),
+                    {"d": delim},
+                )
+            # Dropped last, and inside the same transaction: if anything above
+            # fails the original column is still there and the table is
+            # unchanged. The reverse order would leave the data nowhere.
+            conn.execute(text(f"ALTER TABLE {qualified} DROP COLUMN {quoted}"))  # noqa: S608
+        outcome.ok = True
+        outcome.reason = "split"
+    except Exception as exc:  # noqa: BLE001 — recorded, then reported
+        outcome.error_message = str(exc)[:500]
+        outcome.reason = "split_failed"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+        logger.warning("unsplit-csv repair failed for %s", qualified, exc_info=True)
+        return outcome
+
+    _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="unsplit_csv")
+    return outcome
+
+
+def _year_or_identifier(value: object) -> str:
+    """Name a header cell, giving years a name a person would choose.
+
+    `_normalize_header_to_identifier` turns `2018.0` into `col_2018_0` and
+    `2017` into `col_2017` — two spellings of the same idea, and neither is
+    what the column holds. A year axis is common enough in these tables to be
+    worth naming properly: `anio_2018`, which reads as a year and sorts as one.
+    """
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    if raw.isdigit() and 1900 <= int(raw) <= 2100:
+        return f"anio_{raw}"
+    return _normalize_header_to_identifier(value)
+
+
+def propose_smeared_title_rename(
+    old_cols: list[str],
+    sample_rows_data: list[tuple],
+    *,
+    min_cols: int = 3,
+    min_common_prefix_len: int = 20,
+    min_alpha_cells: int = 2,
+) -> tuple[list[str], int, str]:
+    """Recover a header that pandas smeared across the columns.
+
+    The sibling of `propose_title_as_columns_rename`, and a different shape.
+    That one expects a separator row: the title became the header, row 0 is
+    blank, and the real header waits in row 1. This one has **no separator** —
+    the title became the header and the real header is row 0 itself.
+
+    Measured in production on 2026-08-23: **116 servable tables** carry this,
+    holding 291,436 rows, and they are not obscure —
+    `caba__acceso_de_mujeres_a_la_salud`,
+    `caba__casos_penales_contravencionales_violencia`,
+    `caba__educacion_sexual_integral`. Their columns read
+    `['DEFUNCIONES MATERNAS (ocurridas durante el embarazo o dentro de',
+      '... dentro _2', '... dentro _3', ...]` while row 0 holds
+    `['DEFUNCIONES MATERNAS', '2017', '2018.0', '2019.0', ...]`.
+
+    **Three columns is enough.** The May heuristic requires thirty before it
+    will act, on the reasoning that a wide table is where this happens. These
+    are eight columns wide and just as unusable, and the width was never what
+    made the defect.
+
+    The prefix must be a phrase rather than a word: `fecha_inicio` and
+    `fecha_fin` share seven characters and are both real names.
+    """
+    n_cols = len(old_cols)
+    if n_cols < min_cols:
+        return old_cols, 0, "too_few_cols"
+    if not sample_rows_data:
+        return old_cols, 0, "not_enough_sample_rows"
+
+    business_cols = [c for c in old_cols if not c.startswith("_")]
+    if len(business_cols) < min_cols:
+        return old_cols, 0, "too_few_business_cols"
+    if len(_common_prefix(business_cols)) < min_common_prefix_len:
+        return old_cols, 0, "no_common_prefix"
+
+    row0 = sample_rows_data[0]
+    alpha = sum(1 for v in row0 if v is not None and _ASCII_ALPHA_RE.search(str(v)))
+
+    # The shape these tables actually have: one label column and a column per
+    # year. Only the first cell carries letters, so a plain alpha count reads
+    # `['DEFUNCIONES MATERNAS', '2017', '2018.0', …]` as data and refuses a real
+    # header. `_looks_like_year_header_row` already knows this row when it sees
+    # it — it was written for the same family of statistical tables.
+    from app.application.pipeline.parsers.header_recovery import (
+        _looks_like_year_header_row,
+    )
+
+    as_str = [("" if v is None else str(v)) for v in row0]
+    year_axis = _looks_like_year_header_row(as_str)
+
+    if not year_axis:
+        # That detector needs three numeric cells, which a narrow table does not
+        # have: `['Departamento', '2020', '2021']` has two. Loosening the shared
+        # threshold would change the parser's behaviour for everyone, so the
+        # weaker evidence is judged here instead — and it has to be stronger to
+        # compensate: *every* numeric cell must be a year, not most of them.
+        nums = [
+            v.strip().rstrip("0").rstrip(".") if v.strip().endswith(".0") else v.strip()
+            for v in as_str
+            if v.strip()
+        ]
+        numeric = [v for v in nums if v.replace(",", "").isdigit()]
+        years = [v for v in numeric if 1900 <= int(v.replace(",", "")) <= 2100]
+        year_axis = len(numeric) >= 2 and len(years) == len(numeric) and alpha >= 1
+
+    if alpha < min_alpha_cells and not year_axis:
+        # A row of plain numbers is data, not a header. Promoting it would name
+        # the columns after one observation and lose that row.
+        return old_cols, 0, "row0_not_header_like"
+
+    filled = sum(1 for v in row0 if v is not None and str(v).strip())
+    if filled < n_cols * 0.5:
+        return old_cols, 0, "row0_too_sparse"
+
+    new_cols: list[str] = []
+    for i, (old, hdr_val) in enumerate(zip(old_cols, row0)):
+        if old.startswith("_"):
+            # Collector lineage columns are ours and keep their names.
+            new_cols.append(old)
+            continue
+        new = _year_or_identifier(hdr_val)
+        if not new:
+            new = f"col_{i + 1}"
+        new_cols.append(new)
+    new_cols = _dedupe_identifiers(new_cols)
+
+    if new_cols == old_cols:
+        return old_cols, 0, "no_renames_needed"
+    renamed = sum(1 for a, b in zip(old_cols, new_cols) if a != b)
+    return new_cols, renamed, "ok"
+
+
+def repair_smeared_title_table(
+    engine: Engine,
+    *,
+    table_schema: str,
+    table_name: str,
+    run_id: uuid.UUID | None = None,
+    sample_rows: int = 5,
+    dry_run: bool = True,
+) -> RepairOutcome:
+    """Rename the columns of a smeared-title table and drop the header row.
+
+    The header lived in row 0, so promoting it to the column names leaves that
+    row behind as a duplicate of the header — it goes with the rename, in the
+    same transaction. A rename that succeeded while the delete failed would
+    leave `anio_2018` holding the literal string `2018`.
+
+    Same verification gate as its siblings, and for the same reason: this reads
+    a header out of the data, and a misread produces confident, plausible names
+    for the wrong columns.
+    """
+    run_id = run_id or uuid.uuid4()
+    outcome = RepairOutcome(
+        table_schema=table_schema, table_name=table_name, ok=False, dry_run=dry_run
+    )
+
+    with engine.connect() as conn:
+        old_cols = [
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = :s AND table_name = :t ORDER BY ordinal_position"
+                ),
+                {"s": table_schema, "t": table_name},
+            ).fetchall()
+        ]
+    outcome.old_columns = old_cols
+    if not old_cols:
+        outcome.reason = "table_not_found_or_no_columns"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="smeared_title")
+        return outcome
+
+    qident_table = f"{_quote_ident(table_schema)}.{_quote_ident(table_name)}"
+    select_cols = ", ".join(_quote_ident(c) for c in old_cols)
+    with engine.connect() as conn:
+        sample = [
+            # `propose_smeared_title_rename` types rows as tuples and only
+            # indexes them, so this costs nothing and keeps the types honest.
+            tuple(r)
+            for r in conn.execute(
+                text(f"SELECT {select_cols} FROM {qident_table} LIMIT :n"),  # noqa: S608
+                {"n": sample_rows},
+            ).fetchall()
+        ]
+
+    proposed_cols, renamed, reason = propose_smeared_title_rename(old_cols, sample)
+    outcome.new_columns = proposed_cols
+    if reason != "ok":
+        outcome.reason = reason
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="smeared_title")
+        return outcome
+
+    verdict = verify_intrinsic(current_names=old_cols, proposed_names=proposed_cols)
+    if not verdict.accepted:
+        outcome.reason = f"verification_refused:{verdict.reason}"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="smeared_title")
+        return outcome
+
+    if dry_run:
+        outcome.ok = True
+        outcome.reason = "dry_run_proposal"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="dry_run", phase="smeared_title")
+        return outcome
+
+    try:
+        with engine.begin() as conn:
+            for old, new in zip(old_cols, proposed_cols):
+                if old != new:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {qident_table} "
+                            f"RENAME COLUMN {_quote_ident(old)} TO {_quote_ident(new)}"
+                        )
+                    )
+            # The header row, now redundant. In the same transaction as the
+            # rename: a rename that landed without the delete would leave
+            # `anio_2018` holding the literal string `2018`.
+            conn.execute(
+                text(
+                    f"DELETE FROM {qident_table} WHERE ctid IN "  # noqa: S608
+                    f"(SELECT ctid FROM {qident_table} ORDER BY ctid LIMIT 1)"
+                )
+            )
+        outcome.rows_deleted = 1
+        outcome.ok = True
+        outcome.reason = "applied"
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="smeared_title")
+        logger.info(
+            "parse_repair (smeared_title): %s.%s renamed %d cols",
+            table_schema,
+            table_name,
+            renamed,
+        )
+    except Exception as exc:
+        outcome.reason = f"apply_failed:{str(exc)[:120]}"
+        outcome.error_message = str(exc)[:500]
+        _audit(engine, run_id=run_id, outcome=outcome, operation="apply", phase="smeared_title")
+        logger.warning("smeared_title repair failed for %s", table_name, exc_info=True)
+    return outcome

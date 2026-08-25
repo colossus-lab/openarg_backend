@@ -16,6 +16,21 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _registry_is_healthy(monkeypatch):
+    """These tests exercise the sweep's logic, not its precondition.
+
+    `_require_registry` reads the live `raw.cached_datasets` before a sweep may
+    delete anything, which a mocked engine cannot answer — and answering it with
+    a mock would test the mock. The guard has its own tests against a real
+    Postgres in `tests/integration/test_sweeps_fail_closed.py`, including one
+    that asserts every sweep calls it.
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
+
+
 class _FakeRow:
     def __init__(self, table_name: str, version: int = 1) -> None:
         self.resource_identity = f"portal::{table_name}"
@@ -214,3 +229,54 @@ def test_empty_result_returns_zero_summary():
     assert result["candidates"] == 0
     assert result["dropped"] == 0
     write_conn.execute.assert_not_called()
+
+
+def test_live_tables_holding_data_are_out_of_scope():
+    """A live version with rows is not a leftover, and must not be a candidate.
+
+    The task used the absence of a `cached_datasets` row as its definition of
+    "abandoned". That holds when a reprocess moves a dataset to a new physical
+    name — but the row is equally absent when the *dataset* disappears from the
+    catalog, which happens every time a portal regenerates its source_ids.
+
+    Measured on staging 2026-08-21, immediately after `raw.cached_datasets` was
+    restored: 700 candidates, of which 652 were live and held 99.2M rows between
+    them — orphaned only because their `datasets` row had been re-keyed
+    upstream. With the guard the same query returns 91.
+
+    The engine is mocked in this suite, so what is pinned here is the contract:
+    superseded versions stay in scope, empty live ones stay in scope, and a live
+    table with rows is excluded before it ever reaches the drop loop.
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    source = ops_fixes.cleanup_raw_orphans.__wrapped__.__code__.co_consts
+    sql = next(
+        (c for c in source if isinstance(c, str) and "raw_table_versions rtv" in c),
+        None,
+    )
+    assert sql is not None, "candidate SELECT not found"
+    assert "rtv.superseded_at IS NOT NULL" in sql
+    assert "reltuples" in sql
+
+
+def test_views_are_never_drop_candidates():
+    """`information_schema.tables` lists views, and `DROP TABLE` on one fails
+    with WrongObjectType.
+
+    Production carries 13 views named `cache_*` in the `raw` schema. The sweep
+    orders oldest-first and caps at ten, so it selected the same ten views on
+    every run, failed on all of them, and never reached a real orphan behind
+    them — which is why production recorded no drop at all between 2026-05-20
+    and 2026-08-22. Verified against production: the candidate query returns 11
+    without the filter and 1 with it.
+
+    The failure was invisible for three months because the task reports
+    `{'dropped': 0, 'failed': 10}` and succeeds.
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    source = ops_fixes.cleanup_raw_orphans.__wrapped__.__code__.co_consts
+    sql = next((c for c in source if isinstance(c, str) and "information_schema.tables" in c), None)
+    assert sql is not None, "candidate SELECT not found"
+    assert "BASE TABLE" in sql, "the candidate query must exclude views"

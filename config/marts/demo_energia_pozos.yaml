@@ -81,3 +81,10 @@ refresh:
   # Sin unique_index: las combinaciones (anio, mes, empresa, provincia)
   # no son únicas en la fuente (mismas claves con sub-grupos distintos).
   # Aceptamos REFRESH no concurrente para este demo.
+
+expectations:
+  # Las columnas que identifican una fila. Convierte "estas filas se
+  # repiten" —que es una sospecha— en una afirmación verificable. Vivía
+  # en tests/integration/test_mart_invariants.py, donde sólo corría contra
+  # una base con marts construidos y nadie la corría.
+  business_key: [anio, mes, empresa, provincia]

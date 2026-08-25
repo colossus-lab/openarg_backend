@@ -46,7 +46,7 @@ canonical_columns:
     type: text
     description: Fecha de la observación (mensual)
   - name: monto
-    type: text
+    type: numeric
     description: Monto FOB (exportaciones) o CIF (importaciones) en millones de USD. Texto por compatibilidad con decimales argentinos.
 
 sql: |
@@ -57,7 +57,7 @@ sql: |
   SELECT 'exportacion'::text AS flujo, 'clae2'::text AS tipo_clasificador,
          NULLIF(TRIM(clae2::text), '') AS clasificador,
          NULLIF(TRIM(fecha::text), '') AS fecha,
-         NULLIF(TRIM(total_fob::text), '') AS monto
+         {{ to_numeric('total_fob') }} AS monto
   FROM {{ live_tables_by_table_pattern(
       '*exportaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'clae2', 'total_fob'], require_all_columns=True
@@ -67,7 +67,7 @@ sql: |
   SELECT 'exportacion', 'clae3',
          NULLIF(TRIM(clae3::text), ''),
          NULLIF(TRIM(fecha::text), ''),
-         NULLIF(TRIM(total_fob::text), '')
+         {{ to_numeric('total_fob') }}
   FROM {{ live_tables_by_table_pattern(
       '*exportaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'clae3', 'total_fob'], require_all_columns=True
@@ -77,7 +77,7 @@ sql: |
   SELECT 'exportacion', 'clae6',
          NULLIF(TRIM(clae6::text), ''),
          NULLIF(TRIM(fecha::text), ''),
-         NULLIF(TRIM(total_fob::text), '')
+         {{ to_numeric('total_fob') }}
   FROM {{ live_tables_by_table_pattern(
       '*exportaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'clae6', 'total_fob'], require_all_columns=True
@@ -87,7 +87,7 @@ sql: |
   SELECT 'exportacion', 'letra',
          NULLIF(TRIM(letra::text), ''),
          NULLIF(TRIM(fecha::text), ''),
-         NULLIF(TRIM(total_fob::text), '')
+         {{ to_numeric('total_fob') }}
   FROM {{ live_tables_by_table_pattern(
       '*exportaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'letra', 'total_fob'], require_all_columns=True
@@ -98,7 +98,7 @@ sql: |
   SELECT 'importacion', 'clae2',
          NULLIF(TRIM(clae2::text), ''),
          NULLIF(TRIM(fecha::text), ''),
-         NULLIF(TRIM(total_cif::text), '')
+         {{ to_numeric('total_cif') }}
   FROM {{ live_tables_by_table_pattern(
       '*importaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'clae2', 'total_cif'], require_all_columns=True
@@ -108,7 +108,7 @@ sql: |
   SELECT 'importacion', 'clae3',
          NULLIF(TRIM(clae3::text), ''),
          NULLIF(TRIM(fecha::text), ''),
-         NULLIF(TRIM(total_cif::text), '')
+         {{ to_numeric('total_cif') }}
   FROM {{ live_tables_by_table_pattern(
       '*importaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'clae3', 'total_cif'], require_all_columns=True
@@ -118,7 +118,7 @@ sql: |
   SELECT 'importacion', 'clae6',
          NULLIF(TRIM(clae6::text), ''),
          NULLIF(TRIM(fecha::text), ''),
-         NULLIF(TRIM(total_cif::text), '')
+         {{ to_numeric('total_cif') }}
   FROM {{ live_tables_by_table_pattern(
       '*importaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'clae6', 'total_cif'], require_all_columns=True
@@ -128,7 +128,7 @@ sql: |
   SELECT 'importacion', 'letra',
          NULLIF(TRIM(letra::text), ''),
          NULLIF(TRIM(fecha::text), ''),
-         NULLIF(TRIM(total_cif::text), '')
+         {{ to_numeric('total_cif') }}
   FROM {{ live_tables_by_table_pattern(
       '*importaciones_de_bienes_valores_y_can*',
       expected_columns=['fecha', 'letra', 'total_cif'], require_all_columns=True

@@ -170,6 +170,84 @@ def _compute_mart_embedding(payload_text: str) -> list[float] | None:
         return None
 
 
+def _source_data_span(engine, mart_sql: str) -> tuple[object, object]:
+    """How old were the tables this mart just read?
+
+    Taken at build time because that is the only moment the link exists: once
+    the mart is a matview, nothing records which tables produced it. Returns
+    `(oldest, newest)` from the registry, or `(None, None)` when the mart reads
+    no macro-resolved table or the lookup fails.
+
+    Never raises. A mart must not fail to build because its freshness could not
+    be measured — that would trade a working mart for a label.
+    """
+    try:
+        from app.application.marts.sql_macros import resolved_source_tables
+
+        pairs = resolved_source_tables(mart_sql, engine)
+        if not pairs:
+            return (None, None)
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT min(created_at) AS oldest, max(created_at) AS newest
+                    FROM public.raw_table_versions
+                    WHERE superseded_at IS NULL AND table_name = ANY(:names)
+                    """
+                ),
+                {"names": [t for _, t in pairs]},
+            ).fetchone()
+            conn.rollback()
+        return (row.oldest, row.newest) if row else (None, None)
+    except Exception:
+        logger.debug("could not measure source data span", exc_info=True)
+        return (None, None)
+
+
+def _upsert_sample_queries(engine, mart: Mart) -> int:
+    """Persist the mart's sample questions so the router can earn its boost.
+
+    A mart gets +0.17 when any of its samples sits within cosine 0.45 of the
+    user's question, and a mart with no samples can never earn it. Measured in
+    production on 2026-08-23: nine marts had none, and they were the largest —
+    `sociedades_registro_nacional` at 5.9M rows, `inscripciones_iniciales_autos`
+    at 4.3M, `delitos_caba` at 2.8M. The biggest marts were the ones the router
+    was least able to find.
+
+    Samples were populated once by a hand-run script, which is why marts added
+    afterwards have none: nothing in the build path knew about them. Reading
+    them from the YAML at build time is what makes that impossible to repeat.
+
+    Never raises. An embedding outage must not fail a mart build — the samples
+    simply are not refreshed this round, and the mart keeps whatever it had.
+    """
+    if not mart.sample_queries:
+        return 0
+    written = 0
+    try:
+        for sample in mart.sample_queries:
+            emb = _compute_mart_embedding(sample)
+            if emb is None:
+                continue
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO public.mart_sample_queries (mart_id, sample_text, embedding)
+                        VALUES (:mid, :st, CAST(:emb AS vector))
+                        ON CONFLICT (mart_id, sample_text) DO UPDATE
+                        SET embedding = EXCLUDED.embedding, created_at = NOW()
+                        """
+                    ),
+                    {"mid": mart.id, "st": sample, "emb": "[" + ",".join(map(str, emb)) + "]"},
+                )
+            written += 1
+    except Exception:
+        logger.warning("could not upsert sample queries for %s", mart.id, exc_info=True)
+    return written
+
+
 def _upsert_mart_definition(
     engine,
     mart: Mart,
@@ -260,6 +338,11 @@ def _upsert_mart_definition(
         if embedding_vec is not None
         else None
     )
+    # `mart.sql`, not `resolved_sql`. The resolved form has already had its
+    # macros replaced by concrete table names, so asking it which macros it
+    # contains returns nothing and every mart would report an unknown age.
+    sd_oldest, sd_newest = _source_data_span(engine, mart.sql)
+
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -270,14 +353,16 @@ def _upsert_mart_definition(
                     refresh_policy, unique_index_columns,
                     last_refreshed_at, last_refresh_status, last_refresh_error,
                     last_row_count, yaml_version, embedding, updated_at,
-                    serving_blocked, serving_blocked_reason
+                    serving_blocked, serving_blocked_reason,
+                    source_data_oldest, source_data_newest
                 ) VALUES (
                     :id, :sch, :vn, :desc, :dom,
                     CAST(:portals AS text[]), :sql, CAST(:canonical AS jsonb),
                     :rp, CAST(:uniq AS text[]),
                     NOW(), :st, :err,
                     :lrc, :yv, CAST(:emb AS vector), NOW(),
-                    :sblocked, :sreason
+                    :sblocked, :sreason,
+                    :sd_old, :sd_new
                 )
                 ON CONFLICT (mart_id) DO UPDATE SET
                     mart_schema = EXCLUDED.mart_schema,
@@ -298,6 +383,14 @@ def _upsert_mart_definition(
                     embedding = COALESCE(EXCLUDED.embedding, mart_definitions.embedding),
                     serving_blocked = EXCLUDED.serving_blocked,
                     serving_blocked_reason = EXCLUDED.serving_blocked_reason,
+                    -- COALESCE, not overwrite: a refresh that could not measure
+                    -- its sources must leave the last known date standing
+                    -- rather than blank it. A missing date makes the answer
+                    -- silent about age, which is the state this replaced.
+                    source_data_oldest = COALESCE(EXCLUDED.source_data_oldest,
+                                                  mart_definitions.source_data_oldest),
+                    source_data_newest = COALESCE(EXCLUDED.source_data_newest,
+                                                  mart_definitions.source_data_newest),
                     updated_at = NOW()
                 """
             ),
@@ -315,6 +408,8 @@ def _upsert_mart_definition(
                 "st": status,
                 "err": error,
                 "lrc": last_row_count,
+                "sd_old": sd_oldest,
+                "sd_new": sd_newest,
                 "yv": mart.version,
                 "emb": embedding_literal,
                 "sblocked": mart.serving_blocked,
@@ -433,6 +528,28 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
                 status="built",
                 last_row_count=row_count,
                 resolved_sql=resolved_sql,
+            )
+            _upsert_sample_queries(engine, mart)
+            # History, so that "this mart collapsed" becomes provable. The
+            # current row count alone cannot tell a mart that was always small
+            # from one that just lost its rows.
+            from app.application.quality.expectations import record_build
+
+            # Read back rather than recompute: the upsert just measured the
+            # source span, and asking it again would be a second answer to a
+            # question already answered.
+            with engine.connect() as _c:
+                _sd = _c.execute(
+                    text("SELECT source_data_oldest FROM mart_definitions WHERE mart_id = :m"),
+                    {"m": mart_id},
+                ).scalar()
+                _c.rollback()
+            record_build(
+                engine,
+                mart_id=mart_id,
+                status="built",
+                row_count=row_count,
+                source_data_oldest=_sd,
             )
             invalidate_query_plan_cache(
                 engine,
@@ -770,3 +887,160 @@ def backfill_mart_embeddings(
         "updated": updated,
         "failed": failed,
     }
+
+
+@celery_app.task(
+    name="openarg.backfill_mart_source_ages",
+    bind=True,
+    soft_time_limit=900,
+    time_limit=1200,
+)
+def backfill_mart_source_ages(self, *, dry_run: bool = True) -> dict[str, object]:
+    """Fill in `source_data_oldest/newest` without rebuilding anything.
+
+    The span is recorded at build time, so on the deploy that introduced it
+    every existing mart reads as unknown age and the chat stays silent about
+    marts until each one happens to rebuild — 69 of them, on their own
+    schedules. That is a long time for a feature to be invisible.
+
+    Nothing here touches a matview. The span comes from resolving the mart's
+    macros against the registry and reading `created_at`, which is a read-only
+    question about tables that already exist.
+    """
+    engine = get_sync_engine()
+    marts_dir = _DEFAULT_MARTS_DIR
+    if not marts_dir.exists() or not marts_dir.is_dir():
+        logger.warning("marts dir missing: %s", marts_dir)
+        return {"dry_run": dry_run, "filled": 0, "reason": "marts_dir_missing"}
+
+    filled = 0
+    unknown: list[str] = []
+    for mart in load_all_marts(marts_dir):
+        oldest, newest = _source_data_span(engine, mart.sql)
+        if oldest is None:
+            # A mart whose macros resolve to nothing has no age to report, and
+            # saying so beats writing a date it did not measure.
+            unknown.append(mart.id)
+            continue
+        filled += 1
+        if dry_run:
+            continue
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE mart_definitions
+                       SET source_data_oldest = :o, source_data_newest = :n
+                     WHERE mart_id = :m
+                    """
+                ),
+                {"o": oldest, "n": newest, "m": mart.id},
+            )
+
+    result = {
+        "dry_run": dry_run,
+        "filled": filled,
+        "unknown": len(unknown),
+        "unknown_samples": unknown[:5],
+    }
+    logger.info("mart source age backfill: %s", result)
+    return result
+
+
+# A mart that fails or empties stays that way until something rebuilds it, and
+# nothing did. Both degraded marts found in production on 2026-08-23 —
+# `staff_estado` at `build_failed` for weeks, `pobreza_indec_aglomerados` at
+# zero rows since the 15th — were fixed by a plain rebuild. Their sources had
+# been fine the whole time; what was missing was the retry.
+_DEGRADED_MARTS_SQL = text(
+    """
+    SELECT mart_id, last_refresh_status, COALESCE(last_row_count, 0) AS rows
+    FROM mart_definitions
+    WHERE (
+            last_refresh_status = 'build_failed'
+            OR (COALESCE(last_row_count, 0) = 0
+                AND last_refresh_status IN ('built', 'refreshed'))
+          )
+      AND NOT COALESCE(serving_blocked, FALSE)
+      -- Not one that was just attempted. Without this a mart that fails fast
+      -- would be rebuilt on every pass, and a broken mart would cost more than
+      -- a working one.
+      AND (last_refreshed_at IS NULL
+           OR last_refreshed_at < now() - make_interval(hours => :min_age_hours))
+    -- Oldest attempt first, so a permanently broken mart cannot starve the
+    -- others by always sitting at the front of the queue.
+    ORDER BY last_refreshed_at NULLS FIRST
+    LIMIT :limit
+    """
+)
+
+
+@celery_app.task(
+    name="openarg.retry_degraded_marts",
+    bind=True,
+    soft_time_limit=2400,
+    time_limit=3000,
+)
+def retry_degraded_marts(
+    self, *, limit: int = 10, min_age_hours: int = 6, dry_run: bool = True
+) -> dict[str, object]:
+    """Rebuild marts that are failing or empty.
+
+    Bounded per run, because a rebuild is expensive and a systemic problem would
+    otherwise turn one sweep into an hours-long queue. A mart this cannot fix
+    stays in the list and gets alerted about — the retry is meant to absorb the
+    ordinary case, not to hide a real failure by grinding at it.
+
+    Reports what changed, including the marts it rebuilt and that stayed broken,
+    which is the number that says whether retrying is worth its cost.
+    """
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            _DEGRADED_MARTS_SQL, {"limit": limit, "min_age_hours": min_age_hours}
+        ).fetchall()
+        conn.rollback()
+
+    recovered: list[str] = []
+    still_broken: list[str] = []
+    for row in rows:
+        mid = str(row.mart_id)
+        if dry_run:
+            continue
+        try:
+            build_mart(mid)
+        except Exception:
+            # One mart must not cost the batch; it stays in the list and the
+            # alert channel reports it.
+            logger.warning("retry_degraded_marts: %s raised", mid, exc_info=True)
+            still_broken.append(mid)
+            continue
+        with engine.connect() as conn:
+            after = conn.execute(
+                text(
+                    """
+                    SELECT last_refresh_status AS st, COALESCE(last_row_count, 0) AS rows
+                    FROM mart_definitions WHERE mart_id = :m
+                    """
+                ),
+                {"m": mid},
+            ).fetchone()
+            conn.rollback()
+        # Recovered means it now holds rows. A rebuild that succeeds into zero
+        # rows has not recovered anything, and counting it as a win is how a
+        # retry sweep reports success while the mart stays invisible.
+        if after and after.st in ("built", "refreshed") and after.rows > 0:
+            recovered.append(mid)
+        else:
+            still_broken.append(mid)
+
+    result = {
+        "dry_run": dry_run,
+        "candidates": len(rows),
+        "recovered": len(recovered),
+        "still_broken": len(still_broken),
+        "samples_recovered": recovered[:5],
+        "samples_still_broken": still_broken[:5],
+    }
+    logger.info("retry degraded marts: %s", result)
+    return result

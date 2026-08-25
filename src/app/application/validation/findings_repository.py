@@ -64,6 +64,30 @@ def persist_findings(
     ]
     if not rows:
         return 0
+
+    # A finding with no resource cannot live in a table keyed on one. Dropping
+    # it here rather than letting the INSERT reject it matters because the write
+    # below is a single `executemany`: one unattachable row aborts the whole
+    # transaction and takes **every valid finding in the batch with it**. That
+    # was firing 78,840 times a day in production — 78,840 stack traces, and an
+    # unknown number of real findings silently discarded alongside them.
+    #
+    # `missing_download_url` on a dataset with no resources is the usual source:
+    # the detector is right that something is wrong, and there is simply nowhere
+    # to hang the answer.
+    attachable = [r for r in rows if r["resource_id"]]
+    huerfanos = len(rows) - len(attachable)
+    if huerfanos:
+        # Once per batch with a count, not once per row.
+        logger.warning(
+            "%d finding(s) sin resource_id, no se pueden guardar (detectores: %s)",
+            huerfanos,
+            sorted({r["detector_name"] for r in rows if not r["resource_id"]}),
+        )
+    rows = attachable
+    if not rows:
+        return 0
+
     try:
         # Single executemany — SQLAlchemy batches the parameter list into
         # one INSERT ... VALUES roundtrip rather than N. DEBT-013-002.

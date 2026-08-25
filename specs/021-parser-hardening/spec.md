@@ -308,3 +308,111 @@ same window)**
   - `cleanup_orphan`: 785
   - `title_as_columns`: 26 (13 dry_run + 13 apply, all PAMI)
   - **Total**: 5,858 audit ops.
+
+---
+
+## Round 2 — 2026-08-23
+
+### R2.1 Repair and status never met
+
+`parse_repair.py` has held fixes for these shapes since May and applied them
+thousands of times — **always because a person went to an admin route and asked.**
+A table could be fixed and its resource would stay `error` forever, because
+nothing looked again. 546 sat like that, every one with its table intact on disk.
+
+`rescue_rejected_resources` closes the loop: repair with the existing tiers, ask
+whether the names are clean, and only then promote.
+
+**Promotion is gated on the answer, not the attempt.** A repair that ran and
+changed nothing must leave the resource rejected; flipping it to `ready` for
+having tried would serve `col_3` to someone asking about poverty.
+
+### R2.2 The gate let through what it was built to stop
+
+`is_garbage_column` knows `col_3`, `Unnamed:` and URLs. It does not know the
+shape most rejected tables actually have: a title row read as a header, so every
+column is the same sentence with `_2`, `_3` glued on.
+
+The first run promoted a table whose columns were `['Conformación Cartográfica
+de Localidades Censales 2008 por De', '… por _2', …]`. **A gate that passes what
+it was built to stop is worse than no gate, because it launders the result.**
+
+Detection is by **longest common prefix**, not identical stems: Postgres
+truncates identifiers at 63 bytes, so the first column often ends mid-word while
+its siblings end in `_N`, and the stems never match.
+
+**The same blind spot lived in a second place, and that is why the detector is
+shared.** `verify_intrinsic` measures "garbage before" with `is_garbage_column`,
+which judges one name at a time — and every column of a smeared title is a
+perfectly ordinary string on its own. The ratio came out zero, so the verifier
+refused every proposal to repair one: **143 of 147 valid proposals** were turned
+away on the grounds that nothing was wrong with the current names.
+
+`is_smeared_title` now lives beside `is_garbage_column` in
+`column_normalization.py`. It cannot live *inside* it: that one judges a name,
+this one judges a set. Because it belonged to neither, it was invisible in both.
+
+### R2.3 A sibling repair, and the `.0` that hid a family of tables
+
+`propose_title_as_columns_rename` expects a separator row: title as header, row 0
+blank, real header in row 1. The shape found on 2026-08-23 has **no separator** —
+the real header is row 0 itself. 116 **servable** tables carry it, holding
+291,436 rows, and they are not obscure: `acceso_de_mujeres_a_la_salud`,
+`casos_penales_contravencionales_violencia`, `educacion_sexual_integral`.
+
+**Three columns is enough.** The May heuristic requires thirty on the reasoning
+that this happens in wide tables. These are eight wide and just as unusable; the
+width was never what caused the defect.
+
+**And a gap in shared code**: pandas reads a year column as float, so a header
+arrives as `2018.0` and `int()` refuses it. `['DEFUNCIONES MATERNAS', '2017',
+'2018.0']` was not recognised while the same row without decimals was. A whole
+family of statistical tables turned on that `.0`.
+
+Years are named `anio_2018`, not `col_2018_0` — two spellings of the same idea,
+neither saying what the column holds.
+
+For narrow tables the shared detector needs three numeric cells and
+`['Departamento','2020','2021']` has two. Rather than loosen a threshold that
+changes the parser for everyone, the weaker evidence is judged locally and is
+**stricter** to compensate: *every* numeric cell must be a year.
+
+### R2.4 Retrying what failed because of us
+
+`error_category` already separates our failures from the source's and nothing
+read it that way. 1,031 resources sat at `orchestration_recovery_loop` since
+2026-05-06.
+
+**The first run contradicted its own premise**: 2 succeeded, 147 failed again,
+134 at `placeholder_headers`. The files download; the parser cannot name their
+columns. `orchestration_recovery_loop` recorded *how* they died, not *why*.
+
+The sweep still earns its place, for a different reason than it was built for:
+it is self-limiting — a retry rewrites `error_category` to the real reason, and
+the real reasons are not retryable — and it converts an unusable label into a
+usable one. **A population nobody can characterise is a population nobody fixes.**
+
+### R2.5 Acceptance criteria for this round
+
+Spec 021 states its requirements as measured criteria rather than FRs, so these
+follow that form. Baseline measured 2026-08-23 before any of round 2 ran.
+
+| Metric | Baseline (2026-08-23) | Target | Status |
+|---|---|---|---|
+| Rejected resources whose table is intact and unrepaired | 546 | < 50 | sweep scheduled 06:50 |
+| Servable tables with a smeared title | 116 (291,436 rows) | 0 | sweep scheduled 06:30 |
+| Resources stuck at `orchestration_recovery_loop` | 1,031 | < 100 | 653 eligible; self-limiting |
+| A promoted resource with unusable column names | — | 0 always | gate + test |
+
+Three rules this round adds, stated as invariants because they are what the
+sweeps must never violate:
+
+- A repaired table's resource is promoted **only** when its column names pass
+  the cleanliness gate — never on the strength of a repair having run.
+- The cleanliness gate rejects a smeared title by longest common prefix,
+  independent of column count.
+- A header row promoted to column names is deleted in the same transaction as
+  the rename; a rename that landed without the delete would leave `anio_2018`
+  holding the literal string `2018`.
+- Only `error_category` values naming our own orchestration may be retried. The
+  source's refusals and our own correct policy decisions must not.

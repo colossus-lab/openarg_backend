@@ -3,7 +3,7 @@
 **Type**: Forward-engineered
 **Status**: Implemented 2026-05-04, hardened 2026-05-06 (Sprint Marts Overhaul), expanded 2026-05-09 (analytics-driven sprint).
 **Hexagonal scope**: Application (mart loader + builder + sql_macros) + Infrastructure (Celery tasks + adapter integration)
-**Sister specs**: [015-catalog-resources](../015-catalog-resources/spec.md), [016-serving-port](../016-serving-port/spec.md), [017-raw-layer](../017-raw-layer/spec.md). [018-contracts-staging](../018-contracts-staging/spec.md) is **deprecated**.
+**Sister specs**: [015-catalog-resources](../015-catalog-resources/spec.md), [016-serving-port](../016-serving-port/spec.md), [017-raw-layer](../017-raw-layer/spec.md), [022-mart-quality](../022-mart-quality/spec.md) (nightly audit + `serving_blocked`). [018-contracts-staging](../018-contracts-staging/spec.md) is **deprecated**.
 
 **Recent capability updates (2026-05-09, analytics-driven sprint)**:
 - **Macros now accept `require_all_columns=True` kwarg**: filters out tables that don't have ALL `expected_columns` before the cap check. Resolves the case where a broad pattern (e.g. `presupuesto_de_la_administracion_pu*`) matches hundreds of tables but only a small subset has the canonical FULL shape. Validation at parse time: `require_all_columns=True` requires `expected_columns` to be non-empty.
@@ -110,6 +110,94 @@ predictable and easy to validate.
 **Optional kwargs supported (2026-05-04 / 2026-05-09)**:
 - `expected_columns=['c1','c2',...]` — Schema-intersection projection. With 0 matches → typed-empty `(SELECT NULL::text AS c1, ... WHERE FALSE)`. With N matches and heterogeneous schemas → emits `SELECT "c1"::text AS "c1", ... FROM <each>` with NULL fallback for cols not in that table. Prevents `each UNION query must have the same number of columns` errors.
 - `require_all_columns=True` (2026-05-09) — Filters out tables that do NOT have ALL `expected_columns` before the cap check. Useful when a pattern matches many sub-shapes (e.g. fact + dimension tables in the same slug cluster) and only the FULL shape is desired. Requires `expected_columns` non-empty.
+- `source_marker='<col>'` (2026-08-24) — Each branch of the union additionally projects `'<schema>.<table>'::text AS "<col>"`, a literal naming the physical table the row came from. Required whenever a mart must **deduplicate by provenance**, because no ingest column can do it: `_source_dataset_id` identifies the CKAN *dataset*, and one dataset routinely publishes several resources into several tables. Measured on the DDJJ cluster — 3 of 7 source tables share one `_source_dataset_id`, so a dedup grouped on it merged them into a single group and passed every row through. Validated against `expected_columns` at parse time (a marker colliding with a projected column is an error), and included in the typed-empty fallback so a zero-match cluster still exposes the column.
+
+**Duplicate-source clusters.** A pattern matching a whole cluster can match
+the *same data more than once*: year-slice tables subsumed by a wider table
+(a 2022-2024 table plus a 2024-only table with identical `dj_id`s) and exact
+portal mirrors (`datos_gob_ar` re-publishing a `justicia` resource). Neither
+is visible from row counts alone and `UNION ALL` double-counts both.
+`SELECT DISTINCT` is **not** the remedy — on DDJJ it would have collapsed
+161.119 legitimately repeated line items in the largest table alone.
+
+**But sometimes it is exactly the remedy, and the deciding question is
+whether the source has a true natural key.** `delitos_argentina_snic` shipped
+in May unioning four overlapping SNIC resources with no dedup, and 348.933 of
+its 1.000.000 rows were exact copies — every crime count it served was
+inflated by about a third, on the joint most-asked topic in the corpus. There
+the key `(anio, departamento_id, cod_delito)` is genuinely unique: SNIC
+publishes one record per department, year and offence, so a second row with
+that triple can only be a copy, and it was — 0 duplicated keys carried
+conflicting values. `DISTINCT ON` with an explicit `ORDER BY` (without it the
+build is not reproducible) is correct there and wrong on DDJJ, where a
+declaration may legitimately list two identical assets. Ask what one row
+means before choosing. The
+pattern that works is per-entity source selection: group by
+`(<entity_key>, <source_marker>)`, keep the source with the most rows for
+that entity, break ties on the marker for reproducibility. See
+`config/marts/ddjj_patrimonio_declarado.yaml`.
+
+**Prefer a clean sibling resource over quoting corrupted column names.** A
+mart *can* quote broken names and alias them, and that is sometimes the only
+option — but check the rest of the cluster first. The national school registry
+publishes 19 resources of the same padrón; two of them arrived with a
+hierarchical header concatenated onto the first row of data, so their columns
+are named `<Group>_<Field>_<a data value>` truncated to Postgres's 63-byte
+identifier limit, and columns whose first cell was empty inherited the previous
+non-empty value — which put one school's contact detail inside 25 column names.
+The largest resource is one of the two. The other 17 are clean.
+`escuelas_padron_nacional` takes a clean one and gives up 85 rows of 64.691
+(0,13 %): quoting those names would have carried third-party contact data into
+a public repository and pushed it onto every consumer of the mart. **Measure
+the whole cluster before deciding a resource is the only one available** — the
+first version of this mart was written against the broken resource on the
+assumption that all 19 shared the defect, which a crude test
+(`len(name) > 40 or '@' in name`) appeared to confirm because it also flagged
+the healthy `Establecimiento - Localización_Jurisdicción`.
+
+**Uneven reporting coverage makes cross-entity comparison a trap, and the
+mart has to say so.** A mart can be complete, correct and additive and still
+mislead, because what the source *covers* varies by the dimension people most
+want to compare on. `egresos_hospitalarios_pba` counts discharges from
+establishments that report to the provincial system: in 2022, against
+`censo_poblacion_radios`, Malvinas Argentinas shows 319,5 discharges per
+thousand inhabitants and La Matanza 20,5 — fifteen times fewer, in the
+province's most populous municipality, because care there is largely
+municipal. Nothing about the data is wrong; ranking municipalities with it
+measures who reports to the province, not who is hospitalised. When coverage
+is uneven along a dimension, say which comparisons hold (over time within one
+entity, and province-wide aggregates) and which do not.
+
+**Snapshot clusters need one snapshot, not the union.** The same dataset
+published 19 resources under an identical title with 59.435-64.691 rows each:
+successive cuts of one registry, not different jurisdictions. Unioning them
+repeats the same schools nineteen times. Pick the resource the portal updated
+last, by identity.
+
+**Validate against an external ground truth before shipping a mart whose
+numbers people will trust.** Row counts, build status and `expectations`
+all measure internal consistency, and internal consistency is exactly what a
+partially-ingested source has. The Censo 2022 cluster
+(`Censo Nacional de Población, Hogares y Viviendas 2022`, 24 provincial tables,
+11,4 M rows) builds cleanly, reports a healthy count, and returns the *same*
+population figure from three different variables — while understating Córdoba
+Capital by 30 % (930.548 against 1.330.023) because the ingested file covers
+1.308 of the department's 2.069 radios. Seven provinces are worse: CABA
+retains 12 % of its rows, Mendoza 9 %, and Buenos Aires stopped at the
+1.000.000-row ingest cap with 43 of 76 variables. Nothing in the mart
+machinery can see any of this; only comparing a total to a published figure
+can. `censo_poblacion_radios` was therefore built from the census *radio
+geometry* resources instead, which reproduce all four official national totals
+to 99,4-100,0 % — and the long-format cluster was left unserved rather than
+served wrong. **A mart that is confidently and consistently low is more
+dangerous than one that fails to build.**
+
+**Identifier truncation is a pattern hazard.** Postgres truncates identifiers
+at 63 bytes, so a slug-derived table name can lose its tail: three DDJJ tables
+are named `..._patrimonia_<hash>` rather than `..._patrimoniales_<hash>`. A
+pattern spelling the full word silently matched 4 of 7 tables and the mart
+built `success` with 60 % of its data. Patterns over long slugs should stop
+short of the truncation boundary.
 
 When a macro resolves to **zero rows**, the placeholder is
 `(SELECT NULL::text AS dummy WHERE FALSE)` — a deterministic empty
@@ -193,8 +281,8 @@ when no curated mart has data. `_get_mart_schema` resolves
 - **FR-007**: Macro resolution failures MUST surface as `MacroResolutionError` and mark the mart `build_failed`. The mart MUST NOT silently produce a wrong-shape view.
 - **FR-008**: `mart_id` MUST match `^[a-z][a-z0-9_]{0,62}$`. Any other charset is rejected at YAML load — defense against SQL injection if `mart.id` is ever interpolated unquoted.
 - **FR-009**: `sources.portals` MUST be non-empty. Empty portals means no raw landing triggers refresh — almost always a YAML mistake.
-- **FR-010**: Empty-resolution macros (zero matching live rows) MUST emit `(SELECT NULL::text AS dummy WHERE FALSE)` — valid in any SQL position.
-- **FR-011**: The Serving Port discovery MUST filter `last_row_count > 0` so the planner never sees empty marts.
+- **FR-010**: Empty-resolution macros (zero matching live rows) MUST emit an empty subquery valid in any SQL position. With `expected_columns` this is `(SELECT NULL::text AS "c1", … WHERE FALSE)` (`_typed_empty_select`), so the consuming mart still references a known schema and builds with 0 rows; without it, `(SELECT NULL AS dummy WHERE FALSE)`. *Corrected 2026-08-19 — the FR still described the pre-`expected_columns` behaviour that this spec's own 2026-05-06 changelog superseded.*
+- **FR-011**: Every mart discovery path MUST filter `COALESCE(last_row_count, 0) > 0 AND NOT COALESCE(serving_blocked, FALSE)` — the first hides empty marts, the second hides marts deliberately withheld (migration 0054). The block MUST also be enforced at execution time, since NL2SQL can name a blocked mart directly. See [022-mart-quality](../022-mart-quality/spec.md) FR-015/FR-016. *Corrected 2026-08-19 — the FR named only the first half of the filter.*
 
 ## 9. Success Criteria
 
@@ -239,3 +327,41 @@ when no curated mart has data. `_get_mart_schema` resolves
 - **DEBT-019-009 (CLOSED 2026-05-19, `delitos_caba` v0.1.2)**: la columna `franja` del mart era texto `"0"..."23"` y NL2SQL no podía traducir "horario nocturno" / "madrugada" / "tarde" a un rango. El YAML ahora documenta el formato + los 4 rangos canónicos (madrugada 0-5, mañana 6-11, tarde 12-19, nocturno 20-23 OR 0-5) y la receta de filtro con `CAST AS NUMERIC` + regex guard `^[0-9]+$`. Acompañado por un ejemplo en `nl2sql.txt` ("robos en horario nocturno → COUNT GROUP BY barrio"). Round v4.2 F3 ahora hit el mart y devuelve "Palermo 4.454, Balvanera 3.368, Flores 2.398" en lugar de 0 filas + deflección. Patrón aplicable a cualquier mart con columnas enum-como-texto-numérico.
 
 - **DEBT-019-010 (CLOSED 2026-05-16, `delitos_argentina_snic` v0.1.1)**: la descripción original del mart decía *"equivalente a nivel provincial vía agregación"* — verdadero para `cantidad_*` pero falso para `tasa_*` (las tasas por 100K hab son no-aditivas; sumar la tasa de cada departamento de una provincia da basura inflada). El YAML ahora distingue explícitamente las dos clases de columnas y desactiva la agregación equivocada — el LLM en v4.2 cambió `SUM(tasa_hechos)` por `SUM(cantidad_hechos)` correctamente. Acompañado por la regla `non-additive metrics` en `nl2sql.txt` y el flag `nonadditive_warning` que el analyst recibe (ver spec `001-query-pipeline`).
+
+---
+
+## Unificar fuentes cuyas columnas cambian de nombre entre años
+
+Escrito el 2026-08-24 al construir `pauta_oficial`, porque el patrón se va a
+repetir: es la forma normal de las series estadísticas argentinas, no una
+anomalía de esa fuente.
+
+Las 179 tablas de pauta oficial nombran los mismos tres campos de quince
+maneras: `MEDIO` / `medio` / `Medio`; `IMPORTE` / `Importe` / `importe` /
+`importe_pesos_ars` / `MONTO` / `Monto total`; `FECHA` / `fecha` / `Fecha` /
+`FECHA_PUBLICACION` / `FECHA-PUBLICACION`. No es que las fuentes sean
+descuidadas: cada año lo publica un equipo distinto.
+
+**La forma que funciona** es declarar *todas* las variantes en
+`expected_columns` de un solo macro y unirlas con `COALESCE`. El macro emite
+`NULL::text` para la columna que una tabla no tiene, así que la unión mantiene
+su forma y `COALESCE` se queda con la que exista:
+
+```sql
+COALESCE("MEDIO", "medio", "Medio")::text AS medio
+```
+
+Una rama de UNION por variante también funciona y envejece peor: cada año nuevo
+agrega una rama, y la n-ésima se olvida.
+
+**Lo que esta forma no resuelve**: una fuente con otra *estructura*, no otro
+nombre. Ciudad de Mendoza publica su pauta como tabla cruzada por mes —las
+columnas son `ENERO / DIARIOS DIGITALES`, `FEBRERO / …`— y eso necesita un
+unpivot. Quedó fuera del mart y dicho en su descripción: declarar una fuente que
+aporta cero filas es reclamar una cobertura que no existe.
+
+**Y el importe casi nunca es un número.** El formato argentino `1.234.567,89`
+usa el punto como separador de miles, así que un `::numeric` crudo falla sobre
+buena parte de las filas. El `CASE` que discrimina los tres encodings ya se
+escribió dos veces —`delitos_caba` y ahora éste—; la tercera vez conviene que
+sea una macro.

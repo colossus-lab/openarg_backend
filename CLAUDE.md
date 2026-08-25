@@ -173,6 +173,7 @@ s3_tasks → s3 queue (concurrency 2)
 | `mart_definitions` | Mart catalog with embedding (1024-dim Cohere). Drives mart routing. |
 | `mart_sample_queries` | Sample queries per mart for the gated +0.17 routing boost. |
 | `raw_table_versions` | Tracks live vs superseded `raw.<table>__<hash>__vN` per resource_identity. |
+| `raw_schema_snapshots` | Shape + `pg_stats` value profile of a table, captured immediately before any audited `DROP`. The only record of what a format looked like before it changed. |
 
 ### Application layer modules (worth knowing)
 

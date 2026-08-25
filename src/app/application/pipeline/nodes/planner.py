@@ -253,7 +253,7 @@ async def _top_mart_sample_sim(deps, q_embedding: list[float]) -> float:
                 row = conn.execute(
                     text(
                         "SELECT MAX(1 - (embedding <=> CAST(:e AS vector))) AS top_sim "
-                        "FROM mart_sample_queries WHERE embedding IS NOT NULL"
+                        "FROM public.mart_sample_queries WHERE embedding IS NOT NULL"
                     ),
                     {"e": embedding_str},
                 ).fetchone()
