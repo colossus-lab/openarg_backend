@@ -34,6 +34,7 @@ from app.application.pipeline.parsers import (
     is_garbage_column,
     promote_buried_headers,
 )
+from app.application.repair.value_grounding import reject_contradicted
 from app.application.repair.verify import verify_intrinsic
 
 logger = logging.getLogger(__name__)
@@ -1156,6 +1157,34 @@ async def repair_with_llm_assist(
 
     if reason != "applied":
         outcome.reason = reason
+        _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
+        return outcome
+
+    # Before the structural verifier: ask the values whether the names are true.
+    #
+    # `verify_intrinsic` checks that a proposal is identifier-like, distinct and
+    # less broken than what it replaces — shape, not meaning. The failure that
+    # actually happens is the semantically *adjacent* name: `latitud` on a
+    # longitude column, `fecha_fin` on a start date. Those are valid, distinct,
+    # correctly typed and completely wrong, so they pass every structural test
+    # there is. If a name claims the column holds CUITs, the check digits either
+    # work out or they do not — arithmetic, not judgement.
+    #
+    # A contradicted column keeps its old name and the rest of the proposal
+    # stands. Discarding a whole table over one wrong column throws away work
+    # that was right, and the table returns next run with the same odds.
+    proposed_cols, contradicciones = reject_contradicted(old_cols, proposed_cols, sample)
+    if contradicciones:
+        logger.warning(
+            "llm repair %s.%s: %d columna(s) refutadas por sus valores",
+            table_schema,
+            table_name,
+            len(contradicciones),
+        )
+    if proposed_cols == old_cols:
+        # Every rename it proposed was contradicted. Nothing left to apply.
+        outcome.new_columns = proposed_cols
+        outcome.reason = "value_grounding_refused_all"
         _audit(engine, run_id=run_id, outcome=outcome, operation="skip", phase="llm_assisted")
         return outcome
 

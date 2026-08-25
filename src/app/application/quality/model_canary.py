@@ -36,9 +36,12 @@ logger = logging.getLogger(__name__)
 # "cuit" and "identificador_fiscal" are both right, and pinning one exact string
 # would make this a test of the model's vocabulary rather than its competence.
 _FIXTURES: tuple[tuple[str, list[str], tuple[str, ...]], ...] = (
+    # Dígitos verificadores reales, no cadenas con forma de CUIT. Las primeras
+    # fixtures tenían el dígito mal y nadie lo notó hasta que
+    # `value_grounding` —que sí hace la aritmética— las refutó.
     (
         "col_1",
-        ["20-12345678-9", "27-98765432-1", "30-71234567-8", "23-45678901-2"],
+        ["20-12345678-6", "27-22222222-8", "30-71234567-1", "23-45678901-3"],
         ("cuit", "cuil", "fiscal", "identificador", "tributar"),
     ),
     (
