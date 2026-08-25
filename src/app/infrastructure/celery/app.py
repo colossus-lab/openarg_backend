@@ -115,6 +115,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.rescue_rejected",
             "app.infrastructure.celery.tasks.llm_repair_tasks",
             "app.infrastructure.celery.tasks.self_repair_tasks",
+            "app.infrastructure.celery.tasks.empty_content_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -200,6 +201,7 @@ def create_celery() -> Celery:
         # On `analyst` because the ladder's last rung is a model call, and the
         # `ingest` workers must not block on Bedrock latency.
         "openarg.repair_mart_sources": {"queue": "analyst"},
+        "openarg.find_empty_content_tables": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -582,6 +584,20 @@ def create_celery() -> Celery:
                 "task": "openarg.repair_unsplit_csv_tables",
                 "schedule": crontab(hour=4, minute=45),  # 04:45 ART, before the baseline
                 "kwargs": {"dry_run": False},
+                "options": {"queue": "ingest"},
+            },
+            "find-empty-content-weekly": {
+                # Tablas que tienen filas y no dicen nada — el padrón de
+                # Diputados pasó tres semanas así. Ninguna medida de vacío que
+                # teníamos lo veía: la tabla existía, las filas no eran cero,
+                # el estado era `ready` y el mart construía.
+                #
+                # Camina el corpus por ventanas; una pasada completa lleva
+                # varias semanas y eso está bien, porque el hallazgo no es
+                # urgente por hora sino invisible por meses.
+                "task": "openarg.find_empty_content_tables",
+                "schedule": crontab(hour=6, minute=20, day_of_week=2),  # martes 06:20 ART
+                "kwargs": {"limit": 3000},
                 "options": {"queue": "ingest"},
             },
             "repair-mart-sources-daily": {

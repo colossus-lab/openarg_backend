@@ -200,30 +200,10 @@ def _count(values: Any) -> dict[str, int]:
 
 
 def _model_if_it_answers() -> tuple[Any, str]:
-    """The model, but only if it can still name a column of CUITs.
+    """The canary gate, shared with the connectors that also map with a model."""
+    from app.infrastructure.celery.tasks._llm_gate import model_if_it_answers
 
-    Returns `(None, why)` when it cannot, and the caller carries on with the
-    heuristics. A degraded model produces confident, well-formed names for the
-    wrong columns — the failure that looks like success afterwards — so this is
-    the one gate that has to run before any model output is trusted.
-    """
-    import asyncio
-
-    try:
-        from app.application.quality.model_canary import run_canary
-        from app.application.repair.parse_repair import propose_llm_assisted_rename
-        from app.infrastructure.adapters.llm.bedrock_llm_adapter import BedrockLLMAdapter
-
-        adapter = BedrockLLMAdapter()
-        canary = asyncio.run(run_canary(adapter, propose_llm_assisted_rename))
-    except Exception as exc:
-        logger.warning("repair_mart_sources: canary unavailable", exc_info=True)
-        return None, f"no disponible: {type(exc).__name__}"
-
-    if not canary.ok:
-        logger.warning("repair_mart_sources: canary failed — %s", canary.detail)
-        return None, f"falló: {canary.detail}"
-    return adapter, canary.detail
+    return model_if_it_answers()
 
 
 def _rebuild_affected(index: Any, fixed: list[Any]) -> list[str]:

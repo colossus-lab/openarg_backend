@@ -10,10 +10,21 @@ import httpx
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import text
 
+from app.application.collection.field_mapping import FieldSpec, resolve_mapping
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 
 logger = logging.getLogger(__name__)
+
+# `senator_id` is the identity: without it every senator is skipped and the
+# scrape finishes with zero staff while reporting success.
+_SENATOR_FIELDS: tuple[FieldSpec, ...] = (
+    FieldSpec("senator_id", aliases=("ID", "id_senador"), identity=True),
+    FieldSpec("apellido", aliases=("APELLIDO",)),
+    FieldSpec("nombre", aliases=("NOMBRE",)),
+    FieldSpec("bloque", aliases=("BLOQUE",)),
+    FieldSpec("provincia", aliases=("PROVINCIA",)),
+)
 
 _SENATORS_URL = "https://www.senado.gob.ar/micrositios/DatosAbiertos/ExportarListadoSenadores/json"
 _PROFILE_URL = "https://www.senado.gob.ar/senadores/senador/{senator_id}"
@@ -103,12 +114,34 @@ def scrape_senado_staff(self):
 
             logger.info("Fetched %d senators from open-data endpoint", len(senators))
 
+            # The same silent failure the HCDN payroll hit on 2026-08-10: this
+            # read `ID`, `APELLIDO`, `NOMBRE` as exact literals, so a portal that
+            # changed the case of its keys would leave every `senator_id` empty,
+            # skip every senator, and finish reporting success with zero staff.
+            # Resolved once, case- and accent-insensitively, and refused outright
+            # when the identity is gone.
+            mapping = resolve_mapping(_SENATOR_FIELDS, list(senators[0].keys()))
+            logger.info("Senado senator mapping: %s", mapping.describe())
+            if not mapping.usable:
+                logger.error(
+                    "Senado: no se pudo mapear %s. Campos recibidos: %s",
+                    ", ".join(mapping.unmapped_identity),
+                    sorted(senators[0].keys()),
+                )
+                return {
+                    "status": "unmapped",
+                    "senators_scraped": 0,
+                    "staff_found": 0,
+                    "fields": sorted(senators[0].keys()),
+                }
+
             for senator in senators:
-                senator_id = str(senator.get("ID", "")).strip()
-                apellido = str(senator.get("APELLIDO", "")).strip()
-                nombre = str(senator.get("NOMBRE", "")).strip()
-                bloque = str(senator.get("BLOQUE", "")).strip() or None
-                provincia = str(senator.get("PROVINCIA", "")).strip() or None
+                s_ = mapping.apply(senator)
+                senator_id = s_["senator_id"]
+                apellido = s_["apellido"]
+                nombre = s_["nombre"]
+                bloque = s_["bloque"] or None
+                provincia = s_["provincia"] or None
 
                 if not senator_id:
                     continue
