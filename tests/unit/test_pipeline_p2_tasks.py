@@ -597,12 +597,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         nested_zip_path = tmp_path / "nested.zip"
         outer_zip_path = tmp_path / "outer.zip"
@@ -692,12 +690,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         nested_one = tmp_path / "sepa_a.zip"
         nested_two = tmp_path / "sepa_b.zip"
@@ -750,12 +746,10 @@ class TestCollectorP2:
         import pandas as pd
 
         mock_read_csv.return_value = pd.DataFrame({"id": [1], "nombre": ["Alpha"]})
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         mock_load_csv_chunked.return_value = (
             2,
@@ -797,12 +791,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         nested_one = tmp_path / "sepa_a.zip"
         nested_two = tmp_path / "sepa_b.zip"
@@ -1029,12 +1021,10 @@ class TestCollectorP2:
         mock_to_sql_safe,
         tmp_path: Path,
     ):
-        mock_route_table.side_effect = (
-            lambda engine, dataset_id, table_name, columns, append_mode: (
-                table_name,
-                append_mode,
-                None,
-            )
+        mock_route_table.side_effect = lambda engine, dataset_id, table_name, columns, append_mode: (
+            table_name,
+            append_mode,
+            None,
         )
         geojson_nested_path = tmp_path / "geojson_nested.zip"
         kml_nested_path = tmp_path / "kml_nested.zip"
