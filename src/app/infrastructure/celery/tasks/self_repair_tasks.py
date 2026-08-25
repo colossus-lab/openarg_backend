@@ -120,6 +120,14 @@ def repair_mart_sources(
     """
     from app.application.marts.consumers import build_consumer_index
     from app.application.repair.escalation import Escalation, escalate_table
+    from app.application.repair.quarantine import (
+        MAX_PER_RUN as QUARANTINE_MAX_PER_RUN,
+    )
+    from app.application.repair.quarantine import (
+        is_quarantinable,
+        quarantine,
+        release,
+    )
 
     engine = get_sync_engine()
     run_id = uuid.uuid4()
@@ -143,7 +151,9 @@ def repair_mart_sources(
         llm, canary_detail = _model_if_it_answers()
 
     results: list[Escalation] = []
+    sintomas_por_tabla: dict[str, list[str]] = {}
     for row in selected:
+        sintomas_por_tabla[row.table_name] = _symptoms(row)
         marts = index.marts_for(row.schema_name, row.table_name)
 
         def guard(columns, _s=row.schema_name, _t=row.table_name) -> list[str]:
@@ -168,6 +178,31 @@ def repair_mart_sources(
     blocked = [r for r in results if r.blocked_by_marts]
     unfixed = [r for r in results if not r.fixed and not r.blocked_by_marts]
 
+    # El tercer resultado. Una tabla que nadie pudo arreglar y cuyas columnas son
+    # ilegibles no es sólo poco útil: es peligrosa, porque el modelo le va a
+    # inferir un significado a `col_1` y va a contestar con fluidez y con cita
+    # desde una columna que nadie leyó.
+    aisladas: list[str] = []
+    liberadas: list[str] = []
+    if not dry_run:
+        for r in unfixed:
+            if len(aisladas) >= QUARANTINE_MAX_PER_RUN:
+                # El límite es la lección de todos los incidentes revisados: la
+                # acción estaba bien y el alcance estaba mal.
+                logger.warning(
+                    "quarantine: tope de %d por corrida alcanzado", QUARANTINE_MAX_PER_RUN
+                )
+                break
+            if is_quarantinable(sintomas_por_tabla.get(r.table_name, [])) and quarantine(
+                engine, r.table_name
+            ):
+                aisladas.append(r.table_name)
+        # Una reparación exitosa devuelve la tabla al servicio: la cuarentena es
+        # una pausa, no un veredicto.
+        for r in fixed:
+            if release(engine, r.table_name):
+                liberadas.append(r.table_name)
+
     rebuilt = _rebuild_affected(index, fixed) if (rebuild and not dry_run) else []
 
     report: dict[str, Any] = {
@@ -185,9 +220,15 @@ def repair_mart_sources(
         "blocked_by_marts": len(blocked),
         "unfixed": len(unfixed),
         "unfixed_by_reason": _count(r.reason or "?" for r in unfixed),
+        # Retiradas del servicio, que no es lo mismo que falladas: el chat deja
+        # de ofrecerlas en vez de servir columnas que nadie puede interpretar.
+        "quarantined": aisladas,
+        "released": liberadas,
         "marts_rebuilt": rebuilt,
     }
-    report["alerting"] = _tell_a_person(engine, index, fixed, blocked, unfixed, dry_run=dry_run)
+    report["alerting"] = _tell_a_person(
+        engine, index, fixed, blocked, unfixed, dry_run=dry_run, quarantined=set(aisladas)
+    )
     logger.info("repair_mart_sources: %s", report)
     return report
 
@@ -240,6 +281,7 @@ def _tell_a_person(
     unfixed: list[Any],
     *,
     dry_run: bool,
+    quarantined: set[str] | None = None,
 ) -> dict[str, Any]:
     """One message, three kinds of news, and silence when there is none.
 
@@ -273,7 +315,12 @@ def _tell_a_person(
                 title=f"No pude arreglar {r.table_name[:60]}",
                 detail=(
                     f"probé {len(r.attempts)} vía(s), ninguna aplicó ({r.reason}). "
-                    f"Alimenta: {', '.join(marts[:3]) or 'ningún mart'}"
+                    + (
+                        "La retiré del servicio hasta que alguien la mire. "
+                        if r.table_name in (quarantined or set())
+                        else ""
+                    )
+                    + f"Alimenta: {', '.join(marts[:3]) or 'ningún mart'}"
                 ),
             )
         )

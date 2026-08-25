@@ -307,3 +307,88 @@ def test_a_channel_that_is_down_does_not_cost_the_run(wired, monkeypatch):
 
 def test_symptoms_are_named_not_counted():
     assert srt._symptoms(_Broken("t", n_cols=2)) == ["col_n", "one_or_two_columns"]
+
+
+# ── el tercer resultado ────────────────────────────────────────
+
+
+def test_an_unrepairable_unreadable_table_is_withheld(wired, monkeypatch):
+    retiradas: list[str] = []
+    monkeypatch.setattr(
+        "app.application.repair.quarantine.quarantine",
+        lambda e, t: retiradas.append(t) or True,
+    )
+    _feed(wired, [_Broken("t", col_n=True)])
+    wired["index"] = _index({("raw", "t"): ("m1",)})
+    wired["outcome"] = lambda t: Escalation("raw", t, False, reason="declined")
+
+    report = srt.repair_mart_sources(dry_run=False, use_llm=False)
+
+    assert retiradas == ["t"]
+    assert report["quarantined"] == ["t"]
+
+
+def test_a_dry_run_withholds_nothing(wired, monkeypatch):
+    def _boom(e, t):  # pragma: no cover — must not be reached
+        raise AssertionError("un ensayo no retira nada del servicio")
+
+    monkeypatch.setattr("app.application.repair.quarantine.quarantine", _boom)
+    _feed(wired, [_Broken("t")])
+    wired["index"] = _index({("raw", "t"): ("m1",)})
+    wired["outcome"] = lambda t: Escalation("raw", t, False, reason="declined")
+
+    srt.repair_mart_sources(dry_run=True, use_llm=False)
+
+
+def test_a_repaired_table_is_returned_to_service(wired, monkeypatch):
+    devueltas: list[str] = []
+    monkeypatch.setattr(
+        "app.application.repair.quarantine.release",
+        lambda e, t: devueltas.append(t) or True,
+    )
+    _feed(wired, [_Broken("t")])
+    wired["index"] = _index({("raw", "t"): ("m1",)})
+
+    report = srt.repair_mart_sources(dry_run=False, use_llm=False)
+
+    assert devueltas == ["t"]
+    assert report["released"] == ["t"]
+
+
+def test_a_long_name_alone_is_not_withheld(wired, monkeypatch):
+    def _boom(e, t):  # pragma: no cover — must not be reached
+        raise AssertionError("un nombre largo es feo, no peligroso")
+
+    monkeypatch.setattr("app.application.repair.quarantine.quarantine", _boom)
+    row = _Broken("t", col_n=False)
+    row.long_name = True
+    _feed(wired, [row])
+    wired["index"] = _index({("raw", "t"): ("m1",)})
+    wired["outcome"] = lambda t: Escalation("raw", t, False, reason="declined")
+
+    srt.repair_mart_sources(dry_run=False, use_llm=False)
+
+
+def test_the_number_withheld_in_one_run_is_capped(wired, monkeypatch):
+    from app.application.repair import quarantine as q
+
+    monkeypatch.setattr(q, "MAX_PER_RUN", 2)
+    monkeypatch.setattr("app.application.repair.quarantine.quarantine", lambda e, t: True)
+    _feed(wired, [_Broken(f"t{i}") for i in range(5)])
+    wired["index"] = _index({("raw", f"t{i}"): ("m1",) for i in range(5)})
+    wired["outcome"] = lambda t: Escalation("raw", t, False, reason="declined")
+
+    report = srt.repair_mart_sources(dry_run=False, use_llm=False)
+
+    assert len(report["quarantined"]) == 2, "el alcance es la lección de todos los incidentes"
+
+
+def test_the_message_says_it_was_withheld(wired, monkeypatch):
+    monkeypatch.setattr("app.application.repair.quarantine.quarantine", lambda e, t: True)
+    _feed(wired, [_Broken("t")])
+    wired["index"] = _index({("raw", "t"): ("m1",)})
+    wired["outcome"] = lambda t: Escalation("raw", t, False, reason="declined")
+
+    srt.repair_mart_sources(dry_run=False, use_llm=False)
+
+    assert "retiré del servicio" in wired["alerts"][0].detail
