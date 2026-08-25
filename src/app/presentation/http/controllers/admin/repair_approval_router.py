@@ -15,52 +15,23 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import text
 
 from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.presentation.http.controllers.admin.tasks_router import verify_admin_key
 
 router = APIRouter(prefix="/admin", tags=["admin-repair-approval"])
 
-_PENDING_SQL = text(
-    """
-    SELECT id, table_schema, table_name, tier, action_class, detail,
-           old_columns, new_columns, proposed_at
-    FROM public.repair_proposals
-    WHERE status = 'pending'
-    ORDER BY proposed_at
-    LIMIT :limit
-    """
-)
-
 
 @router.get("/repair-proposals", dependencies=[Depends(verify_admin_key)])
 def list_proposals(limit: int = 50) -> dict[str, Any]:
     """Repairs waiting for a signature, with the diff that would be applied."""
-    engine = get_sync_engine()
+    from app.application.repair.approval import pending
+
     try:
-        with engine.connect() as conn:
-            rows = conn.execute(_PENDING_SQL, {"limit": limit}).fetchall()
-            conn.rollback()
+        return {"pendientes": pending(get_sync_engine(), limit=limit)}
     except Exception:
         # An empty queue and an unreadable one must not look the same.
         raise HTTPException(status_code=503, detail="no se pudo leer la cola") from None
-
-    return {
-        "pendientes": [
-            {
-                "id": str(r.id),
-                "tabla": f"{r.table_schema}.{r.table_name}",
-                "via": r.tier,
-                "clase": r.action_class,
-                "detalle": r.detail,
-                "columnas_antes": r.old_columns,
-                "columnas_despues": r.new_columns,
-                "propuesta_el": r.proposed_at.isoformat() if r.proposed_at else None,
-            }
-            for r in rows
-        ]
-    }
 
 
 @router.post("/repair-proposals/{proposal_id}/decide", dependencies=[Depends(verify_admin_key)])

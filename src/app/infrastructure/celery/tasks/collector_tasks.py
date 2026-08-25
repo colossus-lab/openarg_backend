@@ -5036,6 +5036,11 @@ def _promote_to_raw_atomic(
                     parser_version = COALESCE(:pv, parser_version),
                     updated_at = NOW()
                 WHERE resource_identity = :rid
+                  -- Una cuarentena no se deshace sola. Recolectar de nuevo no
+                  -- prueba que el recurso dejó de ser ilegible, y sin esta
+                  -- condición el retiro del servicio es decorativo: lo pone la
+                  -- escalera y lo levanta el siguiente ingest sin decir nada.
+                  AND materialization_status <> 'materialization_corrupted'
                 """
             ),
             {

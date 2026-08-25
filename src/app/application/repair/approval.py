@@ -142,6 +142,17 @@ _DECIDE_SQL = text(
     """
 )
 
+_PENDING_SQL = text(
+    """
+    SELECT id, table_schema, table_name, tier, action_class, detail,
+           old_columns, new_columns, proposed_at
+    FROM public.repair_proposals
+    WHERE status = 'pending'
+    ORDER BY proposed_at
+    LIMIT :limit
+    """
+)
+
 _APPROVED_SQL = text(
     """
     SELECT id, table_schema, table_name, tier
@@ -224,6 +235,35 @@ def approved(engine: Any, *, limit: int = 25) -> list[dict[str, Any]]:
             "table_schema": r.table_schema,
             "table_name": r.table_name,
             "tier": r.tier,
+        }
+        for r in rows
+    ]
+
+
+def pending(engine: Any, *, limit: int = 50) -> list[dict[str, Any]]:
+    """Proposals waiting for a signature, with the diff that would be applied.
+
+    Ensures the table like every other entry point here. The queue is created
+    lazily by the first proposal, so a reader that assumed it existed answered
+    "unavailable" on a system where nothing had needed approval yet — which is
+    the most likely state and the one where the answer should be "nothing
+    pending".
+    """
+    with engine.connect() as conn:
+        conn.execute(_ENSURE_SQL)
+        conn.commit()
+        rows = conn.execute(_PENDING_SQL, {"limit": limit}).fetchall()
+        conn.rollback()
+    return [
+        {
+            "id": str(r.id),
+            "tabla": f"{r.table_schema}.{r.table_name}",
+            "via": r.tier,
+            "clase": r.action_class,
+            "detalle": r.detail,
+            "columnas_antes": r.old_columns,
+            "columnas_despues": r.new_columns,
+            "propuesta_el": r.proposed_at.isoformat() if r.proposed_at else None,
         }
         for r in rows
     ]

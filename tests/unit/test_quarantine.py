@@ -106,3 +106,44 @@ def test_releasing_something_that_was_not_withheld_changes_nothing():
 def test_a_database_error_on_release_is_swallowed():
     engine, _ = _engine(raises=True)
     assert release(engine, "raw.t") is False
+
+
+# ── que la cuarentena no se deshaga sola ───────────────────────
+
+
+def test_the_via_b_reconciliation_leaves_a_quarantined_resource_alone():
+    # Encontrado midiendo, no razonando: las 5 tablas retiradas del servicio
+    # volvieron a `ready` en minutos. Dos escritores del mismo campo con
+    # intención opuesta, y ganaba siempre el que dice "está todo bien".
+    import inspect
+
+    from app.infrastructure.celery.tasks import _db
+
+    src = inspect.getsource(_db.register_via_b_table)
+    assert "materialization_corrupted" in src
+    i = src.index("materialization_corrupted")
+    assert "<>" in src[i - 40 : i], "tiene que excluirla, no escribirla"
+
+
+def test_the_collector_leaves_a_quarantined_resource_alone():
+    # Recolectar de nuevo no prueba que el recurso dejó de ser ilegible.
+    import inspect
+
+    from app.infrastructure.celery.tasks import collector_tasks
+
+    src = inspect.getsource(collector_tasks)
+    # El UPDATE que marca `ready` tras materializar: se busca por su propia
+    # firma, no por la primera aparición de un fragmento común.
+    i = src.index("UPDATE catalog_resources\n                SET materialized_table_name")
+    bloque = src[i : i + 900]
+    assert "materialization_corrupted" in bloque
+
+
+def test_only_release_and_a_person_can_undo_it():
+    # La única ruta de vuelta declarada.
+
+    from app.application.repair import quarantine as q
+
+    # La SQL vive a nivel de módulo, no dentro de la función.
+    assert "= 'ready'" in str(q._RELEASE_SQL)
+    assert "materialization_corrupted" in str(q._RELEASE_SQL)

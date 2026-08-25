@@ -109,7 +109,9 @@ def test_a_scheduled_task_beats_under_its_own_prefix():
 def test_a_late_task_is_phrased_as_not_running():
     # `cleanup_raw_orphans` reportaba éxito cada hora sin hacer nada durante tres
     # meses. Una corrida que crasheó y una limpia son silencio idéntico.
-    tarde = Late("task:openarg.cleanup_raw_orphans", days_late=16.0, cadence_days=1.0, times_seen=90)
+    tarde = Late(
+        "task:openarg.cleanup_raw_orphans", days_late=16.0, cadence_days=1.0, times_seen=90
+    )
     assert tarde.is_task
     assert "que no corre" in tarde.phrase_es()
 

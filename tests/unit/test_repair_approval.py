@@ -157,3 +157,119 @@ def test_the_decider_name_is_bounded(monkeypatch):
     r.decide_proposal(str(__import__("uuid").uuid4()), approve=True, who="x" * 500)
 
     assert len(vistos[0]) == 64
+
+
+# ── la compuerta del canario, compartida ───────────────────────
+
+
+def test_a_model_that_fails_the_canary_is_not_handed_over(monkeypatch):
+    from app.infrastructure.celery.tasks import _llm_gate
+
+    class _Canary:
+        ok = False
+        detail = "nombró 1 de 3"
+
+    monkeypatch.setattr(
+        "app.infrastructure.adapters.llm.bedrock_llm_adapter.BedrockLLMAdapter",
+        lambda *a, **k: object(),
+    )
+
+    async def _run(llm, proposer):
+        return _Canary()
+
+    monkeypatch.setattr("app.application.quality.model_canary.run_canary", _run)
+
+    llm, detalle = _llm_gate.model_if_it_answers()
+    assert llm is None
+    assert detalle.startswith("falló")
+
+
+def test_a_model_that_answers_is_handed_over(monkeypatch):
+    from app.infrastructure.celery.tasks import _llm_gate
+
+    sentinel = object()
+
+    class _Canary:
+        ok = True
+        detail = "el modelo nombró 3 columnas correctamente"
+
+    monkeypatch.setattr(
+        "app.infrastructure.adapters.llm.bedrock_llm_adapter.BedrockLLMAdapter",
+        lambda *a, **k: sentinel,
+    )
+
+    async def _run(llm, proposer):
+        return _Canary()
+
+    monkeypatch.setattr("app.application.quality.model_canary.run_canary", _run)
+
+    llm, detalle = _llm_gate.model_if_it_answers()
+    assert llm is sentinel and "3 columnas" in detalle
+
+
+def test_an_unavailable_model_degrades_instead_of_aborting(monkeypatch):
+    # Un modelo ausente es una razón para hacer menos, no para no hacer nada:
+    # los escalones deterministas siguen valiendo.
+    from app.infrastructure.celery.tasks import _llm_gate
+
+    def _boom(*a, **k):
+        raise RuntimeError("sin credenciales")
+
+    monkeypatch.setattr(
+        "app.infrastructure.adapters.llm.bedrock_llm_adapter.BedrockLLMAdapter", _boom
+    )
+    llm, detalle = _llm_gate.model_if_it_answers()
+    assert llm is None and detalle.startswith("no disponible")
+
+
+# ── la ruta que lista ──────────────────────────────────────────
+
+
+def test_the_queue_endpoint_returns_the_diff_that_would_be_applied(monkeypatch):
+    from app.presentation.http.controllers.admin import repair_approval_router as r
+
+    monkeypatch.setattr(r, "get_sync_engine", lambda: None)
+    monkeypatch.setattr(
+        "app.application.repair.approval.pending",
+        lambda e, limit=50: [
+            {"tabla": "raw.t", "columnas_antes": ["col_1"], "columnas_despues": ["monto"]}
+        ],
+    )
+
+    p = r.list_proposals()["pendientes"][0]
+    assert p["tabla"] == "raw.t"
+    assert p["columnas_antes"] == ["col_1"] and p["columnas_despues"] == ["monto"]
+
+
+def test_an_empty_queue_on_a_fresh_install_is_not_an_error():
+    # La tabla se crea perezosamente con la primera propuesta. Un lector que la
+    # daba por existente contestaba "no disponible" justo en el estado más
+    # probable: nada pendiente todavía.
+    from app.application.repair.approval import pending
+
+    engine = MagicMock()
+    conn = engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.fetchall.return_value = []
+    assert pending(engine) == []
+
+
+def test_an_unreadable_queue_is_not_an_empty_queue(monkeypatch):
+    # Que una cola vacía y una ilegible se vean igual es exactamente el modo de
+    # falla que este arco entero vino a sacar.
+    from fastapi import HTTPException
+
+    from app.presentation.http.controllers.admin import repair_approval_router as r
+
+    monkeypatch.setattr(r, "get_sync_engine", lambda: None)
+
+    def _boom(e, limit=50):
+        raise RuntimeError("db caída")
+
+    monkeypatch.setattr("app.application.repair.approval.pending", _boom)
+
+    try:
+        r.list_proposals()
+    except HTTPException as exc:
+        assert exc.status_code == 503
+    else:  # pragma: no cover
+        raise AssertionError("debería haber fallado ruidosamente")

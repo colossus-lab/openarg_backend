@@ -259,9 +259,7 @@ def test_a_learned_key_is_used_on_the_next_run():
     from app.application.collection.field_mapping import learned_aliases, with_learned
 
     engine = _Engine(rows=[_Row("area_desempeno", "ESTRUCTURA")])
-    specs = with_learned(
-        (FieldSpec("area_desempeno"),), learned_aliases(engine, "staff_hcdn")
-    )
+    specs = with_learned((FieldSpec("area_desempeno"),), learned_aliases(engine, "staff_hcdn"))
     m = resolve_mapping(specs, ["ESTRUCTURA"])
     assert m.by_field["area_desempeno"] == "ESTRUCTURA"
     assert m.tier_by_field["area_desempeno"] == "exact", "ya no cuesta una llamada"

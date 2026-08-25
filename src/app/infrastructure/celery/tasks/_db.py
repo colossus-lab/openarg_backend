@@ -307,6 +307,14 @@ def register_via_b_table(
                         JOIN datasets d ON d.id = cd.dataset_id
                         WHERE cd.table_name = :tn
                           AND cr.resource_identity = d.portal || '::' || d.source_id
+                          -- Una cuarentena no se deshace sola. Esta
+                          -- reconciliación y `repair/quarantine` escriben el
+                          -- mismo campo con intenciones opuestas, y sin esto
+                          -- gana siempre la que dice "está todo bien": las 5
+                          -- tablas retiradas del servicio volvieron a `ready`
+                          -- en minutos, sin que nada lo dijera. Sólo un arreglo
+                          -- exitoso (`release`) o una persona la levantan.
+                          AND cr.materialization_status <> 'materialization_corrupted'
                           AND (
                               cr.materialized_table_name IS DISTINCT FROM :qn
                               OR cr.materialization_status IS DISTINCT FROM 'ready'
