@@ -392,3 +392,54 @@ def test_the_message_says_it_was_withheld(wired, monkeypatch):
     srt.repair_mart_sources(dry_run=False, use_llm=False)
 
     assert "retiré del servicio" in wired["alerts"][0].detail
+
+
+# ── validación del conjunto objetivo y firma ───────────────────
+
+
+def test_an_implausible_candidate_set_aborts_before_touching_anything(wired):
+    # Azure y Diskerase: la acción estaba bien y el alcance estaba mal.
+    _feed(wired, [_Broken(f"t{i}") for i in range(60)])
+    wired["index"] = _index({("raw", f"t{i}"): ("m1",) for i in range(60)})
+
+    report = srt.repair_mart_sources(dry_run=False, use_llm=False, limit=5)
+
+    assert report["aborted"] == "implausible_target_set"
+    assert report["attempted"] == 0
+    assert wired["escalated"] == [], "no escala ni una"
+
+
+def test_a_normal_candidate_set_proceeds(wired):
+    _feed(wired, [_Broken(f"t{i}") for i in range(8)])
+    wired["index"] = _index({("raw", f"t{i}"): ("m1",) for i in range(8)})
+
+    report = srt.repair_mart_sources(dry_run=False, use_llm=False, limit=5)
+
+    assert "aborted" not in report
+    assert report["attempted"] == 5
+
+
+def test_waiting_for_a_signature_is_not_a_failure(wired, monkeypatch):
+    # Contarlo como falla lo mandaría a cuarentena: retiraríamos del servicio una
+    # tabla que tiene arreglo listo esperando una firma.
+    monkeypatch.setattr(
+        "app.application.repair.quarantine.quarantine",
+        lambda e, t: (_ for _ in ()).throw(AssertionError("no debe aislarse")),
+    )
+    _feed(wired, [_Broken("t")])
+    wired["index"] = _index({("raw", "t"): ("m1",)})
+    wired["outcome"] = lambda t: Escalation(
+        "raw",
+        t,
+        False,
+        reason="needs_approval:delete_rows",
+        proposal_id="p1",
+        action_detail="borraría 3 fila(s)",
+    )
+
+    report = srt.repair_mart_sources(dry_run=False, use_llm=False)
+
+    assert report["unfixed"] == 0
+    assert report["quarantined"] == []
+    assert report["awaiting_approval"][0]["id"] == "p1"
+    assert wired["alerts"][0].kind == "repair_needs_approval"

@@ -51,6 +51,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.application.repair.approval import classify, propose
+
 logger = logging.getLogger(__name__)
 
 # What the guard is asked. Returns the marts that would break.
@@ -94,6 +96,10 @@ class Escalation:
     attempts: tuple[Attempt, ...] = ()
     blocked_by_marts: tuple[str, ...] = ()
     changed_columns: tuple[str, ...] = ()
+    # Set when the repair was recorded for a person to sign off on rather than
+    # applied. Not a failure: the ladder did its work and stopped where it should.
+    proposal_id: str | None = None
+    action_detail: str = ""
 
     @property
     def table(self) -> str:
@@ -112,6 +118,7 @@ class Escalation:
             "reason": self.reason,
             "tried": [a.tier for a in self.attempts],
             "blocked_by_marts": list(self.blocked_by_marts),
+            "proposal_id": self.proposal_id,
         }
 
 
@@ -239,6 +246,30 @@ def escalate_table(
                 Attempt(tier=tier, ok=False, reason=proposal.reason or proposal.error_message)
             )
             continue
+
+        # Gate on what the repair would *do*, not on which rung proposed it. A
+        # rename the audit can walk back applies itself; a repair that deletes
+        # rows becomes a proposal, because no confidence upstream changes the
+        # fact that deleted rows do not come back.
+        accion = classify(proposal)
+        if not accion.reversible:
+            pid = propose(
+                engine,
+                table_schema=table_schema,
+                table_name=table_name,
+                tier=tier,
+                outcome=proposal,
+            )
+            attempts.append(Attempt(tier=tier, ok=False, reason=f"needs_approval:{accion.name}"))
+            return Escalation(
+                table_schema=table_schema,
+                table_name=table_name,
+                fixed=False,
+                reason=f"needs_approval:{accion.name}",
+                attempts=tuple(attempts),
+                proposal_id=pid,
+                action_detail=accion.detail,
+            )
 
         touched = changed_columns(proposal.old_columns, proposal.new_columns)
         blocking = _guarded(guard, touched)

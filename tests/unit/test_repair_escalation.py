@@ -358,4 +358,51 @@ def test_the_result_says_which_rung_and_what_was_tried(monkeypatch):
         "reason": "applied",
         "tried": ["uno", "dos"],
         "blocked_by_marts": [],
+        "proposal_id": None,
     }
+
+
+# ── aprobación por clase de acción ─────────────────────────────
+
+
+def test_a_repair_that_deletes_rows_is_proposed_not_applied(monkeypatch):
+    # La línea es qué puede deshacer el audit. Un renombre se camina para atrás;
+    # las filas borradas no vuelven.
+    rung = _Rung(_outcome())
+    rung.outcome.rows_deleted = 3
+    _tiers(monkeypatch, ("col_n", rung))
+    propuestas: list[str] = []
+    monkeypatch.setattr(
+        # se parchea donde se usa: `escalation` lo importó al cargarse
+        "app.application.repair.escalation.propose",
+        lambda e, **kw: propuestas.append(kw["table_name"]) or "prop-1",
+    )
+
+    r = esc.escalate_table(_engine(), table_schema="raw", table_name="t", dry_run=False)
+
+    assert not r.fixed
+    assert r.reason == "needs_approval:delete_rows"
+    assert r.proposal_id == "prop-1"
+    assert rung.calls == [True], "no aplica lo que espera una firma"
+    assert propuestas == ["t"]
+
+
+def test_a_rename_still_applies_itself(monkeypatch):
+    rung = _Rung(_outcome())
+    _tiers(monkeypatch, ("col_n", rung))
+
+    r = esc.escalate_table(_engine(), table_schema="raw", table_name="t", dry_run=False)
+
+    assert r.fixed and r.proposal_id is None
+    assert rung.calls == [True, False]
+
+
+def test_dropping_verified_empty_columns_still_applies_itself(monkeypatch):
+    # La heurística prueba que están >99 % vacías antes de tocarlas: la prueba
+    # viaja con la reparación.
+    rung = _Rung(_outcome(old=["a", "b", "c"], new=["a", "c"]))
+    _tiers(monkeypatch, ("trailing_garbage", rung))
+
+    r = esc.escalate_table(_engine(), table_schema="raw", table_name="t", dry_run=False)
+
+    assert r.fixed

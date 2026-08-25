@@ -319,8 +319,23 @@ def report_schema_drift(self, *, days: int = 30, limit: int = 5000) -> dict[str,
                 }
             )
 
+    # Recall, measured on planted faults, beside the precision measured on live
+    # traffic. The live number cannot produce this one: real pairs have no
+    # ground truth, which is the entire problem, and a cascade whose only action
+    # is to *remove* items from the alert set makes every one of its mistakes
+    # silently. Running it here means a regression shows up in the same report
+    # that would otherwise look excellent while missing everything.
+    try:
+        from app.application.drift.seeded_faults import measure
+
+        seeded = measure().as_dict()
+    except Exception:
+        logger.warning("drift report: seeded faults could not run", exc_info=True)
+        seeded = {"error": "no_ejecutado"}
+
     report: dict[str, Any] = {
         "window_days": days,
+        "seeded_faults": seeded,
         "coverage": coverage,
         "pairs_found": len(pair_rows),
         "pairs_by_kind": {
@@ -350,6 +365,31 @@ def report_schema_drift(self, *, days: int = 30, limit: int = 5000) -> dict[str,
             extra={"drift_report": report},
         )
         return report
+
+    if seeded.get("recall", 1.0) < 1.0:
+        # Louder than the findings themselves. A cascade that stopped catching a
+        # fault it used to catch is a worse problem than any single pair it
+        # reports, and it is the failure that otherwise never surfaces.
+        logger.error(
+            "drift report: el clasificador dejó de detectar %s", seeded.get("no_detectadas")
+        )
+        try:
+            from app.application.quality.alerting import Alert, notify
+
+            notify(
+                engine,
+                [
+                    Alert(
+                        kind="drift_recall_regression",
+                        key=",".join(sorted(seeded.get("no_detectadas") or [])),
+                        title="El detector de deriva dejó de ver algo que veía",
+                        detail=f"recall {seeded.get('recall')} · {seeded.get('no_detectadas')}",
+                    )
+                ],
+                heading="OpenArg · regresión en el detector",
+            )
+        except Exception:
+            logger.warning("drift report: alerting skipped", exc_info=True)
 
     logger.info("drift report (shadow): %s", {k: v for k, v in report.items() if k != "examples"})
     if report.get("actionable"):

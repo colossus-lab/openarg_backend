@@ -119,6 +119,7 @@ def repair_mart_sources(
     rungs are still worth running.
     """
     from app.application.marts.consumers import build_consumer_index
+    from app.application.repair.approval import target_set_is_plausible
     from app.application.repair.escalation import Escalation, escalate_table
     from app.application.repair.quarantine import (
         MAX_PER_RUN as QUARANTINE_MAX_PER_RUN,
@@ -142,6 +143,21 @@ def repair_mart_sources(
     # by. Widest first inside that, because a table with more columns feeding a
     # mart is more of the mart.
     feeding = [r for r in broken if index.marts_for(r.schema_name, r.table_name)]
+
+    # Antes de ejecutar nada: ¿es una cantidad de trabajo normal? Los dos
+    # incidentes que dieron forma a esta comprobación —el job de remediación de
+    # Azure, el Diskerase de Google— fueron acciones correctas contra un
+    # conjunto objetivo equivocado.
+    plausible, motivo = target_set_is_plausible(len(feeding), cap)
+    if not plausible:
+        logger.error("repair_mart_sources: conjunto objetivo implausible — %s", motivo)
+        return {
+            "aborted": "implausible_target_set",
+            "reason": motivo,
+            "feeding_marts": len(feeding),
+            "attempted": 0,
+        }
+
     feeding.sort(key=lambda r: (-int(r.n_cols or 0), r.table_name))
     selected = feeding[:cap]
 
@@ -176,7 +192,11 @@ def repair_mart_sources(
 
     fixed = [r for r in results if r.fixed]
     blocked = [r for r in results if r.blocked_by_marts]
-    unfixed = [r for r in results if not r.fixed and not r.blocked_by_marts]
+    # Esperar una firma no es fallar: la escalera hizo su trabajo y paró donde
+    # debía. Contarlos como fallas los mandaría a cuarentena, que sería retirar
+    # del servicio una tabla que tiene arreglo listo.
+    awaiting = [r for r in results if r.proposal_id]
+    unfixed = [r for r in results if not r.fixed and not r.blocked_by_marts and not r.proposal_id]
 
     # El tercer resultado. Una tabla que nadie pudo arreglar y cuyas columnas son
     # ilegibles no es sólo poco útil: es peligrosa, porque el modelo le va a
@@ -222,12 +242,22 @@ def repair_mart_sources(
         "unfixed_by_reason": _count(r.reason or "?" for r in unfixed),
         # Retiradas del servicio, que no es lo mismo que falladas: el chat deja
         # de ofrecerlas en vez de servir columnas que nadie puede interpretar.
+        "awaiting_approval": [
+            {"tabla": r.table, "id": r.proposal_id, "detalle": r.action_detail} for r in awaiting
+        ],
         "quarantined": aisladas,
         "released": liberadas,
         "marts_rebuilt": rebuilt,
     }
     report["alerting"] = _tell_a_person(
-        engine, index, fixed, blocked, unfixed, dry_run=dry_run, quarantined=set(aisladas)
+        engine,
+        index,
+        fixed,
+        blocked,
+        unfixed,
+        dry_run=dry_run,
+        quarantined=set(aisladas),
+        awaiting=awaiting,
     )
     logger.info("repair_mart_sources: %s", report)
     return report
@@ -282,6 +312,7 @@ def _tell_a_person(
     *,
     dry_run: bool,
     quarantined: set[str] | None = None,
+    awaiting: list[Any] | None = None,
 ) -> dict[str, Any]:
     """One message, three kinds of news, and silence when there is none.
 
@@ -322,6 +353,15 @@ def _tell_a_person(
                     )
                     + f"Alimenta: {', '.join(marts[:3]) or 'ningún mart'}"
                 ),
+            )
+        )
+    for r in awaiting or []:
+        alerts.append(
+            Alert(
+                kind="repair_needs_approval",
+                key=r.table,
+                title=f"{r.table_name[:60]} tiene arreglo, falta una firma",
+                detail=f"{r.action_detail} · id {r.proposal_id}",
             )
         )
     for r in blocked:
@@ -368,3 +408,68 @@ def _tell_a_person(
         # Never let the notification cost the run that produced it.
         logger.warning("repair_mart_sources: alerting skipped", exc_info=True)
         return {"considered": len(alerts), "new": 0, "sent": 0}
+
+
+@celery_app.task(
+    name="openarg.apply_approved_repairs",
+    bind=True,
+    soft_time_limit=900,
+    time_limit=1200,
+)
+def apply_approved_repairs(self, *, limit: int = 25) -> dict[str, Any]:
+    """Apply the repairs a person signed off on.
+
+    Deciding and executing are separate acts on purpose: a decision made in a
+    hurry should not also be a write made in a hurry, and a proposal that was
+    approved yesterday still runs against today's table.
+    """
+    import uuid as _uuid
+
+    from app.application.repair.approval import approved
+    from app.application.repair.escalation import heuristic_tiers
+
+    engine = get_sync_engine()
+    por_nombre = dict(heuristic_tiers())
+    aplicadas: list[str] = []
+    fallidas: list[str] = []
+
+    for item in approved(engine, limit=limit):
+        fn = por_nombre.get(item["tier"])
+        if fn is None:
+            fallidas.append(f"{item['table_name']}:tier_desconocido")
+            continue
+        try:
+            outcome = fn(
+                engine,
+                table_schema=item["table_schema"],
+                table_name=item["table_name"],
+                run_id=_uuid.uuid4(),
+                dry_run=False,
+            )
+        except Exception:
+            logger.warning("apply_approved: %s falló", item["table_name"], exc_info=True)
+            fallidas.append(f"{item['table_name']}:raised")
+            continue
+        (aplicadas if outcome.ok else fallidas).append(item["table_name"])
+        _mark_applied(engine, item["id"], ok=outcome.ok)
+
+    report = {"aplicadas": len(aplicadas), "fallidas": len(fallidas), "detalle": fallidas[:5]}
+    logger.info("apply_approved_repairs: %s", report)
+    return report
+
+
+def _mark_applied(engine: Any, proposal_id: str, *, ok: bool) -> None:
+    """Close the proposal so the next run does not try it again."""
+    from sqlalchemy import text as _text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                _text(
+                    "UPDATE public.repair_proposals SET status = :s, decided_at = now() "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"s": "applied" if ok else "failed", "id": proposal_id},
+            )
+    except Exception:
+        logger.warning("apply_approved: no se pudo cerrar %s", proposal_id, exc_info=True)

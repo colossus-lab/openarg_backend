@@ -206,6 +206,7 @@ def create_celery() -> Celery:
         "openarg.repair_mart_sources": {"queue": "analyst"},
         "openarg.find_empty_content_tables": {"queue": "ingest"},
         "openarg.alert_stale_ingests": {"queue": "ingest"},
+        "openarg.apply_approved_repairs": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -588,6 +589,15 @@ def create_celery() -> Celery:
                 "task": "openarg.repair_unsplit_csv_tables",
                 "schedule": crontab(hour=4, minute=45),  # 04:45 ART, before the baseline
                 "kwargs": {"dry_run": False},
+                "options": {"queue": "ingest"},
+            },
+            "apply-approved-repairs-daily": {
+                # Decidir y ejecutar son actos separados a propósito: una
+                # decisión tomada con apuro no debería ser además una escritura
+                # hecha con apuro. Una propuesta aprobada ayer corre igual
+                # contra la tabla de hoy.
+                "task": "openarg.apply_approved_repairs",
+                "schedule": crontab(hour=6, minute=40),  # 06:40 ART
                 "options": {"queue": "ingest"},
             },
             "alert-stale-ingests-daily": {
