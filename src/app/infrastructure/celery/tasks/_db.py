@@ -253,6 +253,19 @@ def register_via_b_table(
         )
 
     if registered:
+        # Mark that this resource arrived. Without it there is no record of a
+        # successful ingest anywhere: this function is idempotent on
+        # `(resource_identity, version)` and never touches `created_at`, so for
+        # the connectors that overwrite in place the registry's date is the day
+        # the resource was *first* seen. A source that quietly stops arriving —
+        # or that keeps being refused by a guard — is invisible without this.
+        try:
+            from app.application.quality.heartbeat import record_ingest
+
+            record_ingest(engine, resource_identity)
+        except Exception:
+            _logger.debug("heartbeat skipped for %s", resource_identity, exc_info=True)
+
         # Look at what was just published, for every vía-B connector at once.
         # The thirteen of them are too different to share a schema, but they all
         # end here — and by this point the registry knows what the previous

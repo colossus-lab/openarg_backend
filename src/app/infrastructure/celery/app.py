@@ -116,6 +116,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.llm_repair_tasks",
             "app.infrastructure.celery.tasks.self_repair_tasks",
             "app.infrastructure.celery.tasks.empty_content_tasks",
+            "app.infrastructure.celery.tasks.staleness_tasks",
             "app.infrastructure.celery.tasks.dbt_tasks",
         ],
     )
@@ -202,6 +203,7 @@ def create_celery() -> Celery:
         # `ingest` workers must not block on Bedrock latency.
         "openarg.repair_mart_sources": {"queue": "analyst"},
         "openarg.find_empty_content_tables": {"queue": "ingest"},
+        "openarg.alert_stale_ingests": {"queue": "ingest"},
         "openarg.dbt_run": {"queue": "ingest"},
         "openarg.dbt_test": {"queue": "ingest"},
         "openarg.dbt_build": {"queue": "ingest"},
@@ -584,6 +586,20 @@ def create_celery() -> Celery:
                 "task": "openarg.repair_unsplit_csv_tables",
                 "schedule": crontab(hour=4, minute=45),  # 04:45 ART, before the baseline
                 "kwargs": {"dry_run": False},
+                "options": {"queue": "ingest"},
+            },
+            "alert-stale-ingests-daily": {
+                # La contraparte de todo guardián que se niega a escribir.
+                # Negarse está bien —un padrón en blanco es peor que uno viejo—
+                # pero por sí solo cambia una falla ruidosa por una silenciosa:
+                # el mart sigue contestando y nada dice que el dato se congeló.
+                #
+                # Cada recurso se compara contra su propia cadencia aprendida,
+                # no contra un umbral fijo: un censo anual y una cotización
+                # horaria no comparten umbral, y una lista declarada de
+                # períodos esperados estaría desactualizada en un mes.
+                "task": "openarg.alert_stale_ingests",
+                "schedule": crontab(hour=7, minute=10),  # 07:10 ART diario
                 "options": {"queue": "ingest"},
             },
             "find-empty-content-weekly": {
