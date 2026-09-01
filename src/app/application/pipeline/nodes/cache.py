@@ -26,7 +26,7 @@ async def cache_check_node(state: OpenArgState) -> dict:
     writer({"type": "status", "step": "cache_check", "detail": "Buscando en caché..."})
     deps = nodes_pkg.get_deps()
 
-    # Skip cache in policy mode — always fetch fresh data
+    # Una búsqueda profunda siempre va a datos frescos.
     if state.get("mode") == "deep":
         return {
             "cached_result": None,

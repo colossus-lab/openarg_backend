@@ -264,3 +264,34 @@ async def test_scoping_no_repregunta_en_una_conversacion_ya_empezada() -> None:
     )
     assert out == {"scoping_done": True}
     assert llm.calls == 0
+
+
+# ── plan cache ─────────────────────────────────────────────
+
+
+def test_el_modo_profundo_no_lee_ni_escribe_el_plan_cache() -> None:
+    """El plan cache está ON por defecto y es ciego al modo. Sin este corte:
+
+    - leerlo hace el modo profundo un no-op — un hit saltea la llamada al
+      planner, que es donde entran el modelo capaz y el addendum;
+    - escribirlo envenena el modo normal con planes de varios steps pensados
+      para 60 s, servidos después bajo un presupuesto de 20 s.
+
+    Se verifica sobre el fuente porque la rama no es alcanzable sin una DB.
+    """
+    import inspect
+
+    from app.application.pipeline.nodes import planner
+
+    src = inspect.getsource(planner.planner_node)
+    assert 'deep = state.get("mode") == "deep"' in src
+    # lectura cortada
+    assert "None if deep else await _try_plan_cache_hit" in src
+    # escritura cortada
+    assert "not has_history and not deep and" in src
+
+
+def test_el_modo_profundo_mira_mas_ancho() -> None:
+    from app.application.pipeline.nodes.planner import _DEEP_DISCOVER_LIMIT, _DISCOVER_LIMIT
+
+    assert _DEEP_DISCOVER_LIMIT > _DISCOVER_LIMIT
