@@ -46,36 +46,36 @@ def _r(**over: Any) -> dict:
 
 
 def test_detecta_un_caso_que_ahora_falla() -> None:
-    reg = compare_to_baseline(
+    duras, blandas = compare_to_baseline(
         {"results": [_r(error="Boom: x", answered=False)]}, {"results": [_r()]}
     )
-    assert any("now errors" in p for p in reg)
+    assert any("ahora falla" in p for p in duras)
 
 
 def test_detecta_un_caso_que_se_quedo_mudo() -> None:
-    reg = compare_to_baseline(
+    duras, blandas = compare_to_baseline(
         {"results": [_r(answered=False, answer_chars=3)]}, {"results": [_r()]}
     )
-    assert any("answered before" in p for p in reg)
+    assert any("antes contestaba" in p for p in duras)
 
 
 def test_detecta_que_dejo_de_rutear_al_conector_correcto() -> None:
     peor = _r(connector_match=False, plan_actions=["search_ckan"])
-    reg = compare_to_baseline({"results": [peor]}, {"results": [_r()]})
-    assert any("no longer routes" in p for p in reg)
+    duras, blandas = compare_to_baseline({"results": [peor]}, {"results": [_r()]})
+    assert any("dejó de rutear" in p for p in duras)
 
 
 def test_detecta_latencia_que_mas_que_duplico() -> None:
-    reg = compare_to_baseline(
+    duras, blandas = compare_to_baseline(
         {"results": [_r(latency_ms=2100)]}, {"results": [_r(latency_ms=1000)]}
     )
-    assert any("latency" in p for p in reg)
+    assert any("latencia" in p for p in blandas)
 
 
 def test_una_latencia_apenas_peor_no_es_regresion() -> None:
     """Estas corridas pegan a portales y a un modelo vivos: un umbral apretado
     gritaría en cada corrida y la batería se volvería ruido que nadie mira."""
-    assert compare_to_baseline({"results": [_r(latency_ms=1900)]}, {"results": [_r()]}) == []
+    assert compare_to_baseline({"results": [_r(latency_ms=1900)]}, {"results": [_r()]}) == ([], [])
 
 
 # ── qué NO cuenta ──────────────────────────────────────────
@@ -84,18 +84,18 @@ def test_una_latencia_apenas_peor_no_es_regresion() -> None:
 def test_una_mejora_nunca_es_regresion() -> None:
     mejor = _r(latency_ms=100, keyword_score=1.0, answer_chars=900)
     peor_base = _r(latency_ms=5000, keyword_score=0.5, answered=False, answer_chars=2)
-    assert compare_to_baseline({"results": [mejor]}, {"results": [peor_base]}) == []
+    assert compare_to_baseline({"results": [mejor]}, {"results": [peor_base]}) == ([], [])
 
 
 def test_un_caso_nuevo_no_rompe_la_comparacion() -> None:
     """Agregar un caso al dataset no puede hacer fallar el gate: no hay contra
     qué compararlo todavía."""
-    assert compare_to_baseline({"results": [_r(id="nuevo_001")]}, {"results": []}) == []
+    assert compare_to_baseline({"results": [_r(id="nuevo_001")]}, {"results": []}) == ([], [])
 
 
 def test_un_caso_que_ya_venia_roto_sigue_sin_ser_regresion() -> None:
     roto = _r(error="Boom", answered=False)
-    assert compare_to_baseline({"results": [roto]}, {"results": [roto]}) == []
+    assert compare_to_baseline({"results": [roto]}, {"results": [roto]}) == ([], [])
 
 
 # ── el resumen no esconde el denominador ───────────────────
@@ -169,14 +169,53 @@ def test_no_compara_latencia_entre_modos_distintos() -> None:
     alarma por diseño. Medido, produjo 11 'regresiones' que no eran nada."""
     lento = {"mode": "deep", "results": [_r(latency_ms=50_000)]}
     base = {"mode": "normal", "results": [_r(latency_ms=10_000)]}
-    assert compare_to_baseline(lento, base) == []
+    assert compare_to_baseline(lento, base) == ([], [])
     # pero contra un baseline del mismo modo sí tiene que saltar
     base_deep = {"mode": "deep", "results": [_r(latency_ms=10_000)]}
-    assert any("latency" in p for p in compare_to_baseline(lento, base_deep))
+    assert any("latencia" in p for p in compare_to_baseline(lento, base_deep)[1])
 
 
 def test_una_respuesta_peor_sí_cruza_entre_modos() -> None:
     """Lo que no depende del modo —que una respuesta empeore— se compara igual."""
     peor = {"mode": "deep", "results": [_r(keyword_score=0.5)]}
     base = {"mode": "normal", "results": [_r(keyword_score=1.0)]}
-    assert any("keyword score" in p for p in compare_to_baseline(peor, base))
+    assert any("keywords" in p for p in compare_to_baseline(peor, base)[1])
+
+
+# ── duras vs blandas ───────────────────────────────────────
+
+
+def test_una_variacion_de_redaccion_no_rompe_el_gate() -> None:
+    """`complex_004` bajó de 1.0 a 0.5 entre dos corridas sin que nada del
+    código lo tocara: la respuesta encabezó con la línea de pobreza en pesos en
+    vez de la tasa. Un gate que falla por eso se desactiva a la semana."""
+    duras, blandas = compare_to_baseline(
+        {"mode": "normal", "results": [_r(keyword_score=0.5)]},
+        {"mode": "normal", "results": [_r(keyword_score=1.0)]},
+    )
+    assert duras == []
+    assert any("keywords" in b for b in blandas)
+
+
+def test_lo_que_no_depende_del_modelo_si_rompe_el_gate() -> None:
+    """Explotar, quedarse mudo o dejar de rutear no dependen de cómo redactó."""
+    for peor in (
+        _r(error="Boom", answered=False),
+        _r(answered=False, answer_chars=2),
+        _r(connector_match=False, plan_actions=["search_ckan"]),
+    ):
+        duras, _ = compare_to_baseline(
+            {"mode": "normal", "results": [peor]}, {"mode": "normal", "results": [_r()]}
+        )
+        assert duras, peor
+
+
+def test_no_se_mira_la_latencia_por_debajo_del_piso() -> None:
+    """43ms → 163ms es "más del doble" y no significa nada. Sin el piso,
+    arreglar una compuerta para que un caso rebote en milisegundos se reporta
+    como regresión — que es exactamente lo que pasó."""
+    _, blandas = compare_to_baseline(
+        {"mode": "normal", "results": [_r(latency_ms=163)]},
+        {"mode": "normal", "results": [_r(latency_ms=43)]},
+    )
+    assert blandas == []

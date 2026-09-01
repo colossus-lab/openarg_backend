@@ -69,6 +69,11 @@ INTENT_MAP = {
 # is large and a tight bound would cry wolf on every run.
 LATENCY_REGRESSION_FACTOR = 2.0
 
+# Y por debajo de esto no se mira la latencia: 43 ms → 163 ms es "más del
+# doble" y no significa nada. Sin el piso, arreglar una compuerta para que un
+# caso rebote en milisegundos se reporta como regresión.
+LATENCY_FLOOR_MS = 1_000
+
 # Below this, an answer is treated as "the pipeline produced nothing useful".
 MIN_USEFUL_ANSWER_CHARS = 20
 
@@ -237,16 +242,25 @@ def summarise(results: list[dict], mode: str) -> dict:
     }
 
 
-def compare_to_baseline(current: dict, baseline: dict) -> list[str]:
-    """Return the regressions found. Empty list means clean.
+def compare_to_baseline(current: dict, baseline: dict) -> tuple[list[str], list[str]]:
+    """Return ``(duras, blandas)``: lo que rompe el gate y lo que sólo avisa.
 
-    Only fires on things that are unambiguously worse for a user: an entry
-    that used to answer and now errors or goes quiet, a keyword score that
-    dropped, or a latency that more than doubled. Improvements are reported
-    separately by the caller, never as failures.
+    La distinción no es cosmética, es lo que hace que el gate sirva. Las
+    respuestas del modelo no son deterministas: `complex_004` bajó de 1.0 a 0.5
+    entre dos corridas sin que nada del código lo tocara —la respuesta encabezó
+    con la línea de pobreza en pesos en vez de la tasa— y un gate que falla por
+    eso se desactiva a la semana.
+
+    **Duras** (exit != 0): un caso que antes contestaba y ahora explota o se
+    queda mudo, o que dejó de rutear al conector que acertaba. Ninguna de esas
+    tres depende de cómo redactó el modelo.
+
+    **Blandas** (sólo se imprimen): puntaje de keywords y latencia. Son señales
+    para mirar, no pruebas.
     """
     base = {r["id"]: r for r in baseline.get("results", [])}
-    problems: list[str] = []
+    duras: list[str] = []
+    blandas: list[str] = []
 
     # Comparar modos distintos y quejarse de la latencia es una falsa alarma
     # por diseño: el modo profundo TIENE que tardar más. Medido, produjo 11
@@ -259,27 +273,28 @@ def compare_to_baseline(current: dict, baseline: dict) -> list[str]:
         if b is None:
             continue  # entry is new to the dataset; nothing to compare against
         if r["error"] and not b["error"]:
-            problems.append(f"{r['id']}: now errors — {r['error']}")
+            duras.append(f"{r['id']}: ahora falla — {r['error']}")
         if b["answered"] and not r["answered"]:
-            problems.append(
-                f"{r['id']}: answered before ({b['answer_chars']} chars), now {r['answer_chars']}"
+            duras.append(
+                f"{r['id']}: antes contestaba ({b['answer_chars']} chars), ahora {r['answer_chars']}"
             )
         if r["keyword_score"] < b["keyword_score"] - 0.001:
-            problems.append(f"{r['id']}: keyword score {b['keyword_score']} → {r['keyword_score']}")
+            blandas.append(f"{r['id']}: keywords {b['keyword_score']} → {r['keyword_score']}")
         if b["connector_scored"] and b["connector_match"] and not r["connector_match"]:
-            problems.append(
-                f"{r['id']}: no longer routes to {b['plan_actions']} (now {r['plan_actions']})"
+            duras.append(
+                f"{r['id']}: dejó de rutear a {b['plan_actions']} (ahora {r['plan_actions']})"
             )
         if (
             mismo_modo
+            and r["latency_ms"] >= LATENCY_FLOOR_MS
             and b["latency_ms"] > 0
             and r["latency_ms"] > b["latency_ms"] * LATENCY_REGRESSION_FACTOR
         ):
-            problems.append(
-                f"{r['id']}: latency {b['latency_ms']}ms → {r['latency_ms']}ms "
-                f"(over {LATENCY_REGRESSION_FACTOR}x)"
+            blandas.append(
+                f"{r['id']}: latencia {b['latency_ms']}ms → {r['latency_ms']}ms "
+                f"(más de {LATENCY_REGRESSION_FACTOR}x)"
             )
-    return problems
+    return duras, blandas
 
 
 async def run_evaluation(
@@ -389,14 +404,18 @@ def main() -> None:
 
     if args.compare:
         baseline = json.loads(args.compare.read_text(encoding="utf-8"))
-        regressions = compare_to_baseline(report, baseline)
+        duras, blandas = compare_to_baseline(report, baseline)
         print(f"\ncontra {args.compare.name} ({baseline.get('mode')}):")
         if baseline.get("mode") != report["mode"]:
             print("  (modos distintos: se comparan respuestas, no latencia)")
-        if regressions:
-            print(f"  {len(regressions)} REGRESIONES:")
-            for r in regressions:
-                print(f"    - {r}")
+        if blandas:
+            print(f"  {len(blandas)} avisos (no rompen el gate):")
+            for w in blandas:
+                print(f"    · {w}")
+        if duras:
+            print(f"  {len(duras)} REGRESIONES:")
+            for d in duras:
+                print(f"    - {d}")
             sys.exit(1)
         print("  sin regresiones")
 
