@@ -48,12 +48,44 @@ def audit_marts(self, *, persist: bool = True) -> dict:
     engine = get_sync_engine()
     results = audit_all(engine)
 
+    from app.application.marts.quality.serving_gate import (
+        MAX_PER_RUN as GATE_MAX,
+    )
+    from app.application.marts.quality.serving_gate import (
+        block_empty,
+        unblock_if_recovered,
+    )
+
     persisted = 0
     resolved = 0
+    # El detector `empty_despite_stored_count` viene avisando hace semanas que un
+    # mart vacío "sigue siendo elegible para el routing y responde vacío". Acá
+    # deja de ser un aviso: se corrige el conteo y se lo saca de circulación.
+    # Bloqueo y desbloqueo, porque un mart que vuelve a tener filas tiene que
+    # volver solo — si no, cada recuperación necesita a una persona.
+    bloqueados: list[str] = []
+    devueltos: list[str] = []
     for ctx, findings in results:
         resource_id = f"mart::{ctx.mart_id}"
         if not persist:
             continue
+
+        # `finding_key` viaja en el payload (`check.py:53`), no como atributo:
+        # leerlo mal daría siempre False y el bloqueo nunca correría.
+        vacio = any(
+            (f.payload or {}).get("finding_key") == "empty_despite_stored_count" for f in findings
+        )
+        if vacio and len(bloqueados) < GATE_MAX:
+            if block_empty(engine, ctx.mart_id, stored=int(ctx.last_row_count or 0)):
+                bloqueados.append(ctx.mart_id)
+        elif vacio:
+            # El tope: más marts vacíos que esto de golpe es un problema
+            # sistémico, y sacar medio catálogo en silencio lo empeora.
+            logger.warning(
+                "serving gate: tope de %d por corrida, %s queda elegible", GATE_MAX, ctx.mart_id
+            )
+        elif not vacio and ctx.serving_blocked and unblock_if_recovered(engine, ctx.mart_id):
+            devueltos.append(ctx.mart_id)
         if not findings:
             # Nothing wrong now: close whatever this sweep reported before.
             # Scoped to this mode so it cannot touch ingestion findings that
@@ -96,6 +128,8 @@ def audit_marts(self, *, persist: bool = True) -> dict:
     summary = summarize(results)
     summary["persisted"] = persisted
     summary["resolved"] = resolved
+    summary["retirados_del_servicio"] = bloqueados
+    summary["devueltos_al_servicio"] = devueltos
     summary["persist"] = persist
 
     critical = summary.get("by_severity", {}).get(Severity.CRITICAL.value, 0)
