@@ -1,5 +1,5 @@
 id: empleo_registrado_argentina
-version: 0.1.0
+version: 0.3.0
 description: |
   Empleo registrado (asalariados) en Argentina por sector económico
   (clasificación CLAE letra) y mes. Datos publicados por la Secretaría
@@ -32,25 +32,39 @@ canonical_columns:
     type: text
     description: Cantidad de puestos de trabajo asalariados registrados
 
+# Un solo patrón para los dos portales, y no es cosmético. El detector de
+# espejos federados del macro aparea `datos_gob_ar::<portal>_<uuid>` con
+# `<portal>::<uuid>`, pero **sólo dentro de un mismo conjunto**: con dos
+# llamadas separadas nunca se veían, y el mart traía el mismo dataset dos veces.
+#
+# Medido en staging: cada dataset aparecía en TRIPLETE — 2 en datos_gob_ar y 1
+# en produccion, idénticos (189.352 filas, mismo rango de fechas, misma suma
+# 1.285.874.223). El mart tenía 1.468.225 filas contra 306.841 únicas.
+#
+# `require_all_columns` es el que más pesa. Sin él, el patrón trae también las
+# tablas de DIMENSIÓN — el diccionario CLAE (`clae6, clae6_desc, ..., letra,
+# letra_desc`) tiene `letra` pero no tiene `fecha` ni `puestos`, así que entraba
+# al UNION rellenando NULL y multiplicaba las filas contra los hechos. Es
+# literalmente el caso "fact-vs-dim cluster" para el que se agregó la bandera.
+#
+# Y hay que PEDIR el descarte de espejos: `drop_federated_mirrors` es opt-in y
+# viene en False, así que juntar los patrones sin esto no cambia nada — medido,
+# el mart quedó igual en 1.468.225 filas.
+#
+# El `__` doble es deliberado: exige el separador de portal y así deja afuera
+# las `cache_datos_gob_ar_puestos_...` legacy, que un patrón más suelto
+# arrastraría.
 sql: |
   SELECT
     NULLIF(TRIM(fecha::text), '')             AS fecha,
     NULLIF(TRIM(letra), '')                   AS letra,
     NULLIF(TRIM(puestos::text), '')           AS puestos
   FROM {{ live_tables_by_table_pattern(
-      'produccion__puestos_de_trabajo_asalariados*',
-      expected_columns=['fecha', 'letra', 'puestos']
+      '*__puestos_de_trabajo_asalariados*',
+      expected_columns=['fecha', 'letra', 'puestos'],
+      require_all_columns=True,
+      drop_federated_mirrors=True
   ) }} sub
-  WHERE NULLIF(TRIM(letra), '') IS NOT NULL
-  UNION ALL
-  SELECT
-    NULLIF(TRIM(fecha::text), '')             AS fecha,
-    NULLIF(TRIM(letra), '')                   AS letra,
-    NULLIF(TRIM(puestos::text), '')           AS puestos
-  FROM {{ live_tables_by_table_pattern(
-      'datos_gob_ar__puestos_de_trabajo_asalariados*',
-      expected_columns=['fecha', 'letra', 'puestos']
-  ) }} sub2
   WHERE NULLIF(TRIM(letra), '') IS NOT NULL
 
 refresh:
