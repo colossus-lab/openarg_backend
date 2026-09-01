@@ -24,9 +24,7 @@ from app.application.common.sql_safety import is_pure_select_for_relation
 
 
 def _check(sql: str):
-    return is_pure_select_for_relation(
-        sql, expected_schema="mart", expected_table="gastos_nacion"
-    )
+    return is_pure_select_for_relation(sql, expected_schema="mart", expected_table="gastos_nacion")
 
 
 @pytest.mark.parametrize("tabla", ["api_keys", "users", "conversations", "messages"])
@@ -65,7 +63,5 @@ def test_several_chained_ctes_still_work():
 
 def test_a_cte_named_after_a_forbidden_table_is_blocked_even_if_never_used():
     # El bloqueo es por referencia física, no por uso.
-    ok, _ = _check(
-        "WITH users AS (SELECT u.email FROM users u) SELECT * FROM mart.gastos_nacion"
-    )
+    ok, _ = _check("WITH users AS (SELECT u.email FROM users u) SELECT * FROM mart.gastos_nacion")
     assert not ok

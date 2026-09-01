@@ -77,7 +77,14 @@ _UPSERT_SQL = text(
         display_name = EXCLUDED.display_name,
         title_source = EXCLUDED.title_source,
         title_confidence = EXCLUDED.title_confidence,
-        materialization_status = EXCLUDED.materialization_status,
+        -- Misma guarda que en `catalog_backfill`: un re-ingest no prueba que el
+        -- recurso dejó de ser ilegible, y sin esto levanta la cuarentena que la
+        -- escalera de reparación acababa de poner.
+        materialization_status = CASE
+            WHEN catalog_resources.materialization_status = 'materialization_corrupted'
+                THEN catalog_resources.materialization_status
+            ELSE EXCLUDED.materialization_status
+        END,
         materialized_table_name = EXCLUDED.materialized_table_name,
         parser_version = EXCLUDED.parser_version,
         normalization_version = EXCLUDED.normalization_version,

@@ -184,7 +184,17 @@ _UPSERT_SQL = text(
         display_name = EXCLUDED.display_name,
         title_source = EXCLUDED.title_source,
         title_confidence = EXCLUDED.title_confidence,
-        materialization_status = EXCLUDED.materialization_status,
+        -- Una cuarentena no se deshace sola. Este backfill reescribe las 32.706
+        -- filas cada 30 minutos, así que sin esta condición ponía en `ready`
+        -- todo lo que la escalera de reparación acababa de retirar: medido
+        -- 2026-09-01, cero tablas en cuarentena pese a que los avisos de esa
+        -- madrugada decían haberlas retirado. Sólo un arreglo exitoso
+        -- (`repair/quarantine.release`) o una persona la levantan.
+        materialization_status = CASE
+            WHEN catalog_resources.materialization_status = 'materialization_corrupted'
+                THEN catalog_resources.materialization_status
+            ELSE EXCLUDED.materialization_status
+        END,
         materialized_table_name = EXCLUDED.materialized_table_name,
         layout_profile = EXCLUDED.layout_profile,
         header_quality = EXCLUDED.header_quality,
@@ -284,7 +294,17 @@ _CONNECTOR_UPSERT_SQL = text(
         canonical_title = EXCLUDED.canonical_title,
         display_name = EXCLUDED.display_name,
         resource_kind = EXCLUDED.resource_kind,
-        materialization_status = EXCLUDED.materialization_status,
+        -- Una cuarentena no se deshace sola. Este backfill reescribe las 32.706
+        -- filas cada 30 minutos, así que sin esta condición ponía en `ready`
+        -- todo lo que la escalera de reparación acababa de retirar: medido
+        -- 2026-09-01, cero tablas en cuarentena pese a que los avisos de esa
+        -- madrugada decían haberlas retirado. Sólo un arreglo exitoso
+        -- (`repair/quarantine.release`) o una persona la levantan.
+        materialization_status = CASE
+            WHEN catalog_resources.materialization_status = 'materialization_corrupted'
+                THEN catalog_resources.materialization_status
+            ELSE EXCLUDED.materialization_status
+        END,
         domain = EXCLUDED.domain,
         subdomain = EXCLUDED.subdomain,
         taxonomy_key = EXCLUDED.taxonomy_key,
