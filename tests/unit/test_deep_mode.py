@@ -328,3 +328,19 @@ def test_el_presupuesto_por_defecto_no_cambio() -> None:
     from app.application.pipeline.nodes.analyst import ANALYST_PROMPT_MAX_CHARS
 
     assert ANALYST_PROMPT_MAX_CHARS == 50_000
+
+
+# ── bypass del caché para evaluación ───────────────────────
+
+
+def test_una_corrida_de_evaluacion_ni_lee_ni_escribe_el_cache() -> None:
+    """Si sólo saltea la lectura, las 50 respuestas de la batería quedan en el
+    caché y se le sirven a usuarios reales. Si sólo saltea la escritura, la
+    segunda corrida mide el caché tibio de la primera (medido: p50 de 17 ms) y
+    deja de ser un gate de regresión."""
+    import inspect
+
+    from app.application.pipeline.nodes import cache, finalize
+
+    assert 'state.get("bypass_cache")' in inspect.getsource(cache.cache_check_node)
+    assert 'state.get("bypass_cache")' in inspect.getsource(finalize.finalize_node)

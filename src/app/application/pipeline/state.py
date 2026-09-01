@@ -44,6 +44,10 @@ class OpenArgState(TypedDict, total=False):
     # El acotamiento gasta un turno; esto evita que vuelva a preguntar en cada
     # turno de la misma conversación.
     scoping_done: bool
+    # Ni lee ni escribe el caché semántico. Lo usa la batería de evaluación:
+    # una corrida tiene que medir el pipeline, y sus respuestas no pueden
+    # terminar sirviéndose a usuarios reales.
+    bypass_cache: bool
     # Lo marca el acotamiento cuando la pregunta es sobre una política pública
     # concreta. Es lo que decide si el paso DNFCG entra en el plan profundo,
     # en vez de apendearlo a toda respuesta profunda como hacía el modo viejo.
