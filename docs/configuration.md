@@ -113,6 +113,7 @@ Set via `.secrets.toml` or environment variables:
 |---------|-------------|---------|
 | `bedrock.REGION` | `AWS_REGION` | AWS Bedrock region (default: us-east-1) |
 | `bedrock.LLM_MODEL` | `BEDROCK_LLM_MODEL` | Bedrock LLM model (default: claude-3-5-haiku) |
+| `bedrock.LLM_MODEL_DEEP` | `BEDROCK_LLM_MODEL_DEEP` | Model used only by deep search (default: same as `LLM_MODEL`) |
 | `bedrock.EMBEDDING_MODEL` | `BEDROCK_EMBEDDING_MODEL` | Bedrock embedding model (default: cohere.embed-multilingual-v3) |
 | `gemini.API_KEY` | `GEMINI_API_KEY` | LLM (Gemini 2.5 Flash, optional) |
 | `anthropic.API_KEY` | `ANTHROPIC_API_KEY` | LLM fallback (Claude Sonnet via Anthropic API) |
@@ -126,6 +127,7 @@ Set via `.secrets.toml` or environment variables:
 |-------|------|---------|-------------|
 | `REGION` | str | `"us-east-1"` | `AWS_REGION` |
 | `LLM_MODEL` | str | `"anthropic.claude-3-5-haiku-20241022-v1:0"` | `BEDROCK_LLM_MODEL` |
+| `LLM_MODEL_DEEP` | str | falls back to `LLM_MODEL` | `BEDROCK_LLM_MODEL_DEEP` |
 | `EMBEDDING_MODEL` | str | `"cohere.embed-multilingual-v3"` | `BEDROCK_EMBEDDING_MODEL` |
 
 ### S3Settings
@@ -189,6 +191,7 @@ These override TOML settings:
 | `AWS_ACCESS_KEY_ID` | AWS credentials | Yes (for Bedrock + S3) |
 | `AWS_SECRET_ACCESS_KEY` | AWS credentials | Yes (for Bedrock + S3) |
 | `BEDROCK_LLM_MODEL` | Bedrock LLM model ID | No (default: claude-3-5-haiku) |
+| `BEDROCK_LLM_MODEL_DEEP` | Model for deep search only. Left unset, deep search runs on the same model as everything else, so the feature costs nothing extra. Point it at a more capable model (a Sonnet inference profile) to make it do something. Whichever you pick, confirm the account can actually invoke it — a profile can be listed as ACTIVE and still be denied at invocation | No (default: `BEDROCK_LLM_MODEL`) |
 | `BEDROCK_EMBEDDING_MODEL` | Bedrock embedding model ID | No (default: cohere.embed-multilingual-v3) |
 | `GEMINI_API_KEY` | Google AI API key | No (optional, if using Gemini) |
 | `ANTHROPIC_API_KEY` | Anthropic API key | No (fallback LLM) |

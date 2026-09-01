@@ -8,6 +8,7 @@ from langgraph.config import get_stream_writer
 
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.classifiers import DATA_ACTIONS
+from app.application.pipeline.nodes import llm_for
 from app.application.pipeline.state import OpenArgState
 from app.application.pipeline.step_executor import (
     _CONNECTOR_LABELS,
@@ -135,7 +136,7 @@ async def execute_steps_node(state: OpenArgState) -> dict:
             bcra=deps.bcra,
             sandbox=deps.sandbox,
             vector_search=deps.vector_search,
-            llm=deps.llm,
+            llm=llm_for(deps, state),
             embedding=deps.embedding,
             semantic_cache=deps.semantic_cache,
             user_id=caller_user_id,

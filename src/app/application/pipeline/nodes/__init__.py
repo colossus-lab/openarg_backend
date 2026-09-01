@@ -6,6 +6,7 @@ to prevent race conditions when concurrent requests update deps.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
@@ -36,6 +37,11 @@ class PipelineDeps:
     # working; the planner falls back to the legacy `table_catalog` query
     # when this is None.
     serving_port: Any = None  # IServingPort | None
+    # El proveedor que usan los nodos de razonamiento en modo DeepSearch. Cuando
+    # `BEDROCK_LLM_MODEL_DEEP` no está seteada apunta al mismo modelo que `llm`,
+    # así que un nodo puede pedirlo siempre sin ramificar. Opcional para que los
+    # tests y los caminos que arman deps a mano sigan funcionando.
+    llm_deep: Any = None  # ILLMProvider | None
 
 
 # Per-request dependency isolation using ContextVar (thread/coroutine-safe)
@@ -73,3 +79,19 @@ def __getattr__(name: str) -> Any:
     if name == "_deps":
         return _deps_var.get()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def llm_for(deps: PipelineDeps, state: Mapping[str, Any]) -> Any:
+    """Elegir el modelo según el modo del turno.
+
+    Sólo los pasos que razonan sobre el catálogo entero —planificar, replanificar,
+    traducir a SQL, redactar el análisis— pasan por acá. Los clasificadores
+    baratos (ambigüedad, memoria, acotamiento) siguen con el modelo rápido:
+    subirlos multiplicaría el costo sin mover la calidad de la respuesta.
+
+    Sin ``BEDROCK_LLM_MODEL_DEEP``, ``llm_deep`` es el mismo adapter que ``llm``
+    y esto no cambia nada.
+    """
+    if state.get("mode") == "deep" and deps.llm_deep is not None:
+        return deps.llm_deep
+    return deps.llm

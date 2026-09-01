@@ -47,7 +47,10 @@ CACHE_OPS = Counter(
 LLM_TOKENS = Counter(
     "openarg_llm_tokens_total",
     "Total LLM tokens consumed",
-    ["model"],
+    # `mode` separa normal de deep: sin esa etiqueta no hay forma de saber
+    # cuánto cuesta el modo profundo, que es la pregunta que decide si se deja
+    # prendido.
+    ["model", "mode"],
 )
 
 LLM_CALLS = Counter(

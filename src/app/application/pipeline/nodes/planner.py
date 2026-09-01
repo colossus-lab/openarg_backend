@@ -12,6 +12,7 @@ from langgraph.config import get_stream_writer
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.connectors.sandbox import discover_catalog_hints_for_planner
 from app.application.pipeline.history import record_terminal_analytics
+from app.application.pipeline.nodes import llm_for
 from app.application.pipeline.state import OpenArgState
 from app.domain.entities.connectors.data_result import ExecutionPlan, PlanStep
 from app.infrastructure.adapters.connectors.query_planner import (
@@ -334,7 +335,7 @@ async def planner_node(state: OpenArgState) -> dict:
                 deps.sandbox,
                 deps.embedding,
                 serving_port=deps.serving_port,
-                llm=deps.llm,
+                llm=llm_for(deps, state),
                 precomputed_embedding=q_embedding,
             )
 
@@ -422,11 +423,12 @@ async def planner_node(state: OpenArgState) -> dict:
         # (high-confidence mart match path). Sequential fallback +
         # history path keep the legacy behaviour.
         plan = await generate_plan(
-            deps.llm,
+            llm_for(deps, state),
             preprocessed_q,
             memory_context=planner_ctx,
             catalog_hints=catalog_hints,
             skip_classifier=use_parallel or skip_classifier_high_conf,
+            deep=state.get("mode") == "deep",
         )
 
         # Persist plan to cache for similarity reuse on future queries.

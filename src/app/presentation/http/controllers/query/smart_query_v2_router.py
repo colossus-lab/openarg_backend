@@ -20,7 +20,7 @@ from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.application.common.privacy_gate import ensure_privacy_accepted
 from app.application.pipeline.graph import build_pipeline_graph
@@ -497,8 +497,19 @@ class SmartQueryV2Request(BaseModel):
     question: str = Field(..., min_length=1, max_length=10000)
     user_email: str | None = None
     conversation_id: str | None = None
+    # "normal" | "deep". `policy_mode` queda como alias de compatibilidad: el
+    # frontend y el backend se despliegan por separado, así que durante un ciclo
+    # de deploy conviven las dos formas del payload. `extra="forbid"` haría
+    # fallar el request viejo si lo sacáramos de una.
+    mode: str = "normal"
     policy_mode: bool = False
     history: list[dict[str, Any]] | None = None
+
+    @model_validator(mode="after")
+    def _resolve_mode(self) -> SmartQueryV2Request:
+        if self.policy_mode and self.mode == "normal":
+            self.mode = "deep"
+        return self
 
 
 class SmartQueryV2Response(BaseModel):
@@ -604,7 +615,7 @@ async def smart_query_v2(
         "question": body.question,
         "user_id": user_id,
         "conversation_id": conversation_id,
-        "policy_mode": body.policy_mode,
+        "mode": body.mode,
         "replan_count": 0,
     }
     # Pass the owner_user_id down so load_chat_history can scope the
@@ -833,7 +844,9 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
 
                 question = raw.get("question", "")
                 conversation_id = raw.get("conversation_id", "")
-                policy_mode = raw.get("policy_mode", False)
+                # Mismo alias que en el POST: durante un ciclo de deploy puede
+                # llegar el payload viejo por el WS.
+                mode = raw.get("mode") or ("deep" if raw.get("policy_mode") else "normal")
 
                 if not question or len(question) > 10000:
                     await _safe_send_json(ws, {"type": "error", "message": "question is required"})
@@ -892,7 +905,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                     "question": question,
                     "user_id": ws_identifier,
                     "conversation_id": conversation_id,
-                    "policy_mode": policy_mode,
+                    "mode": mode,
                 }
                 if owner_user_id_ws is not None:
                     initial_state["owner_user_id"] = str(owner_user_id_ws)  # type: ignore[typeddict-unknown-key]

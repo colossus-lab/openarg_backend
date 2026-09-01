@@ -319,8 +319,27 @@ class LangGraphProvider(Provider):  # type: ignore[misc]
         sandbox: ISQLSandbox,
         chat_repo: IChatRepository,
         serving_port: IServingPort,
+        settings: AppSettings,
     ) -> PipelineDeps:
         from app.infrastructure.monitoring.metrics import MetricsCollector
+
+        # Segunda instancia del adapter, no un adapter nuevo: el constructor ya
+        # toma `model`. Se construye acá y no como provider de Dishka porque
+        # dos `ILLMProvider` colisionarían por tipo, y distinguirlos pediría un
+        # NewType que este repo no usa en ningún lado.
+        #
+        # Mismo fallback a Gemini que el normal: si Bedrock se cae, una consulta
+        # profunda degrada igual que una común en vez de fallar entera.
+        llm_deep = FallbackLLMAdapter(
+            primary=BedrockLLMAdapter(
+                region=settings.bedrock.REGION,
+                model=settings.bedrock.LLM_MODEL_DEEP,
+            ),
+            fallback=GeminiLLMAdapter(
+                api_key=settings.gemini.API_KEY,
+                model=settings.gemini.MODEL,
+            ),
+        )
 
         return PipelineDeps(
             llm=llm,
@@ -340,6 +359,7 @@ class LangGraphProvider(Provider):  # type: ignore[misc]
             chat_repo=chat_repo,
             metrics=MetricsCollector(),
             serving_port=serving_port,
+            llm_deep=llm_deep,
         )
 
 

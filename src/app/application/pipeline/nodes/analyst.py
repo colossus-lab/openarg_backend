@@ -22,6 +22,7 @@ from app.application.pipeline.context_builder import (
     build_data_context,
     build_live_marts_block,
 )
+from app.application.pipeline.nodes import llm_for
 from app.application.pipeline.state import OpenArgState
 from app.domain.ports.llm.llm_provider import LLMMessage
 from app.prompts import load_prompt
@@ -610,7 +611,7 @@ async def analyst_node(state: OpenArgState) -> dict:
         stream_buf = ""
         usage_dict: dict[str, int] = {}
         try:
-            async for chunk_text in deps.llm.chat_stream(
+            async for chunk_text in llm_for(deps, state).chat_stream(
                 messages=messages,
                 temperature=0.2,
                 max_tokens=8192,
@@ -647,7 +648,9 @@ async def analyst_node(state: OpenArgState) -> dict:
         except Exception:
             # Fallback to non-streaming if chat_stream fails
             logger.warning("chat_stream failed, falling back to chat()", exc_info=True)
-            response = await deps.llm.chat(messages=messages, temperature=0.4, max_tokens=8192)
+            response = await llm_for(deps, state).chat(
+                messages=messages, temperature=0.4, max_tokens=8192
+            )
             full_text = response.content
             writer(
                 {"type": "chunk", "content": _scrub_internal_identifiers(_strip_tags(full_text))}

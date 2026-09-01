@@ -22,6 +22,18 @@ logger = logging.getLogger(__name__)
 _MAX_REPLAN_DEPTH = 2
 _TIME_BUDGET_SECONDS = 20.0
 
+# En modo profundo el usuario pidió explícitamente que tarde más. Los dos
+# presupuestos suben juntos porque el de tiempo es el que corta primero: con 20 s
+# el techo de 2 replanificaciones casi nunca se alcanza, así que subir sólo la
+# profundidad no cambiaría nada.
+#
+# El techo de 60 s no es arbitrario: el cliente corta a los 120 s de INACTIVIDAD
+# (`wsBridge.ts`), y cada nodo emite un evento de estado, así que 60 s de reloj
+# total deja margen de sobra. Falta medir cuánto tarda de verdad un turno
+# profundo bajo carga antes de subirlo más.
+_DEEP_MAX_REPLAN_DEPTH = 4
+_DEEP_TIME_BUDGET_SECONDS = 60.0
+
 _STRATEGY_LABELS = {
     "broaden": "ampliando búsqueda",
     "narrow": "enfocando búsqueda",
@@ -70,9 +82,13 @@ async def coordinator_node(state: OpenArgState) -> dict:
     replan_count = state.get("replan_count", 0)
     step_warnings = state.get("step_warnings", [])
 
+    deep = state.get("mode") == "deep"
+    max_depth = _DEEP_MAX_REPLAN_DEPTH if deep else _MAX_REPLAN_DEPTH
+    time_budget = _DEEP_TIME_BUDGET_SECONDS if deep else _TIME_BUDGET_SECONDS
+
     # ── Rule 1: Time budget exceeded → escalate ──────────
     start_time = state.get("_start_time")
-    if start_time and (time.monotonic() - start_time) > _TIME_BUDGET_SECONDS:
+    if start_time and (time.monotonic() - start_time) > time_budget:
         logger.info(
             "Coordinator: time budget exceeded (%.1fs), escalating", time.monotonic() - start_time
         )
@@ -83,8 +99,8 @@ async def coordinator_node(state: OpenArgState) -> dict:
         return {"coordinator_decision": "continue", "replan_strategy": None}
 
     # ── Rule 3: Max replan depth reached → escalate ──────
-    if replan_count >= _MAX_REPLAN_DEPTH:
-        logger.info("Coordinator: max replan depth (%d) reached, escalating", _MAX_REPLAN_DEPTH)
+    if replan_count >= max_depth:
+        logger.info("Coordinator: max replan depth (%d) reached, escalating", max_depth)
         return {"coordinator_decision": "escalate", "replan_strategy": None}
 
     # ── Rule 4: Too many connector failures → escalate ───

@@ -24,7 +24,7 @@ from app.application.pipeline.nodes.finalize import finalize_node
 
 
 class _NoopMetrics:
-    def record_tokens_used(self, _tokens: int) -> None:  # pragma: no cover - trivial
+    def record_tokens_used(self, _tokens: int, mode: str = "normal") -> None:  # pragma: no cover
         return None
 
 

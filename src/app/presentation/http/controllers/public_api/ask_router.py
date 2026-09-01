@@ -76,7 +76,8 @@ async def public_ask(
         "question": body.question,
         "user_id": f"apikey:{api_key.id}",
         "conversation_id": "",
-        "policy_mode": False,
+        # La API pública no expone el modo profundo.
+        "mode": "normal",
         "replan_count": 0,
     }
 

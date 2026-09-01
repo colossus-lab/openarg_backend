@@ -34,7 +34,20 @@ class OpenArgState(TypedDict, total=False):
     question: str
     user_id: str
     conversation_id: str
-    policy_mode: bool
+    # "normal" | "deep". Reemplaza al viejo `policy_mode: bool`: el toggle de la
+    # UI pasó de significar "análisis de políticas" a significar "profundidad".
+    # Se eligió str y no bool para no repetir esta migración si aparece un
+    # tercer modo.
+    mode: str
+
+    # ── DeepSearch ──────────────────────────────────────────
+    # El acotamiento gasta un turno; esto evita que vuelva a preguntar en cada
+    # turno de la misma conversación.
+    scoping_done: bool
+    # Lo marca el acotamiento cuando la pregunta es sobre una política pública
+    # concreta. Es lo que decide si el paso DNFCG entra en el plan profundo,
+    # en vez de apendearlo a toda respuesta profunda como hacía el modo viejo.
+    policy_relevant: bool
 
     # ── Classification ──────────────────────────────────────
     classification: str | None  # casual, meta, injection, off_topic, educational, or None

@@ -21,6 +21,21 @@ def route_after_cache(state: OpenArgState) -> str:
     return "load_memory"
 
 
+def route_after_skill_resolver(state: OpenArgState) -> str:
+    """En modo profundo, acotar antes de planificar."""
+    if state.get("mode") == "deep" and not state.get("scoping_done"):
+        return "scoping"
+    return "planner"
+
+
+def route_after_scoping(state: OpenArgState) -> str:
+    """El acotamiento cierra el turno con sus opciones, o deja pasar al plan."""
+    plan = state.get("plan")
+    if plan and plan.intent == "clarification":
+        return "clarify_reply"
+    return "planner"
+
+
 def route_after_plan(state: OpenArgState) -> str:
     """After planner: clarification, or continue to execution."""
     plan = state.get("plan")
@@ -34,7 +49,11 @@ def route_after_coordinator(state: OpenArgState) -> str:
     decision = state.get("coordinator_decision", "continue")
     if decision == "replan":
         return "replan"
-    if state.get("policy_mode"):
+    # El paso DNFCG dejó de correr en toda respuesta profunda: entra sólo
+    # cuando el acotamiento reconoció una política pública concreta. El agente
+    # se conserva —es la decisión (b) del plan— pero como un paso del plan y no
+    # como un apéndice de todo.
+    if state.get("mode") == "deep" and state.get("policy_relevant"):
         return "policy"
     return "finalize"
 

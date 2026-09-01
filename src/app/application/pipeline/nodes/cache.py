@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 async def cache_check_node(state: OpenArgState) -> dict:
     """Check Redis and semantic cache for a prior answer.
 
-    Skipped when *policy_mode* is True (always fetch fresh data).
+    Skipped in deep mode (una búsqueda profunda siempre va a datos frescos).
     Sets *cached_result* and *last_embedding* when a hit is found.
     """
     writer = get_stream_writer()
@@ -27,7 +27,7 @@ async def cache_check_node(state: OpenArgState) -> dict:
     deps = nodes_pkg.get_deps()
 
     # Skip cache in policy mode — always fetch fresh data
-    if state.get("policy_mode", False):
+    if state.get("mode") == "deep":
         return {
             "cached_result": None,
             "last_embedding": None,

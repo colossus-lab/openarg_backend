@@ -71,7 +71,7 @@ async def finalize_node(state: OpenArgState) -> dict:
 
     # Record token usage
     if tokens_used:
-        deps.metrics.record_tokens_used(tokens_used)
+        deps.metrics.record_tokens_used(tokens_used, mode=state.get("mode", "normal"))
 
     # Audit
     plan_intent = state.get("plan_intent", plan.intent if plan else "unknown")

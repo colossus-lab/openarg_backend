@@ -106,6 +106,16 @@ class AnthropicSecrets(BaseModel):
 class BedrockSettings(BaseModel):
     REGION: str = "us-east-1"
     LLM_MODEL: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    # El modelo que usan los nodos donde el razonamiento pesa, sólo en modo
+    # DeepSearch. Vacío por defecto y resuelto a `LLM_MODEL` abajo: **sin la
+    # variable de entorno el comportamiento es idéntico al actual**, así que
+    # apagarlo es sacar una env, no revertir un deploy.
+    #
+    # Medido en la cuenta el 2026-08-26 invocando cada candidato: Sonnet 5 da
+    # `AccessDeniedException` (falta el acuerdo del proveedor), Sonnet 4.6 y 4.5
+    # responden. Se eligió 4.6 —la más nueva de las dos que funcionan, y más
+    # rápida que 4.5 en la prueba: 0,87 s contra 1,37 s.
+    LLM_MODEL_DEEP: str = ""
     EMBEDDING_MODEL: str = "cohere.embed-multilingual-v3"
 
     def model_post_init(self, __context: object) -> None:
@@ -113,6 +123,7 @@ class BedrockSettings(BaseModel):
 
         self.REGION = os.getenv("AWS_REGION", self.REGION)
         self.LLM_MODEL = os.getenv("BEDROCK_LLM_MODEL", self.LLM_MODEL)
+        self.LLM_MODEL_DEEP = os.getenv("BEDROCK_LLM_MODEL_DEEP", "") or self.LLM_MODEL
         self.EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", self.EMBEDDING_MODEL)
 
 
