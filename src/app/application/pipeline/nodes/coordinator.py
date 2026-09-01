@@ -27,10 +27,21 @@ _TIME_BUDGET_SECONDS = 20.0
 # el techo de 2 replanificaciones casi nunca se alcanza, así que subir sólo la
 # profundidad no cambiaría nada.
 #
-# El techo de 60 s no es arbitrario: el cliente corta a los 120 s de INACTIVIDAD
-# (`wsBridge.ts`), y cada nodo emite un evento de estado, así que 60 s de reloj
-# total deja margen de sobra. Falta medir cuánto tarda de verdad un turno
-# profundo bajo carga antes de subirlo más.
+# El techo de 60 s, ya medido en staging: un turno profundo sobre una pregunta
+# ancha ("cómo viene la situación energética" → plan de 5 marts) tardó 49,6 s.
+# O sea que el margen es de ~10 s, no "de sobra" como decía este comentario
+# antes de medirlo.
+#
+# Que quede ajustado NO trunca respuestas: este presupuesto se consulta en el
+# coordinator, o sea DESPUÉS de que el ciclo terminó. No es una fecha límite que
+# mate un turno en vuelo, es una compuerta que decide si se permite otro ciclo.
+# Un turno que se pasa igual devuelve lo que consiguió.
+#
+# Consecuencia de lo mismo: con ciclos de ~50 s, el techo de 4 replanificaciones
+# rara vez se alcanza — el tiempo corta primero. Es exactamente la crítica que
+# le hicimos al plan original por proponer subir sólo la profundidad. Se deja en
+# 4 como margen para preguntas baratas, sabiendo que el control real es el
+# tiempo.
 _DEEP_MAX_REPLAN_DEPTH = 4
 _DEEP_TIME_BUDGET_SECONDS = 60.0
 

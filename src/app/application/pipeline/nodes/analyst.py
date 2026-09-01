@@ -39,6 +39,15 @@ _MAX_MAP_FEATURES = 500
 # swap models, bump this constant — that's the one place it lives.
 ANALYST_PROMPT_MAX_CHARS = 50_000
 
+# El comentario de arriba dice "si cambiamos de modelo, subí la constante", y el
+# modo profundo cambia de modelo. Medido en staging sobre "cómo viene la
+# situación energética": el plan profundo trajo 5 marts, 75.208 caracteres de
+# datos, y el presupuesto de 50.000 **descartó el 34 %** antes de que el analyst
+# los viera. Buscar más ancho y después tirar un tercio es lo peor de los dos
+# mundos. Sonnet 4.6 tiene la misma ventana de ~200k tokens que Haiku, así que
+# 120.000 caracteres (~30k tokens) siguen sobrando de lugar.
+ANALYST_PROMPT_MAX_CHARS_DEEP = 120_000
+
 
 def _build_map_data(results: list) -> dict[str, Any] | None:
     """Build a GeoJSON FeatureCollection from data results that contain geometry.
@@ -384,6 +393,7 @@ def _enforce_prompt_budget(
     data_context: str,
     errors_block: str,
     memory_ctx: str,
+    budget: int = ANALYST_PROMPT_MAX_CHARS,
 ) -> tuple[str, str, str]:
     """Trim the three truncatable segments to fit within the budget (FR-025b).
 
@@ -396,14 +406,14 @@ def _enforce_prompt_budget(
     When truncation fires, emits a single structured WARNING log with
     the final size, budget, and per-segment drop counts (FR-025d).
     """
-    if static_overhead >= ANALYST_PROMPT_MAX_CHARS:
+    if static_overhead >= budget:
         raise ValueError(
             f"Analyst static prompt overhead is {static_overhead} chars, "
-            f"over budget {ANALYST_PROMPT_MAX_CHARS}. This is a programming "
+            f"over budget {budget}. This is a programming "
             "bug — adjust ANALYST_PROMPT_MAX_CHARS or trim the static text."
         )
 
-    available = ANALYST_PROMPT_MAX_CHARS - static_overhead
+    available = budget - static_overhead
     current = len(data_context) + len(errors_block) + len(memory_ctx)
 
     if current <= available:
@@ -439,7 +449,7 @@ def _enforce_prompt_budget(
     logger.warning(
         "analyst prompt truncated: budget=%d final_size=%d "
         "memory_dropped=%d/%d data_dropped=%d/%d errors_dropped=%d/%d",
-        ANALYST_PROMPT_MAX_CHARS,
+        budget,
         final_size,
         dropped_memory,
         original_sizes[2],
@@ -456,7 +466,7 @@ def _enforce_prompt_budget(
         # the model will reject.
         raise ValueError(
             f"Analyst prompt still {final_size} chars after truncation, "
-            f"over budget {ANALYST_PROMPT_MAX_CHARS}. Raise the budget or "
+            f"over budget {budget}. Raise the budget or "
             "reduce the minimum keep_floor."
         )
 
@@ -482,6 +492,7 @@ def _build_analysis_prompt(
     all_warnings: list[str],
     skill_context: dict[str, str] | None = None,
     live_marts_block: str = "",
+    budget: int = ANALYST_PROMPT_MAX_CHARS,
 ) -> str:
     """Build the analyst LLM prompt from data context and warnings."""
     data_context = build_data_context(results)
@@ -546,12 +557,12 @@ def _build_analysis_prompt(
     # static overhead is computed as the delta between the assembled
     # prompt and the sum of the truncatable segments, which keeps the
     # helper format-agnostic.
-    if len(assembled) > ANALYST_PROMPT_MAX_CHARS:
+    if len(assembled) > budget:
         static_overhead = len(assembled) - (
             len(data_context) + len(errors_block) + len(memory_ctx_analyst)
         )
         data_context, errors_block, memory_ctx_analyst = _enforce_prompt_budget(
-            static_overhead, data_context, errors_block, memory_ctx_analyst
+            static_overhead, data_context, errors_block, memory_ctx_analyst, budget
         )
         assembled = _assemble(data_context, errors_block, memory_ctx_analyst)
 
@@ -599,6 +610,11 @@ async def analyst_node(state: OpenArgState) -> dict:
             all_warnings,
             skill_context=skill_context,
             live_marts_block=live_marts_block,
+            budget=(
+                ANALYST_PROMPT_MAX_CHARS_DEEP
+                if state.get("mode") == "deep"
+                else ANALYST_PROMPT_MAX_CHARS
+            ),
         )
 
         # LLM streaming call — emit chunks as they arrive

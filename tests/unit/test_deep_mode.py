@@ -295,3 +295,36 @@ def test_el_modo_profundo_mira_mas_ancho() -> None:
     from app.application.pipeline.nodes.planner import _DEEP_DISCOVER_LIMIT, _DISCOVER_LIMIT
 
     assert _DEEP_DISCOVER_LIMIT > _DISCOVER_LIMIT
+
+
+# ── presupuesto del analyst ────────────────────────────────
+
+
+def test_el_modo_profundo_no_tira_lo_que_salio_a_buscar() -> None:
+    """Medido en staging: un plan profundo trajo 75.208 caracteres de datos y el
+    presupuesto de 50.000 descartó el 34 % antes del analyst. Buscar más ancho y
+    después tirar un tercio es lo peor de los dos mundos."""
+    from app.application.pipeline.nodes.analyst import (
+        ANALYST_PROMPT_MAX_CHARS,
+        ANALYST_PROMPT_MAX_CHARS_DEEP,
+        _enforce_prompt_budget,
+    )
+
+    assert ANALYST_PROMPT_MAX_CHARS_DEEP > ANALYST_PROMPT_MAX_CHARS
+    # el caso real medido entra entero con el presupuesto profundo
+    assert 75_208 < ANALYST_PROMPT_MAX_CHARS_DEEP
+
+    datos = "D" * 75_208
+    # con el presupuesto normal se recorta...
+    recortado, _, _ = _enforce_prompt_budget(1_000, datos, "", "")
+    assert len(recortado) < len(datos)
+    # ...y con el profundo no
+    intacto, _, _ = _enforce_prompt_budget(1_000, datos, "", "", ANALYST_PROMPT_MAX_CHARS_DEEP)
+    assert len(intacto) == len(datos)
+
+
+def test_el_presupuesto_por_defecto_no_cambio() -> None:
+    """El modo normal tiene que seguir con el mismo recorte de siempre."""
+    from app.application.pipeline.nodes.analyst import ANALYST_PROMPT_MAX_CHARS
+
+    assert ANALYST_PROMPT_MAX_CHARS == 50_000
