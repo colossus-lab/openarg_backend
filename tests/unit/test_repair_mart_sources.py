@@ -306,7 +306,23 @@ def test_a_channel_that_is_down_does_not_cost_the_run(wired, monkeypatch):
 
 
 def test_symptoms_are_named_not_counted():
-    assert srt._symptoms(_Broken("t", n_cols=2)) == ["col_n", "one_or_two_columns"]
+    assert srt._symptoms(_Broken("t", n_cols=2)) == ["col_n"]
+
+
+def test_a_narrow_table_with_good_names_has_no_symptom():
+    # `caba__estructura_demografica` entraba a la escalera seis veces por semana
+    # con las columnas `BARRIO | POBLACION`. Dos columnas no es un defecto: es
+    # cómo se ve una tabla de población por barrio. Medido 2026-09-01: ese
+    # síntoma marcaba 1.383 tablas sanas.
+    sana = _Broken("caba__estructura_demografica", n_cols=2, col_n=False)
+    assert srt._symptoms(sana) == []
+
+
+def test_a_narrow_table_that_is_also_broken_still_enters():
+    # No se pierde cobertura: las 336 angostas-Y-rotas siguen entrando por su
+    # defecto real.
+    rota = _Broken("t", n_cols=2, col_n=True)
+    assert "col_n" in srt._symptoms(rota)
 
 
 # ── el tercer resultado ────────────────────────────────────────

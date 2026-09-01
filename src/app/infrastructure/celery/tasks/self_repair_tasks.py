@@ -72,7 +72,6 @@ _BROKEN_SQL = text(
         OR bool_or(column_name ~ '^[Uu]nnamed')
         OR bool_or(length(column_name) > 60)
         OR bool_or(column_name ~ '[,;|]' OR position(chr(9) in column_name) > 0)
-        OR max(n_cols) <= 2
     """
 )
 
@@ -80,6 +79,20 @@ _MAX_PER_RUN = int(os.getenv("OPENARG_MART_SOURCE_REPAIR_MAX_PER_RUN", "40"))
 
 
 def _symptoms(row: Any) -> list[str]:
+    """Los defectos que vuelven ilegible una columna.
+
+    `one_or_two_columns` estuvo acá y salió. Lo puse pensando en el padrón de
+    Diputados colapsado, pero confundí el resultado de un caso con una señal:
+    ahí lo roto eran los VALORES vacíos, no el número de columnas. Medido en
+    producción el 2026-09-01, ese síntoma marcaba **1.383 tablas sanas** contra
+    336 que además tenían un defecto real — y `caba__estructura_demografica`
+    entraba seis veces por semana con las columnas `BARRIO | POBLACION`, que es
+    exactamente como debe verse una tabla de población por barrio.
+
+    Cada una se comía los cinco escalones deterministas más una llamada al
+    modelo para terminar en `nothing_wrong_with_the_current_names`, y encima
+    salía del servicio. Angosto no es ilegible, igual que largo no es peligroso.
+    """
     named = (
         ("col_n", row.col_n),
         ("unnamed", row.unnamed),
@@ -87,8 +100,6 @@ def _symptoms(row: Any) -> list[str]:
         ("delimiter_in_name", row.delimiter_in_name),
     )
     found = [name for name, flag in named if flag]
-    if row.n_cols <= 2:
-        found.append("one_or_two_columns")
     return found
 
 
