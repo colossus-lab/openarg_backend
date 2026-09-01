@@ -1,13 +1,15 @@
 {
   "version": "1.0",
-  "description": "Golden dataset for OpenArg RAG evaluation",
+  "description": "Golden dataset for OpenArg RAG evaluation · 2026-09-01: `expected_connector` de 6 entradas pasó de `search_ckan`/`query_series` a `query_sandbox`. No es que el ruteo empeoró: es el fix de BUG-001/002 — cuando un mart cubre el tema, el plan va al mart y no a CKAN live, porque los steps corren en paralelo y el wall-clock es el del más lento. Las 6 respondían correcto (keyword score 1.0) con el ruteo nuevo.",
   "entries": [
     {
       "id": "casual_001",
       "category": "casual",
       "question": "Hola",
       "expected_intent": "casual",
-      "expected_answer_contains": ["datos abiertos"],
+      "expected_answer_contains": [
+        "datos abiertos"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -17,7 +19,9 @@
       "category": "casual",
       "question": "Gracias por la info",
       "expected_intent": "casual",
-      "expected_answer_contains": ["consultas"],
+      "expected_answer_contains": [
+        "consultas"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -57,7 +61,10 @@
       "category": "educational",
       "question": "Qué es la inflación?",
       "expected_intent": "educational",
-      "expected_answer_contains": ["inflación", "IPC"],
+      "expected_answer_contains": [
+        "inflación",
+        "IPC"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -67,7 +74,10 @@
       "category": "educational",
       "question": "Qué es el PBI?",
       "expected_intent": "educational",
-      "expected_answer_contains": ["PBI", "Producto Bruto"],
+      "expected_answer_contains": [
+        "PBI",
+        "Producto Bruto"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -77,7 +87,10 @@
       "category": "educational",
       "question": "Qué es el riesgo país?",
       "expected_intent": "educational",
-      "expected_answer_contains": ["riesgo país", "bonos"],
+      "expected_answer_contains": [
+        "riesgo país",
+        "bonos"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -87,7 +100,9 @@
       "category": "educational",
       "question": "Qué son los datos abiertos?",
       "expected_intent": "educational",
-      "expected_answer_contains": ["datos abiertos"],
+      "expected_answer_contains": [
+        "datos abiertos"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -97,7 +112,9 @@
       "category": "educational",
       "question": "Qué son las DDJJ?",
       "expected_intent": "educational",
-      "expected_answer_contains": ["Declaraciones Juradas"],
+      "expected_answer_contains": [
+        "Declaraciones Juradas"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -107,7 +124,10 @@
       "category": "meta",
       "question": "Qué podés hacer?",
       "expected_intent": "meta",
-      "expected_answer_contains": ["OpenArg", "Series de tiempo"],
+      "expected_answer_contains": [
+        "OpenArg",
+        "Series de tiempo"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -117,7 +137,9 @@
       "category": "meta",
       "question": "Cuáles son tus funciones?",
       "expected_intent": "meta",
-      "expected_answer_contains": ["OpenArg"],
+      "expected_answer_contains": [
+        "OpenArg"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -127,7 +149,10 @@
       "category": "meta",
       "question": "Qué es OpenArg?",
       "expected_intent": "meta",
-      "expected_answer_contains": ["OpenArg", "datos abiertos"],
+      "expected_answer_contains": [
+        "OpenArg",
+        "datos abiertos"
+      ],
       "expected_sources": [],
       "expected_connector": null,
       "difficulty": "easy"
@@ -187,8 +212,13 @@
       "category": "series_tiempo",
       "question": "Cómo viene la inflación en los últimos meses?",
       "expected_intent": "inflacion",
-      "expected_answer_contains": ["inflación", "%"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "inflación",
+        "%"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "easy"
     },
@@ -197,8 +227,13 @@
       "category": "series_tiempo",
       "question": "Evolución del tipo de cambio oficial en 2025",
       "expected_intent": "tipo_cambio",
-      "expected_answer_contains": ["tipo de cambio", "dólar"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "tipo de cambio",
+        "dólar"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "medium"
     },
@@ -207,8 +242,12 @@
       "category": "series_tiempo",
       "question": "Cuál es el PBI de Argentina?",
       "expected_intent": "pbi",
-      "expected_answer_contains": ["PBI"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "PBI"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "easy"
     },
@@ -217,8 +256,13 @@
       "category": "series_tiempo",
       "question": "Reservas internacionales del BCRA",
       "expected_intent": "reservas",
-      "expected_answer_contains": ["reservas", "BCRA"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "reservas",
+        "BCRA"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "easy"
     },
@@ -227,9 +271,13 @@
       "category": "series_tiempo",
       "question": "Tasa de desempleo en Argentina",
       "expected_intent": "desempleo",
-      "expected_answer_contains": ["desempleo"],
-      "expected_sources": ["Series de Tiempo"],
-      "expected_connector": "query_series",
+      "expected_answer_contains": [
+        "desempleo"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
+      "expected_connector": "query_sandbox",
       "difficulty": "easy"
     },
     {
@@ -237,8 +285,13 @@
       "category": "series_tiempo",
       "question": "Cómo está el EMAE este año?",
       "expected_intent": "emae",
-      "expected_answer_contains": ["EMAE", "actividad"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "EMAE",
+        "actividad"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "medium"
     },
@@ -247,8 +300,12 @@
       "category": "series_tiempo",
       "question": "Base monetaria del BCRA último año",
       "expected_intent": "base_monetaria",
-      "expected_answer_contains": ["base monetaria"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "base monetaria"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "medium"
     },
@@ -257,8 +314,13 @@
       "category": "series_tiempo",
       "question": "Exportaciones e importaciones de Argentina en 2025",
       "expected_intent": "balanza_comercial",
-      "expected_answer_contains": ["exportaciones", "importaciones"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "exportaciones",
+        "importaciones"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "medium"
     },
@@ -267,8 +329,13 @@
       "category": "argentina_datos",
       "question": "A cuánto está el dólar blue hoy?",
       "expected_intent": "dolar",
-      "expected_answer_contains": ["dólar", "blue"],
-      "expected_sources": ["ArgentinaDatos"],
+      "expected_answer_contains": [
+        "dólar",
+        "blue"
+      ],
+      "expected_sources": [
+        "ArgentinaDatos"
+      ],
       "expected_connector": "query_argentina_datos",
       "difficulty": "easy"
     },
@@ -277,8 +344,12 @@
       "category": "argentina_datos",
       "question": "Cuánto está el riesgo país?",
       "expected_intent": "riesgo_pais",
-      "expected_answer_contains": ["riesgo país"],
-      "expected_sources": ["ArgentinaDatos"],
+      "expected_answer_contains": [
+        "riesgo país"
+      ],
+      "expected_sources": [
+        "ArgentinaDatos"
+      ],
       "expected_connector": "query_argentina_datos",
       "difficulty": "easy"
     },
@@ -287,8 +358,12 @@
       "category": "argentina_datos",
       "question": "Dólar CCL hoy",
       "expected_intent": "dolar",
-      "expected_answer_contains": ["CCL"],
-      "expected_sources": ["ArgentinaDatos"],
+      "expected_answer_contains": [
+        "CCL"
+      ],
+      "expected_sources": [
+        "ArgentinaDatos"
+      ],
       "expected_connector": "query_argentina_datos",
       "difficulty": "easy"
     },
@@ -297,8 +372,12 @@
       "category": "argentina_datos",
       "question": "Cotización del dólar cripto",
       "expected_intent": "dolar",
-      "expected_answer_contains": ["cripto"],
-      "expected_sources": ["ArgentinaDatos"],
+      "expected_answer_contains": [
+        "cripto"
+      ],
+      "expected_sources": [
+        "ArgentinaDatos"
+      ],
       "expected_connector": "query_argentina_datos",
       "difficulty": "easy"
     },
@@ -307,7 +386,9 @@
       "category": "argentina_datos",
       "question": "Cuál es la inflación mensual actual?",
       "expected_intent": "inflacion",
-      "expected_answer_contains": ["inflación"],
+      "expected_answer_contains": [
+        "inflación"
+      ],
       "expected_sources": [],
       "expected_connector": "query_series",
       "difficulty": "medium"
@@ -317,9 +398,12 @@
       "category": "ckan",
       "question": "Qué datasets hay sobre educación en Argentina?",
       "expected_intent": "busqueda",
-      "expected_answer_contains": ["educación", "dataset"],
+      "expected_answer_contains": [
+        "educación",
+        "dataset"
+      ],
       "expected_sources": [],
-      "expected_connector": "search_ckan",
+      "expected_connector": "query_sandbox",
       "difficulty": "easy"
     },
     {
@@ -327,9 +411,11 @@
       "category": "ckan",
       "question": "Datos de transporte público en CABA",
       "expected_intent": "busqueda",
-      "expected_answer_contains": ["transporte"],
+      "expected_answer_contains": [
+        "transporte"
+      ],
       "expected_sources": [],
-      "expected_connector": "search_ckan",
+      "expected_connector": "query_sandbox",
       "difficulty": "easy"
     },
     {
@@ -337,9 +423,11 @@
       "category": "ckan",
       "question": "Datasets de salud en la provincia de Buenos Aires",
       "expected_intent": "busqueda",
-      "expected_answer_contains": ["salud"],
+      "expected_answer_contains": [
+        "salud"
+      ],
       "expected_sources": [],
-      "expected_connector": "search_ckan",
+      "expected_connector": "query_sandbox",
       "difficulty": "medium"
     },
     {
@@ -347,9 +435,12 @@
       "category": "ckan",
       "question": "Listado de legisladores de la Cámara de Diputados",
       "expected_intent": "legisladores",
-      "expected_answer_contains": ["legisladores", "diputados"],
+      "expected_answer_contains": [
+        "legisladores",
+        "diputados"
+      ],
       "expected_sources": [],
-      "expected_connector": "search_ckan",
+      "expected_connector": "query_sandbox",
       "difficulty": "easy"
     },
     {
@@ -357,7 +448,9 @@
       "category": "ckan",
       "question": "Qué datos tiene el portal nacional?",
       "expected_intent": "catalogo",
-      "expected_answer_contains": ["datasets"],
+      "expected_answer_contains": [
+        "datasets"
+      ],
       "expected_sources": [],
       "expected_connector": "search_ckan",
       "difficulty": "easy"
@@ -367,8 +460,12 @@
       "category": "ddjj",
       "question": "Quién es el diputado con mayor patrimonio?",
       "expected_intent": "ddjj",
-      "expected_answer_contains": ["patrimonio"],
-      "expected_sources": ["DDJJ"],
+      "expected_answer_contains": [
+        "patrimonio"
+      ],
+      "expected_sources": [
+        "DDJJ"
+      ],
       "expected_connector": "query_ddjj",
       "difficulty": "easy"
     },
@@ -377,8 +474,12 @@
       "category": "ddjj",
       "question": "Ranking de los 10 diputados más ricos",
       "expected_intent": "ddjj",
-      "expected_answer_contains": ["ranking"],
-      "expected_sources": ["DDJJ"],
+      "expected_answer_contains": [
+        "ranking"
+      ],
+      "expected_sources": [
+        "DDJJ"
+      ],
       "expected_connector": "query_ddjj",
       "difficulty": "easy"
     },
@@ -387,8 +488,12 @@
       "category": "ddjj",
       "question": "Estadísticas generales de las declaraciones juradas",
       "expected_intent": "ddjj",
-      "expected_answer_contains": ["declaraciones"],
-      "expected_sources": ["DDJJ"],
+      "expected_answer_contains": [
+        "declaraciones"
+      ],
+      "expected_sources": [
+        "DDJJ"
+      ],
       "expected_connector": "query_ddjj",
       "difficulty": "easy"
     },
@@ -397,8 +502,12 @@
       "category": "ddjj",
       "question": "Cuántos diputados tienen patrimonio negativo?",
       "expected_intent": "ddjj",
-      "expected_answer_contains": ["patrimonio"],
-      "expected_sources": ["DDJJ"],
+      "expected_answer_contains": [
+        "patrimonio"
+      ],
+      "expected_sources": [
+        "DDJJ"
+      ],
       "expected_connector": "query_ddjj",
       "difficulty": "medium"
     },
@@ -408,7 +517,9 @@
       "question": "Declaración jurada de Cristina Fernández",
       "expected_intent": "ddjj",
       "expected_answer_contains": [],
-      "expected_sources": ["DDJJ"],
+      "expected_sources": [
+        "DDJJ"
+      ],
       "expected_connector": "query_ddjj",
       "difficulty": "easy"
     },
@@ -417,8 +528,12 @@
       "category": "sesiones",
       "question": "Qué se debatió sobre educación en el Congreso?",
       "expected_intent": "sesiones",
-      "expected_answer_contains": ["educación"],
-      "expected_sources": ["Sesiones"],
+      "expected_answer_contains": [
+        "educación"
+      ],
+      "expected_sources": [
+        "Sesiones"
+      ],
       "expected_connector": "query_sesiones",
       "difficulty": "easy"
     },
@@ -427,8 +542,12 @@
       "category": "sesiones",
       "question": "Discursos sobre la ley de presupuesto en el Congreso",
       "expected_intent": "sesiones",
-      "expected_answer_contains": ["presupuesto"],
-      "expected_sources": ["Sesiones"],
+      "expected_answer_contains": [
+        "presupuesto"
+      ],
+      "expected_sources": [
+        "Sesiones"
+      ],
       "expected_connector": "query_sesiones",
       "difficulty": "medium"
     },
@@ -438,7 +557,9 @@
       "question": "Qué dijo Milei en las sesiones del Congreso?",
       "expected_intent": "sesiones",
       "expected_answer_contains": [],
-      "expected_sources": ["Sesiones"],
+      "expected_sources": [
+        "Sesiones"
+      ],
       "expected_connector": "query_sesiones",
       "difficulty": "medium"
     },
@@ -447,8 +568,12 @@
       "category": "sesiones",
       "question": "Debates sobre reforma laboral en Diputados",
       "expected_intent": "sesiones",
-      "expected_answer_contains": ["reforma"],
-      "expected_sources": ["Sesiones"],
+      "expected_answer_contains": [
+        "reforma"
+      ],
+      "expected_sources": [
+        "Sesiones"
+      ],
       "expected_connector": "query_sesiones",
       "difficulty": "medium"
     },
@@ -457,8 +582,14 @@
       "category": "complex_multi_hop",
       "question": "Comparar la inflación con la evolución del dólar blue en los últimos 6 meses",
       "expected_intent": "comparacion",
-      "expected_answer_contains": ["inflación", "dólar"],
-      "expected_sources": ["Series de Tiempo", "ArgentinaDatos"],
+      "expected_answer_contains": [
+        "inflación",
+        "dólar"
+      ],
+      "expected_sources": [
+        "Series de Tiempo",
+        "ArgentinaDatos"
+      ],
       "expected_connector": "query_series",
       "difficulty": "hard"
     },
@@ -467,8 +598,13 @@
       "category": "complex_multi_hop",
       "question": "Cuál es la relación entre el EMAE y las exportaciones en 2025?",
       "expected_intent": "comparacion",
-      "expected_answer_contains": ["EMAE", "exportaciones"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "EMAE",
+        "exportaciones"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "hard"
     },
@@ -477,8 +613,12 @@
       "category": "complex_multi_hop",
       "question": "Los 5 diputados más ricos y cuánto gastó el estado en sus viajes",
       "expected_intent": "ddjj",
-      "expected_answer_contains": ["patrimonio"],
-      "expected_sources": ["DDJJ"],
+      "expected_answer_contains": [
+        "patrimonio"
+      ],
+      "expected_sources": [
+        "DDJJ"
+      ],
       "expected_connector": "query_ddjj",
       "difficulty": "hard"
     },
@@ -487,8 +627,13 @@
       "category": "complex_multi_hop",
       "question": "Cómo evolucionó la pobreza junto con la canasta básica en el último año?",
       "expected_intent": "pobreza",
-      "expected_answer_contains": ["pobreza", "canasta"],
-      "expected_sources": ["Series de Tiempo"],
+      "expected_answer_contains": [
+        "pobreza",
+        "canasta"
+      ],
+      "expected_sources": [
+        "Series de Tiempo"
+      ],
       "expected_connector": "query_series",
       "difficulty": "hard"
     },
@@ -497,9 +642,11 @@
       "category": "complex_multi_hop",
       "question": "Qué datasets de salud hay en CABA y en la provincia de Buenos Aires?",
       "expected_intent": "busqueda",
-      "expected_answer_contains": ["salud"],
+      "expected_answer_contains": [
+        "salud"
+      ],
       "expected_sources": [],
-      "expected_connector": "search_ckan",
+      "expected_connector": "query_sandbox",
       "difficulty": "hard"
     }
   ]

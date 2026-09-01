@@ -215,6 +215,65 @@ def _estimated_rows(engine, pairs: list[tuple[str, str]]) -> dict[tuple[str, str
     return {(r.schema_name, r.table_name): float(r.reltuples or 0) for r in rows}
 
 
+def _drop_identical_content(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
+    """Unir el mismo archivo dos veces duplica filas, no agrega datos.
+
+    El colector registra un mismo recurso bajo varias `resource_identity`, y un
+    macro por patrón las une a todas. Medido en staging:
+    `caba_presupuesto_ejecutado` tenía 1.350.388 filas y 822.026 únicas (39 %
+    duplicado) y `empleo_registrado_argentina` 947.396 contra 306.841 (68 %).
+    En un mart de presupuesto eso significa totales inflados para cualquiera
+    que sume.
+
+    Se deduplica por `source_file_hash` y no por filas: dos filas idénticas
+    dentro de una ejecución presupuestaria pueden ser legítimas, dos archivos
+    byte a byte iguales no. Cuando el hash es NULL —hoy el 90 % de las vivas—
+    esto no puede hacer nada; ese resto se cubre por mart, con `DISTINCT`, y
+    sólo donde la granularidad garantiza unicidad.
+
+    Empata por `resource_identity` para que dos builds con la misma entrada
+    produzcan el mismo mart.
+    """
+    if engine is None or len(lives) < 2:
+        return lives, 0
+
+    pares = {(r.schema_name, r.table_name) for r in lives}
+    sql = (
+        "SELECT schema_name, table_name, source_file_hash "
+        "FROM public.raw_table_versions "
+        "WHERE superseded_at IS NULL AND source_file_hash IS NOT NULL"
+    )
+    try:
+        with engine.connect() as conn:
+            hashes = {
+                (str(r.schema_name), str(r.table_name)): str(r.source_file_hash)
+                for r in conn.execute(text(sql)).fetchall()
+                if (str(r.schema_name), str(r.table_name)) in pares
+            }
+    except Exception:
+        logger.debug("no pude leer source_file_hash; sigo sin deduplicar", exc_info=True)
+        return lives, 0
+
+    visto: dict[str, _LiveRow] = {}
+    conservadas: list[_LiveRow] = []
+    descartadas = 0
+    for row in sorted(lives, key=lambda r: r.resource_identity):
+        h = hashes.get((row.schema_name, row.table_name))
+        if h is None:
+            conservadas.append(row)
+            continue
+        if h in visto:
+            descartadas += 1
+            continue
+        visto[h] = row
+        conservadas.append(row)
+
+    # El orden original importa poco pero la estabilidad sí.
+    orden = {id(r): i for i, r in enumerate(lives)}
+    conservadas.sort(key=lambda r: orden[id(r)])
+    return conservadas, descartadas
+
+
 def _drop_federated_mirrors(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
     """Keep one copy per upstream resource: the larger of the two.
 
@@ -498,6 +557,14 @@ def _build_union(
                 macro_name or "live_tables_by_*",
                 mirrors_dropped,
             )
+
+    lives_list, identicas = _drop_identical_content(lives_list, engine)
+    if identicas:
+        logger.info(
+            "%s: dropped %d table(s) whose file is byte-identical to one already included",
+            macro_name or "live_tables_by_*",
+            identicas,
+        )
 
     filter_set: set[str] | None = None
     if require_columns:

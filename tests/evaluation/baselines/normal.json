@@ -14,7 +14,7 @@
   "scored_over": 18
  },
  "connector_accuracy": {
-  "rate": 0.812,
+  "rate": 1.0,
   "scored_over": 32
  },
  "latency_ms": {
@@ -537,7 +537,7 @@
    "intent_scored": false,
    "intent_match": false,
    "connector_scored": true,
-   "connector_match": false
+   "connector_match": true
   },
   {
    "id": "series_006",
@@ -753,7 +753,7 @@
    "intent_scored": false,
    "intent_match": false,
    "connector_scored": true,
-   "connector_match": false
+   "connector_match": true
   },
   {
    "id": "ckan_002",
@@ -782,7 +782,7 @@
    "intent_scored": false,
    "intent_match": false,
    "connector_scored": true,
-   "connector_match": false
+   "connector_match": true
   },
   {
    "id": "ckan_003",
@@ -809,7 +809,7 @@
    "intent_scored": false,
    "intent_match": false,
    "connector_scored": true,
-   "connector_match": false
+   "connector_match": true
   },
   {
    "id": "ckan_004",
@@ -832,7 +832,7 @@
    "intent_scored": false,
    "intent_match": false,
    "connector_scored": true,
-   "connector_match": false
+   "connector_match": true
   },
   {
    "id": "ckan_005",
@@ -1209,7 +1209,7 @@
    "intent_scored": false,
    "intent_match": false,
    "connector_scored": true,
-   "connector_match": false
+   "connector_match": true
   }
  ]
 }

@@ -1,11 +1,10 @@
 id: legisladores_argentina
-version: 0.3.0
+version: 0.4.0
 description: |
   Legisladores del Congreso Nacional argentino — diputados y senadores
   con su bloque, distrito/provincia y partido. Sources: Cámara de
   Diputados (bloques publicados) + Senado de la Nación (listado oficial).
-  ~116 legisladores nominales (44 dip + 72 sen — la lista de diputados
-  parece estar parcial en el dataset upstream).
+  328 legisladores: 256 diputados + 72 senadores.
 
   Build basado en analytics de prod (47 días, 42 hits): preguntas como
   "qué bloques hay en Diputados", "senadores por provincia",
@@ -54,7 +53,14 @@ canonical_columns:
 # Senadores sigue en cache_* (no hay equivalente raw aún —
 # requiere migración del connector).
 sql: |
-  SELECT
+  -- DISTINCT, no por prolijidad: el portal publica el MISMO padrón bajo dos
+  -- resource_identity distintas (`diputados__bloques__84ff2259__v3` y
+  -- `__f3067840__v1`, 256 filas cada una), y el macro une todo lo que matchea
+  -- el patrón. Sin esto cada diputado sale dos veces y el mart devuelve 512
+  -- donde hay 256 — que es exactamente lo que el chat venía contestando.
+  -- Va DISTINCT y no un identity fijo porque nada impide que el portal
+  -- publique una tercera copia mañana.
+  SELECT DISTINCT
     'diputados'::text                            AS camara,
     NULLIF(TRIM("APELLIDO"::text), '')           AS apellido,
     NULLIF(TRIM("NOMBRES"::text), '')            AS nombre,
@@ -84,7 +90,10 @@ sql: |
 
 refresh:
   policy: manual
-  unique_index: []
+  # Con esto una duplicación futura hace fallar el build en vez de doblar el
+  # número calladita. El DISTINCT de arriba arregla el caso de hoy; el índice
+  # es lo que hace que no vuelva sin que nos enteremos.
+  unique_index: [camara, apellido, nombre, distrito_provincia, periodo]
 
 expectations:
-  min_rows: 292
+  min_rows: 300
