@@ -268,3 +268,140 @@ def test_las_columnas_internas_no_cuentan_como_dimension() -> None:
         m._query_columns = original  # type: ignore[assignment]
 
     assert "nacional" in sql
+
+
+# ── red por huella de contenido ────────────────────────────
+
+
+class _EngHuella:
+    """Engine falso: responde row_count, columnas y huellas."""
+
+    def __init__(self, filas: dict, huellas: dict) -> None:
+        self.filas, self.huellas, self.consultas = filas, huellas, 0
+
+    def connect(self) -> Any:
+        return _ConnHuella(self)
+
+
+class _ConnHuella:
+    def __init__(self, eng: _EngHuella) -> None:
+        self.eng = eng
+        self.ultimo: Any = None
+
+    def execute(self, sql: Any, *_: Any) -> Any:
+        self.ultimo = str(sql)
+        self.eng.consultas += 1
+        return self
+
+    def fetchall(self) -> list[Any]:
+        return [
+            type("R", (), {"schema_name": s, "table_name": t, "row_count": n})()
+            for (s, t), n in self.eng.filas.items()
+        ]
+
+    def scalar(self) -> Any:
+        for (_s, t), h in self.eng.huellas.items():
+            if f'"{t}"' in self.ultimo:
+                return h
+        return None
+
+    def __enter__(self) -> _ConnHuella:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        return None
+
+
+def _con_cols(monkeypatch: Any, cols: dict) -> None:
+    import app.application.marts.sql_macros as m
+
+    monkeypatch.setattr(m, "_query_columns", lambda engine, pares: cols)
+
+
+def test_descarta_las_tablas_con_el_mismo_contenido(monkeypatch: Any) -> None:
+    """Caso real: entre las nacionales de empleo, 3.895 filas aparece 6 veces y
+    son sólo DOS datasets (huellas 759310f2… ×2 y 6ba01ebc… ×3)."""
+    from app.application.marts.sql_macros import _drop_duplicate_tables
+
+    tablas = ["a", "b", "c"]
+    cols = {("raw", t): {"fecha", "letra", "puestos", "_source_dataset_id"} for t in tablas}
+    _con_cols(monkeypatch, cols)
+    eng = _EngHuella(
+        filas={("raw", t): 3895 for t in tablas},
+        huellas={("raw", "a"): "H1", ("raw", "b"): "H1", ("raw", "c"): "H2"},
+    )
+    quedan, descartadas = _drop_duplicate_tables([_live(f"p::{t}", t) for t in tablas], eng)
+    assert descartadas == 1
+    assert {r.table_name for r in quedan} == {"a", "c"}
+
+
+def test_el_prefiltro_evita_huellear_lo_que_no_hace_falta(monkeypatch: Any) -> None:
+    """Sin `row_count` repetido no se huellea nada: es lo que hace que esto no
+    cueste minutos en cada build."""
+    from app.application.marts.sql_macros import _drop_duplicate_tables
+
+    cols = {("raw", t): {"x"} for t in ("a", "b")}
+    _con_cols(monkeypatch, cols)
+    eng = _EngHuella(filas={("raw", "a"): 100, ("raw", "b"): 200}, huellas={})
+    quedan, descartadas = _drop_duplicate_tables([_live("p::a", "a"), _live("p::b", "b")], eng)
+    assert descartadas == 0
+    assert eng.consultas == 1  # sólo la de row_count
+
+
+def test_row_count_igual_pero_contenido_distinto_no_se_toca(monkeypatch: Any) -> None:
+    """Mismo tamaño no es lo mismo que mismo dato — medido: dentro del grupo de
+    3.895 conviven dos datasets distintos."""
+    from app.application.marts.sql_macros import _drop_duplicate_tables
+
+    cols = {("raw", t): {"x"} for t in ("a", "b")}
+    _con_cols(monkeypatch, cols)
+    eng = _EngHuella(
+        filas={("raw", "a"): 3895, ("raw", "b"): 3895},
+        huellas={("raw", "a"): "H1", ("raw", "b"): "H2"},
+    )
+    quedan, descartadas = _drop_duplicate_tables([_live("p::a", "a"), _live("p::b", "b")], eng)
+    assert descartadas == 0
+    assert len(quedan) == 2
+
+
+def test_la_huella_ignora_las_columnas_internas() -> None:
+    """`_source_dataset_id` es distinto en cada tabla por construcción. Una
+    huella que lo incluya nunca coincide — que es lo que le pasó a la primera
+    versión de esta función y por lo que no descartaba nada."""
+    import re as _re
+
+    from app.application.marts.sql_macros import _huella
+
+    capturado = {}
+
+    class _E:
+        def connect(self) -> Any:
+            return self
+
+        def execute(self, sql: Any) -> Any:
+            capturado["sql"] = str(sql)
+            return self
+
+        def scalar(self) -> str:
+            return "H"
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+    _huella(_E(), "raw", "t", {"fecha", "puestos", "_source_dataset_id", "_x"})
+    sql = capturado["sql"]
+    # la proyección es la del subquery, no la del md5 de afuera
+    interno = _re.search(r"FROM \(SELECT (.+?) FROM ", sql).group(1)
+    assert "_source_dataset_id" not in interno
+    assert "_x" not in interno
+    assert '"fecha"' in interno and '"puestos"' in interno
+
+
+def test_sin_engine_es_no_op() -> None:
+    from app.application.marts.sql_macros import _drop_duplicate_tables
+
+    lives = [_live("p::a", "a"), _live("p::b", "b")]
+    assert _drop_duplicate_tables(lives, None) == (lives, 0)

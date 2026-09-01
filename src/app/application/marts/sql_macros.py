@@ -263,6 +263,109 @@ def _drop_stale_parent_versions(lives: list[_LiveRow]) -> tuple[list[_LiveRow], 
     return conservadas, len(lives) - len(conservadas)
 
 
+# Muestreo determinístico: huellear una tabla sin leerla entera. Las dos huellas
+# que se comparan se calculan en la misma consulta, así que alcanza con que
+# `hashtext` sea estable dentro de la sesión.
+_MUESTRA_MODULO = 97
+
+
+def _huella(engine, schema: str, table: str, columnas: set[str]) -> str | None:
+    """Huella del contenido de una tabla, **sin las columnas internas**.
+
+    Excluir las que empiezan con `_` no es un detalle: `_source_dataset_id` lo
+    agrega el colector y es distinto en cada tabla por construcción. Una huella
+    que lo incluya nunca coincide, y el filtro no descarta nada — que es
+    exactamente lo que le pasó a la primera versión de esta función.
+    """
+    reales = sorted(c for c in columnas if not c.startswith("_"))
+    if not reales:
+        return None
+    proj = ", ".join(f'"{c}"' for c in reales)
+    sql = text(
+        f"SELECT md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), '')) "  # noqa: S608
+        f'FROM (SELECT {proj} FROM "{schema}"."{table}") x '
+        f"WHERE abs(hashtext(x::text)) % {_MUESTRA_MODULO} = 0"
+    )
+    try:
+        with engine.connect() as conn:
+            return str(conn.execute(sql).scalar())
+    except Exception:
+        logger.debug("no pude huellear %s.%s", schema, table, exc_info=True)
+        return None
+
+
+def _drop_duplicate_tables(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
+    """Descartar tablas cuyo contenido ya está en el conjunto.
+
+    La red que atrapa lo que las reglas sobre la FORMA de la identidad no ven.
+    Medido en `empleo_registrado_argentina`: entre las 14 tablas de grano
+    nacional hay grupos de igual tamaño con contenido idéntico — 3.895 filas
+    aparece 6 veces y son sólo DOS datasets (huellas `759310f2…` ×2 y
+    `6ba01ebc…` ×3). Ninguna regla sobre identidades las reconoce: son portales
+    distintos, UUIDs distintos y hash de archivo en NULL.
+
+    **El prefiltro es lo que lo hace viable.** Huellear todo en cada build
+    costaría minutos; agrupar primero por `row_count` —que el registro ya
+    tiene, gratis— deja sólo las candidatas, y de esas se muestrea ~1 %. Una
+    tabla con un `row_count` único no se toca.
+
+    Conservador ante la duda: sin engine, sin `row_count` o sin poder huellear,
+    la tabla se conserva. A un mart le hace más daño perder una fuente que
+    traer filas de más.
+    """
+    if engine is None or len(lives) < 2:
+        return lives, 0
+
+    pares = {(r.schema_name, r.table_name) for r in lives}
+    try:
+        with engine.connect() as conn:
+            filas = {
+                (str(r.schema_name), str(r.table_name)): r.row_count
+                for r in conn.execute(
+                    text(
+                        "SELECT schema_name, table_name, row_count "
+                        "FROM public.raw_table_versions WHERE superseded_at IS NULL"
+                    )
+                ).fetchall()
+                if (str(r.schema_name), str(r.table_name)) in pares
+            }
+    except Exception:
+        logger.debug("no pude leer row_count; no deduplico por contenido", exc_info=True)
+        return lives, 0
+
+    por_filas: dict[int, list[_LiveRow]] = {}
+    for row in lives:
+        n = filas.get((row.schema_name, row.table_name))
+        if n:
+            por_filas.setdefault(int(n), []).append(row)
+    if not any(len(g) > 1 for g in por_filas.values()):
+        return lives, 0
+
+    cols = _query_columns(engine, [(r.schema_name, r.table_name) for r in lives])
+    huellas: dict[tuple[int, str], _LiveRow] = {}
+    descartar: set[int] = set()
+    for n, grupo in sorted(por_filas.items()):
+        if len(grupo) < 2:
+            continue
+        for row in sorted(grupo, key=lambda r: r.resource_identity):
+            h = _huella(
+                engine,
+                row.schema_name,
+                row.table_name,
+                cols.get((row.schema_name, row.table_name), set()),
+            )
+            if h is None:
+                continue
+            clave = (n, h)
+            if clave in huellas:
+                descartar.add(id(row))
+            else:
+                huellas[clave] = row
+
+    conservadas = [r for r in lives if id(r) not in descartar]
+    return conservadas, len(lives) - len(conservadas)
+
+
 def _drop_identical_content(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
     """Unir el mismo archivo dos veces duplica filas, no agrega datos.
 
@@ -613,6 +716,14 @@ def _build_union(
             "%s: dropped %d expansion child(ren) from a superseded parent version",
             macro_name or "live_tables_by_*",
             viejas,
+        )
+
+    lives_list, gemelas = _drop_duplicate_tables(lives_list, engine)
+    if gemelas:
+        logger.info(
+            "%s: dropped %d table(s) whose content is already in the union",
+            macro_name or "live_tables_by_*",
+            gemelas,
         )
 
     lives_list, identicas = _drop_identical_content(lives_list, engine)
