@@ -227,17 +227,50 @@ DATA_ACTIONS = frozenset(
 # ── Public API ──────────────────────────────────────────────
 
 
-def get_casual_response(question: str) -> str | None:
-    """Return a casual response if the question matches greeting/thanks/farewell."""
-    t = question.strip()
+# Colas inofensivas que la gente le pega a un agradecimiento. Se recortan antes
+# de comparar: sin esto, "Gracias por la info" no entra y corre el pipeline
+# entero para contestar "de nada" (medido: 3 de 5 casos casuales de la batería).
+_CASUAL_TAIL = re.compile(
+    r"\s+(por\s+(la\s+|el\s+|los\s+|las\s+|todo\s+)?"
+    r"(info(rmaci[oó]n)?|ayuda|dato|datos|respuesta|aclaraci[oó]n)|"
+    r"che|capo|amigo|amiga|genio|maestro|bro)\b[\s!?.,;:]*$",
+    re.IGNORECASE,
+)
+
+# Un mensaje casual es corto por definición. El tope existe para que ninguna
+# ampliación de acá abajo pueda tragarse una pregunta de verdad.
+_CASUAL_MAX_CHARS = 60
+
+
+def _casual_subtype(fragmento: str) -> str | None:
+    t = _CASUAL_TAIL.sub("", fragmento.strip()).strip()
     if _GREETING_PATTERN.match(t):
-        subtype = "greeting"
-    elif _THANKS_PATTERN.match(t):
-        subtype = "thanks"
-    elif _FAREWELL_PATTERN.match(t):
-        subtype = "farewell"
-    else:
+        return "greeting"
+    if _THANKS_PATTERN.match(t):
+        return "thanks"
+    if _FAREWELL_PATTERN.match(t):
+        return "farewell"
+    return None
+
+
+def get_casual_response(question: str) -> str | None:
+    """Return a casual response if the question matches greeting/thanks/farewell.
+
+    Acepta varias fórmulas encadenadas ("Chau, nos vemos" / "Perfecto, dale"),
+    que es como escribe la gente. La condición es dura y por eso es segura:
+    **todos** los fragmentos tienen que ser casuales. Un solo fragmento que no
+    lo sea —"Gracias, ahora dame la inflación de 2024"— descarta el mensaje
+    entero y lo manda al pipeline, que es lo correcto.
+    """
+    t = question.strip()
+    if not t or len(t) > _CASUAL_MAX_CHARS:
         return None
+
+    fragmentos = [f for f in re.split(r"[,;]|\s+y\s+", t) if f.strip()]
+    subtipos = [_casual_subtype(f) for f in fragmentos]
+    if not subtipos or any(st is None for st in subtipos):
+        return None
+    subtype = subtipos[0] or "generic"
     responses = _CASUAL_RESPONSES.get(subtype, _CASUAL_RESPONSES["generic"])
     return random.choice(responses)  # noqa: S311
 

@@ -67,7 +67,12 @@ MAX_PER_RUN = 5
 
 # Counted, never listed. Non-actionable by construction: nothing is expected of
 # the reader, and at this system's volume these would be every message.
-DIGEST_KINDS = frozenset({"repaired"})
+# `mart_audit_warn` va digerido y no listado: son decenas, y ninguno pide una
+# acción inmediata. Pero SALE, que es la diferencia con no reportarlos —
+# `caba_presupuesto_ejecutado` estuvo 39 % duplicado sirviendo totales de
+# presupuesto inflados, el check lo detectó y lo guardó, y como el alerta sólo
+# miraba `critical` (>=50 %) nadie se enteró nunca.
+DIGEST_KINDS = frozenset({"repaired", "mart_audit_warn"})
 
 # Never capped, never digested. This is the one that says a repair was withheld
 # because applying it would break something a person built, and it is the single
@@ -264,11 +269,17 @@ def notify(engine: Engine, alerts: list[Alert], *, heading: str) -> dict[str, ob
         lines.append(f"…y {resto} más sin listar.")
 
     if digested:
-        # One line for the whole class. Nothing is expected of the reader, so
-        # listing them would spend the attention budget on the least actionable
-        # thing this channel carries.
+        # Una línea por clase. No se espera nada del lector, así que listarlos
+        # gastaría el presupuesto de atención en lo menos accionable que lleva
+        # este canal — pero sale, que es la diferencia con no reportarlo.
         lines.append("")
-        lines.append(f"<i>Además, {len(digested)} arreglo(s) automático(s).</i>")
+        for kind, etiqueta in (
+            ("repaired", "arreglo(s) automático(s)"),
+            ("mart_audit_warn", "mart(s) con filas repetidas entre 20 % y 50 %"),
+        ):
+            n = sum(1 for a in digested if a.kind == kind)
+            if n:
+                lines.append(f"<i>Además, {n} {etiqueta}.</i>")
 
     sent = _send("\n".join(lines))
     return {

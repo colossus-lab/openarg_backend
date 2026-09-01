@@ -29,7 +29,7 @@ def _state(
     step_warnings=None,
     replan_count=0,
     start_time=None,
-    policy_mode=False,
+    mode="normal",
 ):
     """Build a minimal OpenArgState dict for testing."""
     return {
@@ -37,7 +37,7 @@ def _state(
         "step_warnings": step_warnings or [],
         "replan_count": replan_count,
         "_start_time": start_time or time.monotonic(),
-        "policy_mode": policy_mode,
+        "mode": mode,
         "question": "test question",
     }
 

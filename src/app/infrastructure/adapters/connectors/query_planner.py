@@ -292,6 +292,25 @@ def _resolve_routing_hints(question: str, *, suppress_ckan: bool = False) -> str
     return ""
 
 
+_DEEP_ADDENDUM = """
+
+MODO PROFUNDO — el usuario pidió explícitamente una búsqueda exhaustiva y aceptó
+que tarde más.
+
+- La regla de "un solo step cuando hay mart" se relaja acá: existe porque los
+  steps corren en paralelo y el wall-clock es el del más lento. En modo profundo
+  hay presupuesto para eso. Si un mart cubre el tema, sigue siendo el step
+  principal — pero podés agregar 1-2 steps que **corroboren o contextualicen** el
+  número desde otra fuente.
+- Preferí cubrir la pregunta desde ángulos distintos antes que repetir la misma
+  consulta con parámetros parecidos.
+- Si la pregunta pide una comparación o una serie, traé el período completo, no
+  el último punto.
+- No inventes steps para llenar el plan: si con dos alcanza, son dos. Un plan
+  largo que no agrega evidencia sólo agrega latencia.
+"""
+
+
 async def generate_plan(
     llm: ILLMProvider,
     question: str,
@@ -299,8 +318,14 @@ async def generate_plan(
     catalog_hints: str = "",
     *,
     skip_classifier: bool = False,
+    deep: bool = False,
 ) -> ExecutionPlan:
     """Generate an execution plan from a user query using the LLM.
+
+    `deep=True` agrega un addendum al prompt en vez de cargar un segundo
+    archivo: `planner.txt` tiene 180 líneas de reglas de ruteo y catálogos de
+    series que no cambian entre modos, y duplicarlo garantiza que las dos copias
+    se separen a la primera edición.
 
     `skip_classifier=True` bypasses the in-function ambiguity classifier
     call. Used by `planner_node` after it ran the classifier in parallel
@@ -362,6 +387,8 @@ async def generate_plan(
         user_content += f"\n\n{hints_text}"
     if catalog_hints:
         user_content += f"\n\n{catalog_hints}"
+    if deep:
+        user_content += _DEEP_ADDENDUM
     user_content += (
         "\n\nSi la pregunta del usuario hace referencia a algo mencionado antes "
         'en el historial (ej: "y eso?", "compará", "lo mismo pero..."), '

@@ -93,18 +93,22 @@ _REDIS_WARN_RATIO = 0.75
 # duplicates — would have been reported by the sweep and still gone unread.
 # Detecting without telling anyone is the same as not detecting.
 #
-# Only CRITICAL, and only what is still unresolved: the sweep resolves a
-# finding when the mart comes back clean, so a fixed mart stops alerting on
-# its own.
+# Lo que sigue sin resolver: el barrido resuelve el hallazgo cuando el mart
+# vuelve limpio, así que uno arreglado deja de alertar solo.
+#
+# `critical` se lista; `warn` va digerido en una línea. Antes se leía sólo
+# `critical` y el resto moría en la tabla: `caba_presupuesto_ejecutado` estuvo
+# 39 % duplicado —un mart de presupuesto sirviendo totales inflados— detectado,
+# guardado y jamás reportado, porque 39 % no llega al umbral de 50 %.
 _MART_AUDIT_FINDINGS_SQL = text(
     """
-    SELECT resource_id, detector_name, message
+    SELECT resource_id, detector_name, message, severity
     FROM ingestion_findings
     WHERE mode = 'mart_audit'
-      AND severity = 'critical'
+      AND severity IN ('critical', 'warn')
       AND resolved_at IS NULL
-    ORDER BY found_at DESC
-    LIMIT 20
+    ORDER BY severity DESC, found_at DESC
+    LIMIT 60
     """
 )
 
@@ -188,7 +192,9 @@ def alert_on_quality_signals(self) -> dict[str, Any]:
             for row_a in conn.execute(_MART_AUDIT_FINDINGS_SQL).fetchall():
                 alerts.append(
                     Alert(
-                        kind="mart_audit",
+                        kind=(
+                            "mart_audit" if str(row_a.severity) == "critical" else "mart_audit_warn"
+                        ),
                         # Keyed on mart + check, so a mart with two different
                         # problems reports both, and the same problem reported
                         # again after a rebuild does not re-alert.

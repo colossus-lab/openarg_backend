@@ -19,15 +19,19 @@ logger = logging.getLogger(__name__)
 async def cache_check_node(state: OpenArgState) -> dict:
     """Check Redis and semantic cache for a prior answer.
 
-    Skipped when *policy_mode* is True (always fetch fresh data).
+    Skipped in deep mode (una búsqueda profunda siempre va a datos frescos).
     Sets *cached_result* and *last_embedding* when a hit is found.
     """
     writer = get_stream_writer()
     writer({"type": "status", "step": "cache_check", "detail": "Buscando en caché..."})
     deps = nodes_pkg.get_deps()
 
-    # Skip cache in policy mode — always fetch fresh data
-    if state.get("policy_mode", False):
+    # Una búsqueda profunda siempre va a datos frescos. `bypass_cache` es la
+    # misma puerta abierta explícitamente: una corrida de evaluación tiene que
+    # ejercitar el pipeline, no el caché. Sin esto la batería sólo sirve una
+    # vez — la segunda corrida mide el caché tibio que dejó la primera y da
+    # p50 de 17 ms, que no es una medición de nada.
+    if state.get("mode") == "deep" or state.get("bypass_cache"):
         return {
             "cached_result": None,
             "last_embedding": None,

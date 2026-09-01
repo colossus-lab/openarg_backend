@@ -12,6 +12,7 @@ from langgraph.config import get_stream_writer
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.connectors.sandbox import discover_catalog_hints_for_planner
 from app.application.pipeline.history import record_terminal_analytics
+from app.application.pipeline.nodes import llm_for
 from app.application.pipeline.state import OpenArgState
 from app.domain.entities.connectors.data_result import ExecutionPlan, PlanStep
 from app.infrastructure.adapters.connectors.query_planner import (
@@ -44,6 +45,13 @@ def _high_confidence_skip_threshold() -> float:
         return float(raw)
     except ValueError:
         return 0.80
+
+
+# Candidatas que la búsqueda vectorial le ofrece al planner. El modo profundo
+# mira más ancho; `min_score` sigue siendo el que filtra, así que subir el tope
+# no mete ruido por debajo del umbral, sólo deja entrar más de lo que ya pasaba.
+_DISCOVER_LIMIT = 5
+_DEEP_DISCOVER_LIMIT = 12
 
 
 def _plan_cache_enabled() -> bool:
@@ -303,6 +311,19 @@ async def planner_node(state: OpenArgState) -> dict:
         q_embedding: list[float] | None = None
         skip_classifier_high_conf = False
         cached_plan_dict: dict | None = None
+
+        # El modo profundo no toca el plan cache, en NINGUNA dirección.
+        #
+        # Leerlo lo haría un no-op: un hit saltea la llamada al planner, que es
+        # justamente donde entran el modelo capaz y el addendum profundo. El
+        # usuario pagaría "profundo" y recibiría un plan normal cacheado —
+        # y encima sobre las preguntas más populares, que son las que más
+        # probable es que tengan hit.
+        #
+        # Escribirlo envenenaría el modo normal: un plan de varios steps,
+        # pensado para 60 s de presupuesto, servido después a un turno normal
+        # que corta a los 20 s.
+        deep = state.get("mode") == "deep"
         if not has_history and deps.embedding is not None:
             try:
                 q_embedding = await deps.embedding.embed(preprocessed_q)
@@ -310,7 +331,7 @@ async def planner_node(state: OpenArgState) -> dict:
                 # hit we still run discover (cheap, ~100ms vector search)
                 # for the catalog_hints field that downstream nodes may
                 # consume for explanations, but skip the planner LLM.
-                cached_plan_dict = await _try_plan_cache_hit(deps, q_embedding)
+                cached_plan_dict = None if deep else await _try_plan_cache_hit(deps, q_embedding)
                 if cached_plan_dict is None:
                     top_sim = await _top_mart_sample_sim(deps, q_embedding)
                     if top_sim >= _high_confidence_skip_threshold():
@@ -333,8 +354,13 @@ async def planner_node(state: OpenArgState) -> dict:
                 preprocessed_q,
                 deps.sandbox,
                 deps.embedding,
+                # Más candidatas para elegir. Es el único de los tres límites
+                # que Dante quería ampliar que existe de verdad: no hay tope de
+                # steps en el pipeline, y las citas por afirmación ya las exige
+                # `analyst.txt`.
+                _DEEP_DISCOVER_LIMIT if deep else _DISCOVER_LIMIT,
                 serving_port=deps.serving_port,
-                llm=deps.llm,
+                llm=llm_for(deps, state),
                 precomputed_embedding=q_embedding,
             )
 
@@ -422,17 +448,18 @@ async def planner_node(state: OpenArgState) -> dict:
         # (high-confidence mart match path). Sequential fallback +
         # history path keep the legacy behaviour.
         plan = await generate_plan(
-            deps.llm,
+            llm_for(deps, state),
             preprocessed_q,
             memory_context=planner_ctx,
             catalog_hints=catalog_hints,
             skip_classifier=use_parallel or skip_classifier_high_conf,
+            deep=deep,
         )
 
         # Persist plan to cache for similarity reuse on future queries.
         # Best-effort (errors swallowed). Skipped for clarifications +
         # history-bound queries (handled inside _store_plan_cache).
-        if not has_history and q_embedding is not None and plan is not None:
+        if not has_history and not deep and q_embedding is not None and plan is not None:
             try:
                 await _store_plan_cache(deps, preprocessed_q, q_embedding, plan)
             except Exception:

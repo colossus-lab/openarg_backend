@@ -901,11 +901,19 @@ def cleanup_raw_orphans(
           -- Superseded versions stay in scope; so do empty live ones.
           AND (
               rtv.superseded_at IS NOT NULL
+              -- `= 0`, not `<= 0`. `pg_class.reltuples` is **-1** for a table
+              -- Postgres has never analysed (PG14+), not 0 — so `<= 0` made
+              -- every never-analysed table drop-eligible regardless of what it
+              -- held. Measured in production 2026-08-25: 1,460 tables in `raw`
+              -- sit at -1 and **41 of them hold real data**. This guard was
+              -- added after the August incident to stop exactly this, and the
+              -- comparison quietly undid it for the one population nobody
+              -- vacuums.
               OR COALESCE((
                   SELECT c.reltuples FROM pg_class c
                   JOIN pg_namespace n ON n.oid = c.relnamespace
                   WHERE n.nspname = 'raw' AND c.relname = rtv.table_name
-              ), 0) <= 0
+              ), 0) = 0
           )
         ORDER BY rtv.created_at ASC
         LIMIT :limit

@@ -8,6 +8,8 @@ from langgraph.config import get_stream_writer
 
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.connectors.sandbox import discover_catalog_hints_for_planner
+from app.application.pipeline.nodes import llm_for
+from app.application.pipeline.nodes.planner import _DEEP_DISCOVER_LIMIT, _DISCOVER_LIMIT
 from app.application.pipeline.state import RESET_LIST, OpenArgState
 from app.infrastructure.adapters.connectors.query_planner import generate_plan
 
@@ -86,20 +88,23 @@ async def replan_node(state: OpenArgState) -> dict:
         replan_context += "\n\n" + _strategy_hint(strategy)
 
         # Discover catalog hints again (same logic as planner_node)
+        deep = state.get("mode") == "deep"
         catalog_hints = await discover_catalog_hints_for_planner(
             preprocessed_q,
             deps.sandbox,
             deps.embedding,
+            _DEEP_DISCOVER_LIMIT if deep else _DISCOVER_LIMIT,
             serving_port=deps.serving_port,
-            llm=deps.llm,
+            llm=llm_for(deps, state),
         )
 
         # Generate a new plan with the enriched context
         plan = await generate_plan(
-            deps.llm,
+            llm_for(deps, state),
             preprocessed_q,
             memory_context=replan_context,
             catalog_hints=catalog_hints,
+            deep=deep,
         )
 
         return {

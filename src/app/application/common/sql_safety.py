@@ -211,15 +211,24 @@ def is_pure_select_for_relation(
         if not bare:
             # Defensive: an empty Table node has no business in our SQL.
             return False, "unparseable table reference"
+        # Defense-in-depth: the hard internal blocklist always wins, regardless
+        # of schema. Even if the expected_schema is `public` and the caller
+        # mistakenly lists `successful_queries` as the expected table, the
+        # blocklist still blocks the query.
+        #
+        # **This must run before the CTE-alias skip below.** It used to run
+        # after, and naming a CTE after a forbidden table made the reference to
+        # the *real* table be skipped: in a non-recursive CTE the alias is not
+        # in scope inside its own body, so `WITH api_keys AS (SELECT ... JOIN
+        # api_keys ...)` reads the physical table while the validator saw only
+        # a name it had been told to ignore. Verified passing before this fix.
+        # The comment directly below this block already claimed the blocklist
+        # always wins; the order contradicted it.
+        if bare in blocklist_l:
+            return False, f"forbidden table reference: {bare}"
         # CTE aliases resolve internally — they are not physical tables.
         if bare in cte_aliases:
             continue
-        # Defense-in-depth: hard internal blocklist always wins, regardless
-        # of schema. Even if the expected_schema is `public` and the
-        # caller mistakenly lists `successful_queries` as the expected
-        # table, the blocklist still blocks the query.
-        if bare in blocklist_l:
-            return False, f"forbidden table reference: {bare}"
 
         schema_l = (node.db or "").lower()
         if expected_schema_l == "public":

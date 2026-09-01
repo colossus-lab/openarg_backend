@@ -32,6 +32,7 @@ class MetricsCollector:
         self._cache_hits = 0
         self._cache_misses = 0
         self._tokens_used = 0
+        self._tokens_by_mode: dict[str, int] = {}
         self._cache_drops_by_reason: dict[str, int] = {}
         self._lock_data = threading.Lock()
 
@@ -62,9 +63,16 @@ class MetricsCollector:
         with self._lock_data:
             self._cache_misses += 1
 
-    def record_tokens_used(self, tokens: int) -> None:
+    def record_tokens_used(self, tokens: int, mode: str = "normal") -> None:
+        """Contabilizar tokens, separados por modo.
+
+        El total suelto no alcanza para decidir si el modo profundo se deja
+        prendido: lo que hay que poder comparar es cuánto gasta cada modo.
+        """
+        key = (mode or "normal")[:20]
         with self._lock_data:
             self._tokens_used += tokens
+            self._tokens_by_mode[key] = self._tokens_by_mode.get(key, 0) + tokens
 
     def record_cache_drop(self, reason: str) -> None:
         """Bump the in-memory counter for a `_record_cache_drop` audit row.
@@ -111,6 +119,7 @@ class MetricsCollector:
                 },
                 "tokens": {
                     "total_used": self._tokens_used,
+                    "by_mode": dict(self._tokens_by_mode),
                 },
                 "cache_drops_by_reason": dict(self._cache_drops_by_reason),
             }

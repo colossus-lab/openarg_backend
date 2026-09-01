@@ -28,6 +28,8 @@ from app.application.pipeline.edges import (
     route_after_classify,
     route_after_coordinator,
     route_after_plan,
+    route_after_scoping,
+    route_after_skill_resolver,
     route_cache_reply,
     route_clarify_reply,
     route_fast_reply,
@@ -48,6 +50,7 @@ from app.application.pipeline.nodes.planner import clarify_reply_node, planner_n
 from app.application.pipeline.nodes.policy import policy_node
 from app.application.pipeline.nodes.preprocess import preprocess_node
 from app.application.pipeline.nodes.replan import replan_node
+from app.application.pipeline.nodes.scoping import scoping_node
 from app.application.pipeline.nodes.skill_resolver import skill_resolver_node
 from app.application.pipeline.state import OpenArgState
 
@@ -86,6 +89,7 @@ def build_pipeline_graph(
     builder.add_node("load_memory", load_memory_node)
     builder.add_node("preprocess", preprocess_node)
     builder.add_node("skill_resolver", skill_resolver_node)
+    builder.add_node("scoping", scoping_node)
     builder.add_node("planner", planner_node)
     builder.add_node("clarify_reply", clarify_reply_node)
     builder.add_node("inject_fallbacks", inject_fallbacks_node)
@@ -129,10 +133,27 @@ def build_pipeline_graph(
         {END: END},
     )
 
-    # load_memory -> preprocess -> skill_resolver -> planner (sequential)
+    # load_memory -> preprocess -> skill_resolver -> (scoping | planner)
     builder.add_edge("load_memory", "preprocess")
     builder.add_edge("preprocess", "skill_resolver")
-    builder.add_edge("skill_resolver", "planner")
+
+    # En modo profundo el acotamiento va primero: preguntar antes de buscar
+    # recorta el espacio antes de que el planner mire las ~27.000 fuentes. En
+    # modo normal el camino es exactamente el de siempre.
+    builder.add_conditional_edges(
+        "skill_resolver",
+        route_after_skill_resolver,
+        {"scoping": "scoping", "planner": "planner"},
+    )
+
+    # El acotamiento cierra el turno con sus opciones —reusando `clarify_reply`,
+    # que el frontend ya sabe pintar como chips— o deja pasar cuando la pregunta
+    # ya venía específica.
+    builder.add_conditional_edges(
+        "scoping",
+        route_after_scoping,
+        {"clarify_reply": "clarify_reply", "planner": "planner"},
+    )
 
     # After planner: clarify_reply (terminal) or inject_fallbacks
     builder.add_conditional_edges(

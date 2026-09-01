@@ -215,6 +215,216 @@ def _estimated_rows(engine, pairs: list[tuple[str, str]]) -> dict[tuple[str, str
     return {(r.schema_name, r.table_name): float(r.reltuples or 0) for r in rows}
 
 
+# `<base>__<hash8>__v<N>` y, para los hijos de expansión (hojas de Excel,
+# miembros de ZIP), `..._v<N>_s<hoja>`. El número es la versión del PADRE.
+_HIJO_EXPANDIDO = re.compile(r"^(?P<base>.+?)__v(?P<v>\d+)(?P<hoja>_s.+)$")
+
+
+def _drop_stale_parent_versions(lives: list[_LiveRow]) -> tuple[list[_LiveRow], int]:
+    """Un hijo de expansión sobrevive a la versión del padre que lo generó.
+
+    Cuando un recurso pasa de v1 a v2, sus hijos de v1 quedan vivos junto a los
+    de v2 y el macro une las dos tandas. Medido en staging sobre
+    `caba_presupuesto_ejecutado`: las hojas
+    `...__d8aaa421__v1_scdf4d2ef_s_saa25a06b` y `...__v2_...` tienen 57.673
+    filas cada una y **la misma huella de contenido**
+    (`583db46150e7537ed199b995e86a3d82`). El mart quedaba 39 % duplicado.
+
+    No lo cubre `_drop_identical_content` porque estas tablas tienen
+    `source_file_hash` en NULL, ni "quedarse con la versión máxima por
+    identidad": la `resource_identity` del hijo **incluye** la versión del
+    padre, así que v1 y v2 son identidades distintas y ambas con `version = 1`.
+    Lo que sí comparten es el UUID del padre, y es por ahí que se agrupan.
+
+    Sólo toca hijos de expansión. Una tabla sin sufijo de hoja no entra acá:
+    su versionado ya lo maneja el registro.
+    """
+    if len(lives) < 2:
+        return lives, 0
+
+    grupos: dict[tuple[str, str, str], tuple[int, _LiveRow]] = {}
+    sueltas: list[_LiveRow] = []
+    for row in lives:
+        m = _HIJO_EXPANDIDO.match(row.table_name)
+        if m is None:
+            sueltas.append(row)
+            continue
+        # El prefijo de identidad sin el nombre de tabla es el padre.
+        padre = row.resource_identity.rsplit("::", 1)[0]
+        clave = (padre, m.group("base"), m.group("hoja"))
+        v = int(m.group("v"))
+        actual = grupos.get(clave)
+        if actual is None or v > actual[0]:
+            grupos[clave] = (v, row)
+
+    conservadas = sueltas + [r for _, r in grupos.values()]
+    orden = {id(r): i for i, r in enumerate(lives)}
+    conservadas.sort(key=lambda r: orden[id(r)])
+    return conservadas, len(lives) - len(conservadas)
+
+
+# Muestreo determinístico: huellear una tabla sin leerla entera. Las dos huellas
+# que se comparan se calculan en la misma consulta, así que alcanza con que
+# `hashtext` sea estable dentro de la sesión.
+_MUESTRA_MODULO = 97
+
+
+def _huella(engine, schema: str, table: str, columnas: set[str]) -> str | None:
+    """Huella del contenido de una tabla, **sin las columnas internas**.
+
+    Excluir las que empiezan con `_` no es un detalle: `_source_dataset_id` lo
+    agrega el colector y es distinto en cada tabla por construcción. Una huella
+    que lo incluya nunca coincide, y el filtro no descarta nada — que es
+    exactamente lo que le pasó a la primera versión de esta función.
+    """
+    reales = sorted(c for c in columnas if not c.startswith("_"))
+    if not reales:
+        return None
+    proj = ", ".join(f'"{c}"' for c in reales)
+    sql = text(
+        f"SELECT md5(coalesce(string_agg(x::text, '|' ORDER BY x::text), '')) "  # noqa: S608
+        f'FROM (SELECT {proj} FROM "{schema}"."{table}") x '
+        f"WHERE abs(hashtext(x::text)) % {_MUESTRA_MODULO} = 0"
+    )
+    try:
+        with engine.connect() as conn:
+            return str(conn.execute(sql).scalar())
+    except Exception:
+        logger.debug("no pude huellear %s.%s", schema, table, exc_info=True)
+        return None
+
+
+def _drop_duplicate_tables(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
+    """Descartar tablas cuyo contenido ya está en el conjunto.
+
+    La red que atrapa lo que las reglas sobre la FORMA de la identidad no ven.
+    Medido en `empleo_registrado_argentina`: entre las 14 tablas de grano
+    nacional hay grupos de igual tamaño con contenido idéntico — 3.895 filas
+    aparece 6 veces y son sólo DOS datasets (huellas `759310f2…` ×2 y
+    `6ba01ebc…` ×3). Ninguna regla sobre identidades las reconoce: son portales
+    distintos, UUIDs distintos y hash de archivo en NULL.
+
+    **El prefiltro es lo que lo hace viable.** Huellear todo en cada build
+    costaría minutos; agrupar primero por `row_count` —que el registro ya
+    tiene, gratis— deja sólo las candidatas, y de esas se muestrea ~1 %. Una
+    tabla con un `row_count` único no se toca.
+
+    Conservador ante la duda: sin engine, sin `row_count` o sin poder huellear,
+    la tabla se conserva. A un mart le hace más daño perder una fuente que
+    traer filas de más.
+    """
+    if engine is None or len(lives) < 2:
+        return lives, 0
+
+    pares = {(r.schema_name, r.table_name) for r in lives}
+    try:
+        with engine.connect() as conn:
+            filas = {
+                (str(r.schema_name), str(r.table_name)): r.row_count
+                for r in conn.execute(
+                    text(
+                        "SELECT schema_name, table_name, row_count "
+                        "FROM public.raw_table_versions WHERE superseded_at IS NULL"
+                    )
+                ).fetchall()
+                if (str(r.schema_name), str(r.table_name)) in pares
+            }
+    except Exception:
+        logger.debug("no pude leer row_count; no deduplico por contenido", exc_info=True)
+        return lives, 0
+
+    por_filas: dict[int, list[_LiveRow]] = {}
+    for row in lives:
+        n = filas.get((row.schema_name, row.table_name))
+        if n:
+            por_filas.setdefault(int(n), []).append(row)
+    if not any(len(g) > 1 for g in por_filas.values()):
+        return lives, 0
+
+    cols = _query_columns(engine, [(r.schema_name, r.table_name) for r in lives])
+    huellas: dict[tuple[int, str], _LiveRow] = {}
+    descartar: set[int] = set()
+    for n, grupo in sorted(por_filas.items()):
+        if len(grupo) < 2:
+            continue
+        for row in sorted(grupo, key=lambda r: r.resource_identity):
+            h = _huella(
+                engine,
+                row.schema_name,
+                row.table_name,
+                cols.get((row.schema_name, row.table_name), set()),
+            )
+            if h is None:
+                continue
+            clave = (n, h)
+            if clave in huellas:
+                descartar.add(id(row))
+            else:
+                huellas[clave] = row
+
+    conservadas = [r for r in lives if id(r) not in descartar]
+    return conservadas, len(lives) - len(conservadas)
+
+
+def _drop_identical_content(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
+    """Unir el mismo archivo dos veces duplica filas, no agrega datos.
+
+    El colector registra un mismo recurso bajo varias `resource_identity`, y un
+    macro por patrón las une a todas. Medido en staging:
+    `caba_presupuesto_ejecutado` tenía 1.350.388 filas y 822.026 únicas (39 %
+    duplicado) y `empleo_registrado_argentina` 947.396 contra 306.841 (68 %).
+    En un mart de presupuesto eso significa totales inflados para cualquiera
+    que sume.
+
+    Se deduplica por `source_file_hash` y no por filas: dos filas idénticas
+    dentro de una ejecución presupuestaria pueden ser legítimas, dos archivos
+    byte a byte iguales no. Cuando el hash es NULL —hoy el 90 % de las vivas—
+    esto no puede hacer nada; ese resto se cubre por mart, con `DISTINCT`, y
+    sólo donde la granularidad garantiza unicidad.
+
+    Empata por `resource_identity` para que dos builds con la misma entrada
+    produzcan el mismo mart.
+    """
+    if engine is None or len(lives) < 2:
+        return lives, 0
+
+    pares = {(r.schema_name, r.table_name) for r in lives}
+    sql = (
+        "SELECT schema_name, table_name, source_file_hash "
+        "FROM public.raw_table_versions "
+        "WHERE superseded_at IS NULL AND source_file_hash IS NOT NULL"
+    )
+    try:
+        with engine.connect() as conn:
+            hashes = {
+                (str(r.schema_name), str(r.table_name)): str(r.source_file_hash)
+                for r in conn.execute(text(sql)).fetchall()
+                if (str(r.schema_name), str(r.table_name)) in pares
+            }
+    except Exception:
+        logger.debug("no pude leer source_file_hash; sigo sin deduplicar", exc_info=True)
+        return lives, 0
+
+    visto: dict[str, _LiveRow] = {}
+    conservadas: list[_LiveRow] = []
+    descartadas = 0
+    for row in sorted(lives, key=lambda r: r.resource_identity):
+        h = hashes.get((row.schema_name, row.table_name))
+        if h is None:
+            conservadas.append(row)
+            continue
+        if h in visto:
+            descartadas += 1
+            continue
+        visto[h] = row
+        conservadas.append(row)
+
+    # El orden original importa poco pero la estabilidad sí.
+    orden = {id(r): i for i, r in enumerate(lives)}
+    conservadas.sort(key=lambda r: orden[id(r)])
+    return conservadas, descartadas
+
+
 def _drop_federated_mirrors(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
     """Keep one copy per upstream resource: the larger of the two.
 
@@ -435,6 +645,7 @@ def _build_union(
     require_columns: list[str] | None = None,
     source_marker: str | None = None,
     drop_federated_mirrors: bool = False,
+    exact_columns: bool = False,
     engine=None,
 ) -> str:
     """Build a UNION ALL subquery from N live rows.
@@ -499,6 +710,30 @@ def _build_union(
                 mirrors_dropped,
             )
 
+    lives_list, viejas = _drop_stale_parent_versions(lives_list)
+    if viejas:
+        logger.info(
+            "%s: dropped %d expansion child(ren) from a superseded parent version",
+            macro_name or "live_tables_by_*",
+            viejas,
+        )
+
+    lives_list, gemelas = _drop_duplicate_tables(lives_list, engine)
+    if gemelas:
+        logger.info(
+            "%s: dropped %d table(s) whose content is already in the union",
+            macro_name or "live_tables_by_*",
+            gemelas,
+        )
+
+    lives_list, identicas = _drop_identical_content(lives_list, engine)
+    if identicas:
+        logger.info(
+            "%s: dropped %d table(s) whose file is byte-identical to one already included",
+            macro_name or "live_tables_by_*",
+            identicas,
+        )
+
     filter_set: set[str] | None = None
     if require_columns:
         filter_set = set(require_columns)
@@ -528,6 +763,39 @@ def _build_union(
             for r in lives_list
             if filter_set.issubset(actual_cols.get((r.schema_name, r.table_name), set()))
         ]
+
+        # `require_all_columns` exige que estén las esperadas; no dice nada de
+        # las de MÁS, y una columna de más suele ser una dimensión.
+        #
+        # Medido en `empleo_registrado_argentina`: el patrón traía tablas de
+        # tres granos distintos — 14 nacionales (fecha, letra, puestos, 51.355
+        # filas), 9 por `zona_prov` (740.607) y 8 por `provincia` (670.563). El
+        # mart las proyectaba todas a (fecha, letra, puestos) y las apilaba, así
+        # que el 96,5 % de sus filas era detalle provincial con la provincia
+        # borrada, sumándose encima del total nacional. Quien sumara `puestos`
+        # contaba cada trabajador unas tres veces.
+        #
+        # `exact_columns` descarta la tabla que trae dimensiones extra. Las
+        # internas (`_source_dataset_id` y demás) no cuentan: las agrega el
+        # colector, no la fuente.
+        if exact_columns:
+            antes_exact = len(lives_list)
+            lives_list = [
+                r
+                for r in lives_list
+                if {
+                    c
+                    for c in actual_cols.get((r.schema_name, r.table_name), set())
+                    if not c.startswith("_")
+                }
+                <= filter_set
+            ]
+            if antes_exact != len(lives_list):
+                logger.info(
+                    "%s: dropped %d table(s) with extra dimension columns (exact_columns)",
+                    macro_name or "live_tables_by_*",
+                    antes_exact - len(lives_list),
+                )
         # Dropping source tables silently is how a mart ends up serving a
         # fraction of its domain while looking healthy. Say it out loud.
         logger.info(
@@ -806,6 +1074,9 @@ def resolve_macros(sql: str, engine) -> str:
         drop_federated_mirrors = kwargs.get("drop_federated_mirrors", False)
         if not isinstance(drop_federated_mirrors, bool):
             raise MacroResolutionError(f"Macro {name}(): drop_federated_mirrors must be a bool")
+        exact_columns = kwargs.get("exact_columns", False)
+        if not isinstance(exact_columns, bool):
+            raise MacroResolutionError(f"Macro {name}(): exact_columns must be a bool")
         source_marker = kwargs.get("source_marker")
         if source_marker is not None:
             if not isinstance(source_marker, str) or not source_marker:
@@ -868,6 +1139,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_columns=require_columns,
                 source_marker=source_marker,
                 drop_federated_mirrors=drop_federated_mirrors,
+                exact_columns=exact_columns,
                 engine=engine,
             )
 
@@ -884,6 +1156,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_columns=require_columns,
                 source_marker=source_marker,
                 drop_federated_mirrors=drop_federated_mirrors,
+                exact_columns=exact_columns,
                 engine=engine,
             )
 
@@ -900,6 +1173,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_columns=require_columns,
                 source_marker=source_marker,
                 drop_federated_mirrors=drop_federated_mirrors,
+                exact_columns=exact_columns,
                 engine=engine,
             )
 

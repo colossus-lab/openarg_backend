@@ -71,7 +71,7 @@ async def finalize_node(state: OpenArgState) -> dict:
 
     # Record token usage
     if tokens_used:
-        deps.metrics.record_tokens_used(tokens_used)
+        deps.metrics.record_tokens_used(tokens_used, mode=state.get("mode", "normal"))
 
     # Audit
     plan_intent = state.get("plan_intent", plan.intent if plan else "unknown")
@@ -97,9 +97,12 @@ async def finalize_node(state: OpenArgState) -> dict:
     # No-data deflections must never be cached: a cached deflection gets
     # re-served verbatim to reformulations of the same question, locking
     # the user in a suggestion loop even after the data becomes reachable.
+    #
+    # `bypass_cache` no puede ser sólo de lectura: si la batería escribe, sus
+    # 50 respuestas quedan en el caché y se le sirven a usuarios reales.
     no_data_deflection = bool(state.get("no_data_deflection"))
-    if no_data_deflection:
-        logger.debug("finalize_node: no-data deflection, skipping cache write")
+    if no_data_deflection or state.get("bypass_cache"):
+        logger.debug("finalize_node: cache write skipped")
     else:
         try:
             await write_cache(

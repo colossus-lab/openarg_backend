@@ -39,10 +39,14 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-# Symptoms that make a column's contents unreadable to anything downstream. A
-# `long_name` is not here on purpose: it is unpleasant to read and perfectly
-# usable, and including it would withhold thousands of working tables.
-UNREADABLE_SYMPTOMS = frozenset({"col_n", "unnamed", "delimiter_in_name", "one_or_two_columns"})
+# Symptoms that make a column's contents unreadable to anything downstream.
+#
+# Two are deliberately absent. `long_name` is unpleasant to read and perfectly
+# usable. And `one_or_two_columns` was here until 2026-09-01, when measurement
+# showed it marked **1,383 healthy tables** — `BARRIO | POBLACION` is not a
+# defect, it is what a population-by-neighbourhood table looks like. Both would
+# withhold working data from the chat to protect it from being readable.
+UNREADABLE_SYMPTOMS = frozenset({"col_n", "unnamed", "delimiter_in_name"})
 
 # Most this may withhold in a single run. Small, deliberately: quarantining is
 # cheap to do and expensive to be wrong about, and the sweep runs daily.

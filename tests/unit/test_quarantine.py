@@ -147,3 +147,14 @@ def test_only_release_and_a_person_can_undo_it():
     # La SQL vive a nivel de módulo, no dentro de la función.
     assert "= 'ready'" in str(q._RELEASE_SQL)
     assert "materialization_corrupted" in str(q._RELEASE_SQL)
+
+
+def test_a_narrow_table_is_not_quarantinable():
+    # Retirar del servicio una tabla legible para protegerla de ser legible es
+    # peor que el defecto que se creía estar arreglando.
+    assert not is_quarantinable(["one_or_two_columns"])
+
+
+def test_the_three_unreadable_classes_still_are():
+    for s in ("col_n", "unnamed", "delimiter_in_name"):
+        assert is_quarantinable([s]), s

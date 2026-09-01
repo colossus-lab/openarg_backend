@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 _MAX_REPLAN_DEPTH = 2
 _TIME_BUDGET_SECONDS = 20.0
 
+# En modo profundo el usuario pidió explícitamente que tarde más. Los dos
+# presupuestos suben juntos porque el de tiempo es el que corta primero: con 20 s
+# el techo de 2 replanificaciones casi nunca se alcanza, así que subir sólo la
+# profundidad no cambiaría nada.
+#
+# El techo de 60 s, ya medido en staging: un turno profundo sobre una pregunta
+# ancha ("cómo viene la situación energética" → plan de 5 marts) tardó 49,6 s.
+# O sea que el margen es de ~10 s, no "de sobra" como decía este comentario
+# antes de medirlo.
+#
+# Que quede ajustado NO trunca respuestas: este presupuesto se consulta en el
+# coordinator, o sea DESPUÉS de que el ciclo terminó. No es una fecha límite que
+# mate un turno en vuelo, es una compuerta que decide si se permite otro ciclo.
+# Un turno que se pasa igual devuelve lo que consiguió.
+#
+# Consecuencia de lo mismo: con ciclos de ~50 s, el techo de 4 replanificaciones
+# rara vez se alcanza — el tiempo corta primero. Es exactamente la crítica que
+# le hicimos al plan original por proponer subir sólo la profundidad. Se deja en
+# 4 como margen para preguntas baratas, sabiendo que el control real es el
+# tiempo.
+_DEEP_MAX_REPLAN_DEPTH = 4
+_DEEP_TIME_BUDGET_SECONDS = 60.0
+
 _STRATEGY_LABELS = {
     "broaden": "ampliando búsqueda",
     "narrow": "enfocando búsqueda",
@@ -70,9 +93,13 @@ async def coordinator_node(state: OpenArgState) -> dict:
     replan_count = state.get("replan_count", 0)
     step_warnings = state.get("step_warnings", [])
 
+    deep = state.get("mode") == "deep"
+    max_depth = _DEEP_MAX_REPLAN_DEPTH if deep else _MAX_REPLAN_DEPTH
+    time_budget = _DEEP_TIME_BUDGET_SECONDS if deep else _TIME_BUDGET_SECONDS
+
     # ── Rule 1: Time budget exceeded → escalate ──────────
     start_time = state.get("_start_time")
-    if start_time and (time.monotonic() - start_time) > _TIME_BUDGET_SECONDS:
+    if start_time and (time.monotonic() - start_time) > time_budget:
         logger.info(
             "Coordinator: time budget exceeded (%.1fs), escalating", time.monotonic() - start_time
         )
@@ -83,8 +110,8 @@ async def coordinator_node(state: OpenArgState) -> dict:
         return {"coordinator_decision": "continue", "replan_strategy": None}
 
     # ── Rule 3: Max replan depth reached → escalate ──────
-    if replan_count >= _MAX_REPLAN_DEPTH:
-        logger.info("Coordinator: max replan depth (%d) reached, escalating", _MAX_REPLAN_DEPTH)
+    if replan_count >= max_depth:
+        logger.info("Coordinator: max replan depth (%d) reached, escalating", max_depth)
         return {"coordinator_decision": "escalate", "replan_strategy": None}
 
     # ── Rule 4: Too many connector failures → escalate ───
