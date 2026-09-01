@@ -103,3 +103,62 @@ def test_sin_engine_o_con_una_sola_tabla_es_no_op() -> None:
     lives = [_live("p::a", "t_a")]
     assert _drop_identical_content(lives, None) == (lives, 0)
     assert _drop_identical_content(lives, _FakeEngine([])) == (lives, 0)
+
+
+# ── hijos de expansión de un padre superado ────────────────
+
+
+def test_descarta_la_hoja_de_la_version_vieja_del_padre() -> None:
+    """Caso real medido en staging: las dos hojas tienen 57.673 filas y la
+    MISMA huella de contenido. El mart quedaba 39 % duplicado."""
+    from app.application.marts.sql_macros import _drop_stale_parent_versions
+
+    pref = "caba::df17d1ba-2968-4ae5-9236-ebfb1ea594f5"
+    t1 = "caba__presupuesto_ejecutado__d8aaa421__v1_scdf4d2ef_s_saa25a06b"
+    t2 = "caba__presupuesto_ejecutado__d8aaa421__v2_scdf4d2ef_s_saa25a06b"
+    lives = [
+        _LiveRow(resource_identity=f"{pref}::{t1}", schema_name="raw", table_name=t1),
+        _LiveRow(resource_identity=f"{pref}::{t2}", schema_name="raw", table_name=t2),
+    ]
+    quedan, descartadas = _drop_stale_parent_versions(lives)
+    assert descartadas == 1
+    assert [r.table_name for r in quedan] == [t2]  # gana la versión mayor del padre
+
+
+def test_no_toca_hojas_distintas_del_mismo_padre() -> None:
+    """Dos hojas DISTINTAS de la misma versión son datos distintos."""
+    from app.application.marts.sql_macros import _drop_stale_parent_versions
+
+    pref = "caba::uuid"
+    a = "x__abc__v2_shoja_a"
+    b = "x__abc__v2_shoja_b"
+    lives = [
+        _LiveRow(resource_identity=f"{pref}::{a}", schema_name="raw", table_name=a),
+        _LiveRow(resource_identity=f"{pref}::{b}", schema_name="raw", table_name=b),
+    ]
+    assert _drop_stale_parent_versions(lives) == (lives, 0)
+
+
+def test_no_toca_tablas_que_no_son_hijos_de_expansion() -> None:
+    """Sin sufijo de hoja, el versionado ya lo maneja el registro."""
+    from app.application.marts.sql_macros import _drop_stale_parent_versions
+
+    a = "diputados__bloques__84ff2259__v3"
+    b = "diputados__bloques__f3067840__v1"
+    lives = [
+        _LiveRow(resource_identity=f"p::{a}", schema_name="raw", table_name=a),
+        _LiveRow(resource_identity=f"p::{b}", schema_name="raw", table_name=b),
+    ]
+    assert _drop_stale_parent_versions(lives) == (lives, 0)
+
+
+def test_no_mezcla_padres_distintos() -> None:
+    """La misma hoja de dos recursos distintos son dos datos distintos."""
+    from app.application.marts.sql_macros import _drop_stale_parent_versions
+
+    t = "x__abc__v1_shoja"
+    lives = [
+        _LiveRow(resource_identity=f"caba::uuid_A::{t}", schema_name="raw", table_name=t),
+        _LiveRow(resource_identity=f"caba::uuid_B::{t}", schema_name="raw", table_name=t),
+    ]
+    assert _drop_stale_parent_versions(lives) == (lives, 0)

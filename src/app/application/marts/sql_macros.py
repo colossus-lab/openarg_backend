@@ -215,6 +215,54 @@ def _estimated_rows(engine, pairs: list[tuple[str, str]]) -> dict[tuple[str, str
     return {(r.schema_name, r.table_name): float(r.reltuples or 0) for r in rows}
 
 
+# `<base>__<hash8>__v<N>` y, para los hijos de expansión (hojas de Excel,
+# miembros de ZIP), `..._v<N>_s<hoja>`. El número es la versión del PADRE.
+_HIJO_EXPANDIDO = re.compile(r"^(?P<base>.+?)__v(?P<v>\d+)(?P<hoja>_s.+)$")
+
+
+def _drop_stale_parent_versions(lives: list[_LiveRow]) -> tuple[list[_LiveRow], int]:
+    """Un hijo de expansión sobrevive a la versión del padre que lo generó.
+
+    Cuando un recurso pasa de v1 a v2, sus hijos de v1 quedan vivos junto a los
+    de v2 y el macro une las dos tandas. Medido en staging sobre
+    `caba_presupuesto_ejecutado`: las hojas
+    `...__d8aaa421__v1_scdf4d2ef_s_saa25a06b` y `...__v2_...` tienen 57.673
+    filas cada una y **la misma huella de contenido**
+    (`583db46150e7537ed199b995e86a3d82`). El mart quedaba 39 % duplicado.
+
+    No lo cubre `_drop_identical_content` porque estas tablas tienen
+    `source_file_hash` en NULL, ni "quedarse con la versión máxima por
+    identidad": la `resource_identity` del hijo **incluye** la versión del
+    padre, así que v1 y v2 son identidades distintas y ambas con `version = 1`.
+    Lo que sí comparten es el UUID del padre, y es por ahí que se agrupan.
+
+    Sólo toca hijos de expansión. Una tabla sin sufijo de hoja no entra acá:
+    su versionado ya lo maneja el registro.
+    """
+    if len(lives) < 2:
+        return lives, 0
+
+    grupos: dict[tuple[str, str, str], tuple[int, _LiveRow]] = {}
+    sueltas: list[_LiveRow] = []
+    for row in lives:
+        m = _HIJO_EXPANDIDO.match(row.table_name)
+        if m is None:
+            sueltas.append(row)
+            continue
+        # El prefijo de identidad sin el nombre de tabla es el padre.
+        padre = row.resource_identity.rsplit("::", 1)[0]
+        clave = (padre, m.group("base"), m.group("hoja"))
+        v = int(m.group("v"))
+        actual = grupos.get(clave)
+        if actual is None or v > actual[0]:
+            grupos[clave] = (v, row)
+
+    conservadas = sueltas + [r for _, r in grupos.values()]
+    orden = {id(r): i for i, r in enumerate(lives)}
+    conservadas.sort(key=lambda r: orden[id(r)])
+    return conservadas, len(lives) - len(conservadas)
+
+
 def _drop_identical_content(lives: list[_LiveRow], engine=None) -> tuple[list[_LiveRow], int]:
     """Unir el mismo archivo dos veces duplica filas, no agrega datos.
 
@@ -557,6 +605,14 @@ def _build_union(
                 macro_name or "live_tables_by_*",
                 mirrors_dropped,
             )
+
+    lives_list, viejas = _drop_stale_parent_versions(lives_list)
+    if viejas:
+        logger.info(
+            "%s: dropped %d expansion child(ren) from a superseded parent version",
+            macro_name or "live_tables_by_*",
+            viejas,
+        )
 
     lives_list, identicas = _drop_identical_content(lives_list, engine)
     if identicas:
