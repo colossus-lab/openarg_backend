@@ -542,6 +542,7 @@ def _build_union(
     require_columns: list[str] | None = None,
     source_marker: str | None = None,
     drop_federated_mirrors: bool = False,
+    exact_columns: bool = False,
     engine=None,
 ) -> str:
     """Build a UNION ALL subquery from N live rows.
@@ -651,6 +652,39 @@ def _build_union(
             for r in lives_list
             if filter_set.issubset(actual_cols.get((r.schema_name, r.table_name), set()))
         ]
+
+        # `require_all_columns` exige que estén las esperadas; no dice nada de
+        # las de MÁS, y una columna de más suele ser una dimensión.
+        #
+        # Medido en `empleo_registrado_argentina`: el patrón traía tablas de
+        # tres granos distintos — 14 nacionales (fecha, letra, puestos, 51.355
+        # filas), 9 por `zona_prov` (740.607) y 8 por `provincia` (670.563). El
+        # mart las proyectaba todas a (fecha, letra, puestos) y las apilaba, así
+        # que el 96,5 % de sus filas era detalle provincial con la provincia
+        # borrada, sumándose encima del total nacional. Quien sumara `puestos`
+        # contaba cada trabajador unas tres veces.
+        #
+        # `exact_columns` descarta la tabla que trae dimensiones extra. Las
+        # internas (`_source_dataset_id` y demás) no cuentan: las agrega el
+        # colector, no la fuente.
+        if exact_columns:
+            antes_exact = len(lives_list)
+            lives_list = [
+                r
+                for r in lives_list
+                if {
+                    c
+                    for c in actual_cols.get((r.schema_name, r.table_name), set())
+                    if not c.startswith("_")
+                }
+                <= filter_set
+            ]
+            if antes_exact != len(lives_list):
+                logger.info(
+                    "%s: dropped %d table(s) with extra dimension columns (exact_columns)",
+                    macro_name or "live_tables_by_*",
+                    antes_exact - len(lives_list),
+                )
         # Dropping source tables silently is how a mart ends up serving a
         # fraction of its domain while looking healthy. Say it out loud.
         logger.info(
@@ -929,6 +963,9 @@ def resolve_macros(sql: str, engine) -> str:
         drop_federated_mirrors = kwargs.get("drop_federated_mirrors", False)
         if not isinstance(drop_federated_mirrors, bool):
             raise MacroResolutionError(f"Macro {name}(): drop_federated_mirrors must be a bool")
+        exact_columns = kwargs.get("exact_columns", False)
+        if not isinstance(exact_columns, bool):
+            raise MacroResolutionError(f"Macro {name}(): exact_columns must be a bool")
         source_marker = kwargs.get("source_marker")
         if source_marker is not None:
             if not isinstance(source_marker, str) or not source_marker:
@@ -991,6 +1028,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_columns=require_columns,
                 source_marker=source_marker,
                 drop_federated_mirrors=drop_federated_mirrors,
+                exact_columns=exact_columns,
                 engine=engine,
             )
 
@@ -1007,6 +1045,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_columns=require_columns,
                 source_marker=source_marker,
                 drop_federated_mirrors=drop_federated_mirrors,
+                exact_columns=exact_columns,
                 engine=engine,
             )
 
@@ -1023,6 +1062,7 @@ def resolve_macros(sql: str, engine) -> str:
                 require_columns=require_columns,
                 source_marker=source_marker,
                 drop_federated_mirrors=drop_federated_mirrors,
+                exact_columns=exact_columns,
                 engine=engine,
             )
 

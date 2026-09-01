@@ -41,7 +41,20 @@ canonical_columns:
 # en produccion, idénticos (189.352 filas, mismo rango de fechas, misma suma
 # 1.285.874.223). El mart tenía 1.468.225 filas contra 306.841 únicas.
 #
-# `require_all_columns` es el que más pesa. Sin él, el patrón trae también las
+# `exact_columns` es EL arreglo, y lo demás es accesorio. El patrón traía tablas
+# de tres granos distintos: 14 nacionales (fecha, letra, puestos → 51.355
+# filas), 9 por `zona_prov` (740.607) y 8 por `provincia` (670.563). El mart las
+# proyectaba TODAS a (fecha, letra, puestos) y las apilaba, así que el 96,5 % de
+# sus filas era detalle provincial con la provincia borrada, sumado encima del
+# total nacional. Quien sumara `puestos` contaba cada trabajador unas tres
+# veces. `require_all_columns` no alcanzaba: exige que estén las esperadas, no
+# prohíbe las de más — y una columna de más acá es una dimensión.
+#
+# El detalle provincial NO se pierde por esto: sigue en `raw`. Lo que se decide
+# acá es que este mart sirve la serie nacional, que es lo que declaran sus
+# columnas. Un mart provincial es otro mart.
+#
+# `require_all_columns` también hace falta. Sin él, el patrón trae también las
 # tablas de DIMENSIÓN — el diccionario CLAE (`clae6, clae6_desc, ..., letra,
 # letra_desc`) tiene `letra` pero no tiene `fecha` ni `puestos`, así que entraba
 # al UNION rellenando NULL y multiplicaba las filas contra los hechos. Es
@@ -63,6 +76,7 @@ sql: |
       '*__puestos_de_trabajo_asalariados*',
       expected_columns=['fecha', 'letra', 'puestos'],
       require_all_columns=True,
+      exact_columns=True,
       drop_federated_mirrors=True
   ) }} sub
   WHERE NULLIF(TRIM(letra), '') IS NOT NULL

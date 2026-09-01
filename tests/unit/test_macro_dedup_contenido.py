@@ -162,3 +162,109 @@ def test_no_mezcla_padres_distintos() -> None:
         _LiveRow(resource_identity=f"caba::uuid_B::{t}", schema_name="raw", table_name=t),
     ]
     assert _drop_stale_parent_versions(lives) == (lives, 0)
+
+
+# ── exact_columns: la dimensión de más ─────────────────────
+
+
+def test_exact_columns_descarta_la_tabla_con_una_dimension_de_mas() -> None:
+    """`require_all_columns` exige que estén las esperadas; no dice nada de las
+    de MÁS, y una columna de más suele ser una dimensión.
+
+    Medido en `empleo_registrado_argentina`: 14 tablas nacionales
+    (fecha, letra, puestos → 51.355 filas), 9 por `zona_prov` (740.607) y 8 por
+    `provincia` (670.563), todas proyectadas a (fecha, letra, puestos) y
+    apiladas. El 96,5 % de las filas era detalle provincial con la provincia
+    borrada, sumado encima del total nacional.
+    """
+    from app.application.marts.sql_macros import _build_union
+
+    esperadas = ["fecha", "letra", "puestos"]
+    cols = {
+        ("raw", "nacional"): {"fecha", "letra", "puestos", "_source_dataset_id"},
+        ("raw", "por_provincia"): {"fecha", "letra", "puestos", "provincia"},
+        ("raw", "por_zona"): {"fecha", "zona_prov", "letra", "puestos"},
+    }
+
+    class _Eng:
+        def connect(self) -> Any:  # pragma: no cover - no se usa
+            raise AssertionError("no debería consultar la DB")
+
+    lives = [_live(f"p::{t}", t) for _, t in cols]
+    import app.application.marts.sql_macros as m
+
+    original = m._query_columns
+    m._query_columns = lambda engine, pares: cols  # type: ignore[assignment]
+    try:
+        sql = _build_union(
+            lives,
+            expected_columns=esperadas,
+            require_all_columns=True,
+            exact_columns=True,
+            engine=_Eng(),
+        )
+    finally:
+        m._query_columns = original  # type: ignore[assignment]
+
+    assert "nacional" in sql
+    assert "por_provincia" not in sql, "una dimensión de más no puede entrar al UNION"
+    assert "por_zona" not in sql
+
+
+def test_sin_exact_columns_el_comportamiento_no_cambia() -> None:
+    """Es opt-in: ningún mart existente cambia por esto."""
+    from app.application.marts.sql_macros import _build_union
+
+    cols = {
+        ("raw", "nacional"): {"fecha", "letra", "puestos"},
+        ("raw", "por_provincia"): {"fecha", "letra", "puestos", "provincia"},
+    }
+
+    class _Eng:
+        def connect(self) -> Any:  # pragma: no cover
+            raise AssertionError("no debería consultar la DB")
+
+    lives = [_live(f"p::{t}", t) for _, t in cols]
+    import app.application.marts.sql_macros as m
+
+    original = m._query_columns
+    m._query_columns = lambda engine, pares: cols  # type: ignore[assignment]
+    try:
+        sql = _build_union(
+            lives,
+            expected_columns=["fecha", "letra", "puestos"],
+            require_all_columns=True,
+            engine=_Eng(),
+        )
+    finally:
+        m._query_columns = original  # type: ignore[assignment]
+
+    assert "por_provincia" in sql
+
+
+def test_las_columnas_internas_no_cuentan_como_dimension() -> None:
+    """`_source_dataset_id` lo agrega el colector, no la fuente."""
+    from app.application.marts.sql_macros import _build_union
+
+    cols = {("raw", "nacional"): {"fecha", "letra", "puestos", "_source_dataset_id", "_x"}}
+
+    class _Eng:
+        def connect(self) -> Any:  # pragma: no cover
+            raise AssertionError
+
+    import app.application.marts.sql_macros as m
+
+    original = m._query_columns
+    m._query_columns = lambda engine, pares: cols  # type: ignore[assignment]
+    try:
+        sql = _build_union(
+            [_live("p::nacional", "nacional")],
+            expected_columns=["fecha", "letra", "puestos"],
+            require_all_columns=True,
+            exact_columns=True,
+            engine=_Eng(),
+        )
+    finally:
+        m._query_columns = original  # type: ignore[assignment]
+
+    assert "nacional" in sql
