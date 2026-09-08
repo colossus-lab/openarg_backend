@@ -291,6 +291,10 @@ async def test_empty_indec_triggers_fallback(monkeypatch):
     data_results = final["data_results"]
     assert len(data_results) == 1
     assert data_results[0].source == "indec:live"
+    # El state tiene que quedar honesto: una respuesta servida por el
+    # fallback en vivo es un camino degradado, y `used_fallback` es la marca
+    # que el resto del pipeline usa para tratarla como tal.
+    assert final["used_fallback"] is True
 
 
 @pytest.mark.asyncio

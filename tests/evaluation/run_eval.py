@@ -109,6 +109,39 @@ def _plan_actions(plan: Any) -> list[str]:
     return [getattr(s, "action", "") for s in steps]
 
 
+def _forbidden_sources_hit(forbidden: list[str], sources: list[str]) -> list[str]:
+    """Qué fuentes prohibidas aparecieron, por substring case-insensitive.
+
+    Un caso puede declarar `forbidden_sources` cuando lo que importa no es a
+    qué fuente llegó sino a cuál NO tiene que llegar. Ejemplo: una pregunta
+    cuyo dato no tenemos no debe contestarse con una descarga en vivo del
+    INDEC. La expectativa es negativa a propósito — si el pipeline encuentra
+    el dataset real, la satisface igual, así que no se vuelve ruido.
+    """
+    hits: list[str] = []
+    for pattern in forbidden:
+        needle = pattern.lower()
+        if any(needle in (name or "").lower() for name in sources):
+            hits.append(pattern)
+    return hits
+
+
+def check_absolute_expectations(report: dict) -> list[str]:
+    """Expectativas que valen por sí solas, sin baseline contra qué comparar.
+
+    Vive aparte de `compare_to_baseline` por una razón concreta: ese loop
+    saltea las entradas que no están en el baseline (`if b is None:
+    continue`), y los casos negativos son justamente entradas nuevas. Una
+    condición escrita ahí adentro no se evaluaría nunca. Además, al no
+    depender del baseline, esto no se desarma cuando el baseline envejece.
+    """
+    fallas: list[str] = []
+    for r in report.get("results", []):
+        for pattern in r.get("forbidden_sources_hit") or []:
+            fallas.append(f"{r['id']}: fuente prohibida {pattern!r} en {r.get('sources')}")
+    return fallas
+
+
 def _source_names(sources: list[dict] | None) -> list[str]:
     out: list[str] = []
     for s in sources or []:
@@ -183,6 +216,9 @@ async def evaluate_entry(graph: Any, entry: dict, mode: str, use_cache: bool = F
         ),
         "retrieval_precision": round(
             compute_retrieval_precision(entry.get("expected_sources") or [], sources), 3
+        ),
+        "forbidden_sources_hit": _forbidden_sources_hit(
+            entry.get("forbidden_sources") or [], sources
         ),
         "intent_scored": intent_scored,
         "intent_match": intent_match,
@@ -402,6 +438,13 @@ def main() -> None:
         args.output.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
         print(f"\nreporte escrito en {args.output}")
 
+    # Se chequea siempre, con `--compare` o sin él: no depende del baseline.
+    absolutas = check_absolute_expectations(report)
+    if absolutas:
+        print(f"\n{len(absolutas)} EXPECTATIVAS ABSOLUTAS INCUMPLIDAS:")
+        for a in absolutas:
+            print(f"    - {a}")
+
     if args.compare:
         baseline = json.loads(args.compare.read_text(encoding="utf-8"))
         duras, blandas = compare_to_baseline(report, baseline)
@@ -419,7 +462,7 @@ def main() -> None:
             sys.exit(1)
         print("  sin regresiones")
 
-    sys.exit(0)
+    sys.exit(1 if absolutas else 0)
 
 
 if __name__ == "__main__":

@@ -560,3 +560,59 @@ def test_ground_citations_promotes_basic_education_listing_to_high_from_grounded
     assert warnings == []
     assert grounded[0]["verified"] is True
     assert confidence == 0.9
+
+
+# ── Techo de calidad para respuestas armadas sobre un fallback ──────────
+#
+# `_quality_ceiling` capa la confianza cuando el dato vino de un camino
+# degradado. Miraba `used_fallback`, pero el fallback en vivo del INDEC
+# escribía la clave como `fallback`, así que el techo nunca disparaba y una
+# respuesta armada sobre una descarga no pedida llegaba a 0.9 (2026-09).
+
+
+def _fallback_result(metadata_extra: dict) -> DataResult:
+    return _make_result(
+        [{"anio": 2025, "inflacion": 117.8}],
+        {"fetched_at": "2026-04-13", **metadata_extra},
+    )
+
+
+def test_una_respuesta_sobre_un_fallback_no_supera_el_techo() -> None:
+    citations = [{"claim": "La inflación fue 117,8 en 2025", "source": "IPC Nacional"}]
+
+    _, _, confidence = ground_citations(
+        "La inflación fue 117,8 en 2025.",
+        citations,
+        [_fallback_result({"used_fallback": True})],
+        0.9,
+    )
+
+    assert confidence <= 0.6
+
+
+def test_la_clave_vieja_del_fallback_tambien_capa() -> None:
+    """DataResults cacheados antes del rename siguen trayendo `fallback`."""
+    citations = [{"claim": "La inflación fue 117,8 en 2025", "source": "IPC Nacional"}]
+
+    _, _, confidence = ground_citations(
+        "La inflación fue 117,8 en 2025.",
+        citations,
+        [_fallback_result({"fallback": True})],
+        0.9,
+    )
+
+    assert confidence <= 0.6
+
+
+def test_sin_marca_de_fallback_el_techo_no_baja() -> None:
+    """Que tolerar las dos claves no termine capando todo por accidente."""
+    citations = [{"claim": "La inflación fue 117,8 en 2025", "source": "IPC Nacional"}]
+
+    _, _, confidence = ground_citations(
+        "La inflación fue 117,8 en 2025.",
+        citations,
+        [_fallback_result({})],
+        0.9,
+    )
+
+    assert confidence > 0.6

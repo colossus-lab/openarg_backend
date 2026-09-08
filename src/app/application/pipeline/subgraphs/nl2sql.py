@@ -1015,7 +1015,10 @@ async def indec_fallback_node(state: NL2SQLState) -> dict:
 
     fallback_results = await indec_live_fallback(nl_query)
     if fallback_results:
-        return {"data_results": fallback_results}
+        # Servir por descarga en vivo es un camino degradado, igual que el
+        # `last_resort`. Marcarlo deja el state consistente con lo que ya
+        # traen los propios DataResult en su metadata.
+        return {"data_results": fallback_results, "used_fallback": True}
 
     # Keep the existing (empty) format_result output if the live API had
     # nothing either — the previous format_result call already populated
