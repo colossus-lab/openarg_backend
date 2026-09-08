@@ -24,6 +24,7 @@ from app.application.discovery import (
 from app.application.pipeline.connectors.cache_table_selection import (
     build_table_compat_notes,
     expand_table_hints_compat,
+    hint_matches_table,
     prefer_consolidated_table,
 )
 from app.application.pipeline.connectors.planner_candidates import (
@@ -31,6 +32,7 @@ from app.application.pipeline.connectors.planner_candidates import (
     collect_planner_candidates,
 )
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
+from app.domain.value_objects.table_reference import bare_name
 
 if TYPE_CHECKING:
     from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
@@ -281,11 +283,24 @@ async def get_catalog_entries(
 
     Uses the sandbox's sync engine via run_in_executor to avoid
     needing an async session.
+
+    `table_catalog` guarda las dos formas del nombre — el colector despacha
+    el enriquecimiento calificado en un camino y pelado en otro — así que la
+    búsqueda se hace por nombre pelado y el resultado se vuelve a indexar
+    con el nombre que pidió el llamador. Sin esto, un `raw.cache_x` no
+    encontraba su fila y el prompt de NL2SQL perdía display_name,
+    description y domain sin que nada lo avisara.
     """
     if not table_names or not sandbox:
         return {}
     try:
         loop = asyncio.get_running_loop()
+
+        # Puede haber colisión si entran `cache_x` y `raw.cache_x` a la vez:
+        # son la misma tabla, así que compartir la fila es lo correcto.
+        por_bare: dict[str, list[str]] = {}
+        for name in table_names:
+            por_bare.setdefault(bare_name(name), []).append(name)
 
         def _fetch() -> dict[str, dict[str, Any]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
@@ -294,14 +309,19 @@ async def get_catalog_entries(
                     text(
                         "SELECT table_name, display_name, description, domain, subdomain, "
                         "key_columns, column_types, sample_queries, tags "
-                        "FROM table_catalog WHERE table_name = ANY(:names)"
+                        "FROM table_catalog "
+                        "WHERE table_name = ANY(:names) "
+                        "   OR split_part(table_name, '.', 2) = ANY(:bare) "
+                        "   OR table_name = ANY(:bare)"
                     ),
-                    {"names": table_names},
+                    {"names": table_names, "bare": list(por_bare)},
                 )
                 rows = result.fetchall()
                 conn.rollback()
-                return {
-                    r.table_name: {
+
+                entries: dict[str, dict[str, Any]] = {}
+                for r in rows:
+                    payload = {
                         "display_name": r.display_name,
                         "description": r.description,
                         "domain": r.domain,
@@ -311,8 +331,12 @@ async def get_catalog_entries(
                         "sample_queries": r.sample_queries,
                         "tags": r.tags,
                     }
-                    for r in rows
-                }
+                    # Se devuelve bajo el nombre que usó el llamador, para
+                    # que los `catalog_entries.get(t.table_name)` de siempre
+                    # sigan funcionando sin cambios.
+                    for original in por_bare.get(bare_name(r.table_name), []):
+                        entries[original] = payload
+                return entries
 
         return await loop.run_in_executor(None, _fetch)
     except Exception:
@@ -1227,17 +1251,24 @@ async def execute_sandbox_step(
 
         if table_hints:
             if _from_catalog_or_vector:
-                # Catalog/vector search returns exact table names — use set lookup
-                hint_set = set(table_hints)
-                filtered = [t for t in tables if t.table_name in hint_set]
+                # Catalog/vector search returns exact table names — use set
+                # lookup. Se compara también por nombre pelado: los hints de
+                # `table_catalog` conviven en las dos formas (el colector
+                # despacha el enriquecimiento calificado en un camino y
+                # pelado en otro), así que ninguno de los dos lados es
+                # confiable por sí solo.
+                hint_set = set(table_hints) | {bare_name(h) for h in table_hints}
+                filtered = [
+                    t
+                    for t in tables
+                    if t.table_name in hint_set or bare_name(t.table_name) in hint_set
+                ]
             else:
                 # Planner returns glob patterns — use fnmatch
-                import fnmatch
-
                 filtered = []
                 for t in tables:
                     for pattern in table_hints:
-                        if fnmatch.fnmatch(t.table_name, pattern):
+                        if hint_matches_table(pattern, t.table_name):
                             filtered.append(t)
                             break
             if filtered:
@@ -1250,8 +1281,12 @@ async def execute_sandbox_step(
                     # Parse "Cubre YYYY-YYYY" from table_notes
                     narrowed = []
                     for t in filtered:
+                        # Alternación: `table_notes` sale de KEYWORD_ROUTES
+                        # (nombres pelados) pero también puede venir del
+                        # planner, que a veces califica.
                         note_match = _re.search(
-                            rf"{_re.escape(t.table_name)}.*?[Cc]ubre\s+(\d{{4}})-(\d{{4}})",
+                            rf"(?:{_re.escape(t.table_name)}|{_re.escape(bare_name(t.table_name))})"
+                            rf".*?[Cc]ubre\s+(\d{{4}})-(\d{{4}})",
                             table_notes,
                         )
                         if note_match:

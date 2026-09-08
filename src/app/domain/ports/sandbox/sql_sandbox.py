@@ -6,6 +6,21 @@ from dataclasses import dataclass
 
 @dataclass
 class CachedTableInfo:
+    """Una tabla consultable del sandbox.
+
+    ``table_name`` viene **calificado** (``raw.cache_x``) para las tablas de
+    la capa raw y **pelado** (``cache_x``) para las legacy de ``public``. Las
+    dos formas nombran la misma tabla al ejecutar, porque el engine del
+    sandbox corre con ``search_path = public,raw``; la diferencia importa
+    sólo al *comparar* nombres.
+
+    Para comparar, usar los helpers de
+    ``app.domain.value_objects.table_reference`` — nunca ``==`` ni
+    ``fnmatch`` contra ``table_name`` pelado. Hasta 2026-09 este contrato
+    vivía en un docstring del adapter y los consumidores lo ignoraban: el
+    ruteo del planner quedó roto cinco meses por eso.
+    """
+
     table_name: str
     dataset_id: str
     row_count: int | None
