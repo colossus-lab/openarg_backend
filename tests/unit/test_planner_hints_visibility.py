@@ -44,18 +44,24 @@ def test_la_consulta_de_marts_trae_el_conteo_de_filas() -> None:
     bloque = _SANDBOX[i : i + 900]
 
     assert "md.last_row_count" in bloque, (
-        "sin traer `last_row_count`, el bloque de hints no tiene con qué "
-        "contradecir el 0 por defecto"
+        "el conteo tiene que estar disponible aunque hoy no se imprima: es "
+        "lo que permite decidir en el prompt, y no acá, cuánto pesa"
     )
 
 
-def test_el_conteo_de_un_mart_no_se_busca_en_table_catalog() -> None:
-    i = _SANDBOX.index("base_match = next(")
-    bloque = _SANDBOX[i : i + 900]
+def test_no_se_afirma_un_conteo_que_no_se_tiene() -> None:
+    """Mejor no decir nada que decir "0 filas" sobre un mart con 600 mil.
 
-    assert "mart_row_counts" in bloque, (
-        "los marts no están en `matches`: buscar ahí su conteo devuelve "
-        "siempre 0 y el planner los lee como vacíos"
+    Poner el conteo real tampoco sirve hoy: medido en la batería, hace que
+    el planner deje `query_series` y `query_ddjj` por SQL genérico. Que un
+    mart sea grande no es razón para preferirlo sobre un conector hecho para
+    la pregunta, y esa jerarquía se decide en el prompt.
+    """
+    i = _SANDBOX.index("base_match = next(")
+    bloque = _SANDBOX[i : i + 1600]
+
+    assert "if row_count is not None:" in bloque, (
+        "el segmento de filas tiene que omitirse cuando no hay dato, no caer a 0"
     )
 
 
@@ -83,32 +89,25 @@ def test_el_registro_se_lee_calificado() -> None:
 # ── el cupo ────────────────────────────────────────────────
 
 
-def test_los_marts_no_pueden_quedarse_con_todo_el_cupo() -> None:
+def test_la_reserva_esta_apagada_por_defecto() -> None:
+    """Prenderla hace que el planner abandone los conectores especializados.
+
+    Con la reserva activa los recursos raw sí llegan al prompt (verificado en
+    staging: aparece el bloque RAW DISPONIBLE con la serie de desempleo),
+    pero la bateria midio tres casos cambiando de ruta hacia `query_sandbox`
+    y dos triplicando la latencia. Queda lista y apagada.
+    """
     from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
 
-    # Con el cupo que usa el planner (8), tiene que quedar lugar para raws.
-    assert _raw_slot_reserve(8) >= 1
-    assert _raw_slot_reserve(5) >= 1
-    # Y la reserva nunca puede comerse más de la mitad: los marts siguen
-    # siendo la superficie preferida.
-    for limite in (3, 5, 8, 12, 20):
-        assert _raw_slot_reserve(limite) <= limite // 2
-
-
-def test_con_un_cupo_minimo_no_se_reserva_nada() -> None:
-    """Con 1 o 2 lugares, reservar dejaría al planner sin marts."""
-    from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
-
-    assert _raw_slot_reserve(1) == 0
-    assert _raw_slot_reserve(2) == 0
-
-
-def test_la_reserva_se_puede_apagar_por_env(monkeypatch) -> None:
-    """`OPENARG_RAW_SLOT_RESERVE=0` restaura el comportamiento anterior."""
-    from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
-
-    monkeypatch.setenv("OPENARG_RAW_SLOT_RESERVE", "0")
     assert _raw_slot_reserve(8) == 0
+    assert _raw_slot_reserve(5) == 0
+
+
+def test_la_reserva_se_prende_por_env(monkeypatch) -> None:
+    from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
+
+    monkeypatch.setenv("OPENARG_RAW_SLOT_RESERVE", "2")
+    assert _raw_slot_reserve(8) == 2
 
 
 def test_la_reserva_nunca_deja_al_planner_sin_marts(monkeypatch) -> None:
@@ -117,3 +116,10 @@ def test_la_reserva_nunca_deja_al_planner_sin_marts(monkeypatch) -> None:
 
     monkeypatch.setenv("OPENARG_RAW_SLOT_RESERVE", "99")
     assert _raw_slot_reserve(8) == 7
+
+
+def test_un_valor_invalido_no_rompe_el_descubrimiento(monkeypatch) -> None:
+    from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
+
+    monkeypatch.setenv("OPENARG_RAW_SLOT_RESERVE", "dos")
+    assert _raw_slot_reserve(8) == 0

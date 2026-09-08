@@ -654,18 +654,24 @@ async def discover_catalog_hints_for_planner(
             )
             # Los marts no están en `matches` (esos salen de `table_catalog`),
             # así que `base_match` era siempre None para ellos y TODOS los
-            # marts salían etiquetados "0 filas" — le decíamos al planner que
-            # las vistas curadas estaban vacías. El conteo real ya lo tiene
-            # `mart_definitions.last_row_count`.
-            if base_match is not None:
-                row_count = base_match.row_count
-            else:
-                row_count = mart_row_counts.get(table_name, 0)
+            # marts salían etiquetados "0 filas": le decíamos al planner que
+            # las vistas curadas estaban vacías.
+            #
+            # Se omite el segmento en vez de afirmar un número. Poner el
+            # conteo real (que `mart_definitions.last_row_count` sí tiene, y
+            # va de 18.404 a 2.003.186) hace que el planner abandone los
+            # conectores con lógica propia — query_series, query_ddjj — y se
+            # vaya a SQL genérico: medido en la batería, tres casos cambiaron
+            # de ruta y dos triplicaron la latencia. Que el mart sea grande
+            # no es razón para preferirlo sobre un conector hecho para la
+            # pregunta, y esa jerarquía se decide en el prompt, no acá.
+            row_count = base_match.row_count if base_match is not None else None
             score = round(candidate.base_score, 2)
             line = f"  - {table_name}"
             if display_name:
                 line += f" ({display_name})"
-            line += f" — {row_count} filas"
+            if row_count is not None:
+                line += f" — {row_count} filas"
             if description:
                 # Round v4.4 Fase 3: descriptions of mart-layer candidates
                 # may now include a "COBERTURA TEMPORAL: …" suffix appended

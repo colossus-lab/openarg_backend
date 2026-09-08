@@ -75,19 +75,25 @@ def _layer_for_schema(schema_name: str) -> ServingLayer:
 def _raw_slot_reserve(limit: int) -> int:
     """Cuántos lugares del cupo se le guardan a lo que no es un mart.
 
-    Un tercio, con piso 1 y sin comerse más de la mitad: los marts siguen
-    siendo la superficie preferida, pero dejan de tapar el catálogo entero.
-    Ajustable con `OPENARG_RAW_SLOT_RESERVE` (0 = comportamiento anterior).
+    **Apagado por defecto.** Con la reserva prendida los recursos raw sí
+    llegan al planner —verificado en staging: aparece el bloque RAW
+    DISPONIBLE con la serie de desempleo de la EPH justo ahí— pero también
+    lo empujan a dejar los conectores con lógica propia y resolver todo por
+    SQL genérico. Medido en la batería: tres casos cambiaron de ruta
+    (`query_series`, `query_ddjj` → `query_sandbox`) y dos triplicaron la
+    latencia. Habilitarlo pide antes trabajo de prompt sobre la jerarquía
+    conector-vs-mart-vs-raw, que es su propia tarea.
+
+    `OPENARG_RAW_SLOT_RESERVE=N` lo enciende: un tercio del cupo es un buen
+    punto de partida (con `limit=8`, N=2).
     """
     crudo = os.getenv("OPENARG_RAW_SLOT_RESERVE", "")
-    if crudo.strip():
-        try:
-            return max(0, min(int(crudo), max(0, limit - 1)))
-        except ValueError:
-            pass
-    if limit <= 2:
+    if not crudo.strip():
         return 0
-    return max(1, min(limit // 3, limit // 2))
+    try:
+        return max(0, min(int(crudo), max(0, limit - 1)))
+    except ValueError:
+        return 0
 
 
 def _discover_marts_enabled() -> bool:
