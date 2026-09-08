@@ -65,6 +65,41 @@ class TestCachedTablePreferenceInConnectors:
         assert results[0].source == "cache:cache_energia_canon_gdeadbeef"
 
     @pytest.mark.asyncio
+    async def test_search_cached_tables_cita_bien_una_tabla_de_la_capa_raw(self):
+        """`FROM "raw.cache_x"` es un identificador con un punto adentro.
+
+        Postgres lo busca en `public`, no existe, y el `continue` que sigue
+        se come el error: con la capa raw activa esta función devolvía []
+        siempre. El doble rechaza el SQL mal formado para que el test
+        detecte el bug en vez de ver filas felices sobre SQL inválido.
+        """
+        sandbox = SimpleNamespace()
+        sandbox.list_cached_tables = AsyncMock(
+            return_value=[
+                CachedTableInfo(
+                    table_name="raw.cache_energia_canon_gdeadbeef",
+                    dataset_id="ds-1",
+                    row_count=20,
+                    columns=["a"],
+                ),
+            ]
+        )
+
+        async def _ejecutar(sql: str, timeout_seconds: int = 5):
+            if '"raw.cache' in sql:
+                return SimpleNamespace(error='relation "raw.cache_..." does not exist', rows=[])
+            return SimpleNamespace(error=None, rows=[{"a": 1}])
+
+        sandbox.execute_readonly = _ejecutar
+
+        results = await search_cached_tables("canon", sandbox, limit=5)
+
+        assert len(results) == 1
+        assert results[0].source == "cache:raw.cache_energia_canon_gdeadbeef"
+        # Y el título no arrastra el schema.
+        assert not results[0].dataset_title.startswith("Raw")
+
+    @pytest.mark.asyncio
     async def test_discover_tables_by_vector_search_prefers_consolidated_name(self):
         cached_tables = [
             CachedTableInfo(

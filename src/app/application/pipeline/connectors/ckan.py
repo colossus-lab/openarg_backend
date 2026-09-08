@@ -12,6 +12,7 @@ from app.application.pipeline.connectors.cache_table_selection import (
     table_priority,
 )
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
+from app.domain.value_objects.table_reference import bare_name, quote_qualified
 
 if TYPE_CHECKING:
     from app.domain.ports.connectors.ckan_search import ICKANSearchConnector
@@ -112,9 +113,20 @@ async def search_cached_tables(
     for table in matched:
         try:
             cols = ", ".join(f'"{c}"' for c in table.columns[:30]) if table.columns else "*"
-            sql = f'SELECT {cols} FROM "{table.table_name}" LIMIT 50'
+            # Citando por partes: `"raw"."cache_x"`, no `"raw.cache_x"`, que
+            # es un identificador con un punto adentro y Postgres lo busca en
+            # `public`. Con la capa raw activa eso hacía que esta función
+            # devolviera [] siempre, y el `continue` de abajo se lo comía.
+            sql = f"SELECT {cols} FROM {quote_qualified(table.table_name)} LIMIT 50"
             sandbox_result = await sandbox.execute_readonly(sql, timeout_seconds=5)
-            if sandbox_result.error or not sandbox_result.rows:
+            if sandbox_result.error:
+                logger.debug(
+                    "cached table %s no pudo consultarse: %s",
+                    table.table_name,
+                    sandbox_result.error,
+                )
+                continue
+            if not sandbox_result.rows:
                 continue
 
             results.append(
@@ -122,7 +134,11 @@ async def search_cached_tables(
                     source=f"cache:{table.table_name}",
                     portal_name="Base de datos local (cache)",
                     portal_url="",
-                    dataset_title=table.table_name.replace("cache_", "").replace("_", " ").title(),
+                    # Sin pelar el schema, el título le sale con "Raw." adelante.
+                    dataset_title=bare_name(table.table_name)
+                    .replace("cache_", "")
+                    .replace("_", " ")
+                    .title(),
                     format="json",
                     records=sandbox_result.rows[:50],
                     metadata={
