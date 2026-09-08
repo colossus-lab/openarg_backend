@@ -1047,7 +1047,11 @@ async def indec_live_fallback(nl_query: str) -> list[DataResult]:
                     "total_records": len(records),
                     "columns": list(df.columns),
                     "source_url": ds_info["url"],
-                    "fallback": True,
+                    # `used_fallback` es la clave canónica: es la que lee
+                    # `citation_guard._quality_ceiling` para capar la
+                    # confianza. Hasta 2026-09 acá decía `fallback`, así que
+                    # el techo nunca se aplicaba a este camino.
+                    "used_fallback": True,
                     "fetched_at": datetime.now(UTC).isoformat(),
                 },
             )

@@ -447,7 +447,10 @@ def _quality_ceiling(results: list[DataResult]) -> float:
             ceiling = min(ceiling, 0.35)
         if metadata.get("nonadditive_warning"):
             ceiling = min(ceiling, 0.5)
-        if metadata.get("used_fallback"):
+        # `fallback` es el nombre que usaba el fallback en vivo del INDEC
+        # hasta 2026-09. Se sigue aceptando por los DataResult que quedaron
+        # en el caché semántico con la clave vieja.
+        if metadata.get("used_fallback") or metadata.get("fallback"):
             ceiling = min(ceiling, 0.6)
         if metadata.get("result_kind") == "sample":
             ceiling = min(ceiling, 0.7)
