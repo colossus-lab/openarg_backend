@@ -1279,7 +1279,15 @@ async def execute_sandbox_step(
                     indec_tables[:3],
                 )
                 logger.info("No cached INDEC tables, attempting live fallback")
-                return await indec_live_fallback(nl_query)
+                live_results = await indec_live_fallback(nl_query)
+                if live_results:
+                    return live_results
+                # Sin descarga en vivo, esta rama hacía `return` igual y se
+                # saltaba la inyección de marts que la rama no-INDEC sí
+                # recibe abajo. Un hint con "indec" terminaba viendo menos
+                # opciones que cualquier otro. Mismo trato: `tables` vacío
+                # deja correr la inyección, y el guard de después decide.
+                tables = []
             else:
                 # Planner specified tables but none matched via fnmatch.
                 # Try vector search as last resort before giving up.
