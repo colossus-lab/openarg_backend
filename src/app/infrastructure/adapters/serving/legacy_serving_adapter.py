@@ -72,6 +72,24 @@ def _layer_for_schema(schema_name: str) -> ServingLayer:
     }.get(schema_name, ServingLayer.CACHE_LEGACY)
 
 
+def _raw_slot_reserve(limit: int) -> int:
+    """Cuántos lugares del cupo se le guardan a lo que no es un mart.
+
+    Un tercio, con piso 1 y sin comerse más de la mitad: los marts siguen
+    siendo la superficie preferida, pero dejan de tapar el catálogo entero.
+    Ajustable con `OPENARG_RAW_SLOT_RESERVE` (0 = comportamiento anterior).
+    """
+    crudo = os.getenv("OPENARG_RAW_SLOT_RESERVE", "")
+    if crudo.strip():
+        try:
+            return max(0, min(int(crudo), max(0, limit - 1)))
+        except ValueError:
+            pass
+    if limit <= 2:
+        return 0
+    return max(1, min(limit // 3, limit // 2))
+
+
 def _discover_marts_enabled() -> bool:
     """Default ON — marts are the preferred surface once they exist.
     Operators can disable with OPENARG_DISCOVER_MARTS=0 for debugging.
@@ -142,19 +160,30 @@ class LegacyServingAdapter(IServingPort):
         # Marts always come first when OPENARG_DISCOVER_MARTS=1 (default ON).
         results: list[Resource] = []
 
+        # Cupo reservado para recursos que no son marts.
+        #
+        # Los marts se buscan primero y, hasta 2026-09, si llenaban el
+        # `limit` la función retornaba ahí: con 8 marts sobre el piso y
+        # `limit=8`, `catalog_resources` no se consultaba **nunca** y los
+        # 30.542 recursos de la capa raw eran invisibles para el planner.
+        # Ahora los marts se quedan con el resto del cupo pero no con todo:
+        # siguen yendo primero, que es la preferencia que importa.
+        reserva = _raw_slot_reserve(limit)
+        cupo_marts = max(1, limit - reserva)
+
         if _discover_marts_enabled():
             mart_results = await self._discover_marts(
                 query_text,
-                limit=limit,
+                limit=cupo_marts,
                 domain=domain,
                 portal=portal,
                 query_embedding=query_embedding,
             )
-            results.extend(mart_results)
-            if len(results) >= limit:
-                return results[:limit]
+            results.extend(mart_results[:cupo_marts])
 
         remaining = limit - len(results)
+        if remaining <= 0:
+            return results[:limit]
 
         # Vector path: HNSW cosine over catalog_resources.embedding when
         # caller provides a query embedding. Falls through to ILIKE when
@@ -169,23 +198,39 @@ class LegacyServingAdapter(IServingPort):
             # surfaced top-5 raws unrelated to the question, polluting the
             # planner's hint set. Calibrated 2026-05-09.
             min_sim_raws = float(os.getenv("OPENARG_RAW_DISCOVER_MIN_SIM", "0.45"))
+            # El schema NO se infiere del texto de `materialized_table_name`.
+            # En esa columna conviven tres formas (`cache_x`, `raw."x"`,
+            # `mart.x` — DEBT-015-005) y hoy en staging está 100 % pelada,
+            # así que inferirlo del string marcaba los 30.542 recursos de la
+            # capa raw como `cache_legacy` y el bloque de hints los
+            # descartaba enteros. Se resuelve contra `raw_table_versions`,
+            # que sí sabe dónde vive cada tabla; un schema explícito en el
+            # nombre le gana, y si no hay ninguno queda `public`.
             vec_sql = (
-                "SELECT resource_identity, "
-                "       COALESCE(canonical_title, raw_title) AS title, "
-                "       domain, subdomain, portal, materialized_table_name, "
-                "       1 - (embedding <=> CAST(:vec AS vector)) AS sim "
-                "FROM catalog_resources "
-                "WHERE embedding IS NOT NULL "
-                "  AND 1 - (embedding <=> CAST(:vec AS vector)) >= :min_sim_raws "
+                "SELECT cr.resource_identity, "
+                "       COALESCE(cr.canonical_title, cr.raw_title) AS title, "
+                "       cr.domain, cr.subdomain, cr.portal, "
+                "       cr.materialized_table_name, "
+                "       COALESCE("
+                "         NULLIF(btrim(split_part(cr.materialized_table_name, '.', 1), '\"'), "
+                "                btrim(cr.materialized_table_name, '\"')), "
+                "         rtv.schema_name, 'public') AS resolved_schema, "
+                "       1 - (cr.embedding <=> CAST(:vec AS vector)) AS sim "
+                "FROM catalog_resources cr "
+                "LEFT JOIN public.raw_table_versions rtv "
+                "       ON rtv.table_name = btrim(cr.materialized_table_name, '\"') "
+                "      AND rtv.superseded_at IS NULL "
+                "WHERE cr.embedding IS NOT NULL "
+                "  AND 1 - (cr.embedding <=> CAST(:vec AS vector)) >= :min_sim_raws "
             )
             vec_params["min_sim_raws"] = min_sim_raws
             if portal:
-                vec_sql += "AND portal = :portal "
+                vec_sql += "AND cr.portal = :portal "
                 vec_params["portal"] = portal
             if domain:
-                vec_sql += "AND domain = :domain "
+                vec_sql += "AND cr.domain = :domain "
                 vec_params["domain"] = domain
-            vec_sql += "ORDER BY embedding <=> CAST(:vec AS vector) LIMIT :lim"
+            vec_sql += "ORDER BY cr.embedding <=> CAST(:vec AS vector) LIMIT :lim"
             try:
                 async with self._engine.connect() as conn:
                     rs = await conn.execute(text(vec_sql), vec_params)
@@ -195,7 +240,7 @@ class LegacyServingAdapter(IServingPort):
                     if rid in seen_ids:
                         continue
                     seen_ids.add(rid)
-                    schema_name, _ = _parse_qualified_name(row.materialized_table_name or "")
+                    schema_name = str(row.resolved_schema or "public")
                     results.append(
                         Resource(
                             resource_id=rid,
