@@ -7228,7 +7228,17 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     enrich_single_table,
                 )
 
-                enrich_single_table.delay(table_name)
+                # Calificado: `_enrich_table` busca las columnas filtrando
+                # por schema, así que con el nombre pelado no encuentra una
+                # tabla de `raw` y se va sin enriquecer nada. Esta rama
+                # (append) retorna antes de `_finalize_cached_dataset`, que
+                # es donde el camino normal despacha la forma calificada,
+                # así que acá hay que armarla.
+                enrich_single_table.delay(
+                    f"{destination.schema}.{table_name}"
+                    if destination.schema != "public"
+                    else table_name
+                )
                 parse_ms = int((time.monotonic() - parse_started_at) * 1000)
                 total_ms = int((time.monotonic() - started_at) * 1000)
                 logger.info(
@@ -7329,12 +7339,18 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
 
                 index_dataset_embedding.delay(dataset_id)
 
-                # Auto-enrich with semantic catalog metadata
-                from app.infrastructure.celery.tasks.catalog_enrichment_tasks import (
-                    enrich_single_table,
-                )
-
-                enrich_single_table.delay(table_name)
+                # El enriquecimiento lo despacha `_apply_cached_outcome`
+                # (vía `_finalize_cached_dataset`, unas líneas más abajo)
+                # con el nombre CALIFICADO y con debounce por `task_id`.
+                #
+                # Acá había un segundo despacho con el nombre pelado.
+                # `_enrich_table` filtra `information_schema` por schema, así
+                # que con el pelado no encontraba una tabla de `raw`, salía
+                # sin enriquecer y sin gastar Bedrock: ocupaba un worker de
+                # la cola `embedding` y dejaba un warning por cada landing.
+                # Que las 10 filas de `table_catalog` en staging estén todas
+                # calificadas es la prueba de que el único despacho que
+                # enriquece de verdad es el canónico.
 
             parse_ms = int((time.monotonic() - parse_started_at) * 1000)
             total_ms = int((time.monotonic() - started_at) * 1000)

@@ -76,10 +76,16 @@ def cleanup_orphan_catalog_entries(self):
     """Delete ``table_catalog`` rows whose target table no longer exists.
 
     Implements FR-007 of ``specs/011-table-catalog/`` and closes
-    DEBT-001 of the same spec. A single atomic DELETE removes every
-    row whose ``table_name`` is not in ``information_schema.tables``
-    for the ``public`` schema. Idempotent — re-running on a clean
+    DEBT-001 of the same spec. Idempotent — re-running on a clean
     catalog is a no-op that returns ``{"deleted": 0}``.
+
+    **Cada fila se busca en su propio schema.** La versión anterior
+    comparaba contra ``information_schema.tables WHERE table_schema =
+    'public'``, que devuelve nombres pelados: una fila ``raw.foo`` no podía
+    estar nunca en ese conjunto, así que esta tarea **borraba el 100 % de
+    las filas de la capa raw todas las noches**, con sus tablas físicas
+    vivas. Medido en staging el 2026-09-08 antes del arreglo: 10 de 10
+    filas marcadas para borrar, las 10 con su tabla existente.
 
     Runs on the ``ingest`` queue once a day. See ``celery/app.py``
     beat schedule.
@@ -89,10 +95,17 @@ def cleanup_orphan_catalog_entries(self):
         with engine.begin() as conn:
             result = conn.execute(
                 text(
-                    "DELETE FROM table_catalog "
-                    "WHERE table_name NOT IN ("
-                    "    SELECT table_name FROM information_schema.tables "
-                    "    WHERE table_schema = 'public'"
+                    "DELETE FROM table_catalog tc "
+                    "WHERE NOT EXISTS ("
+                    "    SELECT 1 FROM information_schema.tables t "
+                    "    WHERE t.table_schema = CASE"
+                    "             WHEN position('.' in tc.table_name) > 0"
+                    "             THEN btrim(split_part(tc.table_name, '.', 1), '\"')"
+                    "             ELSE 'public' END"
+                    "      AND t.table_name = CASE"
+                    "             WHEN position('.' in tc.table_name) > 0"
+                    "             THEN btrim(split_part(tc.table_name, '.', 2), '\"')"
+                    "             ELSE btrim(tc.table_name, '\"') END"
                     ")"
                 )
             )
