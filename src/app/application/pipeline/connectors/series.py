@@ -6,7 +6,7 @@ import logging
 import re
 import unicodedata
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
@@ -63,6 +63,9 @@ async def execute_series_step(
     series_ids = params.get("seriesIds") or params.get("series_ids") or []
     collapse = params.get("collapse")
     representation = params.get("representation")
+    # De dónde vino el collapse importa para decidir si se puede degradar:
+    # el del catálogo es curado por serie, el del planner es una conjetura.
+    collapse_del_planner = bool(collapse or representation)
 
     query_text = params.get("query", step.description)
 
@@ -102,36 +105,91 @@ async def execute_series_step(
     if not end_date:
         end_date = datetime.now(UTC).strftime("%Y-%m-%d")
 
-    result = await series.fetch(
-        series_ids=series_ids,
-        start_date=start_date,
-        end_date=end_date,
-        collapse=collapse,
-        representation=representation,
+    # Intentos en orden decreciente de exigencia. Cada uno saca una capa de
+    # parámetros que la API puede rechazar, y se para en el primero que trae
+    # datos.
+    intentos: list[tuple[str, dict[str, Any]]] = [
+        (
+            "lo pedido",
+            {
+                "start_date": start_date,
+                "end_date": end_date,
+                "collapse": collapse,
+                "representation": representation,
+            },
+        )
+    ]
+
+    # FR-009 / FIX-013: cuando el pedido traía un rango de fechas explícito,
+    # reintentar sin rango. Cubre preguntas por un mes que la API todavía no
+    # publicó (p. ej. "IPC de febrero 2026" el día que sólo salió enero); la
+    # serie más reciente le permite al analista describirla con honestidad.
+    if start_date or params.get("endDate"):
+        intentos.append(
+            (
+                "sin rango de fechas",
+                {
+                    "start_date": None,
+                    "end_date": None,
+                    "collapse": collapse,
+                    "representation": representation,
+                },
+            )
+        )
+
+    # 2026-09: y sin `collapse`/`representation`. La API responde HTTP 400
+    # ("Intervalo de collapse inválido … Pruebe con un intervalo mayor")
+    # cuando el collapse pedido es más fino que la frecuencia de la serie —
+    # p. ej. `month` sobre la serie trimestral de desempleo. El planner lo
+    # pide de más porque el template del schema lo sugiere, así que la
+    # degradación tiene que estar acá y no en el prompt.
+    #
+    # Sólo se degrada el collapse que puso el planner. El que sale de
+    # `default_collapse` del catálogo es curado por serie: si ese no trae
+    # datos, sacarlo es una llamada de más y no una chance de rescate.
+    if collapse_del_planner:
+        intentos.append(
+            (
+                "sin collapse ni representation",
+                {
+                    "start_date": None,
+                    "end_date": None,
+                    "collapse": None,
+                    "representation": None,
+                },
+            )
+        )
+
+    result = None
+    ultimo_error: ConnectorError | None = None
+    for i, (etiqueta, kwargs) in enumerate(intentos):
+        try:
+            result = await series.fetch(series_ids=series_ids, **kwargs)
+        except ConnectorError as exc:
+            # Un 400 llega como excepción, no como resultado vacío. Sin este
+            # `except`, la degradación no se alcanzaba nunca.
+            ultimo_error = exc
+            result = None
+        if result:
+            if i > 0:
+                logger.info(
+                    "Series fetch para %s resolvió con '%s' tras %d intento(s)",
+                    series_ids,
+                    etiqueta,
+                    i,
+                )
+            return [result]
+        if i + 1 < len(intentos):
+            logger.info(
+                "Series fetch para %s sin datos con '%s'; degradando a '%s'",
+                series_ids,
+                etiqueta,
+                intentos[i + 1][0],
+            )
+
+    if ultimo_error is not None:
+        raise ultimo_error
+    raise ConnectorError(
+        error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+        details={"series_ids": series_ids, "reason": "API respondió sin datos"},
     )
-    # FR-009 / FIX-013: when a catalog-matched fetch returns empty AND the
-    # request carried an explicit date range, retry once without the
-    # range. This handles queries that asked for a month the upstream
-    # API has not yet published (e.g. "IPC de febrero 2026" on a day
-    # when only January data is out). The retry returns the latest
-    # available series so the analyst can describe it honestly.
-    if not result and (start_date or params.get("endDate")):
-        logger.info(
-            "Series fetch returned empty for %s with range [%s, %s]; retrying without date range",
-            series_ids,
-            start_date,
-            end_date,
-        )
-        result = await series.fetch(
-            series_ids=series_ids,
-            start_date=None,
-            end_date=None,
-            collapse=collapse,
-            representation=representation,
-        )
-    if not result:
-        raise ConnectorError(
-            error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-            details={"series_ids": series_ids, "reason": "API respondió sin datos"},
-        )
-    return [result]

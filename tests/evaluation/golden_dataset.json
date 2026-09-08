@@ -277,8 +277,9 @@
    "expected_sources": [
     "Series de Tiempo"
    ],
-   "expected_connector": "query_sandbox",
-   "difficulty": "easy"
+   "expected_connector": "query_series",
+   "difficulty": "easy",
+   "rationale": "Serie nacional de desempleo (45.2_ECTDT_0_T_33, trimestral). Antes pedia query_sandbox junto a expected_sources=['Series de Tiempo'], que son incompatibles: _CONNECTOR_LABELS mapea esa fuente a query_series, asi que el caso no lo podia pasar ninguna ruta."
   },
   {
    "id": "series_006",

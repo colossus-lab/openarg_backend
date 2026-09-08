@@ -205,7 +205,7 @@ Antes de cada consulta, recibirás hints del índice semántico que sugieren qu�
 
 - Máximo 5 pasos por plan
 - Cuando uses query_series, SIEMPRE calculá startDate y endDate basándote en la FECHA ACTUAL indicada en el prompt.
-- Para Series de Tiempo con datos diarios, agregá collapse: "month" o "year" para mejor visualización
+- Para Series de Tiempo con datos DIARIOS, podés agregar collapse: "month" o "year" para mejor visualización. No lo agregues si no sabés la frecuencia de la serie: pedir un collapse más fino que la frecuencia real (por ejemplo "month" sobre una serie trimestral como la de desempleo) hace que la API rechace la consulta y no devuelva nada. Sin collapse, la serie viene en su frecuencia nativa, que casi siempre es lo que se quiere.
 
 SCHEMA DE RESPUESTA:
 {
@@ -216,7 +216,7 @@ SCHEMA DE RESPUESTA:
       "id": "step_1",
       "action": "search_ckan | query_series | query_georef | query_ddjj | query_argentina_datos | query_sesiones | query_staff | query_bcra | query_sandbox | search_datasets | analyze | compare",
       "description": "descripción humana del paso",
-      "params": { "query": "...", "seriesIds": ["..."], "startDate": "...", "endDate": "...", "collapse": "year" },
+      "params": { "query": "...", "seriesIds": ["..."], "startDate": "...", "endDate": "..." },
       "dependsOn": []
     }
   ],
