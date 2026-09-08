@@ -915,49 +915,112 @@ async def discover_tables_by_vector_search(
 # ---------------------------------------------------------------------------
 
 
+# Cuántos datasets se bajan como mucho en una consulta.
+_INDEC_MAX_DATASETS = 3
+
+# IDs deben coincidir con INDEC_DATASETS en indec_tasks.py.
+# Las keywords se comparan normalizadas (sin tildes, en minúsculas), así que
+# alcanza con escribir una sola forma: "construccion" ya matchea
+# "construcción".
+_INDEC_KEYWORD_MAP: dict[str, list[str]] = {
+    "ipc": ["ipc", "inflacion", "precios"],
+    "emae": ["emae", "actividad economica"],
+    "pib": ["pib", "producto bruto", "producto interno"],
+    "comercio_exterior": [
+        "exportacion",
+        "importacion",
+        "comercio exterior",
+        "balanza comercial",
+    ],
+    "eph_tasas": ["empleo", "eph", "desempleo", "trabajo", "mercado laboral"],
+    "canasta_basica": ["canasta basica", "cbt", "cba"],
+    "salarios_indice": ["salario", "salarios", "sueldo"],
+    "pobreza_informe": ["pobreza", "indigencia"],
+    "pobreza_historica": ["pobreza histor", "indigencia histor"],
+    "isac": ["construccion", "isac"],
+    "ipi_manufacturero": ["industria", "ipi", "manufacturero", "produccion industrial"],
+    "supermercados": ["supermercado"],
+    "turismo_receptivo": ["turismo"],
+    "distribucion_ingreso": ["distribucion del ingreso", "gini", "decil"],
+    "balance_pagos": ["balance de pagos", "balanza de pagos", "cuenta corriente"],
+}
+
+
+def _match_indec_datasets(nl_query: str) -> list[str]:
+    """Qué datasets del INDEC pide esta pregunta. Lista vacía = ninguno.
+
+    Devolver `[]` es una respuesta legítima y es el caso importante: antes
+    había un default `["ipc", "emae", "pib"]` acá, así que una pregunta que
+    el mapa no entendía igual bajaba inflación y PBI, los citaba como
+    fuentes, y — al haber filas — apagaba el camino no-data que habría
+    contestado con honestidad (incidente 2026-09, pregunta sobre el CUD).
+
+    Regla para editar `_INDEC_KEYWORD_MAP`: **una keyword tiene que ser
+    discriminante, no meramente temática.** Sin el default, una keyword que
+    falta cuesta barato (deflección honesta) y una de más cuesta caro
+    (descarga off-topic citada como fuente). Por eso "indec" no está acá:
+    identifica al publicador, no al dataset. Que sí esté en `INDEC_PATTERN`
+    (ruteo: "esto huele a INDEC") y no acá (selección: "qué dataset") es la
+    separación correcta.
+
+    Orden: primero los que matchean más keywords distintas, y a igualdad la
+    keyword más larga, como proxy de especificidad ("canasta básica" le gana
+    a "precios"). Antes se cortaba en 3 por orden de declaración del dict.
+
+    El matcheo pasa por `_normalize_text` (saca tildes y baja a minúsculas)
+    en los dos lados. Sin eso "cómo viene la inflación" no matchearía la
+    keyword "inflacion", que es exactamente lo que pasaba: el default tapaba
+    la falla porque `ipc` estaba entre los tres que bajaba igual.
+    """
+    normalized_query = _normalize_text(nl_query or "")
+
+    scored: list[tuple[int, int, str]] = []
+    for ds_id, keywords in _INDEC_KEYWORD_MAP.items():
+        # Por forma normalizada: dos variantes de la misma palabra no pueden
+        # contar como dos señales distintas.
+        hits = {
+            normalized
+            for kw in keywords
+            if (normalized := _normalize_text(kw)) and normalized in normalized_query
+        }
+        if hits:
+            scored.append((len(hits), max(len(kw) for kw in hits), ds_id))
+
+    if not scored:
+        return []
+
+    # `ds_id` como último criterio para que el orden sea determinístico.
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    ranked = [ds_id for _, _, ds_id in scored]
+
+    if len(ranked) > _INDEC_MAX_DATASETS:
+        logger.info(
+            "INDEC live fallback: %d datasets matchearon, se bajan %s y quedan afuera %s",
+            len(ranked),
+            ranked[:_INDEC_MAX_DATASETS],
+            ranked[_INDEC_MAX_DATASETS:],
+        )
+    return ranked[:_INDEC_MAX_DATASETS]
+
+
 async def indec_live_fallback(nl_query: str) -> list[DataResult]:
-    """Plan B: download INDEC XLS on-the-fly when cache tables don't exist."""
+    """Plan B: download INDEC XLS on-the-fly when cache tables don't exist.
+
+    Devuelve `[]` cuando la pregunta no nombra ningún dataset concreto (ver
+    `_match_indec_datasets`). Los tres llamadores tratan `[]` como "sin
+    datos", que es lo que deja actuar al camino no-data con sus guardrails.
+    """
     import asyncio as _asyncio
 
     from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _download_and_parse
 
-    query_lower = nl_query.lower()
-    keyword_map = {
-        # IDs deben coincidir con INDEC_DATASETS en indec_tasks.py
-        "ipc": ["ipc", "inflacion", "precios"],
-        "emae": ["emae", "actividad economica", "actividad económica"],
-        "pib": ["pib", "producto bruto", "producto interno"],
-        "comercio_exterior": [
-            "exportacion",
-            "importacion",
-            "comercio exterior",
-            "balanza comercial",
-        ],
-        "eph_tasas": ["empleo", "eph", "desempleo", "trabajo", "mercado laboral"],
-        "canasta_basica": ["canasta basica", "canasta básica", "cbt", "cba"],
-        "salarios_indice": ["salario", "salarios", "sueldo"],
-        "pobreza_informe": ["pobreza", "indigencia"],
-        "pobreza_historica": ["pobreza histor", "indigencia histor"],
-        "isac": ["construccion", "construcción", "isac"],
-        "ipi_manufacturero": ["industria", "ipi", "manufacturero", "produccion industrial"],
-        "supermercados": ["supermercado"],
-        "turismo_receptivo": ["turismo"],
-        "distribucion_ingreso": [
-            "distribucion del ingreso",
-            "distribución del ingreso",
-            "gini",
-            "decil",
-        ],
-        "balance_pagos": ["balance de pagos", "balanza de pagos", "cuenta corriente"],
-    }
-
-    matched_ids = []
-    for ds_id, keywords in keyword_map.items():
-        if any(kw in query_lower for kw in keywords):
-            matched_ids.append(ds_id)
-
+    matched_ids = _match_indec_datasets(nl_query)
     if not matched_ids:
-        matched_ids = ["ipc", "emae", "pib"]
+        logger.warning(
+            "INDEC live fallback: ninguna keyword matcheó, no se descarga nada. query=%r",
+            nl_query[:120],
+        )
+        return []
 
     async def _fetch_one(ds_id: str) -> DataResult | None:
         ds_info = next((d for d in INDEC_DATASETS if d["id"] == ds_id), None)
@@ -992,7 +1055,9 @@ async def indec_live_fallback(nl_query: str) -> list[DataResult]:
             logger.warning("INDEC live fallback failed for %s", ds_id, exc_info=True)
             return None
 
-    fetched = await _asyncio.gather(*[_fetch_one(ds_id) for ds_id in matched_ids[:3]])
+    # El corte ya lo hizo `_match_indec_datasets`, por ranking y no por
+    # orden de declaración del dict.
+    fetched = await _asyncio.gather(*[_fetch_one(ds_id) for ds_id in matched_ids])
     return [r for r in fetched if r is not None]
 
 
