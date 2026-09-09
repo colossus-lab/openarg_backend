@@ -657,15 +657,14 @@ async def discover_catalog_hints_for_planner(
             # marts salían etiquetados "0 filas": le decíamos al planner que
             # las vistas curadas estaban vacías.
             #
-            # Se omite el segmento en vez de afirmar un número. Poner el
-            # conteo real (que `mart_definitions.last_row_count` sí tiene, y
-            # va de 18.404 a 2.003.186) hace que el planner abandone los
-            # conectores con lógica propia — query_series, query_ddjj — y se
-            # vaya a SQL genérico: medido en la batería, tres casos cambiaron
-            # de ruta y dos triplicaron la latencia. Que el mart sea grande
-            # no es razón para preferirlo sobre un conector hecho para la
-            # pregunta, y esa jerarquía se decide en el prompt, no acá.
-            row_count = base_match.row_count if base_match is not None else None
+            # Decir la verdad acá sólo es seguro con la jerarquía de fuentes
+            # explícita en REGLA #1 del prompt. Sin ella, un mart de dos
+            # millones de filas se llevaba puestas a `query_series` y
+            # `query_ddjj` por puro tamaño.
+            if base_match is not None:
+                row_count = base_match.row_count
+            else:
+                row_count = mart_row_counts.get(table_name)
             score = round(candidate.base_score, 2)
             line = f"  - {table_name}"
             if display_name:

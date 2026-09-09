@@ -49,20 +49,35 @@ def test_la_consulta_de_marts_trae_el_conteo_de_filas() -> None:
     )
 
 
-def test_no_se_afirma_un_conteo_que_no_se_tiene() -> None:
-    """Mejor no decir nada que decir "0 filas" sobre un mart con 600 mil.
+def test_el_conteo_de_un_mart_no_se_busca_en_table_catalog() -> None:
+    """Los marts no están en `matches`, así que ahí su conteo es siempre 0.
 
-    Poner el conteo real tampoco sirve hoy: medido en la batería, hace que
-    el planner deje `query_series` y `query_ddjj` por SQL genérico. Que un
-    mart sea grande no es razón para preferirlo sobre un conector hecho para
-    la pregunta, y esa jerarquía se decide en el prompt.
+    Decir la verdad sólo es seguro con la jerarquía de fuentes explícita en
+    REGLA #1 del prompt: sin ella, un mart de dos millones de filas se
+    llevaba puestas a `query_series` y `query_ddjj` por puro tamaño.
     """
     i = _SANDBOX.index("base_match = next(")
-    bloque = _SANDBOX[i : i + 1600]
+    bloque = _SANDBOX[i : i + 1400]
 
-    assert "if row_count is not None:" in bloque, (
-        "el segmento de filas tiene que omitirse cuando no hay dato, no caer a 0"
-    )
+    assert "mart_row_counts.get(table_name)" in bloque
+
+
+def test_el_prompt_pone_los_conectores_especificos_por_encima_del_mart() -> None:
+    """La regla que habilita todo lo demás.
+
+    REGLA #1 decía que si un mart cubre el tema el plan "debe ser un único
+    step query_sandbox", nombrando a `query_series` entre lo que NO había
+    que agregar. Su fundamento era el wall-clock de los steps en paralelo,
+    que es cierto para `search_ckan` y falso para las APIs específicas.
+    """
+    prompt = Path("src/app/prompts/planner.txt").read_text(encoding="utf-8")
+    i = prompt.index("REGLA #1")
+    bloque = prompt[i : i + 1800]
+
+    assert "ese conector ES el plan" in bloque
+    assert "query_series" in bloque and "query_ddjj" in bloque
+    # Y el orden tiene que estar escrito: conector → mart → búsqueda genérica.
+    assert bloque.index("query_series") < bloque.index("MARTS DISPONIBLES")
 
 
 # ── la capa de un recurso ──────────────────────────────────
@@ -89,25 +104,30 @@ def test_el_registro_se_lee_calificado() -> None:
 # ── el cupo ────────────────────────────────────────────────
 
 
-def test_la_reserva_esta_apagada_por_defecto() -> None:
-    """Prenderla hace que el planner abandone los conectores especializados.
-
-    Con la reserva activa los recursos raw sí llegan al prompt (verificado en
-    staging: aparece el bloque RAW DISPONIBLE con la serie de desempleo),
-    pero la bateria midio tres casos cambiando de ruta hacia `query_sandbox`
-    y dos triplicando la latencia. Queda lista y apagada.
-    """
+def test_queda_lugar_para_recursos_raw() -> None:
+    """Con el cupo que usa el planner (8), tienen que entrar raws."""
     from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
 
-    assert _raw_slot_reserve(8) == 0
-    assert _raw_slot_reserve(5) == 0
-
-
-def test_la_reserva_se_prende_por_env(monkeypatch) -> None:
-    from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
-
-    monkeypatch.setenv("OPENARG_RAW_SLOT_RESERVE", "2")
     assert _raw_slot_reserve(8) == 2
+    assert _raw_slot_reserve(5) >= 1
+    # Y la reserva nunca se come más de la mitad: los marts siguen primero.
+    for limite in (3, 5, 8, 12, 20):
+        assert _raw_slot_reserve(limite) <= limite // 2
+
+
+def test_con_un_cupo_minimo_no_se_reserva_nada() -> None:
+    """Con 1 o 2 lugares, reservar dejaría al planner sin marts."""
+    from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
+
+    assert _raw_slot_reserve(1) == 0
+    assert _raw_slot_reserve(2) == 0
+
+
+def test_la_reserva_se_puede_apagar_por_env(monkeypatch) -> None:
+    from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
+
+    monkeypatch.setenv("OPENARG_RAW_SLOT_RESERVE", "0")
+    assert _raw_slot_reserve(8) == 0
 
 
 def test_la_reserva_nunca_deja_al_planner_sin_marts(monkeypatch) -> None:
@@ -122,4 +142,5 @@ def test_un_valor_invalido_no_rompe_el_descubrimiento(monkeypatch) -> None:
     from app.infrastructure.adapters.serving.legacy_serving_adapter import _raw_slot_reserve
 
     monkeypatch.setenv("OPENARG_RAW_SLOT_RESERVE", "dos")
-    assert _raw_slot_reserve(8) == 0
+    # Un valor ilegible se ignora y vale el default, no apaga la reserva.
+    assert _raw_slot_reserve(8) == 2
