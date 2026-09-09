@@ -1316,6 +1316,73 @@ def _unchanged_since_last_collect(
     return str(row.table_name)
 
 
+def _settle_unchanged_row(
+    engine, *, dataset_id: str, reserved_table: str | None, live_table: str
+) -> None:
+    """Cerrar la fila que la reserva dejó abierta cuando el archivo no cambió.
+
+    `_ensure_cached_entry` marca `status='downloading'` y `table_name` con el
+    nombre de la PRÓXIMA versión, porque corre antes de saber si el archivo
+    cambió. Cuando no cambió, esa versión no se crea nunca y la fila queda
+    apuntando a una tabla inexistente, sin error, en `downloading`.
+
+    `raw.cached_datasets.table_name` es UNIQUE (`uq_cached_datasets_table_name`),
+    de ahí que borrar y converger sean ramas excluyentes y no dos pasos: si la
+    fila sana ya ocupa el nombre vivo, la reservada sobra; si no lo ocupa nadie,
+    la reservada es la del recurso y sólo tiene el nombre equivocado.
+    """
+    with engine.begin() as conn:
+        if reserved_table and reserved_table != live_table:
+            borradas = conn.execute(
+                text(
+                    """
+                    DELETE FROM raw.cached_datasets
+                    WHERE dataset_id = CAST(:d AS uuid)
+                      AND table_name = :reservada
+                      AND status = 'downloading'
+                      AND EXISTS (
+                          SELECT 1 FROM raw.cached_datasets o
+                          WHERE o.dataset_id = CAST(:d AS uuid)
+                            AND o.table_name = :viva
+                      )
+                    """
+                ),
+                {"d": dataset_id, "reservada": reserved_table, "viva": live_table},
+            ).rowcount
+            if not borradas:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE raw.cached_datasets
+                        SET table_name = :viva,
+                            status = 'ready',
+                            error_message = NULL,
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:d AS uuid)
+                          AND table_name = :reservada
+                          AND status = 'downloading'
+                        """
+                    ),
+                    {"d": dataset_id, "reservada": reserved_table, "viva": live_table},
+                )
+        # La fila viva queda en `ready` con `updated_at` fresco. Mover la fecha
+        # era el propósito original de este bloque: sin ella el refresh
+        # reelegiría este recurso en cada pasada, que es lo contrario del ahorro.
+        conn.execute(
+            text(
+                """
+                UPDATE raw.cached_datasets
+                SET status = 'ready',
+                    error_message = NULL,
+                    updated_at = NOW()
+                WHERE dataset_id = CAST(:d AS uuid)
+                  AND table_name = :viva
+                """
+            ),
+            {"d": dataset_id, "viva": live_table},
+        )
+
+
 def _file_sha256(path: str) -> str | None:
     """Digest of the bytes we downloaded, so "did this change?" has an answer.
 
@@ -6311,18 +6378,38 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 file_hash=source_file_hash,
             )
             if _unchanged_table:
-                # `updated_at` still moves. It records when we last *checked*,
-                # and without it the refresh would pick this resource again on
-                # every pass forever, which is the opposite of the saving.
+                # Antes acá sólo se movía `updated_at`, y eso dejaba la fila
+                # reservada colgada en `downloading` para siempre.
+                #
+                # La reserva (`_ensure_cached_entry`, más arriba) marca
+                # `status='downloading'` y `table_name` con el nombre de la
+                # PRÓXIMA versión — `..._v2` — porque se hace antes de saber si
+                # el archivo cambió. Cuando resulta que no cambió, esa versión
+                # no se crea nunca: la fila queda apuntando a una tabla
+                # inexistente, sin error, en `downloading`, y el dataset pasa a
+                # tener DOS filas (la sana en `ready` sobre `..._v1`, y ésta).
+                #
+                # Medido en staging el 2026-09-09: 194 filas así, la más vieja
+                # del 26-ago; 193 de sus hermanas estaban en `ready`. Y no se
+                # quedaban quietas: `_recycle_stuck_downloads` las veía stale a
+                # los 30 min, las degradaba y las re-despachaba, el colector
+                # volvía a decir "unchanged" y a refrescar `updated_at`. Un
+                # ciclo de 45 min que subía `retry_count` en cada vuelta hasta
+                # `permanently_failed` — quemando un dataset perfectamente
+                # descargado, y pagando una descarga HTTP cada vez.
+                #
+                # Así que la fila reservada se reconcilia en vez de abandonarse:
+                # si el duplicado ya tiene hermana sana, sobra y se borra; si no
+                # la tiene, converge al nombre vivo. La fila viva queda en
+                # `ready` con `updated_at` fresco, que era el propósito original
+                # (sin él el refresh reelegiría este recurso en cada pasada).
                 try:
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text(
-                                "UPDATE raw.cached_datasets SET updated_at = NOW() "
-                                "WHERE dataset_id = CAST(:d AS uuid)"
-                            ),
-                            {"d": dataset_id},
-                        )
+                    _settle_unchanged_row(
+                        engine,
+                        dataset_id=dataset_id,
+                        reserved_table=table_name,
+                        live_table=_unchanged_table,
+                    )
                 except Exception:
                     logger.warning("could not touch %s", dataset_id, exc_info=True)
                 logger.info(
