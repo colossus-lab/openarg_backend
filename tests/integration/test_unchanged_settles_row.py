@@ -1,4 +1,4 @@
-"""Una recolección sin cambios no puede dejar la fila abierta.
+"""Una recolección que no tuvo trabajo que hacer no puede dejar la fila abierta.
 
 El 2026-09-09, con `recover_stuck_tasks` recién destrabada, aparecieron 194
 filas de `raw.cached_datasets` clavadas en `downloading` desde el 26-ago.
@@ -20,6 +20,14 @@ Y no se quedaban quietas: `_recycle_stuck_downloads` las veía stale a los
 `retry_count` en cada vuelta hasta `permanently_failed`, quemando un
 dataset perfectamente descargado y pagando una descarga HTTP cada vez.
 
+El 2026-09-09, ya con el arreglo desplegado, aparecieron 7 filas nuevas
+en el mismo estado. El culpable era **el otro** camino de salida
+temprana: `already_appended` —las filas de este dataset ya están en la
+tabla destino— marcaba `datasets.is_cached` y se iba igual de temprano.
+De ahí que la función se llame `_settle_reserved_row` y no
+`_settle_unchanged_row`: lo que cierra es la fila que dejó la reserva,
+venga de donde venga.
+
 Estos tests corren contra Postgres de verdad porque lo que decide entre
 las dos ramas es `uq_cached_datasets_table_name`: con un doble en memoria
 la restricción no existe y el test no probaría nada.
@@ -29,11 +37,12 @@ from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
 
-from app.infrastructure.celery.tasks.collector_tasks import _settle_unchanged_row
+from app.infrastructure.celery.tasks.collector_tasks import _settle_reserved_row
 
 
 def _engine_or_skip():
@@ -112,7 +121,7 @@ def test_el_duplicado_reservado_se_borra(cached):
     _insert(cached, did, "t__abc__v1", "ready", error=None)
     _insert(cached, did, "t__abc__v2", "downloading", error=None)
 
-    _settle_unchanged_row(
+    _settle_reserved_row(
         cached, dataset_id=did, reserved_table="t__abc__v2", live_table="t__abc__v1"
     )
 
@@ -130,7 +139,7 @@ def test_sin_hermana_la_fila_converge_al_nombre_vivo(cached):
     did = str(uuid.uuid4())
     _insert(cached, did, "t__abc__v2", "downloading")
 
-    _settle_unchanged_row(
+    _settle_reserved_row(
         cached, dataset_id=did, reserved_table="t__abc__v2", live_table="t__abc__v1"
     )
 
@@ -144,7 +153,7 @@ def test_cuando_la_reserva_ya_es_la_viva_solo_se_cierra(cached):
     did = str(uuid.uuid4())
     _insert(cached, did, "t__abc__v1", "downloading")
 
-    _settle_unchanged_row(
+    _settle_reserved_row(
         cached, dataset_id=did, reserved_table="t__abc__v1", live_table="t__abc__v1"
     )
 
@@ -158,7 +167,7 @@ def test_no_se_toca_otro_dataset(cached):
     _insert(cached, mio, "t__abc__v2", "downloading", error=None)
     _insert(cached, ajeno, "otro__xyz__v1", "downloading", error=None)
 
-    _settle_unchanged_row(
+    _settle_reserved_row(
         cached, dataset_id=mio, reserved_table="t__abc__v2", live_table="t__abc__v1"
     )
 
@@ -171,7 +180,7 @@ def test_una_fila_que_no_esta_descargando_no_se_borra(cached):
     _insert(cached, did, "t__abc__v1", "ready", error=None)
     _insert(cached, did, "t__abc__v2", "permanently_failed", error="viejo")
 
-    _settle_unchanged_row(
+    _settle_reserved_row(
         cached, dataset_id=did, reserved_table="t__abc__v2", live_table="t__abc__v1"
     )
 
@@ -187,8 +196,25 @@ def test_corre_dos_veces_sin_cambiar_nada_mas(cached):
     _insert(cached, did, "t__abc__v2", "downloading", error=None)
 
     for _ in range(2):
-        _settle_unchanged_row(
+        _settle_reserved_row(
             cached, dataset_id=did, reserved_table="t__abc__v2", live_table="t__abc__v1"
         )
 
     assert _rows(cached, did) == {"t__abc__v1": ("ready", None)}
+
+
+def test_los_dos_caminos_de_salida_temprana_cierran_la_fila() -> None:
+    """Ninguna salida temprana puede quedarse con la fila abierta.
+
+    `unchanged` se arregló en el #59 y `already_appended` seguía suelto: la
+    tarea reportaba `succeeded` y la fila quedaba en `downloading` hasta que
+    `_recycle_stuck_downloads` la agotaba hasta `permanently_failed`. Si
+    mañana aparece un tercer camino, que este test lo obligue a cerrar.
+    """
+    fuente = Path("src/app/infrastructure/celery/tasks/collector_tasks.py").read_text(
+        encoding="utf-8"
+    )
+    for salida in ('"status": "unchanged"', 'return target_table, True, "already_appended"'):
+        i = fuente.index(salida)
+        # El cierre tiene que estar cerca y antes de irse, no en otra función.
+        assert "_settle_reserved_row(" in fuente[max(0, i - 2500) : i + 200], salida
