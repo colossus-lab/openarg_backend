@@ -62,6 +62,13 @@ def _startup_bootstrap_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+# Los nombres de las colas de colector pesado, con los mismos defaults que
+# usa `collector_tasks`. Se definen acá para poder agendar la limpieza de
+# /tmp en cada una: son contenedores distintos, con /tmp distintos.
+_HEAVY_COLLECT_QUEUE = os.getenv("OPENARG_HEAVY_COLLECT_QUEUE", "collector-heavy")
+_HEAVY_RETRY_QUEUE = os.getenv("OPENARG_HEAVY_RETRY_QUEUE", "collector-heavy-retry")
+
+
 def create_celery() -> Celery:
     broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
@@ -353,6 +360,25 @@ def create_celery() -> Celery:
                 "schedule": crontab(minute="*/30"),
                 "kwargs": {"max_age_seconds": 3600},
                 "options": {"queue": "collector"},
+            },
+            # Una entrada por cola de colector, porque cada worker tiene su
+            # propio /tmp: no hay volumen compartido, y una tarea limpia el
+            # directorio del contenedor que la ejecuta. Con una sola entrada,
+            # los dos `collector-heavy` —los que bajan los archivos grandes,
+            # y donde se midieron 15 MB acumulados mientras el colector
+            # principal estaba en 0— sólo quedaban cubiertos por el hook de
+            # `worker_process_init`, o sea al arrancar y nunca más.
+            "cleanup-orphan-temp-files-heavy": {
+                "task": "openarg.cleanup_orphan_temp_files",
+                "schedule": crontab(minute="*/30"),
+                "kwargs": {"max_age_seconds": 3600},
+                "options": {"queue": _HEAVY_COLLECT_QUEUE},
+            },
+            "cleanup-orphan-temp-files-heavy-retry": {
+                "task": "openarg.cleanup_orphan_temp_files",
+                "schedule": crontab(minute="*/30"),
+                "kwargs": {"max_age_seconds": 3600},
+                "options": {"queue": _HEAVY_RETRY_QUEUE},
             },
             "close-resolved-findings": {
                 "task": "openarg.close_resolved_findings",
