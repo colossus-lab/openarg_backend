@@ -1,0 +1,23 @@
+# Tareas despachadas a una cola que ningún worker consume, congeladas el
+# 2026-09-09 cuando aterrizó `test_celery_queues_have_consumers.py`.
+#
+# Cada línea es una tarea que HOY no corre nunca. El archivo sólo puede
+# achicarse: el test falla ante deriva nueva y ante entradas ya arregladas.
+#
+# Por qué estas tres siguen acá y `recover_stuck_tasks` no: mover una tarea
+# de cola le suma su carga a un worker que ya tiene trabajo, y esa carga hay
+# que medirla antes. `recover_stuck_tasks` es liviana (unos pocos UPDATE y
+# re-despachos cada 15 min) y va con sus hermanas de mantenimiento en
+# `ingest`. Las de abajo no:
+#
+#   ws0_5_state_invariants_sweep — corre a los minutos 7 y 37 de cada hora
+#     y en la última corrida medida escaneó 33.899 recursos persistiendo
+#     31.094 hallazgos. `ingest` tiene concurrencia 2 y ya corre >30 tareas
+#     agendadas; meterla ahí sin medir puede desplazar a las demás.
+#   ops_temp_dir_cleanup / cleanup_orphan_temp_files — limpian el /tmp del
+#     worker que las ejecuta. Mandarlas a UNA cola limpia UN contenedor, así
+#     que el arreglo correcto probablemente no sea rutearlas sino difundirlas
+#     a todos los workers. Decidir eso es cambiar el diseño, no la cola.
+openarg.ws0_5_state_invariants_sweep -> default
+openarg.ops_temp_dir_cleanup -> default
+openarg.cleanup_orphan_temp_files -> default
