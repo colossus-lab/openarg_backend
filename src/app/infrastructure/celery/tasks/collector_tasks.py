@@ -8092,6 +8092,30 @@ def materialize_format_duplicate_aliases(self, title: str, portal: str):
         engine.dispose()
 
 
+# Guardas de `recover_stuck_tasks` paso 3: por debajo de estos valores un
+# lote de filas 'ready' sin tabla se trata como huérfanas reales; por encima,
+# como un problema de matcheo y no se toca nada.
+_ORPHAN_READY_ABS_GUARD = 500
+_ORPHAN_READY_PCT_GUARD = 0.10
+
+
+def _orphan_guard_tripped(candidatos: int, total_ready: int) -> bool:
+    """¿El lote de 'huérfanas' es tan grande que hay que desconfiar?
+
+    Marcar una fila como huérfana le pone `is_cached = false` y re-despacha
+    su descarga. Sobre decenas de miles de filas eso no es una limpieza, es
+    un incidente — y ya pasó una vez (`cleanup_raw_orphans`, 2026-08-03).
+
+    La pregunta que responde: ¿es más creíble que desaparecieran las tablas,
+    o que el nombre haya dejado de matchear? Un salto grande siempre es lo
+    segundo. Es la misma familia de bug que rompió el ruteo de la capa raw:
+    dos formas del mismo nombre.
+    """
+    if candidatos <= 0:
+        return False
+    return candidatos > max(_ORPHAN_READY_ABS_GUARD, total_ready * _ORPHAN_READY_PCT_GUARD)
+
+
 @celery_app.task(name="openarg.recover_stuck_tasks", bind=True, soft_time_limit=60, time_limit=120)
 def recover_stuck_tasks(self):
     """
@@ -8131,18 +8155,67 @@ def recover_stuck_tasks(self):
 
         # 3. Validate 'ready' datasets — check that the actual table still exists
         #    (catches orphaned records after DB restore, migration, or manual cleanup)
+        #
+        # Esto se hacía con una query a `information_schema` POR FILA. Medido en
+        # staging el 2026-09-09: 2,4 ms x 30.921 filas `ready` = 1,2 min, contra
+        # un `soft_time_limit` de 60 s. O sea que el paso 3 no podía terminar
+        # nunca; la tarea moría con SoftTimeLimitExceeded en medio de una query
+        # y el rollback sobre esa conexión rota tiraba un OperationalError
+        # ("another command is already in progress") que tapaba la causa.
+        # El mismo anti-join hecho de una sola vez tarda 0,48 s.
         orphaned_ready = 0
         with engine.begin() as conn:
-            ready_datasets = conn.execute(
+            candidatos = conn.execute(
                 text("""
-                    SELECT CAST(dataset_id AS text) AS dataset_id, table_name
-                    FROM raw.cached_datasets
-                    WHERE status = 'ready' AND table_name IS NOT NULL
+                    SELECT CAST(cd.dataset_id AS text) AS dataset_id, cd.table_name
+                    FROM raw.cached_datasets cd
+                    WHERE cd.status = 'ready' AND cd.table_name IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM information_schema.tables t
+                          WHERE t.table_name = cd.table_name
+                            AND t.table_schema IN ('public', 'raw', 'staging', 'mart')
+                      )
                 """),
             ).fetchall()
 
-            for row in ready_datasets:
-                table_exists = conn.execute(
+            # Guarda de radio de explosión. Marcar una fila como huérfana
+            # re-despacha su descarga y le pone `is_cached = false`: sobre
+            # decenas de miles de filas eso es un incidente, no una limpieza
+            # (cf. `cleanup_raw_orphans`, 2026-08-03). Un salto así no es
+            # "se perdieron las tablas", es que el nombre dejó de matchear
+            # — que es exactamente como se rompió el ruteo de la capa raw.
+            # Ante la duda no se toca nada y se avisa.
+            if candidatos:
+                total_ready = conn.execute(
+                    text(
+                        "SELECT count(*) FROM raw.cached_datasets "
+                        "WHERE status = 'ready' AND table_name IS NOT NULL"
+                    ),
+                ).scalar_one()
+                if _orphan_guard_tripped(len(candidatos), total_ready):
+                    logger.error(
+                        "recover_stuck_tasks: %d de %d filas 'ready' aparecen sin tabla "
+                        "(> guarda). No se toca ninguna: un salto así suele ser un "
+                        "problema de matcheo de nombres, no tablas perdidas.",
+                        len(candidatos),
+                        total_ready,
+                    )
+                    candidatos = []
+
+            for row in candidatos:
+                # Sprint 28: defend against false-positive caused by
+                # concurrent DROP/CREATE in `_to_sql_safe` recreate.
+                # Postgres `information_schema.tables` is not
+                # MVCC-snapshotted; a recreating worker briefly hides
+                # the table. Re-check after a short pause; if it
+                # reappeared, this row was a victim of the race.
+                #
+                # El re-chequeo sigue siendo por fila a propósito: ahora
+                # sólo lo pagan los candidatos, que en staging son 0.
+                import time as _t
+
+                _t.sleep(0.2)
+                table_exists_recheck = conn.execute(
                     text(
                         "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
                         "WHERE table_name = :tn "
@@ -8150,45 +8223,26 @@ def recover_stuck_tasks(self):
                     ),
                     {"tn": row.table_name},
                 ).scalar()
-
-                if not table_exists:
-                    # Sprint 28: defend against false-positive caused by
-                    # concurrent DROP/CREATE in `_to_sql_safe` recreate.
-                    # Postgres `information_schema.tables` is not
-                    # MVCC-snapshotted; a recreating worker briefly hides
-                    # the table. Re-check after a short pause; if it
-                    # reappeared, this row was a victim of the race.
-                    import time as _t
-
-                    _t.sleep(0.2)
-                    table_exists_recheck = conn.execute(
-                        text(
-                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                            "WHERE table_name = :tn "
-                            "AND table_schema IN ('public', 'raw', 'staging', 'mart'))"
-                        ),
-                        {"tn": row.table_name},
-                    ).scalar()
-                    if table_exists_recheck:
-                        continue
-                    conn.execute(
-                        text("""
-                            UPDATE raw.cached_datasets
-                            SET status = 'error',
-                                retry_count = 0,
-                                error_message = 'Table missing: marked for re-download',
-                                updated_at = NOW()
-                            WHERE dataset_id = CAST(:did AS uuid)
-                              AND status = 'ready'
-                        """),
-                        {"did": row.dataset_id},
-                    )
-                    conn.execute(
-                        text("UPDATE datasets SET is_cached = false WHERE id = CAST(:did AS uuid)"),
-                        {"did": row.dataset_id},
-                    )
-                    collect_dataset.delay(row.dataset_id)
-                    orphaned_ready += 1
+                if table_exists_recheck:
+                    continue
+                conn.execute(
+                    text("""
+                        UPDATE raw.cached_datasets
+                        SET status = 'error',
+                            retry_count = 0,
+                            error_message = 'Table missing: marked for re-download',
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:did AS uuid)
+                          AND status = 'ready'
+                    """),
+                    {"did": row.dataset_id},
+                )
+                conn.execute(
+                    text("UPDATE datasets SET is_cached = false WHERE id = CAST(:did AS uuid)"),
+                    {"did": row.dataset_id},
+                )
+                collect_dataset.delay(row.dataset_id)
+                orphaned_ready += 1
 
             if orphaned_ready:
                 logger.warning(
