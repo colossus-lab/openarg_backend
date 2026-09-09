@@ -149,7 +149,7 @@ def create_celery() -> Celery:
         # minutos y la cola `default` clavada en ~7.900 mensajes sin drenar.
         # `test_celery_queues_have_consumers` fija el invariante.
         "openarg.recover_stuck_tasks": {"queue": "ingest"},
-        "openarg.reset_failed_collectors": {"queue": "default"},
+        "openarg.reset_failed_collectors": {"queue": "collector"},
         "openarg.snapshot_staff": {"queue": "scraper"},
         "openarg.reindex_all_embeddings": {"queue": "embedding"},
         # New data source tasks (dedicated ingest queue)
@@ -219,9 +219,22 @@ def create_celery() -> Celery:
         "openarg.dbt_build": {"queue": "ingest"},
         "openarg.dbt_docs_generate": {"queue": "ingest"},
         "openarg.dbt_parse": {"queue": "ingest"},
-        "openarg.ws0_5_state_invariants_sweep": {"queue": "default"},
-        "openarg.ops_temp_dir_cleanup": {"queue": "default"},
-        "openarg.cleanup_orphan_temp_files": {"queue": "default"},
+        # Las tres estaban en `default`, que no consume nadie: se encolaban
+        # y no corrían nunca (ver `test_celery_queues_have_consumers`).
+        #
+        # El barrido de invariantes va a `ingest` con sus hermanas de
+        # mantenimiento. Se midió antes de moverlo, porque rutear una tarea
+        # dormida la despierta y eso ya destapó dos bugs este mismo día:
+        # `scan()` tarda 0,2 s y devuelve 0 violaciones, contra un
+        # `soft_time_limit` de 300 s.
+        "openarg.ws0_5_state_invariants_sweep": {"queue": "ingest"},
+        # Las de /tmp van a `collector` y no a `ingest`: barren el temp dir
+        # del worker que las ejecuta —cada contenedor tiene el suyo, no hay
+        # volumen compartido— y quien deja los archivos de 100 MB es el
+        # colector. En `ingest` correrían sobre un /tmp que nadie ensucia.
+        # (Las dos hacen lo mismo; consolidarlas es otra tarea.)
+        "openarg.ops_temp_dir_cleanup": {"queue": "collector"},
+        "openarg.cleanup_orphan_temp_files": {"queue": "collector"},
         "openarg.ops_portal_health": {"queue": "ingest"},
         "openarg.catalog_backfill": {"queue": "ingest"},
         "openarg.populate_catalog_embeddings": {"queue": "embedding"},
@@ -339,7 +352,7 @@ def create_celery() -> Celery:
                 "task": "openarg.cleanup_orphan_temp_files",
                 "schedule": crontab(minute="*/30"),
                 "kwargs": {"max_age_seconds": 3600},
-                "options": {"queue": "default"},
+                "options": {"queue": "collector"},
             },
             "close-resolved-findings": {
                 "task": "openarg.close_resolved_findings",
@@ -839,13 +852,13 @@ def create_celery() -> Celery:
             "ws0-5-state-invariants-sweep": {
                 "task": "openarg.ws0_5_state_invariants_sweep",
                 "schedule": crontab(minute="7,37"),
-                "options": {"queue": "default"},
+                "options": {"queue": "ingest"},
             },
             # --- Operational: /tmp cleanup (hourly) + portal health (every 30 min) ---
             "ops-temp-dir-cleanup": {
                 "task": "openarg.ops_temp_dir_cleanup",
                 "schedule": crontab(minute=10),
-                "options": {"queue": "default"},
+                "options": {"queue": "collector"},
             },
             "ops-portal-health": {
                 "task": "openarg.ops_portal_health",

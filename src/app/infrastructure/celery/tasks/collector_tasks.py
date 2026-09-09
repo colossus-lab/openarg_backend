@@ -688,29 +688,45 @@ def _recycle_stuck_downloads(
 
         to_redispatch: list[str] = []
         for row in stale_rows:
-            table_exists = False
+            # El schema se resuelve, no se asume. Esto miraba sólo `public`
+            # mientras las tablas viven en `raw` desde el cutover de la capa
+            # raw: medido en staging el 2026-09-09, encontraba 0 de 85 y con
+            # los cuatro schemas encontraba 3. Cada fallo acá degrada a `error`
+            # y re-despacha una tabla que estaba perfectamente materializada.
+            # Misma familia que la regresión de los globs `cache_*` vs `raw.`.
+            table_schema = None
             if row.table_name:
-                table_exists = bool(
-                    conn.execute(
-                        text(
-                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                            "WHERE table_name = :tn AND table_schema = 'public')"
-                        ),
-                        {"tn": row.table_name},
-                    ).scalar()
-                )
+                table_schema = conn.execute(
+                    text(
+                        "SELECT table_schema FROM information_schema.tables "
+                        "WHERE table_name = :tn "
+                        "AND table_schema IN ('public', 'raw', 'staging', 'mart') "
+                        # Orden explícito para que un homónimo en dos schemas
+                        # resuelva siempre igual, y no según el plan del día.
+                        "ORDER BY array_position("
+                        "ARRAY['raw','public','staging','mart'], table_schema) "
+                        "LIMIT 1"
+                    ),
+                    {"tn": row.table_name},
+                ).scalar()
 
-            if table_exists:
+            if table_schema:
+                # Calificado: sin esto el COUNT depende del `search_path` de la
+                # conexión y el listado de columnas mezclaría homónimos.
                 row_count = (
-                    conn.execute(text(f'SELECT COUNT(*) FROM "{row.table_name}"')).scalar() or 0
-                )  # noqa: S608
+                    conn.execute(
+                        text(f'SELECT COUNT(*) FROM "{table_schema}"."{row.table_name}"')  # noqa: S608
+                    ).scalar()
+                    or 0
+                )
                 if row_count > 0:
                     col_result = conn.execute(
                         text(
                             "SELECT column_name FROM information_schema.columns "
-                            "WHERE table_name = :tn ORDER BY ordinal_position"
+                            "WHERE table_name = :tn AND table_schema = :ts "
+                            "ORDER BY ordinal_position"
                         ),
-                        {"tn": row.table_name},
+                        {"tn": row.table_name, "ts": table_schema},
                     ).fetchall()
                     columns = [r.column_name for r in col_result]
                     conn.execute(
