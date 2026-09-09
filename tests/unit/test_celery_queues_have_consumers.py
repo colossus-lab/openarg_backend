@@ -168,3 +168,24 @@ def test_las_tareas_de_mantenimiento_estan_agendadas(tarea: str) -> None:
 
     agendadas = {e["task"] for e in (celery_app.conf.beat_schedule or {}).values()}
     assert tarea in agendadas
+
+
+def test_la_limpieza_de_tmp_cubre_las_tres_colas_de_colector() -> None:
+    """Cada worker tiene su propio /tmp, así que hace falta una entrada por cola.
+
+    La tarea borra archivos del directorio del contenedor **que la ejecuta**:
+    no hay volumen de /tmp compartido entre los workers. Con una sola entrada
+    de beat, los dos `collector-heavy` —los que bajan los archivos grandes—
+    quedaban cubiertos sólo por el hook de `worker_process_init`, o sea al
+    arrancar y nunca más. Medido en staging el 2026-09-09: 15 MB acumulados
+    en `collector-heavy` mientras el colector principal estaba en 0.
+    """
+    from app.infrastructure.celery.app import celery_app
+
+    colas = {
+        (e.get("options") or {}).get("queue")
+        for e in (celery_app.conf.beat_schedule or {}).values()
+        if e["task"] == "openarg.cleanup_orphan_temp_files"
+    }
+    assert colas == {"collector", "collector-heavy", "collector-heavy-retry"}, colas
+    assert colas <= _colas_consumidas()
