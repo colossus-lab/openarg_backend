@@ -6188,18 +6188,51 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             _set_error_status(engine, dataset_id, "no_download_url", table_name=table_name)
             return {"error": "no_download_url"}
 
-        # Check retry_count — skip if permanently failed
+        # Check retry_count — skip if permanently failed.
+        #
+        # Se pregunta por LA FILA QUE SE VA A TRABAJAR, no por el dataset. Un
+        # dataset tiene una fila por `table_name` —una por versión del
+        # recurso— y el presupuesto de intentos es de cada una. La consulta
+        # no filtraba por nombre ni ordenaba, así que con más de una fila
+        # `fetchone()` devolvía cualquiera: el mismo dataset se procesaba o
+        # se saltaba según el plan del día. Medido en staging el 2026-09-09:
+        # 23 datasets con una fila agotada junto a otra sana, y en uno de
+        # ellos la agotada era la v10 mientras la sana era la v7 — o sea que
+        # ni siquiera alcanzaba con quedarse con la más nueva.
+        #
+        # Y al salir se cierra la fila. `_ensure_cached_entry` acaba de
+        # ponerla en `downloading` (revive incluso una `permanently_failed`,
+        # porque busca por nombre sin mirar el estado), así que un `return`
+        # sin más la dejaba abierta para siempre: tercer sitio con el mismo
+        # defecto, después de `unchanged` (#59) y `already_appended` (#62).
         with engine.begin() as conn:
             cd_row = conn.execute(
                 text(
-                    "SELECT retry_count FROM raw.cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
+                    "SELECT retry_count FROM raw.cached_datasets "
+                    "WHERE dataset_id = CAST(:did AS uuid) AND table_name = :tn"
                 ),
-                {"did": dataset_id},
+                {"did": dataset_id, "tn": table_name},
             ).fetchone()
             if cd_row and cd_row.retry_count >= MAX_TOTAL_ATTEMPTS:
                 logger.info(
-                    f"Dataset {dataset_id} permanently failed "
+                    f"Dataset {dataset_id} table {table_name} permanently failed "
                     f"after {cd_row.retry_count} attempts, skipping"
+                )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE raw.cached_datasets
+                        SET status = 'permanently_failed',
+                            error_message = coalesce(
+                                error_message, 'Exhausted retries before download'
+                            ),
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:did AS uuid)
+                          AND table_name = :tn
+                          AND status = 'downloading'
+                        """
+                    ),
+                    {"did": dataset_id, "tn": table_name},
                 )
                 return {"error": "permanently_failed"}
 
