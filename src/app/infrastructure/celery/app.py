@@ -141,7 +141,14 @@ def create_celery() -> Celery:
         "openarg.analyze_session_topics": {"queue": "transparency"},
         "openarg.retry_s3_uploads": {"queue": "s3"},
         "openarg.upload_to_s3": {"queue": "s3"},
-        "openarg.recover_stuck_tasks": {"queue": "default"},
+        # `ingest` y no `default`: NINGÚN worker consume `default` (ver los
+        # `-Q` de docker-compose y docker/*.Dockerfile), así que todo lo que
+        # se rutea ahí se encola y no corre nunca. Esta tarea llevaba así
+        # quién sabe cuánto: el 2026-09-09 dejó 10 filas trabadas en
+        # `downloading` durante horas, con la tarea despachándose cada 15
+        # minutos y la cola `default` clavada en ~7.900 mensajes sin drenar.
+        # `test_celery_queues_have_consumers` fija el invariante.
+        "openarg.recover_stuck_tasks": {"queue": "ingest"},
         "openarg.reset_failed_collectors": {"queue": "default"},
         "openarg.snapshot_staff": {"queue": "scraper"},
         "openarg.reindex_all_embeddings": {"queue": "embedding"},
@@ -317,7 +324,10 @@ def create_celery() -> Celery:
             "recover-stuck-tasks": {
                 "task": "openarg.recover_stuck_tasks",
                 "schedule": crontab(minute="*/15"),
-                "options": {"queue": "default"},
+                # `options` PISA `task_routes`, así que arreglar el ruteo sin
+                # tocar esta línea no habría cambiado nada: beat despacha con
+                # la cola que dice acá. Ver el comentario en `task_routes`.
+                "options": {"queue": "ingest"},
             },
             "cleanup-orphan-temp-files": {
                 # Reaps leaked tempfile.NamedTemporaryFile(delete=False)
