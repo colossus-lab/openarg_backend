@@ -1332,10 +1332,15 @@ def _unchanged_since_last_collect(
     return str(row.table_name)
 
 
-def _settle_unchanged_row(
+def _settle_reserved_row(
     engine, *, dataset_id: str, reserved_table: str | None, live_table: str
 ) -> None:
-    """Cerrar la fila que la reserva dejó abierta cuando el archivo no cambió.
+    """Cerrar la fila que la reserva dejó abierta cuando no hubo trabajo que hacer.
+
+    La llaman los dos caminos de salida temprana del colector: `unchanged`
+    (el sha256 coincide con la versión viva) y `already_appended` (las filas
+    de este dataset ya están en la tabla destino). Los dos reconocen que el
+    trabajo ya estaba hecho, y los dos dejaban la fila reservada colgada.
 
     `_ensure_cached_entry` marca `status='downloading'` y `table_name` con el
     nombre de la PRÓXIMA versión, porque corre antes de saber si el archivo
@@ -5831,6 +5836,19 @@ def _route_table_for_schema(
                     text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
                     {"id": dataset_id},
                 )
+            # Marcaba `datasets.is_cached` y se iba, dejando la fila de
+            # `raw.cached_datasets` en el `downloading` que puso la reserva.
+            # Mismo defecto que tenía el camino `unchanged` (PR #59), y se
+            # vio igual: la tarea reportaba `succeeded` con
+            # `status: already_appended` mientras la fila seguía abierta,
+            # hasta que `_recycle_stuck_downloads` la agotaba a fuerza de
+            # reintentos y la mandaba a `permanently_failed`.
+            _settle_reserved_row(
+                engine,
+                dataset_id=dataset_id,
+                reserved_table=table_name,
+                live_table=target_table,
+            )
             return target_table, True, "already_appended"
     except Exception:
         logger.debug("Could not inspect source_dataset_id on %s", target_table, exc_info=True)
@@ -6420,7 +6438,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 # `ready` con `updated_at` fresco, que era el propósito original
                 # (sin él el refresh reelegiría este recurso en cada pasada).
                 try:
-                    _settle_unchanged_row(
+                    _settle_reserved_row(
                         engine,
                         dataset_id=dataset_id,
                         reserved_table=table_name,
