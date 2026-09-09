@@ -554,13 +554,13 @@ async def discover_catalog_hints_for_planner(
             ServingLayer,
         )
 
-        def _search_marts() -> list[Resource]:
+        def _search_marts() -> tuple[list[Resource], dict[str, int]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
                 rs = conn.execute(
                     text(
                         "WITH ranked AS ("
-                        "  SELECT md.mart_id, md.domain, "
+                        "  SELECT md.mart_id, md.domain, md.last_row_count, "
                         "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_sim "
                         "  FROM mart_definitions md "
                         "  WHERE md.embedding IS NOT NULL "
@@ -569,7 +569,7 @@ async def discover_catalog_hints_for_planner(
                         "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
                         "  LIMIT 3"
                         ") "
-                        "SELECT r.mart_id, r.domain, r.base_sim, "
+                        "SELECT r.mart_id, r.domain, r.base_sim, r.last_row_count, "
                         "       COALESCE(("
                         "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
                         "         FROM public.mart_sample_queries msq "
@@ -591,6 +591,9 @@ async def discover_catalog_hints_for_planner(
                 # disturbing the rerank input). Default 0.45, env-overridable.
                 min_sim = float(os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45"))
                 resources: list[Resource] = []
+                # El conteo de filas de cada mart, para que el bloque de
+                # hints no diga "0 filas" sobre una vista con datos.
+                conteos: dict[str, int] = {}
                 for r in rs:
                     base = float(r.base_sim or 0)
                     sample = float(r.sample_max_sim or 0)
@@ -608,10 +611,12 @@ async def discover_catalog_hints_for_planner(
                             score=boosted,
                         )
                     )
-                return resources
+                    conteos[str(r.mart_id or "")] = int(r.last_row_count or 0)
+                return resources, conteos
 
+        mart_row_counts: dict[str, int] = {}
         try:
-            mart_resources = await loop.run_in_executor(None, _search_marts)
+            mart_resources, mart_row_counts = await loop.run_in_executor(None, _search_marts)
         except Exception:
             logger.debug("mart vector search for rerank candidates failed", exc_info=True)
             mart_resources = []
@@ -647,12 +652,25 @@ async def discover_catalog_hints_for_planner(
                 (m for m in matches if m.table_name == table_name),
                 None,
             )
-            row_count = base_match.row_count if base_match else 0
+            # Los marts no están en `matches` (esos salen de `table_catalog`),
+            # así que `base_match` era siempre None para ellos y TODOS los
+            # marts salían etiquetados "0 filas": le decíamos al planner que
+            # las vistas curadas estaban vacías.
+            #
+            # Decir la verdad acá sólo es seguro con la jerarquía de fuentes
+            # explícita en REGLA #1 del prompt. Sin ella, un mart de dos
+            # millones de filas se llevaba puestas a `query_series` y
+            # `query_ddjj` por puro tamaño.
+            if base_match is not None:
+                row_count = base_match.row_count
+            else:
+                row_count = mart_row_counts.get(table_name)
             score = round(candidate.base_score, 2)
             line = f"  - {table_name}"
             if display_name:
                 line += f" ({display_name})"
-            line += f" — {row_count} filas"
+            if row_count is not None:
+                line += f" — {row_count} filas"
             if description:
                 # Round v4.4 Fase 3: descriptions of mart-layer candidates
                 # may now include a "COBERTURA TEMPORAL: …" suffix appended
