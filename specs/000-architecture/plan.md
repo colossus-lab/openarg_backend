@@ -53,7 +53,9 @@ New Celery tasks:
 - `openarg.bulk_collect_all` / `openarg.reconcile_cache_coverage` — materialization + recovery phase that must run after a destructive staging reset.
 - `openarg.refresh_curated_sources` (weekly) — loads `config/curated_sources.json` into `datasets`.
 - `openarg.ingest_censo2022` — Censo 2022 cuadro-by-cuadro seeder.
-- `openarg.ops_temp_dir_cleanup` (hourly) — `/tmp/tmp*` sweep.
+- `openarg.cleanup_orphan_temp_files` (cada 30 min, en las tres colas de
+  colector) — barrido de `/tmp/tmp*`. Absorbió a `ops_temp_dir_cleanup`, que
+  hacía lo mismo sobre el mismo directorio.
 - `openarg.ops_portal_health` (every 30 min) — pings each portal, marks dead ones in `portals`.
 
 New scripts:
