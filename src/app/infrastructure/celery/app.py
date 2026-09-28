@@ -235,12 +235,10 @@ def create_celery() -> Celery:
         # `scan()` tarda 0,2 s y devuelve 0 violaciones, contra un
         # `soft_time_limit` de 300 s.
         "openarg.ws0_5_state_invariants_sweep": {"queue": "ingest"},
-        # Las de /tmp van a `collector` y no a `ingest`: barren el temp dir
-        # del worker que las ejecuta —cada contenedor tiene el suyo, no hay
-        # volumen compartido— y quien deja los archivos de 100 MB es el
-        # colector. En `ingest` correrían sobre un /tmp que nadie ensucia.
-        # (Las dos hacen lo mismo; consolidarlas es otra tarea.)
-        "openarg.ops_temp_dir_cleanup": {"queue": "collector"},
+        # La de /tmp va a `collector` y no a `ingest`: barre el temp dir del
+        # worker que la ejecuta —cada contenedor tiene el suyo, no hay volumen
+        # compartido— y quien deja los archivos de 100 MB es el colector. En
+        # `ingest` correría sobre un /tmp que nadie ensucia.
         "openarg.cleanup_orphan_temp_files": {"queue": "collector"},
         "openarg.ops_portal_health": {"queue": "ingest"},
         "openarg.catalog_backfill": {"queue": "ingest"},
@@ -881,11 +879,6 @@ def create_celery() -> Celery:
                 "options": {"queue": "ingest"},
             },
             # --- Operational: /tmp cleanup (hourly) + portal health (every 30 min) ---
-            "ops-temp-dir-cleanup": {
-                "task": "openarg.ops_temp_dir_cleanup",
-                "schedule": crontab(minute=10),
-                "options": {"queue": "collector"},
-            },
             "ops-portal-health": {
                 "task": "openarg.ops_portal_health",
                 "schedule": crontab(minute="*/30"),

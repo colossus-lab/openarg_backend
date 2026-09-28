@@ -9,6 +9,9 @@
 #   ops_temp_dir_cleanup         -> collector (el /tmp que se ensucia es ése)
 #   cleanup_orphan_temp_files    -> collector (ídem)
 #
+# `ops_temp_dir_cleanup` ya no existe: hacía lo mismo que
+# `cleanup_orphan_temp_files` sobre el mismo directorio y se unificaron.
+#
 # Si aparece una entrada nueva acá, el reflejo correcto es arreglar el ruteo,
 # no anotarla: `recover_stuck_tasks` estuvo 36 días encolándose sin correr y
 # nadie se enteró, porque una cola sin consumidor no da error en ningún lado.

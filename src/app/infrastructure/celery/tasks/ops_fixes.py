@@ -1,7 +1,8 @@
 """Operational anexos del plan (no requirieren rediseño arquitectónico).
 
-  - `temp_dir_cleanup` — barre `/tmp/tmp*` con mtime > 1h. Evita los ~22
-     fallos `[Errno 28] No space left on device` del 2026-03-30.
+  - El barrido de `/tmp/tmp*` vivía acá y se fue a `collector_tasks`, donde
+     está la otra mitad del mismo trabajo: `cleanup_orphan_temp_files`. Eran
+     dos tareas haciendo lo mismo sobre el mismo directorio.
   - `portal_health` — pingea cada portal y mantiene estado en `portals`
      (down → datasets de ese portal saltan retries vía circuit breaker).
 
@@ -13,8 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import time
 from collections.abc import Iterable
 from urllib.parse import urlparse
 
@@ -156,116 +155,6 @@ def _mart_dependency_guards(engine) -> tuple[set[str], list[str], set[str]]:
 
 
 # ---------- temp dir cleanup ----------
-
-
-def _temp_dir() -> str:
-    return os.getenv("OPENARG_TEMP_DIR") or "/tmp"
-
-
-def _cleanup_threshold_seconds() -> int:
-    try:
-        return int(os.getenv("OPENARG_TEMP_CLEANUP_AGE_SECONDS", "3600"))
-    except ValueError:
-        return 3600
-
-
-def _path_size_bytes(path: str) -> int:
-    """Best-effort recursive size for audit logging.
-
-    Symlinks are ignored so cleanup stays scoped to the temp tree itself.
-    """
-    try:
-        if os.path.islink(path):
-            return 0
-        if os.path.isfile(path):
-            return int(os.path.getsize(path))
-        total = 0
-        for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
-            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
-            for name in files:
-                fp = os.path.join(root, name)
-                if os.path.islink(fp):
-                    continue
-                try:
-                    total += int(os.path.getsize(fp))
-                except OSError:
-                    continue
-        return total
-    except OSError:
-        return 0
-
-
-def _remove_stale_tmp_path(path: str, *, base: str) -> tuple[bool, int]:
-    """Remove one stale tmp path safely.
-
-    Only removes paths that still resolve under `base`. Directories are
-    deleted recursively because crash leftovers are typically non-empty
-    extraction trees.
-    """
-    try:
-        real_base = os.path.realpath(base)
-        real_path = os.path.realpath(path)
-        if os.path.commonpath([real_base, real_path]) != real_base:
-            return False, 0
-    except Exception:
-        return False, 0
-
-    size_bytes = _path_size_bytes(path)
-    try:
-        if os.path.islink(path) or os.path.isfile(path):
-            os.unlink(path)
-        elif os.path.isdir(path):
-            shutil.rmtree(path)
-        else:
-            return False, 0
-        return True, size_bytes
-    except Exception:
-        logger.debug("Could not remove %s", path, exc_info=True)
-        return False, 0
-
-
-@celery_app.task(
-    name="openarg.ops_temp_dir_cleanup",
-    bind=True,
-    soft_time_limit=120,
-    time_limit=180,
-)
-def temp_dir_cleanup(self) -> dict:
-    """Sweep stale temp files left behind by failed collector runs."""
-    threshold = _cleanup_threshold_seconds()
-    cutoff = time.time() - threshold
-    base = _temp_dir()
-    if not os.path.isdir(base):
-        return {"removed": 0, "reason": "temp_dir_missing"}
-    removed = 0
-    bytes_freed = 0
-    skipped = 0
-    for entry in os.listdir(base):
-        if not entry.startswith("tmp"):
-            continue
-        path = os.path.join(base, entry)
-        try:
-            stat = os.stat(path)
-        except FileNotFoundError:
-            continue
-        if stat.st_mtime > cutoff:
-            skipped += 1
-            continue
-        deleted, reclaimed = _remove_stale_tmp_path(path, base=base)
-        if deleted:
-            removed += 1
-            bytes_freed += reclaimed
-        else:
-            skipped += 1
-    summary = {
-        "removed": removed,
-        "skipped": skipped,
-        "bytes_freed": bytes_freed,
-        "threshold_seconds": threshold,
-        "base": base,
-    }
-    logger.info("temp_dir_cleanup: %s", summary)
-    return summary
 
 
 # ---------- portal_health ----------
