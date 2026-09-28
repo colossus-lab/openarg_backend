@@ -183,6 +183,26 @@ _COMANDOS = "\n".join(
 )
 
 
+def test_un_llen_que_no_es_un_numero_es_un_error() -> None:
+    """Sugerencia de la review del #64: se valida la forma, no el mensaje.
+
+    La primera versión matcheaba `NOAUTH|WRONGPASS|ERR`, o sea sólo las fallas
+    ya vistas. Cualquier cosa que no sea un entero en la columna del número es
+    una respuesta vacía disfrazada de dato.
+    """
+    ok = "default\t35\ningest\t0\n"
+    assert ops_core.check_queue_lengths(ok) == ok
+
+    for roto in (
+        "default\tNOAUTH Authentication required.\n",
+        "default\t\n",
+        "default\tERR unknown command\n",
+        "default\tnil\n",
+    ):
+        with pytest.raises(ValueError, match="did not answer with a length"):
+            ops_core.check_queue_lengths(roto)
+
+
 def test_parse_consumed_queues_lee_los_q_reales() -> None:
     consumidas = ops_core.parse_consumed_queues(_COMANDOS)
     assert consumidas == {

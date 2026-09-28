@@ -115,19 +115,18 @@ docker exec "$w" python -c """
 r="$(docker ps --format '{{.Names}}' | grep -i redis | sort | head -1)"
 [ -n "$r" ] || { echo "no running redis container" >&2; exit 91; }
 p="$(docker exec "$r" sh -c 'printf %s "${REDIS_PASSWORD:-}"')"
+if [ -z "$p" ]; then
+  w="$(docker ps --format '{{.Names}}' | grep -E 'worker|beat' | sort | head -1)"
+  [ -n "$w" ] && p="$(docker exec "$w" printenv CELERY_BROKER_URL 2>/dev/null | sed -n 's|redis://[^:]*:\([^@]*\)@.*|\1|p')"
+fi
 [ -n "$p" ] || p="$(docker inspect --format '{{range .Config.Cmd}}{{println .}}{{end}}' "$r" | grep -A1 -x -- '--requirepass' | tail -1)"
-out="$(docker exec -e RP="$p" "$r" sh -c '
+docker exec -e RP="$p" "$r" sh -c '
   for q in """
         + " ".join(KNOWN_QUEUES)
         + r"""; do
     printf "%s\t%s\n" "$q" "$(redis-cli ${RP:+-a "$RP"} --no-auth-warning -n 0 LLEN "$q")"
   done
-')"
-echo "$out"
-case "$out" in
-  *NOAUTH*|*WRONGPASS*|*ERR*)
-    echo "redis refused the credentials found in the container" >&2; exit 92 ;;
-esac
+'
 """
     ),
     "deployed_images": r"""
@@ -213,6 +212,30 @@ def cap(text: str) -> str:
         return text
     dropped = len(text) - MAX_OUTPUT_CHARS
     return f"[truncated: {dropped} leading characters dropped]\n{text[-MAX_OUTPUT_CHARS:]}"
+
+
+def check_queue_lengths(output: str) -> str:
+    """Return *output* if every queue answered a number, else raise.
+
+    A `LLEN` that answers anything else — `NOAUTH Authentication required.`, a
+    connection error, an empty string — must never be printed in the column
+    where a length goes. That is a silent-empty answer wearing a number's
+    clothes, and an operator scanning the column reads it as data.
+
+    Checking the shape rather than matching known error strings is deliberate:
+    the first version matched `NOAUTH|WRONGPASS|ERR`, which only catches the
+    failures already seen.
+    """
+    bad: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        queue, _, value = line.partition("\t")
+        if not value.strip().lstrip("-").isdigit():
+            bad.append(f"{queue.strip()} → {value.strip()[:60] or '(vacío)'}")
+    if bad:
+        raise ValueError("redis did not answer with a length: " + "; ".join(bad[:4]))
+    return output
 
 
 def parse_consumed_queues(worker_commands: str) -> dict[str, list[str]]:

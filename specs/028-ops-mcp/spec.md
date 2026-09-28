@@ -93,14 +93,19 @@ container, no application code imports it, and it adds no dependency to
   one, and which one survives depends on iteration order. Measured against
   staging on 2026-09-23: the collapsing form reported nine queues and dropped
   `collector-heavy` from the report entirely.
-- **FR-011**: `queue_lengths` MAY resolve the Redis password on the target —
-  `REDIS_PASSWORD` inside the container first, else the `--requirepass` argument
-  in Docker's record of the container's command. It MUST NOT print it, and MUST
-  fail when Redis refuses it rather than printing the refusal in the column where
-  a length goes. On staging the env var does not exist (compose interpolates the
-  password into `command:`) and redis-server rewrites its own argv, so
-  `/proc/1/cmdline` has lost it: reading only the env var made every queue come
-  back as `NOAUTH Authentication required`.
+- **FR-011**: `queue_lengths` MAY resolve the Redis password on the target, in
+  this order: `REDIS_PASSWORD` inside the redis container; the password embedded
+  in a worker's `CELERY_BROKER_URL`; the `--requirepass` argument in Docker's
+  record of the container's command. It MUST NOT print it. On staging the env var
+  does not exist (compose interpolates the password into `command:`) and
+  redis-server rewrites its own argv, so `/proc/1/cmdline` has lost it too:
+  reading only the env var made every queue come back as `NOAUTH Authentication
+  required`.
+- **FR-012**: `queue_lengths` MUST reject any answer that is not an integer,
+  rather than printing it in the column where a length goes. The check is on the
+  **shape** of the answer, not on a list of known error strings: matching
+  `NOAUTH|WRONGPASS|ERR` only catches the failures already seen, and the whole
+  point is that an unrecognised failure must not read as data.
 - **FR-009**: Output MUST be capped (20,000 characters) and say so when it
   truncates.
 - **FR-010**: Every command MUST assert the Docker daemon is reachable before

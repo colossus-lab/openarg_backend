@@ -107,7 +107,10 @@ def queue_consumers() -> str:
 @server.tool(annotations=_READ_ONLY)
 def queue_lengths() -> str:
     """Number of pending messages in each known Celery queue. A queue that only grows has no consumer."""
-    return _run("queue_lengths")
+    try:
+        return ops_core.check_queue_lengths(_run("queue_lengths"))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @server.tool(annotations=_READ_ONLY)
