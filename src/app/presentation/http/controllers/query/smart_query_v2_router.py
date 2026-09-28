@@ -626,9 +626,23 @@ async def smart_query_v2(
 
     # When a checkpointer is active, pass thread_id so LangGraph
     # persists state per conversation (enables memory / resumable runs).
+    #
+    # Y cuando NO hay conversación, igual hace falta un thread_id: un grafo
+    # compilado con checkpointer rechaza la invocación sin él
+    # (`ValueError: Checkpointer requires one or more of the following
+    # 'configurable' keys`), y eso salía como un 500 `PIPELINE_ERROR`
+    # genérico. O sea que cualquier cliente que no mandara
+    # `conversation_id` recibía un error del que no se podía deducir nada.
+    # No se nota desde el frontend porque siempre manda uno.
+    #
+    # El thread efímero es por request y no persiste nada reutilizable, que
+    # es justo lo que se quiere para una consulta suelta: sin conversación,
+    # no hay historial que continuar ni estado que compartir.
     invoke_config: dict[str, Any] = {}
-    if checkpointer and conversation_id:
-        invoke_config["configurable"] = {"thread_id": conversation_id}
+    if checkpointer:
+        from uuid import uuid4
+
+        invoke_config["configurable"] = {"thread_id": conversation_id or f"efimero-{uuid4()}"}
 
     try:
         result = await compiled_graph.ainvoke(initial_state, config=invoke_config)
@@ -910,10 +924,18 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 if owner_user_id_ws is not None:
                     initial_state["owner_user_id"] = str(owner_user_id_ws)  # type: ignore[typeddict-unknown-key]
 
-                # When a checkpointer is active, pass thread_id for persistence
+                # When a checkpointer is active, pass thread_id for persistence.
+                # Sin conversación va un thread efímero: el grafo compilado con
+                # checkpointer rechaza la invocación sin `thread_id`, y acá eso
+                # cortaba el stream con un error genérico. Mismo caso que en
+                # `/smart` unas líneas más arriba.
                 stream_config: dict[str, Any] = {}
-                if checkpointer and conversation_id:
-                    stream_config["configurable"] = {"thread_id": conversation_id}
+                if checkpointer:
+                    from uuid import uuid4
+
+                    stream_config["configurable"] = {
+                        "thread_id": conversation_id or f"efimero-{uuid4()}"
+                    }
 
                 # Stream the graph execution. BUG-022: a keepalive task
                 # runs alongside so a long pipeline step never leaves the

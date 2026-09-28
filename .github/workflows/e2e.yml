@@ -22,7 +22,10 @@ jobs:
   e2e-tests:
     runs-on: ubuntu-latest
     name: E2E Tests (Staging DB)
-    timeout-minutes: 120
+    # 120 alcanzaban cuando los tests morían en 2 s contra un pipeline roto.
+    # Con el pipeline andando, cada uno es una consulta real: la corrida del
+    # 2026-09-28 se canceló por timeout al 85%, justo antes del resumen.
+    timeout-minutes: 180
 
     services:
       redis:
@@ -52,27 +55,90 @@ jobs:
       run: |
         uv pip install -e '.[dev,test]' --system
 
+    # Este workflow falló en TODAS las corridas de `main` desde el 2026-08-01,
+    # y lo que se veía era `connection to localhost:5432 failed` en el paso
+    # siguiente — que se lee como un problema de base cuando en realidad el
+    # túnel nunca se levantó. Cinco meses de una señal en rojo que nadie miró
+    # porque no decía dónde se rompía.
+    #
+    # Tres cambios para que falle donde se rompe:
+    #   - los secrets se validan antes de usarse y el error nombra cuál falta;
+    #   - `ExitOnForwardFailure=yes`: sin eso `ssh -f -N` queda vivo aunque el
+    #     forward no se haya establecido, y este paso pasa en verde;
+    #   - la espera hace un handshake de Postgres, no un `connect()` a secas:
+    #     el listener local de un túnel SSH acepta la conexión TCP **siempre**,
+    #     aunque el otro extremo no exista, así que abrir el socket no prueba
+    #     nada. (Primera versión de este arreglo cometió justamente ese error.)
+    #
+    # Y antes de abrir el túnel se comprueba, desde la propia EC2, que el
+    # destino del forward sea alcanzable. Eso separa dos fallas que hasta ahora
+    # se veían igual: el secret que apunta a un host equivocado, y la base que
+    # no responde.
+    - name: Check required secrets
+      run: |
+        faltan=""
+        [ -n "${{ secrets.STAGING_SSH_KEY }}" ] || faltan="$faltan STAGING_SSH_KEY"
+        [ -n "${{ secrets.STAGING_HOST }}" ] || faltan="$faltan STAGING_HOST"
+        [ -n "${{ secrets.STAGING_DB_HOST }}" ] || faltan="$faltan STAGING_DB_HOST"
+        [ -n "${{ secrets.STAGING_DB_PASSWORD }}" ] || faltan="$faltan STAGING_DB_PASSWORD"
+        if [ -n "$faltan" ]; then
+          echo "::error::Faltan secrets:$faltan — el E2E corre contra la base de staging y no puede seguir."
+          exit 1
+        fi
+        echo "Todos los secrets requeridos están definidos."
+
     - name: Set up SSH tunnel to staging DB
       run: |
         mkdir -p ~/.ssh
         echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/staging_key
         chmod 600 ~/.ssh/staging_key
 
+        # ¿La EC2 alcanza el destino del forward? Si no, el secret apunta a un
+        # host que ya no existe y el túnel "se abre" igual: el listener local
+        # queda arriba y la falla aparece recién al primer query.
+        if ! ssh -i ~/.ssh/staging_key -o StrictHostKeyChecking=no -o ConnectTimeout=20 \
+          ec2-user@${{ secrets.STAGING_HOST }} \
+          "timeout 8 bash -c 'cat < /dev/null > /dev/tcp/${{ secrets.STAGING_DB_HOST }}/5432'"; then
+          echo "::error::La EC2 de staging no alcanza STAGING_DB_HOST:5432. El secret apunta a un host equivocado o el security group del RDS ya no habilita a la EC2. (STAGING_DB_HOST se cargó el 2026-03-22.)"
+          exit 1
+        fi
+        echo "La EC2 alcanza el destino del forward."
+
         # Tunnel: localhost:5432 -> staging EC2 -> RDS:5432
-        ssh -f -N -L 5432:${{ secrets.STAGING_DB_HOST }}:5432 \
+        if ! ssh -f -N -L 5432:${{ secrets.STAGING_DB_HOST }}:5432 \
           -i ~/.ssh/staging_key \
           -o StrictHostKeyChecking=no \
+          -o ExitOnForwardFailure=yes \
+          -o ConnectTimeout=20 \
           -o ServerAliveInterval=30 \
-          ec2-user@${{ secrets.STAGING_HOST }}
+          ec2-user@${{ secrets.STAGING_HOST }}; then
+          echo "::error::No se pudo abrir el túnel SSH a staging. Revisar STAGING_HOST, STAGING_SSH_KEY y que el security group siga habilitando al runner."
+          exit 1
+        fi
 
-        # Wait for tunnel to be ready
-        for i in $(seq 1 10); do
-          if pg_isready -h localhost -p 5432 2>/dev/null; then
-            echo "SSH tunnel ready"
-            break
+        # Handshake real contra Postgres a través del túnel. Abrir el socket no
+        # alcanza: el listener del forward acepta cualquier conexión.
+        for i in $(seq 1 20); do
+          if PGPASSWORD='${{ secrets.STAGING_DB_PASSWORD }}' python -c "
+        import os, sys, psycopg
+        try:
+            with psycopg.connect(
+                host='127.0.0.1', port=5432, dbname='openarg_staging',
+                user='openarg', password=os.environ['PGPASSWORD'], connect_timeout=5,
+            ) as c:
+                c.execute('SELECT 1')
+        except Exception as e:
+            print(f'  todavía no: {type(e).__name__}: {str(e)[:120]}')
+            sys.exit(1)
+        "; then
+            echo "SSH tunnel ready — Postgres responde a través del túnel"
+            exit 0
           fi
-          sleep 1
+          sleep 2
         done
+
+        echo "::error::El túnel está abierto y la EC2 alcanza el destino, pero Postgres no responde a través del túnel. Revisar STAGING_DB_PASSWORD y que la base openarg_staging exista."
+        exit 1
 
     - name: Flush caches before E2E
       env:
@@ -107,7 +173,19 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
       run: |
-        pytest tests/e2e/ -v --tb=short --timeout=300 --reruns 2 --reruns-delay 5 -m e2e -o "addopts="
+        # `--reruns 1` y no 2. Los reruns existen porque el LLM no es
+        # determinista, pero multiplican: un test que falla corre 1+N veces, y
+        # cada corrida es una consulta real de 10-30 s contra Bedrock.
+        #
+        # Mientras el pipeline estuvo roto esto no se notaba: los tests morían
+        # en ~2 s con un 500 y la suite entera entraba en 26 minutos. Con el
+        # pipeline andando, la corrida del 2026-09-28 se comió los 120 minutos
+        # del job y quedó cancelada al 85%, sin llegar a imprimir el resumen —
+        # o sea, sin decir nada de por qué fallaba cada test.
+        #
+        # Un rerun sigue absorbiendo el flakeo de una consulta suelta; el
+        # segundo sólo compraba tiempo y tokens.
+        pytest tests/e2e/ -v --tb=short --timeout=300 --reruns 1 --reruns-delay 5 -m e2e -o "addopts="
 
     - name: Cleanup SSH tunnel
       if: always()
