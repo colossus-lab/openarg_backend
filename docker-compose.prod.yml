@@ -1,4 +1,16 @@
-name: openarg-prod
+# Este archivo describe lo que corre en los servidores. Hasta el 2026-09-28
+# no era así: el compose real vivía suelto en /opt/docker/openarg de cada
+# máquina, sin git y con ocho copias .bak al lado, y el repo se había quedado
+# atrás en límites de memoria, concurrencias y —lo más serio— en la política
+# de desalojo de Redis.
+#
+# Staging y prod son idénticos salvo por estas dos variables. Verificado
+# comparando los dos archivos que corren: 30 líneas de diferencia, todas
+# aquí parametrizadas.
+#
+#   staging: OPENARG_STACK=staging OPENARG_IMAGE_TAG=staging
+#   prod:    (los valores por defecto)
+name: openarg-${OPENARG_STACK:-prod}
 
 services:
   # ── Infrastructure ──────────────────────────────────────────────
@@ -40,7 +52,13 @@ services:
     image: redis:7-alpine
     container_name: openarg_redis
     restart: always
-    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy allkeys-lru
+    # `noeviction` y no `allkeys-lru`: con LRU, Redis descarta claves cuando
+    # se llena — y acá las claves son la cola de Celery, así que perdería
+    # tareas en silencio. Con `noeviction` rechaza la escritura y el fallo se
+    # ve. El 2026-09-09 staging llegó a llenarse con 432.077 tareas duplicadas;
+    # el síntoma fue que las escrituras fallaban, que es exactamente lo que se
+    # quiere que pase.
+    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 512mb --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
     networks:
@@ -60,7 +78,7 @@ services:
 
   # ── Backend API ─────────────────────────────────────────────────
   backend:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/api:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/api:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_backend
     restart: always
     command: >
@@ -72,9 +90,9 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: 2G
+          memory: 4G
         reservations:
-          memory: 512M
+          memory: 1G
     volumes:
       - ./config/prod:/app/config/prod:ro
     env_file:
@@ -92,6 +110,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -100,7 +119,7 @@ services:
 
   # ── Celery Workers ──────────────────────────────────────────────
   worker-scraper:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-scraper:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-scraper:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_scraper
     restart: always
     networks:
@@ -130,14 +149,14 @@ services:
         condition: service_healthy
 
   worker-collector:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_collector
     restart: always
     command:
       [
         "sh",
         "-c",
-        "celery -A app.infrastructure.celery.app:celery_app worker -Q collector -c ${OPENARG_COLLECTOR_CONCURRENCY:-2} --max-memory-per-child=${OPENARG_COLLECTOR_MAX_MEMORY_PER_CHILD:-400000} --loglevel=info",
+        "celery -A app.infrastructure.celery.app:celery_app worker -Q collector -c ${OPENARG_COLLECTOR_CONCURRENCY:-8} --max-memory-per-child=${OPENARG_COLLECTOR_MAX_MEMORY_PER_CHILD:-400000} --loglevel=info",
       ]
     networks:
       - openarg_network
@@ -162,6 +181,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -169,7 +189,7 @@ services:
         condition: service_healthy
 
   worker-collector-heavy:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_collector_heavy
     restart: always
     command:
@@ -184,7 +204,7 @@ services:
       resources:
         limits:
           cpus: "4"
-          memory: 6G
+          memory: 8G
         reservations:
           memory: 1G
     volumes:
@@ -209,7 +229,7 @@ services:
         condition: service_healthy
 
   worker-collector-heavy-retry:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-collector:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_collector_heavy_retry
     restart: always
     command:
@@ -224,7 +244,7 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: 6G
+          memory: 8G
         reservations:
           memory: 1G
     volumes:
@@ -249,7 +269,7 @@ services:
         condition: service_healthy
 
   worker-ingest:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-ingest:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-ingest:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_ingest
     restart: always
     # `orchestrator` queue carries `bulk_collect_all` and
@@ -263,7 +283,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
+          cpus: "1"
           memory: 2G
         reservations:
           memory: 512M
@@ -281,6 +301,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -288,7 +309,7 @@ services:
         condition: service_healthy
 
   worker-embedding:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-embedding:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-embedding:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_embedding
     restart: always
     networks:
@@ -318,7 +339,7 @@ services:
         condition: service_healthy
 
   worker-analyst:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-analyst:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-analyst:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_analyst
     restart: always
     networks:
@@ -349,7 +370,7 @@ services:
         condition: service_healthy
 
   worker-transparency:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-transparency:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-transparency:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_transparency
     restart: always
     networks:
@@ -378,7 +399,7 @@ services:
         condition: service_healthy
 
   worker-s3:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-s3:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/worker-s3:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_worker_s3
     restart: always
     networks:
@@ -404,6 +425,7 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-openarg-datasets}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -412,7 +434,7 @@ services:
 
   # ── Celery Beat (periodic tasks) ────────────────────────────────
   beat:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/beat:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/beat:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_beat
     restart: always
     networks:
@@ -435,7 +457,7 @@ services:
 
   # ── Frontend ────────────────────────────────────────────────────
   frontend:
-    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/openarg-frontend:latest
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/openarg-frontend:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_frontend
     restart: always
     networks:
