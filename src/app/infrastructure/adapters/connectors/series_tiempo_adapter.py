@@ -350,7 +350,23 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
         except ConnectorError:
             raise
         except Exception as exc:
+            # `str(exc)` de un HTTPStatusError trae la URL y el código, pero
+            # no el cuerpo — y el cuerpo es donde la API explica qué
+            # parámetro rechazó (p. ej. "Intervalo de collapse inválido …
+            # Pruebe con un intervalo mayor"). Sin esto, un 400 recuperable
+            # y una serie caída se ven idénticos en los logs.
+            detalle = str(exc)
+            cuerpo = getattr(getattr(exc, "response", None), "text", None)
+            if cuerpo:
+                detalle = f"{detalle} | respuesta: {cuerpo[:300]}"
+            logger.warning(
+                "Series fetch falló para %s (collapse=%s, representation=%s): %s",
+                series_ids,
+                collapse,
+                representation,
+                detalle,
+            )
             raise ConnectorError(
                 error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-                details={"series_ids": series_ids, "reason": str(exc)},
+                details={"series_ids": series_ids, "reason": detalle},
             ) from exc

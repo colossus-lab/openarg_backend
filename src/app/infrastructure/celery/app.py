@@ -62,6 +62,13 @@ def _startup_bootstrap_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+# Los nombres de las colas de colector pesado, con los mismos defaults que
+# usa `collector_tasks`. Se definen acá para poder agendar la limpieza de
+# /tmp en cada una: son contenedores distintos, con /tmp distintos.
+_HEAVY_COLLECT_QUEUE = os.getenv("OPENARG_HEAVY_COLLECT_QUEUE", "collector-heavy")
+_HEAVY_RETRY_QUEUE = os.getenv("OPENARG_HEAVY_RETRY_QUEUE", "collector-heavy-retry")
+
+
 def create_celery() -> Celery:
     broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
@@ -141,8 +148,15 @@ def create_celery() -> Celery:
         "openarg.analyze_session_topics": {"queue": "transparency"},
         "openarg.retry_s3_uploads": {"queue": "s3"},
         "openarg.upload_to_s3": {"queue": "s3"},
-        "openarg.recover_stuck_tasks": {"queue": "default"},
-        "openarg.reset_failed_collectors": {"queue": "default"},
+        # `ingest` y no `default`: NINGÚN worker consume `default` (ver los
+        # `-Q` de docker-compose y docker/*.Dockerfile), así que todo lo que
+        # se rutea ahí se encola y no corre nunca. Esta tarea llevaba así
+        # quién sabe cuánto: el 2026-09-09 dejó 10 filas trabadas en
+        # `downloading` durante horas, con la tarea despachándose cada 15
+        # minutos y la cola `default` clavada en ~7.900 mensajes sin drenar.
+        # `test_celery_queues_have_consumers` fija el invariante.
+        "openarg.recover_stuck_tasks": {"queue": "ingest"},
+        "openarg.reset_failed_collectors": {"queue": "collector"},
         "openarg.snapshot_staff": {"queue": "scraper"},
         "openarg.reindex_all_embeddings": {"queue": "embedding"},
         # New data source tasks (dedicated ingest queue)
@@ -212,9 +226,22 @@ def create_celery() -> Celery:
         "openarg.dbt_build": {"queue": "ingest"},
         "openarg.dbt_docs_generate": {"queue": "ingest"},
         "openarg.dbt_parse": {"queue": "ingest"},
-        "openarg.ws0_5_state_invariants_sweep": {"queue": "default"},
-        "openarg.ops_temp_dir_cleanup": {"queue": "default"},
-        "openarg.cleanup_orphan_temp_files": {"queue": "default"},
+        # Las tres estaban en `default`, que no consume nadie: se encolaban
+        # y no corrían nunca (ver `test_celery_queues_have_consumers`).
+        #
+        # El barrido de invariantes va a `ingest` con sus hermanas de
+        # mantenimiento. Se midió antes de moverlo, porque rutear una tarea
+        # dormida la despierta y eso ya destapó dos bugs este mismo día:
+        # `scan()` tarda 0,2 s y devuelve 0 violaciones, contra un
+        # `soft_time_limit` de 300 s.
+        "openarg.ws0_5_state_invariants_sweep": {"queue": "ingest"},
+        # Las de /tmp van a `collector` y no a `ingest`: barren el temp dir
+        # del worker que las ejecuta —cada contenedor tiene el suyo, no hay
+        # volumen compartido— y quien deja los archivos de 100 MB es el
+        # colector. En `ingest` correrían sobre un /tmp que nadie ensucia.
+        # (Las dos hacen lo mismo; consolidarlas es otra tarea.)
+        "openarg.ops_temp_dir_cleanup": {"queue": "collector"},
+        "openarg.cleanup_orphan_temp_files": {"queue": "collector"},
         "openarg.ops_portal_health": {"queue": "ingest"},
         "openarg.catalog_backfill": {"queue": "ingest"},
         "openarg.populate_catalog_embeddings": {"queue": "embedding"},
@@ -317,7 +344,10 @@ def create_celery() -> Celery:
             "recover-stuck-tasks": {
                 "task": "openarg.recover_stuck_tasks",
                 "schedule": crontab(minute="*/15"),
-                "options": {"queue": "default"},
+                # `options` PISA `task_routes`, así que arreglar el ruteo sin
+                # tocar esta línea no habría cambiado nada: beat despacha con
+                # la cola que dice acá. Ver el comentario en `task_routes`.
+                "options": {"queue": "ingest"},
             },
             "cleanup-orphan-temp-files": {
                 # Reaps leaked tempfile.NamedTemporaryFile(delete=False)
@@ -329,7 +359,26 @@ def create_celery() -> Celery:
                 "task": "openarg.cleanup_orphan_temp_files",
                 "schedule": crontab(minute="*/30"),
                 "kwargs": {"max_age_seconds": 3600},
-                "options": {"queue": "default"},
+                "options": {"queue": "collector"},
+            },
+            # Una entrada por cola de colector, porque cada worker tiene su
+            # propio /tmp: no hay volumen compartido, y una tarea limpia el
+            # directorio del contenedor que la ejecuta. Con una sola entrada,
+            # los dos `collector-heavy` —los que bajan los archivos grandes,
+            # y donde se midieron 15 MB acumulados mientras el colector
+            # principal estaba en 0— sólo quedaban cubiertos por el hook de
+            # `worker_process_init`, o sea al arrancar y nunca más.
+            "cleanup-orphan-temp-files-heavy": {
+                "task": "openarg.cleanup_orphan_temp_files",
+                "schedule": crontab(minute="*/30"),
+                "kwargs": {"max_age_seconds": 3600},
+                "options": {"queue": _HEAVY_COLLECT_QUEUE},
+            },
+            "cleanup-orphan-temp-files-heavy-retry": {
+                "task": "openarg.cleanup_orphan_temp_files",
+                "schedule": crontab(minute="*/30"),
+                "kwargs": {"max_age_seconds": 3600},
+                "options": {"queue": _HEAVY_RETRY_QUEUE},
             },
             "close-resolved-findings": {
                 "task": "openarg.close_resolved_findings",
@@ -829,13 +878,13 @@ def create_celery() -> Celery:
             "ws0-5-state-invariants-sweep": {
                 "task": "openarg.ws0_5_state_invariants_sweep",
                 "schedule": crontab(minute="7,37"),
-                "options": {"queue": "default"},
+                "options": {"queue": "ingest"},
             },
             # --- Operational: /tmp cleanup (hourly) + portal health (every 30 min) ---
             "ops-temp-dir-cleanup": {
                 "task": "openarg.ops_temp_dir_cleanup",
                 "schedule": crontab(minute=10),
-                "options": {"queue": "default"},
+                "options": {"queue": "collector"},
             },
             "ops-portal-health": {
                 "task": "openarg.ops_portal_health",

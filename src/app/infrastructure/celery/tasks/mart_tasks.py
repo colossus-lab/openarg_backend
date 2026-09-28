@@ -441,13 +441,65 @@ def dispatch_build_mart(mart_id: str, *, expires_seconds: int = 120) -> str:
     ).id
 
 
+def _version_tuple(v: str | None) -> tuple[int, ...] | None:
+    """`"0.4.0"` → `(0, 4, 0)`. None cuando no se puede comparar."""
+    if not v:
+        return None
+    partes = str(v).strip().split(".")
+    try:
+        return tuple(int(p) for p in partes)
+    except ValueError:
+        return None
+
+
+def _definicion_degradada(engine, mart_id: str, en_disco: str | None) -> str | None:
+    """La versión registrada, si el YAML en disco es MÁS VIEJO que ella.
+
+    Un mart se construye leyendo su YAML del disco del container que agarró la
+    tarea, así que "este mart está arreglado" no es un hecho del sistema: es una
+    propiedad del filesystem de cada worker. Un container con la imagen vieja
+    reconstruye con la definición vieja y revierte el dato **en silencio**.
+
+    Pasó el 2026-09-02 06:00 UTC: el barrido corrió sobre workers que habían
+    quedado sin actualizar y `legisladores_argentina` volvió de 328 a 584 filas
+    —el chat contestó 512 diputados donde hay 256— 14 horas antes de que alguien
+    lo notara. El arreglo del YAML era correcto; lo que faltaba era que no se
+    pudiera deshacer solo.
+
+    El dato para detectarlo ya estaba: `mart_definitions.yaml_version` se
+    escribe en cada build y está poblada en los 74 marts. Nadie la miraba.
+
+    Conservador ante la duda: si alguna de las dos versiones no se puede parsear
+    o no hay registro previo, no bloquea. Frenar un build por no saber comparar
+    sería peor que el problema.
+    """
+    nueva = _version_tuple(en_disco)
+    if nueva is None:
+        return None
+    try:
+        with engine.connect() as conn:
+            registrada = conn.execute(
+                text("SELECT yaml_version FROM public.mart_definitions WHERE mart_id = :m"),
+                {"m": mart_id},
+            ).scalar()
+    except Exception:
+        logger.debug("no pude leer yaml_version de %s", mart_id, exc_info=True)
+        return None
+    vieja = _version_tuple(registrada)
+    if vieja is None:
+        return None
+    return str(registrada) if nueva < vieja else None
+
+
 @celery_app.task(
     name="openarg.build_mart",
     bind=True,
     soft_time_limit=600,
     time_limit=900,
 )
-def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
+def build_mart(
+    self, mart_id: str, *, marts_dir: str | None = None, allow_downgrade: bool = False
+) -> dict:
     """(Re)create the materialized view for `mart_id` from its YAML.
 
     Steps:
@@ -468,6 +520,24 @@ def build_mart(self, mart_id: str, *, marts_dir: str | None = None) -> dict:
         return {"status": "not_found", "mart_id": mart_id}
 
     mart = load_mart(yaml_path)
+
+    # Un build no puede degradar la definición. Ver `_definicion_degradada`.
+    if not allow_downgrade:
+        registrada = _definicion_degradada(engine, mart_id, mart.version)
+        if registrada is not None:
+            logger.error(
+                "build_mart(%s) RECHAZADO: el YAML en disco es %s y el registrado es %s. "
+                "Este container tiene una imagen vieja; construir revertiría el mart.",
+                mart_id,
+                mart.version,
+                registrada,
+            )
+            return {
+                "status": "stale_definition",
+                "mart_id": mart_id,
+                "yaml_version_on_disk": mart.version,
+                "yaml_version_registered": registrada,
+            }
 
     # Serialize concurrent build_mart / refresh_mart for the same mart_id
     # via session-level advisory lock. `pg_try_advisory_lock` returns

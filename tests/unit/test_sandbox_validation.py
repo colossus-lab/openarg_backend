@@ -211,3 +211,52 @@ class TestSandboxColumnTypes:
             "raw.energia_pozos_v2": [("anio", "text")],
             "mart.series_economicas": [("valor", "double precision")],
         }
+
+
+class TestSafeRelationQuery:
+    """El `last_resort` de NL2SQL estuvo apagado sin que nadie lo notara.
+
+    `validate_table_name` exige `^cache_[a-z0-9_]+$`, sin punto, asi que
+    desde que las tablas se reportan como `raw.cache_x` rechazaba todo — y
+    los marts nunca habian pasado. `safe_relation_query` acepta el schema
+    contra una lista blanca y cita cada parte por separado.
+    """
+
+    def test_acepta_una_tabla_de_la_capa_raw(self):
+        from app.infrastructure.adapters.sandbox.table_validation import safe_relation_query
+
+        sql = safe_relation_query("raw.cache_x", "SELECT * FROM {} LIMIT 10")
+        assert sql == 'SELECT * FROM "raw"."cache_x" LIMIT 10'
+
+    def test_acepta_un_mart(self):
+        from app.infrastructure.adapters.sandbox.table_validation import safe_relation_query
+
+        sql = safe_relation_query("mart.presupuesto_consolidado", "SELECT * FROM {} LIMIT 10")
+        assert sql == 'SELECT * FROM "mart"."presupuesto_consolidado" LIMIT 10'
+
+    def test_un_nombre_pelado_va_a_public(self):
+        from app.infrastructure.adapters.sandbox.table_validation import safe_relation_query
+
+        sql = safe_relation_query("cache_x", "SELECT * FROM {} LIMIT 10")
+        assert sql == 'SELECT * FROM "public"."cache_x" LIMIT 10'
+
+    def test_rechaza_un_schema_fuera_de_la_lista_blanca(self):
+        from app.infrastructure.adapters.sandbox.table_validation import safe_relation_query
+
+        assert safe_relation_query("pg_catalog.pg_tables", "SELECT * FROM {}") is None
+        assert safe_relation_query("information_schema.tables", "SELECT * FROM {}") is None
+
+    def test_rechaza_un_intento_de_inyeccion(self):
+        from app.infrastructure.adapters.sandbox.table_validation import safe_relation_query
+
+        assert safe_relation_query('cache_x"; DROP TABLE y; --', "SELECT * FROM {}") is None
+        assert safe_relation_query("raw.cache_x LIMIT 1; DELETE", "SELECT * FROM {}") is None
+
+    def test_una_tabla_prohibida_sigue_bloqueada_aguas_abajo(self):
+        """Pasar la validacion de nombre no alcanza: `_validate_sql` chequea
+        la blocklist sobre el nombre pelado, antes de toda logica de schema."""
+        from app.infrastructure.adapters.sandbox.table_validation import safe_relation_query
+
+        sql = safe_relation_query("raw.api_keys", "SELECT * FROM {} LIMIT 10")
+        assert sql is not None  # el nombre es valido...
+        assert _validate_sql(sql) is not None  # ...pero la consulta se rechaza

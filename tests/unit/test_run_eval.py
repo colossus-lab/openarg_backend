@@ -11,6 +11,7 @@ from typing import Any
 
 from tests.evaluation.run_eval import (
     INTENT_MAP,
+    check_absolute_expectations,
     compare_to_baseline,
     summarise,
     validate_dataset,
@@ -33,6 +34,7 @@ def _r(**over: Any) -> dict:
         "sources": ["INDEC"],
         "keyword_score": 1.0,
         "retrieval_precision": 1.0,
+        "forbidden_sources_hit": [],
         "intent_scored": False,
         "intent_match": False,
         "connector_scored": True,
@@ -135,8 +137,14 @@ def test_el_dataset_que_esta_en_el_repo_es_valido() -> None:
     from tests.evaluation.run_eval import DEFAULT_DATASET, load_golden_dataset
 
     entries = load_golden_dataset(DEFAULT_DATASET)
-    assert len(entries) == 50
+    assert len(entries) == 52
     assert validate_dataset(entries) == []
+
+    # Los casos negativos sólo sirven si traen la expectativa: sin
+    # `forbidden_sources` son dos preguntas más y el gate no mira nada.
+    negativos = [e for e in entries if e["category"] == "negativo"]
+    assert len(negativos) == 2
+    assert all(e.get("forbidden_sources") for e in negativos)
 
 
 def test_solo_se_puntua_el_intent_que_el_clasificador_puede_emitir() -> None:
@@ -219,3 +227,29 @@ def test_no_se_mira_la_latencia_por_debajo_del_piso() -> None:
         {"mode": "normal", "results": [_r(latency_ms=43)]},
     )
     assert blandas == []
+
+
+# -- expectativas absolutas (no dependen del baseline) ------------------
+
+
+def test_una_fuente_prohibida_rompe_el_gate() -> None:
+    fallas = check_absolute_expectations({"results": [_r(forbidden_sources_hit=[" (live)"])]})
+
+    assert fallas
+    assert "(live)" in fallas[0]
+
+
+def test_un_caso_nuevo_igual_se_chequea_contra_sus_fuentes_prohibidas() -> None:
+    """Por que esto vive afuera de `compare_to_baseline`.
+
+    Ese loop saltea las entradas que no estan en el baseline, y los casos
+    negativos son entradas nuevas por definicion. Una condicion escrita ahi
+    adentro no se evaluaria nunca, y el gate seria decorativo.
+    """
+    reporte = {"results": [_r(id="negativo_001", forbidden_sources_hit=[" (live)"])]}
+
+    assert check_absolute_expectations(reporte)
+
+
+def test_sin_fuentes_prohibidas_no_hay_falla() -> None:
+    assert check_absolute_expectations({"results": [_r()]}) == []

@@ -1777,7 +1777,17 @@ class TestCollectorP2:
 
         assert result["rows"] == 25
         mock_index_delay.assert_called_once_with("11111111-1111-1111-1111-111111111111")
-        mock_enrich_delay.assert_called_once()
+        # El enriquecimiento ya no se despacha desde acá. Vive en
+        # `_apply_cached_outcome`, que manda el nombre CALIFICADO por
+        # `apply_async` con `task_id` para deduplicar. El `.delay()` con el
+        # nombre pelado que había en este punto no podía resolverse contra
+        # `information_schema` y no enriquecía nada — que las 10 filas de
+        # `table_catalog` en staging estén todas calificadas lo confirma.
+        #
+        # Este test no alcanza el camino canónico: sus mocks del engine
+        # cortan antes de `_finalize_cached_dataset`. Lo que fija es que el
+        # despacho muerto no vuelva.
+        mock_enrich_delay.assert_not_called()
 
 
 class TestEmbeddingP2:

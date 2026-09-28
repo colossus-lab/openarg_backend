@@ -21,4 +21,8 @@ ENV APP_ENV=local
 RUN chown -R app:app /app
 USER app
 
-CMD ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "ingest", "-c", "2", "--max-memory-per-child=512000", "--loglevel=info"]
+# `orchestrator` va acá porque es lo que ya consume este worker en staging y
+# en prod: los dos compose de los servidores le agregan la cola a mano, y no
+# están versionados. Mientras el CMD dijera sólo `ingest`, recrear el stack
+# desde el repo dejaba `bulk_collect_all` sin consumidor.
+CMD ["celery", "-A", "app.infrastructure.celery.app:celery_app", "worker", "-Q", "ingest,orchestrator", "-c", "2", "--max-memory-per-child=512000", "--loglevel=info"]

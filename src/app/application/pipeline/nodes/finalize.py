@@ -101,6 +101,16 @@ async def finalize_node(state: OpenArgState) -> dict:
     # `bypass_cache` no puede ser sólo de lectura: si la batería escribe, sus
     # 50 respuestas quedan en el caché y se le sirven a usuarios reales.
     no_data_deflection = bool(state.get("no_data_deflection"))
+    if no_data_deflection and not state.get("bypass_cache"):
+        # Y tampoco puede quedar cacheado el PLAN que no trajo nada: se
+        # guarda antes de ejecutar los steps, así que sin este desalojo se
+        # re-sirve durante todo su TTL a cualquier reformulación parecida.
+        try:
+            from app.application.pipeline.nodes.planner import evict_plan_cache
+
+            await evict_plan_cache(deps, state.get("preprocessed_query") or question)
+        except Exception:
+            logger.debug("finalize_node: plan cache eviction skipped", exc_info=True)
     if no_data_deflection or state.get("bypass_cache"):
         logger.debug("finalize_node: cache write skipped")
     else:

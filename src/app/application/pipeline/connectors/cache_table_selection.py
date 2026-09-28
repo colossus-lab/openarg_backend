@@ -1,6 +1,22 @@
+"""Elegir la tabla física detrás de un hint del planner.
+
+El vocabulario de este módulo (los alias legacy, los `startswith`) está
+escrito en nombres **pelados**, porque así los emiten `KEYWORD_ROUTES` y el
+prompt del planner. Las tablas, en cambio, pueden llegar calificadas
+(`raw.cache_x`). Por eso todo lo que compara pasa por
+`table_reference.bare_name`.
+"""
+
 from __future__ import annotations
 
+import fnmatch
 import re
+
+from app.domain.value_objects.table_reference import (
+    LAYER_TRANSPARENT_SCHEMAS,
+    bare_name,
+    split_qualified,
+)
 
 _RESOURCE_SUFFIX_RE = re.compile(r"_r[a-f0-9]{10}$")
 _GROUP_SUFFIX_RE = re.compile(r"_g[a-f0-9]{8}$")
@@ -18,6 +34,35 @@ _LEGACY_HINT_ALIASES = {
     "cache_coparticipacion": "cache_presupuesto_*",
     "cache_bcra_principales_variables": "cache_bcra_*",
 }
+
+
+def hint_matches_table(pattern: str, table_name: str) -> bool:
+    """¿El hint del planner nombra a esta tabla?
+
+    El planner y `KEYWORD_ROUTES` emiten globs pelados (`cache_indec_*`),
+    pero el sandbox reporta las tablas de la capa raw calificadas
+    (`raw.cache_indec_ipc`). Comparar el nombre completo contra el glob
+    pelado no matchea nunca — eso dejó el ruteo roto desde que se activó
+    `OPENARG_USE_RAW_LAYER` (2026-08).
+
+    El orden de las cláusulas importa:
+
+    1. Match directo, que cubre calificado↔calificado y los globs `mart.*`.
+    2. Si el patrón nombra un schema explícito, se respeta y no se despela:
+       pedir `raw.cache_*` no puede traer una tabla de `public`.
+    3. Si la tabla vive en un schema que el `search_path` NO resuelve
+       (`mart`), tampoco se despela. Así un glob `cache_*` sigue sin
+       alcanzar un mart, que es la semántica que BUG-001 fijó: los marts
+       entran por re-inyección, no por matcheo de globs.
+    4. Recién ahí se compara contra el nombre sin schema.
+    """
+    if fnmatch.fnmatch(table_name, pattern):
+        return True
+    if "." in pattern:
+        return False
+    if split_qualified(table_name)[0] not in LAYER_TRANSPARENT_SCHEMAS:
+        return False
+    return fnmatch.fnmatch(bare_name(table_name), pattern)
 
 
 def table_base_name(table_name: str) -> str:
@@ -65,20 +110,29 @@ def _extract_year(table_name: str) -> int:
 
 
 def resolve_compat_table_name(table_name: str, available_tables: list[str]) -> str | None:
-    """Map legacy exact table names to current physical cache tables when possible."""
-    direct = _LEGACY_TABLE_ALIASES.get(table_name)
-    if direct and direct in available_tables:
-        return direct
+    """Map legacy exact table names to current physical cache tables when possible.
 
-    if table_name == "cache_presupuesto_nacional":
-        credito_tables = [
-            name for name in available_tables if name.startswith("cache_presupuesto_credito_")
-        ]
-        if credito_tables:
-            return max(credito_tables, key=_extract_year)
-        budget_tables = [name for name in available_tables if name.startswith("cache_presupuesto_")]
-        if budget_tables:
-            return max(budget_tables, key=lambda name: (_extract_year(name), name))
+    Devuelve el nombre **tal como vino en `available_tables`** (calificado si
+    así llegó), porque el retorno se sustituye dentro de SQL: devolver el
+    pelado apuntaría a `public` cuando la tabla vive en `raw`.
+    """
+    # El vocabulario de alias es pelado; las tablas disponibles pueden no
+    # serlo. Se indexa por nombre pelado y se devuelve el original.
+    por_bare: dict[str, str] = {}
+    for name in available_tables:
+        por_bare.setdefault(bare_name(name), name)
+
+    direct = _LEGACY_TABLE_ALIASES.get(bare_name(table_name))
+    if direct and direct in por_bare:
+        return por_bare[direct]
+
+    if bare_name(table_name) == "cache_presupuesto_nacional":
+        credito = [b for b in por_bare if b.startswith("cache_presupuesto_credito_")]
+        if credito:
+            return por_bare[max(credito, key=_extract_year)]
+        budget = [b for b in por_bare if b.startswith("cache_presupuesto_")]
+        if budget:
+            return por_bare[max(budget, key=lambda name: (_extract_year(name), name))]
 
     return None
 
@@ -86,6 +140,9 @@ def resolve_compat_table_name(table_name: str, available_tables: list[str]) -> s
 def build_table_compat_notes(available_tables: list[str]) -> str:
     """Describe legacy aliases so prompts and SQL-fixer steer toward real tables."""
     notes: list[str] = []
+    # Los nombres de los alias son pelados; las tablas pueden venir
+    # calificadas. Sin esto las notas desaparecían en silencio.
+    available_tables = [bare_name(name) for name in available_tables]
 
     if "cache_series_inflacion_ipc" in available_tables:
         notes.append(

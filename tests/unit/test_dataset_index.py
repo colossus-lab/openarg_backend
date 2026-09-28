@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.infrastructure.adapters.connectors.dataset_index import (
     _KEYWORD_PATTERNS,
     KEYWORD_ROUTES,
@@ -352,10 +354,33 @@ class TestTableGlobsMatchInventory:
         fixture = Path(__file__).resolve().parent.parent / "fixtures" / name
         return [line.strip() for line in fixture.read_text().splitlines() if line.strip()]
 
-    def test_table_globs_match_inventory(self):
-        import fnmatch
+    @pytest.mark.parametrize(
+        "project",
+        [lambda n: n, lambda n: f"raw.{n}"],
+        ids=["public", "raw"],
+    )
+    def test_table_globs_match_inventory(self, project):
+        """Los mismos globs, contra el mismo inventario dicho de dos formas.
 
-        inventory = self._fixture_lines("cache_table_inventory.txt")
+        El fixture guarda nombres pelados porque es un snapshot de
+        `cached_datasets`, que los guarda así — el `raw.` lo construye el
+        adapter al reportar. Prefijar el archivo lo haría mentir sobre su
+        fuente; la proyección se aplica en memoria.
+
+        Y se usa `hint_matches_table`, el matcher de producción, en vez de
+        reimplementar `fnmatch`. Antes este test tenía su propia copia de la
+        regla, así que no podía detectar un cambio en la regla real: el
+        ruteo estuvo roto cinco meses con este test en verde.
+
+        Que las dos variantes compartan `known_broken_hints.txt` es la
+        aserción fuerte: el conjunto de hints rotos tiene que ser idéntico
+        en las dos capas. Si difiere, hay un sitio que no es transparente.
+        """
+        from app.application.pipeline.connectors.cache_table_selection import (
+            hint_matches_table,
+        )
+
+        inventory = [project(n) for n in self._fixture_lines("cache_table_inventory.txt")]
         assert len(inventory) > 1000, "inventory fixture looks truncated"
         baseline = set(self._fixture_lines("known_broken_hints.txt"))
 
@@ -364,10 +389,7 @@ class TestTableGlobsMatchInventory:
             for pattern in route.get("params", {}).get("tables", []):
                 if not pattern.startswith("cache_"):
                     continue  # mart.* / raw.* names are validated elsewhere
-                if "*" in pattern or "?" in pattern:
-                    matched = any(fnmatch.fnmatch(name, pattern) for name in inventory)
-                else:
-                    matched = pattern in inventory
+                matched = any(hint_matches_table(pattern, name) for name in inventory)
                 if not matched:
                     failures.add(f"{keyword} -> {pattern}")
 

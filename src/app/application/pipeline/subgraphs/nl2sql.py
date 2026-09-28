@@ -673,10 +673,13 @@ async def last_resort_node(state: NL2SQLState) -> dict:
         logger.warning("NL2SQL last_resort: no tables available")
         return {"used_fallback": True}
 
-    from app.infrastructure.adapters.sandbox.table_validation import safe_table_query
+    from app.infrastructure.adapters.sandbox.table_validation import safe_relation_query
 
     fallback_table = tables[0].table_name
-    fallback_sql = safe_table_query(fallback_table, 'SELECT * FROM "{}" LIMIT 10')
+    # `safe_relation_query` y no `safe_table_query`: desde que las tablas se
+    # reportan como `raw.cache_x`, el regex sin schema del segundo las
+    # rechazaba y este nodo no llegaba a ejecutar nunca.
+    fallback_sql = safe_relation_query(fallback_table, "SELECT * FROM {} LIMIT 10")
     if fallback_sql is None:
         logger.warning("NL2SQL last_resort: invalid table name %s", fallback_table)
         return {"used_fallback": True}
@@ -1015,7 +1018,10 @@ async def indec_fallback_node(state: NL2SQLState) -> dict:
 
     fallback_results = await indec_live_fallback(nl_query)
     if fallback_results:
-        return {"data_results": fallback_results}
+        # Servir por descarga en vivo es un camino degradado, igual que el
+        # `last_resort`. Marcarlo deja el state consistente con lo que ya
+        # traen los propios DataResult en su metadata.
+        return {"data_results": fallback_results, "used_fallback": True}
 
     # Keep the existing (empty) format_result output if the live API had
     # nothing either — the previous format_result call already populated

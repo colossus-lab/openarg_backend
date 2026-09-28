@@ -446,13 +446,39 @@ def enrich_all_tables(self, batch_size: int = 50):
 
     engine = get_sync_engine()
     try:
-        # Find tables with status=ready that have no catalog entry
+        # Tablas `ready` que todavía no tienen entrada en el catálogo.
+        #
+        # Dos cosas que esta consulta tiene que hacer bien, y antes hacía mal:
+        #
+        # 1. `cached_datasets.table_name` es siempre PELADO, y
+        #    `table_catalog.table_name` puede venir CALIFICADO (`raw.x`). El
+        #    LEFT JOIN comparaba las dos formas directamente, así que
+        #    `tc.id IS NULL` era siempre verdadero: la tarea volvía a tomar
+        #    las mismas N tablas por `row_count` en cada corrida y nunca
+        #    avanzaba.
+        # 2. Lo que se despacha tiene que ir CALIFICADO. `_enrich_table`
+        #    busca las columnas en `information_schema` filtrando por
+        #    schema; con el nombre pelado busca en `public`, no encuentra la
+        #    tabla raw y devuelve False sin enriquecer nada.
         with engine.connect() as conn:
             rows = conn.execute(
                 text("""
-                    SELECT cd.table_name
+                    SELECT CASE
+                             WHEN rtv.schema_name IS NOT NULL
+                                  AND rtv.schema_name <> 'public'
+                                 THEN rtv.schema_name || '.' || cd.table_name
+                             ELSE cd.table_name
+                           END AS table_name
                     FROM raw.cached_datasets cd
-                    LEFT JOIN table_catalog tc ON tc.table_name = cd.table_name
+                    LEFT JOIN public.raw_table_versions rtv
+                           ON rtv.table_name = cd.table_name
+                          AND rtv.superseded_at IS NULL
+                    LEFT JOIN table_catalog tc
+                           ON CASE
+                                WHEN position('.' in tc.table_name) > 0
+                                    THEN btrim(split_part(tc.table_name, '.', 2), '"')
+                                ELSE btrim(tc.table_name, '"')
+                              END = cd.table_name
                     WHERE cd.status = 'ready'
                       AND tc.id IS NULL
                     ORDER BY cd.row_count DESC NULLS LAST

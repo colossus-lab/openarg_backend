@@ -24,6 +24,7 @@ from app.application.discovery import (
 from app.application.pipeline.connectors.cache_table_selection import (
     build_table_compat_notes,
     expand_table_hints_compat,
+    hint_matches_table,
     prefer_consolidated_table,
 )
 from app.application.pipeline.connectors.planner_candidates import (
@@ -31,6 +32,7 @@ from app.application.pipeline.connectors.planner_candidates import (
     collect_planner_candidates,
 )
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
+from app.domain.value_objects.table_reference import bare_name
 
 if TYPE_CHECKING:
     from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
@@ -281,11 +283,24 @@ async def get_catalog_entries(
 
     Uses the sandbox's sync engine via run_in_executor to avoid
     needing an async session.
+
+    `table_catalog` guarda las dos formas del nombre — el colector despacha
+    el enriquecimiento calificado en un camino y pelado en otro — así que la
+    búsqueda se hace por nombre pelado y el resultado se vuelve a indexar
+    con el nombre que pidió el llamador. Sin esto, un `raw.cache_x` no
+    encontraba su fila y el prompt de NL2SQL perdía display_name,
+    description y domain sin que nada lo avisara.
     """
     if not table_names or not sandbox:
         return {}
     try:
         loop = asyncio.get_running_loop()
+
+        # Puede haber colisión si entran `cache_x` y `raw.cache_x` a la vez:
+        # son la misma tabla, así que compartir la fila es lo correcto.
+        por_bare: dict[str, list[str]] = {}
+        for name in table_names:
+            por_bare.setdefault(bare_name(name), []).append(name)
 
         def _fetch() -> dict[str, dict[str, Any]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
@@ -294,14 +309,19 @@ async def get_catalog_entries(
                     text(
                         "SELECT table_name, display_name, description, domain, subdomain, "
                         "key_columns, column_types, sample_queries, tags "
-                        "FROM table_catalog WHERE table_name = ANY(:names)"
+                        "FROM table_catalog "
+                        "WHERE table_name = ANY(:names) "
+                        "   OR split_part(table_name, '.', 2) = ANY(:bare) "
+                        "   OR table_name = ANY(:bare)"
                     ),
-                    {"names": table_names},
+                    {"names": table_names, "bare": list(por_bare)},
                 )
                 rows = result.fetchall()
                 conn.rollback()
-                return {
-                    r.table_name: {
+
+                entries: dict[str, dict[str, Any]] = {}
+                for r in rows:
+                    payload = {
                         "display_name": r.display_name,
                         "description": r.description,
                         "domain": r.domain,
@@ -311,8 +331,12 @@ async def get_catalog_entries(
                         "sample_queries": r.sample_queries,
                         "tags": r.tags,
                     }
-                    for r in rows
-                }
+                    # Se devuelve bajo el nombre que usó el llamador, para
+                    # que los `catalog_entries.get(t.table_name)` de siempre
+                    # sigan funcionando sin cambios.
+                    for original in por_bare.get(bare_name(r.table_name), []):
+                        entries[original] = payload
+                return entries
 
         return await loop.run_in_executor(None, _fetch)
     except Exception:
@@ -530,13 +554,13 @@ async def discover_catalog_hints_for_planner(
             ServingLayer,
         )
 
-        def _search_marts() -> list[Resource]:
+        def _search_marts() -> tuple[list[Resource], dict[str, int]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
                 rs = conn.execute(
                     text(
                         "WITH ranked AS ("
-                        "  SELECT md.mart_id, md.domain, "
+                        "  SELECT md.mart_id, md.domain, md.last_row_count, "
                         "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_sim "
                         "  FROM mart_definitions md "
                         "  WHERE md.embedding IS NOT NULL "
@@ -545,7 +569,7 @@ async def discover_catalog_hints_for_planner(
                         "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
                         "  LIMIT 3"
                         ") "
-                        "SELECT r.mart_id, r.domain, r.base_sim, "
+                        "SELECT r.mart_id, r.domain, r.base_sim, r.last_row_count, "
                         "       COALESCE(("
                         "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
                         "         FROM public.mart_sample_queries msq "
@@ -567,6 +591,9 @@ async def discover_catalog_hints_for_planner(
                 # disturbing the rerank input). Default 0.45, env-overridable.
                 min_sim = float(os.getenv("OPENARG_MART_DISCOVER_MIN_SIM", "0.45"))
                 resources: list[Resource] = []
+                # El conteo de filas de cada mart, para que el bloque de
+                # hints no diga "0 filas" sobre una vista con datos.
+                conteos: dict[str, int] = {}
                 for r in rs:
                     base = float(r.base_sim or 0)
                     sample = float(r.sample_max_sim or 0)
@@ -584,10 +611,12 @@ async def discover_catalog_hints_for_planner(
                             score=boosted,
                         )
                     )
-                return resources
+                    conteos[str(r.mart_id or "")] = int(r.last_row_count or 0)
+                return resources, conteos
 
+        mart_row_counts: dict[str, int] = {}
         try:
-            mart_resources = await loop.run_in_executor(None, _search_marts)
+            mart_resources, mart_row_counts = await loop.run_in_executor(None, _search_marts)
         except Exception:
             logger.debug("mart vector search for rerank candidates failed", exc_info=True)
             mart_resources = []
@@ -623,12 +652,25 @@ async def discover_catalog_hints_for_planner(
                 (m for m in matches if m.table_name == table_name),
                 None,
             )
-            row_count = base_match.row_count if base_match else 0
+            # Los marts no están en `matches` (esos salen de `table_catalog`),
+            # así que `base_match` era siempre None para ellos y TODOS los
+            # marts salían etiquetados "0 filas": le decíamos al planner que
+            # las vistas curadas estaban vacías.
+            #
+            # Decir la verdad acá sólo es seguro con la jerarquía de fuentes
+            # explícita en REGLA #1 del prompt. Sin ella, un mart de dos
+            # millones de filas se llevaba puestas a `query_series` y
+            # `query_ddjj` por puro tamaño.
+            if base_match is not None:
+                row_count = base_match.row_count
+            else:
+                row_count = mart_row_counts.get(table_name)
             score = round(candidate.base_score, 2)
             line = f"  - {table_name}"
             if display_name:
                 line += f" ({display_name})"
-            line += f" — {row_count} filas"
+            if row_count is not None:
+                line += f" — {row_count} filas"
             if description:
                 # Round v4.4 Fase 3: descriptions of mart-layer candidates
                 # may now include a "COBERTURA TEMPORAL: …" suffix appended
@@ -915,49 +957,112 @@ async def discover_tables_by_vector_search(
 # ---------------------------------------------------------------------------
 
 
+# Cuántos datasets se bajan como mucho en una consulta.
+_INDEC_MAX_DATASETS = 3
+
+# IDs deben coincidir con INDEC_DATASETS en indec_tasks.py.
+# Las keywords se comparan normalizadas (sin tildes, en minúsculas), así que
+# alcanza con escribir una sola forma: "construccion" ya matchea
+# "construcción".
+_INDEC_KEYWORD_MAP: dict[str, list[str]] = {
+    "ipc": ["ipc", "inflacion", "precios"],
+    "emae": ["emae", "actividad economica"],
+    "pib": ["pib", "producto bruto", "producto interno"],
+    "comercio_exterior": [
+        "exportacion",
+        "importacion",
+        "comercio exterior",
+        "balanza comercial",
+    ],
+    "eph_tasas": ["empleo", "eph", "desempleo", "trabajo", "mercado laboral"],
+    "canasta_basica": ["canasta basica", "cbt", "cba"],
+    "salarios_indice": ["salario", "salarios", "sueldo"],
+    "pobreza_informe": ["pobreza", "indigencia"],
+    "pobreza_historica": ["pobreza histor", "indigencia histor"],
+    "isac": ["construccion", "isac"],
+    "ipi_manufacturero": ["industria", "ipi", "manufacturero", "produccion industrial"],
+    "supermercados": ["supermercado"],
+    "turismo_receptivo": ["turismo"],
+    "distribucion_ingreso": ["distribucion del ingreso", "gini", "decil"],
+    "balance_pagos": ["balance de pagos", "balanza de pagos", "cuenta corriente"],
+}
+
+
+def _match_indec_datasets(nl_query: str) -> list[str]:
+    """Qué datasets del INDEC pide esta pregunta. Lista vacía = ninguno.
+
+    Devolver `[]` es una respuesta legítima y es el caso importante: antes
+    había un default `["ipc", "emae", "pib"]` acá, así que una pregunta que
+    el mapa no entendía igual bajaba inflación y PBI, los citaba como
+    fuentes, y — al haber filas — apagaba el camino no-data que habría
+    contestado con honestidad (incidente 2026-09, pregunta sobre el CUD).
+
+    Regla para editar `_INDEC_KEYWORD_MAP`: **una keyword tiene que ser
+    discriminante, no meramente temática.** Sin el default, una keyword que
+    falta cuesta barato (deflección honesta) y una de más cuesta caro
+    (descarga off-topic citada como fuente). Por eso "indec" no está acá:
+    identifica al publicador, no al dataset. Que sí esté en `INDEC_PATTERN`
+    (ruteo: "esto huele a INDEC") y no acá (selección: "qué dataset") es la
+    separación correcta.
+
+    Orden: primero los que matchean más keywords distintas, y a igualdad la
+    keyword más larga, como proxy de especificidad ("canasta básica" le gana
+    a "precios"). Antes se cortaba en 3 por orden de declaración del dict.
+
+    El matcheo pasa por `_normalize_text` (saca tildes y baja a minúsculas)
+    en los dos lados. Sin eso "cómo viene la inflación" no matchearía la
+    keyword "inflacion", que es exactamente lo que pasaba: el default tapaba
+    la falla porque `ipc` estaba entre los tres que bajaba igual.
+    """
+    normalized_query = _normalize_text(nl_query or "")
+
+    scored: list[tuple[int, int, str]] = []
+    for ds_id, keywords in _INDEC_KEYWORD_MAP.items():
+        # Por forma normalizada: dos variantes de la misma palabra no pueden
+        # contar como dos señales distintas.
+        hits = {
+            normalized
+            for kw in keywords
+            if (normalized := _normalize_text(kw)) and normalized in normalized_query
+        }
+        if hits:
+            scored.append((len(hits), max(len(kw) for kw in hits), ds_id))
+
+    if not scored:
+        return []
+
+    # `ds_id` como último criterio para que el orden sea determinístico.
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    ranked = [ds_id for _, _, ds_id in scored]
+
+    if len(ranked) > _INDEC_MAX_DATASETS:
+        logger.info(
+            "INDEC live fallback: %d datasets matchearon, se bajan %s y quedan afuera %s",
+            len(ranked),
+            ranked[:_INDEC_MAX_DATASETS],
+            ranked[_INDEC_MAX_DATASETS:],
+        )
+    return ranked[:_INDEC_MAX_DATASETS]
+
+
 async def indec_live_fallback(nl_query: str) -> list[DataResult]:
-    """Plan B: download INDEC XLS on-the-fly when cache tables don't exist."""
+    """Plan B: download INDEC XLS on-the-fly when cache tables don't exist.
+
+    Devuelve `[]` cuando la pregunta no nombra ningún dataset concreto (ver
+    `_match_indec_datasets`). Los tres llamadores tratan `[]` como "sin
+    datos", que es lo que deja actuar al camino no-data con sus guardrails.
+    """
     import asyncio as _asyncio
 
     from app.infrastructure.celery.tasks.indec_tasks import INDEC_DATASETS, _download_and_parse
 
-    query_lower = nl_query.lower()
-    keyword_map = {
-        # IDs deben coincidir con INDEC_DATASETS en indec_tasks.py
-        "ipc": ["ipc", "inflacion", "precios"],
-        "emae": ["emae", "actividad economica", "actividad económica"],
-        "pib": ["pib", "producto bruto", "producto interno"],
-        "comercio_exterior": [
-            "exportacion",
-            "importacion",
-            "comercio exterior",
-            "balanza comercial",
-        ],
-        "eph_tasas": ["empleo", "eph", "desempleo", "trabajo", "mercado laboral"],
-        "canasta_basica": ["canasta basica", "canasta básica", "cbt", "cba"],
-        "salarios_indice": ["salario", "salarios", "sueldo"],
-        "pobreza_informe": ["pobreza", "indigencia"],
-        "pobreza_historica": ["pobreza histor", "indigencia histor"],
-        "isac": ["construccion", "construcción", "isac"],
-        "ipi_manufacturero": ["industria", "ipi", "manufacturero", "produccion industrial"],
-        "supermercados": ["supermercado"],
-        "turismo_receptivo": ["turismo"],
-        "distribucion_ingreso": [
-            "distribucion del ingreso",
-            "distribución del ingreso",
-            "gini",
-            "decil",
-        ],
-        "balance_pagos": ["balance de pagos", "balanza de pagos", "cuenta corriente"],
-    }
-
-    matched_ids = []
-    for ds_id, keywords in keyword_map.items():
-        if any(kw in query_lower for kw in keywords):
-            matched_ids.append(ds_id)
-
+    matched_ids = _match_indec_datasets(nl_query)
     if not matched_ids:
-        matched_ids = ["ipc", "emae", "pib"]
+        logger.warning(
+            "INDEC live fallback: ninguna keyword matcheó, no se descarga nada. query=%r",
+            nl_query[:120],
+        )
+        return []
 
     async def _fetch_one(ds_id: str) -> DataResult | None:
         ds_info = next((d for d in INDEC_DATASETS if d["id"] == ds_id), None)
@@ -984,7 +1089,11 @@ async def indec_live_fallback(nl_query: str) -> list[DataResult]:
                     "total_records": len(records),
                     "columns": list(df.columns),
                     "source_url": ds_info["url"],
-                    "fallback": True,
+                    # `used_fallback` es la clave canónica: es la que lee
+                    # `citation_guard._quality_ceiling` para capar la
+                    # confianza. Hasta 2026-09 acá decía `fallback`, así que
+                    # el techo nunca se aplicaba a este camino.
+                    "used_fallback": True,
                     "fetched_at": datetime.now(UTC).isoformat(),
                 },
             )
@@ -992,7 +1101,9 @@ async def indec_live_fallback(nl_query: str) -> list[DataResult]:
             logger.warning("INDEC live fallback failed for %s", ds_id, exc_info=True)
             return None
 
-    fetched = await _asyncio.gather(*[_fetch_one(ds_id) for ds_id in matched_ids[:3]])
+    # El corte ya lo hizo `_match_indec_datasets`, por ranking y no por
+    # orden de declaración del dict.
+    fetched = await _asyncio.gather(*[_fetch_one(ds_id) for ds_id in matched_ids])
     return [r for r in fetched if r is not None]
 
 
@@ -1158,17 +1269,24 @@ async def execute_sandbox_step(
 
         if table_hints:
             if _from_catalog_or_vector:
-                # Catalog/vector search returns exact table names — use set lookup
-                hint_set = set(table_hints)
-                filtered = [t for t in tables if t.table_name in hint_set]
+                # Catalog/vector search returns exact table names — use set
+                # lookup. Se compara también por nombre pelado: los hints de
+                # `table_catalog` conviven en las dos formas (el colector
+                # despacha el enriquecimiento calificado en un camino y
+                # pelado en otro), así que ninguno de los dos lados es
+                # confiable por sí solo.
+                hint_set = set(table_hints) | {bare_name(h) for h in table_hints}
+                filtered = [
+                    t
+                    for t in tables
+                    if t.table_name in hint_set or bare_name(t.table_name) in hint_set
+                ]
             else:
                 # Planner returns glob patterns — use fnmatch
-                import fnmatch
-
                 filtered = []
                 for t in tables:
                     for pattern in table_hints:
-                        if fnmatch.fnmatch(t.table_name, pattern):
+                        if hint_matches_table(pattern, t.table_name):
                             filtered.append(t)
                             break
             if filtered:
@@ -1181,8 +1299,12 @@ async def execute_sandbox_step(
                     # Parse "Cubre YYYY-YYYY" from table_notes
                     narrowed = []
                     for t in filtered:
+                        # Alternación: `table_notes` sale de KEYWORD_ROUTES
+                        # (nombres pelados) pero también puede venir del
+                        # planner, que a veces califica.
                         note_match = _re.search(
-                            rf"{_re.escape(t.table_name)}.*?[Cc]ubre\s+(\d{{4}})-(\d{{4}})",
+                            rf"(?:{_re.escape(t.table_name)}|{_re.escape(bare_name(t.table_name))})"
+                            rf".*?[Cc]ubre\s+(\d{{4}})-(\d{{4}})",
                             table_notes,
                         )
                         if note_match:
@@ -1210,7 +1332,15 @@ async def execute_sandbox_step(
                     indec_tables[:3],
                 )
                 logger.info("No cached INDEC tables, attempting live fallback")
-                return await indec_live_fallback(nl_query)
+                live_results = await indec_live_fallback(nl_query)
+                if live_results:
+                    return live_results
+                # Sin descarga en vivo, esta rama hacía `return` igual y se
+                # saltaba la inyección de marts que la rama no-INDEC sí
+                # recibe abajo. Un hint con "indec" terminaba viendo menos
+                # opciones que cualquier otro. Mismo trato: `tables` vacío
+                # deja correr la inyección, y el guard de después decide.
+                tables = []
             else:
                 # Planner specified tables but none matched via fnmatch.
                 # Try vector search as last resort before giving up.

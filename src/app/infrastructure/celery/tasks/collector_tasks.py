@@ -688,29 +688,45 @@ def _recycle_stuck_downloads(
 
         to_redispatch: list[str] = []
         for row in stale_rows:
-            table_exists = False
+            # El schema se resuelve, no se asume. Esto miraba sólo `public`
+            # mientras las tablas viven en `raw` desde el cutover de la capa
+            # raw: medido en staging el 2026-09-09, encontraba 0 de 85 y con
+            # los cuatro schemas encontraba 3. Cada fallo acá degrada a `error`
+            # y re-despacha una tabla que estaba perfectamente materializada.
+            # Misma familia que la regresión de los globs `cache_*` vs `raw.`.
+            table_schema = None
             if row.table_name:
-                table_exists = bool(
-                    conn.execute(
-                        text(
-                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                            "WHERE table_name = :tn AND table_schema = 'public')"
-                        ),
-                        {"tn": row.table_name},
-                    ).scalar()
-                )
+                table_schema = conn.execute(
+                    text(
+                        "SELECT table_schema FROM information_schema.tables "
+                        "WHERE table_name = :tn "
+                        "AND table_schema IN ('public', 'raw', 'staging', 'mart') "
+                        # Orden explícito para que un homónimo en dos schemas
+                        # resuelva siempre igual, y no según el plan del día.
+                        "ORDER BY array_position("
+                        "ARRAY['raw','public','staging','mart'], table_schema) "
+                        "LIMIT 1"
+                    ),
+                    {"tn": row.table_name},
+                ).scalar()
 
-            if table_exists:
+            if table_schema:
+                # Calificado: sin esto el COUNT depende del `search_path` de la
+                # conexión y el listado de columnas mezclaría homónimos.
                 row_count = (
-                    conn.execute(text(f'SELECT COUNT(*) FROM "{row.table_name}"')).scalar() or 0
-                )  # noqa: S608
+                    conn.execute(
+                        text(f'SELECT COUNT(*) FROM "{table_schema}"."{row.table_name}"')  # noqa: S608
+                    ).scalar()
+                    or 0
+                )
                 if row_count > 0:
                     col_result = conn.execute(
                         text(
                             "SELECT column_name FROM information_schema.columns "
-                            "WHERE table_name = :tn ORDER BY ordinal_position"
+                            "WHERE table_name = :tn AND table_schema = :ts "
+                            "ORDER BY ordinal_position"
                         ),
-                        {"tn": row.table_name},
+                        {"tn": row.table_name, "ts": table_schema},
                     ).fetchall()
                     columns = [r.column_name for r in col_result]
                     conn.execute(
@@ -1314,6 +1330,78 @@ def _unchanged_since_last_collect(
     if not present or rows_held <= 0:
         return None
     return str(row.table_name)
+
+
+def _settle_reserved_row(
+    engine, *, dataset_id: str, reserved_table: str | None, live_table: str
+) -> None:
+    """Cerrar la fila que la reserva dejó abierta cuando no hubo trabajo que hacer.
+
+    La llaman los dos caminos de salida temprana del colector: `unchanged`
+    (el sha256 coincide con la versión viva) y `already_appended` (las filas
+    de este dataset ya están en la tabla destino). Los dos reconocen que el
+    trabajo ya estaba hecho, y los dos dejaban la fila reservada colgada.
+
+    `_ensure_cached_entry` marca `status='downloading'` y `table_name` con el
+    nombre de la PRÓXIMA versión, porque corre antes de saber si el archivo
+    cambió. Cuando no cambió, esa versión no se crea nunca y la fila queda
+    apuntando a una tabla inexistente, sin error, en `downloading`.
+
+    `raw.cached_datasets.table_name` es UNIQUE (`uq_cached_datasets_table_name`),
+    de ahí que borrar y converger sean ramas excluyentes y no dos pasos: si la
+    fila sana ya ocupa el nombre vivo, la reservada sobra; si no lo ocupa nadie,
+    la reservada es la del recurso y sólo tiene el nombre equivocado.
+    """
+    with engine.begin() as conn:
+        if reserved_table and reserved_table != live_table:
+            borradas = conn.execute(
+                text(
+                    """
+                    DELETE FROM raw.cached_datasets
+                    WHERE dataset_id = CAST(:d AS uuid)
+                      AND table_name = :reservada
+                      AND status = 'downloading'
+                      AND EXISTS (
+                          SELECT 1 FROM raw.cached_datasets o
+                          WHERE o.dataset_id = CAST(:d AS uuid)
+                            AND o.table_name = :viva
+                      )
+                    """
+                ),
+                {"d": dataset_id, "reservada": reserved_table, "viva": live_table},
+            ).rowcount
+            if not borradas:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE raw.cached_datasets
+                        SET table_name = :viva,
+                            status = 'ready',
+                            error_message = NULL,
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:d AS uuid)
+                          AND table_name = :reservada
+                          AND status = 'downloading'
+                        """
+                    ),
+                    {"d": dataset_id, "reservada": reserved_table, "viva": live_table},
+                )
+        # La fila viva queda en `ready` con `updated_at` fresco. Mover la fecha
+        # era el propósito original de este bloque: sin ella el refresh
+        # reelegiría este recurso en cada pasada, que es lo contrario del ahorro.
+        conn.execute(
+            text(
+                """
+                UPDATE raw.cached_datasets
+                SET status = 'ready',
+                    error_message = NULL,
+                    updated_at = NOW()
+                WHERE dataset_id = CAST(:d AS uuid)
+                  AND table_name = :viva
+                """
+            ),
+            {"d": dataset_id, "viva": live_table},
+        )
 
 
 def _file_sha256(path: str) -> str | None:
@@ -5748,6 +5836,19 @@ def _route_table_for_schema(
                     text("UPDATE datasets SET is_cached = true WHERE id = CAST(:id AS uuid)"),
                     {"id": dataset_id},
                 )
+            # Marcaba `datasets.is_cached` y se iba, dejando la fila de
+            # `raw.cached_datasets` en el `downloading` que puso la reserva.
+            # Mismo defecto que tenía el camino `unchanged` (PR #59), y se
+            # vio igual: la tarea reportaba `succeeded` con
+            # `status: already_appended` mientras la fila seguía abierta,
+            # hasta que `_recycle_stuck_downloads` la agotaba a fuerza de
+            # reintentos y la mandaba a `permanently_failed`.
+            _settle_reserved_row(
+                engine,
+                dataset_id=dataset_id,
+                reserved_table=table_name,
+                live_table=target_table,
+            )
             return target_table, True, "already_appended"
     except Exception:
         logger.debug("Could not inspect source_dataset_id on %s", target_table, exc_info=True)
@@ -6087,18 +6188,51 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             _set_error_status(engine, dataset_id, "no_download_url", table_name=table_name)
             return {"error": "no_download_url"}
 
-        # Check retry_count — skip if permanently failed
+        # Check retry_count — skip if permanently failed.
+        #
+        # Se pregunta por LA FILA QUE SE VA A TRABAJAR, no por el dataset. Un
+        # dataset tiene una fila por `table_name` —una por versión del
+        # recurso— y el presupuesto de intentos es de cada una. La consulta
+        # no filtraba por nombre ni ordenaba, así que con más de una fila
+        # `fetchone()` devolvía cualquiera: el mismo dataset se procesaba o
+        # se saltaba según el plan del día. Medido en staging el 2026-09-09:
+        # 23 datasets con una fila agotada junto a otra sana, y en uno de
+        # ellos la agotada era la v10 mientras la sana era la v7 — o sea que
+        # ni siquiera alcanzaba con quedarse con la más nueva.
+        #
+        # Y al salir se cierra la fila. `_ensure_cached_entry` acaba de
+        # ponerla en `downloading` (revive incluso una `permanently_failed`,
+        # porque busca por nombre sin mirar el estado), así que un `return`
+        # sin más la dejaba abierta para siempre: tercer sitio con el mismo
+        # defecto, después de `unchanged` (#59) y `already_appended` (#62).
         with engine.begin() as conn:
             cd_row = conn.execute(
                 text(
-                    "SELECT retry_count FROM raw.cached_datasets WHERE dataset_id = CAST(:did AS uuid)"
+                    "SELECT retry_count FROM raw.cached_datasets "
+                    "WHERE dataset_id = CAST(:did AS uuid) AND table_name = :tn"
                 ),
-                {"did": dataset_id},
+                {"did": dataset_id, "tn": table_name},
             ).fetchone()
             if cd_row and cd_row.retry_count >= MAX_TOTAL_ATTEMPTS:
                 logger.info(
-                    f"Dataset {dataset_id} permanently failed "
+                    f"Dataset {dataset_id} table {table_name} permanently failed "
                     f"after {cd_row.retry_count} attempts, skipping"
+                )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE raw.cached_datasets
+                        SET status = 'permanently_failed',
+                            error_message = coalesce(
+                                error_message, 'Exhausted retries before download'
+                            ),
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:did AS uuid)
+                          AND table_name = :tn
+                          AND status = 'downloading'
+                        """
+                    ),
+                    {"did": dataset_id, "tn": table_name},
                 )
                 return {"error": "permanently_failed"}
 
@@ -6311,18 +6445,38 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 file_hash=source_file_hash,
             )
             if _unchanged_table:
-                # `updated_at` still moves. It records when we last *checked*,
-                # and without it the refresh would pick this resource again on
-                # every pass forever, which is the opposite of the saving.
+                # Antes acá sólo se movía `updated_at`, y eso dejaba la fila
+                # reservada colgada en `downloading` para siempre.
+                #
+                # La reserva (`_ensure_cached_entry`, más arriba) marca
+                # `status='downloading'` y `table_name` con el nombre de la
+                # PRÓXIMA versión — `..._v2` — porque se hace antes de saber si
+                # el archivo cambió. Cuando resulta que no cambió, esa versión
+                # no se crea nunca: la fila queda apuntando a una tabla
+                # inexistente, sin error, en `downloading`, y el dataset pasa a
+                # tener DOS filas (la sana en `ready` sobre `..._v1`, y ésta).
+                #
+                # Medido en staging el 2026-09-09: 194 filas así, la más vieja
+                # del 26-ago; 193 de sus hermanas estaban en `ready`. Y no se
+                # quedaban quietas: `_recycle_stuck_downloads` las veía stale a
+                # los 30 min, las degradaba y las re-despachaba, el colector
+                # volvía a decir "unchanged" y a refrescar `updated_at`. Un
+                # ciclo de 45 min que subía `retry_count` en cada vuelta hasta
+                # `permanently_failed` — quemando un dataset perfectamente
+                # descargado, y pagando una descarga HTTP cada vez.
+                #
+                # Así que la fila reservada se reconcilia en vez de abandonarse:
+                # si el duplicado ya tiene hermana sana, sobra y se borra; si no
+                # la tiene, converge al nombre vivo. La fila viva queda en
+                # `ready` con `updated_at` fresco, que era el propósito original
+                # (sin él el refresh reelegiría este recurso en cada pasada).
                 try:
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text(
-                                "UPDATE raw.cached_datasets SET updated_at = NOW() "
-                                "WHERE dataset_id = CAST(:d AS uuid)"
-                            ),
-                            {"d": dataset_id},
-                        )
+                    _settle_reserved_row(
+                        engine,
+                        dataset_id=dataset_id,
+                        reserved_table=table_name,
+                        live_table=_unchanged_table,
+                    )
                 except Exception:
                     logger.warning("could not touch %s", dataset_id, exc_info=True)
                 logger.info(
@@ -7228,7 +7382,17 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                     enrich_single_table,
                 )
 
-                enrich_single_table.delay(table_name)
+                # Calificado: `_enrich_table` busca las columnas filtrando
+                # por schema, así que con el nombre pelado no encuentra una
+                # tabla de `raw` y se va sin enriquecer nada. Esta rama
+                # (append) retorna antes de `_finalize_cached_dataset`, que
+                # es donde el camino normal despacha la forma calificada,
+                # así que acá hay que armarla.
+                enrich_single_table.delay(
+                    f"{destination.schema}.{table_name}"
+                    if destination.schema != "public"
+                    else table_name
+                )
                 parse_ms = int((time.monotonic() - parse_started_at) * 1000)
                 total_ms = int((time.monotonic() - started_at) * 1000)
                 logger.info(
@@ -7329,12 +7493,18 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
 
                 index_dataset_embedding.delay(dataset_id)
 
-                # Auto-enrich with semantic catalog metadata
-                from app.infrastructure.celery.tasks.catalog_enrichment_tasks import (
-                    enrich_single_table,
-                )
-
-                enrich_single_table.delay(table_name)
+                # El enriquecimiento lo despacha `_apply_cached_outcome`
+                # (vía `_finalize_cached_dataset`, unas líneas más abajo)
+                # con el nombre CALIFICADO y con debounce por `task_id`.
+                #
+                # Acá había un segundo despacho con el nombre pelado.
+                # `_enrich_table` filtra `information_schema` por schema, así
+                # que con el pelado no encontraba una tabla de `raw`, salía
+                # sin enriquecer y sin gastar Bedrock: ocupaba un worker de
+                # la cola `embedding` y dejaba un warning por cada landing.
+                # Que las 10 filas de `table_catalog` en staging estén todas
+                # calificadas es la prueba de que el único despacho que
+                # enriquece de verdad es el canónico.
 
             parse_ms = int((time.monotonic() - parse_started_at) * 1000)
             total_ms = int((time.monotonic() - started_at) * 1000)
@@ -8076,6 +8246,30 @@ def materialize_format_duplicate_aliases(self, title: str, portal: str):
         engine.dispose()
 
 
+# Guardas de `recover_stuck_tasks` paso 3: por debajo de estos valores un
+# lote de filas 'ready' sin tabla se trata como huérfanas reales; por encima,
+# como un problema de matcheo y no se toca nada.
+_ORPHAN_READY_ABS_GUARD = 500
+_ORPHAN_READY_PCT_GUARD = 0.10
+
+
+def _orphan_guard_tripped(candidatos: int, total_ready: int) -> bool:
+    """¿El lote de 'huérfanas' es tan grande que hay que desconfiar?
+
+    Marcar una fila como huérfana le pone `is_cached = false` y re-despacha
+    su descarga. Sobre decenas de miles de filas eso no es una limpieza, es
+    un incidente — y ya pasó una vez (`cleanup_raw_orphans`, 2026-08-03).
+
+    La pregunta que responde: ¿es más creíble que desaparecieran las tablas,
+    o que el nombre haya dejado de matchear? Un salto grande siempre es lo
+    segundo. Es la misma familia de bug que rompió el ruteo de la capa raw:
+    dos formas del mismo nombre.
+    """
+    if candidatos <= 0:
+        return False
+    return candidatos > max(_ORPHAN_READY_ABS_GUARD, total_ready * _ORPHAN_READY_PCT_GUARD)
+
+
 @celery_app.task(name="openarg.recover_stuck_tasks", bind=True, soft_time_limit=60, time_limit=120)
 def recover_stuck_tasks(self):
     """
@@ -8115,18 +8309,67 @@ def recover_stuck_tasks(self):
 
         # 3. Validate 'ready' datasets — check that the actual table still exists
         #    (catches orphaned records after DB restore, migration, or manual cleanup)
+        #
+        # Esto se hacía con una query a `information_schema` POR FILA. Medido en
+        # staging el 2026-09-09: 2,4 ms x 30.921 filas `ready` = 1,2 min, contra
+        # un `soft_time_limit` de 60 s. O sea que el paso 3 no podía terminar
+        # nunca; la tarea moría con SoftTimeLimitExceeded en medio de una query
+        # y el rollback sobre esa conexión rota tiraba un OperationalError
+        # ("another command is already in progress") que tapaba la causa.
+        # El mismo anti-join hecho de una sola vez tarda 0,48 s.
         orphaned_ready = 0
         with engine.begin() as conn:
-            ready_datasets = conn.execute(
+            candidatos = conn.execute(
                 text("""
-                    SELECT CAST(dataset_id AS text) AS dataset_id, table_name
-                    FROM raw.cached_datasets
-                    WHERE status = 'ready' AND table_name IS NOT NULL
+                    SELECT CAST(cd.dataset_id AS text) AS dataset_id, cd.table_name
+                    FROM raw.cached_datasets cd
+                    WHERE cd.status = 'ready' AND cd.table_name IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM information_schema.tables t
+                          WHERE t.table_name = cd.table_name
+                            AND t.table_schema IN ('public', 'raw', 'staging', 'mart')
+                      )
                 """),
             ).fetchall()
 
-            for row in ready_datasets:
-                table_exists = conn.execute(
+            # Guarda de radio de explosión. Marcar una fila como huérfana
+            # re-despacha su descarga y le pone `is_cached = false`: sobre
+            # decenas de miles de filas eso es un incidente, no una limpieza
+            # (cf. `cleanup_raw_orphans`, 2026-08-03). Un salto así no es
+            # "se perdieron las tablas", es que el nombre dejó de matchear
+            # — que es exactamente como se rompió el ruteo de la capa raw.
+            # Ante la duda no se toca nada y se avisa.
+            if candidatos:
+                total_ready = conn.execute(
+                    text(
+                        "SELECT count(*) FROM raw.cached_datasets "
+                        "WHERE status = 'ready' AND table_name IS NOT NULL"
+                    ),
+                ).scalar_one()
+                if _orphan_guard_tripped(len(candidatos), total_ready):
+                    logger.error(
+                        "recover_stuck_tasks: %d de %d filas 'ready' aparecen sin tabla "
+                        "(> guarda). No se toca ninguna: un salto así suele ser un "
+                        "problema de matcheo de nombres, no tablas perdidas.",
+                        len(candidatos),
+                        total_ready,
+                    )
+                    candidatos = []
+
+            for row in candidatos:
+                # Sprint 28: defend against false-positive caused by
+                # concurrent DROP/CREATE in `_to_sql_safe` recreate.
+                # Postgres `information_schema.tables` is not
+                # MVCC-snapshotted; a recreating worker briefly hides
+                # the table. Re-check after a short pause; if it
+                # reappeared, this row was a victim of the race.
+                #
+                # El re-chequeo sigue siendo por fila a propósito: ahora
+                # sólo lo pagan los candidatos, que en staging son 0.
+                import time as _t
+
+                _t.sleep(0.2)
+                table_exists_recheck = conn.execute(
                     text(
                         "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
                         "WHERE table_name = :tn "
@@ -8134,45 +8377,26 @@ def recover_stuck_tasks(self):
                     ),
                     {"tn": row.table_name},
                 ).scalar()
-
-                if not table_exists:
-                    # Sprint 28: defend against false-positive caused by
-                    # concurrent DROP/CREATE in `_to_sql_safe` recreate.
-                    # Postgres `information_schema.tables` is not
-                    # MVCC-snapshotted; a recreating worker briefly hides
-                    # the table. Re-check after a short pause; if it
-                    # reappeared, this row was a victim of the race.
-                    import time as _t
-
-                    _t.sleep(0.2)
-                    table_exists_recheck = conn.execute(
-                        text(
-                            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                            "WHERE table_name = :tn "
-                            "AND table_schema IN ('public', 'raw', 'staging', 'mart'))"
-                        ),
-                        {"tn": row.table_name},
-                    ).scalar()
-                    if table_exists_recheck:
-                        continue
-                    conn.execute(
-                        text("""
-                            UPDATE raw.cached_datasets
-                            SET status = 'error',
-                                retry_count = 0,
-                                error_message = 'Table missing: marked for re-download',
-                                updated_at = NOW()
-                            WHERE dataset_id = CAST(:did AS uuid)
-                              AND status = 'ready'
-                        """),
-                        {"did": row.dataset_id},
-                    )
-                    conn.execute(
-                        text("UPDATE datasets SET is_cached = false WHERE id = CAST(:did AS uuid)"),
-                        {"did": row.dataset_id},
-                    )
-                    collect_dataset.delay(row.dataset_id)
-                    orphaned_ready += 1
+                if table_exists_recheck:
+                    continue
+                conn.execute(
+                    text("""
+                        UPDATE raw.cached_datasets
+                        SET status = 'error',
+                            retry_count = 0,
+                            error_message = 'Table missing: marked for re-download',
+                            updated_at = NOW()
+                        WHERE dataset_id = CAST(:did AS uuid)
+                          AND status = 'ready'
+                    """),
+                    {"did": row.dataset_id},
+                )
+                conn.execute(
+                    text("UPDATE datasets SET is_cached = false WHERE id = CAST(:did AS uuid)"),
+                    {"did": row.dataset_id},
+                )
+                collect_dataset.delay(row.dataset_id)
+                orphaned_ready += 1
 
             if orphaned_ready:
                 logger.warning(

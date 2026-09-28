@@ -15,6 +15,7 @@ import pytest
 from app.application.pipeline.connectors.series import execute_series_step
 from app.domain.entities.connectors.data_result import DataResult, PlanStep
 from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 
 
 class _FakeSeriesConnector:
@@ -47,7 +48,13 @@ class _FakeSeriesConnector:
         )
         if not self._responses:
             return None
-        return self._responses.pop(0)
+        respuesta = self._responses.pop(0)
+        # Una respuesta puede ser una excepción: la API devuelve HTTP 400
+        # cuando el `collapse` pedido es más fino que la frecuencia de la
+        # serie, y el adapter lo convierte en ConnectorError.
+        if isinstance(respuesta, Exception):
+            raise respuesta
+        return respuesta
 
 
 def _data_result(ids: list[str]) -> DataResult:
@@ -134,3 +141,83 @@ async def test_raises_when_both_fetches_return_empty() -> None:
         await execute_series_step(step, connector)  # type: ignore[arg-type]
 
     assert len(connector.calls) == 2
+
+
+# -- collapse invalido (2026-09) ---------------------------------------
+#
+# "Tasa de desempleo en Argentina" no se contestaba. La serie
+# 45.2_ECTDT_0_T_33 esta viva y tiene 93 puntos trimestrales, pero el
+# planner pedia collapse="month" y la API responde HTTP 400: "Intervalo de
+# collapse invalido para la(s) serie(s) seleccionadas: month. Pruebe con un
+# intervalo mayor". El retry existente solo sacaba las fechas, y ademas solo
+# corria si el fetch DEVOLVIA vacio -- un 400 lanza, no devuelve.
+
+
+def _desempleo_step(**extra_params) -> PlanStep:
+    params = {
+        "query": "tasa de desempleo",
+        "seriesIds": ["45.2_ECTDT_0_T_33"],
+    }
+    params.update(extra_params)
+    return PlanStep(
+        id="step_1",
+        action="query_series",
+        params=params,
+        description="Obtener tasa de desempleo",
+    )
+
+
+@pytest.mark.asyncio
+async def test_un_collapse_invalido_reintenta_sin_collapse() -> None:
+    """El 400 por collapse no puede matar la consulta: se reintenta sin el."""
+    connector = _FakeSeriesConnector(
+        responses=[
+            ConnectorError(
+                error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+                details={"reason": "Intervalo de collapse invalido"},
+            ),
+            _data_result(["45.2_ECTDT_0_T_33"]),
+        ]
+    )
+
+    results = await execute_series_step(_desempleo_step(collapse="month"), connector)
+
+    assert len(results) == 1
+    assert connector.calls[0]["collapse"] == "month"
+    assert connector.calls[-1]["collapse"] is None
+
+
+@pytest.mark.asyncio
+async def test_un_fetch_vacio_con_collapse_reintenta_sin_collapse() -> None:
+    """Mismo caso pero cuando la API devuelve 200 con data vacia."""
+    connector = _FakeSeriesConnector(responses=[None, _data_result(["45.2_ECTDT_0_T_33"])])
+
+    results = await execute_series_step(_desempleo_step(collapse="month"), connector)
+
+    assert len(results) == 1
+    assert connector.calls[-1]["collapse"] is None
+
+
+@pytest.mark.asyncio
+async def test_sin_collapse_no_hay_reintento_extra() -> None:
+    """Que el reintento nuevo no dispare cuando no habia nada que degradar."""
+    connector = _FakeSeriesConnector(responses=[_data_result(["45.2_ECTDT_0_T_33"])])
+
+    await execute_series_step(_desempleo_step(), connector)
+
+    assert len(connector.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_si_todos_los_intentos_fallan_se_propaga_el_error() -> None:
+    """Degradar no puede tapar una serie que de verdad no responde."""
+    connector = _FakeSeriesConnector(
+        responses=[
+            ConnectorError(error_code=ErrorCode.CN_SERIES_UNAVAILABLE, details={}),
+            ConnectorError(error_code=ErrorCode.CN_SERIES_UNAVAILABLE, details={}),
+            ConnectorError(error_code=ErrorCode.CN_SERIES_UNAVAILABLE, details={}),
+        ]
+    )
+
+    with pytest.raises(ConnectorError):
+        await execute_series_step(_desempleo_step(collapse="month"), connector)

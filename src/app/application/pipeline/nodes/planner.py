@@ -208,6 +208,46 @@ async def _store_plan_cache(
     await loop.run_in_executor(None, _insert)
 
 
+async def evict_plan_cache(deps, question: str) -> None:
+    """Sacar del caché el plan de una pregunta que no devolvió datos.
+
+    El plan se guarda en `planner_node`, o sea antes de ejecutar los steps:
+    ahí todavía no se sabe si va a servir. Sin este desalojo, un plan que no
+    trae nada queda fijado por el TTL entero (7 días por defecto) y se le
+    re-sirve a toda pregunta que se le parezca por encima de 0.95 — que es
+    lo que hacía que "tasa de desempleo" fallara igual una y otra vez.
+
+    Best-effort: si falla, la consulta ya se contestó igual.
+    """
+    if deps.sandbox is None or not question or not _plan_cache_enabled():
+        return
+
+    import asyncio
+    import hashlib
+
+    from sqlalchemy import text
+
+    qhash = hashlib.sha256(question.encode("utf-8")).hexdigest()
+
+    def _delete() -> None:
+        try:
+            engine = deps.sandbox._get_engine()
+            with engine.begin() as conn:
+                res = conn.execute(
+                    text("DELETE FROM query_plan_cache WHERE question_hash = :h"),
+                    {"h": qhash},
+                )
+            if res.rowcount:
+                logger.info(
+                    "plan_cache: desalojado el plan de %r por no devolver datos",
+                    question[:80],
+                )
+        except Exception:
+            logger.debug("plan_cache eviction failed", exc_info=True)
+
+    await asyncio.get_running_loop().run_in_executor(None, _delete)
+
+
 def _plan_from_cached_dict(plan_dict: dict):
     """Rehydrate an `ExecutionPlan` from a cached JSON dict.
 
