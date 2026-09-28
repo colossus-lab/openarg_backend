@@ -144,6 +144,49 @@ _EMPTY_TABLES_SQL = text(
 )
 
 
+# Un recurso que el portal borró no es un error nuestro, y por eso no aparece
+# en ningún tablero de fallas: el colector lo reintenta, recibe 404, lo anota
+# y sigue. Medido en prod el 2026-09-28: **300 recursos de `datos_gob_ar`**
+# y 74 de `neuquen_legislatura` ya no existen en el origen, y eso sólo se veía
+# consultando la base a mano.
+#
+# Se agrupa por portal a propósito. Alertar recurso por recurso serían 409
+# mensajes que nadie lee; "datos.gob.ar borró 300 recursos" es una frase sobre
+# la que alguien puede actuar — y en ese caso concreto apunta a la migración a
+# CKAN 2.11.5 que regeneró los identificadores.
+_VANISHED_BY_PORTAL_SQL = text(
+    """
+    SELECT d.portal AS portal,
+           count(*) AS recursos,
+           max(cd.updated_at) AS ultimo,
+           min(left(coalesce(d.title, ''), 60)) AS ejemplo
+    FROM raw.cached_datasets cd
+    JOIN datasets d ON d.id = cd.dataset_id
+    WHERE cd.error_category = 'download_http_error'
+      AND (cd.error_message ILIKE '%404%' OR cd.error_message ILIKE '%410 gone%')
+      AND cd.updated_at > NOW() - (:dias * INTERVAL '1 day')
+    GROUP BY d.portal
+    HAVING count(*) >= :minimo
+    ORDER BY count(*) DESC
+    """
+)
+
+
+def _escala(n: int) -> int:
+    """Orden de magnitud del recuento, para keyear la alerta.
+
+    El `key` de un `Alert` es la identidad del problema, no la del avistamiento.
+    Con el portal solo, un portal que borra recursos avisa una vez y nunca más,
+    aunque el mes siguiente borre mil. Con el recuento exacto, avisa cada vez
+    que aparece uno nuevo. La escala es el punto medio: se vuelve a hablar
+    cuando el problema cambia de tamaño, no cuando cambia de número.
+    """
+    escala = 1
+    while escala * 10 <= max(n, 1):
+        escala *= 10
+    return (n // escala) * escala
+
+
 @celery_app.task(
     name="openarg.alert_on_quality_signals",
     bind=True,
@@ -186,6 +229,23 @@ def alert_on_quality_signals(self) -> dict[str, Any]:
                         detail=(
                             f"{int(row_t.claimed_rows or 0):,} filas declaradas que no "
                             f"existen. Ej: {row_t.sample}"
+                        ),
+                    )
+                )
+            for row_v in conn.execute(
+                _VANISHED_BY_PORTAL_SQL, {"dias": 30, "minimo": 10}
+            ).fetchall():
+                n = int(row_v.recursos)
+                alerts.append(
+                    Alert(
+                        kind="portal_vanished_resources",
+                        # Portal + escala: se vuelve a avisar cuando el problema
+                        # crece de orden, no cada vez que aparece uno más.
+                        key=f"{row_v.portal}:{_escala(n)}",
+                        title=f"{row_v.portal}: {n} recursos ya no existen en el origen",
+                        detail=(
+                            f"Responden 404/410 al reintentar la descarga. "
+                            f"Último visto {row_v.ultimo:%Y-%m-%d}. Ej: {row_v.ejemplo}"
                         ),
                     )
                 )
