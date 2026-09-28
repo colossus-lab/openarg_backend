@@ -15,7 +15,6 @@ import os
 import random
 import re
 import shutil
-import stat
 import tempfile
 import time
 from collections import Counter
@@ -8941,6 +8940,79 @@ def retry_failed_shapefiles(self):
         engine.dispose()
 
 
+def _path_size_bytes(path: str) -> int:
+    """Tamaño recursivo, best-effort, para poder informar cuánto se liberó.
+
+    Un directorio reporta el tamaño de su *entrada*, no el de su contenido:
+    sin recorrerlo, una limpieza que borra 4 GB de restos de extracción
+    informa unos pocos KiB, y la métrica que existe para seguir el leak
+    dice que no hay leak.
+    """
+    total = 0
+    if os.path.islink(path):
+        return 0
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+    for raiz, _dirs, archivos in os.walk(path, onerror=lambda _e: None):
+        for nombre in archivos:
+            try:
+                total += os.path.getsize(os.path.join(raiz, nombre))
+            except OSError:
+                continue
+    return total
+
+
+def _remove_stale_tmp_path(path: str, *, base: str) -> tuple[bool, int]:
+    """Borrar un resto de /tmp, sólo si sigue resolviendo dentro de `base`.
+
+    La guarda de contención es el motivo de que esta función exista: un
+    resto dentro del temp dir puede resolver a cualquier parte del disco, y
+    lo que se borra acá corre como root dentro del contenedor. Se compara
+    por `realpath`, así que un path se evalúa por su destino real.
+
+    Los directorios se borran recursivamente porque los restos de una
+    extracción interrumpida no están vacíos.
+    """
+    # Los symlinks se resuelven ANTES de la guarda, no después. `realpath`
+    # sigue el enlace hasta su destino: si ese destino cae afuera, la guarda
+    # rechaza el path entero y el enlace se queda en /tmp para siempre —
+    # justo el leak que esta tarea existe para evitar. Borrarlo es seguro
+    # precisamente porque `unlink` NO sigue el enlace: se va el enlace y
+    # nunca lo que hay del otro lado, que es la distinción que la guarda
+    # está para preservar.
+    if os.path.islink(path):
+        try:
+            os.unlink(path)
+            return True, 0
+        except OSError:
+            logger.debug("No se pudo borrar el enlace %s", path, exc_info=True)
+            return False, 0
+
+    try:
+        real_base = os.path.realpath(base)
+        real_path = os.path.realpath(path)
+        if os.path.commonpath([real_base, real_path]) != real_base:
+            return False, 0
+    except Exception:
+        return False, 0
+
+    size_bytes = _path_size_bytes(path)
+    try:
+        if os.path.isfile(path):
+            os.unlink(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            return False, 0
+        return True, size_bytes
+    except OSError:
+        logger.debug("No se pudo borrar %s", path, exc_info=True)
+        return False, 0
+
+
 @celery_app.task(
     name="openarg.cleanup_orphan_temp_files",
     soft_time_limit=120,
@@ -8972,25 +9044,21 @@ def cleanup_orphan_temp_files(max_age_seconds: int = 3600) -> dict:
     bytes_freed = 0
     errors = 0
 
-    patterns = ["tmp*"]
-    for pat in patterns:
-        for path in glob.glob(os.path.join(temp_dir, pat)):
-            try:
-                st = os.lstat(path)
-            except OSError:
-                continue
-            if st.st_mtime > threshold:
-                continue
-            try:
-                size = st.st_size if not stat.S_ISDIR(st.st_mode) else 0
-                if stat.S_ISDIR(st.st_mode):
-                    shutil.rmtree(path, ignore_errors=True)
-                else:
-                    os.unlink(path)
-                reaped += 1
-                bytes_freed += size
-            except OSError:
-                errors += 1
+    skipped = 0
+    for path in glob.glob(os.path.join(temp_dir, "tmp*")):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if st.st_mtime > threshold:
+            skipped += 1
+            continue
+        borrado, liberado = _remove_stale_tmp_path(path, base=temp_dir)
+        if borrado:
+            reaped += 1
+            bytes_freed += liberado
+        else:
+            errors += 1
 
     if reaped or errors:
         logger.info(
@@ -9004,6 +9072,7 @@ def cleanup_orphan_temp_files(max_age_seconds: int = 3600) -> dict:
         "reaped": reaped,
         "bytes_freed": bytes_freed,
         "errors": errors,
+        "skipped": skipped,
         "temp_dir": temp_dir,
     }
 
