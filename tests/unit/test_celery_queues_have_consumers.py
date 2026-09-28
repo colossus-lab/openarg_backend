@@ -77,24 +77,41 @@ def _colas_consumidas() -> set[str]:
     return colas
 
 
-def _colas_despachadas() -> dict[str, str]:
-    """Tarea → cola efectiva.
+def _colas_despachadas() -> dict[str, set[str]]:
+    """Tarea → las colas a las que se la despacha.
 
     El orden importa y es el de Celery: `options` de una entrada de beat
     **pisa** `task_routes`. Ignorarlo fue justamente lo que casi deja el
     arreglo a medias — `recover_stuck_tasks` estaba en `default` en los
     dos lados, y corregir sólo el ruteo no habría cambiado nada.
+
+    Y el valor es un conjunto, no una cola: **una misma tarea puede estar
+    agendada en varias**. Esto devolvía un `dict[str, str]` indexado por
+    nombre de tarea, así que las entradas se pisaban entre sí y sólo
+    sobrevivía la última. Lo destapó el 2026-09-22 el MCP de ops, que
+    copió esta misma precedencia: con `cleanup_orphan_temp_files`
+    agendada en las tres colas de colector (PR #61), `collector-heavy`
+    desaparecía de las colas despachadas. Acá no llegó a tapar nada
+    porque `test_la_limpieza_de_tmp_cubre_las_tres_colas_de_colector` la
+    mira aparte, pero el agujero era real: una cola sin consumidor
+    quedaba invisible si su tarea también estaba agendada en otra.
     """
     from app.infrastructure.celery.app import celery_app
 
-    destino: dict[str, str] = {}
+    destino: dict[str, set[str]] = {}
     for tarea, ruta in (celery_app.conf.task_routes or {}).items():
         if isinstance(ruta, dict) and ruta.get("queue"):
-            destino[tarea] = ruta["queue"]
+            destino[tarea] = {ruta["queue"]}
+
+    # Las entradas de beat se juntan primero entre sí y recién después pisan
+    # la ruta: `options` le gana a `task_routes`, pero no a otra entrada de
+    # beat de la misma tarea, porque cada una es un despacho real.
+    de_beat: dict[str, set[str]] = {}
     for entrada in (celery_app.conf.beat_schedule or {}).values():
         cola = (entrada.get("options") or {}).get("queue")
         if cola:
-            destino[entrada["task"]] = cola
+            de_beat.setdefault(entrada["task"], set()).add(cola)
+    destino.update(de_beat)
     return destino
 
 
@@ -125,7 +142,8 @@ def test_toda_cola_despachada_tiene_consumidor() -> None:
 
     huerfanas = {
         f"{tarea} -> {cola}"
-        for tarea, cola in _colas_despachadas().items()
+        for tarea, colas in _colas_despachadas().items()
+        for cola in colas
         if cola not in consumidas
     }
     baseline = _baseline()
@@ -152,9 +170,9 @@ def test_recover_stuck_tasks_corre_en_una_cola_viva() -> None:
     que llega a un worker.
     """
     destino = _colas_despachadas()["openarg.recover_stuck_tasks"]
-    assert destino in _colas_consumidas(), (
-        f"`recover_stuck_tasks` despacha a `{destino}`, que nadie consume: "
-        "las descargas trabadas se quedan trabadas"
+    assert destino <= _colas_consumidas(), (
+        f"`recover_stuck_tasks` despacha a {sorted(destino)}, y alguna no la "
+        "consume nadie: las descargas trabadas se quedan trabadas"
     )
 
 
@@ -189,3 +207,38 @@ def test_la_limpieza_de_tmp_cubre_las_tres_colas_de_colector() -> None:
     }
     assert colas == {"collector", "collector-heavy", "collector-heavy-retry"}, colas
     assert colas <= _colas_consumidas()
+
+
+def test_una_tarea_agendada_en_varias_colas_las_reporta_todas() -> None:
+    """El agujero que tenía este archivo, escrito como regla.
+
+    `_colas_despachadas` devolvía `dict[str, str]` indexado por nombre de
+    tarea, así que dos entradas de beat de la misma tarea se pisaban y sólo
+    sobrevivía la última. Con `cleanup_orphan_temp_files` agendada en las
+    tres colas de colector (PR #61), `collector-heavy` desaparecía del
+    conjunto de colas despachadas — y una cola que no figura no se puede
+    detectar como huérfana.
+
+    Lo destapó el MCP de ops (#64), que copió esta misma precedencia y
+    devolvió 9 colas donde había 10.
+    """
+    despachadas = _colas_despachadas()
+    colas_tmp = despachadas["openarg.cleanup_orphan_temp_files"]
+
+    assert len(colas_tmp) == 3, f"se perdieron entradas de beat: {sorted(colas_tmp)}"
+    assert "collector-heavy" in colas_tmp
+
+
+def test_el_universo_de_colas_despachadas_no_pierde_ninguna() -> None:
+    """Contado sobre el conjunto entero, no sobre una tarea elegida a dedo."""
+    from app.infrastructure.celery.app import celery_app
+
+    de_beat = {
+        (e["task"], (e.get("options") or {}).get("queue"))
+        for e in (celery_app.conf.beat_schedule or {}).values()
+        if (e.get("options") or {}).get("queue")
+    }
+    todas = {c for colas in _colas_despachadas().values() for c in colas}
+
+    faltantes = sorted({cola for _, cola in de_beat} - todas)
+    assert not faltantes, f"colas agendadas que no figuran como despachadas: {faltantes}"
