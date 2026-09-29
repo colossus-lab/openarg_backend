@@ -28,6 +28,20 @@ class CachedTableInfo:
 
 
 @dataclass
+class TableSource:
+    """El dataset publicado del que sale una tabla del sandbox.
+
+    Es lo que se le muestra al usuario como fuente: sin esto, una respuesta
+    armada con NL2SQL citaba "Consulta SQL: <la pregunta>" en vez del dataset
+    oficial, y no había forma de ir a verificar el dato.
+    """
+
+    title: str
+    portal: str
+    url: str
+
+
+@dataclass
 class SandboxResult:
     columns: list[str]
     rows: list[dict]
@@ -50,3 +64,12 @@ class ISQLSandbox(ABC):
     ) -> dict[str, list[tuple[str, str]]]:
         """Return {table_name: [(column_name, data_type), ...]} for given tables."""
         ...
+
+    async def get_table_sources(self, table_names: list[str]) -> dict[str, TableSource]:
+        """Return {bare_table_name: TableSource} for the tables that map to a dataset.
+
+        No es abstracto a propósito: una implementación que no sepa resolverlo
+        (un fake de test, un sandbox sin catálogo) devuelve vacío y el llamador
+        se queda con la etiqueta genérica, como antes.
+        """
+        return {}

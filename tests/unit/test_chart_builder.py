@@ -163,6 +163,14 @@ class TestAdoptLlmTitles:
         llm = [{"title": "Otro", "xKey": "fecha"}]
         assert adopt_llm_titles(det, llm)[0]["title"] == "IPC (porcentaje)"
 
+    def test_nl2sql_dataset_title_takes_the_models_title(self):
+        # Con la fuente real, el resultado NL2SQL se llama como el dataset
+        # entero; el modelo describe el recorte ("dic 2025 – jun 2026").
+        det = [{"title": "Principales tasas de interés", "xKey": "indice_tiempo"}]
+        llm = [{"title": "Tasas del BCRA (dic 2025 – jun 2026)", "xKey": "indice_tiempo"}]
+        out = adopt_llm_titles(det, llm, frozenset({"Principales tasas de interés"}))
+        assert out[0]["title"] == "Tasas del BCRA (dic 2025 – jun 2026)"
+
     def test_different_axis_is_not_mixed(self):
         det = [{"title": "Consulta SQL: x", "xKey": "indice_tiempo"}]
         llm = [{"title": "Por provincia", "xKey": "provincia"}]

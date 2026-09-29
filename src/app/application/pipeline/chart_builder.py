@@ -177,21 +177,27 @@ _GENERIC_TITLE_PREFIX = "Consulta SQL:"
 
 
 def adopt_llm_titles(
-    det_charts: list[dict[str, Any]], llm_charts: list[dict[str, Any]]
+    det_charts: list[dict[str, Any]],
+    llm_charts: list[dict[str, Any]],
+    query_titles: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Ponerle a un gráfico determinístico el título que propuso el modelo.
 
     Los datos del gráfico determinístico son los buenos (todas las filas), pero
-    en una consulta NL2SQL su título es "Consulta SQL: <la pregunta tal cual>".
-    Si el modelo armó un gráfico sobre el mismo eje, su título describe mejor lo
-    que se ve. Sólo se toma el título: los datos no se tocan.
+    en una consulta NL2SQL su título es el del resultado: "Consulta SQL: <la
+    pregunta>", o el nombre del dataset entero ("Principales tasas de
+    interés"), que no dice qué recorte se consultó. Si el modelo armó un gráfico
+    sobre el mismo eje, su título describe mejor lo que se ve ("… dic 2025 – jun
+    2026"). `query_titles` son los títulos de resultados NL2SQL. Sólo se toma
+    el título: los datos no se tocan.
     """
     llm_titles = {
         c.get("xKey"): c.get("title") for c in llm_charts if c.get("xKey") and c.get("title")
     }
     for chart in det_charts:
         title = str(chart.get("title", ""))
-        if title.startswith(_GENERIC_TITLE_PREFIX) and chart.get("xKey") in llm_titles:
+        adoptable = title.startswith(_GENERIC_TITLE_PREFIX) or title in query_titles
+        if adoptable and chart.get("xKey") in llm_titles:
             chart["title"] = llm_titles[chart["xKey"]]
     return det_charts
 
