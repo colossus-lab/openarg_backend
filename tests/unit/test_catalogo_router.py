@@ -44,8 +44,25 @@ class FakeSandbox:
         self.sql: list[str] = []
         self.error: str | None = None
 
+    tables = [
+        CachedTableInfo(table_name=_T, dataset_id="ds-1", row_count=8569, columns=[]),
+        # Versión vieja del mismo dataset: 0 filas, no se tiene que ofrecer.
+        CachedTableInfo(
+            table_name="raw.tasas_vieja__v1", dataset_id="ds-1b", row_count=0, columns=[]
+        ),
+    ]
+    find_calls: list[dict] = []
+
     async def list_cached_tables(self) -> list[CachedTableInfo]:
-        return [CachedTableInfo(table_name=_T, dataset_id="ds-1", row_count=8569, columns=[])]
+        raise AssertionError("el modo datos no tiene que listar las ~32.000 tablas")
+
+    async def find_tables(self, *, dataset_ids=None, table_names=None) -> list[CachedTableInfo]:
+        self.find_calls.append({"dataset_ids": dataset_ids, "table_names": table_names})
+        ids = set(dataset_ids or [])
+        names = {n.split(".")[-1] for n in table_names or []}
+        return [
+            t for t in self.tables if t.dataset_id in ids or t.table_name.split(".")[-1] in names
+        ]
 
     async def get_column_types(self, names: list[str]) -> dict[str, list[tuple[str, str]]]:
         cols = [
@@ -110,7 +127,7 @@ async def client(key: tuple[str, ApiKey], sandbox: FakeSandbox, cache: FakeCache
     repo = AsyncMock(spec=IApiKeyRepository)
     repo.get_by_key_hash.return_value = key[1]
     search = AsyncMock(spec=IVectorSearch)
-    search.search_datasets_hybrid.return_value = [
+    search.search_datasets.return_value = [
         SearchResult(
             dataset_id="ds-1",
             title="Principales tasas de interés",
@@ -119,6 +136,16 @@ async def client(key: tuple[str, ApiKey], sandbox: FakeSandbox, cache: FakeCache
             download_url=_CSV,
             columns="",
             score=0.9,
+        ),
+        # El mismo dataset duplicado en el catálogo (otro ID, mismo título y URL).
+        SearchResult(
+            dataset_id="ds-1b",
+            title="Principales tasas de interés",
+            description="Tasas diarias del BCRA",
+            portal="datos_gob_ar",
+            download_url=_CSV,
+            columns="",
+            score=0.89,
         ),
         SearchResult(
             dataset_id="ds-sin-tabla",
@@ -173,9 +200,11 @@ async def test_without_key_is_401(client: AsyncClient) -> None:
 async def test_buscar_lists_datasets_with_their_queryable_tables(client: AsyncClient) -> None:
     r = await client.get("/catalogo/buscar", params={"q": "tasas de interés"})
     assert r.status_code == 200, r.text
+    # El duplicado se agrupa: dos resultados, no tres.
     first, second = r.json()["resultados"]
     assert first["titulo"] == "Principales tasas de interés"
     assert first["url"] == _CSV
+    # La tabla de 0 filas (versión vieja) no se ofrece.
     assert first["tablas"] == [{"tabla": _T, "filas": 8569}]
     assert second["tablas"] == []  # está en el catálogo pero no tiene tabla consultable
 
@@ -254,3 +283,15 @@ async def test_catalog_quota_is_enforced(
     assert not any(
         ":day:" in k and "catalog" not in k for k in cache.counters
     )  # no toca las 10 preguntas
+
+
+async def test_lookups_are_targeted_not_a_full_listing(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    sandbox.find_calls.clear()
+    await client.get("/catalogo/buscar", params={"q": "tasas"})
+    await client.get("/catalogo/tabla", params={"nombre": _T})
+    await client.post("/catalogo/datos", json={"tabla": _T})
+    assert sandbox.find_calls[0]["dataset_ids"] == ["ds-1", "ds-1b", "ds-sin-tabla"]
+    assert sandbox.find_calls[1]["table_names"] == [_T]
+    assert sandbox.find_calls[2]["table_names"] == [_T]
