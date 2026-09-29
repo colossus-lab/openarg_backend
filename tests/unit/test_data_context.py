@@ -115,8 +115,68 @@ class TestBuildDataContextTruncation:
         assert "contexto recortado" not in ctx
 
 
+class TestSeriesSampling:
+    """Una serie de tiempo larga se muestrea parejo, no por las puntas.
+
+    Caso real (29-sep): 200 días del BCRA, el modelo recibía 1-25 de diciembre y
+    25-may a 18-jun, y narró un "salto" en los meses que nunca vio.
+    """
+
+    @staticmethod
+    def _series(days: int = 200) -> list[dict]:
+        from datetime import date, timedelta
+
+        start = date(2025, 12, 1)
+        return [
+            {"indice_tiempo": (start + timedelta(days=i)).isoformat(), "valor": i}
+            for i in range(days)
+        ]
+
+    @staticmethod
+    def _date(record: dict) -> str:
+        # El context builder renombra las columnas para el modelo; la fecha es la primera.
+        return next(iter(record.values()))
+
+    @staticmethod
+    def _sent(ctx: str) -> list[dict]:
+        body = ctx.split("registros):\n", 1)[1]
+        return json.JSONDecoder().raw_decode(body)[0]
+
+    def test_points_cover_the_whole_period_without_big_holes(self):
+        from datetime import date
+
+        ctx = _build_data_context([_make_result(self._series())])
+        sent = self._sent(ctx)
+        assert len(sent) == 50
+        dates = [date.fromisoformat(self._date(r)) for r in sent]
+        assert dates[0] == date(2025, 12, 1) and dates[-1] == date(2026, 6, 18)
+        gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
+        assert max(gaps) <= 5, f"hueco de {max(gaps)} días en lo que ve el modelo"
+
+    def test_the_model_is_told_it_sees_a_sample(self):
+        ctx = _build_data_context([_make_result(self._series())])
+        assert "se muestran 50 de 200 filas" in ctx
+        assert "intervalos parejos" in ctx
+
+    def test_descending_series_keeps_both_ends(self):
+        ctx = _build_data_context([_make_result(list(reversed(self._series())))])
+        sent = self._sent(ctx)
+        assert self._date(sent[0]) == "2026-06-18"
+        assert self._date(sent[-1]) == "2025-12-01"
+
+    def test_short_series_goes_whole_and_without_note(self):
+        ctx = _build_data_context([_make_result(self._series(50))])
+        assert len(self._sent(ctx)) == 50
+        assert "se muestran" not in ctx
+
+
 class TestBuildDataContextRecordSlicing:
-    """When >50 records, first 25 + last 25 are sent."""
+    """Tablas que no son series: >50 filas → primeras 25 + últimas 25, avisado."""
+
+    def test_non_series_says_which_rows_are_missing(self):
+        records = [{"idx": i, "val": i * 10} for i in range(100)]
+        ctx = _build_data_context([_make_result(records)])
+        assert "primeras 25 y las últimas 25 de 100 filas" in ctx
 
     def test_more_than_50_records_sliced(self):
         records = [{"idx": i, "val": i * 10} for i in range(100)]

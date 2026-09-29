@@ -9,9 +9,56 @@ import logging
 import time
 from typing import Any
 
+from app.application.pipeline.chart_builder import is_date_column
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
+
+# Filas de un resultado que se le mandan al modelo, como máximo.
+_MAX_RECORDS_TO_SEND = 50
+
+
+def _sample_records(
+    records: list[dict[str, Any]], columns: tuple[str, ...]
+) -> tuple[list[dict[str, Any]], bool]:
+    """Elige qué filas ve el modelo cuando hay más de `_MAX_RECORDS_TO_SEND`.
+
+    Devuelve `(filas, es_serie)`.
+
+    - **Serie de tiempo** (hay una columna de fecha): puntos repartidos de forma
+      pareja en todo el rango, incluyendo el primero y el último. Antes eran las
+      primeras 25 y las últimas 25: en una serie diaria de 200 días el modelo
+      veía diciembre pegado a junio, graficaba esos 50 puntos como si fueran
+      continuos y narraba un "salto" en los meses que nunca recibió.
+    - **Cualquier otra tabla**: primeras 25 + últimas 25, como antes. En un
+      ranking (ORDER BY monto DESC) las primeras filas son las que importan.
+    """
+    total = len(records)
+    if total <= _MAX_RECORDS_TO_SEND:
+        return records, False
+    if any(is_date_column(c) for c in columns):
+        last = total - 1
+        steps = _MAX_RECORDS_TO_SEND - 1
+        indices = sorted({round(i * last / steps) for i in range(_MAX_RECORDS_TO_SEND)})
+        return [records[i] for i in indices], True
+    half = _MAX_RECORDS_TO_SEND // 2
+    return records[:half] + records[-half:], False
+
+
+def _omitted_rows_note(sent: int, total: int, is_series: bool) -> str:
+    if is_series:
+        return (
+            f"⚠ MUESTRA DE LA SERIE: se muestran {sent} de {total} filas, tomadas a "
+            "intervalos parejos en todo el período. Entre dos puntos consecutivos hay "
+            "filas que no ves: describí la tendencia general, no afirmes saltos ni "
+            "valores puntuales entre esos puntos."
+        )
+    return (
+        f"⚠ FILAS OMITIDAS: se muestran las primeras {sent // 2} y las últimas "
+        f"{sent - sent // 2} de {total} filas; las del medio no están. No saques "
+        "conclusiones sobre las filas que no ves."
+    )
+
 
 _NO_RESULTS_CONTEXT = (
     "No se obtuvieron resultados directos en esta búsqueda. "
@@ -327,10 +374,7 @@ def build_data_context(results: list[DataResult]) -> str:
             display_columns_text = _display_columns_text(columns)
             total_rows = len(valid_records)
 
-            if total_rows > 50:
-                records_to_send = valid_records[:25] + valid_records[-25:]
-            else:
-                records_to_send = valid_records
+            records_to_send, sampled_series = _sample_records(valid_records, columns)
 
             # Pre-compute key mapping once, reuse for all records
             if records_to_send:
@@ -358,6 +402,8 @@ def build_data_context(results: list[DataResult]) -> str:
             if metadata.get("value_substitution"):
                 lines.append(_value_substitution_note(metadata["value_substitution"]))
             lines.append(f"Columnas: {display_columns_text}")
+            if len(records_to_send) < total_rows:
+                lines.append(_omitted_rows_note(len(records_to_send), total_rows, sampled_series))
             if description:
                 lines.append(f"Descripción: {description}")
             if metadata.get("table_descriptions"):

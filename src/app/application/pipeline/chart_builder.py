@@ -12,6 +12,19 @@ from app.domain.entities.connectors.data_result import DataResult
 logger = logging.getLogger(__name__)
 
 
+# Columnas de fecha que ordenan una serie y se grafican como línea. `indice_tiempo`
+# es el nombre estándar de TODAS las series de datos.gob.ar (Series de Tiempo);
+# sin él, el gráfico determinístico no se armaba y quedaba el que dibuja el
+# modelo, que sólo ve una muestra de las filas (ver context_builder).
+DATE_COLUMNS = frozenset({"fecha", "indice_tiempo", "periodo"})
+
+
+def is_date_column(name: str) -> bool:
+    """True si la columna es una fecha que ordena una serie."""
+    lowered = name.lower()
+    return lowered in DATE_COLUMNS or "date" in lowered
+
+
 def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda row: str(row.get(x_key, "")))
 
@@ -57,7 +70,7 @@ def build_deterministic_charts(
         time_key = None
         for k in keys:
             kl = k.lower()
-            if k == "fecha" or "date" in kl or kl in ("año", "year", "mes"):
+            if is_date_column(k) or kl in ("año", "year", "mes"):
                 time_key = k
                 break
 
@@ -129,7 +142,9 @@ def build_deterministic_charts(
         if len(clean) < 2:
             continue
 
-        is_time = result.format == "time_series" or time_key == "fecha"
+        is_time = result.format == "time_series" or (
+            time_key is not None and is_date_column(time_key)
+        )
         if is_time:
             clean = _sort_chart_rows(clean, x_key)
         if _looks_like_mixed_quote_snapshot(result, clean, x_key, numeric_keys):
@@ -156,6 +171,29 @@ def build_deterministic_charts(
             }
         )
     return charts
+
+
+_GENERIC_TITLE_PREFIX = "Consulta SQL:"
+
+
+def adopt_llm_titles(
+    det_charts: list[dict[str, Any]], llm_charts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Ponerle a un gráfico determinístico el título que propuso el modelo.
+
+    Los datos del gráfico determinístico son los buenos (todas las filas), pero
+    en una consulta NL2SQL su título es "Consulta SQL: <la pregunta tal cual>".
+    Si el modelo armó un gráfico sobre el mismo eje, su título describe mejor lo
+    que se ve. Sólo se toma el título: los datos no se tocan.
+    """
+    llm_titles = {
+        c.get("xKey"): c.get("title") for c in llm_charts if c.get("xKey") and c.get("title")
+    }
+    for chart in det_charts:
+        title = str(chart.get("title", ""))
+        if title.startswith(_GENERIC_TITLE_PREFIX) and chart.get("xKey") in llm_titles:
+            chart["title"] = llm_titles[chart["xKey"]]
+    return det_charts
 
 
 def extract_llm_charts(text: str) -> list[dict[str, Any]]:
