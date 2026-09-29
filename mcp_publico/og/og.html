@@ -50,7 +50,10 @@
   .eyebrow { font: 600 14px/1 "Inter"; letter-spacing: .18em; text-transform: uppercase; color: var(--ink-2); display: flex; align-items: center; gap: 12px; }
   .eyebrow::before { content: ""; width: 34px; height: 1px; background: var(--ink-2); }
   .eyebrow .n { font: 400 14px/1 "JetBrains Mono"; letter-spacing: .04em; color: var(--sol); }
-  h1 { font: 700 70px/.98 "Familjen Grotesk"; letter-spacing: -.04em; margin-top: 22px; }
+  h1 { font: 700 64px/.98 "Familjen Grotesk"; letter-spacing: -.04em; margin-top: 22px; }
+  .src { margin-top: 26px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .src span { font: 600 14px/1 "Inter"; letter-spacing: .12em; text-transform: uppercase; color: var(--ink); border: 1px solid var(--rule-strong); padding: 8px 11px; }
+  .src span.k { color: var(--paper); background: var(--celeste-2); border-color: var(--celeste-2); }
   h1 em { display: block; font-style: italic; font-weight: 600; color: var(--sol); }
 
   .term { border: 1px solid var(--rule-strong); background: rgba(6,9,15,.78); }
@@ -82,6 +85,7 @@
     <div>
       <p class="eyebrow"><span class="n">N.º 02</span> Model Context Protocol</p>
       <h1>Los datos públicos de Argentina, <em>en tu asistente de IA.</em></h1>
+      <div class="src"><span class="k">INDEC</span><span>BCRA</span><span>Ministerios</span><span>Provincias</span><span>Congreso</span></div>
     </div>
     <div class="term">
       <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span>claude code</span></div>
