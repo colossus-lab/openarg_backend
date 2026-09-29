@@ -12,6 +12,7 @@ import logging
 import os
 import secrets as _secrets_mod
 import time
+import weakref
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -38,8 +39,40 @@ from app.presentation.http.middleware.google_jwt_middleware import (
 from app.setup.app_factory import limiter
 
 # Module-level cache for compiled graph (compile once, reuse)
-_compiled_graphs_lock = asyncio.Lock()
-_checkpointer_lock = asyncio.Lock()
+#
+# Los locks van por event loop y no como un `asyncio.Lock()` de módulo. Un
+# lock se liga al primer loop que lo usa y a partir de ahí cualquier otro
+# recibe `RuntimeError: <Lock> is bound to a different event loop`.
+#
+# En producción no se nota —uvicorn corre un loop por proceso y el módulo se
+# importa una vez— pero basta un segundo loop para que todo request falle con
+# un 500 genérico. Es lo que tenía la suite E2E, donde cada test crea el suyo:
+# 131 de 135 caían así, y el mensaje no decía nada del loop.
+_locks_por_loop: weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _lock(nombre: str) -> asyncio.Lock:
+    """El lock de `nombre` para el event loop en curso.
+
+    La clave es el loop mismo y no su `id()`: CPython reutiliza direcciones,
+    así que un loop nuevo podría recibir el lock de uno muerto que cayó en la
+    misma posición. Con referencias débiles, los locks de un loop se liberan
+    con él y no queda nada que heredar.
+    """
+    loop = asyncio.get_running_loop()
+    del_loop = _locks_por_loop.get(loop)
+    if del_loop is None:
+        del_loop = {}
+        _locks_por_loop[loop] = del_loop
+    lock = del_loop.get(nombre)
+    if lock is None:
+        lock = asyncio.Lock()
+        del_loop[nombre] = lock
+    return lock
+
+
 _compiled_graphs: dict[bool, Any] = {}
 _checkpointer = None  # AsyncPostgresSaver instance (lazy)
 _checkpointer_stack: AsyncExitStack | None = None
@@ -265,7 +298,7 @@ async def _get_or_compile_graph(deps: PipelineDeps, checkpointer=None):  # type:
     global _compiled_graphs  # noqa: PLW0603
     cache_key = bool(checkpointer)
     if cache_key not in _compiled_graphs:
-        async with _compiled_graphs_lock:
+        async with _lock("compiled_graphs"):
             if cache_key not in _compiled_graphs:
                 _compiled_graphs[cache_key] = build_pipeline_graph(deps, checkpointer=checkpointer)
     return _compiled_graphs[cache_key]
@@ -335,7 +368,7 @@ def _checkpointer_is_live() -> bool:
 async def _teardown_checkpointer_locked() -> None:
     """Drop the cached saver, its pool and the compiled graphs.
 
-    Caller must hold `_checkpointer_lock`. `_compiled_graphs` has to go too: a
+    Caller must hold `_lock("checkpointer")`. `_compiled_graphs` has to go too: a
     compiled graph captures the saver object, so leaving it cached would keep
     routing requests at the saver we just discarded.
 
@@ -396,7 +429,7 @@ async def _get_checkpointer():
     # meant a checkpointer that died within the TTL of its own successful init
     # was neither rebuilt nor torn down: the call just returned None and left
     # the corpse cached, with the graph still compiled around it.
-    async with _checkpointer_lock:
+    async with _lock("checkpointer"):
         # Double-check after acquiring lock
         if _checkpointer is not None:
             if _checkpointer_is_live():
@@ -458,7 +491,7 @@ async def shutdown_pipeline_persistence() -> None:
     """Release app-scoped persistence resources on shutdown."""
     global _checkpointer, _checkpointer_stack, _checkpointer_attempted, _compiled_graphs  # noqa: PLW0603
 
-    async with _checkpointer_lock:
+    async with _lock("checkpointer"):
         stack = _checkpointer_stack
         _checkpointer = None
         _checkpointer_stack = None
