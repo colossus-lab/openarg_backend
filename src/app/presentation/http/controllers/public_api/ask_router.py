@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
+from uuid import uuid4
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Request
@@ -20,15 +22,35 @@ import app.application.pipeline.nodes as nodes_pkg
 from app.application.api_key_service import check_rate_limit, verify_api_key
 from app.application.pipeline.nodes import PipelineDeps
 from app.application.pipeline.state import OpenArgState
-from app.domain.entities.api_key.api_key import ApiUsage
+from app.domain.entities.api_key.api_key import ApiKey, ApiUsage
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
-from app.presentation.http.controllers.query import smart_query_v2_router as smart_router
-from app.presentation.http.controllers.query.smart_query_v2_router import _get_or_compile_graph
+from app.presentation.http.controllers.query.smart_query_v2_router import (
+    _get_checkpointer,
+    _get_or_compile_graph,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["public-api"])
+
+_DEFAULT_TIMEOUT_SECONDS = 30
+
+
+def _pipeline_timeout() -> float:
+    try:
+        value = float(os.getenv("PUBLIC_API_TIMEOUT_SECONDS", ""))
+    except ValueError:
+        return _DEFAULT_TIMEOUT_SECONDS
+    return value if value > 0 else _DEFAULT_TIMEOUT_SECONDS
+
+
+async def authenticate_bearer(request: Request, repo: IApiKeyRepository) -> ApiKey:
+    """Validate ``Authorization: Bearer oarg_sk_…`` and return the key."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return await verify_api_key(auth_header[7:].strip(), repo)
 
 
 class AskRequest(BaseModel):
@@ -51,22 +73,21 @@ async def public_ask(
     """Execute a query using a public API key.
 
     Auth: ``Authorization: Bearer oarg_sk_xxx``
-    Rate limited per plan (free: 5/min, 10/day).
+    Rate limited per plan (see ``PLAN_LIMITS``; free: 2/min, 10/day) plus a
+    per-IP daily limit and a shared daily cap for the free plan.
     Does NOT save conversations.
     """
     # 1. Authenticate Bearer token
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    token = auth_header[7:].strip()
-    api_key = await verify_api_key(token, api_key_repo)
+    api_key = await authenticate_bearer(request, api_key_repo)
 
     # 2. Rate limit check (per-key + per-IP + global free cap)
     client_ip = request.client.host if request.client else ""
     rate_info = await check_rate_limit(api_key, cache, client_ip=client_ip)
 
-    # 3. Reuse the same compiled graph as the frontend endpoint
-    checkpointer = smart_router._checkpointer
+    # 3. Reuse the same compiled graph as the frontend endpoint.
+    # `_get_checkpointer()` (no el atributo del módulo) reintenta la init
+    # después del TTL, igual que en /smart.
+    checkpointer = await _get_checkpointer()
     compiled_graph = await _get_or_compile_graph(deps, checkpointer)
     nodes_pkg.set_deps(deps)
 
@@ -81,9 +102,18 @@ async def public_ask(
         "replan_count": 0,
     }
 
+    # Un grafo compilado con checkpointer rechaza la invocación sin
+    # `thread_id` (`ValueError: Checkpointer requires ... 'configurable'
+    # keys`), y eso salía como un 500 en TODAS las consultas de la API
+    # pública. Es el mismo arreglo que tiene /smart: un thread efímero por
+    # request, que no se reutiliza porque la API no guarda conversaciones.
+    invoke_config: dict[str, Any] = {}
+    if checkpointer:
+        invoke_config["configurable"] = {"thread_id": f"efimero-{uuid4()}"}
+
     try:
-        async with asyncio.timeout(30):
-            result = await compiled_graph.ainvoke(initial_state)
+        async with asyncio.timeout(_pipeline_timeout()):
+            result = await compiled_graph.ainvoke(initial_state, config=invoke_config)
     except TimeoutError:
         logger.error("Pipeline timeout for API key %s", api_key.key_prefix)
         await _log_usage(api_key_repo, api_key.id, body.question, 408, 0, 0)
@@ -95,6 +125,12 @@ async def public_ask(
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
     tokens_used = result.get("tokens_used", 0)
+
+    # Injection blocked → 400, como en /smart. Sin esto la API devolvía un
+    # 200 con la respuesta de rechazo como si fuera un dato.
+    if result.get("plan_intent", "") == "injection_blocked":
+        await _log_usage(api_key_repo, api_key.id, body.question, 400, 0, duration_ms)
+        raise HTTPException(status_code=400, detail="Potential prompt injection detected")
 
     # 5. Log usage (post-pipeline, fire-and-forget errors)
     await _log_usage(api_key_repo, api_key.id, body.question, 200, tokens_used, duration_ms)

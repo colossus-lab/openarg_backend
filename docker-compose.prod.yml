@@ -81,9 +81,13 @@ services:
     image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/api:${OPENARG_IMAGE_TAG:-latest}
     container_name: openarg_backend
     restart: always
+    # --forwarded-allow-ips='*': el backend no publica puertos, sólo lo
+    # alcanzan Caddy y los contenedores de esta red, y Caddy reescribe
+    # X-Forwarded-For con la IP real del cliente. Sin esto `request.client`
+    # es la IP de Caddy y el límite por IP de /ask es uno solo para todos.
     command: >
       sh -c "alembic -c alembic.ini upgrade head &&
-             uvicorn app.run:make_app --factory --host 0.0.0.0 --port 8080 --loop uvloop --workers 2"
+             uvicorn app.run:make_app --factory --host 0.0.0.0 --port 8080 --loop uvloop --workers 2 --proxy-headers --forwarded-allow-ips='*'"
     networks:
       - openarg_network
     deploy:
