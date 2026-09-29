@@ -72,6 +72,18 @@ def _safe_str(value: Any) -> str:
 
 
 def _normalize_numeric_token(token: str) -> float | None:
+    parsed = _parse_numeric_token(token)
+    return parsed[0] if parsed else None
+
+
+def _parse_numeric_token(token: str) -> tuple[float, float] | None:
+    """Devuelve `(valor, tolerancia_de_redondeo)` de un número escrito en el texto.
+
+    La tolerancia es media unidad del último decimal que se escribió: "29,44"
+    admite cualquier dato que redondeado a dos decimales dé 29,44 (29,4375 sí).
+    Un entero no tiene tolerancia: si la tuviera, un "30%" inventado encontraría
+    algún 29,8 entre cientos de filas y quedaría como verificado.
+    """
     text = token.strip().lower().replace(" ", "")
     multiplier = 1.0
     for suffix, factor in (
@@ -111,9 +123,12 @@ def _normalize_numeric_token(token: str) -> float | None:
                 text = integer + decimal
 
     try:
-        return float(text) * multiplier
+        value = float(text) * multiplier
     except ValueError:
         return None
+    decimals = len(text.partition(".")[2]) if "." in text else 0
+    tolerance = 0.5 * 10**-decimals * multiplier if decimals else 0.0
+    return value, tolerance
 
 
 def _iter_evidence_values(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
@@ -321,14 +336,18 @@ def _match_source_evidence(
 
 
 def _numbers_in_text(text: str) -> list[float]:
-    values: list[float] = []
+    return [value for value, _ in _numbers_with_tolerance(text)]
+
+
+def _numbers_with_tolerance(text: str) -> list[tuple[float, float]]:
+    values: list[tuple[float, float]] = []
     stripped = _TIME_RE.sub(
         " ", _DATE_TEXT_RE.sub(" ", _DATE_DMY_RE.sub(" ", _DATE_RE.sub(" ", text)))
     )
     for match in _NUM_RE.findall(stripped):
-        normalized = _normalize_numeric_token(match)
-        if normalized is not None:
-            values.append(normalized)
+        parsed = _parse_numeric_token(match)
+        if parsed is not None:
+            values.append(parsed)
     return values
 
 
@@ -339,12 +358,16 @@ def _is_rounded_quote_match(target: float, item: NumericEvidence) -> bool:
     return False
 
 
-def _matches_any(target: float, evidence: list[NumericEvidence]) -> list[NumericEvidence]:
+def _matches_any(
+    target: float, evidence: list[NumericEvidence], tolerance: float = 0.0
+) -> list[NumericEvidence]:
     hits: list[NumericEvidence] = []
     for item in evidence:
-        if math.isclose(
-            item.normalized, target, rel_tol=1e-6, abs_tol=1e-6
-        ) or _is_rounded_quote_match(target, item):
+        if (
+            math.isclose(item.normalized, target, rel_tol=1e-6, abs_tol=1e-6)
+            or (tolerance and abs(item.normalized - target) <= tolerance + 1e-9)
+            or _is_rounded_quote_match(target, item)
+        ):
             hits.append(item)
     return hits
 
@@ -408,12 +431,13 @@ def _assess_citation(
     claim = _safe_str(citation.get("claim", ""))
     source = _safe_str(citation.get("source", ""))
     candidate_evidence = _match_source_evidence(source, evidence)
-    claim_numbers = _numbers_in_text(claim)
+    claim_tokens = _numbers_with_tolerance(claim)
+    claim_numbers = [number for number, _ in claim_tokens]
     matched: list[NumericEvidence] = []
     unsupported: list[float] = []
 
-    for number in claim_numbers:
-        hits = _matches_any(number, candidate_evidence)
+    for number, tolerance in claim_tokens:
+        hits = _matches_any(number, candidate_evidence, tolerance)
         if hits:
             matched.extend(hits[:_MAX_GROUNDED_ITEMS])
         else:
