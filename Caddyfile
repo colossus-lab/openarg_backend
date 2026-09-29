@@ -31,8 +31,11 @@
 	@options method OPTIONS
 	respond @options 204
 
-	# SECURITY: Block admin/docs endpoints in production
-	@blocked path /docs /docs/* /redoc /openapi.json /api/v1/admin/*
+	# SECURITY: Block admin/docs endpoints in production.
+	# /api/v1/data/* es SQL de solo lectura para servicios internos (token
+	# estático DATA_SERVICE_TOKEN); los contenedores lo llaman por
+	# backend:8080, nunca por este dominio. Hallazgo del pentest de junio.
+	@blocked path /docs /docs/* /redoc /openapi.json /api/v1/admin/* /api/v1/data/*
 	respond @blocked 404
 
 

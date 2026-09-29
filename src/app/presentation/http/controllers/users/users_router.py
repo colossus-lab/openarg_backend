@@ -37,12 +37,22 @@ class UpdateSettingsRequest(BaseModel):
 @router.post("/sync", response_model=UserResponse)
 @inject
 async def sync_user(
+    request: Request,
     body: UserSyncRequest,
     user_repo: FromDishka[IUserRepository],
 ) -> UserResponse:
     """Upsert user from Google OAuth (NextAuth frontend)."""
     if not body.email:
         raise HTTPException(status_code=400, detail="email is required")
+
+    # El email del body tiene que ser el del token de Google validado. Sin
+    # esto, cualquiera con una sesión válida podía crear o pisar el usuario
+    # de OTRO email (nombre, imagen, aceptación de privacidad) — y con el
+    # MCP público las cuentas nuevas dejan de ser sólo las del equipo.
+    # Mismo criterio que /smart (AUTH_SPOOF).
+    authed_email = get_request_user_email(request)
+    if authed_email and authed_email.lower() != str(body.email).lower():
+        raise HTTPException(status_code=403, detail="email mismatch")
 
     # SECURITY: Always use server timestamp — never trust client-provided time
     privacy_ts = datetime.now(UTC) if body.privacy_accepted_at else None
