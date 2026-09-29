@@ -1,0 +1,5 @@
+# Dependencias del contenedor del MCP público. No van en pyproject.toml:
+# la API y los workers no las usan, y así el lock de la app no se mueve.
+mcp==2.2.0
+httpx==0.28.1
+uvicorn==0.54.0

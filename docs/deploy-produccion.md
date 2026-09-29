@@ -49,7 +49,7 @@ del frontend son independientes.
 ## 3. Esperar las imágenes
 
 Verificar que **Build & Push Docker Images** termine en verde y publique las
-**9 imágenes** del backend (`api`, `beat` y los 7 `worker-*`), más la del
+**10 imágenes** del backend (`api`, `beat`, los 7 `worker-*` y `openarg-mcp`), más la del
 frontend en su repo. Este paso es explícito por el filtro de `paths`: un
 build que no corrió no se nota hasta que el deploy no cambia nada.
 
@@ -62,7 +62,7 @@ configuración anterior.
 
 ```bash
 cd /opt/docker/openarg
-SVC="backend beat frontend worker-scraper worker-collector \
+SVC="backend beat frontend mcp worker-scraper worker-collector \
      worker-collector-heavy worker-collector-heavy-retry worker-ingest \
      worker-embedding worker-analyst worker-transparency worker-s3"
 docker compose pull $SVC

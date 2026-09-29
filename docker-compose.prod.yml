@@ -477,6 +477,26 @@ services:
     depends_on:
       - backend
 
+  # ── MCP público de datos + web mcp.openarg.org (spec 029) ───────
+  # Sin estado y sin acceso a la base: reenvía la clave del usuario a
+  # POST /api/v1/ask. Si se cae, el chat y la API no se enteran.
+  mcp:
+    image: ghcr.io/${REGISTRY_ORG:-openarg}/openarg/openarg-mcp:${OPENARG_IMAGE_TAG:-latest}
+    container_name: openarg_mcp
+    restart: always
+    networks:
+      - openarg_network
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    environment:
+      BACKEND_URL: http://backend:8080
+      MCP_ALLOWED_HOSTS: ${MCP_DOMAIN:-mcp.openarg.org},mcp:8000,localhost:*,127.0.0.1:*
+    depends_on:
+      - backend
+
   # ── Caddy (reverse proxy + auto HTTPS) ─────────────────────────
   caddy:
     image: caddy:2-alpine
@@ -495,6 +515,7 @@ services:
     depends_on:
       - frontend
       - backend
+      - mcp
 
 volumes:
   redis_data:

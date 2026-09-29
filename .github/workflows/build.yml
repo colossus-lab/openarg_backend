@@ -15,6 +15,8 @@ on:
       # the old SQL, with nothing anywhere reporting a failure.
       - 'config/**'
       - 'docker/**'
+      # El MCP público y su web viven fuera de src/ (no los importa la app).
+      - 'mcp_publico/**'
       - 'pyproject.toml'
       - 'alembic.ini'
       - '.github/workflows/build.yml'
@@ -82,6 +84,11 @@ jobs:
           - service: beat
             dockerfile: docker/beat.Dockerfile
             image_name: openarg/beat
+
+          # MCP público de datos + web mcp.openarg.org (spec 029)
+          - service: mcp
+            dockerfile: docker/mcp.Dockerfile
+            image_name: openarg/openarg-mcp
 
     steps:
       - name: Free up disk space
@@ -166,5 +173,6 @@ jobs:
           echo "  - API"
           echo "  - 7 Celery Workers (scraper, collector, ingest, embedding, analyst, s3, transparency)"
           echo "  - Celery Beat"
+          echo "  - MCP público (openarg-mcp)"
           echo ""
-          echo "Total: 9 Docker images"
+          echo "Total: 10 Docker images"

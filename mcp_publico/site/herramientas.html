@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="es-AR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Herramientas · OpenArg MCP</title>
+  <meta name="description" content="Referencia de las herramientas del MCP de OpenArg: consultar_datos_publicos y listar_fuentes.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="canonical" href="https://mcp.openarg.org/herramientas.html">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="" width="28" height="28">OpenArg <small>MCP</small></a>
+    <nav class="nav" aria-label="Secciones">
+      <a href="./">Inicio</a>
+      <a href="empezar.html">Empezar</a>
+      <a href="herramientas.html" aria-current="page">Herramientas</a>
+      <a href="limites.html">Límites y privacidad</a>
+      <a href="https://openarg.org">openarg.org</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <span class="kicker">Referencia</span>
+    <h1>Herramientas</h1>
+    <p class="lede">
+      El servidor <code>https://mcp.openarg.org/mcp</code> usa el transporte
+      Streamable HTTP. Expone dos herramientas, las dos de solo lectura.
+    </p>
+  </section>
+
+  <h2><code>consultar_datos_publicos</code></h2>
+  <p>Responde una pregunta sobre datos públicos oficiales de Argentina, con fuentes.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Parámetro</th><th>Tipo</th><th>Descripción</th></tr></thead>
+    <tbody>
+      <tr><td><code>pregunta</code></td><td>texto</td><td>La pregunta en lenguaje natural, hasta 2.000 caracteres. Mejor en castellano y concreta.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Devuelve</strong> un texto en Markdown con:</p>
+  <ul>
+    <li>la respuesta,</li>
+    <li><strong>Fuentes</strong>: los datasets consultados, con el nombre, el portal y el link al portal oficial,</li>
+    <li><strong>Advertencias</strong>: dato provisorio, serie incompleta, números que no se pudieron verificar contra la tabla,</li>
+    <li>las consultas que te quedan hoy.</li>
+  </ul>
+  <p><strong>Cupo:</strong> descuenta 1 de las 10 consultas diarias, aunque la pregunta termine sin datos.</p>
+  <p class="muted">Tarda entre unos segundos y un minuto, según cuántas tablas tenga que cruzar.</p>
+
+  <h2><code>listar_fuentes</code></h2>
+  <p>Lista los portales de datos abiertos que cubre OpenArg y cuántos datasets tiene indexados cada uno. No lleva parámetros.</p>
+  <p><strong>Cupo:</strong> no descuenta consultas. Tiene un límite propio de 60 por día.</p>
+
+  <h2>Errores</h2>
+  <p>
+    Los errores vuelven como error de herramienta (<code>isError: true</code>) con un
+    mensaje en castellano que el asistente le puede mostrar al usuario.
+    La tabla está en <a href="empezar.html">Empezar</a>.
+  </p>
+
+  <h2>Sin MCP</h2>
+  <p>La misma clave sirve para la API HTTP, con el mismo cupo:</p>
+  <div class="code"><pre><code>curl https://api.openarg.org/api/v1/ask \
+  -H "Authorization: Bearer oarg_sk_TU_CLAVE" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "tasa de desempleo del último trimestre"}'</code></pre></div>
+  <p class="muted">
+    Devuelve JSON con <code>answer</code>, <code>sources</code>, <code>citations</code>,
+    <code>warnings</code>, <code>chart_data</code>, <code>map_data</code> y <code>usage</code>.
+  </p>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>OpenArg · un proyecto de <a href="https://colossuslab.org">Colossus Lab</a></span>
+    <span><a href="https://openarg.org/privacy">Privacidad</a> · <a href="https://github.com/colossus-lab">GitHub</a> · <a href="mailto:hola@colossuslab.org">hola@colossuslab.org</a></span>
+  </div>
+</footer>
+<script src="site.js"></script>
+</body>
+</html>

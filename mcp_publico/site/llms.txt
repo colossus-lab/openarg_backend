@@ -1,0 +1,18 @@
+# OpenArg MCP
+
+> Servidor MCP público de OpenArg: responde preguntas sobre datos públicos oficiales de Argentina (INDEC, datos.gob.ar, provincias, municipios, Congreso, presupuesto) consultando los datasets de los portales de datos abiertos, con fuentes citadas.
+
+- Endpoint MCP (Streamable HTTP): https://mcp.openarg.org/mcp
+- Autenticación: header `Authorization: Bearer oarg_sk_…`. Clave gratis en https://openarg.org/desarrolladores
+- Cupo: 10 preguntas por día por clave; se renueva a las 00:00 UTC.
+
+## Herramientas
+
+- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y consultas restantes. Descuenta 1 del cupo diario.
+- `listar_fuentes()`: portales cubiertos y cantidad de datasets. No descuenta cupo.
+
+## Docs
+
+- [Empezar](https://mcp.openarg.org/empezar.html): clave y configuración de Claude Code, Claude Desktop, Cursor y VS Code
+- [Herramientas](https://mcp.openarg.org/herramientas.html): referencia y API HTTP equivalente
+- [Límites y privacidad](https://mcp.openarg.org/limites.html)
