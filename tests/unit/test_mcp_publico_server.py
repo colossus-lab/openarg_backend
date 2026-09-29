@@ -42,7 +42,67 @@ class FakeBackend:
             return httpx.Response(
                 200, json={"total_datasets": 10, "fuentes": [{"portal": "caba", "datasets": 10}]}
             )
+        if request.url.path.startswith("/api/v1/catalogo/"):
+            return self.catalog(request)
         return httpx.Response(self.status, json=self.body)
+
+    catalog_status = 200
+    catalog_detail = ""
+
+    def catalog(self, request: httpx.Request) -> httpx.Response:
+        if self.catalog_status != 200:
+            return httpx.Response(self.catalog_status, json={"detail": self.catalog_detail})
+        path = request.url.path
+        if path.endswith("/buscar"):
+            return httpx.Response(
+                200,
+                json={
+                    "resultados": [
+                        {
+                            "dataset_id": "d1",
+                            "titulo": "Principales tasas de interés",
+                            "descripcion": "Tasas diarias",
+                            "portal": "datos_gob_ar",
+                            "url": "https://infra.datos.gob.ar/x.csv",
+                            "tablas": [{"tabla": "raw.tasas", "filas": 8569}],
+                        }
+                    ]
+                },
+            )
+        if path.endswith("/tabla"):
+            return httpx.Response(
+                200,
+                json={
+                    "tabla": "raw.tasas",
+                    "titulo": "Principales tasas de interés",
+                    "portal": "datos_gob_ar",
+                    "url": "https://infra.datos.gob.ar/x.csv",
+                    "filas": 8569,
+                    "columnas": [
+                        {"nombre": "indice_tiempo", "tipo": "text"},
+                        {"nombre": "call", "tipo": "double precision"},
+                    ],
+                    "columna_fecha": "indice_tiempo",
+                    "desde": "2003-01-02",
+                    "hasta": "2026-06-18",
+                    "muestra": [{"indice_tiempo": "2003-01-02", "call": 6.02}],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "tabla": "raw.tasas",
+                "columnas": ["indice_tiempo", "call"],
+                "filas": [
+                    {"indice_tiempo": "2026-06-18", "call": 33.14},
+                    {"indice_tiempo": "2026-06-17", "call": 33.0},
+                ],
+                "cantidad": 2,
+                "truncado": True,
+                "fuente": "Principales tasas de interés",
+                "url": "https://infra.datos.gob.ar/x.csv",
+            },
+        )
 
 
 @pytest.fixture
@@ -87,7 +147,13 @@ def _text(result: Any) -> str:
 async def test_tools_are_listed_without_a_key(backend: FakeBackend) -> None:
     result = await _call("__list__", {}, {})
     names = {t.name for t in result.tools}
-    assert names == {"consultar_datos_publicos", "listar_fuentes"}
+    assert names == {
+        "consultar_datos_publicos",
+        "listar_fuentes",
+        "buscar_datasets",
+        "describir_tabla",
+        "obtener_datos",
+    }
     for tool in result.tools:
         assert "\n    " not in (tool.description or ""), f"{tool.name}: descripción con sangría"
     assert backend.requests == []
@@ -123,7 +189,8 @@ async def test_quota_exhausted_is_a_spanish_tool_error(backend: FakeBackend) -> 
         "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
     )
     assert result.is_error
-    assert "10 consultas de hoy" in _text(result)
+    assert "10 preguntas de hoy" in _text(result)
+    assert "modo datos" in _text(result)
 
 
 async def test_listar_fuentes(backend: FakeBackend) -> None:
@@ -155,3 +222,75 @@ async def test_health_and_site() -> None:
         home = await http.get("/")
     assert home.status_code == 200
     assert "OpenArg" in home.text
+
+
+class TestModoDatos:
+    async def test_buscar_sends_query_and_lists_tables(self, backend: FakeBackend) -> None:
+        result = await _call(
+            "buscar_datasets",
+            {"texto": "tasas BCRA", "limite": 99},
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        assert not result.is_error, _text(result)
+        req = backend.requests[0]
+        assert req.url.path == "/api/v1/catalogo/buscar"
+        assert req.url.params["q"] == "tasas BCRA"
+        assert req.url.params["limite"] == "25"  # acotado
+        text = _text(result)
+        assert "`raw.tasas` (8569 filas)" in text and "describir_tabla" in text
+
+    async def test_describir_shows_period_columns_and_sample(self, backend: FakeBackend) -> None:
+        result = await _call(
+            "describir_tabla", {"tabla": "raw.tasas"}, {"Authorization": f"Bearer {KEY}"}
+        )
+        text = _text(result)
+        assert backend.requests[0].url.params["nombre"] == "raw.tasas"
+        assert "2003-01-02 a 2026-06-18" in text
+        assert "- call (double precision)" in text
+        assert "```csv" in text
+
+    async def test_obtener_datos_sends_structured_request_and_returns_csv(
+        self, backend: FakeBackend
+    ) -> None:
+        result = await _call(
+            "obtener_datos",
+            {
+                "tabla": "raw.tasas",
+                "columnas": ["indice_tiempo", "call"],
+                "desde": "2026-06",
+                "orden": "desc",
+                "limite": 2,
+            },
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        req = backend.requests[0]
+        assert req.method == "POST" and req.url.path == "/api/v1/catalogo/datos"
+        assert json.loads(req.content) == {
+            "tabla": "raw.tasas",
+            "columnas": ["indice_tiempo", "call"],
+            "desde": "2026-06",
+            "orden": "desc",
+            "limite": 2,
+        }
+        text = _text(result)
+        assert "indice_tiempo,call\n2026-06-18,33.14" in text
+        assert "Hay más filas" in text
+        assert "https://infra.datos.gob.ar/x.csv" in text
+
+    async def test_backend_validation_message_reaches_the_model(self, backend: FakeBackend) -> None:
+        backend.catalog_status = 400
+        backend.catalog_detail = "Columnas que no existen en la tabla: password."
+        result = await _call(
+            "obtener_datos",
+            {"tabla": "raw.tasas", "columnas": ["password"]},
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        assert result.is_error
+        assert "Columnas que no existen en la tabla: password." in _text(result)
+
+    async def test_data_mode_without_key_explains_how_to_get_one(
+        self, backend: FakeBackend
+    ) -> None:
+        result = await _call("buscar_datasets", {"texto": "x"}, {})
+        assert result.is_error and "openarg.org/desarrolladores" in _text(result)
+        assert backend.requests == []

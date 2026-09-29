@@ -222,18 +222,31 @@ async def check_rate_limit(
     }
 
 
-# Consultas de catálogo (listar fuentes): no pasan por el LLM, así que no
-# descuentan del cupo de preguntas. Igual llevan un límite propio para que
-# una clave no pueda usarlas para martillar la base.
-CATALOG_DAILY_LIMIT = 60
+# Modo datos (listar fuentes, buscar, describir, leer filas): no pasa por el
+# LLM, así que no descuenta del cupo de preguntas. Igual lleva límite propio,
+# porque cada pedido es una consulta a la base de producción: por día para
+# acotar el total y por minuto para que un script no la martille en ráfaga.
+_DEFAULT_CATALOG_DAILY_LIMIT = 200
+CATALOG_MINUTE_LIMIT = 30
+
+
+def catalog_daily_limit() -> int:
+    return _env_int("PUBLIC_API_CATALOG_DAILY_LIMIT", _DEFAULT_CATALOG_DAILY_LIMIT)
 
 
 async def check_catalog_rate_limit(api_key: ApiKey, cache: ICacheService) -> None:
-    """Enforce the per-key daily limit on catalog (no-LLM) endpoints."""
-    key = f"rl:user:{api_key.user_id}:catalog:{_utc_day()}"
-    count = await _incr_fail_open(cache, key, _DAY_TTL)
-    if count > CATALOG_DAILY_LIMIT:
+    """Enforce the per-key limits on data-mode (no-LLM) endpoints."""
+    user_id = api_key.user_id
+    minute = await _incr_fail_open(cache, f"rl:user:{user_id}:catalog:min", _MIN_TTL)
+    if minute > CATALOG_MINUTE_LIMIT:
         raise _too_many(
-            f"Rate limit exceeded: {CATALOG_DAILY_LIMIT} catalog requests per day",
+            f"Rate limit exceeded: {CATALOG_MINUTE_LIMIT} catalog requests per minute",
+            {"Retry-After": "60"},
+        )
+    limit = catalog_daily_limit()
+    count = await _incr_fail_open(cache, f"rl:user:{user_id}:catalog:{_utc_day()}", _DAY_TTL)
+    if count > limit:
+        raise _too_many(
+            f"Rate limit exceeded: {limit} catalog requests per day",
             {"Retry-After": str(seconds_until_utc_midnight())},
         )

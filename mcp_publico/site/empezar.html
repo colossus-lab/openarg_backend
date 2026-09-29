@@ -118,6 +118,7 @@
       <h3 style="margin-top:0">Preguntá</h3>
       <p>Pedile algo a tu asistente que necesite datos, por ejemplo:</p>
       <ul>
+        <li>Buscá en OpenArg la serie diaria de tasas del BCRA y graficame la BADLAR de 2026.</li>
         <li>¿Cuál fue la tasa de desempleo del último trimestre publicado?</li>
         <li>Mostrame la evolución mensual del IPC en 2025.</li>
         <li>¿Cómo se reparten las bancas de Diputados por bloque?</li>
@@ -138,7 +139,9 @@
     <tbody>
       <tr><td>Falta la clave de OpenArg</td><td>El cliente no está mandando el header <code>Authorization</code>. Revisá la configuración del paso 2.</td></tr>
       <tr><td>La clave es inválida o fue revocada</td><td>Generaste otra después, o se copió incompleta. Creá una nueva.</td></tr>
-      <tr><td>Usaste las 10 consultas de hoy</td><td>Se renuevan a las 21:00 (hora de Argentina).</td></tr>
+      <tr><td>Usaste las 10 preguntas de hoy</td><td>Se renuevan a las 21:00 (hora de Argentina). Mientras tanto, el modo datos sigue disponible.</td></tr>
+      <tr><td>Se alcanzó el límite diario del modo datos</td><td>200 pedidos por día; se renueva a las 21:00.</td></tr>
+      <tr><td>Columnas que no existen en la tabla…</td><td>El asistente pidió un nombre de columna mal: que use <code>describir_tabla</code> primero.</td></tr>
       <tr><td>El cupo público de hoy está agotado</td><td>Se alcanzó el límite total del día para todos los usuarios. Se renueva a las 21:00.</td></tr>
       <tr><td>La consulta tardó demasiado</td><td>Acotá la pregunta: un indicador, un período, una jurisdicción.</td></tr>
     </tbody>

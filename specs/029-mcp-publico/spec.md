@@ -61,12 +61,38 @@ API pública no muestre ya.
   contenedor en `/`. La CSP no permite nada de otro origen, así que las
   fuentes tipográficas están en el repo.
 
+- **FR-010 (modo datos)**: `buscar_datasets`, `describir_tabla` y
+  `obtener_datos` sirven catálogo y filas **sin pasar por el LLM**: el modelo
+  del usuario hace el razonamiento y paga sus propios tokens. Cupo propio
+  (`PUBLIC_API_CATALOG_DAILY_LIMIT`, default 200/día, más 30/min), separado de
+  las 10 preguntas.
+- **FR-011**: `obtener_datos` no acepta SQL. La consulta se arma en
+  `app.application.public_catalog`:
+  - la tabla tiene que estar en `list_cached_tables()`;
+  - cada columna tiene que existir en el schema real (`get_column_types`);
+  - las fechas son `AAAA[-MM[-DD]]`;
+  - los filtros son igualdades sobre columnas reales, con el valor escapado y
+    acotado;
+  - hasta 500 filas y 30 columnas.
+
+  Después corre por `execute_readonly`: rol de sólo lectura, timeout y el
+  mismo validador que NL2SQL, que sigue siendo la segunda barrera. Un test
+  verifica que el validador acepta todo lo que se arma.
+- **FR-012**: Las columnas internas del colector (`_source_url`, …) no se
+  sirven ni se listan.
+- **FR-013**: En el modo datos, los 400/404 del backend traen un mensaje en
+  castellano que le dice al modelo cómo corregir el pedido; el MCP lo pasa
+  tal cual.
+
 ### Herramientas
 
 | Herramienta | Backend | Cupo |
 |---|---|---|
-| `consultar_datos_publicos(pregunta)` | `POST /api/v1/ask` | 1 de las 10 diarias |
-| `listar_fuentes()` | `GET /api/v1/fuentes` | no descuenta; 60/día propio |
+| `buscar_datasets(texto, portal?, limite?)` | `GET /api/v1/catalogo/buscar` (1 embedding Cohere, sin LLM) | modo datos |
+| `describir_tabla(tabla)` | `GET /api/v1/catalogo/tabla` | modo datos |
+| `obtener_datos(tabla, columnas?, desde?, hasta?, filtros?, orden?, limite?)` | `POST /api/v1/catalogo/datos` | modo datos |
+| `listar_fuentes()` | `GET /api/v1/fuentes` | modo datos |
+| `consultar_datos_publicos(pregunta)` | `POST /api/v1/ask` | 1 de las 10 preguntas diarias |
 
 ## 5. Success Criteria
 
@@ -93,3 +119,11 @@ API pública no muestre ya.
   `uv pip install -r mcp_publico/requirements.txt`.
 - **[DEBT-002]** — Cualquier cambio en `mcp_publico/**` reconstruye las 10
   imágenes (`build.yml` es una sola matriz sin filtro por servicio).
+- **[DEBT-003]** — El filtro de período del modo datos usa
+  `left(col::text, n)`, que no aprovecha índices. Con tablas de millones de
+  filas el `statement_timeout` del sandbox (10 s) es lo que acota el costo.
+  Medido en staging sobre la serie diaria del BCRA: 1–20 ms.
+- **[DEBT-004]** — Un valor de filtro que contiene una palabra reservada
+  suelta ("do", "set") lo rechaza el validador del sandbox, que busca
+  palabras sin mirar si están dentro de un string. Se devuelve un 400 con un
+  mensaje que invita a cambiar el filtro.

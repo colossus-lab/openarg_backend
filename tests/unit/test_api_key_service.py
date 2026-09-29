@@ -10,8 +10,9 @@ import pytest
 from fastapi import HTTPException
 
 from app.application.api_key_service import (
-    CATALOG_DAILY_LIMIT,
+    CATALOG_MINUTE_LIMIT,
     PLAN_LIMITS,
+    catalog_daily_limit,
     check_catalog_rate_limit,
     check_rate_limit,
     generate_api_key,
@@ -268,16 +269,30 @@ class TestRateLimit:
 
     @pytest.mark.asyncio
     async def test_catalog_limit_is_separate_from_questions(
-        self, free_key: ApiKey, cache: FakeCache
+        self, free_key: ApiKey, cache: FakeCache, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        for _ in range(CATALOG_DAILY_LIMIT):
+        monkeypatch.setenv("PUBLIC_API_CATALOG_DAILY_LIMIT", "3")
+        for _ in range(3):
             await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
         with pytest.raises(HTTPException) as exc_info:
             await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 429
+        assert "per day" in exc_info.value.detail
         # Las preguntas no se tocaron.
         result = await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
         assert result["remaining_day"] == PLAN_LIMITS["free"]["per_day"] - 1
+
+    @pytest.mark.asyncio
+    async def test_catalog_has_a_per_minute_limit(self, free_key: ApiKey, cache: FakeCache) -> None:
+        for _ in range(CATALOG_MINUTE_LIMIT):
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as exc_info:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert "per minute" in exc_info.value.detail
+
+    def test_catalog_daily_default_is_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PUBLIC_API_CATALOG_DAILY_LIMIT", raising=False)
+        assert catalog_daily_limit() == 200
 
 
 # ── Plan limits ──────────────────────────────────────────────
