@@ -60,6 +60,63 @@ def _omitted_rows_note(sent: int, total: int, is_series: bool) -> str:
     )
 
 
+# Columnas numéricas que se resumen por serie, como máximo (acota el contexto).
+_MAX_SUMMARY_COLUMNS = 8
+
+
+def _fmt_number(value: float) -> str:
+    return f"{round(value, 2):g}"
+
+
+def _series_summary(records: list[dict[str, Any]], columns: tuple[str, ...]) -> str | None:
+    """Primero, último, mínimo y máximo de cada columna, sobre TODAS las filas.
+
+    El texto de la respuesta lo escribe el modelo mirando una muestra (ver
+    `_sample_records`), y ahí se equivocaba en lo que más se lee: el 29-sep, con
+    200 días del BCRA, dijo que la BADLAR "subió de 26% a 33%" (bajó de 29,4 a
+    21; el 33 era la call) y que la call "osciló entre 19% y 42%" (el máximo
+    fue 64%, un pico de tres días que no cayó en la muestra). Estos números
+    salen del código, no de lo que el modelo estima mirando puntos sueltos.
+    """
+    date_col = next((c for c in columns if is_date_column(c)), None)
+    if date_col is None:
+        return None
+    dated = [r for r in records if r.get(date_col) not in (None, "")]
+    if len(dated) < 3:
+        return None
+    dated.sort(key=lambda r: str(r[date_col]))
+
+    lines: list[str] = []
+    for col in columns:
+        if col == date_col or col.startswith("_") or len(lines) >= _MAX_SUMMARY_COLUMNS:
+            continue
+        points = [
+            (str(r[date_col]), float(r[col]))
+            for r in dated
+            if isinstance(r.get(col), int | float) and not isinstance(r.get(col), bool)
+        ]
+        if len(points) < 2:
+            continue
+        first, last = points[0], points[-1]
+        low = min(points, key=lambda p: p[1])
+        high = max(points, key=lambda p: p[1])
+        lines.append(
+            f"- {_display_key(col)}: primero {_fmt_number(first[1])} ({first[0]}), "
+            f"último {_fmt_number(last[1])} ({last[0]}), "
+            f"mínimo {_fmt_number(low[1])} ({low[0]}), "
+            f"máximo {_fmt_number(high[1])} ({high[0]})"
+        )
+    if not lines:
+        return None
+    period = f"{dated[0][date_col]} a {dated[-1][date_col]}"
+    return (
+        f"RESUMEN CALCULADO SOBRE LAS {len(dated)} FILAS (período cubierto: {period}).\n"
+        "Para decir si algo subió o bajó, desde y hasta cuánto, o su mínimo y máximo, "
+        "usá SOLO estos números, cada uno con su serie: no los estimes mirando las filas. "
+        "Si el período cubierto no es el que pidió el usuario, decilo.\n" + "\n".join(lines)
+    )
+
+
 _NO_RESULTS_CONTEXT = (
     "No se obtuvieron resultados directos en esta búsqueda. "
     "Sin embargo, TENÉS acceso en tiempo real a estos "
@@ -404,6 +461,9 @@ def build_data_context(results: list[DataResult]) -> str:
             lines.append(f"Columnas: {display_columns_text}")
             if len(records_to_send) < total_rows:
                 lines.append(_omitted_rows_note(len(records_to_send), total_rows, sampled_series))
+            summary = _series_summary(valid_records, columns)
+            if summary:
+                lines.append(summary)
             if description:
                 lines.append(f"Descripción: {description}")
             if metadata.get("table_descriptions"):
