@@ -40,6 +40,7 @@ Read-only SQL executor over the `cache_*` tables populated by the connectors. En
 - **FR-004**: MUST truncate results to a **maximum of 1000 rows** (`MAX_ROWS`).
 - **FR-005**: MUST return `SandboxResult(columns, rows, row_count, truncated, error)`.
 - **FR-006**: `list_cached_tables` MUST return `CachedTableInfo(table_name, dataset_id, row_count, columns)` for all `cache_*`.
+- **FR-006a**: `list_cached_tables` MUST be cached **per process** (module-level `_LIST_CACHE`, keyed by DB URL, TTL 60 s), not per adapter instance: the adapter is `Scope.REQUEST`, so an instance cache never hit (staging, 2026-09-29: every sandbox-routed chat or `/ask` query paid a full ~32k-row listing, 3.9–4.8 s). Concurrent refreshes MUST collapse into a single listing, and callers MUST get their own copy of the list, because `execute_sandbox_step` appends marts to it.
 - **FR-008**: MUST apply rate limiting (SlowAPI: 10/min) to the endpoints (`/api/v1/sandbox/query`).
 
 ## 5. Success Criteria
