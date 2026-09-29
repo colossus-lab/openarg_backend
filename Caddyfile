@@ -41,3 +41,22 @@
 
 	reverse_proxy backend:8080
 }
+
+# MCP público de datos + su web (spec 029). Sin el CORS del bloque de la API:
+# los clientes MCP no son navegadores de openarg.org.
+{$MCP_DOMAIN:mcp.openarg.org} {
+	encode gzip zstd
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	reverse_proxy mcp:8000 {
+		flush_interval -1
+	}
+}

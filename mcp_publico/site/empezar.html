@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="es-AR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Empezar · OpenArg MCP</title>
+  <meta name="description" content="Cómo conseguir tu clave de OpenArg y conectarla a Claude Code, Claude Desktop, Cursor o VS Code.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="canonical" href="https://mcp.openarg.org/empezar.html">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="" width="28" height="28">OpenArg <small>MCP</small></a>
+    <nav class="nav" aria-label="Secciones">
+      <a href="./">Inicio</a>
+      <a href="empezar.html" aria-current="page">Empezar</a>
+      <a href="herramientas.html">Herramientas</a>
+      <a href="limites.html">Límites y privacidad</a>
+      <a href="https://openarg.org">openarg.org</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <span class="kicker">Empezar</span>
+    <h1>Conectalo en dos minutos.</h1>
+    <p class="lede">Necesitás una clave gratis de OpenArg y un cliente que hable MCP.</p>
+  </section>
+
+  <ol class="steps">
+    <li>
+      <h3 style="margin-top:0">Conseguí tu clave</h3>
+      <p>
+        Entrá a <a href="https://openarg.org/desarrolladores">openarg.org/desarrolladores</a>
+        con tu cuenta de Google y tocá <strong>Crear clave</strong>. Empieza con
+        <code>oarg_sk_</code> y se muestra <strong>una sola vez</strong>: copiala a un lugar seguro.
+      </p>
+      <p class="muted">Si la perdés, generá otra: la anterior queda revocada.</p>
+    </li>
+    <li>
+      <h3 style="margin-top:0">Agregá OpenArg a tu cliente</h3>
+      <p>La dirección del servidor es <code>https://mcp.openarg.org/mcp</code> y la clave va en el header <code>Authorization</code>. Reemplazá <code>oarg_sk_TU_CLAVE</code> por la tuya.</p>
+
+      <div class="tabs">
+        <input type="radio" name="cliente" id="t-code" checked>
+        <input type="radio" name="cliente" id="t-desktop">
+        <input type="radio" name="cliente" id="t-cursor">
+        <input type="radio" name="cliente" id="t-vscode">
+        <div class="labels" role="tablist">
+          <label for="t-code">Claude Code</label>
+          <label for="t-desktop">Claude Desktop</label>
+          <label for="t-cursor">Cursor</label>
+          <label for="t-vscode">VS Code</label>
+        </div>
+
+        <div class="panel p-code">
+          <p>En la terminal:</p>
+          <div class="code"><pre><code>claude mcp add --transport http openarg https://mcp.openarg.org/mcp \
+  --header "Authorization: Bearer oarg_sk_TU_CLAVE"</code></pre></div>
+          <p class="muted">Con <code>--scope user</code> queda disponible en todos tus proyectos.</p>
+        </div>
+
+        <div class="panel p-desktop">
+          <p>
+            Claude Desktop se conecta a servidores remotos con clave a través de
+            <a href="https://www.npmjs.com/package/mcp-remote">mcp-remote</a> (necesita Node.js).
+            Abrí <strong>Configuración → Desarrollador → Editar configuración</strong> y agregá:
+          </p>
+          <div class="code"><span class="label">claude_desktop_config.json</span><pre><code>{
+  "mcpServers": {
+    "openarg": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote", "https://mcp.openarg.org/mcp",
+        "--header", "Authorization:${OPENARG_AUTH}"
+      ],
+      "env": { "OPENARG_AUTH": "Bearer oarg_sk_TU_CLAVE" }
+    }
+  }
+}</code></pre></div>
+          <p class="muted">Reiniciá Claude Desktop después de guardar.</p>
+        </div>
+
+        <div class="panel p-cursor">
+          <p>En <code>~/.cursor/mcp.json</code> (o <code>.cursor/mcp.json</code> dentro de un proyecto):</p>
+          <div class="code"><span class="label">mcp.json</span><pre><code>{
+  "mcpServers": {
+    "openarg": {
+      "url": "https://mcp.openarg.org/mcp",
+      "headers": { "Authorization": "Bearer oarg_sk_TU_CLAVE" }
+    }
+  }
+}</code></pre></div>
+        </div>
+
+        <div class="panel p-vscode">
+          <p>En <code>.vscode/mcp.json</code>. VS Code te pide la clave la primera vez y la guarda cifrada:</p>
+          <div class="code"><span class="label">.vscode/mcp.json</span><pre><code>{
+  "inputs": [
+    { "type": "promptString", "id": "openarg-key",
+      "description": "Clave de OpenArg (oarg_sk_…)", "password": true }
+  ],
+  "servers": {
+    "openarg": {
+      "type": "http",
+      "url": "https://mcp.openarg.org/mcp",
+      "headers": { "Authorization": "Bearer ${input:openarg-key}" }
+    }
+  }
+}</code></pre></div>
+        </div>
+      </div>
+    </li>
+    <li>
+      <h3 style="margin-top:0">Preguntá</h3>
+      <p>Pedile algo a tu asistente que necesite datos, por ejemplo:</p>
+      <ul>
+        <li>¿Cuál fue la tasa de desempleo del último trimestre publicado?</li>
+        <li>Mostrame la evolución mensual del IPC en 2025.</li>
+        <li>¿Cómo se reparten las bancas de Diputados por bloque?</li>
+      </ul>
+      <p class="muted">Cuanto más concreta la pregunta (indicador, período, lugar), mejor la respuesta.</p>
+    </li>
+  </ol>
+
+  <div class="note">
+    <strong>Cuidá tu clave.</strong> No la subas a un repositorio público ni la pegues en un chat.
+    Si se filtró, generá una nueva en <a href="https://openarg.org/desarrolladores">openarg.org/desarrolladores</a> y la anterior deja de funcionar.
+  </div>
+
+  <h2>Si algo no anda</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Mensaje</th><th>Qué hacer</th></tr></thead>
+    <tbody>
+      <tr><td>Falta la clave de OpenArg</td><td>El cliente no está mandando el header <code>Authorization</code>. Revisá la configuración del paso 2.</td></tr>
+      <tr><td>La clave es inválida o fue revocada</td><td>Generaste otra después, o se copió incompleta. Creá una nueva.</td></tr>
+      <tr><td>Usaste las 10 consultas de hoy</td><td>Se renuevan a las 21:00 (hora de Argentina).</td></tr>
+      <tr><td>El cupo público de hoy está agotado</td><td>Se alcanzó el límite total del día para todos los usuarios. Se renueva a las 21:00.</td></tr>
+      <tr><td>La consulta tardó demasiado</td><td>Acotá la pregunta: un indicador, un período, una jurisdicción.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>OpenArg · un proyecto de <a href="https://colossuslab.org">Colossus Lab</a></span>
+    <span><a href="https://openarg.org/privacy">Privacidad</a> · <a href="https://github.com/colossus-lab">GitHub</a> · <a href="mailto:hola@colossuslab.org">hola@colossuslab.org</a></span>
+  </div>
+</footer>
+<script src="site.js"></script>
+</body>
+</html>
