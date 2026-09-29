@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 import pytest
+import pytest_asyncio
 from dishka.integrations.fastapi import setup_dishka
 from httpx import ASGITransport, AsyncClient
 
@@ -20,6 +21,25 @@ from app.setup.ioc.provider_registry import create_async_ioc_container, get_prov
 
 # Mark all tests in this directory as e2e
 pytestmark = pytest.mark.e2e
+
+
+def pytest_collection_modifyitems(items):
+    """Un solo event loop para toda la suite E2E.
+
+    En producción hay **un** loop por proceso: uvicorn levanta uno y el módulo
+    del router se importa una vez. Por eso el checkpointer, el grafo compilado
+    y sus locks se cachean a nivel de módulo.
+
+    Con un loop por test, ese caché cruza loops y el `AsyncPostgresSaver` de
+    LangGraph falla desde adentro con `<Lock> is bound to a different event
+    loop` — que sale como un `500 PIPELINE_ERROR` genérico. Así caían 131 de
+    135 tests el 2026-09-28.
+
+    Compartir el loop no tapa un bug: reproduce la topología real. Un caché de
+    proceso probado contra un loop por test estaba probando algo que no existe.
+    """
+    for item in items:
+        item.add_marker(pytest.mark.asyncio(loop_scope="session"))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -46,7 +66,11 @@ def e2e_settings(_e2e_env_check) -> AppSettings:
     return AppSettings()
 
 
-@pytest.fixture
+# `loop_scope="session"` para que el fixture viva en el mismo loop que los
+# tests (ver `pytest_collection_modifyitems`). Sin esto, el fixture async
+# corre en un loop de función y el test en el de sesión, y pytest-asyncio
+# falla antes de llegar a la app.
+@pytest_asyncio.fixture(loop_scope="session")
 async def app(e2e_settings):
     """Create FastAPI app with real DI container (no mocks)."""
     fast_app = create_app()
@@ -72,7 +96,7 @@ def _reset_rate_limiter():
         storage.reset()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def client(app):
     """Async HTTP client hitting the real app."""
     transport = ASGITransport(app=app, raise_app_exceptions=False)

@@ -140,6 +140,10 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Los fixtures async de la suite E2E (`app`, el contenedor DI) tienen que
+# vivir en el mismo loop que los tests que los usan; ver el conftest de
+# `tests/e2e/`, que explica por qué esa suite comparte un loop.
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
