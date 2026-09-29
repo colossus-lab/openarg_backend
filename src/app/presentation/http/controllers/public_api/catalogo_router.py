@@ -49,6 +49,8 @@ router = APIRouter(prefix="/catalogo", tags=["public-api"])
 
 _MAX_TABLES_PER_DATASET = 5
 _DESCRIPTION_CHARS = 400
+# Mismo umbral que `/data/search`.
+_MIN_SIMILARITY = 0.40
 
 
 class TablaResumen(BaseModel):
@@ -141,37 +143,57 @@ async def buscar(
     portal: str | None = Query(default=None, max_length=80),
     limite: int = Query(default=10, ge=1, le=25),
 ) -> BuscarResponse:
-    """Búsqueda semántica + texto en el catálogo (un embedding, sin LLM)."""
+    """Búsqueda semántica en el catálogo (un embedding, sin LLM).
+
+    Semántica y no híbrida: en staging la híbrida tardaba 3,5 s por pedido y
+    la semántica 0,5 s, que es la misma que usa `/data/search`. Se pide el
+    doble de resultados porque después se agrupan los duplicados.
+    """
     await _authorize(request, api_key_repo, cache)
     try:
         vector = await embedding.embed(q)
     except Exception:
         logger.exception("catalogo/buscar: embedding falló")
         raise HTTPException(status_code=503, detail="La búsqueda no está disponible ahora.")
-    hits = await vector_search.search_datasets_hybrid(
-        query_embedding=vector, query_text=q, limit=limite, portal_filter=portal
+    hits = await vector_search.search_datasets(
+        query_embedding=vector,
+        limit=limite * 2,
+        portal_filter=portal,
+        min_similarity=_MIN_SIMILARITY,
     )
 
     tables_by_dataset: dict[str, list[TablaResumen]] = {}
-    for t in await sandbox.list_cached_tables():
-        if t.dataset_id:
+    for t in await sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits]):
+        # Una tabla con 0 filas es una versión vieja o una descarga fallida:
+        # no sirve para consultar y confunde al modelo.
+        if t.dataset_id and t.row_count != 0:
             tables_by_dataset.setdefault(str(t.dataset_id), []).append(
                 TablaResumen(tabla=t.table_name, filas=t.row_count)
             )
 
-    return BuscarResponse(
-        resultados=[
-            DatasetEncontrado(
-                dataset_id=str(h.dataset_id),
-                titulo=h.title,
-                descripcion=(h.description or "")[:_DESCRIPTION_CHARS],
-                portal=h.portal,
-                url=h.download_url or "",
-                tablas=tables_by_dataset.get(str(h.dataset_id), [])[:_MAX_TABLES_PER_DATASET],
-            )
-            for h in hits
-        ]
-    )
+    # El catálogo tiene el mismo dataset varias veces (la migración de
+    # datos.gob.ar regeneró IDs). Mismo título + misma URL = el mismo dataset:
+    # se muestra una vez, con todas sus tablas.
+    merged: dict[tuple[str, str], DatasetEncontrado] = {}
+    for h in hits:
+        key = (h.title.strip().lower(), (h.download_url or "").strip())
+        tables = tables_by_dataset.get(str(h.dataset_id), [])
+        if key in merged:
+            known = {t.tabla for t in merged[key].tablas}
+            merged[key].tablas.extend(t for t in tables if t.tabla not in known)
+            continue
+        merged[key] = DatasetEncontrado(
+            dataset_id=str(h.dataset_id),
+            titulo=h.title,
+            descripcion=(h.description or "")[:_DESCRIPTION_CHARS],
+            portal=h.portal,
+            url=h.download_url or "",
+            tablas=list(tables),
+        )
+    results = list(merged.values())[:limite]
+    for r in results:
+        r.tablas = sorted(r.tablas, key=lambda t: -(t.filas or 0))[:_MAX_TABLES_PER_DATASET]
+    return BuscarResponse(resultados=results)
 
 
 @router.get("/tabla", response_model=TablaResponse)
@@ -185,7 +207,7 @@ async def describir_tabla(
 ) -> TablaResponse:
     """Columnas con su tipo, filas, período cubierto y una muestra."""
     await _authorize(request, api_key_repo, cache)
-    table = resolve_table(nombre, await sandbox.list_cached_tables())
+    table = resolve_table(nombre, await sandbox.find_tables(table_names=[nombre]))
     if table is None:
         raise HTTPException(
             status_code=404,
@@ -230,7 +252,7 @@ async def obtener_datos(
 ) -> DatosResponse:
     """Filas de una tabla: columnas, período, filtros de igualdad y orden por fecha."""
     await _authorize(request, api_key_repo, cache)
-    table = resolve_table(body.tabla, await sandbox.list_cached_tables())
+    table = resolve_table(body.tabla, await sandbox.find_tables(table_names=[body.tabla]))
     if table is None:
         raise HTTPException(
             status_code=404,

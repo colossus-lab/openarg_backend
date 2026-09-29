@@ -65,6 +65,29 @@ class ISQLSandbox(ABC):
         """Return {table_name: [(column_name, data_type), ...]} for given tables."""
         ...
 
+    async def find_tables(
+        self,
+        *,
+        dataset_ids: list[str] | None = None,
+        table_names: list[str] | None = None,
+    ) -> list[CachedTableInfo]:
+        """Las tablas listas de ciertos datasets o con ciertos nombres.
+
+        Mismo contrato que `list_cached_tables()` pero acotado: el listado
+        completo son ~32.000 filas y, con el sandbox en scope de request, su
+        caché no sobrevive entre pedidos (4 s cada vez en staging). La versión
+        por defecto filtra el listado completo; los adapters reales la
+        reemplazan por una consulta puntual.
+        """
+        wanted_ids = {str(i) for i in dataset_ids or []}
+        wanted_names = {n.split(".")[-1].strip('"').lower() for n in table_names or []}
+        return [
+            t
+            for t in await self.list_cached_tables()
+            if (t.dataset_id and str(t.dataset_id) in wanted_ids)
+            or t.table_name.split(".")[-1].strip('"').lower() in wanted_names
+        ]
+
     async def get_table_sources(self, table_names: list[str]) -> dict[str, TableSource]:
         """Return {bare_table_name: TableSource} for the tables that map to a dataset.
 

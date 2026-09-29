@@ -717,6 +717,72 @@ class PgSandboxAdapter(ISQLSandbox):
             partial(self._get_column_types_sync, table_names),
         )
 
+    def _find_tables_sync(
+        self, dataset_ids: list[str], table_names: list[str]
+    ) -> list[CachedTableInfo]:
+        ids = sorted({str(i) for i in dataset_ids if i})
+        names = sorted({bare_name(n) for n in table_names if n})
+        if not ids and not names:
+            return []
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            # Misma forma que `_list_tables_sync` (calificar con el schema de la
+            # versión viva), pero sólo para los datasets / tablas pedidos.
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT CAST(cd.dataset_id AS text) AS dataset_id,
+                           CASE
+                               WHEN rtv.schema_name IS NOT NULL
+                                    AND rtv.schema_name <> 'public'
+                                    AND rtv.superseded_at IS NULL
+                                   THEN rtv.schema_name || '.' || cd.table_name
+                               ELSE cd.table_name
+                           END AS table_name,
+                           cd.row_count,
+                           cd.columns_json
+                    FROM raw.cached_datasets cd
+                    LEFT JOIN public.raw_table_versions rtv
+                      ON rtv.table_name = cd.table_name
+                     AND rtv.superseded_at IS NULL
+                    WHERE cd.status = 'ready'
+                      AND (CAST(cd.dataset_id AS text) = ANY(:ids) OR cd.table_name = ANY(:names))
+                    ORDER BY table_name
+                    """
+                ),
+                {"ids": ids, "names": names},
+            ).fetchall()
+            conn.rollback()
+        tables = []
+        for row in rows:
+            columns: list[str] = []
+            if row.columns_json:
+                try:
+                    columns = json.loads(row.columns_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            tables.append(
+                CachedTableInfo(
+                    table_name=row.table_name,
+                    dataset_id=row.dataset_id,
+                    row_count=row.row_count,
+                    columns=columns,
+                )
+            )
+        return tables
+
+    async def find_tables(
+        self,
+        *,
+        dataset_ids: list[str] | None = None,
+        table_names: list[str] | None = None,
+    ) -> list[CachedTableInfo]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(self._find_tables_sync, list(dataset_ids or []), list(table_names or [])),
+        )
+
     def _get_table_sources_sync(self, table_names: list[str]) -> dict[str, TableSource]:
         bare = sorted({bare_name(name) for name in table_names if name})
         if not bare:
