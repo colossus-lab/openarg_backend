@@ -102,15 +102,28 @@ def backend_headers(key: str, ip: str | None) -> dict[str, str]:
     return headers
 
 
-def error_message(status: int, detail: str = "") -> str:
-    """Traduce una respuesta de error del backend a un mensaje para el usuario."""
+def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> str:
+    """Traduce una respuesta de error del backend a un mensaje para el usuario.
+
+    En el modo datos (`/catalogo/*`) los 400/404/503 traen un `detail` que
+    armamos nosotros en castellano ("Columnas que no existen en la tabla: …")
+    y que le dice al modelo cómo corregir el pedido: se pasa tal cual. En el
+    modo respuestas el detalle de esos códigos no es para el usuario.
+    """
     detail_l = (detail or "").lower()
+    if data_mode and status in (400, 404, 503) and detail:
+        return detail
     if status == 401:
         return (
             "La clave de OpenArg es inválida o fue revocada. Generá una nueva en "
             f"{KEY_URL} y actualizala en tu cliente MCP."
         )
     if status == 429:
+        if "catalog" in detail_l and "day" in detail_l:
+            return (
+                "Se alcanzó el límite diario del modo datos (buscar, describir y "
+                "obtener datos). Se renueva a las 21:00 (hora de Argentina)."
+            )
         if "minute" in detail_l:
             return "Demasiadas consultas seguidas: esperá un minuto y volvé a intentar."
         if "this ip" in detail_l:
@@ -118,11 +131,10 @@ def error_message(status: int, detail: str = "") -> str:
                 "Se alcanzó el límite diario de consultas desde esta conexión. "
                 "Se renueva a las 21:00 (hora de Argentina)."
             )
-        if "catalog" in detail_l:
-            return "Se alcanzó el límite diario de consultas al catálogo. Se renueva a las 21:00 (hora de Argentina)."
         return (
-            "Usaste las 10 consultas de hoy. Se renuevan a las 21:00 (hora de "
-            "Argentina). Listar las fuentes no descuenta cupo."
+            "Usaste las 10 preguntas de hoy. Se renuevan a las 21:00 (hora de "
+            "Argentina). Mientras tanto podés usar el modo datos (buscar_datasets, "
+            "describir_tabla, obtener_datos), que no descuenta preguntas."
         )
     if status == 503:
         return (
@@ -183,3 +195,94 @@ def format_sources(payload: Mapping[str, Any]) -> str:
     head = f"OpenArg indexa {total} datasets de {len(fuentes)} portales:" if total else "Portales:"
     lines = [f"- {f.get('portal')}: {f.get('datasets')} datasets" for f in fuentes]
     return head + "\n" + "\n".join(lines)
+
+
+# ── Modo datos ───────────────────────────────────────────────────────────────
+
+_MAX_CELL = 120
+
+
+def _cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\r", " ").replace("\n", " ")
+    if len(text) > _MAX_CELL:
+        text = text[: _MAX_CELL - 1] + "…"
+    if any(ch in text for ch in (",", '"')):
+        text = '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def rows_to_csv(columns: list[str], rows: list[Mapping[str, Any]]) -> str:
+    """CSV compacto para el modelo: menos tokens que JSON para lo mismo."""
+    lines = [",".join(_cell(c) for c in columns)]
+    lines += [",".join(_cell(row.get(c)) for c in columns) for row in rows]
+    return "\n".join(lines)
+
+
+def _link(title: str, url: str) -> str:
+    return f"[{title}]({url})" if url.startswith(("http://", "https://")) else title
+
+
+def format_search(payload: Mapping[str, Any]) -> str:
+    results = [r for r in payload.get("resultados") or [] if isinstance(r, Mapping)]
+    if not results:
+        return "No encontré datasets para esa búsqueda. Probá con otras palabras o sin filtrar por portal."
+    parts = []
+    for i, r in enumerate(results, 1):
+        lines = [f"{i}. **{r.get('titulo') or 'Sin título'}** ({r.get('portal', '')})"]
+        desc = str(r.get("descripcion") or "").strip()
+        if desc:
+            lines.append(f"   {desc}")
+        tables = [t for t in r.get("tablas") or [] if isinstance(t, Mapping)]
+        if tables:
+            listed = ", ".join(
+                f"`{t.get('tabla')}`"
+                + (f" ({t.get('filas')} filas)" if t.get("filas") is not None else "")
+                for t in tables
+            )
+            lines.append(f"   Tablas consultables: {listed}")
+        else:
+            lines.append("   Sin tabla consultable en OpenArg")
+        url = str(r.get("url") or "")
+        if url:
+            lines.append(f"   Fuente: {_link('descarga oficial', url)}")
+        parts.append("\n".join(lines))
+    return (
+        "\n\n".join(parts)
+        + "\n\nUsá `describir_tabla` con el nombre de una tabla para ver sus columnas y período."
+    )
+
+
+def format_table(payload: Mapping[str, Any]) -> str:
+    title = str(payload.get("titulo") or payload.get("tabla") or "")
+    lines = [f"**{_link(title, str(payload.get('url') or ''))}** — tabla `{payload.get('tabla')}`"]
+    if payload.get("filas") is not None:
+        lines.append(f"Filas: {payload.get('filas')}")
+    if payload.get("columna_fecha"):
+        lines.append(
+            f"Período ({payload.get('columna_fecha')}): {payload.get('desde')} a {payload.get('hasta')}"
+        )
+    cols = [c for c in payload.get("columnas") or [] if isinstance(c, Mapping)]
+    lines.append("Columnas:\n" + "\n".join(f"- {c.get('nombre')} ({c.get('tipo')})" for c in cols))
+    sample = [r for r in payload.get("muestra") or [] if isinstance(r, Mapping)]
+    if sample:
+        names = [str(c.get("nombre")) for c in cols] or list(sample[0].keys())
+        lines.append("Muestra:\n```csv\n" + rows_to_csv(names, sample) + "\n```")
+    lines.append("Pedí las filas con `obtener_datos` (columnas, desde, hasta, filtros, limite).")
+    return "\n".join(lines)
+
+
+def format_rows(payload: Mapping[str, Any]) -> str:
+    rows = [r for r in payload.get("filas") or [] if isinstance(r, Mapping)]
+    columns = [str(c) for c in payload.get("columnas") or []]
+    source = _link(
+        str(payload.get("fuente") or payload.get("tabla") or ""), str(payload.get("url") or "")
+    )
+    if not rows:
+        return f"La consulta no devolvió filas. Fuente: {source}"
+    head = f"{len(rows)} filas de `{payload.get('tabla')}`. Fuente: {source}"
+    if payload.get("truncado"):
+        head += (
+            "\nHay más filas: acotá con `desde`/`hasta` o `filtros`, o subí `limite` (máximo 500)."
+        )
+    return head + "\n```csv\n" + rows_to_csv(columns, rows) + "\n```"

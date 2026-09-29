@@ -11,8 +11,18 @@ from app.infrastructure.auth import GoogleJwtValidator, InvalidGoogleToken
 
 logger = logging.getLogger(__name__)
 
-# /ask y /fuentes hacen su propia auth con la clave `oarg_sk_` del usuario.
-_ALWAYS_PUBLIC = frozenset({"/health", "/health/ready", "/api/v1/ask", "/api/v1/fuentes"})
+# /ask, /fuentes y /catalogo/* hacen su propia auth con la clave `oarg_sk_` del usuario.
+_ALWAYS_PUBLIC = frozenset(
+    {
+        "/health",
+        "/health/ready",
+        "/api/v1/ask",
+        "/api/v1/fuentes",
+        "/api/v1/catalogo/buscar",
+        "/api/v1/catalogo/tabla",
+        "/api/v1/catalogo/datos",
+    }
+)
 _SERVICE_PREFIXES = ("/api/v1/data/", "/api/v1/admin/")
 _DEV_PUBLIC = frozenset({"/docs", "/openapi.json", "/redoc"})
 

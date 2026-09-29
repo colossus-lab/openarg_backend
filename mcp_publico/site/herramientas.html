@@ -29,9 +29,65 @@
     <h1>Herramientas</h1>
     <p class="lede">
       El servidor <code>https://mcp.openarg.org/mcp</code> usa el transporte
-      Streamable HTTP. Expone dos herramientas, las dos de solo lectura.
+      Streamable HTTP. Tiene cinco herramientas, todas de solo lectura, en dos modos.
     </p>
   </section>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Modo datos</h3>
+      <p>Tu asistente busca, mira y trae las filas, y razona él. <strong>200 pedidos por día</strong>, sin descontar preguntas.</p>
+      <p class="muted"><code>buscar_datasets</code> · <code>describir_tabla</code> · <code>obtener_datos</code> · <code>listar_fuentes</code></p>
+    </div>
+    <div class="card">
+      <h3>Modo respuestas</h3>
+      <p>OpenArg arma la respuesta, cruza tablas y verifica los números. <strong>10 preguntas por día.</strong></p>
+      <p class="muted"><code>consultar_datos_publicos</code></p>
+    </div>
+  </div>
+
+  <h2><code>buscar_datasets</code></h2>
+  <p>Busca en el catálogo (más de 30.000 datasets de portales oficiales), por significado y por palabras.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Parámetro</th><th>Tipo</th><th>Descripción</th></tr></thead>
+    <tbody>
+      <tr><td><code>texto</code></td><td>texto</td><td>Lo que buscás: "tasas de interés BCRA", "matrícula escolar CABA".</td></tr>
+      <tr><td><code>portal</code></td><td>texto, opcional</td><td>Limita a un portal (ver <code>listar_fuentes</code>).</td></tr>
+      <tr><td><code>limite</code></td><td>número, opcional</td><td>De 1 a 25. Por defecto 10.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Devuelve</strong> título, portal, descripción, link a la fuente oficial y las <strong>tablas consultables</strong> de cada dataset, con su cantidad de filas.</p>
+
+  <h2><code>describir_tabla</code></h2>
+  <p>Todo lo necesario para pedir bien los datos de una tabla.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Parámetro</th><th>Tipo</th><th>Descripción</th></tr></thead>
+    <tbody>
+      <tr><td><code>tabla</code></td><td>texto</td><td>El nombre que devolvió <code>buscar_datasets</code>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Devuelve</strong> las columnas con su tipo, la cantidad de filas, el período cubierto (si tiene fechas), una muestra de 5 filas y la fuente oficial.</p>
+
+  <h2><code>obtener_datos</code></h2>
+  <p>Trae filas de una tabla, en CSV. No se escribe SQL: se eligen columnas, período y filtros.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Parámetro</th><th>Tipo</th><th>Descripción</th></tr></thead>
+    <tbody>
+      <tr><td><code>tabla</code></td><td>texto</td><td>La tabla, como la devuelve <code>buscar_datasets</code>.</td></tr>
+      <tr><td><code>columnas</code></td><td>lista, opcional</td><td>Nombres exactos de <code>describir_tabla</code>. Por defecto, todas (hasta 30).</td></tr>
+      <tr><td><code>desde</code> / <code>hasta</code></td><td>texto, opcional</td><td>Período: <code>AAAA</code>, <code>AAAA-MM</code> o <code>AAAA-MM-DD</code>.</td></tr>
+      <tr><td><code>filtros</code></td><td>objeto, opcional</td><td>Igualdad exacta por columna, hasta 5: <code>{"provincia": "Córdoba"}</code>.</td></tr>
+      <tr><td><code>orden</code></td><td>texto, opcional</td><td><code>asc</code> o <code>desc</code>, por fecha.</td></tr>
+      <tr><td><code>limite</code></td><td>número, opcional</td><td>De 1 a 500 filas. Por defecto 100.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Devuelve</strong> las filas en CSV, la fuente oficial con su link y un aviso si hay más filas que las pedidas.</p>
 
   <h2><code>consultar_datos_publicos</code></h2>
   <p>Responde una pregunta sobre datos públicos oficiales de Argentina, con fuentes.</p>
@@ -50,12 +106,12 @@
     <li><strong>Advertencias</strong>: dato provisorio, serie incompleta, números que no se pudieron verificar contra la tabla,</li>
     <li>las consultas que te quedan hoy.</li>
   </ul>
-  <p><strong>Cupo:</strong> descuenta 1 de las 10 consultas diarias, aunque la pregunta termine sin datos.</p>
+  <p><strong>Cupo:</strong> descuenta 1 de las 10 preguntas diarias, aunque la pregunta termine sin datos.</p>
   <p class="muted">Tarda entre unos segundos y un minuto, según cuántas tablas tenga que cruzar.</p>
 
   <h2><code>listar_fuentes</code></h2>
   <p>Lista los portales de datos abiertos que cubre OpenArg y cuántos datasets tiene indexados cada uno. No lleva parámetros.</p>
-  <p><strong>Cupo:</strong> no descuenta consultas. Tiene un límite propio de 60 por día.</p>
+  <p><strong>Cupo:</strong> cuenta como un pedido del modo datos.</p>
 
   <h2>Errores</h2>
   <p>
@@ -74,6 +130,16 @@
     Devuelve JSON con <code>answer</code>, <code>sources</code>, <code>citations</code>,
     <code>warnings</code>, <code>chart_data</code>, <code>map_data</code> y <code>usage</code>.
   </p>
+  <p>Y el modo datos, en JSON:</p>
+  <div class="code"><pre><code>curl -G https://api.openarg.org/api/v1/catalogo/buscar \
+  -H "Authorization: Bearer oarg_sk_TU_CLAVE" --data-urlencode "q=tasas de interés"
+
+curl -G https://api.openarg.org/api/v1/catalogo/tabla \
+  -H "Authorization: Bearer oarg_sk_TU_CLAVE" --data-urlencode "nombre=TABLA"
+
+curl https://api.openarg.org/api/v1/catalogo/datos \
+  -H "Authorization: Bearer oarg_sk_TU_CLAVE" -H "Content-Type: application/json" \
+  -d '{"tabla": "TABLA", "desde": "2026-01", "limite": 100}'</code></pre></div>
 </main>
 
 <footer class="foot">

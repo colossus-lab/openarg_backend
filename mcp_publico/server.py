@@ -48,16 +48,20 @@ server = MCPServer(
     title="OpenArg — Datos Públicos de Argentina",
     website_url=core.DOCS_URL,
     instructions=(
-        "OpenArg responde preguntas sobre datos públicos oficiales de Argentina "
-        "(INDEC, datos.gob.ar, provincias, municipios, Congreso, presupuesto, "
-        "series económicas y más) consultando los datasets de los portales "
-        "de datos abiertos. Usá `consultar_datos_publicos` con la pregunta en "
-        "lenguaje natural, preferentemente en español y lo más concreta posible "
-        "(indicador, período, jurisdicción). Cada llamada descuenta una de las "
-        "10 consultas diarias del usuario: no la llames para repreguntar lo "
-        "mismo ni para cosas que no sean datos públicos argentinos. Citá "
-        "siempre las fuentes que devuelve y mostrá las advertencias. "
-        "`listar_fuentes` muestra qué portales cubre y no descuenta cupo."
+        "OpenArg da acceso a datos públicos oficiales de Argentina (INDEC, "
+        "datos.gob.ar, provincias, municipios, Congreso, presupuesto, series "
+        "económicas y más) en dos modos.\n"
+        "MODO DATOS (preferilo cuando puedas razonar vos con los datos): "
+        "`buscar_datasets` encuentra datasets y sus tablas; `describir_tabla` "
+        "muestra columnas, período y una muestra; `obtener_datos` trae filas "
+        "filtradas por período, columnas y valores. No descuenta preguntas "
+        "(tiene su propio cupo, más amplio).\n"
+        "MODO RESPUESTAS: `consultar_datos_publicos` recibe una pregunta en "
+        "lenguaje natural y OpenArg arma la respuesta con fuentes y advertencias. "
+        "Cada llamada descuenta 1 de las 10 preguntas diarias del usuario: usala "
+        "cuando la pregunta necesite cruzar tablas o cuando el modo datos no alcance.\n"
+        "Citá siempre la fuente (título y link) de los datos que uses. "
+        "`listar_fuentes` muestra qué portales cubre."
     ),
 )
 
@@ -74,12 +78,19 @@ def _key_and_ip(ctx: Context) -> tuple[str, str | None]:
 
 
 async def _call_backend(
-    method: str, path: str, key: str, ip: str | None, json: Any = None
+    method: str,
+    path: str,
+    key: str,
+    ip: str | None,
+    json: Any = None,
+    params: dict[str, Any] | None = None,
+    *,
+    data_mode: bool = False,
 ) -> dict[str, Any]:
     try:
         async with _client_factory() as client:
             resp = await client.request(
-                method, path, json=json, headers=core.backend_headers(key, ip)
+                method, path, json=json, params=params, headers=core.backend_headers(key, ip)
             )
     except httpx.TimeoutException:
         raise ToolError(core.error_message(408)) from None
@@ -93,7 +104,7 @@ async def _call_backend(
         except ValueError:
             detail = ""
         logger.info("backend %s %s -> %s", method, path, resp.status_code)
-        raise ToolError(core.error_message(resp.status_code, detail))
+        raise ToolError(core.error_message(resp.status_code, detail, data_mode=data_mode))
     return resp.json()
 
 
@@ -121,7 +132,8 @@ async def consultar_datos_publicos(pregunta: str, ctx: Context) -> str:
     "Presupuesto ejecutado por el Ministerio de Salud en 2024".
     La respuesta incluye los datasets usados (con link al portal oficial),
     advertencias sobre la calidad o cobertura del dato, y cuántas consultas
-    le quedan hoy al usuario. Descuenta 1 de las 10 consultas diarias.
+    le quedan hoy al usuario. Descuenta 1 de las 10 preguntas diarias: si podés
+    responder con `buscar_datasets` + `obtener_datos`, preferí esas.
     """
     try:
         question = core.validate_question(pregunta)
@@ -144,6 +156,87 @@ async def listar_fuentes(ctx: Context) -> str:
     key, ip = _key_and_ip(ctx)
     payload = await _call_backend("GET", "/api/v1/fuentes", key, ip)
     return core.format_sources(payload)
+
+
+_IDEMPOTENT = ToolAnnotations(
+    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True
+)
+
+
+@_tool("Buscar datasets públicos de Argentina", _IDEMPOTENT)
+async def buscar_datasets(
+    texto: str, ctx: Context, portal: str | None = None, limite: int = 10
+) -> str:
+    """Busca en el catálogo de OpenArg (más de 30.000 datasets de portales oficiales).
+
+    Devuelve título, portal, descripción, link a la fuente oficial y las tablas
+    consultables de cada dataset (usalas con `describir_tabla` y `obtener_datos`).
+    `texto` es lo que buscás, en castellano ("tasas de interés BCRA", "matrícula
+    escolar CABA"). `portal` filtra por portal (ver `listar_fuentes`).
+    `limite` entre 1 y 25. No descuenta preguntas.
+    """
+    key, ip = _key_and_ip(ctx)
+    params: dict[str, Any] = {"q": texto.strip(), "limite": max(1, min(int(limite), 25))}
+    if portal:
+        params["portal"] = portal
+    payload = await _call_backend(
+        "GET", "/api/v1/catalogo/buscar", key, ip, params=params, data_mode=True
+    )
+    return core.format_search(payload)
+
+
+@_tool("Describir una tabla de OpenArg", _IDEMPOTENT)
+async def describir_tabla(tabla: str, ctx: Context) -> str:
+    """Muestra las columnas (con su tipo), cantidad de filas, período cubierto y una muestra de una tabla.
+
+    `tabla` es el nombre que devuelve `buscar_datasets`. Usalo antes de
+    `obtener_datos` para saber qué columnas pedir y qué fechas existen.
+    No descuenta preguntas.
+    """
+    key, ip = _key_and_ip(ctx)
+    payload = await _call_backend(
+        "GET", "/api/v1/catalogo/tabla", key, ip, params={"nombre": tabla.strip()}, data_mode=True
+    )
+    return core.format_table(payload)
+
+
+@_tool("Obtener datos de una tabla de OpenArg", _IDEMPOTENT)
+async def obtener_datos(
+    tabla: str,
+    ctx: Context,
+    columnas: list[str] | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+    filtros: dict[str, str] | None = None,
+    orden: str = "asc",
+    limite: int = 100,
+) -> str:
+    """Trae filas de una tabla, en CSV, con la fuente oficial.
+
+    - `columnas`: las que quieras (por defecto, todas); nombres exactos de `describir_tabla`.
+    - `desde` / `hasta`: período, como AAAA, AAAA-MM o AAAA-MM-DD, sobre la columna de fecha.
+    - `filtros`: igualdad exacta por columna, p. ej. {"provincia": "Córdoba"} (hasta 5).
+    - `orden`: "asc" o "desc" por fecha. `limite`: 1 a 500 filas.
+    No descuenta preguntas.
+    """
+    key, ip = _key_and_ip(ctx)
+    body: dict[str, Any] = {
+        "tabla": tabla.strip(),
+        "orden": orden,
+        "limite": max(1, min(int(limite), 500)),
+    }
+    for field, value in (
+        ("columnas", columnas),
+        ("desde", desde),
+        ("hasta", hasta),
+        ("filtros", filtros),
+    ):
+        if value:
+            body[field] = value
+    payload = await _call_backend(
+        "POST", "/api/v1/catalogo/datos", key, ip, json=body, data_mode=True
+    )
+    return core.format_rows(payload)
 
 
 @server.custom_route("/health", methods=["GET"])

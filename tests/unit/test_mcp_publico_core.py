@@ -66,7 +66,7 @@ class TestQuestion:
 class TestErrorMessages:
     def test_day_quota(self) -> None:
         msg = core.error_message(429, "Rate limit exceeded: 10 requests per day")
-        assert "10 consultas de hoy" in msg and "21:00" in msg
+        assert "10 preguntas de hoy" in msg and "21:00" in msg
 
     def test_minute_quota(self) -> None:
         assert "minuto" in core.error_message(429, "Rate limit exceeded: 2 requests per minute")
@@ -149,3 +149,30 @@ class TestContacto:
             html = page.read_text(encoding="utf-8")
             assert "hola@colossuslab.org" not in html, f"{page.name}: ese mail no existe"
             assert "devops@colossuslab.org" in html, f"{page.name}: falta el mail de contacto"
+
+
+class TestModoDatosCore:
+    def test_catalog_daily_quota_message(self) -> None:
+        msg = core.error_message(429, "Rate limit exceeded: 200 catalog requests per day")
+        assert "modo datos" in msg
+
+    def test_catalog_minute_quota_message(self) -> None:
+        msg = core.error_message(429, "Rate limit exceeded: 30 catalog requests per minute")
+        assert "minuto" in msg
+
+    def test_data_mode_passes_our_validation_message(self) -> None:
+        msg = core.error_message(404, "No existe esa tabla en el catálogo.", data_mode=True)
+        assert msg == "No existe esa tabla en el catálogo."
+
+    def test_answer_mode_does_not_pass_details(self) -> None:
+        assert "Traceback" not in core.error_message(400, "Traceback x")
+
+    def test_csv_quotes_commas_and_flattens_newlines(self) -> None:
+        out = core.rows_to_csv(["a", "b"], [{"a": "x,y", "b": "l1\nl2"}, {"a": None, "b": 3}])
+        assert out == 'a,b\n"x,y",l1 l2\n,3'
+
+    def test_search_without_results(self) -> None:
+        assert "No encontré" in core.format_search({"resultados": []})
+
+    def test_rows_without_results(self) -> None:
+        assert "no devolvió filas" in core.format_rows({"filas": [], "fuente": "X"})
