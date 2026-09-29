@@ -21,6 +21,7 @@ from app.application.discovery import (
     catalog_only_mode,
     discovery_enabled,
 )
+from app.application.marts.serving_redirect import MART_CANDIDATES_SQL
 from app.application.pipeline.connectors.cache_table_selection import (
     build_table_compat_notes,
     expand_table_hints_compat,
@@ -408,26 +409,10 @@ async def discover_tables_by_catalog_search(
                 # overlap the query stay un-boosted and raw correctly wins.
                 # 0.45 mirrors the same min_score used for raws — below
                 # that, a sample isn't really a semantic match.
+                # Los 3 marts más parecidos, con los bloqueados reemplazados
+                # por el mart que su bloqueo indica (serving_redirect).
                 mart_result = conn.execute(
-                    text(
-                        "WITH ranked AS ("
-                        "  SELECT md.mart_schema, md.mart_view_name, md.mart_id, "
-                        "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_score "
-                        "  FROM mart_definitions md "
-                        "  WHERE md.embedding IS NOT NULL "
-                        "    AND COALESCE(md.last_row_count, 0) > 0 "
-                        "    AND NOT COALESCE(md.serving_blocked, FALSE) "
-                        "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
-                        "  LIMIT 3"
-                        ") "
-                        "SELECT r.mart_schema, r.mart_view_name, r.base_score, "
-                        "       COALESCE(("
-                        "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
-                        "         FROM public.mart_sample_queries msq "
-                        "         WHERE msq.mart_id = r.mart_id"
-                        "       ), 0) AS sample_max_sim "
-                        "FROM ranked r"
-                    ),
+                    text(MART_CANDIDATES_SQL),
                     {"emb": embedding_str},
                 )
                 mart_rows = []
@@ -557,26 +542,10 @@ async def discover_catalog_hints_for_planner(
         def _search_marts() -> tuple[list[Resource], dict[str, int]]:
             engine = sandbox._get_engine()  # type: ignore[union-attr]
             with engine.connect() as conn:
+                # Misma consulta que `_catalog_vector_search`: bloqueados
+                # reemplazados por su redirección (serving_redirect).
                 rs = conn.execute(
-                    text(
-                        "WITH ranked AS ("
-                        "  SELECT md.mart_id, md.domain, md.last_row_count, "
-                        "         1 - (md.embedding <=> CAST(:emb AS vector)) AS base_sim "
-                        "  FROM mart_definitions md "
-                        "  WHERE md.embedding IS NOT NULL "
-                        "    AND COALESCE(md.last_row_count, 0) > 0 "
-                        "    AND NOT COALESCE(md.serving_blocked, FALSE) "
-                        "  ORDER BY md.embedding <=> CAST(:emb AS vector) "
-                        "  LIMIT 3"
-                        ") "
-                        "SELECT r.mart_id, r.domain, r.base_sim, r.last_row_count, "
-                        "       COALESCE(("
-                        "         SELECT MAX(1 - (msq.embedding <=> CAST(:emb AS vector))) "
-                        "         FROM public.mart_sample_queries msq "
-                        "         WHERE msq.mart_id = r.mart_id"
-                        "       ), 0) AS sample_max_sim "
-                        "FROM ranked r"
-                    ),
+                    text(MART_CANDIDATES_SQL),
                     {"emb": embedding_str},
                 ).fetchall()
                 conn.rollback()
@@ -595,7 +564,7 @@ async def discover_catalog_hints_for_planner(
                 # hints no diga "0 filas" sobre una vista con datos.
                 conteos: dict[str, int] = {}
                 for r in rs:
-                    base = float(r.base_sim or 0)
+                    base = float(r.base_score or 0)
                     sample = float(r.sample_max_sim or 0)
                     boosted = base + 0.17 if sample >= 0.70 else base
                     if boosted < min_sim:
