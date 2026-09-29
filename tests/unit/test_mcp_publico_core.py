@@ -138,3 +138,14 @@ class TestLinks:
         assert pages, "core.py no enlaza ninguna página de la web"
         for page in pages:
             assert (site / page).is_file(), f"{page} no existe en mcp_publico/site"
+
+
+class TestContacto:
+    def test_la_web_usa_el_mail_que_existe(self) -> None:
+        from pathlib import Path
+
+        site = Path(core.__file__).parent / "site"
+        for page in site.glob("*.html"):
+            html = page.read_text(encoding="utf-8")
+            assert "hola@colossuslab.org" not in html, f"{page.name}: ese mail no existe"
+            assert "devops@colossuslab.org" in html, f"{page.name}: falta el mail de contacto"
