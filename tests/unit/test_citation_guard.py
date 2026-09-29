@@ -85,6 +85,52 @@ def test_ground_citations_degrades_confidence_when_number_is_unsupported() -> No
     assert confidence == 0.45
 
 
+def _bcra_badlar() -> DataResult:
+    # Caso real (staging, 29-sep): la tabla guarda 29.4375 y 36.4375 y la
+    # respuesta —correcta— los escribe redondeados a dos decimales.
+    return _make_result(
+        [
+            {"indice_tiempo": "2025-12-01", "tasas_interes_badlar": 29.4375},
+            {"indice_tiempo": "2026-01-23", "tasas_interes_badlar": 36.4375},
+            {"indice_tiempo": "2026-06-18", "tasas_interes_badlar": 21},
+        ]
+    )
+
+
+def test_ground_citations_accepts_values_rounded_to_the_decimals_written() -> None:
+    claim = "Tasa BADLAR: 29,44% (1 dic 2025) a 21% (18 jun 2026), máximo 36,44% (23 ene 2026)"
+    grounded, warnings, _ = ground_citations(
+        claim, [{"claim": claim, "source": "IPC Nacional"}], [_bcra_badlar()], 0.9
+    )
+    assert warnings == []
+    assert grounded[0]["verified"] is True
+    assert grounded[0]["unsupported_numbers"] == []
+
+
+def test_ground_citations_rounding_tolerance_follows_the_decimals() -> None:
+    # Con un decimal, 29,4 cubre 29.4375; 29,5 no (el redondeo da 29,4).
+    ok = "BADLAR 29,4%"
+    grounded, _, _ = ground_citations(ok, [{"claim": ok, "source": "IPC"}], [_bcra_badlar()], 0.9)
+    assert grounded[0]["verified"] is True
+    bad = "BADLAR 29,5%"
+    grounded, warnings, _ = ground_citations(
+        bad, [{"claim": bad, "source": "IPC"}], [_bcra_badlar()], 0.9
+    )
+    assert grounded[0]["unsupported_numbers"] == [29.5]
+    assert warnings
+
+
+def test_ground_citations_integers_stay_exact() -> None:
+    # Sin decimales no hay tolerancia: un "29%" inventado no se valida
+    # porque haya un 29.4375 en la tabla.
+    claim = "BADLAR 29%"
+    grounded, warnings, _ = ground_citations(
+        claim, [{"claim": claim, "source": "IPC"}], [_bcra_badlar()], 0.9
+    )
+    assert grounded[0]["unsupported_numbers"] == [29.0]
+    assert warnings
+
+
 def test_ground_citations_keeps_low_confidence_when_only_supported_number_is_temporal() -> None:
     result = _make_result([{"anio": 2025, "inflacion": 117.8}])
     citations = [{"claim": "La inflación fue 200 en 2025", "source": "IPC Nacional"}]

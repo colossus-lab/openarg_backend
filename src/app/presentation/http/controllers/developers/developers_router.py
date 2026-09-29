@@ -19,6 +19,7 @@ from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.user.user_repository import IUserRepository
 from app.presentation.http.middleware.google_jwt_middleware import get_request_user_email
+from app.setup.app_factory import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,10 @@ class KeyResponse(BaseModel):
 
 
 @router.post("/keys")
+# Cada alta revoca la clave anterior; sin límite, regenerar en bucle es una
+# forma gratis de resetear contadores atados a la clave. El bucket es por
+# usuario (`request.state.user_email`, ver rate_limit_key.py).
+@limiter.limit("5/hour")  # type: ignore[untyped-decorator]
 @inject
 async def create_api_key_endpoint(
     request: Request,
@@ -160,4 +165,9 @@ async def get_usage(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return await api_key_repo.get_usage_summary(user.id)
+    summary = await api_key_repo.get_usage_summary(user.id)
+    # El frontend mostraba "X/5 consultas" con el 5 escrito a mano; el
+    # límite sale de acá para que no vuelva a desfasarse de PLAN_LIMITS.
+    # Todas las claves se crean con plan "free" (ver create_api_key_endpoint).
+    limits = PLAN_LIMITS["free"]
+    return {**summary, "limit_day": limits["per_day"], "limit_minute": limits["per_min"]}

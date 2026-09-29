@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="es-AR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenArg MCP</title>
+  <meta name="description" content="Conectá tu asistente de IA a más de 30.000 datasets públicos oficiales de Argentina. Buscá, leé las tablas y obtené respuestas con fuentes citadas. Gratis.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="canonical" href="https://mcp.openarg.org/">
+  <meta property="og:title" content="OpenArg MCP — Datos públicos de Argentina en tu asistente de IA">
+  <meta property="og:description" content="Preguntale a Claude, Cursor o VS Code por datos oficiales de Argentina y recibí respuestas con fuentes citadas.">
+  <meta property="og:image" content="https://mcp.openarg.org/og-image.png">
+  <meta property="og:url" content="https://mcp.openarg.org/">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="" width="28" height="28">OpenArg <small>MCP</small></a>
+    <nav class="nav" aria-label="Secciones">
+      <a href="./" aria-current="page">Inicio</a>
+      <a href="empezar.html">Empezar</a>
+      <a href="herramientas.html">Herramientas</a>
+      <a href="limites.html">Límites y privacidad</a>
+      <a href="https://openarg.org">openarg.org</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <span class="kicker">Model Context Protocol · Beta</span>
+    <h1>Los datos públicos de Argentina, adentro de tu asistente de IA.</h1>
+    <p class="lede">
+      Conectá Claude, Cursor o VS Code a más de 30.000 datasets oficiales:
+      desempleo, inflación, presupuesto, el Congreso y todo lo que publica el
+      Estado. Tu asistente busca, lee las tablas y te responde con la fuente.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://openarg.org/desarrolladores">Conseguí tu clave gratis</a>
+      <a class="btn" href="empezar.html">Cómo conectarlo →</a>
+    </div>
+    <div class="flag-rule" aria-hidden="true"></div>
+  </section>
+
+  <h2>Dos modos</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Modo datos · 200 por día</h3>
+      <p>Tu asistente busca en el catálogo, mira las columnas y trae las filas que necesita, y razona él con los datos. Ideal para análisis, gráficos y cruces propios.</p>
+      <p class="muted" style="margin:0"><code>buscar_datasets</code> → <code>describir_tabla</code> → <code>obtener_datos</code></p>
+    </div>
+    <div class="card">
+      <h3>Modo respuestas · 10 por día</h3>
+      <p>Preguntás en castellano y OpenArg arma la respuesta: elige las tablas, cruza los datos y verifica los números contra la fuente.</p>
+      <p class="muted" style="margin:0"><code>consultar_datos_publicos</code></p>
+    </div>
+  </div>
+
+  <h2>Cómo se ve</h2>
+  <div class="chat" aria-label="Ejemplo de uso">
+    <div class="turn user">
+      <div class="who">Vos, en tu asistente</div>
+      ¿Cómo evolucionó la tasa de desempleo en los últimos cuatro trimestres?
+    </div>
+    <div class="turn">
+      <div class="who">El asistente llama a OpenArg</div>
+      <div class="tool">consultar_datos_publicos(pregunta="tasa de desempleo últimos cuatro trimestres")</div>
+    </div>
+    <div class="turn">
+      <div class="who">OpenArg devuelve</div>
+      <p>La respuesta en texto, armada a partir de las tablas del dataset.</p>
+      <p><strong>Fuentes</strong>: cada dataset usado, con el link al portal oficial de donde sale.</p>
+      <p><strong>Advertencias</strong>: si el dato es provisorio, si la serie tiene huecos o si el total está incompleto.</p>
+      <p class="muted" style="margin:0">Y cuántas consultas te quedan hoy.</p>
+    </div>
+  </div>
+
+  <h2>Qué podés preguntar</h2>
+  <div class="grid">
+    <div class="card"><h3>Economía</h3><p>Inflación, desempleo, actividad, series del INDEC y del BCRA.</p></div>
+    <div class="card"><h3>Presupuesto</h3><p>Crédito y ejecución por jurisdicción, programa y año.</p></div>
+    <div class="card"><h3>Congreso</h3><p>Composición de las cámaras, bloques, declaraciones juradas.</p></div>
+    <div class="card"><h3>Territorio</h3><p>Datos de provincias y municipios con portal de datos abiertos.</p></div>
+  </div>
+  <p class="muted" style="margin-top:14px">
+    La cobertura crece con cada portal que se indexa. La herramienta
+    <code>listar_fuentes</code> te dice qué portales hay hoy y cuántos datasets tiene cada uno.
+  </p>
+
+  <h2>Por qué OpenArg</h2>
+  <div class="grid">
+    <div class="card"><h3>Fuentes, no memoria</h3><p>El asistente no contesta de memoria: consulta los datasets publicados y te dice cuáles usó.</p></div>
+    <div class="card"><h3>Avisa lo que no sabe</h3><p>Los números que no se pueden verificar contra los datos vuelven marcados como advertencia.</p></div>
+    <div class="card"><h3>Gratis y abierto</h3><p>200 pedidos de datos y 10 preguntas por día con tu clave. El código de OpenArg es público.</p></div>
+  </div>
+
+  <h2>Preguntas frecuentes</h2>
+  <div class="qa">
+    <details>
+      <summary>¿Qué es un MCP?</summary>
+      <div>El Model Context Protocol es el estándar abierto con el que los asistentes de IA se conectan a herramientas externas. Con OpenArg conectado, tu asistente puede consultar datos públicos argentinos cuando la pregunta lo necesita.</div>
+    </details>
+    <details>
+      <summary>¿Cuánto cuesta?</summary>
+      <div>Nada. Cada clave tiene 200 pedidos por día en el modo datos y 10 preguntas en el modo respuestas; los dos se renuevan a las 21:00 (hora de Argentina).</div>
+    </details>
+    <details>
+      <summary>¿Funciona en claude.ai o en ChatGPT desde el navegador?</summary>
+      <div>Todavía no. Esos conectores piden un inicio de sesión (OAuth) que estamos construyendo. Hoy funciona en Claude Code, Claude Desktop, Cursor y VS Code, que aceptan la clave como header.</div>
+    </details>
+    <details>
+      <summary>¿Puedo confiar ciegamente en las respuestas?</summary>
+      <div>No. OpenArg usa un modelo de lenguaje para leer los datos y redactar la respuesta, y puede equivocarse. Por eso siempre devuelve las fuentes: para datos que vayas a publicar o usar en decisiones, verificá en el portal oficial.</div>
+    </details>
+    <details>
+      <summary>¿Qué se guarda de mis preguntas?</summary>
+      <div>El texto de la pregunta, asociado a tu clave, para medir el uso y mejorar las respuestas. No se guardan conversaciones. Detalle en <a href="limites.html">Límites y privacidad</a>.</div>
+    </details>
+    <details>
+      <summary>¿Hay una API sin MCP?</summary>
+      <div>Sí: la misma clave sirve para <code>POST https://api.openarg.org/api/v1/ask</code> con <code>{"question": "…"}</code>. Comparte el cupo de 10 consultas diarias.</div>
+    </details>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>OpenArg · un proyecto de <a href="https://colossuslab.org">Colossus Lab</a></span>
+    <span><a href="https://openarg.org/privacy">Privacidad</a> · <a href="https://github.com/colossus-lab">GitHub</a> · <a href="mailto:devops@colossuslab.org">devops@colossuslab.org</a></span>
+  </div>
+</footer>
+<script src="site.js"></script>
+</body>
+</html>

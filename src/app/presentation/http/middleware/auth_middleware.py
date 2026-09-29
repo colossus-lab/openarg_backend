@@ -11,7 +11,18 @@ from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
-_ALWAYS_PUBLIC = frozenset({"/health", "/health/ready", "/api/v1/ask"})
+# /ask, /fuentes y /catalogo/* hacen su propia auth con la clave `oarg_sk_` del usuario.
+_ALWAYS_PUBLIC = frozenset(
+    {
+        "/health",
+        "/health/ready",
+        "/api/v1/ask",
+        "/api/v1/fuentes",
+        "/api/v1/catalogo/buscar",
+        "/api/v1/catalogo/tabla",
+        "/api/v1/catalogo/datos",
+    }
+)
 _SERVICE_PREFIXES = (
     "/api/v1/data/",  # Own auth via Bearer service token
     "/api/v1/admin/",  # Own auth via X-Admin-Key (verify_admin_key dependency)

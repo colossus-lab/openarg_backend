@@ -1,0 +1,26 @@
+# OpenArg MCP
+
+> Servidor MCP público de OpenArg: acceso a más de 30.000 datasets públicos oficiales de Argentina (INDEC, datos.gob.ar, provincias, municipios, Congreso, presupuesto). Modo datos: buscar, describir y leer tablas. Modo respuestas: preguntas en lenguaje natural respondidas con fuentes citadas.
+
+- Endpoint MCP (Streamable HTTP): https://mcp.openarg.org/mcp
+- Autenticación: header `Authorization: Bearer oarg_sk_…`. Clave gratis en https://openarg.org/desarrolladores
+- Cupo: modo datos 200 pedidos/día (30/min, hasta 500 filas por pedido); modo respuestas 10 preguntas/día. Se renueva a las 00:00 UTC.
+
+## Herramientas
+
+Modo datos (el modelo del usuario razona con las filas):
+
+- `buscar_datasets(texto, portal?, limite?)`: datasets con título, portal, link oficial y tablas consultables.
+- `describir_tabla(tabla)`: columnas con tipo, filas, período cubierto y muestra.
+- `obtener_datos(tabla, columnas?, desde?, hasta?, filtros?, orden?, limite?)`: filas en CSV con la fuente. Sin SQL: columnas, período AAAA[-MM[-DD]] y filtros de igualdad.
+- `listar_fuentes()`: portales cubiertos y cantidad de datasets.
+
+Modo respuestas (OpenArg razona):
+
+- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y preguntas restantes. Descuenta 1 de las 10 diarias.
+
+## Docs
+
+- [Empezar](https://mcp.openarg.org/empezar.html): clave y configuración de Claude Code, Claude Desktop, Cursor y VS Code
+- [Herramientas](https://mcp.openarg.org/herramientas.html): referencia y API HTTP equivalente
+- [Límites y privacidad](https://mcp.openarg.org/limites.html)

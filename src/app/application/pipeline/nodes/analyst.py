@@ -12,6 +12,7 @@ from langgraph.config import get_stream_writer
 
 import app.application.pipeline.nodes as nodes_pkg
 from app.application.pipeline.chart_builder import (
+    adopt_llm_titles,
     build_deterministic_charts,
     extract_llm_charts,
     extract_meta,
@@ -675,7 +676,10 @@ async def analyst_node(state: OpenArgState) -> dict:
         # Charts: prefer deterministic, fall back to LLM-generated
         det_charts = build_deterministic_charts(results)
         llm_charts = extract_llm_charts(full_text)
-        charts = det_charts if det_charts else llm_charts
+        query_titles = frozenset(r.dataset_title for r in results if r.source == "sandbox:nl2sql")
+        charts = (
+            adopt_llm_titles(det_charts, llm_charts, query_titles) if det_charts else llm_charts
+        )
 
         # Maps: build GeoJSON FeatureCollection from geo results (deterministic)
         map_data = _build_map_data(results)

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from app.application.pipeline.chart_builder import build_deterministic_charts, extract_llm_charts
+from app.application.pipeline.chart_builder import (
+    adopt_llm_titles,
+    build_deterministic_charts,
+    extract_llm_charts,
+)
 from app.domain.entities.connectors.data_result import DataResult
 
 # Bind static methods for convenience
@@ -97,6 +101,80 @@ class TestBuildDeterministicCharts:
         )
         charts = _build_deterministic_charts([result])
         assert charts == []
+
+
+def _bcra_daily(days: int = 200) -> list[dict]:
+    """Serie diaria como la de principales_tasas_de_interes (datos.gob.ar)."""
+    from datetime import date, timedelta
+
+    start = date(2025, 12, 1)
+    return [
+        {
+            "indice_tiempo": (start + timedelta(days=i)).isoformat(),
+            "tasas_interes_call": 20.0 + i * 0.05,
+            "tasas_interes_badlar": 26.0 - i * 0.02,
+        }
+        for i in range(days)
+    ]
+
+
+class TestIndiceTiempo:
+    """`indice_tiempo` es la columna de fecha de todas las series de datos.gob.ar.
+
+    Sin reconocerla, el gráfico determinístico (todas las filas) no se armaba y
+    quedaba el del modelo, que sólo ve 50 filas: el 29-sep un "último año" del
+    BCRA salió con diciembre pegado a junio.
+    """
+
+    def test_nl2sql_series_charts_every_row_as_a_line(self):
+        records = list(reversed(_bcra_daily()))  # la consulta vino ORDER BY DESC
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert len(charts) == 1
+        chart = charts[0]
+        assert chart["type"] == "line_chart"
+        assert chart["xKey"] == "indice_tiempo"
+        assert len(chart["data"]) == 200
+        dates = [row["indice_tiempo"] for row in chart["data"]]
+        assert dates == sorted(dates)
+        assert dates[0] == "2025-12-01" and dates[-1] == "2026-06-18"
+
+    def test_periodo_is_a_date_column(self):
+        records = [{"periodo": "2024-02", "valor": 2}, {"periodo": "2024-01", "valor": 1}]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert charts[0]["type"] == "line_chart"
+        assert [r["periodo"] for r in charts[0]["data"]] == ["2024-01", "2024-02"]
+
+    def test_year_columns_keep_their_bar_chart(self):
+        records = [{"año": "2023", "valor": 100}, {"año": "2024", "valor": 200}]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert charts[0]["type"] == "bar_chart"
+
+
+class TestAdoptLlmTitles:
+    def test_generic_sql_title_takes_the_models_title(self):
+        det = [{"title": "Consulta SQL: Mostrame las tasas", "xKey": "indice_tiempo", "data": [1]}]
+        llm = [{"title": "Tasas de interés del BCRA", "xKey": "indice_tiempo", "data": [9]}]
+        out = adopt_llm_titles(det, llm)
+        assert out[0]["title"] == "Tasas de interés del BCRA"
+        assert out[0]["data"] == [1]  # los datos siguen siendo los determinísticos
+
+    def test_real_dataset_title_is_kept(self):
+        det = [{"title": "IPC (porcentaje)", "xKey": "fecha", "data": [1]}]
+        llm = [{"title": "Otro", "xKey": "fecha"}]
+        assert adopt_llm_titles(det, llm)[0]["title"] == "IPC (porcentaje)"
+
+    def test_nl2sql_dataset_title_takes_the_models_title(self):
+        # Con la fuente real, el resultado NL2SQL se llama como el dataset
+        # entero; el modelo describe el recorte ("dic 2025 – jun 2026").
+        det = [{"title": "Principales tasas de interés", "xKey": "indice_tiempo"}]
+        llm = [{"title": "Tasas del BCRA (dic 2025 – jun 2026)", "xKey": "indice_tiempo"}]
+        out = adopt_llm_titles(det, llm, frozenset({"Principales tasas de interés"}))
+        assert out[0]["title"] == "Tasas del BCRA (dic 2025 – jun 2026)"
+
+    def test_different_axis_is_not_mixed(self):
+        det = [{"title": "Consulta SQL: x", "xKey": "indice_tiempo"}]
+        llm = [{"title": "Por provincia", "xKey": "provincia"}]
+        assert adopt_llm_titles(det, llm)[0]["title"] == "Consulta SQL: x"
 
 
 class TestExtractLLMCharts:

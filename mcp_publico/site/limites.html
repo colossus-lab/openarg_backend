@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="es-AR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Límites y privacidad · OpenArg MCP</title>
+  <meta name="description" content="Cuántas consultas incluye la clave gratuita de OpenArg, qué se guarda de cada pregunta y cómo usar las respuestas.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="canonical" href="https://mcp.openarg.org/limites.html">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="" width="28" height="28">OpenArg <small>MCP</small></a>
+    <nav class="nav" aria-label="Secciones">
+      <a href="./">Inicio</a>
+      <a href="empezar.html">Empezar</a>
+      <a href="herramientas.html">Herramientas</a>
+      <a href="limites.html" aria-current="page">Límites y privacidad</a>
+      <a href="https://openarg.org">openarg.org</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <span class="kicker">Reglas de uso</span>
+    <h1>Límites y privacidad</h1>
+    <p class="lede">OpenArg es gratis. Para que siga así, cada consulta tiene un costo que cuidamos con límites claros.</p>
+  </section>
+
+  <h2>Límites</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Límite</th><th>Valor</th><th>Se renueva</th></tr></thead>
+    <tbody>
+      <tr><td>Modo datos por clave (buscar, describir, obtener datos, listar fuentes)</td><td>200 por día</td><td>21:00, hora de Argentina (00:00 UTC)</td></tr>
+      <tr><td>Modo datos, seguidos</td><td>30 por minuto</td><td>Al minuto</td></tr>
+      <tr><td>Filas por pedido de datos</td><td>hasta 500</td><td>—</td></tr>
+      <tr><td>Preguntas por clave (modo respuestas)</td><td>10 por día</td><td>21:00, hora de Argentina (00:00 UTC)</td></tr>
+      <tr><td>Preguntas por clave, seguidas</td><td>2 por minuto</td><td>Al minuto</td></tr>
+      <tr><td>Preguntas por conexión (IP)</td><td>30 por día, sumando todas las claves</td><td>21:00, hora de Argentina</td></tr>
+      <tr><td>Claves por cuenta</td><td>1 activa; crear otra revoca la anterior</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    El modo datos no descuenta preguntas. Además, el modo respuestas tiene un <strong>cupo público total por día</strong> para todos los usuarios juntos.
+    Si se agota, las consultas vuelven a funcionar a las 21:00. Lo vamos a ampliar a medida que crezca el uso.
+  </p>
+  <p class="muted">¿Necesitás más consultas para un proyecto periodístico, académico o de gobierno? Escribinos a <a href="mailto:devops@colossuslab.org">devops@colossuslab.org</a>.</p>
+
+  <h2>Qué se guarda</h2>
+  <ul>
+    <li><strong>El texto de cada pregunta</strong>, asociado a tu clave, con la fecha, cuánto tardó y si respondió bien. Lo usamos para medir el uso, detectar abusos y mejorar las respuestas.</li>
+    <li><strong>En el modo datos</strong>, sólo la cantidad de pedidos por día y por minuto, para aplicar el cupo. No se guarda qué buscaste ni qué tablas leíste.</li>
+    <li><strong>Las preguntas frecuentes y sus respuestas</strong> se guardan en un caché, para responder más rápido cuando alguien pregunta lo mismo.</li>
+    <li><strong>Tu cuenta</strong>: el email y el nombre de Google con los que creaste la clave.</li>
+  </ul>
+  <p><strong>Qué no se guarda:</strong> las conversaciones con tu asistente. OpenArg sólo ve la pregunta que el asistente le manda, no el resto del chat.</p>
+  <p>
+    No pongas datos personales ni información confidencial en las preguntas.
+    La política completa está en <a href="https://openarg.org/privacy">openarg.org/privacy</a>.
+  </p>
+
+  <h2>Cómo usar las respuestas</h2>
+  <ul>
+    <li>OpenArg usa un modelo de lenguaje para leer las tablas y redactar. <strong>Puede equivocarse.</strong></li>
+    <li>Las <strong>fuentes</strong> te llevan al dataset original: usalas para verificar antes de publicar un número.</li>
+    <li>Las <strong>advertencias</strong> no son decorativas. Si una respuesta dice que el total está incompleto, lo está.</li>
+    <li>OpenArg refleja lo que publica cada organismo, con sus demoras y sus cambios de metodología.</li>
+  </ul>
+
+  <h2>Uso aceptable</h2>
+  <p>
+    No uses la clave para automatizar consultas masivas, eludir los límites con varias cuentas
+    ni para nada que no sean preguntas sobre datos públicos. Podemos revocar las claves que se usen así.
+  </p>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>OpenArg · un proyecto de <a href="https://colossuslab.org">Colossus Lab</a></span>
+    <span><a href="https://openarg.org/privacy">Privacidad</a> · <a href="https://github.com/colossus-lab">GitHub</a> · <a href="mailto:devops@colossuslab.org">devops@colossuslab.org</a></span>
+  </div>
+</footer>
+<script src="site.js"></script>
+</body>
+</html>

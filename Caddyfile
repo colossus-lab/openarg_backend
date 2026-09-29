@@ -31,10 +31,32 @@
 	@options method OPTIONS
 	respond @options 204
 
-	# SECURITY: Block admin/docs endpoints in production
-	@blocked path /docs /docs/* /redoc /openapi.json /api/v1/admin/*
+	# SECURITY: Block admin/docs endpoints in production.
+	# /api/v1/data/* es SQL de solo lectura para servicios internos (token
+	# estático DATA_SERVICE_TOKEN); los contenedores lo llaman por
+	# backend:8080, nunca por este dominio. Hallazgo del pentest de junio.
+	@blocked path /docs /docs/* /redoc /openapi.json /api/v1/admin/* /api/v1/data/*
 	respond @blocked 404
 
 
 	reverse_proxy backend:8080
+}
+
+# MCP público de datos + su web (spec 029). Sin el CORS del bloque de la API:
+# los clientes MCP no son navegadores de openarg.org.
+{$MCP_DOMAIN:mcp.openarg.org} {
+	encode gzip zstd
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	reverse_proxy mcp:8000 {
+		flush_interval -1
+	}
 }

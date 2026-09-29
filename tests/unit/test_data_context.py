@@ -115,8 +115,136 @@ class TestBuildDataContextTruncation:
         assert "contexto recortado" not in ctx
 
 
+class TestSeriesSampling:
+    """Una serie de tiempo larga se muestrea parejo, no por las puntas.
+
+    Caso real (29-sep): 200 días del BCRA, el modelo recibía 1-25 de diciembre y
+    25-may a 18-jun, y narró un "salto" en los meses que nunca vio.
+    """
+
+    @staticmethod
+    def _series(days: int = 200) -> list[dict]:
+        from datetime import date, timedelta
+
+        start = date(2025, 12, 1)
+        return [
+            {"indice_tiempo": (start + timedelta(days=i)).isoformat(), "valor": i}
+            for i in range(days)
+        ]
+
+    @staticmethod
+    def _date(record: dict) -> str:
+        # El context builder renombra las columnas para el modelo; la fecha es la primera.
+        return next(iter(record.values()))
+
+    @staticmethod
+    def _sent(ctx: str) -> list[dict]:
+        body = ctx.split("registros):\n", 1)[1]
+        return json.JSONDecoder().raw_decode(body)[0]
+
+    def test_points_cover_the_whole_period_without_big_holes(self):
+        from datetime import date
+
+        ctx = _build_data_context([_make_result(self._series())])
+        sent = self._sent(ctx)
+        assert len(sent) == 50
+        dates = [date.fromisoformat(self._date(r)) for r in sent]
+        assert dates[0] == date(2025, 12, 1) and dates[-1] == date(2026, 6, 18)
+        gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
+        assert max(gaps) <= 5, f"hueco de {max(gaps)} días en lo que ve el modelo"
+
+    def test_the_model_is_told_it_sees_a_sample(self):
+        ctx = _build_data_context([_make_result(self._series())])
+        assert "se muestran 50 de 200 filas" in ctx
+        assert "intervalos parejos" in ctx
+
+    def test_descending_series_keeps_both_ends(self):
+        ctx = _build_data_context([_make_result(list(reversed(self._series())))])
+        sent = self._sent(ctx)
+        assert self._date(sent[0]) == "2026-06-18"
+        assert self._date(sent[-1]) == "2025-12-01"
+
+    def test_short_series_goes_whole_and_without_note(self):
+        ctx = _build_data_context([_make_result(self._series(50))])
+        assert len(self._sent(ctx)) == 50
+        assert "se muestran" not in ctx
+
+
+class TestSeriesSummary:
+    """Números de subas, bajas, máximos y mínimos calculados sobre TODAS las filas.
+
+    Caso real (29-sep, staging): con 200 días del BCRA la respuesta dijo que la
+    BADLAR "subió de 26% a 33%" (bajó de 29,44 a 21; el 33 era la call) y que la
+    call "osciló entre 19% y 42%" (el máximo fue 64%, un pico de tres días que no
+    cayó en la muestra de 50 puntos).
+    """
+
+    @staticmethod
+    def _bcra() -> list[dict]:
+        from datetime import date, timedelta
+
+        start = date(2025, 12, 1)
+        rows = []
+        for i in range(200):
+            d = start + timedelta(days=i)
+            call = 64.0 if date(2025, 12, 30) <= d <= date(2026, 1, 1) else 30.0
+            if d == date(2025, 12, 4):
+                call = 18.74
+            badlar = 29.4375 - (8.4375 * i / 199)  # 29,44 → 21,00
+            rows.append(
+                {
+                    "indice_tiempo": d.isoformat(),
+                    "tasas_interes_call": call,
+                    "tasas_interes_badlar": badlar,
+                }
+            )
+        # la consulta vino ORDER BY DESC: el resumen no puede depender del orden
+        return list(reversed(rows))
+
+    def test_the_spike_the_sample_misses_is_in_the_summary(self):
+        ctx = _build_data_context([_make_result(self._bcra())])
+        assert "máximo 64 (2025-12-30)" in ctx
+        assert "mínimo 18.74 (2025-12-04)" in ctx
+
+    def test_each_series_has_its_own_first_and_last(self):
+        ctx = _build_data_context([_make_result(self._bcra())])
+        badlar = next(
+            line for line in ctx.splitlines() if line.startswith("- tasas interes badlar")
+        )
+        assert "primero 29.44 (2025-12-01)" in badlar
+        assert "último 21 (2026-06-18)" in badlar
+        call = next(line for line in ctx.splitlines() if line.startswith("- tasas interes call"))
+        assert "último 30 (2026-06-18)" in call
+
+    def test_real_period_is_stated(self):
+        ctx = _build_data_context([_make_result(self._bcra())])
+        assert "SOBRE LAS 200 FILAS (período cubierto: 2025-12-01 a 2026-06-18)" in ctx
+        assert "Si el período cubierto no es el que pidió el usuario, decilo." in ctx
+
+    def test_summary_goes_before_the_rows(self):
+        ctx = _build_data_context([_make_result(self._bcra())])
+        assert ctx.index("RESUMEN CALCULADO") < ctx.index("registros):")
+
+    def test_tables_without_dates_have_no_summary(self):
+        records = [{"provincia": f"P{i}", "monto": i} for i in range(100)]
+        assert "RESUMEN CALCULADO" not in _build_data_context([_make_result(records)])
+
+    def test_non_numeric_and_internal_columns_are_skipped(self):
+        records = [
+            {"fecha": f"2024-0{i}", "valor": i, "nota": "x", "_source_url": 1} for i in range(1, 5)
+        ]
+        ctx = _build_data_context([_make_result(records)])
+        summary = [line for line in ctx.splitlines() if line.startswith("- ")]
+        assert [line.split(":")[0] for line in summary] == ["- valor"]
+
+
 class TestBuildDataContextRecordSlicing:
-    """When >50 records, first 25 + last 25 are sent."""
+    """Tablas que no son series: >50 filas → primeras 25 + últimas 25, avisado."""
+
+    def test_non_series_says_which_rows_are_missing(self):
+        records = [{"idx": i, "val": i * 10} for i in range(100)]
+        ctx = _build_data_context([_make_result(records)])
+        assert "primeras 25 y las últimas 25 de 100 filas" in ctx
 
     def test_more_than_50_records_sliced(self):
         records = [{"idx": i, "val": i * 10} for i in range(100)]

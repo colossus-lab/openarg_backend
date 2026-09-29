@@ -9,9 +9,113 @@ import logging
 import time
 from typing import Any
 
+from app.application.pipeline.chart_builder import is_date_column
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
+
+# Filas de un resultado que se le mandan al modelo, como máximo.
+_MAX_RECORDS_TO_SEND = 50
+
+
+def _sample_records(
+    records: list[dict[str, Any]], columns: tuple[str, ...]
+) -> tuple[list[dict[str, Any]], bool]:
+    """Elige qué filas ve el modelo cuando hay más de `_MAX_RECORDS_TO_SEND`.
+
+    Devuelve `(filas, es_serie)`.
+
+    - **Serie de tiempo** (hay una columna de fecha): puntos repartidos de forma
+      pareja en todo el rango, incluyendo el primero y el último. Antes eran las
+      primeras 25 y las últimas 25: en una serie diaria de 200 días el modelo
+      veía diciembre pegado a junio, graficaba esos 50 puntos como si fueran
+      continuos y narraba un "salto" en los meses que nunca recibió.
+    - **Cualquier otra tabla**: primeras 25 + últimas 25, como antes. En un
+      ranking (ORDER BY monto DESC) las primeras filas son las que importan.
+    """
+    total = len(records)
+    if total <= _MAX_RECORDS_TO_SEND:
+        return records, False
+    if any(is_date_column(c) for c in columns):
+        last = total - 1
+        steps = _MAX_RECORDS_TO_SEND - 1
+        indices = sorted({round(i * last / steps) for i in range(_MAX_RECORDS_TO_SEND)})
+        return [records[i] for i in indices], True
+    half = _MAX_RECORDS_TO_SEND // 2
+    return records[:half] + records[-half:], False
+
+
+def _omitted_rows_note(sent: int, total: int, is_series: bool) -> str:
+    if is_series:
+        return (
+            f"⚠ MUESTRA DE LA SERIE: se muestran {sent} de {total} filas, tomadas a "
+            "intervalos parejos en todo el período. Entre dos puntos consecutivos hay "
+            "filas que no ves: describí la tendencia general, no afirmes saltos ni "
+            "valores puntuales entre esos puntos."
+        )
+    return (
+        f"⚠ FILAS OMITIDAS: se muestran las primeras {sent // 2} y las últimas "
+        f"{sent - sent // 2} de {total} filas; las del medio no están. No saques "
+        "conclusiones sobre las filas que no ves."
+    )
+
+
+# Columnas numéricas que se resumen por serie, como máximo (acota el contexto).
+_MAX_SUMMARY_COLUMNS = 8
+
+
+def _fmt_number(value: float) -> str:
+    return f"{round(value, 2):g}"
+
+
+def _series_summary(records: list[dict[str, Any]], columns: tuple[str, ...]) -> str | None:
+    """Primero, último, mínimo y máximo de cada columna, sobre TODAS las filas.
+
+    El texto de la respuesta lo escribe el modelo mirando una muestra (ver
+    `_sample_records`), y ahí se equivocaba en lo que más se lee: el 29-sep, con
+    200 días del BCRA, dijo que la BADLAR "subió de 26% a 33%" (bajó de 29,4 a
+    21; el 33 era la call) y que la call "osciló entre 19% y 42%" (el máximo
+    fue 64%, un pico de tres días que no cayó en la muestra). Estos números
+    salen del código, no de lo que el modelo estima mirando puntos sueltos.
+    """
+    date_col = next((c for c in columns if is_date_column(c)), None)
+    if date_col is None:
+        return None
+    dated = [r for r in records if r.get(date_col) not in (None, "")]
+    if len(dated) < 3:
+        return None
+    dated.sort(key=lambda r: str(r[date_col]))
+
+    lines: list[str] = []
+    for col in columns:
+        if col == date_col or col.startswith("_") or len(lines) >= _MAX_SUMMARY_COLUMNS:
+            continue
+        points = [
+            (str(r[date_col]), float(r[col]))
+            for r in dated
+            if isinstance(r.get(col), int | float) and not isinstance(r.get(col), bool)
+        ]
+        if len(points) < 2:
+            continue
+        first, last = points[0], points[-1]
+        low = min(points, key=lambda p: p[1])
+        high = max(points, key=lambda p: p[1])
+        lines.append(
+            f"- {_display_key(col)}: primero {_fmt_number(first[1])} ({first[0]}), "
+            f"último {_fmt_number(last[1])} ({last[0]}), "
+            f"mínimo {_fmt_number(low[1])} ({low[0]}), "
+            f"máximo {_fmt_number(high[1])} ({high[0]})"
+        )
+    if not lines:
+        return None
+    period = f"{dated[0][date_col]} a {dated[-1][date_col]}"
+    return (
+        f"RESUMEN CALCULADO SOBRE LAS {len(dated)} FILAS (período cubierto: {period}).\n"
+        "Para decir si algo subió o bajó, desde y hasta cuánto, o su mínimo y máximo, "
+        "usá SOLO estos números, cada uno con su serie: no los estimes mirando las filas. "
+        "Si el período cubierto no es el que pidió el usuario, decilo.\n" + "\n".join(lines)
+    )
+
 
 _NO_RESULTS_CONTEXT = (
     "No se obtuvieron resultados directos en esta búsqueda. "
@@ -327,10 +431,7 @@ def build_data_context(results: list[DataResult]) -> str:
             display_columns_text = _display_columns_text(columns)
             total_rows = len(valid_records)
 
-            if total_rows > 50:
-                records_to_send = valid_records[:25] + valid_records[-25:]
-            else:
-                records_to_send = valid_records
+            records_to_send, sampled_series = _sample_records(valid_records, columns)
 
             # Pre-compute key mapping once, reuse for all records
             if records_to_send:
@@ -358,6 +459,11 @@ def build_data_context(results: list[DataResult]) -> str:
             if metadata.get("value_substitution"):
                 lines.append(_value_substitution_note(metadata["value_substitution"]))
             lines.append(f"Columnas: {display_columns_text}")
+            if len(records_to_send) < total_rows:
+                lines.append(_omitted_rows_note(len(records_to_send), total_rows, sampled_series))
+            summary = _series_summary(valid_records, columns)
+            if summary:
+                lines.append(summary)
             if description:
                 lines.append(f"Descripción: {description}")
             if metadata.get("table_descriptions"):

@@ -41,6 +41,12 @@ from app.presentation.http.controllers.monitoring.metrics_router import (
 from app.presentation.http.controllers.public_api.ask_router import (
     router as ask_router,
 )
+from app.presentation.http.controllers.public_api.catalogo_router import (
+    router as catalogo_router,
+)
+from app.presentation.http.controllers.public_api.fuentes_router import (
+    router as fuentes_router,
+)
 from app.presentation.http.controllers.query.smart_query_v2_router import (
     router as smart_query_v2_router,
 )
@@ -81,6 +87,8 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(skills_router)
     api_v1.include_router(developers_router)
     api_v1.include_router(ask_router)
+    api_v1.include_router(fuentes_router)
+    api_v1.include_router(catalogo_router)
     api_v1.include_router(data_router)
     api_v1.include_router(admin_tasks_router)
     api_v1.include_router(admin_monitoring_router)

@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -15,7 +17,9 @@ from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
     ISQLSandbox,
     SandboxResult,
+    TableSource,
 )
+from app.domain.value_objects.table_reference import bare_name
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,48 @@ _FORBIDDEN_PATTERNS = re.compile(
     r"COMMENT|SECURITY|LOAD|IMPORT|REFRESH)\b",
     re.IGNORECASE,
 )
+
+
+# Caché de `list_cached_tables()` a nivel de PROCESO, no de instancia.
+# `SandboxProvider` entrega el adapter con `Scope.REQUEST`, así que cada
+# consulta del chat y de /api/v1/ask arma un adapter nuevo: la caché que
+# vivía en `self._list_cache` arrancaba vacía siempre y nunca acertaba.
+# Medido en staging el 29-sep-2026: cada consulta que pasa por el sandbox
+# pagaba un listado completo de ~32.400 filas, 3,9–4,8 s.
+#
+# No se sube el adapter entero a `Scope.APP` porque también es dueño del
+# engine (pool_size=2) y de un ThreadPoolExecutor(max_workers=2): como
+# singleton, todas las consultas concurrentes del proceso compartirían dos
+# hilos y tres conexiones (el cuello de botella que ya anota CL-003 en
+# specs/010-sandbox-sql/010a-sql-sandbox/spec.md). Lo único que tiene
+# sentido compartir es el listado.
+#
+# La clave es la URL de la base porque `_db_url` se resuelve en cada
+# llamada (los tests la cambian por env var): un listado de una base no
+# puede servirse para otra.
+#
+# `_LIST_REFRESH_LOCK` serializa el refresco: si N consultas llegan con la
+# caché vencida, una sola corre el listado y las demás esperan y reusan el
+# resultado, en vez de N listados de 4 s y ~50 MB cada uno en paralelo (el
+# heap del listado ya contribuyó a los OOM del incidente del 14-may). Es un
+# `threading.Lock` y no un `asyncio.Lock` porque el refresco corre en el
+# executor y el adapter también se usa desde tareas Celery con su propio
+# event loop.
+#
+# La LECTURA no toma ese lock, a propósito: corre en el event loop, y el
+# lock queda tomado los ~4 s que dura el listado; esperarlo ahí congelaría
+# el worker de uvicorn entero. No hace falta: cada entrada se reemplaza de
+# una vez por una tupla nueva, y un `dict.get` de una clave es atómico bajo
+# el GIL, así que el lector ve la tupla vieja o la nueva, nunca media.
+_LIST_CACHE: dict[str, tuple[float, list[CachedTableInfo]]] = {}
+_LIST_REFRESH_LOCK = threading.Lock()
+
+
+def _list_cache_get(key: str, ttl_s: float) -> list[CachedTableInfo] | None:
+    cached = _LIST_CACHE.get(key)
+    if cached is not None and (time.monotonic() - cached[0]) < ttl_s:
+        return cached[1]
+    return None
 
 
 _ALLOWED_TABLE_PREFIXES = tuple(os.getenv("SANDBOX_TABLE_PREFIX", "cache_").split(","))
@@ -371,19 +417,20 @@ def _validate_sql_ast(sql: str) -> str | None:
 class PgSandboxAdapter(ISQLSandbox):
     """Read-only SQL sandbox that executes queries against cached dataset tables."""
 
-    # Per-process cache for list_cached_tables. The query returns 23k+ rows
-    # in staging and gets called on every pipeline run; loading those into
-    # python objects costs ~50 MB of heap and was contributing to OOM kills
-    # of the backend uvicorn worker (see 2026-05-14 incident). 60 s TTL
-    # bounds staleness — new cache_* / mart.* tables become visible within
-    # a minute, which is acceptable since the planner already has the
-    # mart embeddings (refreshed on build_mart) to suggest fresh targets.
+    # TTL of the per-process list_cached_tables cache (`_LIST_CACHE`, module
+    # level — see there why it is not an instance attribute). The query
+    # returns ~32k rows in staging and gets called on every pipeline run;
+    # loading those into python objects costs ~50 MB of heap and was
+    # contributing to OOM kills of the backend uvicorn worker (see
+    # 2026-05-14 incident). 60 s TTL bounds staleness — new cache_* /
+    # mart.* tables become visible within a minute, which is acceptable
+    # since the planner already has the mart embeddings (refreshed on
+    # build_mart) to suggest fresh targets.
     _LIST_CACHE_TTL_S = 60.0
 
     def __init__(self) -> None:
         self._engine: Engine | None = None
         self._executor = ThreadPoolExecutor(max_workers=2)
-        self._list_cache: tuple[float, list[CachedTableInfo]] | None = None
 
     @property
     def _db_url(self) -> str:
@@ -647,17 +694,36 @@ class PgSandboxAdapter(ISQLSandbox):
             conn.rollback()
             return tables
 
-    async def list_cached_tables(self) -> list[CachedTableInfo]:
-        import time as _time
+    def _list_tables_cached_sync(self, key: str) -> list[CachedTableInfo]:
+        with _LIST_REFRESH_LOCK:
+            # Doble chequeo: mientras este hilo esperaba el lock, otro pudo
+            # haber refrescado la caché. Sin esto, las consultas que se
+            # encolaron detrás del refresco repetirían el listado igual.
+            cached = _list_cache_get(key, self._LIST_CACHE_TTL_S)
+            if cached is not None:
+                return cached
+            # El sello se toma ANTES de listar, como antes: el TTL cuenta
+            # desde el estado de la base que el listado refleja, no desde
+            # que terminó de leerlo.
+            started = time.monotonic()
+            tables = self._list_tables_sync()
+            _LIST_CACHE[key] = (started, tables)
+            return tables
 
-        now = _time.monotonic()
-        cached = self._list_cache
-        if cached is not None and (now - cached[0]) < self._LIST_CACHE_TTL_S:
-            return cached[1]
-        loop = asyncio.get_running_loop()
-        tables = await loop.run_in_executor(self._executor, self._list_tables_sync)
-        self._list_cache = (now, tables)
-        return tables
+    async def list_cached_tables(self) -> list[CachedTableInfo]:
+        key = self._db_url
+        tables = _list_cache_get(key, self._LIST_CACHE_TTL_S)
+        if tables is None:
+            loop = asyncio.get_running_loop()
+            tables = await loop.run_in_executor(
+                self._executor, partial(self._list_tables_cached_sync, key)
+            )
+        # Copia de la lista (no de los CachedTableInfo): ahora la caché es
+        # compartida entre requests, y `execute_sandbox_step` le hace
+        # `.append()` de los marts al resultado. Devolviendo la lista
+        # cacheada, cada consulta le sumaría otra tanda de marts a la de
+        # todas las siguientes.
+        return list(tables)
 
     def _get_column_types_sync(
         self,
@@ -713,4 +779,101 @@ class PgSandboxAdapter(ISQLSandbox):
         return await loop.run_in_executor(
             self._executor,
             partial(self._get_column_types_sync, table_names),
+        )
+
+    def _find_tables_sync(
+        self, dataset_ids: list[str], table_names: list[str]
+    ) -> list[CachedTableInfo]:
+        ids = sorted({str(i) for i in dataset_ids if i})
+        names = sorted({bare_name(n) for n in table_names if n})
+        if not ids and not names:
+            return []
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            # Misma forma que `_list_tables_sync` (calificar con el schema de la
+            # versión viva), pero sólo para los datasets / tablas pedidos.
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT CAST(cd.dataset_id AS text) AS dataset_id,
+                           CASE
+                               WHEN rtv.schema_name IS NOT NULL
+                                    AND rtv.schema_name <> 'public'
+                                    AND rtv.superseded_at IS NULL
+                                   THEN rtv.schema_name || '.' || cd.table_name
+                               ELSE cd.table_name
+                           END AS table_name,
+                           cd.row_count,
+                           cd.columns_json
+                    FROM raw.cached_datasets cd
+                    LEFT JOIN public.raw_table_versions rtv
+                      ON rtv.table_name = cd.table_name
+                     AND rtv.superseded_at IS NULL
+                    WHERE cd.status = 'ready'
+                      AND (CAST(cd.dataset_id AS text) = ANY(:ids) OR cd.table_name = ANY(:names))
+                    ORDER BY table_name
+                    """
+                ),
+                {"ids": ids, "names": names},
+            ).fetchall()
+            conn.rollback()
+        tables = []
+        for row in rows:
+            columns: list[str] = []
+            if row.columns_json:
+                try:
+                    columns = json.loads(row.columns_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            tables.append(
+                CachedTableInfo(
+                    table_name=row.table_name,
+                    dataset_id=row.dataset_id,
+                    row_count=row.row_count,
+                    columns=columns,
+                )
+            )
+        return tables
+
+    async def find_tables(
+        self,
+        *,
+        dataset_ids: list[str] | None = None,
+        table_names: list[str] | None = None,
+    ) -> list[CachedTableInfo]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(self._find_tables_sync, list(dataset_ids or []), list(table_names or [])),
+        )
+
+    def _get_table_sources_sync(self, table_names: list[str]) -> dict[str, TableSource]:
+        bare = sorted({bare_name(name) for name in table_names if name})
+        if not bare:
+            return {}
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT cd.table_name, d.title, d.portal, "
+                    "       COALESCE(NULLIF(d.url, ''), d.download_url, '') AS url "
+                    "FROM raw.cached_datasets cd "
+                    "JOIN public.datasets d ON d.id = cd.dataset_id "
+                    "WHERE cd.table_name = ANY(:names)"
+                ),
+                {"names": bare},
+            ).fetchall()
+        return {
+            row.table_name: TableSource(
+                title=row.title or "", portal=row.portal or "", url=row.url or ""
+            )
+            for row in rows
+            if row.title
+        }
+
+    async def get_table_sources(self, table_names: list[str]) -> dict[str, TableSource]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(self._get_table_sources_sync, table_names),
         )

@@ -53,6 +53,8 @@ The top-level modules are ordered roughly by architectural depth. Modules with �
 | 025 | [`025-self-repair/`](025-self-repair/) | — | Routing a failure to the artefact that is actually wrong: reinduction repairs one table, APR only ever proposes a parser change. |
 | 026 | [`026-dataset-refresh/`](026-dataset-refresh/) | — | Reading a source more than once. A dataset is collected once and never again, which makes drift undetectable and answers three months old. |
 | 027 | [`027-catalog-integrity/`](027-catalog-integrity/) | — | Making the registry's answers true, and deciding what a resource is when a portal renames it. A registry that lies does not contradict itself. |
+| 028 | [`028-ops-mcp/`](028-ops-mcp/) | — | Read-only MCP server over a running environment: queue consumers vs dispatched routes, queue lengths, deployed images. Reads the half of the configuration that lives outside the repo. |
+| 029 | [`029-mcp-publico/`](029-mcp-publico/) | 007 | Public MCP server for Argentine open data (`mcp.openarg.org`) plus its docs site. Stateless proxy to `POST /api/v1/ask` with the user's `oarg_sk_` key; quotas stay in the backend. |
 
 Cross-cutting artifacts:
 
