@@ -15,7 +15,9 @@ from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
     ISQLSandbox,
     SandboxResult,
+    TableSource,
 )
+from app.domain.value_objects.table_reference import bare_name
 
 logger = logging.getLogger(__name__)
 
@@ -713,4 +715,35 @@ class PgSandboxAdapter(ISQLSandbox):
         return await loop.run_in_executor(
             self._executor,
             partial(self._get_column_types_sync, table_names),
+        )
+
+    def _get_table_sources_sync(self, table_names: list[str]) -> dict[str, TableSource]:
+        bare = sorted({bare_name(name) for name in table_names if name})
+        if not bare:
+            return {}
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT cd.table_name, d.title, d.portal, "
+                    "       COALESCE(NULLIF(d.url, ''), d.download_url, '') AS url "
+                    "FROM raw.cached_datasets cd "
+                    "JOIN public.datasets d ON d.id = cd.dataset_id "
+                    "WHERE cd.table_name = ANY(:names)"
+                ),
+                {"names": bare},
+            ).fetchall()
+        return {
+            row.table_name: TableSource(
+                title=row.title or "", portal=row.portal or "", url=row.url or ""
+            )
+            for row in rows
+            if row.title
+        }
+
+    async def get_table_sources(self, table_names: list[str]) -> dict[str, TableSource]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(self._get_table_sources_sync, table_names),
         )

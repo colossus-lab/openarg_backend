@@ -55,6 +55,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
@@ -63,9 +64,54 @@ from app.application.pipeline._background_tasks import spawn_background
 from app.application.pipeline.connectors.cache_table_selection import rewrite_legacy_sql_tables
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.llm_provider import LLMMessage
+from app.domain.ports.sandbox.sql_sandbox import TableSource
+from app.domain.value_objects.table_reference import bare_name
 from app.prompts import load_prompt
 
 logger = logging.getLogger(__name__)
+
+NL2SQL_PORTAL_LABEL = "Cache Local (NL2SQL)"
+
+
+async def _lookup_table_source(state: Any, served_table: str) -> TableSource | None:
+    """El dataset publicado del que sale `served_table`, si se puede saber.
+
+    Un mart cruza varios datasets y no tiene uno solo que citar; una tabla sin
+    fila en el catálogo, tampoco. En esos casos, y ante cualquier error, se
+    devuelve None y la respuesta sigue citando la consulta, como antes.
+    """
+    if not served_table or served_table.startswith("mart."):
+        return None
+    sandbox = _format_node_sandbox(state)
+    if sandbox is None:
+        return None
+    try:
+        found = await sandbox.get_table_sources([served_table])
+    except Exception:
+        logger.warning("No se pudo resolver el dataset de %s", served_table, exc_info=True)
+        return None
+    source = found.get(bare_name(served_table)) if isinstance(found, dict) else None
+    return source if isinstance(source, TableSource) else None
+
+
+def _format_node_sandbox(state: Any) -> Any:
+    """El sandbox para el nodo de formato: el del runtime, o el del state en tests.
+
+    En producción el sandbox llega SOLO por `nl2sql_runtime(...)` (ContextVar);
+    el state inicial no lo trae (connectors/sandbox.py). Buscarlo sólo en el
+    state devolvía None en el lookup de la fuente —un no-op silencioso— y hacía
+    explotar `_resolve_runtime_dep` en la medición de filas excluidas.
+    """
+    runtime = _get_runtime_optional()
+    if runtime is not None and runtime.get("sandbox") is not None:
+        return runtime["sandbox"]
+    return state.get("sandbox")
+
+
+def _portal_label(source: TableSource) -> str:
+    """El dominio de la URL del dataset (lo que el usuario puede ir a ver)."""
+    host = urlparse(source.url).hostname or ""
+    return host.removeprefix("www.") or source.portal or NL2SQL_PORTAL_LABEL
 
 
 class NL2SQLRuntime(TypedDict):
@@ -954,7 +1000,7 @@ async def format_result_node(state: NL2SQLState) -> dict:
         coverage = await _measure_excluded_rows(
             served_table=served_table,
             filters=lossy,
-            sandbox=_resolve_runtime_dep(state, "sandbox", None),
+            sandbox=_format_node_sandbox(state),
         )
         metadata["coverage_warning"] = {
             "columns": [col for col, _ in lossy],
@@ -973,13 +1019,19 @@ async def format_result_node(state: NL2SQLState) -> dict:
     if state.get("used_fallback"):
         metadata["used_fallback"] = True
 
+    # La fuente que ve el usuario es el dataset publicado, con su link, no la
+    # consulta: "Consulta SQL: <pregunta>" en "Cache Local (NL2SQL)" no le
+    # dejaba a nadie ir a verificar el dato.
+    table_source = await _lookup_table_source(state, served_table)
     return {
         "data_results": [
             DataResult(
                 source="sandbox:nl2sql",
-                portal_name="Cache Local (NL2SQL)",
-                portal_url="",
-                dataset_title=f"Consulta SQL: {nl_query[:100]}",
+                portal_name=_portal_label(table_source) if table_source else NL2SQL_PORTAL_LABEL,
+                portal_url=table_source.url if table_source else "",
+                dataset_title=(
+                    table_source.title if table_source else f"Consulta SQL: {nl_query[:100]}"
+                ),
                 format="json",
                 records=result.rows[:200],
                 metadata=metadata,
