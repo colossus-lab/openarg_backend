@@ -18,11 +18,11 @@ from sqlalchemy import text
 from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.prompts import load_prompt
+from app.setup.config.constants import bedrock_llm_model
 
 logger = logging.getLogger(__name__)
 
 _EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", "cohere.embed-multilingual-v3")
-_LLM_MODEL = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-haiku-20241022-v1:0")
 _EMBEDDING_DIMS = 1024
 
 
@@ -76,7 +76,7 @@ def _generate_metadata_for_table(
 
     try:
         resp = bedrock.converse(
-            modelId=_LLM_MODEL,
+            modelId=bedrock_llm_model(),
             messages=[{"role": "user", "content": [{"text": prompt}]}],
             inferenceConfig={"maxTokens": 1024, "temperature": 0.1},
         )
