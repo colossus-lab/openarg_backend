@@ -98,7 +98,36 @@ RAW_RETENTION_KEEP_LAST: int = _int_env("OPENARG_RAW_RETENTION_KEEP_LAST", 2)
 RAW_RETENTION_SOAK_DAYS: int = _int_env("OPENARG_RAW_RETENTION_SOAK_DAYS", 7)
 
 
+# ── El modelo de las tareas de fondo ────────────────────────────────────────
+
+# Default de último recurso. Tiene que coincidir con `BedrockSettings.LLM_MODEL`
+# en `settings.py`; `test_un_solo_modelo_de_fondo` ata las dos definiciones,
+# porque vivían separadas y se fueron una generación entera de distancia.
+BEDROCK_LLM_MODEL_DEFAULT = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+
+def bedrock_llm_model() -> str:
+    """El modelo de Bedrock para las tareas Celery que no pasan por settings.
+
+    `analyst_tasks` y `catalog_enrichment_tasks` leían `BEDROCK_MODEL_ID` con
+    un default propio —Claude 3.5 Haiku, de octubre de 2024— mientras el resto
+    del backend corría con `BEDROCK_LLM_MODEL`, que en staging y prod apunta a
+    Haiku 4.5. No era una decisión: son dos literales copiados que envejecieron
+    en direcciones distintas, sin un comentario que los justificara.
+
+    `BEDROCK_MODEL_ID` sigue primero para no romper a quien la tenga seteada,
+    pero ahora cae a `BEDROCK_LLM_MODEL` antes que a un literal. El efecto es
+    que el enriquecimiento de catálogo hereda el modelo del sistema en vez de
+    elegir uno por su cuenta.
+    """
+    return (
+        os.getenv("BEDROCK_MODEL_ID") or os.getenv("BEDROCK_LLM_MODEL") or BEDROCK_LLM_MODEL_DEFAULT
+    )
+
+
 __all__ = [
+    "BEDROCK_LLM_MODEL_DEFAULT",
+    "bedrock_llm_model",
     "MAX_TABLE_ROWS",
     "MAX_DOWNLOAD_BYTES",
     "MAX_TOTAL_ATTEMPTS",

@@ -22,6 +22,7 @@ from app.infrastructure.celery.app import celery_app
 from app.infrastructure.celery.tasks._db import get_sync_engine
 from app.infrastructure.celery.tasks.collector_tasks import collect_dataset
 from app.prompts import load_prompt
+from app.setup.config.constants import bedrock_llm_model
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def analyze_query(self: Any, query_id: str, question: str) -> dict[str, Any]:
     """
     start = time.time()
     engine = get_sync_engine()
-    _llm_model = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-haiku-20241022-v1:0")
+    _llm_model = bedrock_llm_model()
 
     try:
         # Update query status
