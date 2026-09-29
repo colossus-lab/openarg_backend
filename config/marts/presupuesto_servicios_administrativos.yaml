@@ -1,15 +1,15 @@
 id: presupuesto_servicios_administrativos
-version: 0.1.0
+version: 0.1.1
 description: |
   Catálogo de servicios administrativos del Presupuesto de la
-  Administración Pública Nacional, por ejercicio. Dimensión de
-  lookup que acompaña al mart `presupuesto_nacional_ejecutado`
-  (subshape de 5 cols del cluster: ejercicio, servicio_id,
-  servicio_desc, fecha_actualizacion).
+  Administración Pública Nacional, por ejercicio: sólo nombres y
+  códigos (ejercicio, servicio_id, servicio_desc,
+  fecha_actualizacion). NO tiene montos.
 
-  Usar para joinear codigo→descripción de los servicios que
-  aparecen en queries de presupuesto, y para listar qué servicios
-  estuvieron operativos en cada ejercicio.
+  Usar para traducir código→descripción de un servicio y para
+  listar qué servicios estuvieron operativos en cada ejercicio.
+  Para gasto, crédito vigente o devengado por ministerio o
+  jurisdicción, el mart es presupuesto_consolidado.
 domain: gobierno
 
 sources:
@@ -69,3 +69,15 @@ sql: |
 refresh:
   policy: on_upstream_change
   unique_index: []
+
+# v0.1.1: muestras de catálogo, nada de montos. La que estaba cargada a mano
+# desde mayo ("ministerios y secretarías presupuesto") le daba a este mart —que
+# no tiene un solo peso— el +0.17 del ruteo en cada pregunta de "gasto por
+# ministerio" (prod, 29-sep). Al construir, las muestras que no están acá se
+# borran.
+sample_queries:
+  - "catálogo de servicios PEN"
+  - "código de servicio administrativo"
+  - "lookup servicio presupuestario"
+  - "servicios administrativos del presupuesto"
+  - "servicios de la administración pública nacional"

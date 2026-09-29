@@ -1,0 +1,110 @@
+<!doctype html>
+<!-- Fuente de site/og-image.png (1200×630). Para regenerarla, desde mcp_publico/og:
+     msedge --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+       --window-size=1200,630 --screenshot=../site/og-image.png og.html -->
+<html lang="es-AR">
+<head>
+<meta charset="utf-8">
+<title>OpenArg MCP · OG</title>
+<style>
+  @font-face { font-family: "Familjen Grotesk"; src: url("../site/fonts/familjen-grotesk-latin-wght-normal.woff2") format("woff2-variations"); font-weight: 400 700; font-style: normal; }
+  @font-face { font-family: "Familjen Grotesk"; src: url("../site/fonts/familjen-grotesk-latin-wght-italic.woff2") format("woff2-variations"); font-weight: 400 700; font-style: italic; }
+  @font-face { font-family: "Inter"; src: url("../site/fonts/inter-latin-500-normal.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Inter"; src: url("../site/fonts/inter-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "JetBrains Mono"; src: url("../site/fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2"); font-weight: 400; }
+
+  :root { --paper:#06090f; --ink:#e8ecf4; --ink-2:#8892a8; --sol:#f6b40e; --celeste:#74acdf; --celeste-2:#93c5f8; --rule:rgba(232,236,244,.14); --rule-strong:rgba(232,236,244,.4); }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    position: relative; isolation: isolate;
+    background: var(--paper);
+    background-image:
+      radial-gradient(ellipse 900px 600px at 8% -12%, rgba(116,172,223,.2), transparent 60%),
+      radial-gradient(ellipse 800px 600px at 104% 112%, rgba(246,180,14,.13), transparent 62%);
+    color: var(--ink); font-family: "Inter", sans-serif;
+  }
+  .grid {
+    position: absolute; left: -600px; top: -300px; width: 2400px; height: 1300px; z-index: -1;
+    background-image:
+      linear-gradient(rgba(116,172,223,.09) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(116,172,223,.09) 1px, transparent 1px),
+      linear-gradient(rgba(232,236,244,.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(232,236,244,.045) 1px, transparent 1px);
+    background-size: 240px 240px, 240px 240px, 80px 80px, 80px 80px;
+    transform: perspective(1100px) rotateX(48deg);
+    transform-origin: 50% 60%;
+    -webkit-mask-image: radial-gradient(ellipse 45% 50% at 50% 62%, #000 0%, rgba(0,0,0,.5) 55%, transparent 85%);
+  }
+  .edge { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; background: var(--celeste); }
+
+  .frame { position: absolute; inset: 52px 64px 48px 72px; display: flex; flex-direction: column; }
+  .top { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 20px; border-bottom: 1px solid var(--rule); }
+  .mark { font: 700 30px/1 "Familjen Grotesk"; letter-spacing: -.015em; }
+  .mark b { color: var(--celeste-2); }
+  .mark small { font: 600 13px/1 "Inter"; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-2); margin-left: 14px; }
+  .launch { font: 400 15px/1 "JetBrains Mono"; letter-spacing: .06em; color: var(--sol); display: flex; align-items: center; gap: 12px; }
+  .launch::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--sol); box-shadow: 0 0 0 5px rgba(246,180,14,.18); }
+
+  .body { flex: 1; display: grid; grid-template-columns: 1fr 390px; gap: 44px; align-items: center; }
+  .eyebrow { font: 600 14px/1 "Inter"; letter-spacing: .18em; text-transform: uppercase; color: var(--ink-2); display: flex; align-items: center; gap: 12px; }
+  .eyebrow::before { content: ""; width: 34px; height: 1px; background: var(--ink-2); }
+  .eyebrow .n { font: 400 14px/1 "JetBrains Mono"; letter-spacing: .04em; color: var(--sol); }
+  h1 { font: 700 64px/.98 "Familjen Grotesk"; letter-spacing: -.04em; margin-top: 22px; }
+  .src { margin-top: 26px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .src span { font: 600 14px/1 "Inter"; letter-spacing: .12em; text-transform: uppercase; color: var(--ink); border: 1px solid var(--rule-strong); padding: 8px 11px; }
+  .src span.k { color: var(--paper); background: var(--celeste-2); border-color: var(--celeste-2); }
+  h1 em { display: block; font-style: italic; font-weight: 600; color: var(--sol); }
+
+  .term { border: 1px solid var(--rule-strong); background: rgba(6,9,15,.78); }
+  .term-bar { display: flex; justify-content: space-between; align-items: center; padding: 11px 16px; border-bottom: 1px solid var(--rule); font: 400 12px/1 "JetBrains Mono"; color: var(--ink-2); }
+  .dots { display: flex; gap: 6px; } .dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--rule-strong); display: block; }
+  .term pre { padding: 16px 18px 18px; font: 400 14px/1.75 "JetBrains Mono"; color: var(--ink); white-space: pre; }
+  .p { color: var(--sol); } .d { color: var(--ink-2); } .t { color: var(--celeste-2); }
+
+  .foot { display: grid; grid-template-columns: repeat(4, auto) 1fr; align-items: end; border-top: 1px solid var(--rule); padding-top: 20px; }
+  .stat { padding-right: 34px; margin-right: 34px; border-right: 1px solid var(--rule); }
+  .stat:nth-child(4) { border-right: 0; }
+  .num { font: 700 44px/1 "Familjen Grotesk"; letter-spacing: -.03em; color: var(--celeste-2); }
+  .lbl { font: 600 12px/1 "Inter"; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-2); margin-top: 10px; }
+  .url { justify-self: end; text-align: right; }
+  .url b { display: block; font: 700 30px/1 "Familjen Grotesk"; letter-spacing: -.01em; }
+  .url span { display: block; font: 400 13px/1 "JetBrains Mono"; color: var(--ink-2); margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="grid"></div>
+<div class="edge"></div>
+<div class="frame">
+  <div class="top">
+    <div class="mark">OpenArg <b>MCP</b><small>por Colossus Lab</small></div>
+    <div class="launch">LANZAMIENTO · MMXXVI</div>
+  </div>
+
+  <div class="body">
+    <div>
+      <p class="eyebrow"><span class="n">N.º 02</span> Model Context Protocol</p>
+      <h1>Los datos públicos de Argentina, <em>en tu asistente de IA.</em></h1>
+      <div class="src"><span class="k">INDEC</span><span>BCRA</span><span>Ministerios</span><span>Provincias</span><span>Congreso</span></div>
+    </div>
+    <div class="term">
+      <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span>claude code</span></div>
+<pre><span class="p">&gt;</span> ¿Cómo viene la BADLAR?
+<span class="t">● buscar_datasets</span><span class="d">("tasas BCRA")</span>
+<span class="t">● obtener_datos</span><span class="d">(desde="2026-06")</span>
+<span class="d">  2026-06-18  21,00 %</span>
+<span class="d">  2026-06-17  20,75 %</span>
+<span class="d">  └ Fuente: datos.gob.ar</span></pre>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="stat"><div class="num">33.048</div><div class="lbl">Datasets</div></div>
+    <div class="stat"><div class="num">38</div><div class="lbl">Portales</div></div>
+    <div class="stat"><div class="num">5</div><div class="lbl">Herramientas</div></div>
+    <div class="stat"><div class="num">0 <span style="font-size:.5em;color:var(--ink-2)">USD</span></div><div class="lbl">Gratis</div></div>
+    <div class="url"><b>mcp.openarg.org</b><span>Claude · Cursor · VS Code</span></div>
+  </div>
+</div>
+</body>
+</html>
