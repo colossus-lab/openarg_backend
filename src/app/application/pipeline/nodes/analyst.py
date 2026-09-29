@@ -149,6 +149,24 @@ _RE_INTERNAL_CITATION = re.compile(
 )
 
 
+# Nombres de tabla o mart citados como código: `presupuesto_nacional_ejecutado`,
+# `mart.x`, `raw.y`. En prod (29-sep) una respuesta le pidió al usuario "datos
+# del fact table `presupuesto_nacional_ejecutado`": el nombre interno de un mart
+# bloqueado. No se borran —la frase quedaría rota—, se muestran como texto:
+# "presupuesto nacional ejecutado". Sólo identificadores con al menos dos `_`
+# (un nombre de tabla); `x_y` puede ser cualquier cosa y se deja.
+_RE_CODE_TABLE_IDENTIFIER = re.compile(r"`(?:(?:mart|raw)\.)?([a-z0-9]+(?:_[a-z0-9]+){2,})`")
+_RE_QUALIFIED_TABLE = re.compile(r"\b(?:mart|raw)\.([a-z0-9]+(?:_[a-z0-9]+)+)\b")
+
+
+def _humanize_table_identifiers(text: str) -> str:
+    def _words(match: re.Match[str]) -> str:
+        return match.group(1).replace("_", " ")
+
+    text = _RE_CODE_TABLE_IDENTIFIER.sub(_words, text)
+    return _RE_QUALIFIED_TABLE.sub(_words, text)
+
+
 def _scrub_internal_identifiers(text: str) -> str:
     """Remove internal sandbox/infrastructure identifiers from analyst output.
 
@@ -169,6 +187,12 @@ def _scrub_internal_identifiers(text: str) -> str:
     """
     if not text:
         return text
+    # Después de borrar los internos (`cache_*`, tablas del sistema), no antes:
+    # humanizados primero, dejarían de reconocerse y quedarían a la vista.
+    return _humanize_table_identifiers(_remove_internal_identifiers(text))
+
+
+def _remove_internal_identifiers(text: str) -> str:
     scrubbed, citations = _RE_INTERNAL_CITATION.subn("", text)
     scrubbed, bare = _RE_INTERNAL_IDENTIFIER.subn("", scrubbed)
     if not (citations or bare):

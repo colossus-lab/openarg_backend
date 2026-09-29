@@ -226,6 +226,19 @@ def _upsert_sample_queries(engine, mart: Mart) -> int:
         return 0
     written = 0
     try:
+        # Sincronizar, no sólo agregar: los ejemplos que el YAML ya no trae se
+        # borran. Antes se acumulaban para siempre, y uno cargado a mano en
+        # mayo ("ministerios y secretarías presupuesto", en el catálogo de
+        # servicios administrativos) le daba el +0.17 a un mart sin montos
+        # en cada pregunta de "gasto por ministerio" (prod, 29-sep).
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "DELETE FROM public.mart_sample_queries "
+                    "WHERE mart_id = :mid AND NOT (sample_text = ANY(:keep))"
+                ),
+                {"mid": mart.id, "keep": list(mart.sample_queries)},
+            )
         for sample in mart.sample_queries:
             emb = _compute_mart_embedding(sample)
             if emb is None:

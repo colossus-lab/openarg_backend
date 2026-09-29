@@ -40,10 +40,13 @@ _ADAPTER = Path("src/app/infrastructure/adapters/serving/legacy_serving_adapter.
 
 
 def test_la_consulta_de_marts_trae_el_conteo_de_filas() -> None:
-    i = _SANDBOX.index("WITH ranked AS (")
-    bloque = _SANDBOX[i : i + 900]
+    # Desde el 29-sep la consulta vive en `serving_redirect` (la comparten los
+    # dos caminos de ruteo y resuelve los marts bloqueados); `sandbox.py` la usa.
+    from app.application.marts.serving_redirect import MART_CANDIDATES_SQL
 
-    assert "md.last_row_count" in bloque, (
+    assert "MART_CANDIDATES_SQL" in _SANDBOX
+    select_final = MART_CANDIDATES_SQL[MART_CANDIDATES_SQL.rindex("SELECT e.") :]
+    assert "e.last_row_count" in select_final, (
         "el conteo tiene que estar disponible aunque hoy no se imprima: es "
         "lo que permite decidir en el prompt, y no acá, cuánto pesa"
     )

@@ -1,5 +1,5 @@
 id: presupuesto_consolidado
-version: 0.5.0
+version: 0.5.1
 description: |
   Crédito presupuestario nacional consolidado por año, jurisdicción y
   programa. Fuente: API de Presupuesto Abierto (Min. Economía), tablas
@@ -96,6 +96,26 @@ sql: |
 
 refresh:
   policy: on_upstream_change
+
+# v0.5.1: es el reemplazo de `presupuesto_nacional_ejecutado` (bloqueado), así
+# que tiene que ganar las preguntas de gasto por ministerio / jurisdicción. Sin
+# estas muestras, "gasto público por ministerio del último ejercicio" se iba al
+# catálogo de servicios administrativos, que no tiene montos (prod, 29-sep).
+# Las primeras siete son las que ya estaban en la base desde mayo.
+sample_queries:
+  - "crédito devengado del Ministerio de Salud"
+  - "cuánto se ejecutó del presupuesto"
+  - "ejecución del presupuesto de educación"
+  - "ejecución presupuestaria 2024"
+  - "gasto público por programa"
+  - "presupuesto nacional consolidado"
+  - "presupuesto vigente por jurisdicción"
+  - "gasto público por ministerio"
+  - "cuánto gastó cada ministerio"
+  - "gasto por ministerio del último ejercicio"
+  - "gasto público por jurisdicción"
+  - "presupuesto ejecutado por ministerio en 2025"
+  - "qué ministerio gastó más"
 
 expectations:
   # Las columnas que identifican una fila. Convierte "estas filas se
