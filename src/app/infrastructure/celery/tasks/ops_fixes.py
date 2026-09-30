@@ -1764,7 +1764,7 @@ def prewarm_query_plan_cache(
             text(
                 """
                 SELECT question, count(*) AS n
-                FROM query_analytics
+                FROM public.query_analytics
                 WHERE ts > now() - INTERVAL '30 days'
                   AND question IS NOT NULL
                 GROUP BY question

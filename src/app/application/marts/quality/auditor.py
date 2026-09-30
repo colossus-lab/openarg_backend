@@ -70,7 +70,7 @@ _SOURCE_STATS_SQL = text(
 _TRAFFIC_SQL = text(
     "SELECT replace(served_table, 'mart.', '') AS mart_id, count(*) AS hits, "
     "       avg(CASE WHEN success THEN 1.0 ELSE 0.0 END) AS success_rate "
-    "FROM query_analytics "
+    "FROM public.query_analytics "
     "WHERE ts > now() - interval '30 days' AND served_table LIKE 'mart.%' "
     "GROUP BY 1"
 )
