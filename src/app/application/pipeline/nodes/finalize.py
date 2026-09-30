@@ -21,8 +21,52 @@ from app.infrastructure.audit.audit_logger import audit_query
 logger = logging.getLogger(__name__)
 
 
-def _extract_sources(results: list) -> list[dict[str, Any]]:
-    """Build the sources list from data results."""
+# Pasos que acompañan a la respuesta sin ser el dato: georef ubica el lugar
+# por el que se pregunta, analyze/compare trabajan sobre lo que trajeron otros.
+_SUPPORT_ACTIONS = frozenset({"query_georef", "analyze", "compare"})
+
+ROLE_PRINCIPAL = "principal"
+ROLE_AUXILIAR = "auxiliar"
+ROLE_RELLENO = "relleno"
+
+
+def result_role(result: Any, plan: Any) -> str:
+    """Qué papel jugó un resultado en la respuesta.
+
+    - ``auxiliar``: georef cuando el plan buscaba otro dato. Ubicar Pinamar no
+      responde cuántas personas con discapacidad hay en Pinamar.
+    - ``relleno``: el último recurso del NL2SQL, ``SELECT * LIMIT 10`` sobre la
+      primera tabla candidata, sea la que sea.
+    - ``principal``: todo lo demás.
+    """
+    metadata = result.metadata or {}
+    if result.source == "georef" and _plan_seeks_other_data(plan):
+        return ROLE_AUXILIAR
+    if result.source == "sandbox:nl2sql" and metadata.get("used_fallback"):
+        return ROLE_RELLENO
+    return ROLE_PRINCIPAL
+
+
+def _plan_seeks_other_data(plan: Any) -> bool:
+    steps = getattr(plan, "steps", None) or []
+    return any(getattr(s, "action", "") not in _SUPPORT_ACTIONS for s in steps)
+
+
+def primary_results(results: list, plan: Any) -> list:
+    """Los resultados con filas que responden la pregunta."""
+    return [r for r in results if r.records and result_role(r, plan) == ROLE_PRINCIPAL]
+
+
+def _extract_sources(results: list, plan: Any = None) -> list[dict[str, Any]]:
+    """Las fuentes de la respuesta: sólo lo que se usó para responder.
+
+    Antes entraba todo resultado con filas de cualquier paso, así que el
+    último recurso o una ubicación de georef aparecían como si respaldaran el
+    número. Si no hubo ningún resultado principal se listan los auxiliares,
+    que es lo que de verdad se usó, y finalize registra la respuesta como sin
+    datos.
+    """
+    used = primary_results(results, plan) or [r for r in results if r.records]
     return [
         {
             "name": r.dataset_title,
@@ -30,8 +74,7 @@ def _extract_sources(results: list) -> list[dict[str, Any]]:
             "portal": r.portal_name,
             "accessed_at": r.metadata.get("fetched_at", ""),
         }
-        for r in results
-        if r.records
+        for r in used
     ]
 
 
@@ -66,7 +109,7 @@ async def finalize_node(state: OpenArgState) -> dict:
     all_warnings = list(state.get("step_warnings", []))
 
     # Build sources and documents
-    sources = _extract_sources(results)
+    sources = _extract_sources(results, plan)
     documents = _extract_documents(results)
 
     # Record token usage
@@ -155,9 +198,16 @@ async def finalize_node(state: OpenArgState) -> dict:
     # exactly once per query. The NL2SQL subgraph no longer logs here
     # (that double-counted sandbox queries and missed connector/mart
     # flows); the served table comes from the DataResult metadata.
-    served_table = next(
-        (r.metadata.get("served_table") or r.source for r in results if r.records),
-        None,
+    #
+    # La tabla servida es el primer resultado PRINCIPAL: con el primero que
+    # tuviera filas, una respuesta armada sólo con la ubicación de georef
+    # quedaba registrada como servida desde "georef" y exitosa.
+    primary = primary_results(results, plan)
+    served = primary[0] if primary else None
+    served_table = (
+        (served.metadata.get("served_table") or served.source)
+        if served
+        else next((r.metadata.get("served_table") or r.source for r in results if r.records), None)
     )
     # A no-data deflection has a non-empty answer but served no data —
     # log it as a failure with a distinct marker so /admin/analytics
@@ -166,6 +216,14 @@ async def finalize_node(state: OpenArgState) -> dict:
     if no_data_deflection:
         analytics_success = False
         analytics_error = "no_data_deflection"
+    elif answer_ok and not primary and _plan_seeks_other_data(plan):
+        # El plan buscaba datos y la respuesta salió sin ninguno que la
+        # respalde (sólo georef, o sólo el último recurso). La persona la
+        # recibe igual; lo que cambia es que deja de contarse como éxito y
+        # aparece en /admin/analytics. Un plan sin pasos de datos (una
+        # respuesta conceptual) no entra acá.
+        analytics_success = False
+        analytics_error = "sin_datos_principales"
     else:
         analytics_success = answer_ok
         analytics_error = None if answer_ok else "empty_answer"
@@ -195,7 +253,8 @@ async def finalize_node(state: OpenArgState) -> dict:
         await record_terminal_analytics(
             question=question,
             served_table=served_table,
-            row_count=sum(len(r.records) for r in results),
+            # Las filas de la tabla servida, no la suma de todo lo consultado.
+            row_count=len(served.records) if served else 0,
             success=analytics_success,
             duration_ms=duration_ms,
             error_message=analytics_error,

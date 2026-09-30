@@ -65,6 +65,63 @@ class TestCachedTablePreferenceInConnectors:
         assert results[0].source == "cache:cache_energia_canon_gdeadbeef"
 
     @pytest.mark.asyncio
+    async def test_una_palabra_generica_no_alcanza_para_traer_una_tabla(self):
+        """Pinamar, 30-sep-2026: "caba" y "2018" trajeron Juegos Olímpicos de
+        la Juventud y la Encuesta de Movilidad como fuentes de una pregunta de
+        discapacidad."""
+        sandbox = AsyncMock()
+        sandbox.list_cached_tables = AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    table_name="raw.cache_caba_legado_juegos_olimpicos_de_la_juventud_2018",
+                    columns=["a"],
+                    row_count=10,
+                ),
+                SimpleNamespace(
+                    table_name="raw.cache_caba_encuesta_de_movilidad_domiciliaria_2018",
+                    columns=["a"],
+                    row_count=10,
+                ),
+                SimpleNamespace(
+                    table_name="raw.cache_discapacidad_perfil_2018",
+                    columns=["a"],
+                    row_count=10,
+                ),
+            ]
+        )
+        sandbox.execute_readonly = AsyncMock(
+            return_value=SimpleNamespace(error=None, rows=[{"a": 1}])
+        )
+
+        results = await search_cached_tables("personas discapacidad caba 2018", sandbox)
+
+        assert [r.source for r in results] == ["cache:raw.cache_discapacidad_perfil_2018"]
+
+    async def test_con_dos_palabras_significativas_hacen_falta_las_dos(self):
+        sandbox = AsyncMock()
+        sandbox.list_cached_tables = AsyncMock(
+            return_value=[
+                SimpleNamespace(table_name="cache_energia_canon_x", columns=["a"], row_count=1),
+                SimpleNamespace(table_name="cache_canon_minero_y", columns=["a"], row_count=1),
+            ]
+        )
+        sandbox.execute_readonly = AsyncMock(
+            return_value=SimpleNamespace(error=None, rows=[{"a": 1}])
+        )
+
+        results = await search_cached_tables("canon minero", sandbox)
+
+        assert [r.source for r in results] == ["cache:cache_canon_minero_y"]
+
+    def test_palabras_significativas(self):
+        from app.application.pipeline.connectors.ckan import significant_keywords
+
+        assert significant_keywords("¿Cuántas personas con discapacidad hay en CABA 2018?") == [
+            "cuántas",
+            "personas",
+            "discapacidad",
+        ]
+
     async def test_search_cached_tables_cita_bien_una_tabla_de_la_capa_raw(self):
         """`FROM "raw.cache_x"` es un identificador con un punto adentro.
 
