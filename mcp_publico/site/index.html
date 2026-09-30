@@ -23,6 +23,106 @@
   <meta name="twitter:title" content="OpenArg MCP — Los datos públicos de Argentina, en tu asistente de IA">
   <meta name="twitter:description" content="INDEC, BCRA, ministerios y provincias: 33.000 datasets oficiales, 38 portales, 5 herramientas. Gratis.">
   <meta name="twitter:image" content="https://mcp.openarg.org/og-image.png">
+  <!-- Datos estructurados (schema.org). El FAQ repite, sin HTML, las preguntas de la sección "Lo que conviene saber"; un test controla que coincidan. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://colossuslab.org/#organization",
+        "name": "Colossus Lab",
+        "url": "https://colossuslab.org",
+        "email": "devops@colossuslab.org"
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://mcp.openarg.org/#app",
+        "name": "OpenArg MCP",
+        "alternateName": "org.openarg/datos-publicos",
+        "url": "https://mcp.openarg.org/",
+        "description": "Servidor MCP con más de 33.000 datasets oficiales de 38 portales públicos de Argentina (INDEC, BCRA, ministerios, provincias, municipios y el Congreso). Conecta Claude, Cursor, VS Code o un agente propio; cada dato viene con el link a la fuente oficial.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Any",
+        "inLanguage": "es",
+        "isAccessibleForFree": true,
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD",
+          "description": "Clave gratis: 200 consultas de datos y 10 preguntas por mes."
+        },
+        "softwareHelp": "https://mcp.openarg.org/empezar.html",
+        "sameAs": [
+          "https://github.com/colossus-lab/openarg-mcp",
+          "https://glama.ai/mcp/servers/colossus-lab/openarg-mcp"
+        ],
+        "isPartOf": {
+          "@type": "WebSite",
+          "name": "OpenArg",
+          "url": "https://openarg.org"
+        },
+        "publisher": {
+          "@id": "https://colossuslab.org/#organization"
+        }
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://mcp.openarg.org/#faq",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "¿Qué es un MCP?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "El Model Context Protocol es el estándar abierto con el que los asistentes de IA se conectan a herramientas externas. Con OpenArg conectado, tu asistente consulta datos públicos argentinos cuando la pregunta lo necesita."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Cuánto cuesta?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Nada. Cada persona tiene 200 pedidos por mes en el modo datos y 10 preguntas en el modo respuestas. Los dos se renuevan el 1° de cada mes. OpenArg se sostiene con los aportes de quienes lo usan: si te sirve, podés bancarlo acá."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Qué modo conviene usar?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "El modo datos, siempre que tu asistente pueda razonar con las filas: es más rápido y tiene más cupo. El modo respuestas conviene cuando la pregunta cruza varias tablas o cuando querés que OpenArg verifique los números por vos."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Puedo confiar ciegamente en las respuestas?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. En el modo respuestas un modelo de lenguaje lee los datos y redacta, y puede equivocarse; por eso siempre devuelve las fuentes y las advertencias. Para datos que vayas a publicar, verificá en el portal oficial."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Qué se guarda?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "De las preguntas, el texto asociado a tu clave, para medir el uso y mejorar las respuestas. Del modo datos, qué herramienta usaste y cuándo, pero no qué buscaste ni qué tablas leíste. No se guardan conversaciones. Detalle en Límites y privacidad."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "¿Hay una API sin MCP?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Sí, con la misma clave y el mismo cupo: POST /api/v1/ask y /api/v1/catalogo/* en api.openarg.org. Ejemplos en Herramientas."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
 </head>
 <body>
 <div class="edge-bar" aria-hidden="true"></div>
