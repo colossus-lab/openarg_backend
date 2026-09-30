@@ -439,3 +439,22 @@ thead th { font: 600 .7rem/1.3 var(--body); letter-spacing: .14em; text-transfor
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* ── Apoyar ────────────────────────────────────────────── */
+.nav a.nav-support { color: var(--sol); }
+.nav a.nav-support:hover { color: var(--ink); }
+.support { display: grid; grid-template-columns: 6fr 5fr; gap: 56px; align-items: start; }
+.support .section-title { margin-top: 1.1rem; }
+.support-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.4rem; margin-top: 1.8rem; }
+.support-cta .cta-btn { background: var(--sol); border-color: var(--sol); color: var(--paper); font-size: .95rem; padding: .8rem 1.2rem; }
+.support-cta .cta-btn:hover { background: var(--ink); border-color: var(--ink); }
+.support-note { margin-top: 1.4rem; font-size: .9rem; color: var(--ink-2); max-width: 52ch; border-left: 2px solid var(--rule-strong); padding-left: 14px; }
+.support-costs { border-top: 1px solid var(--rule-strong); padding-top: 18px; }
+.cost-row { display: grid; grid-template-columns: 116px 1fr; gap: 14px; padding: 18px 0; border-bottom: 1px solid var(--rule); align-items: baseline; }
+.cost-num { font: 700 1.7rem/1 var(--display); letter-spacing: -0.03em; color: var(--celeste-2); white-space: nowrap; }
+.cost-row:last-child .cost-num { color: var(--sol); font-size: 1.45rem; }
+.cost-row h3 { margin: 0 0 .25rem; font-size: 1.02rem; }
+.cost-row p { margin: 0; font-size: .9rem; color: var(--ink-2); }
+@media (max-width: 860px) {
+  .support { grid-template-columns: 1fr; gap: 36px; }
+}
