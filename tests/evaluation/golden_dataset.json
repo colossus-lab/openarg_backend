@@ -677,6 +677,28 @@
    "expected_connector": null,
    "difficulty": "hard",
    "rationale": "Nombra al publicador pero no a un dataset. Cubre el agujero que se decidió NO tapar con una keyword: 'indec' rutea, no selecciona."
+  },
+  {
+   "id": "negativo_003",
+   "category": "negativo",
+   "question": "¿Cuántas personas con discapacidad hay en el partido de Pinamar, provincia de Buenos Aires? Usá el Estudio Nacional sobre el Perfil de las Personas con Discapacidad (2018) del INDEC si está disponible",
+   "expected_intent": "busqueda",
+   "expected_answer_contains": [
+    "Pinamar"
+   ],
+   "expected_sources": [
+    "Perfil de las Personas con Discapacidad"
+   ],
+   "forbidden_sources": [
+    " (live)"
+   ],
+   "forbidden_answer_contains": [
+    "no está disponible",
+    "no disponible en los datasets"
+   ],
+   "expected_connector": "query_sandbox",
+   "difficulty": "hard",
+   "rationale": "Pregunta real del lanzamiento del MCP (2026-09-30). El estudio SÍ está: raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1 (82.327 filas), pero es una muestra nacional sin columnas geográficas. La respuesta correcta lo cita y explica que no hay dato por partido. En prod respondió sólo con georef y dijo que el estudio 'no está disponible'."
   }
  ]
 }

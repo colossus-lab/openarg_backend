@@ -126,6 +126,17 @@ def _forbidden_sources_hit(forbidden: list[str], sources: list[str]) -> list[str
     return hits
 
 
+def _forbidden_answer_hit(forbidden: list[str], answer: str) -> list[str]:
+    """Qué frases prohibidas dijo la respuesta, por substring case-insensitive.
+
+    Para lo que ninguna fuente expresa: que la respuesta no afirme algo falso.
+    Caso Pinamar (30-sep-2026): el estudio del INDEC estaba en OpenArg y la
+    respuesta dijo que "no está disponible".
+    """
+    text = (answer or "").lower()
+    return [p for p in forbidden if p.lower() in text]
+
+
 def check_absolute_expectations(report: dict) -> list[str]:
     """Expectativas que valen por sí solas, sin baseline contra qué comparar.
 
@@ -139,6 +150,8 @@ def check_absolute_expectations(report: dict) -> list[str]:
     for r in report.get("results", []):
         for pattern in r.get("forbidden_sources_hit") or []:
             fallas.append(f"{r['id']}: fuente prohibida {pattern!r} en {r.get('sources')}")
+        for phrase in r.get("forbidden_answer_hit") or []:
+            fallas.append(f"{r['id']}: la respuesta dice {phrase!r}")
     return fallas
 
 
@@ -219,6 +232,9 @@ async def evaluate_entry(graph: Any, entry: dict, mode: str, use_cache: bool = F
         ),
         "forbidden_sources_hit": _forbidden_sources_hit(
             entry.get("forbidden_sources") or [], sources
+        ),
+        "forbidden_answer_hit": _forbidden_answer_hit(
+            entry.get("forbidden_answer_contains") or [], answer
         ),
         "intent_scored": intent_scored,
         "intent_match": intent_match,
