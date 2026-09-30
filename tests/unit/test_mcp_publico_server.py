@@ -33,7 +33,7 @@ class FakeBackend:
                 {"name": "EPH", "url": "https://datos.gob.ar/eph", "portal": "datos_gob_ar"}
             ],
             "warnings": [],
-            "usage": {"requests_remaining_today": 9},
+            "usage": {"requests_remaining_today": 9, "requests_remaining_month": 9},
         }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -174,7 +174,7 @@ async def test_question_forwards_key_and_client_ip(backend: FakeBackend) -> None
     )
     assert not result.is_error, _text(result)
     text = _text(result)
-    assert "7,6 %" in text and "datos.gob.ar/eph" in text and "restantes hoy: 9" in text
+    assert "7,6 %" in text and "datos.gob.ar/eph" in text and "te quedan este mes: 9" in text
     sent = backend.requests[0]
     assert sent.url.path == "/api/v1/ask"
     assert sent.headers["authorization"] == f"Bearer {KEY}"
@@ -203,13 +203,13 @@ async def test_backend_learns_it_came_through_the_mcp_and_from_which_client(
 
 
 async def test_quota_exhausted_is_a_spanish_tool_error(backend: FakeBackend) -> None:
-    backend.status = 429
-    backend.body = {"detail": "Rate limit exceeded: 10 requests per day"}
+    backend.status = 402
+    backend.body = {"detail": "Monthly quota exceeded: 10 questions per month"}
     result = await _call(
         "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
     )
     assert result.is_error
-    assert "10 preguntas de hoy" in _text(result)
+    assert "10 preguntas de este mes" in _text(result)
     assert "modo datos" in _text(result)
 
 

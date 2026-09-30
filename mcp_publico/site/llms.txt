@@ -4,7 +4,7 @@
 
 - Endpoint MCP (Streamable HTTP): https://mcp.openarg.org/mcp
 - Autenticación: header `Authorization: Bearer oarg_sk_…`. Clave gratis en https://openarg.org/desarrolladores
-- Cupo: modo datos 200 pedidos/día (30/min, hasta 500 filas por pedido); modo respuestas 10 preguntas/día. Se renueva a las 00:00 UTC.
+- Cupo por persona: modo datos 200 pedidos/mes (30/min, hasta 500 filas por pedido); modo respuestas 10 preguntas/mes. Se renueva el 1° de cada mes a las 00:00 UTC. Fundadores (quienes aportan): 2.000 y 100. Al agotarse el cupo sin créditos, la API responde 402.
 
 OpenArg es abierto y gratuito, un proyecto de Colossus Lab que se sostiene con aportes de quienes lo usan: https://www.colossuslab.org/support
 
@@ -37,7 +37,7 @@ Modo datos (el modelo del usuario razona con las filas):
 
 Modo respuestas (OpenArg razona):
 
-- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y preguntas restantes. Descuenta 1 de las 10 diarias.
+- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y preguntas restantes. Descuenta 1 de las preguntas del mes.
 
 ## Docs
 

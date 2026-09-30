@@ -15,8 +15,16 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.application.api_key_service import PLAN_LIMITS, generate_api_key
+from app.application.public_quota import (
+    first_of_next_month_utc,
+    monthly_counter_key,
+    resolve_tier,
+)
 from app.domain.entities.api_key.api_key import ApiKey
+from app.domain.entities.credits.credits import CreditType
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
+from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.user.user_repository import IUserRepository
 from app.presentation.http.middleware.google_jwt_middleware import get_request_user_email
 from app.setup.app_factory import limiter
@@ -155,8 +163,10 @@ async def get_usage(
     request: Request,
     api_key_repo: FromDishka[IApiKeyRepository],
     user_repo: FromDishka[IUserRepository],
+    cache: FromDishka[ICacheService],
+    credits: FromDishka[ICreditRepository],
 ) -> dict:
-    """Get usage summary for all API keys owned by the authenticated user."""
+    """Usage of the authenticated user: this month's allowance, credits and tier."""
     user_email = get_request_user_email(request)
     if not user_email:
         raise HTTPException(status_code=401, detail="User identity required")
@@ -166,8 +176,38 @@ async def get_usage(
         raise HTTPException(status_code=404, detail="User not found")
 
     summary = await api_key_repo.get_usage_summary(user.id)
-    # El frontend mostraba "X/5 consultas" con el 5 escrito a mano; el
-    # límite sale de acá para que no vuelva a desfasarse de PLAN_LIMITS.
-    # Todas las claves se crean con plan "free" (ver create_api_key_endpoint).
-    limits = PLAN_LIMITS["free"]
-    return {**summary, "limit_day": limits["per_day"], "limit_minute": limits["per_min"]}
+    # Los límites salen de acá, no del frontend, para que no se desfasen.
+    tier = await resolve_tier(user.id, credits)
+    try:
+        balance = await credits.balance(user.id)
+    except Exception:
+        logger.warning("Credit balance lookup failed for %s", user.id, exc_info=True)
+        balance = {"preguntas": 0, "datos": 0}
+
+    async def used(tipo: CreditType) -> int:
+        # El mismo contador que aplica el cupo (Redis). Cuenta intentos, así
+        # que puede pasar el límite: se muestra como mucho el límite.
+        try:
+            value = await cache.get(monthly_counter_key(user.id, tipo))
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    preguntas_usadas = min(await used("preguntas"), tier.preguntas)
+    datos_usados = min(await used("datos"), tier.datos)
+    return {
+        **summary,
+        "preguntas": {"usadas": preguntas_usadas, "limite": tier.preguntas},
+        "datos": {"usadas": datos_usados, "limite": tier.datos},
+        "renueva": first_of_next_month_utc().isoformat(),
+        "creditos": balance,
+        "fundador": (
+            {"hasta": tier.fundador_hasta.isoformat() if tier.fundador_hasta else None}
+            if tier.nombre == "fundador"
+            else None
+        ),
+        # Campos viejos, para el frontend anterior mientras se despliega el nuevo.
+        "requests_today": preguntas_usadas,
+        "limit_day": tier.preguntas,
+        "limit_minute": PLAN_LIMITS["free"]["per_min"],
+    }

@@ -15,6 +15,7 @@ from app.application.api_key_service import generate_api_key
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider
 from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
@@ -183,6 +184,14 @@ async def client(key: tuple[str, ApiKey], sandbox: FakeSandbox, cache: FakeCache
         def e(self) -> IEmbeddingProvider:
             return embedding
 
+        @provide
+        def cr(self) -> ICreditRepository:
+            credits = AsyncMock(spec=ICreditRepository)
+            credits.get_active_supporter.return_value = None
+            credits.balance.return_value = {"preguntas": 0, "datos": 0}
+            credits.debit.return_value = False
+            return credits
+
     app = FastAPI()
     app.include_router(router)
     setup_dishka(container=make_async_container(P()), app=app)
@@ -275,14 +284,15 @@ async def test_sandbox_rejection_is_a_400_not_a_500(
 async def test_catalog_quota_is_enforced(
     client: AsyncClient, cache: FakeCache, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PUBLIC_API_CATALOG_DAILY_LIMIT", "2")
+    monkeypatch.setenv("PUBLIC_API_MONTHLY_DATOS", "2")
     assert (await client.get("/catalogo/tabla", params={"nombre": _T})).status_code == 200
     assert (await client.get("/catalogo/tabla", params={"nombre": _T})).status_code == 200
     r = await client.get("/catalogo/tabla", params={"nombre": _T})
-    assert r.status_code == 429
+    assert r.status_code == 402
+    assert "per month" in r.json()["detail"]
     assert not any(
-        ":day:" in k and "catalog" not in k for k in cache.counters
-    )  # no toca las 10 preguntas
+        ":month:" in k and "catalog" not in k for k in cache.counters
+    )  # no toca las preguntas
 
 
 async def test_lookups_are_targeted_not_a_full_listing(

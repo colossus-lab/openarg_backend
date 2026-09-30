@@ -20,6 +20,9 @@ from app.presentation.http.controllers.admin.query_analytics_router import (
 from app.presentation.http.controllers.admin.repair_approval_router import (
     router as admin_repair_approval_router,
 )
+from app.presentation.http.controllers.admin.supporters_router import (
+    router as admin_supporters_router,
+)
 from app.presentation.http.controllers.admin.tasks_router import (
     router as admin_tasks_router,
 )
@@ -99,6 +102,7 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(admin_repair_approval_router)
     api_v1.include_router(admin_query_analytics_router)
     api_v1.include_router(admin_mcp_analytics_router)
+    api_v1.include_router(admin_supporters_router)
     api_v1.include_router(admin_parse_repair_router)
 
     root.include_router(api_v1)

@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 import os
 import secrets
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
+from app.application.public_quota import (
+    MONTH_TTL,
+    first_of_next_month_utc,
+    has_credit,
+    monthly_counter_key,
+    resolve_tier,
+    seconds_until_next_month,
+    try_debit,
+)
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
+
+if TYPE_CHECKING:
+    from app.domain.entities.credits.credits import CreditType
+    from app.domain.ports.credits.credit_repository import ICreditRepository
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +48,12 @@ _DEFAULT_IP_DAILY_LIMIT = 30
 _DAY_TTL = 172800
 _MIN_TTL = 60
 
+# Sólo el límite por minuto: el cupo del período es mensual y depende de si la
+# persona es Fundador (ver app.application.public_quota).
 PLAN_LIMITS: dict[str, dict[str, int]] = {
-    "free": {"per_min": 2, "per_day": 10},
-    "basic": {"per_min": 15, "per_day": 200},
-    "pro": {"per_min": 30, "per_day": 1000},
+    "free": {"per_min": 2},
+    "basic": {"per_min": 15},
+    "pro": {"per_min": 30},
 }
 
 
@@ -130,22 +145,22 @@ async def check_rate_limit(
     api_key: ApiKey,
     cache: ICacheService,
     client_ip: str = "",
-) -> dict[str, int]:
-    """Check and enforce rate limits: per-minute, per-day, per-IP, and global free cap.
+    credits: ICreditRepository | None = None,
+) -> dict[str, Any]:
+    """Check and enforce the answers-mode limits for one question.
 
-    Cada contador es un INCR atómico (`increment_with_ttl`), así que dos
-    pedidos simultáneos no pueden pasar los dos por debajo del límite. El
-    orden importa: un pedido rechazado por minuto no consume el cupo del día,
-    y uno rechazado por el día no llega a tocar el tope global.
+    Orden: por minuto → cupo del mes → IP del día → tope global del día → y
+    recién al final, si el cupo del mes ya estaba usado, se gasta un crédito.
+    El crédito va último a propósito: si el pedido termina rechazado por la IP
+    o por el tope global, no se quema un crédito.
 
-    Los contadores por usuario y por IP fallan abiertos si Redis no responde:
-    un Redis degradado no tiene que cortarle el servicio a nadie. El tope
-    global falla CERRADO: es el techo de gasto, y sin Redis no hay forma de
-    saber cuánto se gastó hoy.
+    Cada contador es un INCR atómico (`increment_with_ttl`). Los contadores
+    por usuario y por IP fallan abiertos si Redis no responde (un Redis
+    degradado no le corta el servicio a nadie); el tope global falla CERRADO,
+    porque es el techo de gasto de Bedrock.
 
-    Returns a dict with remaining quotas. Raises HTTPException(429) when a
-    per-caller limit is exceeded and HTTPException(503) when the shared free
-    capacity for the day is used up or cannot be checked.
+    Raises HTTPException 429 (por minuto, IP), 402 (cupo del mes sin créditos)
+    or 503 (tope global). Returns the remaining quota.
     """
     limits = PLAN_LIMITS.get(api_key.plan, PLAN_LIMITS["free"])
     user_id = str(api_key.user_id)
@@ -162,16 +177,13 @@ async def check_rate_limit(
             },
         )
 
-    day_count = await _incr_fail_open(cache, f"rl:user:{user_id}:day:{day}", _DAY_TTL)
-    if day_count > limits["per_day"]:
-        raise _too_many(
-            f"Rate limit exceeded: {limits['per_day']} requests per day",
-            {
-                "X-RateLimit-Limit-Day": str(limits["per_day"]),
-                "X-RateLimit-Remaining-Day": "0",
-                "Retry-After": str(seconds_until_utc_midnight()),
-            },
-        )
+    tier = await resolve_tier(api_key.user_id, credits)
+    month_count = await _incr_fail_open(cache, monthly_counter_key(user_id, "preguntas"), MONTH_TTL)
+    needs_credit = month_count > tier.preguntas
+    # Sin saldo, se corta acá: si no, cada reintento de alguien que ya agotó su
+    # mes sumaría al tope global del día y le comería lugar a los demás.
+    if needs_credit and not await has_credit(api_key.user_id, "preguntas", credits):
+        raise _quota_exhausted("preguntas", tier.preguntas)
 
     if client_ip:
         ip_count = await _incr_fail_open(cache, f"rl:ip:{client_ip}:day:{day}", _DAY_TTL)
@@ -203,39 +215,54 @@ async def check_rate_limit(
                 headers={"Retry-After": str(seconds_until_utc_midnight())},
             )
 
-    # ── Abuse monitoring ─────────────────────────────────
-    day_threshold = math.ceil(limits["per_day"] * 0.8)
-    if day_count == day_threshold:
-        logger.warning(
-            "API key %s (%s plan) reached 80%% of daily limit (%d/%d)",
-            api_key.key_prefix,
-            api_key.plan,
-            day_count,
-            limits["per_day"],
-        )
+    used_credit = False
+    if needs_credit:
+        used_credit = await try_debit(api_key.user_id, "preguntas", credits)
+        if not used_credit:
+            raise _quota_exhausted("preguntas", tier.preguntas)
 
+    remaining = max(tier.preguntas - month_count, 0)
     return {
         "remaining_minute": max(limits["per_min"] - min_count, 0),
-        "remaining_day": max(limits["per_day"] - day_count, 0),
         "limit_minute": limits["per_min"],
-        "limit_day": limits["per_day"],
+        "remaining_month": remaining,
+        "limit_month": tier.preguntas,
+        "quota_resets_at": first_of_next_month_utc().isoformat(),
+        "used_credit": used_credit,
+        "tier": tier.nombre,
+        "founder_until": tier.fundador_hasta.isoformat() if tier.fundador_hasta else None,
+        # Nombres viejos: hay integraciones que ya los leen. Ahora son del mes.
+        "remaining_day": remaining,
+        "limit_day": tier.preguntas,
     }
+
+
+def _quota_exhausted(tipo: CreditType, limit: int) -> HTTPException:
+    """402 como en Tomi: el cupo del mes se terminó y no quedan créditos."""
+    what = "questions" if tipo == "preguntas" else "catalog requests"
+    return HTTPException(
+        status_code=402,
+        detail=f"Monthly quota exceeded: {limit} {what} per month",
+        headers={
+            "X-Quota-Reset": first_of_next_month_utc().isoformat(),
+            "Retry-After": str(seconds_until_next_month()),
+        },
+    )
 
 
 # Modo datos (listar fuentes, buscar, describir, leer filas): no pasa por el
 # LLM, así que no descuenta del cupo de preguntas. Igual lleva límite propio,
-# porque cada pedido es una consulta a la base de producción: por día para
+# porque cada pedido es una consulta a la base de producción: por mes para
 # acotar el total y por minuto para que un script no la martille en ráfaga.
-_DEFAULT_CATALOG_DAILY_LIMIT = 200
 CATALOG_MINUTE_LIMIT = 30
 
 
-def catalog_daily_limit() -> int:
-    return _env_int("PUBLIC_API_CATALOG_DAILY_LIMIT", _DEFAULT_CATALOG_DAILY_LIMIT)
-
-
-async def check_catalog_rate_limit(api_key: ApiKey, cache: ICacheService) -> None:
-    """Enforce the per-key limits on data-mode (no-LLM) endpoints."""
+async def check_catalog_rate_limit(
+    api_key: ApiKey,
+    cache: ICacheService,
+    credits: ICreditRepository | None = None,
+) -> None:
+    """Enforce the per-person limits on data-mode (no-LLM) endpoints."""
     user_id = api_key.user_id
     minute = await _incr_fail_open(cache, f"rl:user:{user_id}:catalog:min", _MIN_TTL)
     if minute > CATALOG_MINUTE_LIMIT:
@@ -243,10 +270,7 @@ async def check_catalog_rate_limit(api_key: ApiKey, cache: ICacheService) -> Non
             f"Rate limit exceeded: {CATALOG_MINUTE_LIMIT} catalog requests per minute",
             {"Retry-After": "60"},
         )
-    limit = catalog_daily_limit()
-    count = await _incr_fail_open(cache, f"rl:user:{user_id}:catalog:{_utc_day()}", _DAY_TTL)
-    if count > limit:
-        raise _too_many(
-            f"Rate limit exceeded: {limit} catalog requests per day",
-            {"Retry-After": str(seconds_until_utc_midnight())},
-        )
+    tier = await resolve_tier(user_id, credits)
+    count = await _incr_fail_open(cache, monthly_counter_key(user_id, "datos"), MONTH_TTL)
+    if count > tier.datos and not await try_debit(user_id, "datos", credits):
+        raise _quota_exhausted("datos", tier.datos)
