@@ -6,6 +6,24 @@
 - Autenticación: header `Authorization: Bearer oarg_sk_…`. Clave gratis en https://openarg.org/desarrolladores
 - Cupo: modo datos 200 pedidos/día (30/min, hasta 500 filas por pedido); modo respuestas 10 preguntas/día. Se renueva a las 00:00 UTC.
 
+## Si sos un agente de IA y te pidieron conectar OpenArg
+
+1. Clave: la del usuario, empieza con `oarg_sk_`. Buscala en la variable de entorno `OPENARG_API_KEY` o en las credenciales de tu configuración. Si no existe, pedile al usuario que la cree gratis en https://openarg.org/desarrolladores y que la cargue él en tu configuración. No la escribas en archivos que se suban a un repositorio ni la repitas en el chat.
+2. Registrá un servidor MCP remoto:
+   - Transporte: Streamable HTTP.
+   - URL: `https://mcp.openarg.org/mcp`
+   - Header: `Authorization: Bearer <clave>`
+   - Claude Code: `claude mcp add --transport http openarg https://mcp.openarg.org/mcp --header "Authorization: Bearer $OPENARG_API_KEY"`
+   - Clientes con `mcpServers` en JSON (Cursor y similares): `{"openarg": {"url": "https://mcp.openarg.org/mcp", "headers": {"Authorization": "Bearer <clave>"}}}`
+   - Clientes que sólo corren servidores locales: `npx -y mcp-remote https://mcp.openarg.org/mcp --header "Authorization: Bearer <clave>"`
+3. Si tu entorno no habla MCP, usá la API HTTP con la misma clave y el mismo cupo:
+   - `POST https://api.openarg.org/api/v1/ask` con `{"question": "..."}`
+   - `GET https://api.openarg.org/api/v1/catalogo/buscar?q=...`
+   - `GET https://api.openarg.org/api/v1/catalogo/tabla?nombre=...`
+   - `POST https://api.openarg.org/api/v1/catalogo/datos` con `{"tabla": "...", "desde": "AAAA-MM", "limite": 100}`
+4. Probá la conexión con `listar_fuentes`: cuenta como un pedido del modo datos y no gasta preguntas.
+5. Flujo recomendado: `buscar_datasets` → `describir_tabla` → `obtener_datos`. Usá `consultar_datos_publicos` sólo cuando la pregunta cruce varias tablas. Citá siempre la fuente (link oficial) que devuelve cada herramienta.
+
 ## Herramientas
 
 Modo datos (el modelo del usuario razona con las filas):

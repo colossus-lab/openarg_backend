@@ -66,11 +66,13 @@
           <input type="radio" name="cliente" id="t-desktop">
           <input type="radio" name="cliente" id="t-cursor">
           <input type="radio" name="cliente" id="t-vscode">
+          <input type="radio" name="cliente" id="t-agente">
           <div class="labels" role="tablist">
             <label for="t-code">Claude Code</label>
             <label for="t-desktop">Claude Desktop</label>
             <label for="t-cursor">Cursor</label>
             <label for="t-vscode">VS Code</label>
+            <label for="t-agente">Tu agente</label>
           </div>
 
           <div class="panel p-code">
@@ -128,6 +130,16 @@
     }
   }
 }</code></pre></div>
+          </div>
+          <div class="panel p-agente">
+            <p>
+              Si tu asistente puede leer una URL y editar su configuración (Claude Code, Cursor) o usás una plataforma de agentes
+              con soporte MCP, que se configure solo. Cargá tu clave como <code>OPENARG_API_KEY</code> en su configuración, no en el chat, y mandale:
+            </p>
+            <div class="code prompt"><span class="label">para tu asistente o agente</span><pre><code>Agregá el servidor MCP de OpenArg (datos públicos oficiales de Argentina) siguiendo las instrucciones de https://mcp.openarg.org/llms.txt
+
+Mi clave está en la variable OPENARG_API_KEY: usala desde ahí, sin escribirla en archivos que se suban a un repositorio. Cuando termines, probá la conexión con listar_fuentes.</code></pre></div>
+            <p class="muted">Las instrucciones para agentes están en <a class="inline-link" href="llms.txt">llms.txt</a>. Así lo conectamos a un agente de WhatsApp.</p>
           </div>
         </div>
       </div>

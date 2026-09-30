@@ -188,6 +188,29 @@
         <div class="client"><span class="meta">Editor</span><h3>Cursor</h3><p>En mcp.json, con headers.</p></div>
         <div class="client"><span class="meta">Editor</span><h3>VS Code</h3><p>La clave queda cifrada.</p></div>
       </div>
+      <div class="agents" id="agentes">
+        <div class="agents-case">
+          <p class="eyebrow"><span class="num">Caso</span> Un agente de WhatsApp</p>
+          <h3 class="agents-title">Y también en <em>tus propios agentes.</em></h3>
+          <p class="muted">Lo probamos conectando OpenArg a un agente de WhatsApp: le escribís como a cualquier contacto y responde con el dato y la fuente oficial. Sirve cualquier agente que hable MCP, o la API HTTP con la misma clave.</p>
+          <div class="chat" aria-label="Ilustración de un chat de WhatsApp">
+            <div class="bubble me">¿Cómo viene la BADLAR?</div>
+            <div class="bubble bot">El 18 de junio de 2026 la BADLAR estaba en <strong>21 %</strong>, contra 20 % dos días antes.<span class="bubble-src">Fuente: Principales tasas de interés · datos.gob.ar</span></div>
+            <p class="chat-note mono">Ilustración con datos reales de la serie del BCRA</p>
+          </div>
+        </div>
+        <div class="agents-link">
+          <p class="eyebrow"><span class="num">Atajo</span> Mandale este link a tu IA</p>
+          <ol class="mini-steps">
+            <li>Creá tu clave en <a class="inline-link" href="https://openarg.org/desarrolladores">openarg.org/desarrolladores</a> y cargala en tu agente como <code>OPENARG_API_KEY</code>: en su configuración, no en el chat.</li>
+            <li>Copiá esto y mandáselo:</li>
+          </ol>
+          <div class="code prompt"><span class="label">para tu asistente o agente</span><pre><code>Agregá el servidor MCP de OpenArg (datos públicos oficiales de Argentina) siguiendo las instrucciones de https://mcp.openarg.org/llms.txt
+
+Mi clave está en la variable OPENARG_API_KEY: usala desde ahí, sin escribirla en archivos que se suban a un repositorio. Cuando termines, probá la conexión con listar_fuentes.</code></pre></div>
+          <p class="muted small">Funciona con asistentes que pueden leer una URL y editar su configuración, como Claude Code o Cursor, y con plataformas de agentes que aceptan servidores MCP.</p>
+        </div>
+      </div>
       <p class="soon muted">claude.ai y ChatGPT desde el navegador: próximamente, cuando sumemos inicio de sesión (OAuth). · <a class="inline-link" href="empezar.html">Ver la configuración de cada uno →</a></p>
     </div>
   </section>
