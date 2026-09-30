@@ -76,6 +76,11 @@ def map_api_key_tables() -> None:
         Column("status_code", Integer, nullable=False),
         Column("tokens_used", Integer, server_default="0"),
         Column("duration_ms", Integer, server_default="0"),
+        Column("mode", String(12), nullable=True),
+        Column("tool", String(40), nullable=True),
+        Column("via", String(8), nullable=True),
+        Column("client", String(32), nullable=True),
+        Column("user_agent", String(160), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
     )
 

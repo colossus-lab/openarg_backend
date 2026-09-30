@@ -37,7 +37,14 @@ class ApiUsage(BaseEntity):
 
     api_key_id: UUID = field(default=_ZERO_UUID)  # Must be set explicitly
     endpoint: str = ""
-    question: str = ""  # truncated to 200 chars
+    # Truncated to 200 chars. Only the answers mode stores it: data-mode rows
+    # leave it empty, so what someone searched for is never kept.
+    question: str | None = None
     status_code: int = 200
     tokens_used: int = 0
     duration_ms: int = 0
+    mode: str | None = None  # respuestas | datos
+    tool: str | None = None  # the MCP tool the endpoint backs
+    via: str | None = None  # mcp | api
+    client: str | None = None  # normalised family, see public_api_clients
+    user_agent: str | None = None
