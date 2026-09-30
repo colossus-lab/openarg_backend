@@ -278,6 +278,24 @@ p { margin: 0 0 .9rem; }
 .client p { font-size: .9rem; color: var(--ink-2); margin: 0; }
 .soon { margin-top: 18px; }
 
+/* Agentes propios */
+.agents { display: grid; grid-template-columns: 1fr 1fr; margin-top: 48px; border-top: 1px solid var(--rule-strong); }
+.agents-case { padding: 32px 32px 8px 0; border-right: 1px solid var(--rule); }
+.agents-link { padding: 32px 0 8px 32px; min-width: 0; }
+.agents-title { font: 700 clamp(1.4rem, 2.4vw, 1.9rem)/1.15 var(--display); letter-spacing: -0.02em; margin: 1rem 0 .8rem; }
+.agents-title em { font-style: italic; font-weight: 600; color: var(--sol); }
+.chat { margin-top: 22px; padding: 18px; background: var(--code-bg); border: 1px solid var(--rule); display: flex; flex-direction: column; gap: 10px; }
+.bubble { max-width: 85%; padding: 10px 14px; font-size: .92rem; line-height: 1.45; border-radius: 12px; }
+.bubble.me { align-self: flex-end; background: var(--celeste); color: var(--paper); border-bottom-right-radius: 3px; }
+.bubble.bot { align-self: flex-start; background: var(--paper-3); color: var(--ink); border-bottom-left-radius: 3px; }
+.bubble-src { display: block; margin-top: 6px; font: 400 .74rem/1.4 var(--mono); color: var(--ink-2); }
+.chat-note { margin: 4px 0 0; font-size: .7rem; }
+.mini-steps { margin: 18px 0 0; padding-left: 20px; }
+.mini-steps li { margin-bottom: 8px; font-size: .95rem; }
+.mini-steps li::marker { color: var(--sol); font-family: var(--mono); }
+.code.prompt pre { white-space: pre-wrap; word-break: break-word; font-size: .82rem; }
+.small { font-size: .86rem; }
+
 /* Filas de escala */
 .scale-row { display: grid; grid-template-columns: 3fr 3fr 5fr; gap: 24px; align-items: center; padding: 24px 0; border-top: 1px solid var(--rule); }
 .scale-row:last-child { border-bottom: 1px solid var(--rule); }
@@ -352,9 +370,11 @@ code, pre { font-family: var(--mono); }
 #t-code:checked ~ .labels label[for="t-code"],
 #t-desktop:checked ~ .labels label[for="t-desktop"],
 #t-cursor:checked ~ .labels label[for="t-cursor"],
-#t-vscode:checked ~ .labels label[for="t-vscode"] { color: var(--ink); border-bottom-color: var(--sol); }
+#t-vscode:checked ~ .labels label[for="t-vscode"],
+#t-agente:checked ~ .labels label[for="t-agente"] { color: var(--ink); border-bottom-color: var(--sol); }
 #t-code:checked ~ .p-code, #t-desktop:checked ~ .p-desktop,
-#t-cursor:checked ~ .p-cursor, #t-vscode:checked ~ .p-vscode { display: block; }
+#t-cursor:checked ~ .p-cursor, #t-vscode:checked ~ .p-vscode,
+#t-agente:checked ~ .p-agente { display: block; }
 
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; margin: 10px 0 20px; font-size: .92rem; }
@@ -406,6 +426,9 @@ thead th { font: 600 .7rem/1.3 var(--body); letter-spacing: .14em; text-transfor
   .t-question { padding: 24px 0; border-right: 0; border-bottom: 1px solid var(--rule); }
   .t-steps { padding: 18px 0; }
   .scale-row { grid-template-columns: 1fr; gap: 6px; }
+  .agents { grid-template-columns: 1fr; }
+  .agents-case { padding: 26px 0; border-right: 0; border-bottom: 1px solid var(--rule); }
+  .agents-link { padding: 26px 0 0; }
   .indec-grid { grid-template-columns: 1fr; }
   .indec-cell:nth-child(even) { padding-left: 0; border-left: 0; }
   .steps > li { grid-template-columns: 1fr; }
