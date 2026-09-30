@@ -11,6 +11,7 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'mcp_publico/**'
       - 'pyproject.toml'
       - 'alembic.ini'
       - 'config/**'
@@ -20,6 +21,7 @@ on:
     paths:
       - 'src/**'
       - 'tests/**'
+      - 'mcp_publico/**'
       - 'pyproject.toml'
       - 'alembic.ini'
       - 'config/**'
@@ -197,6 +199,47 @@ jobs:
           done
         fi
         exit "${status}"
+
+  mcp-publico-tests:
+    runs-on: ubuntu-latest
+    name: MCP público
+    timeout-minutes: 10
+
+    # El SDK de MCP no está en pyproject.toml: es dependencia sólo del
+    # contenedor del MCP público (mcp_publico/requirements.txt). Sin él,
+    # `test_mcp_publico_server.py` se saltea entero con `importorskip` y el
+    # job de unit tests queda verde sin haber probado el servidor: autenticación,
+    # cupos, las herramientas, robots.txt. Este job instala exactamente lo que
+    # instala el contenedor y falla si algo se saltea.
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+    - name: Install MCP container dependencies
+      run: |
+        uv pip install --system -r mcp_publico/requirements.txt \
+          'pytest>=8.3.0' 'pytest-asyncio>=0.24.0'
+        python -c "import mcp, mcp_publico.server"
+
+    - name: Run MCP tests
+      run: |
+        set -o pipefail
+        pytest tests/unit/test_mcp_publico_server.py tests/unit/test_mcp_publico_core.py \
+          -q --no-header --tb=short -rs 2>&1 | tee /tmp/mcp.log
+        # Un skip acá es el mismo agujero que este job viene a tapar.
+        if grep -qE '[0-9]+ skipped' /tmp/mcp.log; then
+          echo "::error::Se saltearon tests del MCP público; ver el resumen -rs arriba"
+          exit 1
+        fi
 
   type-check:
     runs-on: ubuntu-latest
