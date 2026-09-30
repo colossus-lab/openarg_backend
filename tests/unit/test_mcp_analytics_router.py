@@ -193,6 +193,62 @@ def test_keys_serialise_dates(rows) -> None:
     assert row["email"] == "alguien@example.com"
 
 
+def test_users_lists_keys_without_usage_too(rows) -> None:
+    """La lista parte de `api_keys`, no del registro: una clave sin uso aparece."""
+    queue, seen = rows
+    when = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+    queue.append(
+        [
+            {
+                "email": "usa@example.com",
+                "nombre": "Usa",
+                "key_prefix": "oarg_sk_abcd",
+                "activa": True,
+                "claves": 1,
+                "alta": when,
+                "ultimo_uso": when,
+                "datos_mes": 12,
+                "preguntas_mes": 3,
+                "pedidos_total": 80,
+                "rechazos_total": 1,
+                "fundador_hasta": datetime(2027, 3, 31, 23, 59, tzinfo=UTC),
+                "fundador": True,
+                "creditos_preguntas": 0,
+                "creditos_datos": 5,
+            },
+            {
+                "email": "nunca@example.com",
+                "nombre": None,
+                "key_prefix": "oarg_sk_efgh",
+                "activa": True,
+                "claves": 2,
+                "alta": when,
+                "ultimo_uso": None,
+                "datos_mes": 0,
+                "preguntas_mes": 0,
+                "pedidos_total": 0,
+                "rechazos_total": 0,
+                "fundador_hasta": None,
+                "fundador": False,
+                "creditos_preguntas": 0,
+                "creditos_datos": 0,
+            },
+        ]
+    )
+    usa, nunca = mod.users(limit=1000)
+    assert usa["ultimo_uso"] == when.isoformat()
+    assert usa["fundador_hasta"].startswith("2027-03-31")
+    assert nunca["ultimo_uso"] is None and nunca["fundador_hasta"] is None
+
+    sql = seen[0]
+    assert "FROM k\n" in sql and "LEFT JOIN uso" in sql
+    # Tablas nombradas con esquema: el search_path por defecto es `raw, public`.
+    for table in ("api_usage", "api_keys", "users", "api_supporters", "api_credit_balances"):
+        assert f"public.{table}" in sql
+    # El último uso no depende sólo de last_used_at, que quedó vacío en claves usadas.
+    assert "GREATEST(uso.ultimo_registro, k.last_used_at)" in sql
+
+
 def test_questions_only_look_at_the_answers_mode(rows) -> None:
     queue, seen = rows
     when = datetime(2026, 9, 29, tzinfo=UTC)

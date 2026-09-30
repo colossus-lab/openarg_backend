@@ -307,6 +307,82 @@ def top_keys(days: int = _days(), limit: int = Query(20, ge=1, le=100)) -> list[
     ]
 
 
+@router.get("/users", dependencies=[Depends(verify_admin_key)])
+def users(limit: int = Query(1000, ge=1, le=5000)) -> list[dict[str, Any]]:
+    """Todas las personas con clave, la hayan usado o no.
+
+    La misma clave sirve para la API y para el MCP. El último uso sale del
+    registro (`api_usage`) y no sólo de `api_keys.last_used_at`, que quedó
+    vacío en claves que sí se usaron. El uso "del mes" cuenta el mes UTC, que
+    es el período del cupo.
+    """
+    rows = _rows(
+        f"""
+        WITH mes AS (
+            SELECT date_trunc('month', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS desde
+        ),
+        a AS (
+            SELECT k.user_id, u.status_code, u.created_at,
+                   {_MODE} AS mode
+            FROM public.api_usage u
+            JOIN public.api_keys k ON k.id = u.api_key_id
+        ),
+        uso AS (
+            SELECT user_id,
+                   MAX(created_at)                                        AS ultimo_registro,
+                   COUNT(*) FILTER (WHERE mode = 'datos' AND {_EXECUTED}
+                                    AND created_at >= (SELECT desde FROM mes))  AS datos_mes,
+                   COUNT(*) FILTER (WHERE mode = 'respuestas' AND {_EXECUTED}
+                                    AND created_at >= (SELECT desde FROM mes))  AS preguntas_mes,
+                   COUNT(*) FILTER (WHERE {_EXECUTED})                        AS pedidos_total,
+                   COUNT(*) FILTER (WHERE {_REJECTED})                        AS rechazos_total
+            FROM a GROUP BY user_id
+        ),
+        k AS (
+            SELECT user_id,
+                   COUNT(*)                                                   AS claves,
+                   COUNT(*) FILTER (WHERE is_active)                          AS claves_activas,
+                   MIN(created_at)                                            AS alta,
+                   MAX(last_used_at)                                          AS last_used_at,
+                   (ARRAY_AGG(key_prefix ORDER BY is_active DESC, created_at DESC))[1] AS key_prefix
+            FROM public.api_keys GROUP BY user_id
+        )
+        SELECT us.email,
+               us.name                                                        AS nombre,
+               k.key_prefix,
+               k.claves_activas > 0                                           AS activa,
+               k.claves,
+               k.alta,
+               GREATEST(uso.ultimo_registro, k.last_used_at)                  AS ultimo_uso,
+               COALESCE(uso.datos_mes, 0)                                     AS datos_mes,
+               COALESCE(uso.preguntas_mes, 0)                                 AS preguntas_mes,
+               COALESCE(uso.pedidos_total, 0)                                 AS pedidos_total,
+               COALESCE(uso.rechazos_total, 0)                                AS rechazos_total,
+               s.hasta                                                        AS fundador_hasta,
+               (s.user_id IS NOT NULL AND (s.hasta IS NULL OR s.hasta > NOW())) AS fundador,
+               COALESCE(b.preguntas, 0)                                       AS creditos_preguntas,
+               COALESCE(b.datos, 0)                                           AS creditos_datos
+        FROM k
+        JOIN public.users us                    ON us.id = k.user_id
+        LEFT JOIN uso                           ON uso.user_id = k.user_id
+        LEFT JOIN public.api_supporters s       ON s.user_id = k.user_id
+        LEFT JOIN public.api_credit_balances b  ON b.user_id = k.user_id
+        ORDER BY GREATEST(uso.ultimo_registro, k.last_used_at) DESC NULLS LAST, k.alta DESC
+        LIMIT :limit
+        """,
+        {"limit": limit},
+    )
+    return [
+        {
+            **r,
+            "alta": r["alta"].isoformat() if r["alta"] else None,
+            "ultimo_uso": r["ultimo_uso"].isoformat() if r["ultimo_uso"] else None,
+            "fundador_hasta": r["fundador_hasta"].isoformat() if r["fundador_hasta"] else None,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/questions", dependencies=[Depends(verify_admin_key)])
 def questions(days: int = _days()) -> dict[str, Any]:
     """Qué pregunta la gente (sólo el modo respuestas guarda el texto)."""
