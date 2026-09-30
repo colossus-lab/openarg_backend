@@ -11,6 +11,7 @@ from typing import Any
 
 from tests.evaluation.run_eval import (
     INTENT_MAP,
+    _forbidden_answer_hit,
     check_absolute_expectations,
     compare_to_baseline,
     summarise,
@@ -35,6 +36,7 @@ def _r(**over: Any) -> dict:
         "keyword_score": 1.0,
         "retrieval_precision": 1.0,
         "forbidden_sources_hit": [],
+        "forbidden_answer_hit": [],
         "intent_scored": False,
         "intent_match": False,
         "connector_scored": True,
@@ -137,13 +139,13 @@ def test_el_dataset_que_esta_en_el_repo_es_valido() -> None:
     from tests.evaluation.run_eval import DEFAULT_DATASET, load_golden_dataset
 
     entries = load_golden_dataset(DEFAULT_DATASET)
-    assert len(entries) == 52
+    assert len(entries) == 53
     assert validate_dataset(entries) == []
 
     # Los casos negativos sólo sirven si traen la expectativa: sin
     # `forbidden_sources` son dos preguntas más y el gate no mira nada.
     negativos = [e for e in entries if e["category"] == "negativo"]
-    assert len(negativos) == 2
+    assert len(negativos) == 3
     assert all(e.get("forbidden_sources") for e in negativos)
 
 
@@ -253,3 +255,31 @@ def test_un_caso_nuevo_igual_se_chequea_contra_sus_fuentes_prohibidas() -> None:
 
 def test_sin_fuentes_prohibidas_no_hay_falla() -> None:
     assert check_absolute_expectations({"results": [_r()]}) == []
+
+
+def test_una_frase_prohibida_en_la_respuesta_rompe_el_gate() -> None:
+    """Caso Pinamar: el estudio estaba y la respuesta dijo que no."""
+    fallas = check_absolute_expectations(
+        {"results": [_r(id="negativo_003", forbidden_answer_hit=["no está disponible"])]}
+    )
+
+    assert fallas == ["negativo_003: la respuesta dice 'no está disponible'"]
+
+
+def test_la_frase_prohibida_se_busca_sin_distinguir_mayusculas() -> None:
+    respuesta = "El Estudio Nacional INDEC 2018 NO ESTÁ DISPONIBLE en los datasets precargados."
+
+    assert _forbidden_answer_hit(["no está disponible"], respuesta) == ["no está disponible"]
+    assert (
+        _forbidden_answer_hit(["no está disponible"], "El estudio no tiene datos por partido.")
+        == []
+    )
+
+
+def test_el_caso_pinamar_exige_la_fuente_y_prohibe_decir_que_no_esta() -> None:
+    from tests.evaluation.run_eval import DEFAULT_DATASET, load_golden_dataset
+
+    caso = next(e for e in load_golden_dataset(DEFAULT_DATASET) if e["id"] == "negativo_003")
+
+    assert "Perfil de las Personas con Discapacidad" in caso["expected_sources"]
+    assert "no está disponible" in caso["forbidden_answer_contains"]
