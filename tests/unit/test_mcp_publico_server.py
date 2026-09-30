@@ -182,6 +182,26 @@ async def test_question_forwards_key_and_client_ip(backend: FakeBackend) -> None
     assert json.loads(sent.content) == {"question": "tasa de desempleo"}
 
 
+async def test_backend_learns_it_came_through_the_mcp_and_from_which_client(
+    backend: FakeBackend,
+) -> None:
+    """Para el tablero de uso: vía y programa cliente, nunca la clave en otro header.
+
+    El cliente del SDK manda su `clientInfo` en cada pedido (protocolo nuevo), y
+    eso le gana al User-Agent: es el nombre que el propio cliente declara.
+    """
+    result = await _call(
+        "listar_fuentes",
+        {},
+        {"Authorization": f"Bearer {KEY}", "User-Agent": "claude-code/2.1.0"},
+    )
+    assert not result.is_error, _text(result)
+    sent = backend.requests[0]
+    assert sent.headers["x-openarg-via"] == "mcp"
+    assert sent.headers["x-openarg-client"] == "mcp/0.1.0"
+    assert [k for k, v in sent.headers.items() if KEY in v] == ["authorization"]
+
+
 async def test_quota_exhausted_is_a_spanish_tool_error(backend: FakeBackend) -> None:
     backend.status = 429
     backend.body = {"detail": "Rate limit exceeded: 10 requests per day"}

@@ -69,12 +69,27 @@ server = MCPServer(
 _client_factory = lambda: httpx.AsyncClient(base_url=BACKEND_URL, timeout=_ASK_TIMEOUT)  # noqa: E731
 
 
-def _key_and_ip(ctx: Context) -> tuple[str, str | None]:
+def _client_name(ctx: Context) -> str | None:
+    """`clientInfo` del protocolo, si el cliente lo mandó en este pedido."""
+    # En modo stateless, `client_params` es None salvo en clientes que mandan
+    # `clientInfo` en cada pedido (protocolo 2026-07-28). Nunca debe romper.
+    try:
+        info = ctx.session.client_params.client_info  # type: ignore[union-attr]
+    except Exception:
+        return None
+    name = (getattr(info, "name", "") or "").strip()
+    version = (getattr(info, "version", "") or "").strip()
+    return f"{name}/{version}" if name and version else name or None
+
+
+def _caller(ctx: Context) -> tuple[str, str | None, str | None]:
+    """Clave, IP real y programa cliente de quien llama a la herramienta."""
     headers = ctx.headers
     try:
-        return core.extract_key(headers), core.client_ip(headers)
+        key, ip = core.extract_key(headers), core.client_ip(headers)
     except core.UserFacingError as exc:
         raise ToolError(str(exc)) from None
+    return key, ip, core.client_label(headers, _client_name(ctx))
 
 
 async def _call_backend(
@@ -82,6 +97,7 @@ async def _call_backend(
     path: str,
     key: str,
     ip: str | None,
+    caller: str | None,
     json: Any = None,
     params: dict[str, Any] | None = None,
     *,
@@ -90,7 +106,11 @@ async def _call_backend(
     try:
         async with _client_factory() as client:
             resp = await client.request(
-                method, path, json=json, params=params, headers=core.backend_headers(key, ip)
+                method,
+                path,
+                json=json,
+                params=params,
+                headers=core.backend_headers(key, ip, caller),
             )
     except httpx.TimeoutException:
         raise ToolError(core.error_message(408)) from None
@@ -139,8 +159,10 @@ async def consultar_datos_publicos(pregunta: str, ctx: Context) -> str:
         question = core.validate_question(pregunta)
     except core.UserFacingError as exc:
         raise ToolError(str(exc)) from None
-    key, ip = _key_and_ip(ctx)
-    payload = await _call_backend("POST", "/api/v1/ask", key, ip, json={"question": question})
+    key, ip, caller = _caller(ctx)
+    payload = await _call_backend(
+        "POST", "/api/v1/ask", key, ip, caller, json={"question": question}
+    )
     return core.format_answer(payload)
 
 
@@ -153,8 +175,8 @@ async def listar_fuentes(ctx: Context) -> str:
 
     No descuenta consultas del cupo diario.
     """
-    key, ip = _key_and_ip(ctx)
-    payload = await _call_backend("GET", "/api/v1/fuentes", key, ip)
+    key, ip, caller = _caller(ctx)
+    payload = await _call_backend("GET", "/api/v1/fuentes", key, ip, caller)
     return core.format_sources(payload)
 
 
@@ -175,12 +197,12 @@ async def buscar_datasets(
     escolar CABA"). `portal` filtra por portal (ver `listar_fuentes`).
     `limite` entre 1 y 25. No descuenta preguntas.
     """
-    key, ip = _key_and_ip(ctx)
+    key, ip, caller = _caller(ctx)
     params: dict[str, Any] = {"q": texto.strip(), "limite": max(1, min(int(limite), 25))}
     if portal:
         params["portal"] = portal
     payload = await _call_backend(
-        "GET", "/api/v1/catalogo/buscar", key, ip, params=params, data_mode=True
+        "GET", "/api/v1/catalogo/buscar", key, ip, caller, params=params, data_mode=True
     )
     return core.format_search(payload)
 
@@ -193,9 +215,15 @@ async def describir_tabla(tabla: str, ctx: Context) -> str:
     `obtener_datos` para saber qué columnas pedir y qué fechas existen.
     No descuenta preguntas.
     """
-    key, ip = _key_and_ip(ctx)
+    key, ip, caller = _caller(ctx)
     payload = await _call_backend(
-        "GET", "/api/v1/catalogo/tabla", key, ip, params={"nombre": tabla.strip()}, data_mode=True
+        "GET",
+        "/api/v1/catalogo/tabla",
+        key,
+        ip,
+        caller,
+        params={"nombre": tabla.strip()},
+        data_mode=True,
     )
     return core.format_table(payload)
 
@@ -219,7 +247,7 @@ async def obtener_datos(
     - `orden`: "asc" o "desc" por fecha. `limite`: 1 a 500 filas.
     No descuenta preguntas.
     """
-    key, ip = _key_and_ip(ctx)
+    key, ip, caller = _caller(ctx)
     body: dict[str, Any] = {
         "tabla": tabla.strip(),
         "orden": orden,
@@ -234,7 +262,7 @@ async def obtener_datos(
         if value:
             body[field] = value
     payload = await _call_backend(
-        "POST", "/api/v1/catalogo/datos", key, ip, json=body, data_mode=True
+        "POST", "/api/v1/catalogo/datos", key, ip, caller, json=body, data_mode=True
     )
     return core.format_rows(payload)
 

@@ -95,10 +95,33 @@ def validate_question(question: str) -> str:
     return q
 
 
-def backend_headers(key: str, ip: str | None) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+_CLIENT_LABEL_CHARS = 160
+
+
+def client_label(headers: Mapping[str, str] | None, client_name: str | None = None) -> str | None:
+    """Qué programa usa la persona (Claude Code, Cursor, su propio agente).
+
+    El `clientInfo` del protocolo es lo más preciso, pero en modo stateless sólo
+    llega con los clientes nuevos; si no, queda el `User-Agent`. Es para el
+    tablero de uso: nunca decide nada, y se limpia para que no pueda inyectar
+    otro header.
+    """
+    raw = (client_name or "").strip() or _header(headers, "User-Agent").strip()
+    clean = "".join(ch for ch in raw if 32 <= ord(ch) < 127)[:_CLIENT_LABEL_CHARS].strip()
+    return clean or None
+
+
+def backend_headers(key: str, ip: str | None, client: str | None = None) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        # Para que `api_usage` distinga el MCP de la API directa.
+        "X-OpenArg-Via": "mcp",
+    }
     if ip:
         headers["X-Forwarded-For"] = ip
+    if client:
+        headers["X-OpenArg-Client"] = client
     return headers
 
 
