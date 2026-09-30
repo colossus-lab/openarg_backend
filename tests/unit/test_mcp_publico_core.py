@@ -74,9 +74,26 @@ class TestQuestion:
 
 
 class TestErrorMessages:
-    def test_day_quota(self) -> None:
-        msg = core.error_message(429, "Rate limit exceeded: 10 requests per day")
-        assert "10 preguntas de hoy" in msg and "21:00" in msg
+    def test_monthly_quota_is_402(self) -> None:
+        """Desde el 30-sep-2026 el cupo es mensual y se agota con 402, como en Tomi."""
+        msg = core.error_message(402, "Monthly quota exceeded: 10 questions per month")
+        assert "10 preguntas de este mes" in msg and "modo datos" in msg
+        assert "21:00" in msg and core.SUPPORT_URL in msg and core.CONTACT_EMAIL in msg
+
+    def test_founder_quota_number_comes_from_the_backend(self) -> None:
+        msg = core.error_message(402, "Monthly quota exceeded: 100 questions per month")
+        assert "100 preguntas de este mes" in msg
+
+    def test_renewal_is_the_first_of_next_month(self) -> None:
+        from datetime import UTC, datetime
+
+        assert core.renewal_label(datetime(2026, 10, 15, tzinfo=UTC)).startswith(
+            "1/11 (el 31/10 a las 21:00"
+        )
+        assert core.renewal_label(datetime(2026, 12, 31, 23, 0, tzinfo=UTC)).startswith(
+            "1/1 (el 31/12"
+        )
+        assert core.renewal_label(datetime(2027, 2, 3, tzinfo=UTC)).startswith("1/3 (el 28/2")
 
     def test_minute_quota(self) -> None:
         assert "minuto" in core.error_message(429, "Rate limit exceeded: 2 requests per minute")
@@ -107,13 +124,13 @@ class TestFormatAnswer:
                     {"name": "EPH", "url": "https://datos.gob.ar/eph", "portal": "datos_gob_ar"},
                 ],
                 "warnings": ["Dato provisorio"],
-                "usage": {"requests_remaining_today": 7},
+                "usage": {"requests_remaining_today": 7, "requests_remaining_month": 7},
             }
         )
         assert text.startswith("La tasa fue 7,6 %.")
         assert text.count("[EPH (datos_gob_ar)](https://datos.gob.ar/eph)") == 1
         assert "- Dato provisorio" in text
-        assert "restantes hoy: 7" in text
+        assert "te quedan este mes: 7" in text
 
     def test_non_http_url_is_not_linked(self) -> None:
         text = core.format_answer(
@@ -162,9 +179,9 @@ class TestContacto:
 
 
 class TestModoDatosCore:
-    def test_catalog_daily_quota_message(self) -> None:
-        msg = core.error_message(429, "Rate limit exceeded: 200 catalog requests per day")
-        assert "modo datos" in msg
+    def test_catalog_monthly_quota_message(self) -> None:
+        msg = core.error_message(402, "Monthly quota exceeded: 200 catalog requests per month")
+        assert "200 consultas del modo datos de este mes" in msg
 
     def test_catalog_minute_quota_message(self) -> None:
         msg = core.error_message(429, "Rate limit exceeded: 30 catalog requests per minute")
@@ -209,13 +226,13 @@ class TestClientLabel:
 
 
 class TestSupportLine:
-    """El pedido de apoyo aparece sólo cuando se agota un cupo diario."""
+    """El pedido de apoyo aparece sólo cuando se agota un cupo."""
 
     @pytest.mark.parametrize(
         ("status", "detail"),
         [
-            (429, "Rate limit exceeded: 10 requests per day"),
-            (429, "Rate limit exceeded: 200 catalog requests per day"),
+            (402, "Monthly quota exceeded: 10 questions per month"),
+            (402, "Monthly quota exceeded: 200 catalog requests per month"),
             (503, "Free tier daily capacity reached."),
         ],
     )

@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app.application.api_key_service import check_catalog_rate_limit
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession  # noqa: TC001
 from app.presentation.http.controllers.public_api.ask_router import authenticate_bearer
 from app.presentation.http.controllers.public_api.usage_log import log_rejection, track_usage
@@ -42,6 +43,7 @@ async def listar_fuentes(
     session: FromDishka[MainAsyncSession],
     cache: FromDishka[ICacheService],
     api_key_repo: FromDishka[IApiKeyRepository],
+    credits: FromDishka[ICreditRepository],
 ) -> FuentesResponse:
     """List the portals OpenArg indexes, with their dataset counts.
 
@@ -50,7 +52,7 @@ async def listar_fuentes(
     """
     api_key = await authenticate_bearer(request, api_key_repo)
     try:
-        await check_catalog_rate_limit(api_key, cache)
+        await check_catalog_rate_limit(api_key, cache, credits)
     except HTTPException as exc:
         await log_rejection(
             api_key_repo,

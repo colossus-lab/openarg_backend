@@ -14,17 +14,41 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 KEY_URL = "https://openarg.org/desarrolladores"
 DOCS_URL = "https://mcp.openarg.org"
+CONTACT_EMAIL = "devops@colossuslab.org"
 SUPPORT_URL = "https://www.colossuslab.org/support"
 # Sólo cuando se agota un cupo diario: es el momento en que alguien valora el
 # servicio. Nunca en respuestas normales, que el modelo lee en cada llamada.
 SUPPORT_LINE = (
     " OpenArg es gratis y se sostiene con aportes de quienes lo usan: si te sirve, "
-    f"podés bancarlo en {SUPPORT_URL}"
+    f"podés bancarlo en {SUPPORT_URL} (quienes lo sostienen como Fundadores tienen "
+    "cupo ampliado)."
 )
+# Como en Tomi: el acceso no depende de poder pagar.
+HARDSHIP_LINE = (
+    " Si lo necesitás para periodismo, investigación o una organización y no podés "
+    f"aportar, escribinos a {CONTACT_EMAIL}: el acceso no depende de poder pagar."
+)
+
+
+def _first_int(text: str) -> int | None:
+    match = re.search(r"\d+", text or "")
+    return int(match.group()) if match else None
+
+
+def renewal_label(now: datetime | None = None) -> str:
+    """Cuándo se renueva el cupo: el 1° del mes que viene a las 00:00 UTC,
+    que en Argentina es el último día del mes a las 21:00."""
+    now = now or datetime.now(UTC)
+    first = datetime(now.year + (now.month == 12), now.month % 12 + 1, 1, tzinfo=UTC)
+    last_day = first - timedelta(days=1)
+    return f"{first.day}/{first.month} (el {last_day.day}/{last_day.month} a las 21:00, hora de Argentina)"
+
+
 KEY_PREFIX = "oarg_sk_"
 MAX_QUESTION_CHARS = 2000
 
@@ -148,12 +172,21 @@ def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> 
             "La clave de OpenArg es inválida o fue revocada. Generá una nueva en "
             f"{KEY_URL} y actualizala en tu cliente MCP."
         )
+    if status == 402:
+        # El cupo del mes se terminó y no quedan créditos. El número sale del
+        # detalle del backend: no es el mismo para un Fundador.
+        n = _first_int(detail)
+        cuantas = f"las {n}" if n else "todas las"
+        if "catalog" in detail_l:
+            head = f"Usaste {cuantas} consultas del modo datos de este mes."
+        else:
+            head = (
+                f"Usaste {cuantas} preguntas de este mes. Mientras tanto podés seguir con "
+                "el modo datos (buscar_datasets, describir_tabla, obtener_datos), que "
+                "tiene su propio cupo."
+            )
+        return f"{head} Se renuevan el {renewal_label()}." + SUPPORT_LINE + HARDSHIP_LINE
     if status == 429:
-        if "catalog" in detail_l and "day" in detail_l:
-            return (
-                "Se alcanzó el límite diario del modo datos (buscar, describir y "
-                "obtener datos). Se renueva a las 21:00 (hora de Argentina)."
-            ) + SUPPORT_LINE
         if "minute" in detail_l:
             return "Demasiadas consultas seguidas: esperá un minuto y volvé a intentar."
         if "this ip" in detail_l:
@@ -161,11 +194,7 @@ def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> 
                 "Se alcanzó el límite diario de consultas desde esta conexión. "
                 "Se renueva a las 21:00 (hora de Argentina)."
             )
-        return (
-            "Usaste las 10 preguntas de hoy. Se renuevan a las 21:00 (hora de "
-            "Argentina). Mientras tanto podés usar el modo datos (buscar_datasets, "
-            "describir_tabla, obtener_datos), que no descuenta preguntas."
-        ) + SUPPORT_LINE
+        return "Demasiadas consultas: esperá un rato y volvé a intentar."
     if status == 503:
         return (
             "El cupo público de OpenArg para hoy está agotado. Se renueva a las "
@@ -211,9 +240,14 @@ def format_answer(payload: Mapping[str, Any]) -> str:
         parts.append("**Advertencias**\n" + "\n".join(f"- {w}" for w in warnings))
 
     usage = payload.get("usage") or {}
-    remaining = usage.get("requests_remaining_today") if isinstance(usage, Mapping) else None
-    if isinstance(remaining, int):
-        parts.append(f"_Consultas restantes hoy: {remaining}. Datos: OpenArg (openarg.org)._")
+    if isinstance(usage, Mapping):
+        remaining = usage.get("requests_remaining_month")
+        if not isinstance(remaining, int):
+            remaining = usage.get("requests_remaining_today")
+        if isinstance(remaining, int):
+            parts.append(
+                f"_Preguntas que te quedan este mes: {remaining}. Datos: OpenArg (openarg.org)._"
+            )
     return "\n\n".join(parts)
 
 

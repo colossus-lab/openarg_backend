@@ -58,7 +58,7 @@ server = MCPServer(
         "(tiene su propio cupo, más amplio).\n"
         "MODO RESPUESTAS: `consultar_datos_publicos` recibe una pregunta en "
         "lenguaje natural y OpenArg arma la respuesta con fuentes y advertencias. "
-        "Cada llamada descuenta 1 de las 10 preguntas diarias del usuario: usala "
+        "Cada llamada descuenta 1 de las preguntas del mes del usuario (10 gratis): usala "
         "cuando la pregunta necesite cruzar tablas o cuando el modo datos no alcance.\n"
         "Citá siempre la fuente (título y link) de los datos que uses. "
         "`listar_fuentes` muestra qué portales cubre."
@@ -151,9 +151,10 @@ async def consultar_datos_publicos(pregunta: str, ctx: Context) -> str:
     "Evolución del IPC en 2025", "¿Cuántos diputados tiene cada bloque?",
     "Presupuesto ejecutado por el Ministerio de Salud en 2024".
     La respuesta incluye los datasets usados (con link al portal oficial),
-    advertencias sobre la calidad o cobertura del dato, y cuántas consultas
-    le quedan hoy al usuario. Descuenta 1 de las 10 preguntas diarias: si podés
-    responder con `buscar_datasets` + `obtener_datos`, preferí esas.
+    advertencias sobre la calidad o cobertura del dato, y cuántas preguntas
+    le quedan este mes al usuario. Descuenta 1 de sus preguntas del mes (10
+    gratis): si podés responder con `buscar_datasets` + `obtener_datos`,
+    preferí esas.
     """
     try:
         question = core.validate_question(pregunta)
@@ -173,7 +174,7 @@ async def consultar_datos_publicos(pregunta: str, ctx: Context) -> str:
 async def listar_fuentes(ctx: Context) -> str:
     """Lista los portales de datos abiertos que cubre OpenArg y cuántos datasets tiene cada uno.
 
-    No descuenta consultas del cupo diario.
+    No descuenta preguntas: cuenta como un pedido del modo datos.
     """
     key, ip, caller = _caller(ctx)
     payload = await _call_backend("GET", "/api/v1/fuentes", key, ip, caller)

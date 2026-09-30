@@ -17,6 +17,7 @@ from app.domain.ports.connectors.georef import IGeorefConnector
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.connectors.staff import IStaffConnector
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
@@ -374,6 +375,17 @@ class ApiKeyProvider(Provider):  # type: ignore[misc]
         from app.infrastructure.adapters.api_key.api_key_repository_sqla import ApiKeyRepositorySQLA
 
         return ApiKeyRepositorySQLA(session)
+
+    @provide  # type: ignore[untyped-decorator]
+    def credit_repo(
+        self,
+        session: MainAsyncSession,
+    ) -> ICreditRepository:
+        from app.infrastructure.adapters.credits.credit_repository_sqla import (
+            CreditRepositorySQLA,
+        )
+
+        return CreditRepositorySQLA(session)
 
 
 class AuthProvider(Provider):  # type: ignore[misc]
