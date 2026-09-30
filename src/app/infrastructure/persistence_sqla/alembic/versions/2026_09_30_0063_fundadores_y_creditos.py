@@ -16,6 +16,10 @@ gaps — a non-atomic check-then-debit and no record of movements:
   index on (motivo, referencia) is what will make a Mercado Pago webhook
   idempotent later: the same payment id cannot be credited twice.
 
+Tables are schema-qualified: the database default search_path is
+`raw, public`, so an unqualified CREATE lands in `raw` (it did, on staging
+before this was fixed; 0064 moves them).
+
 Revision ID: 0063
 Revises: 0062
 """
@@ -31,8 +35,8 @@ depends_on = None
 def upgrade() -> None:
     op.execute(
         """
-        CREATE TABLE IF NOT EXISTS api_supporters (
-            user_id     UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        CREATE TABLE IF NOT EXISTS public.api_supporters (
+            user_id     UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
             nivel       VARCHAR(16) NOT NULL DEFAULT 'fundador',
             desde       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             hasta       TIMESTAMPTZ,
@@ -46,8 +50,8 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE TABLE IF NOT EXISTS api_credit_balances (
-            user_id     UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        CREATE TABLE IF NOT EXISTS public.api_credit_balances (
+            user_id     UUID PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
             preguntas   INTEGER NOT NULL DEFAULT 0 CHECK (preguntas >= 0),
             datos       INTEGER NOT NULL DEFAULT 0 CHECK (datos >= 0),
             updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -56,9 +60,9 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        CREATE TABLE IF NOT EXISTS api_credit_movements (
+        CREATE TABLE IF NOT EXISTS public.api_credit_movements (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            user_id     UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
             tipo        VARCHAR(12) NOT NULL CHECK (tipo IN ('preguntas', 'datos')),
             delta       INTEGER NOT NULL,
             motivo      VARCHAR(16) NOT NULL
@@ -71,15 +75,15 @@ def upgrade() -> None:
     )
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_api_credit_movements_user "
-        "ON api_credit_movements (user_id, created_at)"
+        "ON public.api_credit_movements (user_id, created_at)"
     )
     op.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_api_credit_movements_ref "
-        "ON api_credit_movements (motivo, referencia, tipo) WHERE referencia IS NOT NULL"
+        "ON public.api_credit_movements (motivo, referencia, tipo) WHERE referencia IS NOT NULL"
     )
 
 
 def downgrade() -> None:
-    op.execute("DROP TABLE IF EXISTS api_credit_movements")
-    op.execute("DROP TABLE IF EXISTS api_credit_balances")
-    op.execute("DROP TABLE IF EXISTS api_supporters")
+    op.execute("DROP TABLE IF EXISTS public.api_credit_movements")
+    op.execute("DROP TABLE IF EXISTS public.api_credit_balances")
+    op.execute("DROP TABLE IF EXISTS public.api_supporters")

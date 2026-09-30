@@ -56,7 +56,7 @@ class CreditsRequest(BaseModel):
 
 def _user_id(conn: Any, email: str) -> Any:
     row = conn.execute(
-        text("SELECT id FROM users WHERE LOWER(email) = LOWER(:e)"), {"e": email}
+        text("SELECT id FROM public.users WHERE LOWER(email) = LOWER(:e)"), {"e": email}
     ).first()
     if row is None:
         raise HTTPException(
@@ -83,9 +83,9 @@ def list_supporters() -> dict[str, Any]:
                            (s.hasta IS NULL OR s.hasta > NOW()) AS activo,
                            COALESCE(b.preguntas, 0) AS creditos_preguntas,
                            COALESCE(b.datos, 0) AS creditos_datos
-                    FROM api_supporters s
-                    JOIN users u ON u.id = s.user_id
-                    LEFT JOIN api_credit_balances b ON b.user_id = s.user_id
+                    FROM public.api_supporters s
+                    JOIN public.users u ON u.id = s.user_id
+                    LEFT JOIN public.api_credit_balances b ON b.user_id = s.user_id
                     ORDER BY activo DESC, s.hasta NULLS FIRST, u.email
                     """
                 )
@@ -94,8 +94,8 @@ def list_supporters() -> dict[str, Any]:
                 text(
                     """
                     SELECT u.email, b.preguntas, b.datos, b.updated_at
-                    FROM api_credit_balances b
-                    JOIN users u ON u.id = b.user_id
+                    FROM public.api_credit_balances b
+                    JOIN public.users u ON u.id = b.user_id
                     WHERE b.preguntas > 0 OR b.datos > 0
                     ORDER BY b.updated_at DESC
                     """
@@ -144,7 +144,7 @@ def upsert_supporter(
             conn.execute(
                 text(
                     """
-                    INSERT INTO api_supporters (user_id, hasta, origen, nota, created_by)
+                    INSERT INTO public.api_supporters (user_id, hasta, origen, nota, created_by)
                     VALUES (:u, :hasta, :origen, :nota, :actor)
                     ON CONFLICT (user_id) DO UPDATE
                     SET hasta = EXCLUDED.hasta, origen = EXCLUDED.origen,
@@ -172,7 +172,7 @@ def delete_supporter(email: EmailStr) -> dict[str, Any]:
         with engine.begin() as conn:
             user_id = _user_id(conn, email)
             deleted = conn.execute(
-                text("DELETE FROM api_supporters WHERE user_id = :u"), {"u": user_id}
+                text("DELETE FROM public.api_supporters WHERE user_id = :u"), {"u": user_id}
             ).rowcount
     finally:
         engine.dispose()
@@ -200,7 +200,7 @@ def grant_credits(
                 body.referencia
                 and conn.execute(
                     text(
-                        "SELECT 1 FROM api_credit_movements WHERE motivo = :m AND referencia = :r LIMIT 1"
+                        "SELECT 1 FROM public.api_credit_movements WHERE motivo = :m AND referencia = :r LIMIT 1"
                     ),
                     {"m": body.motivo, "r": body.referencia},
                 ).first()
@@ -209,7 +209,7 @@ def grant_credits(
             balance = conn.execute(
                 text(
                     """
-                    INSERT INTO api_credit_balances (user_id, preguntas, datos)
+                    INSERT INTO public.api_credit_balances (user_id, preguntas, datos)
                     VALUES (:u, :p, :d)
                     ON CONFLICT (user_id) DO UPDATE
                     SET preguntas = api_credit_balances.preguntas + EXCLUDED.preguntas,
@@ -225,7 +225,7 @@ def grant_credits(
                     conn.execute(
                         text(
                             """
-                            INSERT INTO api_credit_movements
+                            INSERT INTO public.api_credit_movements
                                 (user_id, tipo, delta, motivo, referencia, created_by)
                             VALUES (:u, :t, :d, :m, :r, :a)
                             """
