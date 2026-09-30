@@ -76,6 +76,30 @@ def sanitize_ckan_query(raw: str) -> str:
     return " ".join(words[:5])
 
 
+# Palabras que aparecen en nombres de tablas de cualquier tema: solas no dicen
+# de qué trata la pregunta.
+_GENERIC_WORDS = frozenset(
+    {
+        "del", "los", "las", "que", "por", "para", "con", "una", "uno", "como",
+        "hay", "son", "sus", "sobre", "entre", "desde", "hasta", "cual", "cuales",
+        "cuanto", "cuantos", "cuanta", "cuantas", "datos", "dato", "total", "tasa",
+        "año", "años", "anio", "anual", "mensual", "argentina", "pais", "nacional",
+        "nacion", "provincia", "provincial", "municipio", "municipal", "ciudad",
+        "caba", "pba", "buenos", "aires", "gobierno", "indec",
+    }
+)  # fmt: skip
+_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+
+
+def significant_keywords(query: str) -> list[str]:
+    """Palabras de la consulta que sirven para elegir una tabla por su nombre."""
+    words = [w.strip("¿?¡!.,;:()\"'").lower() for w in query.split()]
+    return [
+        w for w in dict.fromkeys(words)
+        if len(w) > 2 and w not in _GENERIC_WORDS and not _YEAR_RE.match(w)
+    ]  # fmt: skip
+
+
 async def search_cached_tables(
     query: str,
     sandbox: ISQLSandbox | None,
@@ -94,11 +118,20 @@ async def search_cached_tables(
     if not all_tables:
         return []
 
-    keywords = [k.lower() for k in query.split() if len(k) > 2]
+    keywords = significant_keywords(query)
     if not keywords:
         return []
 
-    matched = [t for t in all_tables if any(kw in t.table_name.lower() for kw in keywords)]
+    # Con una sola palabra en común alcanzaba: "caba" o "2018" traían tablas de
+    # cualquier tema (Juegos Olímpicos de la Juventud para una pregunta de
+    # discapacidad) y terminaban listadas como fuentes de la respuesta. Ahora
+    # esas palabras no cuentan, y quedan sólo las tablas que comparten más
+    # palabras con la consulta.
+    scores = {t.table_name: sum(kw in t.table_name.lower() for kw in keywords) for t in all_tables}
+    best = max(scores.values(), default=0)
+    if best == 0:
+        return []
+    matched = [t for t in all_tables if scores[t.table_name] == best]
     if not matched:
         return []
 
