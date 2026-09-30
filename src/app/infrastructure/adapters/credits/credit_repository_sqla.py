@@ -30,7 +30,7 @@ class CreditRepositorySQLA(ICreditRepository):
             await self._session.execute(
                 text(
                     "SELECT user_id, nivel, desde, hasta, COALESCE(origen, '') AS origen "
-                    "FROM api_supporters "
+                    "FROM public.api_supporters "
                     "WHERE user_id = :u AND (hasta IS NULL OR hasta > NOW())"
                 ),
                 {"u": user_id},
@@ -54,7 +54,7 @@ class CreditRepositorySQLA(ICreditRepository):
         row = (
             await self._session.execute(
                 text(
-                    f"UPDATE api_credit_balances SET {tipo} = {tipo} - 1, updated_at = NOW() "  # noqa: S608
+                    f"UPDATE public.api_credit_balances SET {tipo} = {tipo} - 1, updated_at = NOW() "  # noqa: S608
                     f"WHERE user_id = :u AND {tipo} > 0 RETURNING {tipo}"
                 ),
                 {"u": user_id},
@@ -67,7 +67,7 @@ class CreditRepositorySQLA(ICreditRepository):
             return False
         await self._session.execute(
             text(
-                "INSERT INTO api_credit_movements (user_id, tipo, delta, motivo) "
+                "INSERT INTO public.api_credit_movements (user_id, tipo, delta, motivo) "
                 "VALUES (:u, :t, -1, 'consumo')"
             ),
             {"u": user_id, "t": tipo},
@@ -78,7 +78,7 @@ class CreditRepositorySQLA(ICreditRepository):
     async def balance(self, user_id: UUID) -> dict[str, int]:
         row = (
             await self._session.execute(
-                text("SELECT preguntas, datos FROM api_credit_balances WHERE user_id = :u"),
+                text("SELECT preguntas, datos FROM public.api_credit_balances WHERE user_id = :u"),
                 {"u": user_id},
             )
         ).first()
