@@ -18,6 +18,13 @@ from typing import Any
 
 KEY_URL = "https://openarg.org/desarrolladores"
 DOCS_URL = "https://mcp.openarg.org"
+SUPPORT_URL = "https://www.colossuslab.org/support"
+# Sólo cuando se agota un cupo diario: es el momento en que alguien valora el
+# servicio. Nunca en respuestas normales, que el modelo lee en cada llamada.
+SUPPORT_LINE = (
+    " OpenArg es gratis y se sostiene con aportes de quienes lo usan: si te sirve, "
+    f"podés bancarlo en {SUPPORT_URL}"
+)
 KEY_PREFIX = "oarg_sk_"
 MAX_QUESTION_CHARS = 2000
 
@@ -146,7 +153,7 @@ def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> 
             return (
                 "Se alcanzó el límite diario del modo datos (buscar, describir y "
                 "obtener datos). Se renueva a las 21:00 (hora de Argentina)."
-            )
+            ) + SUPPORT_LINE
         if "minute" in detail_l:
             return "Demasiadas consultas seguidas: esperá un minuto y volvé a intentar."
         if "this ip" in detail_l:
@@ -158,12 +165,12 @@ def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> 
             "Usaste las 10 preguntas de hoy. Se renuevan a las 21:00 (hora de "
             "Argentina). Mientras tanto podés usar el modo datos (buscar_datasets, "
             "describir_tabla, obtener_datos), que no descuenta preguntas."
-        )
+        ) + SUPPORT_LINE
     if status == 503:
         return (
             "El cupo público de OpenArg para hoy está agotado. Se renueva a las "
-            "21:00 (hora de Argentina)."
-        )
+            "21:00 (hora de Argentina). Los aportes son lo que nos permite ampliarlo."
+        ) + SUPPORT_LINE
     if status == 408:
         return (
             "La consulta tardó demasiado y se cortó. Probá con una pregunta más "
