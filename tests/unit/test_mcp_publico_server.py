@@ -244,6 +244,47 @@ async def test_health_and_site() -> None:
     assert "OpenArg" in home.text
 
 
+async def test_robots_and_sitemap() -> None:
+    """Sólo mcp.openarg.org se indexa; staging (misma imagen) responde "no indexar"."""
+    app = mcp_server.create_app()
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://localhost:8000"
+    ) as http:
+        local = await http.get("/robots.txt")
+        prod = await http.get("/robots.txt", headers={"host": "mcp.openarg.org"})
+        staging = await http.get("/robots.txt", headers={"host": "mcp.staging.openarg.org"})
+        sitemap = await http.get("/sitemap.xml")
+    assert local.text == staging.text == "User-agent: *\nDisallow: /\n"
+    assert "Allow: /\n" in prod.text and "Disallow: /mcp\n" in prod.text
+    assert "Sitemap: https://mcp.openarg.org/sitemap.xml" in prod.text
+    assert sitemap.status_code == 200
+    for page in ("empezar.html", "herramientas.html", "limites.html"):
+        assert f"https://mcp.openarg.org/{page}" in sitemap.text
+        assert (mcp_server._SITE_DIR / page).is_file()
+
+
+def test_structured_faq_matches_the_visible_faq() -> None:
+    """El FAQ de schema.org tiene que decir lo mismo que la sección visible."""
+    import html
+    import re
+
+    page = (mcp_server._SITE_DIR / "index.html").read_text(encoding="utf-8")
+    ld = json.loads(re.search(r'<script type="application/ld\+json">(.*?)</script>', page, re.S)[1])
+    faq = next(n for n in ld["@graph"] if n["@type"] == "FAQPage")["mainEntity"]
+
+    def text(fragment: str) -> str:
+        return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", fragment))).strip()
+
+    visible = re.findall(
+        r"<details>\s*<summary>(.*?)</summary>\s*<div>(.*?)</div>\s*</details>", page, re.S
+    )
+    assert [(q["name"], q["acceptedAnswer"]["text"]) for q in faq] == [
+        (text(q), text(a)) for q, a in visible
+    ]
+    app = next(n for n in ld["@graph"] if n["@type"] == "SoftwareApplication")
+    assert app["offers"]["price"] == "0"
+
+
 class TestModoDatos:
     async def test_buscar_sends_query_and_lists_tables(self, backend: FakeBackend) -> None:
         result = await _call(

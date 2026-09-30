@@ -350,3 +350,17 @@ def format_rows(payload: Mapping[str, Any]) -> str:
             "\nHay más filas: acotá con `desde`/`hasta` o `filtros`, o subí `limite` (máximo 500)."
         )
     return head + "\n```csv\n" + rows_to_csv(columns, rows) + "\n```"
+
+
+# Sólo el dominio de producción se indexa: la misma imagen sirve la web en
+# mcp.staging.openarg.org, que no debe competir con la real en los buscadores.
+INDEXABLE_HOST = "mcp.openarg.org"
+
+
+def robots_txt(host: str | None) -> str:
+    """robots.txt según el host que pidió la página."""
+    if (host or "").split(":")[0].lower() != INDEXABLE_HOST:
+        return "User-agent: *\nDisallow: /\n"
+    # Buscadores y agentes de IA entran por la regla general. /mcp es el
+    # protocolo, no una página.
+    return f"User-agent: *\nAllow: /\nDisallow: /mcp\n\nSitemap: {DOCS_URL}/sitemap.xml\n"
