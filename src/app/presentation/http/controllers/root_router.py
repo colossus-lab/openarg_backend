@@ -5,6 +5,9 @@ from fastapi import APIRouter
 from app.presentation.http.controllers.admin.data_health_router import (
     router as admin_data_health_router,
 )
+from app.presentation.http.controllers.admin.mcp_analytics_router import (
+    router as admin_mcp_analytics_router,
+)
 from app.presentation.http.controllers.admin.monitoring_router import (
     router as admin_monitoring_router,
 )
@@ -95,6 +98,7 @@ def create_root_router() -> APIRouter:
     api_v1.include_router(admin_data_health_router)
     api_v1.include_router(admin_repair_approval_router)
     api_v1.include_router(admin_query_analytics_router)
+    api_v1.include_router(admin_mcp_analytics_router)
     api_v1.include_router(admin_parse_repair_router)
 
     root.include_router(api_v1)

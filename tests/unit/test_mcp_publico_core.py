@@ -38,6 +38,16 @@ class TestClientIp:
     def test_garbage_is_not_forwarded(self, value: str) -> None:
         assert core.client_ip({"X-Forwarded-For": value}) is None
 
+    def test_backend_headers_mark_the_mcp_and_the_client(self) -> None:
+        headers = core.backend_headers(KEY, None, "claude-code/2.1.0")
+        assert headers["X-OpenArg-Via"] == "mcp"
+        assert headers["X-OpenArg-Client"] == "claude-code/2.1.0"
+        assert "X-OpenArg-Client" not in core.backend_headers(KEY, None)
+
+    def test_the_key_only_travels_in_authorization(self) -> None:
+        headers = core.backend_headers(KEY, "1.2.3.4", "cursor/1.0")
+        assert [k for k, v in headers.items() if KEY in v] == ["Authorization"]
+
     def test_backend_headers_only_carry_a_valid_ip(self) -> None:
         assert "X-Forwarded-For" not in core.backend_headers(KEY, None)
         assert core.backend_headers(KEY, "1.2.3.4")["X-Forwarded-For"] == "1.2.3.4"
@@ -176,3 +186,23 @@ class TestModoDatosCore:
 
     def test_rows_without_results(self) -> None:
         assert "no devolvió filas" in core.format_rows({"filas": [], "fuente": "X"})
+
+
+class TestClientLabel:
+    def test_client_info_wins_over_user_agent(self) -> None:
+        assert core.client_label({"User-Agent": "node"}, "claude-code/2.1.0") == "claude-code/2.1.0"
+
+    def test_falls_back_to_user_agent(self) -> None:
+        assert core.client_label({"user-agent": "Cursor/1.7.2"}) == "Cursor/1.7.2"
+
+    def test_nothing_known(self) -> None:
+        assert core.client_label({}) is None
+        assert core.client_label(None, "  ") is None
+
+    def test_cannot_smuggle_another_header(self) -> None:
+        label = core.client_label({"User-Agent": "evil\r\nX-Admin-Key: x"})
+        assert label is not None
+        assert "\r" not in label and "\n" not in label
+
+    def test_is_truncated(self) -> None:
+        assert len(core.client_label({"User-Agent": "a" * 500}) or "") == 160
