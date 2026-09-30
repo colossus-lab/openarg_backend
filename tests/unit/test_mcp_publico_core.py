@@ -206,3 +206,32 @@ class TestClientLabel:
 
     def test_is_truncated(self) -> None:
         assert len(core.client_label({"User-Agent": "a" * 500}) or "") == 160
+
+
+class TestSupportLine:
+    """El pedido de apoyo aparece sólo cuando se agota un cupo diario."""
+
+    @pytest.mark.parametrize(
+        ("status", "detail"),
+        [
+            (429, "Rate limit exceeded: 10 requests per day"),
+            (429, "Rate limit exceeded: 200 catalog requests per day"),
+            (503, "Free tier daily capacity reached."),
+        ],
+    )
+    def test_daily_quota_messages_invite_support(self, status: int, detail: str) -> None:
+        assert core.SUPPORT_URL in core.error_message(status, detail)
+
+    @pytest.mark.parametrize(
+        ("status", "detail", "data_mode"),
+        [
+            (429, "Rate limit exceeded: 2 requests per minute", False),
+            (429, "Rate limit exceeded: 30 catalog requests per minute", True),
+            (401, "", False),
+            (408, "", False),
+            (500, "", False),
+            (404, "No existe esa tabla", True),
+        ],
+    )
+    def test_other_messages_do_not(self, status: int, detail: str, data_mode: bool) -> None:
+        assert core.SUPPORT_URL not in core.error_message(status, detail, data_mode=data_mode)

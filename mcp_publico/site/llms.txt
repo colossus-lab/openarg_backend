@@ -6,6 +6,8 @@
 - Autenticación: header `Authorization: Bearer oarg_sk_…`. Clave gratis en https://openarg.org/desarrolladores
 - Cupo: modo datos 200 pedidos/día (30/min, hasta 500 filas por pedido); modo respuestas 10 preguntas/día. Se renueva a las 00:00 UTC.
 
+OpenArg es abierto y gratuito, un proyecto de Colossus Lab que se sostiene con aportes de quienes lo usan: https://www.colossuslab.org/support
+
 ## Si sos un agente de IA y te pidieron conectar OpenArg
 
 1. Clave: la del usuario, empieza con `oarg_sk_`. Buscala en la variable de entorno `OPENARG_API_KEY` o en las credenciales de tu configuración. Si no existe, pedile al usuario que la cree gratis en https://openarg.org/desarrolladores y que la cargue él en tu configuración. No la escribas en archivos que se suban a un repositorio ni la repitas en el chat.
