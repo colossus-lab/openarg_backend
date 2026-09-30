@@ -26,9 +26,10 @@ _DEFAULT_COST_PER_ANSWER_USD = 0.034  # medido en CloudWatch, septiembre 2026
 
 # `mode` explícito, o inferido para las filas viejas (sólo `/ask` se registraba).
 _MODE = "COALESCE(u.mode, CASE WHEN u.endpoint = '/api/v1/ask' THEN 'respuestas' ELSE 'datos' END)"
-# Rechazo por cupo. El 503 del modo respuestas es el tope global; en el modo
-# datos un 503 es una falla (p. ej. la búsqueda sin embeddings), no un rechazo.
-_REJECTED = "(status_code = 429 OR (status_code = 503 AND mode = 'respuestas'))"
+# Rechazo por cupo: 429 (por minuto o IP), 402 (cupo del mes sin créditos) y
+# el 503 del modo respuestas, que es el tope global. En el modo datos un 503 es
+# una falla (p. ej. la búsqueda sin embeddings), no un rechazo.
+_REJECTED = "(status_code IN (402, 429) OR (status_code = 503 AND mode = 'respuestas'))"
 _ERROR = f"((status_code >= 500 OR status_code = 408) AND NOT {_REJECTED})"
 _EXECUTED = f"(NOT {_REJECTED})"
 
@@ -112,13 +113,13 @@ def overview(days: int = _days()) -> dict[str, Any]:
               WHERE created_at > NOW() - make_interval(days => :days))    AS claves_nuevas,
             (SELECT COUNT(DISTINCT api_key_id) FROM api_usage u
               WHERE u.created_at > NOW() - INTERVAL '1 day'
-                AND NOT (u.status_code = 429 OR u.status_code = 503))     AS activas_1d,
+                AND u.status_code NOT IN (402, 429, 503))     AS activas_1d,
             (SELECT COUNT(DISTINCT api_key_id) FROM api_usage u
               WHERE u.created_at > NOW() - INTERVAL '7 days'
-                AND NOT (u.status_code = 429 OR u.status_code = 503))     AS activas_7d,
+                AND u.status_code NOT IN (402, 429, 503))     AS activas_7d,
             (SELECT COUNT(DISTINCT api_key_id) FROM api_usage u
               WHERE u.created_at > NOW() - INTERVAL '30 days'
-                AND NOT (u.status_code = 429 OR u.status_code = 503))     AS activas_30d,
+                AND u.status_code NOT IN (402, 429, 503))     AS activas_30d,
             (SELECT COUNT(*) FROM (
                 SELECT api_key_id FROM api_usage u
                  WHERE u.created_at > NOW() - make_interval(days => :days)
@@ -128,7 +129,7 @@ def overview(days: int = _days()) -> dict[str, Any]:
             (SELECT COUNT(*) FROM api_usage u
               WHERE (u.created_at AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date
                 AND {_MODE} = 'respuestas'
-                AND NOT (u.status_code = 429 OR u.status_code = 503))     AS preguntas_hoy
+                AND u.status_code NOT IN (402, 429, 503))     AS preguntas_hoy
         """,
         {"days": days},
     )[0]

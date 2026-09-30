@@ -38,6 +38,7 @@ from app.application.public_catalog import (
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
@@ -116,13 +117,14 @@ async def _authorize(
     request: Request,
     api_key_repo: IApiKeyRepository,
     cache: ICacheService,
+    credits: ICreditRepository,
     *,
     endpoint: str,
     tool: str,
 ) -> ApiKey:
     api_key = await authenticate_bearer(request, api_key_repo)
     try:
-        await check_catalog_rate_limit(api_key, cache)
+        await check_catalog_rate_limit(api_key, cache, credits)
     except HTTPException as exc:
         await log_rejection(
             api_key_repo,
@@ -160,6 +162,7 @@ async def buscar(
     embedding: FromDishka[IEmbeddingProvider],
     cache: FromDishka[ICacheService],
     api_key_repo: FromDishka[IApiKeyRepository],
+    credits: FromDishka[ICreditRepository],
     q: str = Query(..., min_length=2, max_length=300),
     portal: str | None = Query(default=None, max_length=80),
     limite: int = Query(default=10, ge=1, le=25),
@@ -171,7 +174,7 @@ async def buscar(
     doble de resultados porque después se agrupan los duplicados.
     """
     endpoint, tool = "/api/v1/catalogo/buscar", "buscar_datasets"
-    api_key = await _authorize(request, api_key_repo, cache, endpoint=endpoint, tool=tool)
+    api_key = await _authorize(request, api_key_repo, cache, credits, endpoint=endpoint, tool=tool)
     async with track_usage(api_key_repo, api_key, request, endpoint=endpoint, tool=tool):
         try:
             vector = await embedding.embed(q)
@@ -226,11 +229,12 @@ async def describir_tabla(
     sandbox: FromDishka[ISQLSandbox],
     cache: FromDishka[ICacheService],
     api_key_repo: FromDishka[IApiKeyRepository],
+    credits: FromDishka[ICreditRepository],
     nombre: str = Query(..., min_length=1, max_length=200),
 ) -> TablaResponse:
     """Columnas con su tipo, filas, período cubierto y una muestra."""
     endpoint, tool = "/api/v1/catalogo/tabla", "describir_tabla"
-    api_key = await _authorize(request, api_key_repo, cache, endpoint=endpoint, tool=tool)
+    api_key = await _authorize(request, api_key_repo, cache, credits, endpoint=endpoint, tool=tool)
     async with track_usage(api_key_repo, api_key, request, endpoint=endpoint, tool=tool):
         table = resolve_table(nombre, await sandbox.find_tables(table_names=[nombre]))
         if table is None:
@@ -276,10 +280,11 @@ async def obtener_datos(
     sandbox: FromDishka[ISQLSandbox],
     cache: FromDishka[ICacheService],
     api_key_repo: FromDishka[IApiKeyRepository],
+    credits: FromDishka[ICreditRepository],
 ) -> DatosResponse:
     """Filas de una tabla: columnas, período, filtros de igualdad y orden por fecha."""
     endpoint, tool = "/api/v1/catalogo/datos", "obtener_datos"
-    api_key = await _authorize(request, api_key_repo, cache, endpoint=endpoint, tool=tool)
+    api_key = await _authorize(request, api_key_repo, cache, credits, endpoint=endpoint, tool=tool)
     async with track_usage(api_key_repo, api_key, request, endpoint=endpoint, tool=tool):
         table = resolve_table(body.tabla, await sandbox.find_tables(table_names=[body.tabla]))
         if table is None:

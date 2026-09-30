@@ -18,11 +18,12 @@ from dishka.integrations.fastapi import setup_dishka
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.application.api_key_service import PLAN_LIMITS, generate_api_key
+from app.application.api_key_service import generate_api_key
 from app.application.pipeline.nodes import PipelineDeps
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
 from app.presentation.http.controllers.public_api import ask_router as ask_module
 from app.presentation.http.controllers.public_api.ask_router import router as ask_router
@@ -117,6 +118,15 @@ def graph(monkeypatch: pytest.MonkeyPatch) -> FakeGraph:
     return g
 
 
+def _no_credits() -> AsyncMock:
+    """Persona sin Fundador ni créditos: el caso de casi todos."""
+    credits = AsyncMock(spec=ICreditRepository)
+    credits.get_active_supporter.return_value = None
+    credits.balance.return_value = {"preguntas": 0, "datos": 0}
+    credits.debit.return_value = False
+    return credits
+
+
 @pytest.fixture
 def app(repo: AsyncMock, cache: FakeCache, session: AsyncMock, graph: FakeGraph) -> FastAPI:
     class TestProvider(Provider):
@@ -137,6 +147,10 @@ def app(repo: AsyncMock, cache: FakeCache, session: AsyncMock, graph: FakeGraph)
         @provide
         def main_session(self) -> MainAsyncSession:
             return session
+
+        @provide
+        def credit_repo(self) -> ICreditRepository:
+            return _no_credits()
 
     fast_app = FastAPI()
     fast_app.include_router(ask_router)
@@ -168,7 +182,10 @@ class TestAsk:
         body = r.json()
         assert body["answer"].startswith("La tasa")
         assert body["sources"][0]["portal"] == "datos_gob_ar"
-        assert body["usage"]["requests_remaining_today"] == PLAN_LIMITS["free"]["per_day"] - 1
+        assert body["usage"]["requests_remaining_month"] == 9
+        assert body["usage"]["limit_month"] == 10
+        # El nombre viejo sigue, con el valor del mes: hay integraciones que lo leen.
+        assert body["usage"]["requests_remaining_today"] == 9
         thread_id = graph.configs[0]["configurable"]["thread_id"]
         assert thread_id.startswith("efimero-")
 
@@ -180,18 +197,19 @@ class TestAsk:
         threads = {c["configurable"]["thread_id"] for c in graph.configs}
         assert len(threads) == 2
 
-    async def test_eleventh_question_of_the_day_is_429(
+    async def test_eleventh_question_of_the_month_is_402(
         self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache
     ) -> None:
         user = key[1].user_id
-        for _ in range(PLAN_LIMITS["free"]["per_day"]):
+        for _ in range(10):
             cache.counters[f"rl:user:{user}:min"] = 0  # que no corte el límite por minuto
             r = await client.post("/ask", json={"question": "x"}, headers=_auth(key[0]))
             assert r.status_code == 200
         cache.counters[f"rl:user:{user}:min"] = 0
         r = await client.post("/ask", json={"question": "x"}, headers=_auth(key[0]))
-        assert r.status_code == 429
-        assert "day" in r.json()["detail"]
+        assert r.status_code == 402
+        assert r.json()["detail"] == "Monthly quota exceeded: 10 questions per month"
+        assert "X-Quota-Reset" in r.headers
 
     async def test_injection_blocked_is_400_not_a_data_answer(
         self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph

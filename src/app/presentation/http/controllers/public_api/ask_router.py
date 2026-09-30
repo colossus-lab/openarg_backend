@@ -25,6 +25,7 @@ from app.application.pipeline.state import OpenArgState
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.presentation.http.controllers.public_api.usage_log import log_rejection, log_usage
 from app.presentation.http.controllers.query.smart_query_v2_router import (
     _get_checkpointer,
@@ -73,11 +74,13 @@ async def public_ask(
     deps: FromDishka[PipelineDeps],
     cache: FromDishka[ICacheService],
     api_key_repo: FromDishka[IApiKeyRepository],
+    credits: FromDishka[ICreditRepository],
 ) -> dict[str, Any]:
     """Execute a query using a public API key.
 
     Auth: ``Authorization: Bearer oarg_sk_xxx``
-    Rate limited per plan (see ``PLAN_LIMITS``; free: 2/min, 10/day) plus a
+    Rate limited: 2/min, a monthly allowance (10 questions free, 100 for
+    Fundadores, then credits; see ``app.application.public_quota``), plus a
     per-IP daily limit and a shared daily cap for the free plan.
     Does NOT save conversations.
     """
@@ -87,7 +90,7 @@ async def public_ask(
     # 2. Rate limit check (per-key + per-IP + global free cap)
     client_ip = request.client.host if request.client else ""
     try:
-        rate_info = await check_rate_limit(api_key, cache, client_ip=client_ip)
+        rate_info = await check_rate_limit(api_key, cache, client_ip=client_ip, credits=credits)
     except HTTPException as exc:
         # Sin cupo: antes no quedaba rastro, y es la mejor señal de demanda.
         await log_rejection(
@@ -171,7 +174,14 @@ async def public_ask(
             "tokens": tokens_used,
             "duration_ms": duration_ms,
             "plan": api_key.plan,
+            # Del mes desde el 30-sep-2026; el nombre viejo queda por compatibilidad.
             "requests_remaining_today": rate_info["remaining_day"],
+            "requests_remaining_month": rate_info["remaining_month"],
+            "limit_month": rate_info["limit_month"],
+            "quota_resets_at": rate_info["quota_resets_at"],
+            "used_credit": rate_info["used_credit"],
+            "tier": rate_info["tier"],
+            "founder_until": rate_info["founder_until"],
             "requests_remaining_minute": rate_info["remaining_minute"],
         },
     }
