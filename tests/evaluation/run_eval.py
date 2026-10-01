@@ -36,6 +36,9 @@ Usage::
     # chequear regresiones contra un baseline
     python -m tests.evaluation.run_eval --compare tests/evaluation/baselines/normal.json
 
+    # corregir una expectativa y recalcular sin volver a gastar
+    python -m tests.evaluation.run_eval --rescore tests/evaluation/baselines/legacy_normal_x3.json
+
     # sólo validar el dataset, sin llamar a nada
     python -m tests.evaluation.run_eval --dry-run
 
@@ -592,6 +595,31 @@ def compare_to_baseline(current: dict, baseline: dict) -> tuple[list[str], list[
     return duras, blandas
 
 
+def rescore(report: dict, entries: list[dict]) -> dict:
+    """Recalcula los veredictos de un reporte con las expectativas actuales.
+
+    Los chequeos son funciones puras sobre la respuesta guardada, así que
+    corregir una expectativa del dataset no obliga a volver a gastar Bedrock:
+    se vuelven a aplicar sobre las mismas respuestas. Lo que viene del motor
+    o del juez (latencia, costo, puntajes) queda como estaba. Los casos que no
+    están en el reporte se ignoran.
+    """
+    from tests.evaluation.quality_checks import assess
+
+    by_id = {e["id"]: e for e in entries}
+    results = []
+    for old in report.get("results", []):
+        entry = by_id.get(old["id"])
+        if entry is None:
+            continue
+        runs = [
+            {**run, "quality": assess(entry, run["answer"], run["sources"], run["error"]).to_dict()}
+            for run in old["runs"]
+        ]
+        results.append(aggregate_entry(entry, runs))
+    return summarise(results, report.get("mode", "normal"), report.get("engine", "legacy"))
+
+
 # ── la corrida entera ──────────────────────────────────────
 
 
@@ -742,6 +770,12 @@ def main() -> None:
         help="deja el caché semántico activo (mide el camino de producción, "
         "pero la corrida deja de ser repetible)",
     )
+    p.add_argument(
+        "--rescore",
+        type=Path,
+        help="recalcula los veredictos de un reporte guardado con el dataset actual, "
+        "sin llamar al motor",
+    )
     p.add_argument("--dry-run", action="store_true", help="validate the dataset only")
     args = p.parse_args()
 
@@ -765,17 +799,20 @@ def main() -> None:
         )
         sys.exit(0)
 
-    report = asyncio.run(
-        run_evaluation(
-            entries,
-            args.mode,
-            args.concurrency,
-            args.use_cache,
-            n_runs=max(1, args.n_runs),
-            engine_name=args.engine,
-            judge=args.judge,
+    if args.rescore:
+        report = rescore(json.loads(args.rescore.read_text(encoding="utf-8")), entries)
+    else:
+        report = asyncio.run(
+            run_evaluation(
+                entries,
+                args.mode,
+                args.concurrency,
+                args.use_cache,
+                n_runs=max(1, args.n_runs),
+                engine_name=args.engine,
+                judge=args.judge,
+            )
         )
-    )
     _print_report(report)
 
     if args.output:

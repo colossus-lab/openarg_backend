@@ -25,7 +25,7 @@ from tests.evaluation.quality_checks import (
     numbers_in_answer,
     source_kinds,
 )
-from tests.evaluation.run_eval import aggregate_entry, summarise, validate_dataset
+from tests.evaluation.run_eval import aggregate_entry, rescore, summarise, validate_dataset
 
 DATASET = Path(__file__).parents[1] / "evaluation" / "golden_dataset.json"
 
@@ -114,6 +114,14 @@ def test_la_serie_oficial_no_cuenta_tambien_como_dataset_del_portal() -> None:
 
 def test_un_dataset_del_portal_es_datos_gob_ar() -> None:
     assert source_kinds(ESTUDIO) == ["datos_gob_ar"]
+
+
+def test_las_cotizaciones_de_dolarapi_son_argentina_datos() -> None:
+    """Línea base del 01-oct: el conector sirve las cotizaciones del día desde
+    DolarApi y tres casos salían en rojo por un detector incompleto."""
+    assert source_kinds([{"portal": "DolarApi", "url": "https://dolarapi.com"}]) == [
+        "argentina_datos"
+    ]
 
 
 def test_la_descarga_en_vivo_del_indec_se_distingue() -> None:
@@ -277,6 +285,19 @@ def test_el_reporte_guarda_la_respuesta_completa() -> None:
     agg = aggregate_entry(_entry("series_003"), [_run(larga)])
     assert agg["runs"][0]["answer"] == larga
     assert len(agg["answer_head"]) == 160
+
+
+def test_rescore_aplica_las_expectativas_nuevas_sin_tocar_lo_medido() -> None:
+    entry = _entry("series_003")
+    viejo = summarise([aggregate_entry(entry, [_run("El EMAE cayó 6,28 %.")])], "normal")
+    # La respuesta guardada aprobaba con un veredicto viejo; con el dataset
+    # actual (que prohíbe el EMAE) tiene que fallar, y la latencia y el costo
+    # quedan como se midieron.
+    nuevo = rescore(viejo, [entry])
+    [r] = nuevo["results"]
+    assert r["pass_rate"] == 0.0
+    assert r["runs"][0]["latency_ms"] == 1000
+    assert nuevo["cost"]["total_usd"] == viejo["cost"]["total_usd"]
 
 
 def test_un_modelo_sin_precio_no_inventa_un_costo() -> None:

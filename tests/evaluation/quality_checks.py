@@ -272,7 +272,9 @@ def leaked_identifiers(text: str) -> list[str]:
 # serie oficial o una tabla cacheada.
 SOURCE_KINDS: dict[str, tuple[str, ...]] = {
     "series_tiempo": ("series de tiempo", "datos.gob.ar/series", "apis.datos.gob.ar/series"),
-    "argentina_datos": ("argentinadatos",),
+    # El conector de ArgentinaDatos sirve las cotizaciones del día desde
+    # DolarApi (`dolarapi.com`), del mismo autor.
+    "argentina_datos": ("argentinadatos", "dolarapi"),
     "bcra": ("banco central", "bcra.gob.ar"),
     "ddjj": ("declaraciones juradas", "anticorrupcion"),
     "sesiones": ("diario de sesiones",),

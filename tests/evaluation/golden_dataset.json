@@ -247,7 +247,11 @@
    "question": "Evolución del tipo de cambio oficial en 2025",
    "expected_intent": "tipo_cambio",
    "expected_answer_contains": [
-    "tipo de cambio",
+    [
+     "tipo de cambio",
+     "dólar oficial",
+     "cotización oficial"
+    ],
     "dólar"
    ],
    "expected_sources": [
@@ -263,7 +267,8 @@
      "datos_gob_ar"
     ]
    ],
-   "must_deflect": false
+   "must_deflect": false,
+   "rationale": "En 2 de 3 corridas del 01-oct dijo \"dólar oficial\" en vez de \"tipo de cambio\", que es lo mismo: se aceptan las dos."
   },
   {
    "id": "series_003",
