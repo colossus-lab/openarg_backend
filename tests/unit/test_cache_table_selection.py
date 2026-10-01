@@ -117,10 +117,62 @@ class TestCachedTablePreferenceInConnectors:
         from app.application.pipeline.connectors.ckan import significant_keywords
 
         assert significant_keywords("¿Cuántas personas con discapacidad hay en CABA 2018?") == [
-            "cuántas",
-            "personas",
-            "discapacidad",
+            "discapacidad"
         ]
+        # Sin acentos, como los nombres de las tablas.
+        assert significant_keywords("Matrícula de educación técnica") == [
+            "matricula",
+            "educacion",
+            "tecnica",
+        ]
+
+    async def test_una_sola_palabra_en_comun_sobre_tres_no_alcanza(self):
+        """Pinamar, staging 01-oct: "personas" trajo trata de personas y
+        personas buscadas. Con "personas" genérica, una coincidencia de una
+        palabra sobre tres o más significativas tampoco alcanza."""
+        sandbox = AsyncMock()
+        sandbox.list_cached_tables = AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    table_name="raw.datos_gob_ar__lucha_contra_la_trata_de_personas_l__02",
+                    columns=["a"],
+                    row_count=10,
+                ),
+                SimpleNamespace(
+                    table_name="raw.caba__personas_buscadas__937d7a1d__v4",
+                    columns=["a"],
+                    row_count=10,
+                ),
+                SimpleNamespace(
+                    table_name="raw.cache_balance_energetico_pinamar", columns=["a"], row_count=10
+                ),
+            ]
+        )
+        sandbox.execute_readonly = AsyncMock(
+            return_value=SimpleNamespace(error=None, rows=[{"a": 1}])
+        )
+
+        results = await search_cached_tables(
+            "perfil personas discapacidad pinamar ministerio salud", sandbox
+        )
+
+        # "pinamar" coincide con una tabla, pero es una palabra de cuatro.
+        assert results == []
+
+    async def test_con_pocas_palabras_una_coincidencia_alcanza(self):
+        sandbox = AsyncMock()
+        sandbox.list_cached_tables = AsyncMock(
+            return_value=[
+                SimpleNamespace(table_name="cache_peajes_ausol", columns=["a"], row_count=1),
+            ]
+        )
+        sandbox.execute_readonly = AsyncMock(
+            return_value=SimpleNamespace(error=None, rows=[{"a": 1}])
+        )
+
+        results = await search_cached_tables("peajes autopista", sandbox)
+
+        assert [r.source for r in results] == ["cache:cache_peajes_ausol"]
 
     async def test_search_cached_tables_cita_bien_una_tabla_de_la_capa_raw(self):
         """`FROM "raw.cache_x"` es un identificador con un punto adentro.
