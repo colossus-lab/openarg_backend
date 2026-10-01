@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -83,17 +84,28 @@ _GENERIC_WORDS = frozenset(
         "del", "los", "las", "que", "por", "para", "con", "una", "uno", "como",
         "hay", "son", "sus", "sobre", "entre", "desde", "hasta", "cual", "cuales",
         "cuanto", "cuantos", "cuanta", "cuantas", "datos", "dato", "total", "tasa",
-        "año", "años", "anio", "anual", "mensual", "argentina", "pais", "nacional",
+        "ano", "anos", "anio", "anual", "mensual", "argentina", "pais", "nacional",
         "nacion", "provincia", "provincial", "municipio", "municipal", "ciudad",
-        "caba", "pba", "buenos", "aires", "gobierno", "indec",
+        "caba", "pba", "buenos", "aires", "gobierno", "indec", "persona", "personas",
+        "cantidad", "numero", "estudio", "encuesta", "informe", "perfil",
     }
 )  # fmt: skip
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+# Desde cuántas palabras significativas una sola coincidencia ya no alcanza.
+_MIN_KEYWORDS_FOR_STRICT = 3
+
+
+def _unaccent(word: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", word) if not unicodedata.combining(c))
 
 
 def significant_keywords(query: str) -> list[str]:
-    """Palabras de la consulta que sirven para elegir una tabla por su nombre."""
-    words = [w.strip("¿?¡!.,;:()\"'").lower() for w in query.split()]
+    """Palabras de la consulta que sirven para elegir una tabla por su nombre.
+
+    Sin acentos, como los nombres de las tablas: "educación" tiene que poder
+    encontrar `cache_educacion_*`, y "cuántas" es tan genérica como "cuantas".
+    """
+    words = [_unaccent(w.strip("¿?¡!.,;:()\"'").lower()) for w in query.split()]
     return [
         w for w in dict.fromkeys(words)
         if len(w) > 2 and w not in _GENERIC_WORDS and not _YEAR_RE.match(w)
@@ -130,6 +142,11 @@ async def search_cached_tables(
     scores = {t.table_name: sum(kw in t.table_name.lower() for kw in keywords) for t in all_tables}
     best = max(scores.values(), default=0)
     if best == 0:
+        return []
+    # Una sola palabra en común sobre tres o más significativas es casualidad,
+    # no un tema: "personas" trajo nueve tablas (trata de personas, personas
+    # buscadas) para la pregunta de discapacidad en Pinamar (staging, 01-oct).
+    if best == 1 and len(keywords) >= _MIN_KEYWORDS_FOR_STRICT:
         return []
     matched = [t for t in all_tables if scores[t.table_name] == best]
     if not matched:
