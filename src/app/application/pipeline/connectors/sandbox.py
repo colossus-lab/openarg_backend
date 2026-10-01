@@ -873,6 +873,18 @@ async def _hybrid_logical_hints(query: str, q_embedding: list[float] | None, *, 
         return ""
 
 
+# Cuántas tablas de la búsqueda semántica van delante de las que matcheó un
+# glob. Pocas: el NL2SQL ve las primeras 50 y un glob como `cache_indec_*`
+# matchea decenas.
+_SEMANTIC_FIRST_LIMIT = 5
+
+
+def _ahead(first: list[Any], rest: list[Any]) -> list[Any]:
+    """`first` adelante, sin repetir lo que ya está en `rest`."""
+    seen = {t.table_name for t in first}
+    return [*first, *(t for t in rest if t.table_name not in seen)]
+
+
 async def discover_tables_by_vector_search(
     query: str,
     cached_tables: list[Any],
@@ -1236,6 +1248,32 @@ async def execute_sandbox_step(
                         discovered[:5],
                     )
 
+        # Los globs del planificador nombran al publicador ("INDEC" →
+        # `cache_indec_*`), pero una tabla se llama por el portal que la
+        # publicó: el Estudio Nacional sobre el Perfil de las Personas con
+        # Discapacidad (INDEC) es `raw.datos_gob_ar__estudio_nacional_…`.
+        # Mientras el glob matcheara algo, la búsqueda vectorial —la misma
+        # que usa `buscar_datasets`, y que pone ese estudio primero— no
+        # corría nunca, y la respuesta dijo que el estudio "no está
+        # disponible" (lanzamiento del MCP, 30-sep-2026). Ahora corre siempre
+        # que haya globs, y lo que encuentra va adelante.
+        semantic_first: list[Any] = []
+        if table_hints and not _from_catalog_or_vector:
+            semantic_names = await discover_tables_by_vector_search(
+                nl_query, tables, embedding, vector_search
+            )
+            if semantic_names:
+                by_name = {t.table_name: t for t in tables}
+                semantic_first = [
+                    by_name[n] for n in semantic_names[:_SEMANTIC_FIRST_LIMIT] if n in by_name
+                ]
+                logger.info(
+                    "Sandbox: semantic search adds %d table(s) ahead of glob hints %s: %s",
+                    len(semantic_first),
+                    table_hints,
+                    [t.table_name for t in semantic_first],
+                )
+
         if table_hints:
             if _from_catalog_or_vector:
                 # Catalog/vector search returns exact table names — use set
@@ -1291,7 +1329,12 @@ async def execute_sandbox_step(
                             len(filtered),
                             [t.table_name for t in filtered],
                         )
-                tables = filtered
+                tables = _ahead(semantic_first, filtered)
+            elif semantic_first:
+                # El glob no matcheó nada pero la búsqueda semántica sí: eso
+                # está cacheado, así que ni descarga en vivo ni segunda
+                # búsqueda vectorial.
+                tables = semantic_first
             elif any("indec" in h for h in table_hints):
                 indec_tables = [t.table_name for t in tables if "indec" in t.table_name]
                 logger.info(
