@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import secrets as _secrets_mod
-import time
 import weakref
 from contextlib import AsyncExitStack
 from typing import Any
@@ -23,10 +22,19 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.application.answers.engine import (
+    CHANNEL_SMART,
+    CHANNEL_WS,
+    AnswerEngine,
+    CompleteEvent,
+    EngineRequest,
+    selected_engine_name,
+)
+from app.application.answers.legacy_engine import LegacyGraphEngine
+from app.application.answers.runner import EngineRunner
 from app.application.common.privacy_gate import ensure_privacy_accepted
 from app.application.pipeline.graph import build_pipeline_graph
-from app.application.pipeline.nodes import PipelineDeps, set_deps
-from app.application.pipeline.state import OpenArgState
+from app.application.pipeline.nodes import PipelineDeps
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
 from app.domain.ports.user.user_repository import IUserRepository
@@ -142,67 +150,6 @@ _STREAM_ALLOWED_PAYLOAD_KEYS: frozenset[str] = frozenset(
         "connector",
     }
 )
-
-_COMPLETE_EVENT_KEYS: tuple[str, ...] = (
-    "answer",
-    "sources",
-    "chart_data",
-    "map_data",
-    "citations",
-    "documents",
-    "warnings",
-    # CONTRACT-03 (round v46): tokens_used was already in the HTTP
-    # response of POST /smart but missing from the WS `complete` event,
-    # so SPA telemetry that watches LLM cost went silent on the
-    # streaming path. confidence was intentionally removed from the API
-    # (commit acc884a) and is NOT restored here — the chip is gone from
-    # the UI and the pipeline still computes it internally.
-    "tokens_used",
-)
-
-_TERMINAL_COMPLETE_NODES: frozenset[str] = frozenset(
-    {
-        "finalize",
-        "cache_reply",
-        "fast_reply",
-        # 2026-05-14: `clarify_reply` also produces `clean_answer` and is
-        # a terminal node when the planner returns `intent="clarification"`.
-        # Without it, ambiguous queries (e.g. "Cuáles son los proveedores
-        # con más contratos en BAC?" — planner asks user to clarify what
-        # 'BAC' means) emitted only the custom `clarification` event and
-        # the WS closed without a `complete`. Frontends handle the
-        # clarification chips event; API/QA consumers that don't subscribe
-        # to it saw a graceful 1000 OK close with no payload and reported
-        # it as a transport error.
-        "clarify_reply",
-    }
-)
-
-
-def _build_complete_event(node_name: str, update: Any) -> dict[str, Any] | None:
-    """Return a browser ``complete`` event from a terminal-looking update."""
-    if not isinstance(update, dict):
-        return None
-    if node_name not in _TERMINAL_COMPLETE_NODES:
-        return None
-    if "clean_answer" not in update:
-        return None
-    return {
-        "type": "complete",
-        "answer": update.get("clean_answer", ""),
-        "sources": update.get("sources", []),
-        "chart_data": update.get("chart_data"),
-        "map_data": update.get("map_data"),
-        "citations": update.get("citations", []),
-        "documents": update.get("documents"),
-        "warnings": update.get("warnings", []),
-        # CONTRACT-03 (round v46): paridad con la response HTTP POST /smart,
-        # que ya emite tokens_used. Sin esto el frontend ve siempre 0 en
-        # el path streaming. confidence NO se incluye: fue removida de la
-        # API deliberadamente (commit acc884a) — el pipeline la sigue
-        # calculando internamente pero no la expone al cliente.
-        "tokens_used": update.get("tokens_used", 0),
-    }
 
 
 async def _safe_send_json(ws: WebSocket, payload: Any) -> None:
@@ -482,6 +429,18 @@ async def _get_checkpointer():
             return None
 
 
+async def _answer_engine(deps: PipelineDeps) -> AnswerEngine:
+    """El motor que contesta este turno, según ``ANSWERS_ENGINE``.
+
+    Lo usan el chat, ``/smart`` y ``/ask``: los tres contestan con el mismo
+    motor. Hoy el único es el grafo; volver a él es poner ``legacy``.
+    """
+    selected_engine_name()
+    checkpointer = await _get_checkpointer()
+    graph = await _get_or_compile_graph(deps, checkpointer)
+    return LegacyGraphEngine(graph, deps, persistent=bool(checkpointer))
+
+
 async def init_pipeline_persistence() -> None:
     """Warm up the optional LangGraph checkpointer during app startup."""
     await _get_checkpointer()
@@ -589,13 +548,6 @@ async def smart_query_v2(
     # Server-side privacy gate (defense in depth — the frontend also checks).
     await ensure_privacy_accepted(user_email, user_repo)
 
-    # Compile graph once (thread-safe), set deps per-request (ContextVar-safe).
-    # `_get_checkpointer()` re-attempts init after the TTL, so a DB blip at
-    # boot doesn't permanently disable persistence.
-    checkpointer = await _get_checkpointer()
-    compiled_graph = await _get_or_compile_graph(deps, checkpointer)
-    set_deps(deps)
-
     user_id = user_email or "anonymous"
     conversation_id = body.conversation_id or ""
 
@@ -644,51 +596,28 @@ async def smart_query_v2(
             )
         owner_user_id = user.id
 
-    initial_state: OpenArgState = {
-        "question": body.question,
-        "user_id": user_id,
-        "conversation_id": conversation_id,
-        "mode": body.mode,
-        "replan_count": 0,
-    }
-    # Pass the owner_user_id down so load_chat_history can scope the
-    # message fetch as defense-in-depth (the ownership check above already
-    # gates entry, but the repo-level filter closes any future bypass).
-    if owner_user_id is not None:
-        initial_state["owner_user_id"] = str(owner_user_id)  # type: ignore[typeddict-unknown-key]
-
-    # When a checkpointer is active, pass thread_id so LangGraph
-    # persists state per conversation (enables memory / resumable runs).
-    #
-    # Y cuando NO hay conversación, igual hace falta un thread_id: un grafo
-    # compilado con checkpointer rechaza la invocación sin él
-    # (`ValueError: Checkpointer requires one or more of the following
-    # 'configurable' keys`), y eso salía como un 500 `PIPELINE_ERROR`
-    # genérico. O sea que cualquier cliente que no mandara
-    # `conversation_id` recibía un error del que no se podía deducir nada.
-    # No se nota desde el frontend porque siempre manda uno.
-    #
-    # El thread efímero es por request y no persiste nada reutilizable, que
-    # es justo lo que se quiere para una consulta suelta: sin conversación,
-    # no hay historial que continuar ni estado que compartir.
-    invoke_config: dict[str, Any] = {}
-    if checkpointer:
-        from uuid import uuid4
-
-        invoke_config["configurable"] = {"thread_id": conversation_id or f"efimero-{uuid4()}"}
-
+    req = EngineRequest(
+        question=body.question,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        # El dueño ya verificado baja hasta el repo como defensa en
+        # profundidad: la lectura del historial se filtra por él.
+        owner_user_id=str(owner_user_id) if owner_user_id is not None else None,
+        mode=body.mode,
+        channel=CHANNEL_SMART,
+    )
     try:
-        result = await compiled_graph.ainvoke(initial_state, config=invoke_config)
+        runner = EngineRunner(await _answer_engine(deps), deps)
+        result = await runner.run(req)
     except Exception:
-        logger.exception("LangGraph pipeline failed")
+        logger.exception("Answer engine failed")
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "PIPELINE_ERROR", "message": "Pipeline execution failed"}},
         )
 
     # Injection blocked → return 400
-    plan_intent = result.get("plan_intent", "")
-    if plan_intent == "injection_blocked":
+    if result.injection_blocked:
         from app.infrastructure.adapters.search.prompt_injection_detector import is_suspicious
 
         _, score = is_suspicious(body.question)
@@ -704,14 +633,14 @@ async def smart_query_v2(
         )
 
     return {
-        "answer": result.get("clean_answer", ""),
-        "sources": result.get("sources", []),
-        "chart_data": result.get("chart_data"),
-        "map_data": result.get("map_data"),
-        "tokens_used": result.get("tokens_used", 0),
-        "citations": result.get("citations", []),
-        **({"documents": result.get("documents")} if result.get("documents") else {}),
-        **({"warnings": result.get("warnings")} if result.get("warnings") else {}),
+        "answer": result.answer,
+        "sources": result.sources,
+        "chart_data": result.chart_data,
+        "map_data": result.map_data,
+        "tokens_used": result.tokens_used,
+        "citations": result.citations,
+        **({"documents": result.documents} if result.documents else {}),
+        **({"warnings": result.warnings} if result.warnings else {}),
     }
 
 
@@ -777,13 +706,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
             async with session_scope() as request_scope:
                 cache = await request_scope.get(ICacheService)
                 deps = await request_scope.get(PipelineDeps)
-
-                # Compile graph once (thread-safe), set deps per-request.
-                # `_get_checkpointer()` re-attempts after TTL; a transient
-                # DB blip at boot does not permanently disable persistence.
-                checkpointer = await _get_checkpointer()
-                set_deps(deps)
-                graph = await _get_or_compile_graph(deps, checkpointer)
+                engine = await _answer_engine(deps)
 
                 raw_text = await ws.receive_text()
                 if len(raw_text) > 10_000:
@@ -946,91 +869,40 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         await ws.close(code=4403)
                         return
                     owner_user_id_ws = user_ws.id
-                    owner_user_id_ws = user_ws.id
 
-                initial_state: OpenArgState = {
-                    "question": question,
-                    "user_id": ws_identifier,
-                    "conversation_id": conversation_id,
-                    "mode": mode,
-                }
-                if owner_user_id_ws is not None:
-                    initial_state["owner_user_id"] = str(owner_user_id_ws)  # type: ignore[typeddict-unknown-key]
+                req = EngineRequest(
+                    question=question,
+                    user_id=ws_identifier,
+                    conversation_id=conversation_id,
+                    owner_user_id=(str(owner_user_id_ws) if owner_user_id_ws is not None else None),
+                    mode=mode,
+                    channel=CHANNEL_WS,
+                )
+                runner = EngineRunner(engine, deps)
 
-                # When a checkpointer is active, pass thread_id for persistence.
-                # Sin conversación va un thread efímero: el grafo compilado con
-                # checkpointer rechaza la invocación sin `thread_id`, y acá eso
-                # cortaba el stream con un error genérico. Mismo caso que en
-                # `/smart` unas líneas más arriba.
-                stream_config: dict[str, Any] = {}
-                if checkpointer:
-                    from uuid import uuid4
-
-                    stream_config["configurable"] = {
-                        "thread_id": conversation_id or f"efimero-{uuid4()}"
-                    }
-
-                # Stream the graph execution. BUG-022: a keepalive task
-                # runs alongside so a long pipeline step never leaves the
-                # socket idle long enough to be dropped mid-stream. A send
-                # lock serializes the two producers (stream + keepalive).
+                # BUG-022: a keepalive task runs alongside so a long engine
+                # step never leaves the socket idle long enough to be dropped
+                # mid-stream. A send lock serializes the two producers
+                # (stream + keepalive). Un turno que no llega al `complete`
+                # (el cliente cerró, el motor falló) lo registra el runner en
+                # `query_analytics` como `ws_closed_mid_stream`.
                 send_lock = asyncio.Lock()
                 keepalive_task = asyncio.create_task(_ws_keepalive(ws, send_lock))
-                # P1 last-resort logger: track whether a terminal `complete`
-                # ever flew. If the pipeline starts but never emits one
-                # (WS closed mid-stream, unhandled exception, etc.), the
-                # finally block writes a synthetic query_analytics row so
-                # the request stays visible in telemetry.
-                complete_sent = False
-                stream_started_at = time.monotonic()
                 try:
-                    async for mode, payload in graph.astream(
-                        initial_state,
-                        config=stream_config,
-                        stream_mode=["updates", "custom"],
-                    ):
-                        if mode == "custom":
-                            # Custom events emitted by nodes via get_stream_writer().
-                            # _filter_stream_payload applies FR-038 (fail-closed
-                            # allowlist, SEC-07) AND FR-038b (WARNING log on any
-                            # dropped key — DEBT-017 fix 2026-04-11).
+                    async with contextlib.aclosing(runner.stream(req)) as events:
+                        async for event in events:
+                            if isinstance(event, CompleteEvent):
+                                payload = event.to_wire()
+                            else:
+                                # FR-038 (fail-closed allowlist, SEC-07) and
+                                # FR-038b (WARNING log on any dropped key).
+                                payload = _filter_stream_payload(event.to_wire())
                             async with send_lock:
-                                await _safe_send_json(ws, _filter_stream_payload(payload))
-                        elif mode == "updates":
-                            # Node completed — check if it's a terminal node
-                            for node_name, update in payload.items():
-                                complete_event = _build_complete_event(node_name, update)
-                                if complete_event is None:
-                                    logger.debug(
-                                        "Ignoring non-terminal stream update from node %s",
-                                        node_name,
-                                    )
-                                    continue
-                                async with send_lock:
-                                    await _safe_send_json(ws, complete_event)
-                                complete_sent = True
+                                await _safe_send_json(ws, payload)
                 finally:
                     keepalive_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await keepalive_task
-                    # P1 last-resort logger: terminal-node analytics fires
-                    # inline within each terminal node (FR-036t). If the
-                    # request died before reaching any terminal, no row
-                    # lands. Write a synthetic one tagged ws_closed_mid_stream
-                    # so the call stays in coverage.
-                    if not complete_sent and question:
-                        with contextlib.suppress(Exception):
-                            from app.application.pipeline.history import save_query_attempt
-
-                            await save_query_attempt(
-                                question=question,
-                                served_table=None,
-                                row_count=0,
-                                success=False,
-                                duration_ms=int((time.monotonic() - stream_started_at) * 1000),
-                                error_message="ws_closed_mid_stream",
-                                semantic_cache=deps.semantic_cache,
-                            )
 
     except WebSocketDisconnect:
         logger.debug("WebSocket v2 client disconnected")
