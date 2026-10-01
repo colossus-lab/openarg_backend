@@ -151,7 +151,7 @@ async def save_query_attempt(
             await session.execute(
                 text(
                     """
-                CREATE TABLE IF NOT EXISTS query_analytics (
+                CREATE TABLE IF NOT EXISTS public.query_analytics (
                     id BIGSERIAL PRIMARY KEY,
                     ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     question TEXT NOT NULL,
@@ -167,7 +167,10 @@ async def save_query_attempt(
                 )
             )
             await session.execute(
-                text("CREATE INDEX IF NOT EXISTS ix_query_analytics_ts ON query_analytics(ts DESC)")
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_query_analytics_ts "
+                    "ON public.query_analytics(ts DESC)"
+                )
             )
             await session.commit()
     except Exception:
@@ -191,7 +194,7 @@ async def save_query_attempt(
             async with semantic_cache._session_factory() as session:
                 await session.execute(
                     text(
-                        "INSERT INTO query_analytics "
+                        "INSERT INTO public.query_analytics "
                         "(question, served_table, mart_used, row_count, success, "
                         " duration_ms, error_message) "
                         "VALUES (:q, :t, :mu, :r, :ok, :d, :err)"
