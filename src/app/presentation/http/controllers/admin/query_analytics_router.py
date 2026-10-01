@@ -48,7 +48,7 @@ def overview(hours: int = Query(24, ge=1, le=720)) -> dict:
             COUNT(DISTINCT served_table) FILTER (WHERE served_table IS NOT NULL)
                                                                 AS distinct_tables,
             ROUND(AVG(NULLIF(duration_ms, 0))::numeric, 0)      AS avg_duration_ms
-        FROM query_analytics
+        FROM public.query_analytics
         WHERE ts > NOW() - (:h || ' hours')::interval
         """,
         {"h": str(hours)},
@@ -70,7 +70,7 @@ def top_queries(
             ROUND(AVG(success::int)::numeric, 2)           AS success_rate,
             COUNT(*) FILTER (WHERE mart_used)              AS mart_routed,
             MAX(ts)::timestamp(0)                          AS last_seen
-        FROM query_analytics
+        FROM public.query_analytics
         WHERE ts > NOW() - (:h || ' hours')::interval
         GROUP BY question
         ORDER BY hits DESC, success_rate ASC
@@ -96,7 +96,7 @@ def top_tables(
             ROUND(AVG(success::int)::numeric, 2)           AS success_rate,
             ROUND(AVG(row_count)::numeric, 0)              AS avg_rows,
             BOOL_OR(mart_used)                             AS is_mart
-        FROM query_analytics
+        FROM public.query_analytics
         WHERE ts > NOW() - (:h || ' hours')::interval
           AND served_table IS NOT NULL
         GROUP BY served_table
@@ -120,7 +120,7 @@ def mart_coverage(hours: int = Query(168, ge=1, le=720)) -> dict:
             COUNT(*) FILTER (WHERE success)         AS successes,
             ROUND(AVG(success::int)::numeric, 3)    AS success_rate,
             ROUND(AVG(row_count)::numeric, 1)       AS avg_rows
-        FROM query_analytics
+        FROM public.query_analytics
         WHERE ts > NOW() - (:h || ' hours')::interval
         GROUP BY mart_used
         """,
@@ -151,7 +151,7 @@ def persistent_failures(
             STRING_AGG(DISTINCT served_table, ', ')        AS tables_tried,
             STRING_AGG(DISTINCT error_message, ' | ')      AS error_samples,
             MAX(ts)::timestamp(0)                          AS last_seen
-        FROM query_analytics
+        FROM public.query_analytics
         WHERE ts > NOW() - (:h || ' hours')::interval
         GROUP BY question
         HAVING COUNT(*) >= :min_attempts AND SUM(success::int) = 0
@@ -173,7 +173,7 @@ def timeline(hours: int = Query(48, ge=1, le=720)) -> list[dict]:
             COUNT(*)                                        AS queries,
             COUNT(*) FILTER (WHERE mart_used)               AS mart_routed,
             COUNT(*) FILTER (WHERE success)                 AS successes
-        FROM query_analytics
+        FROM public.query_analytics
         WHERE ts > NOW() - (:h || ' hours')::interval
         GROUP BY 1
         ORDER BY 1 DESC
@@ -202,7 +202,7 @@ def recent(
             success,
             duration_ms,
             error_message
-        FROM query_analytics
+        FROM public.query_analytics
         {where}
         ORDER BY id DESC
         LIMIT :lim
