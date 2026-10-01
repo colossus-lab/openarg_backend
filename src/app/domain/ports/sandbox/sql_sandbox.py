@@ -42,6 +42,24 @@ class TableSource:
 
 
 @dataclass
+class MartInfo:
+    """Un mart: una tabla curada que junta y normaliza varios datasets.
+
+    ``columns`` trae la descripción de cada columna tal como la escribió el
+    autor del mart (``canonical_columns`` del YAML): es lo único que dice en
+    qué unidad está un valor o qué nivel geográfico cubre una fila.
+    """
+
+    table_name: str  # calificado: "mart.<vista>"
+    mart_id: str
+    description: str
+    domain: str
+    row_count: int | None
+    score: float = 0.0
+    columns: list[dict] | None = None
+
+
+@dataclass
 class SandboxResult:
     columns: list[str]
     rows: list[dict]
@@ -87,6 +105,17 @@ class ISQLSandbox(ABC):
             if (t.dataset_id and str(t.dataset_id) in wanted_ids)
             or t.table_name.split(".")[-1].strip('"').lower() in wanted_names
         ]
+
+    async def find_marts(self, query_embedding: list[float], limit: int = 5) -> list[MartInfo]:
+        """Los marts más parecidos a una pregunta, sin los retirados del serving.
+
+        No es abstracto: un sandbox sin marts (un fake de test) devuelve vacío.
+        """
+        return []
+
+    async def describe_marts(self, table_names: list[str]) -> dict[str, MartInfo]:
+        """``{"mart.<vista>": MartInfo}`` de los marts pedidos que se pueden servir."""
+        return {}
 
     async def get_table_sources(self, table_names: list[str]) -> dict[str, TableSource]:
         """Return {bare_table_name: TableSource} for the tables that map to a dataset.

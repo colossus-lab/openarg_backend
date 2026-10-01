@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncGenerator
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -406,6 +406,51 @@ def test_sin_variable_es_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_un_motor_que_no_existe_no_tira_el_servicio(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Poner `agent` antes de que exista contesta con el de siempre."""
-    monkeypatch.setenv(engine_module.ENGINE_ENV, "agent")
+    """Un nombre mal escrito contesta con el de siempre."""
+    monkeypatch.setenv(engine_module.ENGINE_ENV, "agente")
     assert selected_engine_name() == "legacy"
+
+
+def test_el_agente_se_elige_por_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(engine_module.ENGINE_ENV, " Agent ")
+    assert selected_engine_name() == "agent"
+
+
+async def test_el_motor_recibe_las_fuentes_de_los_turnos_anteriores(
+    rec: Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _sources(conversation_id: str, repo: Any, owner_user_id: Any = None) -> tuple:
+        return ("IPC Nacional — API de Series de Tiempo",)
+
+    monkeypatch.setattr(runner_module, "load_previous_sources", _sources)
+    rec.history = "HISTORIAL"
+    engine = FakeEngine()
+    await EngineRunner(engine, MagicMock()).run(_req(conversation_id="c"))
+    assert engine.requests[0].previous_sources == ("IPC Nacional — API de Series de Tiempo",)
+
+
+async def test_las_fuentes_previas_salen_de_los_mensajes_guardados() -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app.application.pipeline.history import load_previous_sources
+
+    msg = SimpleNamespace
+    repo = MagicMock()
+    repo.get_messages = AsyncMock(
+        return_value=[
+            msg(role="user", sources=[]),
+            msg(role="assistant", sources=[{"name": "EPH", "portal": "datos.gob.ar"}]),
+            msg(role="user", sources=[]),
+            msg(
+                role="assistant",
+                sources=[
+                    {"name": "IPC", "portal": "Series"},
+                    {"name": "EPH", "portal": "datos.gob.ar"},
+                ],
+            ),
+        ]
+    )
+    # Más recientes primero, sin repetidos.
+    assert await load_previous_sources(str(uuid4()), repo) == ("IPC — Series", "EPH — datos.gob.ar")
+    assert await load_previous_sources("", repo) == ()

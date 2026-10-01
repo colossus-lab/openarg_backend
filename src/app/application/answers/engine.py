@@ -58,6 +58,10 @@ class EngineRequest:
     # El historial ya formateado. Lo llena el runner para los motores que no
     # lo cargan por su cuenta; el grafo actual lo carga en `load_memory`.
     history: str = ""
+    # Las fuentes de los turnos anteriores ("título — portal"), leídas de los
+    # mensajes guardados. Sin resumen de un modelo en el medio: lo que se usó,
+    # tal cual. Las llena el runner.
+    previous_sources: tuple[str, ...] = ()
 
 
 # ── los eventos ────────────────────────────────────────────
@@ -147,6 +151,10 @@ class EngineResult:
     # Los `DataResult` que respaldan la respuesta, para verificar las cifras
     # citadas contra lo que de verdad se leyó.
     evidence: list[Any] = field(default_factory=list, repr=False)
+    # Con qué modelo y a qué costo, sumando todas las vueltas del turno.
+    # None = no se sabe (el grafo actual no lo mide entero).
+    model: str = ""
+    cost_usd: float | None = None
 
     @property
     def injection_blocked(self) -> bool:
@@ -223,7 +231,7 @@ class EngineTimeout(TimeoutError):
 ENGINE_ENV = "ANSWERS_ENGINE"
 DEFAULT_ENGINE = "legacy"
 # Los que existen. Volver atrás es cambiar la variable a `legacy`, sin deploy.
-KNOWN_ENGINES = frozenset({"legacy"})
+KNOWN_ENGINES = frozenset({"legacy", "agent"})
 
 
 def selected_engine_name() -> str:
@@ -231,7 +239,7 @@ def selected_engine_name() -> str:
 
     Un valor desconocido no tira el servicio: contesta con el motor de
     siempre y lo deja en el log como ERROR. Es lo que pasaría si alguien
-    pusiera ``agent`` antes de que el agente exista.
+    pusiera un nombre mal escrito.
     """
     name = (os.getenv(ENGINE_ENV) or DEFAULT_ENGINE).strip().lower()
     if name not in KNOWN_ENGINES:
