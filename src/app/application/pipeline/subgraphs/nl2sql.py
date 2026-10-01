@@ -419,6 +419,24 @@ _TEXT_PREDICATE_PATTERN = re.compile(
 )
 
 
+# La salida que `nl2sql.txt` reserva para intentos de manipulación. El modelo
+# la usó también como escape cuando la tabla no podía responder ("¿cuántas
+# personas con discapacidad hay en Pinamar?" sobre una encuesta nacional sin
+# columnas geográficas), y esa fila llegaba como dato: la tabla quedaba listada
+# como fuente y el analista le contaba al usuario un "error de acceso".
+_REFUSAL_TEXT = "operación no permitida"
+
+
+def _is_refusal(result: Any) -> bool:
+    """El SQL devolvió sólo la fila centinela de seguridad, no datos."""
+    rows = getattr(result, "rows", None) or []
+    return (
+        len(rows) == 1
+        and set(rows[0]) == {"error"}
+        and str(rows[0]["error"]).strip().lower() == _REFUSAL_TEXT
+    )
+
+
 def _is_effectively_empty(result: Any) -> bool:
     """True when a successful query carries no usable data.
 
@@ -925,7 +943,8 @@ async def format_result_node(state: NL2SQLState) -> dict:
             ]
         }
 
-    if result.error:
+    error = result.error or ("nl2sql_refused" if _is_refusal(result) else None)
+    if error:
         return {
             "data_results": [
                 DataResult(
@@ -936,7 +955,7 @@ async def format_result_node(state: NL2SQLState) -> dict:
                     format="json",
                     records=[],
                     metadata={
-                        "error": result.error,
+                        "error": error,
                         "fetched_at": datetime.now(UTC).isoformat(),
                     },
                 )
