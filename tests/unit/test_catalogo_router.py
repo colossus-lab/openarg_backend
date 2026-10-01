@@ -124,11 +124,9 @@ def cache() -> FakeCache:
 
 
 @pytest.fixture
-async def client(key: tuple[str, ApiKey], sandbox: FakeSandbox, cache: FakeCache):
-    repo = AsyncMock(spec=IApiKeyRepository)
-    repo.get_by_key_hash.return_value = key[1]
+def search() -> AsyncMock:
     search = AsyncMock(spec=IVectorSearch)
-    search.search_datasets.return_value = [
+    search.search_datasets_ann.return_value = [
         SearchResult(
             dataset_id="ds-1",
             title="Principales tasas de interés",
@@ -158,6 +156,15 @@ async def client(key: tuple[str, ApiKey], sandbox: FakeSandbox, cache: FakeCache
             score=0.5,
         ),
     ]
+    return search
+
+
+@pytest.fixture
+async def client(
+    key: tuple[str, ApiKey], sandbox: FakeSandbox, cache: FakeCache, search: AsyncMock
+):
+    repo = AsyncMock(spec=IApiKeyRepository)
+    repo.get_by_key_hash.return_value = key[1]
     embedding = AsyncMock(spec=IEmbeddingProvider)
     embedding.embed.return_value = [0.1] * 4
 
@@ -216,6 +223,19 @@ async def test_buscar_lists_datasets_with_their_queryable_tables(client: AsyncCl
     # La tabla de 0 filas (versión vieja) no se ofrece.
     assert first["tablas"] == [{"tabla": _T, "filas": 8569}]
     assert second["tablas"] == []  # está en el catálogo pero no tiene tabla consultable
+
+
+async def test_buscar_goes_through_the_hnsw_index(client: AsyncClient, search: AsyncMock) -> None:
+    """La búsqueda exacta recorre los 76k chunks (de 1 a más de 60 s en staging)."""
+    r = await client.get(
+        "/catalogo/buscar", params={"q": "tasas de interés", "portal": "caba", "limite": 5}
+    )
+    assert r.status_code == 200, r.text
+    search.search_datasets.assert_not_awaited()
+    kwargs = search.search_datasets_ann.await_args.kwargs
+    assert kwargs["portal_filter"] == "caba"
+    assert kwargs["limit"] == 10  # el doble: después se agrupan los duplicados
+    assert kwargs["min_similarity"] == 0.40
 
 
 async def test_tabla_describes_columns_period_and_sample(

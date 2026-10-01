@@ -89,7 +89,7 @@ def _default_sandbox() -> AsyncMock:
 
 def _default_vector_search() -> AsyncMock:
     mock = AsyncMock(spec=IVectorSearch)
-    mock.search_datasets.return_value = [
+    mock.search_datasets_ann.return_value = [
         SearchResult(
             dataset_id="ds-budget-001",
             title="Budget Sample",
@@ -182,7 +182,7 @@ class TestDataRouterPolicyFlow:
             error=None,
         )
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             SearchResult(
                 "ds-budget-001", "Budget Sample", "National budget", "p", "", '["fecha"]', 0.92
             ),
@@ -248,7 +248,7 @@ class TestDataRouterPolicyFlow:
             ]
 
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.side_effect = fake_search
+        vector_search.search_datasets_ann.side_effect = fake_search
 
         async with _build_client(
             monkeypatch,
@@ -502,7 +502,7 @@ class TestDataRouterDataShapes:
             CachedTableInfo("cache_budget_sample", "ds-budget-001", 42, ["a", "b"]),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             SearchResult(
                 "ds-budget-001",
                 "Budget",
@@ -669,7 +669,7 @@ class TestDataRouterBatchScenarios:
             error=None,
         )
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             SearchResult("ds-budget-001", "Budget", "B", "p", "", "[]", 0.9),
             SearchResult("ds-health-001", "Health", "H", "p", "", "[]", 0.85),
         ]

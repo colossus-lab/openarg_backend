@@ -81,7 +81,7 @@ def _default_sandbox() -> AsyncMock:
 
 def _default_vector_search() -> AsyncMock:
     mock = AsyncMock(spec=IVectorSearch)
-    mock.search_datasets.return_value = [
+    mock.search_datasets_ann.return_value = [
         SearchResult(
             dataset_id="ds-001",
             title="IPC Nacional",
@@ -293,7 +293,7 @@ class TestDataSearch:
             CachedTableInfo("cache_ipc", "ds-001", 100, ["fecha", "valor"]),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             SearchResult(
                 dataset_id="ds-001",
                 title="IPC Nacional",
@@ -322,8 +322,9 @@ class TestDataSearch:
             )
 
         assert resp.status_code == 200
-        vector_search.search_datasets.assert_awaited_once()
-        _, kwargs = vector_search.search_datasets.await_args
+        vector_search.search_datasets_ann.assert_awaited_once()
+        vector_search.search_datasets.assert_not_awaited()  # exact search scans every chunk
+        _, kwargs = vector_search.search_datasets_ann.await_args
         assert kwargs["limit"] == 3
 
     async def test_no_cached_tables_match_returns_empty(self, monkeypatch):
@@ -332,7 +333,7 @@ class TestDataSearch:
             CachedTableInfo("cache_other", "ds-other", 10, ["x"]),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             SearchResult(
                 dataset_id="ds-not-cached",
                 title="Uncached",

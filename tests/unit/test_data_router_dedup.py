@@ -84,7 +84,7 @@ def _default_sandbox() -> AsyncMock:
 
 def _default_vector_search() -> AsyncMock:
     mock = AsyncMock(spec=IVectorSearch)
-    mock.search_datasets.return_value = [
+    mock.search_datasets_ann.return_value = [
         SearchResult(
             dataset_id="ds-001",
             title="Dataset A",
@@ -211,7 +211,7 @@ class TestSearchDeduplication:
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
         # Simulate 3 chunks (main, columns, contextual) for the same dataset
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.95, title="Dataset A (main)"),
             _make_search_result("ds-001", 0.90, title="Dataset A (columns)"),
             _make_search_result("ds-001", 0.85, title="Dataset A (contextual)"),
@@ -237,7 +237,7 @@ class TestSearchDeduplication:
             _make_cached("ds-003", "cache_dataset_c"),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.95),
             _make_search_result("ds-002", 0.90),
             _make_search_result("ds-003", 0.85),
@@ -261,8 +261,8 @@ class TestSearchDeduplication:
             _make_cached("ds-001", "cache_dataset_a"),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        # Results come sorted descending from search_datasets
-        vector_search.search_datasets.return_value = [
+        # Results come sorted descending from search_datasets_ann
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.95),
             _make_search_result("ds-001", 0.90),
             _make_search_result("ds-001", 0.85),
@@ -289,7 +289,7 @@ class TestSearchDeduplication:
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
         # 5 results: ds-001 (dup x3 interleaved), ds-002 (skip, not cached), ds-003
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.95),
             _make_search_result("ds-001", 0.92),
             _make_search_result("ds-002", 0.88),  # not cached → skipped
@@ -326,7 +326,7 @@ class TestSearchDeduplication:
             dataset_id = f"ds-00{(i % 3) + 1}"
             results.append(_make_search_result(dataset_id, round(score, 3)))
             score -= 0.01
-        vector_search.search_datasets.return_value = results
+        vector_search.search_datasets_ann.return_value = results
 
         fast_app = _build_app(
             monkeypatch,
@@ -382,7 +382,7 @@ class TestSearchDeduplication:
         sandbox._get_engine = lambda: _FakeEngine()
 
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = []
+        vector_search.search_datasets_ann.return_value = []
 
         fast_app = _build_app(
             monkeypatch,
@@ -406,7 +406,7 @@ class TestSearchDeduplication:
 
 class TestSearchRelevanceThreshold:
     async def test_results_below_threshold_not_shown(self, monkeypatch):
-        """Assumes search_datasets applied min_similarity=0.40 filter.
+        """Assumes search_datasets_ann applied min_similarity=0.40 filter.
 
         When it returns mixed scores at/above the threshold, all are kept.
         """
@@ -417,7 +417,7 @@ class TestSearchRelevanceThreshold:
             _make_cached("ds-003", "cache_dataset_c"),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.90),
             _make_search_result("ds-002", 0.45),
             _make_search_result("ds-003", 0.41),
@@ -443,7 +443,7 @@ class TestSearchRelevanceThreshold:
             _make_cached("ds-001", "cache_dataset_a"),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.923456),
         ]
 
@@ -464,8 +464,8 @@ class TestSearchRelevanceThreshold:
             _make_cached("ds-001", "cache_dataset_a"),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        # search_datasets did the min_similarity filtering already
-        vector_search.search_datasets.return_value = [
+        # search_datasets_ann did the min_similarity filtering already
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.401),
         ]
 
@@ -493,7 +493,7 @@ class TestSearchLimit:
             _make_cached(f"ds-{i:03d}", f"cache_dataset_{i:03d}") for i in range(1, 16)
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result(f"ds-{i:03d}", round(0.99 - i * 0.01, 3)) for i in range(1, 16)
         ]
 
@@ -515,7 +515,7 @@ class TestSearchLimit:
             _make_cached("ds-003", "cache_dataset_c"),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.95),
             _make_search_result("ds-002", 0.90),
             _make_search_result("ds-003", 0.85),
@@ -631,7 +631,7 @@ class TestSearchEmptyResults:
             _make_cached("ds-001", "cache_dataset_a"),
         ]
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = []
+        vector_search.search_datasets_ann.return_value = []
 
         fast_app = _build_app(
             monkeypatch,
@@ -648,7 +648,7 @@ class TestSearchEmptyResults:
         # no cached tables at all
         sandbox.list_cached_tables.return_value = []
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             _make_search_result("ds-001", 0.95),
             _make_search_result("ds-002", 0.90),
             _make_search_result("ds-003", 0.85),
