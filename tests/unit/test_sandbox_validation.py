@@ -97,6 +97,51 @@ class TestSQLValidation:
         assert _validate_sql("SELECT * FROM cache_delitos_caba_v3") is None
 
 
+class TestFunctionAllowlist:
+    """Server functions that run SQL from a string or read the filesystem must
+    be rejected even when no forbidden table name appears in the text.
+
+    These functions take the target as an argument, so the table-name checks
+    never see it. They parse to sqlglot `Anonymous` nodes, which the allowlist
+    rejects. The strings below are the shape of the escape, not a working
+    payload; the test only asserts they are refused.
+    """
+
+    def test_xml_sql_functions_rejected(self):
+        for fn in ("query_to_xml", "table_to_xml", "cursor_to_xml"):
+            sql = f"SELECT {fn}('x', true, true, '') AS c FROM raw.cache_x"
+            result = _validate_sql(sql)
+            assert result is not None, f"{fn} debería rechazarse"
+            assert "no permitida" in result
+
+    def test_filesystem_and_dblink_functions_rejected(self):
+        for sql in (
+            "SELECT pg_read_file('x') FROM raw.cache_x",
+            "SELECT pg_ls_dir('x') FROM raw.cache_x",
+            "SELECT lo_import('x') FROM raw.cache_x",
+            "SELECT * FROM dblink('h', 'q') AS t(a int)",
+        ):
+            assert _validate_sql(sql) is not None
+
+    def test_concatenated_argument_still_rejected(self):
+        # Building the argument by string concat doesn't hide the function.
+        sql = "SELECT query_to_xml('a' || 'b', true, true, '') AS c FROM raw.cache_x"
+        assert _validate_sql(sql) is not None
+
+    def test_analytic_functions_allowed(self):
+        # The functions a data question actually needs must pass untouched.
+        for sql in (
+            "SELECT count(*), sum(x), avg(x), min(x), max(x) FROM cache_x",
+            "SELECT date_trunc('month', fecha), sum(CAST(v AS numeric)) "
+            "FROM raw.cache_x GROUP BY 1",
+            "SELECT extract(year FROM fecha), to_char(fecha, 'YYYY') FROM cache_x",
+            "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY v) FROM cache_x",
+            "SELECT regexp_replace(n, 'a', 'b'), string_agg(n, ',') FROM cache_x GROUP BY 1",
+            "SELECT coalesce(nullif(a, ''), 'x'), round(avg(v), 2) FROM cache_x GROUP BY 1",
+        ):
+            assert _validate_sql(sql) is None, sql
+
+
 class _FetchAllResult:
     def __init__(self, rows):
         self._rows = rows

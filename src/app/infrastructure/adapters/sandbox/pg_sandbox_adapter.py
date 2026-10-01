@@ -133,6 +133,47 @@ _TABLE_REF_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Function allowlist — defense-in-depth layer 4.
+#
+# The table checks above are lexical: they look at FROM/JOIN names. A handful
+# of Postgres server functions take a SQL string as an ARGUMENT and run it,
+# so the dangerous table never appears as a FROM/JOIN token and slips past
+# every table check — e.g. `query_to_xml('select … from users', …)`,
+# `table_to_xml`, `cursor_to_xml`, `dblink`, `pg_read_file`, `pg_ls_dir`,
+# `lo_import`. sqlglot does not model these, so they parse to `exp.Anonymous`
+# nodes. We reject every anonymous function whose name is not a known-safe
+# analytic one. Functions sqlglot DOES model (SUM, COUNT, EXTRACT, CAST,
+# COALESCE, …) are typed nodes and always allowed; none of the escape-hatch
+# functions are modelled, so none can hide among them.
+#
+# This is a backstop in code. The real containment is the database role
+# `openarg_sandbox_ro`, which should only be able to read public data.
+_SAFE_ANONYMOUS_FUNCTIONS = frozenset(
+    {
+        # fecha / tiempo
+        "date_trunc", "date_part", "to_char", "to_date", "to_timestamp",
+        "age", "now", "make_date", "make_timestamp", "justify_interval",
+        "date_bin",
+        # texto
+        "regexp_replace", "regexp_match", "regexp_matches", "regexp_count",
+        "regexp_split_to_array", "split_part", "initcap", "translate",
+        "unaccent", "left", "right", "lpad", "rpad", "btrim", "ltrim",
+        "rtrim", "repeat", "reverse", "starts_with", "format", "concat_ws",
+        "char_length", "character_length", "strpos", "ascii", "chr",
+        # numérico / estadístico
+        "percentile_cont", "percentile_disc", "mode", "stddev", "stddev_pop",
+        "stddev_samp", "variance", "var_pop", "var_samp", "corr", "covar_pop",
+        "covar_samp", "regr_slope", "regr_intercept", "width_bucket", "trunc",
+        "div", "mod", "gcd", "lcm", "sign", "trim_scale", "scale",
+        # ventana auxiliar / agregación
+        "string_agg", "array_agg", "percent_rank", "cume_dist", "ntile",
+        "lag", "lead", "first_value", "last_value", "nth_value",
+        "bool_and", "bool_or", "every",
+        # json de solo lectura sobre columnas ya accesibles
+        "jsonb_extract_path_text", "json_extract_path_text", "jsonb_array_length",
+    }
+)  # fmt: skip
+
 
 def _split_table_reference(table_name: str) -> tuple[str, str]:
     """Normalize a surfaced table reference to `(schema, bare_name)`.
@@ -329,23 +370,22 @@ def _validate_sql(sql: str) -> str | None:
     # Mart / raw schemas: every relation is emitted by our own pipeline
     #   (mart_definitions / raw_table_versions). The pipeline already
     #   gates what lands there, so we don't impose a prefix.
+    # Parser-independent early catch of the internal / PII tables, in case
+    # sqlglot ever parses something in a way that hides a reference. Only the
+    # blocklist runs here: the schema and `cache_*` prefix rules moved to the
+    # AST walk below, because this regex can't tell a real table from the
+    # `FROM` inside `EXTRACT(year FROM fecha)`, `SUBSTRING(x FROM 1)` or
+    # `x IS DISTINCT FROM y`, and was rejecting legitimate aggregate queries.
+    # The AST identifies real table nodes and fails closed when it can't parse,
+    # so it is the authoritative layer for schema and prefix.
     for m in _TABLE_REF_PATTERN.finditer(no_comments):
         first, second = m.group(1), m.group(2)
-        if second:
-            schema, table = first.lower(), second
-        else:
-            schema, table = "public", first
-        # Internal-table blocklist applies regardless of schema (BUG-014).
+        table = second if second else first
         if table.lower() in _FORBIDDEN_TABLES:
             return f"Access to internal table '{table}' is not allowed."
-        if schema not in _ALLOWED_SCHEMAS:
-            return f"Access to schema '{schema}' is not allowed."
-        if schema in _PREFIX_FREE_SCHEMAS:
-            continue
-        if not any(table.lower().startswith(p) for p in _ALLOWED_TABLE_PREFIXES):
-            return f"Access to table '{table}' is not allowed. Only cached dataset tables are accessible."
 
-    # AST-level validation with sqlglot (defense-in-depth layer 3)
+    # AST-level validation with sqlglot (defense-in-depth layers 3 and 4:
+    # pure-SELECT, table schema/prefix, and the function allowlist).
     error = _validate_sql_ast(stripped)
     if error:
         return error
@@ -388,6 +428,15 @@ def _validate_sql_ast(sql: str) -> str | None:
         for node in stmt.walk():
             if isinstance(node, _DML_DDL):
                 return f"Forbidden SQL operation in subquery: {type(node).__name__}"
+
+            # Function allowlist — reject server functions that run SQL from a
+            # string argument or read the filesystem (query_to_xml, dblink,
+            # pg_read_file, …). sqlglot leaves these as Anonymous nodes; the
+            # analytic functions it models are typed nodes and pass untouched.
+            if isinstance(node, exp.Anonymous):
+                fname = (node.name or "").lower()
+                if fname not in _SAFE_ANONYMOUS_FUNCTIONS:
+                    return f"Función no permitida: {node.name}"
 
             # Table allowlist — catches all references including comma-separated.
             # Mirror the regex-based check above: schemas in _PREFIX_FREE_SCHEMAS
