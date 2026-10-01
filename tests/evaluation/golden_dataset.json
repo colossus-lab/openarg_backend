@@ -1,6 +1,6 @@
 {
- "version": "1.0",
- "description": "Golden dataset for OpenArg RAG evaluation · 2026-09-01: `expected_connector` de 6 entradas pasó de `search_ckan`/`query_series` a `query_sandbox`. No es que el ruteo empeoró: es el fix de BUG-001/002 — cuando un mart cubre el tema, el plan va al mart y no a CKAN live, porque los steps corren en paralelo y el wall-clock es el del más lento. Las 6 respondían correcto (keyword score 1.0) con el ruteo nuevo.",
+ "version": "2.0",
+ "description": "Golden dataset for OpenArg evaluation · 2026-10-01: campos de calidad para que la batería mida y no sólo cuente — expected_values/forbidden_values con tolerancia, expected_source_by (por conector o portal, no por título), must_deflect, expected_answer_patterns/forbidden_answer_patterns, y palabras clave con alternativas. Ver tests/evaluation/quality_checks.py. · Golden dataset for OpenArg RAG evaluation · 2026-09-01: `expected_connector` de 6 entradas pasó de `search_ckan`/`query_series` a `query_sandbox`. No es que el ruteo empeoró: es el fix de BUG-001/002 — cuando un mart cubre el tema, el plan va al mart y no a CKAN live, porque los steps corren en paralelo y el wall-clock es el del más lento. Las 6 respondían correcto (keyword score 1.0) con el ruteo nuevo.",
  "entries": [
   {
    "id": "casual_001",
@@ -8,11 +8,16 @@
    "question": "Hola",
    "expected_intent": "casual",
    "expected_answer_contains": [
-    "datos abiertos"
+    [
+     "datos abiertos",
+     "datos públicos",
+     "dato público"
+    ]
    ],
    "expected_sources": [],
    "expected_connector": null,
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "rationale": "El saludo sale al azar de tres variantes y sólo una dice 'datos abiertos'; las otras dicen 'datos públicos' o 'dato público'. Con una sola palabra clave el caso fallaba por sorteo."
   },
   {
    "id": "casual_002",
@@ -20,11 +25,16 @@
    "question": "Gracias por la info",
    "expected_intent": "casual",
    "expected_answer_contains": [
-    "consultas"
+    [
+     "consultas",
+     "algo más",
+     "lo que necesites"
+    ]
    ],
    "expected_sources": [],
    "expected_connector": null,
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "rationale": "Mismo problema que casual_001: tres variantes del agradecimiento."
   },
   {
    "id": "casual_003",
@@ -220,7 +230,16 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar",
+     "argentina_datos"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "series_002",
@@ -235,7 +254,16 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "bcra",
+     "argentina_datos",
+     "datos_gob_ar"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "series_003",
@@ -249,7 +277,22 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar"
+    ]
+   ],
+   "must_deflect": false,
+   "expected_answer_patterns": [
+    "\\bPBI\\b|\\bPIB\\b|producto bruto"
+   ],
+   "forbidden_answer_patterns": [
+    "\\bEMAE\\b"
+   ],
+   "rationale": "En 4 de 4 corridas del 01-oct respondió con el EMAE ('La actividad económica cayó -6,28 %') y una vez lo llamó interanual y otra mensual. El EMAE no es el PBI: si el PBI no se encuentra, la respuesta tiene que decirlo, no cambiar de indicador."
   },
   {
    "id": "series_004",
@@ -264,7 +307,21 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "bcra"
+    ]
+   ],
+   "must_deflect": false,
+   "expected_answer_patterns": [
+    "US\\$|U\\$S|USD|d[oó]lares"
+   ],
+   "forbidden_answer_patterns": [
+    "(?<!US)(?<!U)\\$\\s?\\d"
+   ],
+   "rationale": "Respondió '$44.516 millones': las reservas son en dólares, no en pesos. El valor cambia todos los días, así que se chequea la unidad y no la cifra."
   },
   {
    "id": "series_005",
@@ -279,7 +336,15 @@
    ],
    "expected_connector": "query_series",
    "difficulty": "easy",
-   "rationale": "Serie nacional de desempleo (45.2_ECTDT_0_T_33, trimestral). Antes pedia query_sandbox junto a expected_sources=['Series de Tiempo'], que son incompatibles: _CONNECTOR_LABELS mapea esa fuente a query_series, asi que el caso no lo podia pasar ninguna ruta."
+   "rationale": "Serie nacional de desempleo (45.2_ECTDT_0_T_33, trimestral). Antes pedia query_sandbox junto a expected_sources=['Series de Tiempo'], que son incompatibles: _CONNECTOR_LABELS mapea esa fuente a query_series, asi que el caso no lo podia pasar ninguna ruta.",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "series_006",
@@ -294,7 +359,15 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "series_007",
@@ -308,7 +381,15 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "bcra"
+    ]
+   ],
+   "must_deflect": false,
+   "rationale": "Respondió '$41.975 millones', una magnitud dudosa: la base monetaria se mide en billones de pesos. Falta fijar el chequeo de magnitud en la sesión de casos reales."
   },
   {
    "id": "series_008",
@@ -323,7 +404,15 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "argentina_datos_001",
@@ -338,7 +427,13 @@
     "ArgentinaDatos"
    ],
    "expected_connector": "query_argentina_datos",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "argentina_datos"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "argentina_datos_002",
@@ -352,7 +447,13 @@
     "ArgentinaDatos"
    ],
    "expected_connector": "query_argentina_datos",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "argentina_datos"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "argentina_datos_003",
@@ -366,7 +467,13 @@
     "ArgentinaDatos"
    ],
    "expected_connector": "query_argentina_datos",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "argentina_datos"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "argentina_datos_004",
@@ -380,7 +487,13 @@
     "ArgentinaDatos"
    ],
    "expected_connector": "query_argentina_datos",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "argentina_datos"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "argentina_datos_005",
@@ -392,7 +505,16 @@
    ],
    "expected_sources": [],
    "expected_connector": "query_series",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar",
+     "argentina_datos"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "ckan_001",
@@ -405,7 +527,8 @@
    ],
    "expected_sources": [],
    "expected_connector": "query_sandbox",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "must_deflect": false
   },
   {
    "id": "ckan_002",
@@ -417,7 +540,8 @@
    ],
    "expected_sources": [],
    "expected_connector": "query_sandbox",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "must_deflect": false
   },
   {
    "id": "ckan_003",
@@ -429,7 +553,8 @@
    ],
    "expected_sources": [],
    "expected_connector": "query_sandbox",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "must_deflect": false
   },
   {
    "id": "ckan_004",
@@ -442,7 +567,23 @@
    ],
    "expected_sources": [],
    "expected_connector": "query_sandbox",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "must_deflect": false,
+   "expected_values": [
+    {
+     "value": 257,
+     "unit_patterns": [
+      "banca",
+      "diputad",
+      "legislador",
+      "miembro",
+      "esca[ñn]o",
+      "integrante"
+     ],
+     "label": "bancas de Diputados"
+    }
+   ],
+   "rationale": "Respondió '256 legisladores': la Cámara tiene 257 bancas. El 256 es lo que hay en la tabla (una banca vacante o una fila de menos); la respuesta tiene que dar las 257 bancas y, si quiere, explicar la diferencia."
   },
   {
    "id": "ckan_005",
@@ -454,7 +595,8 @@
    ],
    "expected_sources": [],
    "expected_connector": "search_ckan",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "must_deflect": false
   },
   {
    "id": "ddjj_001",
@@ -468,7 +610,13 @@
     "DDJJ"
    ],
    "expected_connector": "query_ddjj",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "ddjj"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "ddjj_002",
@@ -482,7 +630,13 @@
     "DDJJ"
    ],
    "expected_connector": "query_ddjj",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "ddjj"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "ddjj_003",
@@ -496,7 +650,13 @@
     "DDJJ"
    ],
    "expected_connector": "query_ddjj",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "ddjj"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "ddjj_004",
@@ -510,7 +670,14 @@
     "DDJJ"
    ],
    "expected_connector": "query_ddjj",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "ddjj"
+    ]
+   ],
+   "must_deflect": false,
+   "rationale": "Respondió 'los datos agregados no me permiten contar…' con la tabla correcta en la mano. must_deflect=false lo detecta."
   },
   {
    "id": "ddjj_005",
@@ -522,7 +689,13 @@
     "DDJJ"
    ],
    "expected_connector": "query_ddjj",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "ddjj"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "sesiones_001",
@@ -536,7 +709,13 @@
     "Sesiones"
    ],
    "expected_connector": "query_sesiones",
-   "difficulty": "easy"
+   "difficulty": "easy",
+   "expected_source_by": [
+    [
+     "sesiones"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "sesiones_002",
@@ -550,7 +729,13 @@
     "Sesiones"
    ],
    "expected_connector": "query_sesiones",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "sesiones"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "sesiones_003",
@@ -562,7 +747,13 @@
     "Sesiones"
    ],
    "expected_connector": "query_sesiones",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "sesiones"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "sesiones_004",
@@ -576,7 +767,13 @@
     "Sesiones"
    ],
    "expected_connector": "query_sesiones",
-   "difficulty": "medium"
+   "difficulty": "medium",
+   "expected_source_by": [
+    [
+     "sesiones"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "complex_001",
@@ -592,7 +789,19 @@
     "ArgentinaDatos"
    ],
    "expected_connector": "query_series",
-   "difficulty": "hard"
+   "difficulty": "hard",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar",
+     "argentina_datos"
+    ],
+    [
+     "argentina_datos"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "complex_002",
@@ -607,7 +816,15 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "hard"
+   "difficulty": "hard",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "complex_003",
@@ -621,7 +838,13 @@
     "DDJJ"
    ],
    "expected_connector": "query_ddjj",
-   "difficulty": "hard"
+   "difficulty": "hard",
+   "expected_source_by": [
+    [
+     "ddjj"
+    ]
+   ],
+   "must_deflect": false
   },
   {
    "id": "complex_004",
@@ -636,7 +859,19 @@
     "Series de Tiempo"
    ],
    "expected_connector": "query_series",
-   "difficulty": "hard"
+   "difficulty": "hard",
+   "expected_source_by": [
+    [
+     "series_tiempo",
+     "indec",
+     "datos_gob_ar"
+    ]
+   ],
+   "must_deflect": false,
+   "expected_answer_patterns": [
+    "tasa de pobreza|incidencia de la pobreza|\\d[\\d.,]*\\s*%\\s*de\\s*(?:las\\s+)?(?:personas|hogares|la\\s+poblaci[oó]n)"
+   ],
+   "rationale": "Respondió 'La línea de pobreza subió 32 %': la línea es el valor de la canasta básica total, no la tasa de pobreza. La pregunta pide cómo evolucionó la pobreza; la respuesta tiene que dar la tasa (porcentaje de personas u hogares)."
   },
   {
    "id": "complex_005",
@@ -648,7 +883,9 @@
    ],
    "expected_sources": [],
    "expected_connector": "query_sandbox",
-   "difficulty": "hard"
+   "difficulty": "hard",
+   "must_deflect": false,
+   "rationale": "Salud en CABA: 4 de 4 corridas deflectaron ('OpenArg cubre datos de demografía…') y una pregunta casi igual encuentra 20 datasets."
   },
   {
    "id": "negativo_001",
@@ -662,7 +899,7 @@
    ],
    "expected_connector": null,
    "difficulty": "hard",
-   "rationale": "No tenemos el dato y datos.gob.ar tampoco lo publica. Debe deflectar, no contestar con una descarga en vivo del INDEC (incidente 2026-09)."
+   "rationale": "No tenemos el dato y datos.gob.ar tampoco lo publica. Debe deflectar, no contestar con una descarga en vivo del INDEC (incidente 2026-09). Revisar en la sesión de casos reales: el Estudio Nacional sobre el Perfil de las Personas con Discapacidad (2018) tiene la columna `certificado` (CUD), así que hay un dato NACIONAL; lo que no hay es el dato por provincia. Por eso todavía no se fija must_deflect."
   },
   {
    "id": "negativo_002",
@@ -698,7 +935,38 @@
    ],
    "expected_connector": "query_sandbox",
    "difficulty": "hard",
-   "rationale": "Pregunta real del lanzamiento del MCP (2026-09-30). El estudio SÍ está: raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1 (82.327 filas), pero es una muestra nacional sin columnas geográficas. La respuesta correcta lo cita y explica que no hay dato por partido. En prod respondió sólo con georef y dijo que el estudio 'no está disponible'."
+   "rationale": "Pregunta real del lanzamiento del MCP (2026-09-30). El estudio SÍ está: raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1 (82.327 filas), pero es una muestra nacional sin columnas geográficas. La respuesta correcta lo cita y explica que no hay dato por partido. En prod respondió sólo con georef y dijo que el estudio 'no está disponible'. Verificado en staging el 01-oct: dificultad_total=1 son 7.944 filas que expandidas con `pondera` dan 3.675.564 personas (todas las edades); con dificultad_6ymas=1, 7.800 filas y 3.571.983, que es la cifra oficial del INDEC. Las dos son correctas si se dice cuál es; las filas sin expandir, no.",
+   "expected_values": [
+    {
+     "value": [
+      3675564,
+      3571983
+     ],
+     "rel_tolerance": 0.01,
+     "label": "personas con discapacidad (total nacional)"
+    }
+   ],
+   "forbidden_values": [
+    {
+     "value": 7944,
+     "label": "filas de la muestra"
+    },
+    {
+     "value": 7800,
+     "label": "filas de la muestra (6 años y más)"
+    }
+   ],
+   "expected_answer_patterns": [
+    "nacional"
+   ],
+   "expected_source_by": [
+    [
+     "datos_gob_ar",
+     "indec",
+     "cache_local"
+    ]
+   ],
+   "must_deflect": false
   }
  ]
 }

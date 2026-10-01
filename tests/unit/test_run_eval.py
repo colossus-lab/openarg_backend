@@ -168,9 +168,9 @@ def test_la_bateria_nunca_escribe_en_una_conversacion() -> None:
     conversation_id. La batería tiene que pasar vacío siempre."""
     import inspect
 
-    from tests.evaluation.run_eval import evaluate_entry
+    from tests.evaluation.engines import LegacyGraphEngine
 
-    src = inspect.getsource(evaluate_entry)
+    src = inspect.getsource(LegacyGraphEngine.run)
     assert '"conversation_id": ""' in src
 
 
