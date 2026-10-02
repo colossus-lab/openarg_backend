@@ -9,6 +9,7 @@ acción y los parámetros a la vista.
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from typing import Any
 
 from app.application.answers.engine import ClarificationEvent
@@ -50,18 +51,30 @@ def _months_between(a: str, b: str) -> int | None:
     return (yb - ya) * 12 + (mb - ma)
 
 
-def _period_label(fecha: str, step: int | None) -> str | None:
-    """ "2024-07-01" en una serie semestral es "2024-S2", no julio.
+def _shift_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    total = year * 12 + (month - 1) + delta
+    return total // 12, total % 12 + 1
 
-    La API fecha cada período por su primer día. Medido en staging el 01-oct:
-    con la fecha sola, el modelo corrió un semestre las etiquetas de la tasa
-    de pobreza y presentó un "2° semestre 2026" que todavía no existe.
+
+def _period_label(fecha: str, step: int | None, *, dated_by_end: bool = False) -> str | None:
+    """La fecha de una observación como período: "2024-S1", "2026-T2", "2025".
+
+    La API no fecha todas las series igual. El PBI trimestral fecha cada
+    período por su primer día (el 2° trimestre de 2026 es `2026-04-01`), pero
+    las series semestrales de pobreza del INDEC lo fechan por el día siguiente
+    a su fin (el 1er semestre de 2024, 52,9 %, es `2024-07-01`). Con
+    ``dated_by_end`` la fecha cierra el período anterior.
     """
     if not step or len(fecha) < 7:
         return None
-    year, month = fecha[:4], int(fecha[5:7])
+    try:
+        year, month = int(fecha[:4]), int(fecha[5:7])
+    except ValueError:
+        return None
+    if dated_by_end:
+        year, month = _shift_months(year, month, -step)
     if step == 12:
-        return year
+        return str(year)
     if step == 6:
         return f"{year}-S{1 if month <= 6 else 2}"
     if step == 3:
@@ -69,14 +82,36 @@ def _period_label(fecha: str, step: int | None) -> str | None:
     return None
 
 
-def _tail_for_model(result: DataResult, last: int) -> dict[str, Any]:
+def _is_dated_by_end(last_fecha: str, step: int, today: date) -> bool:
+    """¿La serie fecha cada período por su final?
+
+    Si leer la última fecha como inicio del período da un período que todavía
+    no terminó, la serie no puede estar fechada así: ningún organismo publica
+    un semestre en curso. Medido en staging el 02-oct: la tasa de pobreza
+    termina en `2026-07-01`, que leído como inicio sería el 2° semestre de
+    2026, y el modelo lo presentó así.
+    """
+    try:
+        year, month = int(last_fecha[:4]), int(last_fecha[5:7])
+    except (ValueError, IndexError):
+        return False
+    end_year, end_month = _shift_months(year, month, step)
+    # El período termina el día anterior al primer día de (end_year, end_month).
+    return date(end_year, end_month, 1) > today
+
+
+def _tail_for_model(result: DataResult, last: int, *, today: date | None = None) -> dict[str, Any]:
     """Una serie como la ve el modelo: las últimas observaciones, no las primeras."""
     records = result.records or []
     shown = records[-last:]
     if len(records) >= 2 and "fecha" in records[-1] and "fecha" in records[-2]:
         step = _months_between(str(records[-2]["fecha"]), str(records[-1]["fecha"]))
         if step in (3, 6, 12):
-            shown = [{"periodo": _period_label(str(r.get("fecha", "")), step), **r} for r in shown]
+            by_end = _is_dated_by_end(str(records[-1]["fecha"]), step, today or date.today())
+            shown = [
+                {"periodo": _period_label(str(r.get("fecha", "")), step, dated_by_end=by_end), **r}
+                for r in shown
+            ]
     payload = result_for_model(result)
     payload["filas"] = shown
     payload.pop("nota", None)
