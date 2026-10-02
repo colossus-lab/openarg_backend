@@ -27,6 +27,18 @@ class PgVectorSearchAdapter(IVectorSearch):
     def __init__(self, session: MainAsyncSession) -> None:
         self._session = session
 
+    async def reset(self) -> None:
+        """Rollback the request session after a failed or cancelled query.
+
+        A query cancelled mid-flight (an agent tool timeout) leaves the session
+        in an invalid transaction, and every later query in the same request
+        fails with ``PendingRollbackError`` until someone rolls it back.
+        """
+        try:
+            await self._session.rollback()
+        except Exception:  # noqa: BLE001 — best effort; the caller already failed
+            pass
+
     async def _supports_iterative_scan(self) -> bool:
         cls = type(self)
         if cls._pgvector_version is None:

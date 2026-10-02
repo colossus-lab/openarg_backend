@@ -16,6 +16,13 @@ class SearchResult:
 
 
 class IVectorSearch(ABC):
+    async def reset(self) -> None:
+        """Deja el adapter usable después de una búsqueda que falló o se canceló.
+
+        No es abstracto: un adapter sin estado no tiene nada que hacer.
+        """
+        return None
+
     async def search_datasets_ann(
         self,
         query_embedding: list[float],
