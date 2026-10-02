@@ -349,10 +349,15 @@ def aggregate_entry(entry: dict, runs: list[dict]) -> dict:
                 )
             }
         ),
-        "intent_scored": mapped is not None,
+        "intent_scored": mapped is not None
+        and first["diagnostics"].get("routing_comparable", True),
         "intent_match": bool(mapped)
         and all(r["diagnostics"].get("classification") == mapped for r in runs),
-        "connector_scored": expected_connector is not None,
+        # El conector esperado es un nombre de paso del pipeline viejo
+        # (`query_series`…). El agente no tiene pasos: sus herramientas se
+        # llaman distinto, y compararlas daría una "regresión" que no es tal.
+        "connector_scored": expected_connector is not None
+        and first["diagnostics"].get("routing_comparable", True),
         "connector_match": bool(expected_connector)
         and all(expected_connector in (r["diagnostics"].get("plan_actions") or []) for r in runs),
         # ── lo nuevo ──

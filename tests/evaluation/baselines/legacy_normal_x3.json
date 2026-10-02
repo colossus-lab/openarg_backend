@@ -19,11 +19,11 @@
   },
   "deflection_accuracy": {
    "rate": 1.0,
-   "scored_over": 99
+   "scored_over": 96
   },
   "source_accuracy": {
    "rate": 1.0,
-   "scored_over": 81
+   "scored_over": 78
   },
   "runs_with_leaked_errors": 0,
   "runs_with_internal_identifiers": 0,
@@ -10214,7 +10214,7 @@
    "passes": 0,
    "pass_rate": 0.0,
    "failures": {
-    "palabras_clave: faltan: datasets": 3
+    "palabras_clave: faltan: datasets | dataset | conjuntos de datos | datos.gob.ar": 3
    },
    "cost_usd": 0.0968,
    "llm_tokens": 88689,
@@ -10250,7 +10250,7 @@
      "quality": {
       "passed": false,
       "failures": [
-       "palabras_clave: faltan: datasets"
+       "palabras_clave: faltan: datasets | dataset | conjuntos de datos | datos.gob.ar"
       ],
       "checks": [
        {
@@ -10261,7 +10261,7 @@
        {
         "name": "palabras_clave",
         "ok": false,
-        "detail": "faltan: datasets"
+        "detail": "faltan: datasets | dataset | conjuntos de datos | datos.gob.ar"
        },
        {
         "name": "no_deflecta",
@@ -10336,7 +10336,7 @@
      "quality": {
       "passed": false,
       "failures": [
-       "palabras_clave: faltan: datasets"
+       "palabras_clave: faltan: datasets | dataset | conjuntos de datos | datos.gob.ar"
       ],
       "checks": [
        {
@@ -10347,7 +10347,7 @@
        {
         "name": "palabras_clave",
         "ok": false,
-        "detail": "faltan: datasets"
+        "detail": "faltan: datasets | dataset | conjuntos de datos | datos.gob.ar"
        },
        {
         "name": "no_deflecta",
@@ -10422,7 +10422,7 @@
      "quality": {
       "passed": false,
       "failures": [
-       "palabras_clave: faltan: datasets"
+       "palabras_clave: faltan: datasets | dataset | conjuntos de datos | datos.gob.ar"
       ],
       "checks": [
        {
@@ -10433,7 +10433,7 @@
        {
         "name": "palabras_clave",
         "ok": false,
-        "detail": "faltan: datasets"
+        "detail": "faltan: datasets | dataset | conjuntos de datos | datos.gob.ar"
        },
        {
         "name": "no_deflecta",
@@ -11906,16 +11906,6 @@
         "name": "sin_errores_filtrados",
         "ok": true,
         "detail": ""
-       },
-       {
-        "name": "fuente_por_tipo",
-        "ok": true,
-        "detail": ""
-       },
-       {
-        "name": "no_deflecta",
-        "ok": true,
-        "detail": ""
        }
       ],
       "warnings": [],
@@ -11999,16 +11989,6 @@
         "name": "sin_errores_filtrados",
         "ok": true,
         "detail": ""
-       },
-       {
-        "name": "fuente_por_tipo",
-        "ok": true,
-        "detail": ""
-       },
-       {
-        "name": "no_deflecta",
-        "ok": true,
-        "detail": ""
        }
       ],
       "warnings": [],
@@ -12090,16 +12070,6 @@
       "checks": [
        {
         "name": "sin_errores_filtrados",
-        "ok": true,
-        "detail": ""
-       },
-       {
-        "name": "fuente_por_tipo",
-        "ok": true,
-        "detail": ""
-       },
-       {
-        "name": "no_deflecta",
         "ok": true,
         "detail": ""
        }
@@ -15976,6 +15946,11 @@
         "detail": ""
        },
        {
+        "name": "patron_prohibido:estudio[^.]{0,80}no (?:está|esta) disponible",
+        "ok": true,
+        "detail": ""
+       },
+       {
         "name": "frases_prohibidas",
         "ok": true,
         "detail": ""
@@ -16115,6 +16090,11 @@
        },
        {
         "name": "patron:nacional",
+        "ok": true,
+        "detail": ""
+       },
+       {
+        "name": "patron_prohibido:estudio[^.]{0,80}no (?:está|esta) disponible",
         "ok": true,
         "detail": ""
        },
@@ -16260,6 +16240,11 @@
        },
        {
         "name": "patron:nacional",
+        "ok": true,
+        "detail": ""
+       },
+       {
+        "name": "patron_prohibido:estudio[^.]{0,80}no (?:está|esta) disponible",
         "ok": true,
         "detail": ""
        },

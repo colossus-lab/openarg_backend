@@ -320,4 +320,140 @@ class LegacyGraphEngine:
             await self._container.close()
 
 
-ENGINES: dict[str, type] = {"legacy": LegacyGraphEngine}
+class _MeteredAgentLLM:
+    """Envuelve el modelo del agente para contar cada vuelta en el medidor.
+
+    El agente no pasa por el adaptador de Converse que parchea
+    ``install_usage_capture``: habla con ``AsyncAnthropicBedrock``. Sin esto,
+    su costo saldría de lo que el motor dice de sí mismo, que es justo lo que
+    la batería no quiere creerle a nadie.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    @property
+    def model(self) -> str:
+        return str(self._inner.model)
+
+    async def stream_turn(self, **kwargs: Any) -> Any:
+        from app.domain.ports.llm.agent_llm import AgentTurn
+
+        async for item in self._inner.stream_turn(**kwargs):
+            if isinstance(item, AgentTurn):
+                meter = _meter.get()
+                if meter is not None:
+                    u = item.usage
+                    meter.add(
+                        self.model,
+                        u.input_tokens,
+                        u.output_tokens,
+                        u.cache_read_tokens,
+                        u.cache_write_tokens,
+                    )
+            yield item
+
+
+class AgentEngine:
+    """El agente con herramientas (``ANSWERS_ENGINE=agent``), con un modelo fijo.
+
+    Corre a través de ``EngineRunner``, igual que en producción: el runner
+    descarta saludos e inyecciones, verifica las cifras y registra el turno.
+
+    Cada caso abre su propio scope de request, como cada pedido real. El
+    agente pide herramientas en paralelo y la búsqueda vectorial usa la sesión
+    de la request: compartir una sola entre los casos concurrentes de la
+    batería rompería la sesión, cosa que en producción no pasa.
+    """
+
+    def __init__(self, model: str, name: str) -> None:
+        self.name = name
+        self._model = model
+        self._container: Any = None
+        self._llm: Any = None
+
+    async def start(self) -> None:
+        from app.infrastructure.adapters.llm.anthropic_bedrock_agent_adapter import (
+            AnthropicBedrockAgentAdapter,
+        )
+        from app.setup.config.settings import AppSettings
+        from app.setup.ioc.provider_registry import create_async_ioc_container, get_providers
+
+        install_usage_capture()
+        settings = AppSettings()
+        self._container = create_async_ioc_container(providers=get_providers(), settings=settings)
+        self._llm = _MeteredAgentLLM(
+            AnthropicBedrockAgentAdapter(region=settings.bedrock.REGION, model=self._model)
+        )
+
+    async def run(
+        self, question: str, *, case_id: str, mode: str, bypass_cache: bool
+    ) -> EngineOutput:
+        from dishka import Scope
+
+        from app.application.answers.agent_engine import AgentEngine as _Agent
+        from app.application.answers.engine import (
+            CompleteEvent,
+            EngineRequest,
+            StatusEvent,
+        )
+        from app.application.answers.runner import EngineRunner
+        from app.application.pipeline.nodes import PipelineDeps
+
+        started = time.monotonic()
+        error: str | None = None
+        result: Any = None
+        tools: list[str] = []
+        with metering() as meter:
+            try:
+                async with self._container(scope=Scope.REQUEST) as request_scope:
+                    deps = await request_scope.get(PipelineDeps)
+                    runner = EngineRunner(_Agent(self._llm, deps), deps)
+                    req = EngineRequest(
+                        question=question,
+                        user_id=f"eval:{case_id}",
+                        mode=mode,
+                        bypass_cache=bypass_cache,
+                    )
+                    async with contextlib.aclosing(runner.stream(req)) as events:
+                        async for event in events:
+                            if isinstance(event, StatusEvent) and event.connector:
+                                tools.append(event.connector)
+                            elif isinstance(event, CompleteEvent):
+                                result = event.result
+            except Exception as exc:  # noqa: BLE001 — un caso que explota ES el hallazgo
+                error = f"{type(exc).__name__}: {exc}"[:300]
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if result is None and error is None:
+            error = "EngineIncomplete: el motor terminó sin respuesta"
+        return EngineOutput(
+            answer=str(getattr(result, "answer", "") or ""),
+            sources=[s for s in getattr(result, "sources", None) or [] if isinstance(s, dict)],
+            latency_ms=latency_ms,
+            usage=meter.to_dict(),
+            tokens_reported=int(getattr(result, "tokens_used", 0) or 0),
+            evidence=summarize_evidence(getattr(result, "evidence", None) or []),
+            error=error,
+            diagnostics={
+                "classification": None,
+                "plan_actions": tools,
+                "intent": getattr(result, "intent", None),
+                # Ni el intent del clasificador ni los pasos del pipeline viejo
+                # existen en el agente: no se comparan.
+                "routing_comparable": False,
+            },
+        )
+
+    async def aclose(self) -> None:
+        if self._container is not None:
+            await self._container.close()
+
+
+SONNET_4_6 = "us.anthropic.claude-sonnet-4-6"
+HAIKU_4_5 = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+ENGINES: dict[str, Any] = {
+    "legacy": LegacyGraphEngine,
+    "agent-sonnet": lambda: AgentEngine(SONNET_4_6, "agent-sonnet"),
+    "agent-haiku": lambda: AgentEngine(HAIKU_4_5, "agent-haiku"),
+}
