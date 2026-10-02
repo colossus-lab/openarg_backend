@@ -42,6 +42,9 @@ class PipelineDeps:
     # así que un nodo puede pedirlo siempre sin ramificar. Opcional para que los
     # tests y los caminos que arman deps a mano sigan funcionando.
     llm_deep: Any = None  # ILLMProvider | None
+    # El modelo del agente de respuestas (`ANSWERS_ENGINE=agent`). Opcional por
+    # lo mismo que los anteriores; el grafo no lo usa.
+    agent_llm: Any = None  # IAgentLLM | None
 
 
 # Per-request dependency isolation using ContextVar (thread/coroutine-safe)

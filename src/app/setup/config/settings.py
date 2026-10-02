@@ -116,6 +116,9 @@ class BedrockSettings(BaseModel):
     # responden. Se eligió 4.6 —la más nueva de las dos que funcionan, y más
     # rápida que 4.5 en la prueba: 0,87 s contra 1,37 s.
     LLM_MODEL_DEEP: str = ""
+    # El modelo del agente de respuestas (`ANSWERS_ENGINE=agent`). Sonnet 4.6 por
+    # defecto; para comparar con Haiku 4.5 alcanza con cambiar la variable.
+    AGENT_MODEL: str = "us.anthropic.claude-sonnet-4-6"
     EMBEDDING_MODEL: str = "cohere.embed-multilingual-v3"
 
     def model_post_init(self, __context: object) -> None:
@@ -124,6 +127,7 @@ class BedrockSettings(BaseModel):
         self.REGION = os.getenv("AWS_REGION", self.REGION)
         self.LLM_MODEL = os.getenv("BEDROCK_LLM_MODEL", self.LLM_MODEL)
         self.LLM_MODEL_DEEP = os.getenv("BEDROCK_LLM_MODEL_DEEP", "") or self.LLM_MODEL
+        self.AGENT_MODEL = os.getenv("BEDROCK_AGENT_MODEL", "") or self.AGENT_MODEL
         self.EMBEDDING_MODEL = os.getenv("BEDROCK_EMBEDDING_MODEL", self.EMBEDDING_MODEL)
 
 

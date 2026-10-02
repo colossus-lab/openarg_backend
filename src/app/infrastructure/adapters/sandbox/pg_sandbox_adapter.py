@@ -9,6 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from typing import Any
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -16,6 +17,7 @@ from sqlalchemy.engine import Engine
 from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
     ISQLSandbox,
+    MartInfo,
     SandboxResult,
     TableSource,
 )
@@ -845,6 +847,83 @@ class PgSandboxAdapter(ISQLSandbox):
         return await loop.run_in_executor(
             self._executor,
             partial(self._find_tables_sync, list(dataset_ids or []), list(table_names or [])),
+        )
+
+    # Los marts que se pueden servir: con filas y no retirados del serving.
+    _MART_COLUMNS_SQL = (
+        "SELECT mart_id, mart_schema, mart_view_name, description, domain, "
+        "       last_row_count, canonical_columns_json"
+    )
+    _MART_SERVABLE_SQL = "COALESCE(last_row_count, 0) > 0 AND NOT COALESCE(serving_blocked, FALSE)"
+
+    @staticmethod
+    def _mart_info(row: Any, score: float = 0.0) -> MartInfo:
+        columns = row.canonical_columns_json
+        if isinstance(columns, str):
+            try:
+                columns = json.loads(columns)
+            except (json.JSONDecodeError, TypeError):
+                columns = None
+        return MartInfo(
+            table_name=f"{row.mart_schema or 'mart'}.{row.mart_view_name or row.mart_id}",
+            mart_id=str(row.mart_id),
+            description=str(row.description or ""),
+            domain=str(row.domain or ""),
+            row_count=row.last_row_count,
+            score=score,
+            columns=columns if isinstance(columns, list) else None,
+        )
+
+    def _find_marts_sync(self, embedding: list[float], limit: int) -> list[MartInfo]:
+        literal = "[" + ",".join(str(x) for x in embedding) + "]"
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"{self._MART_COLUMNS_SQL}, "
+                    "       1 - (embedding <=> CAST(:emb AS vector)) AS score "
+                    "FROM mart_definitions "
+                    f"WHERE embedding IS NOT NULL AND {self._MART_SERVABLE_SQL} "
+                    "ORDER BY embedding <=> CAST(:emb AS vector) "
+                    "LIMIT :lim"
+                ),
+                {"emb": literal, "lim": limit},
+            ).fetchall()
+            conn.rollback()
+        return [self._mart_info(r, float(r.score)) for r in rows]
+
+    async def find_marts(self, query_embedding: list[float], limit: int = 5) -> list[MartInfo]:
+        if not query_embedding:
+            return []
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, partial(self._find_marts_sync, list(query_embedding), limit)
+        )
+
+    def _describe_marts_sync(self, table_names: list[str]) -> dict[str, MartInfo]:
+        views = sorted(
+            {bare_name(n).lower() for n in table_names if n and n.lower().startswith("mart.")}
+        )
+        if not views:
+            return {}
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"{self._MART_COLUMNS_SQL} FROM mart_definitions "
+                    "WHERE mart_schema = 'mart' AND lower(mart_view_name) = ANY(:views) "
+                    f"AND {self._MART_SERVABLE_SQL}"
+                ),
+                {"views": views},
+            ).fetchall()
+            conn.rollback()
+        infos = [self._mart_info(r) for r in rows]
+        return {i.table_name: i for i in infos}
+
+    async def describe_marts(self, table_names: list[str]) -> dict[str, MartInfo]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, partial(self._describe_marts_sync, list(table_names))
         )
 
     def _get_table_sources_sync(self, table_names: list[str]) -> dict[str, TableSource]:

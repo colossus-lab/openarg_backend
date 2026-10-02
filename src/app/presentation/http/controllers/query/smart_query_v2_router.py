@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.application.answers.agent_engine import AgentEngine
 from app.application.answers.engine import (
     CHANNEL_SMART,
     CHANNEL_WS,
@@ -433,9 +434,12 @@ async def _answer_engine(deps: PipelineDeps) -> AnswerEngine:
     """El motor que contesta este turno, según ``ANSWERS_ENGINE``.
 
     Lo usan el chat, ``/smart`` y ``/ask``: los tres contestan con el mismo
-    motor. Hoy el único es el grafo; volver a él es poner ``legacy``.
+    motor. Volver al grafo es poner ``legacy``, sin deploy.
     """
-    selected_engine_name()
+    if selected_engine_name() == "agent":
+        if deps.agent_llm is not None:
+            return AgentEngine(deps.agent_llm, deps)
+        logger.error("ANSWERS_ENGINE=agent pero no hay modelo del agente; uso legacy")
     checkpointer = await _get_checkpointer()
     graph = await _get_or_compile_graph(deps, checkpointer)
     return LegacyGraphEngine(graph, deps, persistent=bool(checkpointer))

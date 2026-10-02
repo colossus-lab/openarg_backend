@@ -15,6 +15,80 @@ class PgVectorSearchAdapter(IVectorSearch):
     def __init__(self, session: MainAsyncSession) -> None:
         self._session = session
 
+    # Chunks candidates fetched through the HNSW index before grouping by
+    # dataset. The catalog repeats datasets (the datos.gob.ar migration
+    # regenerated ids), so a few hundred chunks yield a dozen distinct ones.
+    _ANN_CANDIDATES = 200
+    _ANN_CANDIDATES_FILTERED = 600
+
+    async def search_datasets_ann(
+        self,
+        query_embedding: list[float],
+        limit: int = 10,
+        portal_filter: str | None = None,
+        min_similarity: float = 0.40,
+    ) -> list[SearchResult]:
+        """Approximate nearest neighbours through the HNSW index.
+
+        ``ORDER BY embedding <=> q LIMIT n`` is what the index answers; a
+        similarity threshold in the WHERE clause is not, and turns the search
+        into a scan of every chunk (measured on staging: 0.2-1 s here versus
+        1 s to over 60 s for ``search_datasets``). The threshold and the
+        portal filter apply after the neighbour fetch.
+        """
+        embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+        candidates = self._ANN_CANDIDATES_FILTERED if portal_filter else self._ANN_CANDIDATES
+        portal_clause = "WHERE d.portal = :portal" if portal_filter else ""
+        query = text(
+            "WITH nn AS ("
+            " SELECT dc.dataset_id, dc.embedding <=> CAST(:embedding AS vector) AS dist"
+            " FROM dataset_chunks dc"
+            " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
+            " LIMIT :candidates"
+            ")"
+            " SELECT CAST(d.id AS text) AS dataset_id, d.title, d.description, d.portal,"
+            "        d.download_url, d.columns, 1 - min(nn.dist) AS score"
+            " FROM nn JOIN datasets d ON d.id = nn.dataset_id"
+            f" {portal_clause}"
+            " GROUP BY d.id, d.title, d.description, d.portal, d.download_url, d.columns"
+            " HAVING 1 - min(nn.dist) >= :min_sim"
+            " ORDER BY score DESC"
+            " LIMIT :limit"
+        )
+        params: dict = {
+            "embedding": embedding_str,
+            "candidates": candidates,
+            "min_sim": min_similarity,
+            "limit": limit,
+        }
+        if portal_filter:
+            params["portal"] = portal_filter
+        result = await self._session.execute(query, params)
+        return [
+            SearchResult(
+                dataset_id=row.dataset_id,
+                title=row.title,
+                description=row.description or "",
+                portal=row.portal,
+                download_url=row.download_url or "",
+                columns=row.columns or "",
+                score=float(row.score),
+            )
+            for row in result.fetchall()
+        ]
+
+    async def reset(self) -> None:
+        """Rollback the request session after a failed or cancelled query.
+
+        A query cancelled mid-flight (a tool timeout) leaves the session in an
+        invalid transaction, and every later query in the same request fails
+        with ``PendingRollbackError`` until someone rolls it back.
+        """
+        try:
+            await self._session.rollback()
+        except Exception:  # noqa: BLE001 — best effort; the caller already failed
+            pass
+
     async def search_datasets(
         self,
         query_embedding: list[float],

@@ -66,6 +66,48 @@ async def load_chat_history(
         return ""
 
 
+async def load_previous_sources(
+    conversation_id: str,
+    chat_repo: IChatRepository | None,
+    owner_user_id: str | None = None,
+    *,
+    max_sources: int = 8,
+) -> tuple[str, ...]:
+    """Las fuentes que usaron las respuestas anteriores de la conversación.
+
+    Es lo útil de la memoria resumida sin el resumen: ante un "¿y en 2023?",
+    el motor sabe de qué dataset se venía hablando y vuelve a él sin buscar.
+    Sale de los mensajes guardados tal cual —sin un modelo en el medio que
+    reescriba cifras— y no vence a las 4 horas como la memoria en Redis.
+    Más recientes primero, sin repetidos.
+    """
+    if not conversation_id or not chat_repo:
+        return ()
+    try:
+        from uuid import UUID
+
+        owner_uuid = UUID(owner_user_id) if owner_user_id else None
+        messages = await chat_repo.get_messages(UUID(conversation_id), limit=7, user_id=owner_uuid)
+        seen: set[str] = set()
+        out: list[str] = []
+        for m in reversed(messages):
+            if m.role != "assistant":
+                continue
+            for s in m.sources or []:
+                if not isinstance(s, dict) or not s.get("name"):
+                    continue
+                label = str(s["name"])[:160]
+                if s.get("portal"):
+                    label += f" — {str(s['portal'])[:60]}"
+                if label not in seen:
+                    seen.add(label)
+                    out.append(label)
+        return tuple(out[:max_sources])
+    except Exception:
+        logger.debug("Failed to load previous sources for %s", conversation_id, exc_info=True)
+        return ()
+
+
 async def save_history(
     session: AsyncSession,
     question: str,

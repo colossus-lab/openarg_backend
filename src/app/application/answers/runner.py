@@ -42,7 +42,11 @@ from app.application.answers.engine import (
 from app.application.pipeline.cache_manager import check_cache, write_cache
 from app.application.pipeline.citation_guard import ground_citations
 from app.application.pipeline.classifiers import classify_request
-from app.application.pipeline.history import load_chat_history, record_terminal_analytics
+from app.application.pipeline.history import (
+    load_chat_history,
+    load_previous_sources,
+    record_terminal_analytics,
+)
 from app.infrastructure.audit.audit_logger import audit_query
 
 logger = logging.getLogger(__name__)
@@ -160,9 +164,15 @@ class EngineRunner:
             return
 
         history = ""
+        previous_sources: tuple[str, ...] = ()
         if req.conversation_id:
             yield StatusEvent("loading_context", "Cargando contexto...")
+            # Uno después del otro: el repo usa la sesión de la request, y una
+            # sesión de SQLAlchemy no admite dos operaciones a la vez.
             history = await load_chat_history(
+                req.conversation_id, self._deps.chat_repo, owner_user_id=req.owner_user_id
+            )
+            previous_sources = await load_previous_sources(
                 req.conversation_id, self._deps.chat_repo, owner_user_id=req.owner_user_id
             )
 
@@ -188,7 +198,7 @@ class EngineRunner:
                 yield CompleteEvent(result)
                 return
 
-        engine_req = replace(req, history=history)
+        engine_req = replace(req, history=history, previous_sources=previous_sources)
         async with contextlib.aclosing(self._engine.stream(engine_req)) as events:
             async for event in events:
                 if isinstance(event, CompleteEvent):
