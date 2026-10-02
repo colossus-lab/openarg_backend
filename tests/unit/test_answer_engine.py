@@ -331,7 +331,8 @@ async def test_un_saludo_no_llega_al_motor(rec: Recorder) -> None:
     assert engine.requests == []
     # El saludo sale al azar entre tres variantes: no se fija el texto.
     assert result.answer
-    assert result.intent == ""
+    # El intent dice que fue un saludo: el cupo web no lo descuenta.
+    assert result.intent == "casual"
     assert [r["success"] for r in rec.analytics] == [True]
 
 

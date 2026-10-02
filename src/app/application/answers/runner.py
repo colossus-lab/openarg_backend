@@ -151,7 +151,9 @@ class EngineRunner:
         kind, text = classify_request(req.question, req.user_id)
         if kind:
             # Saludos, preguntas sobre OpenArg, inyecciones: sin gastar modelo.
-            result = EngineResult(answer=text or "", intent=_FAST_REPLY_INTENTS.get(kind, ""))
+            # El intent dice qué fue ("casual", "meta"…): el cupo web no
+            # descuenta estas respuestas, que no usan el modelo.
+            result = EngineResult(answer=text or "", intent=_FAST_REPLY_INTENTS.get(kind, kind))
             await self._record(
                 req,
                 started,
