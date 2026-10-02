@@ -29,6 +29,7 @@ from app.application.answers.engine import (
     AnswerEngine,
     CompleteEvent,
     EngineRequest,
+    EngineResult,
     selected_engine_name,
 )
 from app.application.answers.legacy_engine import LegacyGraphEngine
@@ -36,8 +37,19 @@ from app.application.answers.runner import EngineRunner
 from app.application.common.privacy_gate import ensure_privacy_accepted
 from app.application.pipeline.graph import build_pipeline_graph
 from app.application.pipeline.nodes import PipelineDeps
+from app.application.web_quota import (
+    DAILY_CAP_MESSAGE,
+    DAILY_CAP_REACHED,
+    QUOTA_EXHAUSTED,
+    consume_web_question,
+    counts_against_quota,
+    daily_cap_reached,
+    exhausted_message,
+    web_quota,
+)
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.chat.chat_repository import IChatRepository
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.user.user_repository import IUserRepository
 from app.infrastructure.audit.audit_logger import audit_rate_limited
 from app.infrastructure.auth import GoogleJwtValidator, InvalidGoogleToken
@@ -517,6 +529,53 @@ class SmartQueryV2Response(BaseModel):
     citations: list[dict[str, Any]] = []
     documents: list[dict[str, Any]] | None = None
     warnings: list[str] = []
+    # Cupo web después de esta respuesta (ver `web_quota.py`).
+    quota: dict[str, Any] | None = None
+
+
+# ── Cupo mensual del chat web ──────────────────────────────
+
+
+async def _web_quota_gate(
+    email: str,
+    user_repo: IUserRepository,
+    cache: ICacheService,
+    credits: ICreditRepository,
+) -> tuple[Any, dict[str, Any] | None]:
+    """(user_id, rechazo). Sin usuario conocido no hay cupo que aplicar.
+
+    El rechazo lleva ``code`` para que el frontend lo muestre como aviso y no
+    como un error, y el estado del cupo para el indicador.
+    """
+    if not email:
+        return None, None
+    user = await user_repo.get_by_email(email)
+    if user is None:
+        return None, None
+    quota = await web_quota(user.id, cache, credits)
+    if quota.agotado:
+        return user.id, {
+            "code": QUOTA_EXHAUSTED,
+            "message": exhausted_message(quota),
+            "quota": quota.to_wire(),
+        }
+    if await daily_cap_reached(cache):
+        logger.warning("Web daily cap reached; rejecting question")
+        return user.id, {
+            "code": DAILY_CAP_REACHED,
+            "message": DAILY_CAP_MESSAGE,
+            "quota": quota.to_wire(),
+        }
+    return user.id, None
+
+
+async def _web_quota_after(
+    result: EngineResult, user_id: Any, cache: ICacheService, credits: ICreditRepository
+) -> dict[str, Any]:
+    """Descuenta si la respuesta cuenta y devuelve el cupo para el cliente."""
+    if counts_against_quota(result):
+        return (await consume_web_question(user_id, cache, credits)).to_wire()
+    return (await web_quota(user_id, cache, credits)).to_wire()
 
 
 # ── POST endpoint ──────────────────────────────────────────
@@ -531,6 +590,8 @@ async def smart_query_v2(
     deps: FromDishka[PipelineDeps],
     user_repo: FromDishka[IUserRepository],
     chat_repo: FromDishka[IChatRepository],
+    cache: FromDishka[ICacheService],
+    credits: FromDishka[ICreditRepository],
 ) -> dict[str, Any] | JSONResponse:
     """Execute a query through the LangGraph pipeline."""
     # H3 fix: authenticated email comes from the Google JWT validated by
@@ -600,6 +661,11 @@ async def smart_query_v2(
             )
         owner_user_id = user.id
 
+    quota_user_id, rejection = await _web_quota_gate(user_email, user_repo, cache, credits)
+    if rejection is not None:
+        status = 402 if rejection["code"] == QUOTA_EXHAUSTED else 503
+        return JSONResponse(status_code=status, content={"error": rejection})
+
     req = EngineRequest(
         question=body.question,
         user_id=user_id,
@@ -636,6 +702,11 @@ async def smart_query_v2(
             },
         )
 
+    quota = (
+        await _web_quota_after(result, quota_user_id, cache, credits)
+        if quota_user_id is not None
+        else None
+    )
     return {
         "answer": result.answer,
         "sources": result.sources,
@@ -645,6 +716,7 @@ async def smart_query_v2(
         "citations": result.citations,
         **({"documents": result.documents} if result.documents else {}),
         **({"warnings": result.warnings} if result.warnings else {}),
+        **({"quota": quota} if quota is not None else {}),
     }
 
 
@@ -874,6 +946,15 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         return
                     owner_user_id_ws = user_ws.id
 
+                credits_ws = await request_scope.get(ICreditRepository)
+                quota_user_ws, rejection_ws = await _web_quota_gate(
+                    ws_user_email, await request_scope.get(IUserRepository), cache, credits_ws
+                )
+                if rejection_ws is not None:
+                    await _safe_send_json(ws, {"type": "error", **rejection_ws})
+                    await ws.close(code=4402 if rejection_ws["code"] == QUOTA_EXHAUSTED else 4503)
+                    return
+
                 req = EngineRequest(
                     question=question,
                     user_id=ws_identifier,
@@ -897,6 +978,10 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                         async for event in events:
                             if isinstance(event, CompleteEvent):
                                 payload = event.to_wire()
+                                if quota_user_ws is not None:
+                                    payload["quota"] = await _web_quota_after(
+                                        event.result, quota_user_ws, cache, credits_ws
+                                    )
                             else:
                                 # FR-038 (fail-closed allowlist, SEC-07) and
                                 # FR-038b (WARNING log on any dropped key).
