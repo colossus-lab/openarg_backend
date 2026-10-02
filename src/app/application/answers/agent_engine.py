@@ -47,6 +47,8 @@ from app.application.answers.tools.base import (
     ToolContext,
     ToolInputError,
     ToolOutcome,
+    count,
+    quoted,
 )
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
@@ -69,6 +71,45 @@ _NO_ANSWER = (
     "acotándola a un lugar o período."
 )
 _REFUSAL = "No puedo ayudarte con esa consulta. Preguntame por datos públicos de Argentina."
+
+
+# Los pasos que ve el usuario. Usan nombres de paso que el frontend ya conoce
+# (`coordination` y `searching` muestran el texto tal cual; `generating`
+# prende la fase de redacción), así el chat los muestra bien aunque no se haya
+# actualizado todavía.
+STEP_THINKING = "coordination"
+STEP_TOOL = "searching"
+STEP_WRITING = "generating"
+THINKING_TEXT = "Pensando…"
+WRITING_TEXT = "Escribiendo la respuesta…"
+
+
+def _describe(tool: AgentToolImpl | None, call: ToolCall) -> str:
+    """Qué está haciendo la herramienta, con lo que pidió el modelo."""
+    if tool is None:
+        return "Consultando…"
+    describe = getattr(tool, "describe", None)
+    if callable(describe):
+        try:
+            return str(describe(call.input))
+        except Exception:
+            logger.debug("agent: describe failed for %s", call.name, exc_info=True)
+    return tool.status
+
+
+def _summary(outcome: ToolOutcome) -> str | None:
+    """Qué hizo la herramienta. Las que leen datos dicen qué y cuánto leyeron."""
+    if outcome.is_error or outcome.clarification is not None:
+        return None
+    if outcome.summary:
+        return outcome.summary
+    if outcome.results:
+        first = outcome.results[0]
+        return (
+            f"Leyó {quoted(first.dataset_title, 80)} "
+            f"({count(len(first.records or []), 'fila', 'filas')})"
+        )
+    return None
 
 
 class _ChunkCleaner:
@@ -204,6 +245,7 @@ class AgentEngine:
             cleaner = _ChunkCleaner()
             streamed = False
             turn: AgentTurn | None = None
+            yield StatusEvent(STEP_THINKING, THINKING_TEXT)
             async for item in self._llm.stream_turn(
                 system=system,
                 messages=messages,
@@ -214,7 +256,11 @@ class AgentEngine:
                 if isinstance(item, TextDelta):
                     text = cleaner.feed(item.text)
                     if text:
-                        streamed = True
+                        # Un espacio suelto antes de pedir herramientas no es
+                        # el comienzo de la respuesta.
+                        if text.strip() and not streamed:
+                            yield StatusEvent(STEP_WRITING, WRITING_TEXT)
+                            streamed = True
                         yield ChunkEvent(text)
                 else:
                     turn = item
@@ -237,13 +283,15 @@ class AgentEngine:
             messages.append({"role": "assistant", "content": turn.content})
             for call in turn.tool_calls:
                 tool = by_name.get(call.name)
-                yield StatusEvent(
-                    "searching", tool.status if tool else "Consultando...", connector=call.name
-                )
+                yield StatusEvent(STEP_TOOL, _describe(tool, call), connector=call.name)
             outcomes = await asyncio.gather(
                 *(self._run_tool(by_name.get(c.name), c, ctx) for c in turn.tool_calls)
             )
             calls_made += len(turn.tool_calls)
+            for call, outcome in zip(turn.tool_calls, outcomes, strict=True):
+                done = _summary(outcome)
+                if done:
+                    yield StatusEvent(STEP_TOOL, done, connector=call.name)
 
             clarification = next((o.clarification for o in outcomes if o.clarification), None)
             if clarification is not None:

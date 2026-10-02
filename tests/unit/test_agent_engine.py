@@ -205,11 +205,54 @@ async def test_pinamar_cuenta_personas_con_el_ponderador_y_cita_el_estudio() -> 
     assert "aviso_geografico" in second
 
 
-async def test_cada_herramienta_avisa_lo_que_hace() -> None:
-    llm = ScriptedLLM([_turn(calls=[_call("ubicar_lugar", texto="Pinamar")]), _turn("Listo.")])
+async def test_los_pasos_que_ve_el_usuario_dicen_que_hace_y_que_hizo() -> None:
+    """Como "Pensando… / Buscando X / Encontró Y" de los asistentes conocidos.
+
+    Los nombres de paso son los que el frontend ya conoce: el chat los
+    muestra aunque no se haya actualizado.
+    """
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("ubicar_lugar", 1, texto="Pinamar"),
+                    _call("calcular", 2, tabla=ESTUDIO, operacion="conteo", ponderar_por="pondera"),
+                ]
+            ),
+            _turn("Listo."),
+        ]
+    )
     events = await _run(AgentEngine(llm, _deps()))
-    status = [e for e in events if isinstance(e, StatusEvent)]
-    assert status == [StatusEvent("searching", "Ubicando el lugar...", connector="ubicar_lugar")]
+    status = [(e.step, e.detail) for e in events if isinstance(e, StatusEvent)]
+    assert status == [
+        ("coordination", "Pensando…"),
+        ("searching", "Ubicando «Pinamar»"),
+        ("searching", "Contando con el factor de expansión de la encuesta"),
+        ("searching", "Ubicó «Pinamar»"),
+        (
+            "searching",
+            "Calculó conteo ponderado por pondera en «Estudio Nacional sobre el Perfil de "
+            "las Personas con Discapacidad»",
+        ),
+        ("coordination", "Pensando…"),
+        ("generating", "Escribiendo la respuesta…"),
+    ]
+
+
+def test_un_resultado_sin_resumen_propio_dice_que_leyo_y_cuanto() -> None:
+    from app.application.answers.agent_engine import _summary
+    from app.application.answers.tools.base import ToolOutcome
+
+    result = DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url="",
+        dataset_title="IPC Nacional",
+        format="time_series",
+        records=[{"v": i} for i in range(1234)],
+    )
+    assert _summary(ToolOutcome("{}", results=[result])) == "Leyó «IPC Nacional» (1.234 filas)"
+    assert _summary(ToolOutcome("error", is_error=True)) is None
 
 
 async def test_sin_datos_leidos_no_hay_fuentes_ni_exito() -> None:
@@ -228,8 +271,11 @@ async def test_el_texto_antes_de_las_herramientas_se_borra() -> None:
         ]
     )
     events = await _run(AgentEngine(llm, _deps()))
-    kinds = [type(e).__name__ for e in events]
-    assert kinds.index("ClearAnswerEvent") < kinds.index("StatusEvent")
+    kinds = [
+        "Herramienta" if isinstance(e, StatusEvent) and e.connector else type(e).__name__
+        for e in events
+    ]
+    assert kinds.index("ClearAnswerEvent") < kinds.index("Herramienta")
     assert events[-1].result.answer == "Respuesta final."
 
 

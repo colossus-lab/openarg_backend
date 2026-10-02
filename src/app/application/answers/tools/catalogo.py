@@ -34,8 +34,10 @@ from app.application.answers.tools.base import (
     ToolContext,
     ToolInputError,
     ToolOutcome,
+    count,
     int_arg,
     plain_rows,
+    quoted,
     str_arg,
     to_json,
 )
@@ -179,6 +181,10 @@ def _table_summary(t: Any) -> dict[str, Any]:
 
 class BuscarDatos:
     status = "Buscando en el catálogo..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        return f"Buscando {quoted(args.get('texto'))} en el catálogo"
+
     spec = AgentTool(
         name="buscar_datos",
         description=(
@@ -264,8 +270,17 @@ class BuscarDatos:
             if m.score >= _MIN_SIMILARITY
         ]
         if not datasets and not curated:
-            return ToolOutcome(to_json({"resultados": [], "nota": "Nada parecido en el catálogo."}))
-        return ToolOutcome(to_json({"tablas_curadas": curated, "datasets": datasets}))
+            return ToolOutcome(
+                to_json({"resultados": [], "nota": "Nada parecido en el catálogo."}),
+                summary="No encontró nada parecido en el catálogo",
+            )
+        found = count(len(datasets), "dataset", "datasets")
+        if curated:
+            found += f" y {count(len(curated), 'tabla curada', 'tablas curadas')}"
+        return ToolOutcome(
+            to_json({"tablas_curadas": curated, "datasets": datasets}),
+            summary=f"Encontró {found}",
+        )
 
 
 # ── describir_tabla ────────────────────────────────────────
@@ -273,6 +288,10 @@ class BuscarDatos:
 
 class DescribirTabla:
     status = "Revisando la tabla..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        return "Revisando cómo es la tabla"
+
     spec = AgentTool(
         name="describir_tabla",
         description=(
@@ -357,7 +376,10 @@ class DescribirTabla:
                 "nacional, calculándola con calcular (con el ponderador si lo hay) y aclarando "
                 "que es nacional."
             )
-        return ToolOutcome(to_json(payload))
+        return ToolOutcome(
+            to_json(payload),
+            summary=f"Revisó {quoted(table.title, 80)} ({count(table.row_count, 'fila', 'filas')})",
+        )
 
 
 # ── obtener_datos ──────────────────────────────────────────
@@ -365,6 +387,10 @@ class DescribirTabla:
 
 class ObtenerDatos:
     status = "Leyendo datos..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        return "Leyendo los datos de la tabla"
+
     spec = AgentTool(
         name="obtener_datos",
         description=(
@@ -442,6 +468,19 @@ class ObtenerDatos:
 
 class Calcular:
     status = "Calculando..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        what = {
+            "conteo": "Contando",
+            "suma": "Sumando",
+            "promedio": "Promediando",
+            "minimo": "Buscando el mínimo",
+            "maximo": "Buscando el máximo",
+        }.get(str(args.get("operacion") or ""), "Calculando")
+        if args.get("ponderar_por"):
+            what += " con el factor de expansión de la encuesta"
+        return what
+
     spec = AgentTool(
         name="calcular",
         description=(
@@ -534,4 +573,5 @@ class Calcular:
                 }
             ),
             results=[_data_result(table, rows, sql, title)] if rows else [],
+            summary=f"Calculó {what} en {quoted(table.title, 80)}",
         )
