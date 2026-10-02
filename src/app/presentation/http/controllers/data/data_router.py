@@ -351,7 +351,7 @@ async def data_search(
         raise HTTPException(status_code=502, detail="Servicio de búsqueda no disponible")
 
     logger.info("Executing semantic search for query: %s", body.query[:100])
-    results = await vector_search.search_datasets(
+    results = await vector_search.search_datasets_ann(
         query_embedding=query_embedding,
         limit=body.limit,
         min_similarity=_MIN_SIMILARITY,

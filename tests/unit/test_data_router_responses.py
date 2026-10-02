@@ -84,7 +84,7 @@ def _default_sandbox() -> AsyncMock:
 
 def _default_vector_search() -> AsyncMock:
     mock = AsyncMock(spec=IVectorSearch)
-    mock.search_datasets.return_value = [
+    mock.search_datasets_ann.return_value = [
         SearchResult(
             dataset_id="ds-001",
             title="Sample Dataset",
@@ -540,7 +540,7 @@ class TestSearchResponseContract:
 
     async def test_search_relevance_rounded_3_decimals(self, monkeypatch):
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = [
+        vector_search.search_datasets_ann.return_value = [
             SearchResult(
                 dataset_id="ds-001",
                 title="Sample",
@@ -566,7 +566,7 @@ class TestSearchResponseContract:
 
     async def test_empty_search_returns_empty_array(self, monkeypatch):
         vector_search = AsyncMock(spec=IVectorSearch)
-        vector_search.search_datasets.return_value = []
+        vector_search.search_datasets_ann.return_value = []
         fast_app = _build_app(monkeypatch, vector_search=vector_search)
 
         transport = ASGITransport(app=fast_app, raise_app_exceptions=False)
