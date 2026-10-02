@@ -415,10 +415,12 @@ class PedirAclaracion:
     spec = AgentTool(
         name="pedir_aclaracion",
         description=(
-            "Termina el turno con una pregunta al usuario, con opciones para elegir. Usala sólo "
-            "si la pregunta es ambigua de una forma que cambia la respuesta (p. ej. una sigla con "
-            "varios significados) y no se puede resolver mirando los datos. No la uses para "
-            "confirmar algo que ya podés buscar."
+            "Último recurso: termina el turno con una pregunta al usuario, con opciones. Usala "
+            "sólo si la pregunta tiene dos lecturas que llevan a respuestas distintas (p. ej. una "
+            "sigla con varios significados) y mirar los datos no lo resuelve. Si hay una lectura "
+            "razonable, respondé con ella y aclarala en la respuesta. Nunca preguntes por el "
+            "período (usá el más reciente), por el nivel de detalle ni por el formato: decidilo "
+            "vos."
         ),
         input_schema={
             "type": "object",

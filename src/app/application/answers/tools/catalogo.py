@@ -157,6 +157,23 @@ def _data_result(
     )
 
 
+# Columnas que se muestran de cada tabla en la búsqueda. Un dataset puede traer
+# varias tablas con la misma cantidad de filas: el Estudio de Discapacidad
+# trae la de microdatos (pondera, dificultad_total…) y otra sólo con 40 pesos
+# replicados. Batería del 02-oct: sin ver las columnas, Sonnet abrió la de
+# pesos replicados y concluyó que el estudio "estaba incompleto".
+_PREVIEW_COLUMNS = 12
+
+
+def _table_summary(t: Any) -> dict[str, Any]:
+    visible = [c for c in (t.columns or []) if not is_internal_column(str(c))]
+    summary: dict[str, Any] = {"tabla": t.table_name, "filas": t.row_count}
+    if visible:
+        summary["columnas"] = len(visible)
+        summary["primeras_columnas"] = [str(c) for c in visible[:_PREVIEW_COLUMNS]]
+    return summary
+
+
 # ── buscar_datos ───────────────────────────────────────────
 
 
@@ -211,9 +228,7 @@ class BuscarDatos:
         for t in await deps.sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits]):
             # Una tabla con 0 filas es una versión vieja o una descarga fallida.
             if t.dataset_id and t.row_count != 0:
-                tables.setdefault(str(t.dataset_id), []).append(
-                    {"tabla": t.table_name, "filas": t.row_count}
-                )
+                tables.setdefault(str(t.dataset_id), []).append(_table_summary(t))
 
         # El catálogo tiene datasets repetidos (la migración de datos.gob.ar
         # regeneró IDs): mismo título y URL = el mismo dataset.
@@ -332,9 +347,15 @@ class DescribirTabla:
                 "tamaño de la muestra, no la población."
             )
         if not geo:
+            # Batería del 02-oct: con el aviso sin la segunda oración, Sonnet y
+            # Haiku explicaban bien que no había dato de Pinamar pero no daban
+            # el total nacional, que la tabla sí tiene.
             payload["aviso_geografico"] = (
                 "Sin columnas geográficas: el dato es de un solo nivel (normalmente el total "
-                "nacional). No lo presentes como dato de una provincia, partido o ciudad."
+                "nacional). No lo presentes como dato de una provincia, partido o ciudad. Si te "
+                "preguntaron por un lugar, decí que no hay dato a ese nivel y DÁ IGUAL la cifra "
+                "nacional, calculándola con calcular (con el ponderador si lo hay) y aclarando "
+                "que es nacional."
             )
         return ToolOutcome(to_json(payload))
 
