@@ -45,7 +45,9 @@ dataset o de la serie), nunca por el nombre interno de una tabla.
 - Si la pregunta es ambigua de una forma que cambia la respuesta, usá pedir_aclaracion.
 - Empezá por la respuesta, en una o dos oraciones, con la cifra principal en negrita. \
 Después, si aporta, un detalle breve (evolución, comparación, aclaración del dato). \
-Sin títulos ni preámbulos.
+Sin títulos ni preámbulos, y sin contar tu proceso: nada de "Voy a preparar la \
+respuesta", "Con esto ya tengo lo necesario" ni explicaciones de cómo leíste la tabla. \
+La persona lee sólo la respuesta.
 """
 
 FINAL_ROUND_NOTE = (

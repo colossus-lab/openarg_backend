@@ -414,14 +414,26 @@ def test_las_descripciones_de_herramientas_no_repiten_nombres() -> None:
 @pytest.mark.parametrize(
     ("fechas", "esperado"),
     [
+        # Fechadas por el primer día del período (lo habitual).
         (["2025-01-01", "2025-07-01"], ["2025-S1", "2025-S2"]),
         (["2025-04-01", "2025-07-01"], ["2025-T2", "2025-T3"]),
         (["2024-01-01", "2025-01-01"], ["2024", "2025"]),
+        # PBI trimestral real: el 2° trimestre de 2026 es `2026-04-01`.
+        (["2026-01-01", "2026-04-01"], ["2026-T1", "2026-T2"]),
+        # Tasa de pobreza real del INDEC: fechada por el día siguiente al fin.
+        # `2026-07-01` es el 1er semestre de 2026 (publicado en septiembre),
+        # y el 52,9 % de `2024-07-01` es el 1er semestre de 2024.
+        (
+            ["2024-07-01", "2025-01-01", "2025-07-01", "2026-01-01", "2026-07-01"],
+            ["2024-S1", "2024-S2", "2025-S1", "2025-S2", "2026-S1"],
+        ),
     ],
 )
-def test_las_series_semestrales_llevan_el_periodo_explicito(
+def test_las_series_llevan_el_periodo_con_la_convencion_de_la_serie(
     fechas: list[str], esperado: list[str]
 ) -> None:
+    from datetime import date
+
     from app.application.answers.tools.conectores import _tail_for_model
 
     result = DataResult(
@@ -432,7 +444,8 @@ def test_las_series_semestrales_llevan_el_periodo_explicito(
         format="time_series",
         records=[{"fecha": f, "pobreza": 30.0} for f in fechas],
     )
-    assert [r["periodo"] for r in _tail_for_model(result, 10)["filas"]] == esperado
+    filas = _tail_for_model(result, 10, today=date(2026, 10, 2))["filas"]
+    assert [r["periodo"] for r in filas] == esperado
 
 
 def test_una_serie_mensual_no_lleva_periodo() -> None:
