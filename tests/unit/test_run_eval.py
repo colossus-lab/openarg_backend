@@ -281,5 +281,13 @@ def test_el_caso_pinamar_exige_la_fuente_y_prohibe_decir_que_no_esta() -> None:
 
     caso = next(e for e in load_golden_dataset(DEFAULT_DATASET) if e["id"] == "negativo_003")
 
+    import re
+
     assert "Perfil de las Personas con Discapacidad" in caso["expected_sources"]
-    assert "no está disponible" in caso["forbidden_answer_contains"]
+    [patron] = caso["forbidden_answer_patterns"]
+    # Lo que dijo prod el 30-sep: que el ESTUDIO no estaba disponible.
+    assert re.search(patron, "El Estudio Nacional sobre el Perfil… no está disponible", re.I)
+    # Lo correcto (agente, 02-oct): el dato de Pinamar no está en el estudio.
+    assert not re.search(
+        patron, "El dato para Pinamar no está disponible en el Estudio Nacional.", re.I
+    )
