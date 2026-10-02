@@ -53,14 +53,34 @@ class ToolOutcome:
     is_error: bool = False
     # Sólo `pedir_aclaracion`: el turno termina con una pregunta al usuario.
     clarification: ClarificationEvent | None = None
+    # Lo que se hizo, para la lista de pasos que ve el usuario
+    # ("Revisó «Estudio Nacional…» (82.327 filas)"). None = no se muestra.
+    summary: str | None = None
 
 
 class AgentToolImpl(Protocol):
     spec: AgentTool
-    # Lo que ve el usuario mientras corre ("Consultando series de tiempo…").
+    # Lo que ve el usuario mientras corre, si la herramienta no da algo más
+    # concreto con `describe(args)` ("Consultando series de tiempo…").
     status: str
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolOutcome: ...
+
+
+def quoted(text: Any, limit: int = 60) -> str:
+    """Un texto del pedido, entre comillas y corto, para mostrarle al usuario."""
+    value = " ".join(str(text or "").split())
+    if len(value) > limit:
+        value = value[: limit - 1].rstrip() + "…"
+    return f"«{value}»"
+
+
+def count(n: int | None, singular: str, plural: str) -> str:
+    """ "1 fila", "82.327 filas" (con separador de miles argentino)."""
+    if n is None:
+        return plural
+    word = singular if n == 1 else plural
+    return f"{n:,}".replace(",", ".") + f" {word}"
 
 
 def _default(value: Any) -> Any:

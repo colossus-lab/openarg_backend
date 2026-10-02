@@ -18,7 +18,9 @@ from app.application.answers.tools.base import (
     ToolContext,
     ToolInputError,
     ToolOutcome,
+    count,
     int_arg,
+    quoted,
     result_for_model,
     str_arg,
     to_json,
@@ -125,6 +127,10 @@ def _tail_for_model(result: DataResult, last: int, *, today: date | None = None)
 
 class BuscarSeries:
     status = "Buscando series de tiempo..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        return f"Buscando series oficiales de {quoted(args.get('texto'))}"
+
     spec = AgentTool(
         name="buscar_series",
         description=(
@@ -168,12 +174,22 @@ class BuscarSeries:
             for s in found
         ]
         if not curated and not series:
-            return ToolOutcome(to_json({"series": [], "nota": "No hay series con ese nombre."}))
-        return ToolOutcome(to_json({"verificadas": curated, "series": series}))
+            return ToolOutcome(
+                to_json({"series": [], "nota": "No hay series con ese nombre."}),
+                summary="No encontró series oficiales con ese nombre",
+            )
+        return ToolOutcome(
+            to_json({"verificadas": curated, "series": series}),
+            summary=f"Encontró {count(len(curated) + len(series), 'serie', 'series')}",
+        )
 
 
 class SeriesTiempo:
     status = "Consultando series de tiempo..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        return "Leyendo la serie de tiempo"
+
     spec = AgentTool(
         name="series_tiempo",
         description=(
@@ -238,6 +254,13 @@ class SeriesTiempo:
 
 class Cotizaciones:
     status = "Consultando cotizaciones..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        if args.get("indicador") == "riesgo_pais":
+            return "Consultando el riesgo país"
+        casa = str(args.get("casa") or "").strip()
+        return f"Consultando la cotización del dólar {casa}".rstrip()
+
     spec = AgentTool(
         name="cotizaciones",
         description=(
@@ -280,6 +303,14 @@ class Cotizaciones:
 
 class DeclaracionesJuradas:
     status = "Consultando declaraciones juradas..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        if args.get("accion") == "buscar" and args.get("nombre"):
+            return f"Buscando la declaración jurada de {quoted(args.get('nombre'))}"
+        if args.get("accion") == "ranking":
+            return "Armando el ranking de declaraciones juradas"
+        return self.status
+
     spec = AgentTool(
         name="declaraciones_juradas",
         description=(
@@ -327,6 +358,10 @@ class DeclaracionesJuradas:
 
 class Sesiones:
     status = "Buscando en las sesiones del Congreso..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        return f"Buscando {quoted(args.get('texto'))} en las sesiones del Congreso"
+
     spec = AgentTool(
         name="sesiones",
         description=(
@@ -414,6 +449,10 @@ class PersonalLegislativo:
 
 class UbicarLugar:
     status = "Ubicando el lugar..."
+
+    def describe(self, args: dict[str, Any]) -> str:
+        return f"Ubicando {quoted(args.get('texto'))}"
+
     spec = AgentTool(
         name="ubicar_lugar",
         description=(
@@ -439,7 +478,9 @@ class UbicarLugar:
         payload["filas"] = (result.records or [])[: min(10, MAX_ROWS_FOR_MODEL)]
         # Ubicar Pinamar no responde cuántas personas viven en Pinamar: no va a
         # las fuentes ni a la evidencia de la respuesta.
-        return ToolOutcome(to_json(payload))
+        first = (result.records or [{}])[0]
+        place = first.get("nombre") or ""
+        return ToolOutcome(to_json(payload), summary=f"Ubicó {quoted(place)}" if place else None)
 
 
 # ── pedir una aclaración ───────────────────────────────────
