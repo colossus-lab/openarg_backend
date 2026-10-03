@@ -310,7 +310,7 @@ async def test_una_herramienta_desconocida_no_rompe_el_turno() -> None:
 async def test_al_agotar_las_herramientas_se_pide_la_respuesta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(agent_module.MAX_TOOL_CALLS, "normal", 2)
+    monkeypatch.setattr(agent_module, "MAX_TOOL_CALLS", 2)
     llm = ScriptedLLM(
         [
             _turn(calls=[_call("ubicar_lugar", 1, texto="a"), _call("ubicar_lugar", 2, texto="b")]),
@@ -326,7 +326,7 @@ async def test_al_agotar_las_herramientas_se_pide_la_respuesta(
 async def test_si_el_modelo_insiste_sin_presupuesto_se_cierra_igual(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(agent_module.MAX_TOOL_CALLS, "normal", 1)
+    monkeypatch.setattr(agent_module, "MAX_TOOL_CALLS", 1)
     llm = ScriptedLLM(
         [
             _turn(calls=[_call("ubicar_lugar", texto="a")]),
@@ -341,7 +341,12 @@ async def test_si_el_modelo_insiste_sin_presupuesto_se_cierra_igual(
 async def test_el_tope_de_tiempo_del_canal_achica_el_presupuesto() -> None:
     engine = AgentEngine(ScriptedLLM([]), _deps())
     assert engine._time_budget(EngineRequest("q", "u", deadline_s=30)) == 20
-    assert engine._time_budget(EngineRequest("q", "u")) == agent_module.SOFT_TIME_BUDGET_S["normal"]
+    assert engine._time_budget(EngineRequest("q", "u")) == agent_module.SOFT_TIME_BUDGET_S
+
+
+async def test_un_pedido_viejo_en_modo_profundo_corre_como_el_normal() -> None:
+    engine = AgentEngine(ScriptedLLM([]), _deps())
+    assert engine._time_budget(EngineRequest("q", "u", mode="deep")) == 35.0
 
 
 async def test_la_aclaracion_cierra_el_turno_sin_otra_vuelta() -> None:

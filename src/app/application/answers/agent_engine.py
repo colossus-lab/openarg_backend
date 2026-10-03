@@ -56,11 +56,12 @@ from app.domain.ports.llm.agent_llm import AgentTurn, AgentUsage, IAgentLLM, Tex
 
 logger = logging.getLogger(__name__)
 
-# Presupuesto por turno. El modo profundo puede mirar más fuentes.
-MAX_TOOL_CALLS = {"normal": 10, "deep": 20}
+# Presupuesto por turno. No hay modo profundo: medido el 02-oct con la
+# batería, costaba ×1,19 y respondía igual que el normal, y se sacó.
+MAX_TOOL_CALLS = 10
 # Tiempo de herramientas antes de pedir la respuesta con lo que hay. Deja
 # margen para la redacción dentro del objetivo de p95 ≤ 45 s del chat.
-SOFT_TIME_BUDGET_S = {"normal": 35.0, "deep": 90.0}
+SOFT_TIME_BUDGET_S = 35.0
 # Lo que se reserva para redactar cuando el canal tiene un tope duro (/ask).
 _ANSWER_MARGIN_S = 10.0
 TOOL_TIMEOUT_S = 25.0
@@ -209,7 +210,7 @@ class AgentEngine:
             return ToolOutcome("La herramienta falló. Probá con otra.", is_error=True)
 
     def _time_budget(self, req: EngineRequest) -> float:
-        budget = SOFT_TIME_BUDGET_S.get(req.mode, SOFT_TIME_BUDGET_S["normal"])
+        budget = SOFT_TIME_BUDGET_S
         if req.deadline_s:
             budget = min(budget, max(1.0, req.deadline_s - _ANSWER_MARGIN_S))
         return budget
@@ -220,7 +221,7 @@ class AgentEngine:
         by_name = {t.spec.name: t for t in tools}
         specs = [t.spec for t in tools]
         ctx = ToolContext(deps=self._deps, req=req)
-        system = system_prompt(deep=req.mode == "deep")
+        system = system_prompt()
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -230,7 +231,7 @@ class AgentEngine:
             }
         ]
 
-        max_calls = MAX_TOOL_CALLS.get(req.mode, MAX_TOOL_CALLS["normal"])
+        max_calls = MAX_TOOL_CALLS
         time_budget = self._time_budget(req)
         usage = AgentUsage()
         evidence: list[DataResult] = []

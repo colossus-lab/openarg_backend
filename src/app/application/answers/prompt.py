@@ -56,15 +56,9 @@ FINAL_ROUND_NOTE = (
 )
 
 
-def system_prompt(today: date | None = None, *, deep: bool = False) -> str:
+def system_prompt(today: date | None = None) -> str:
     """El prompt del sistema. La fecha va al final: cambia una vez por día."""
-    text = SYSTEM_PROMPT
-    if deep:
-        text += (
-            "\nModo profundo: revisá más de una fuente cuando haya varias candidatas, "
-            "contrastá las cifras y explicá las diferencias.\n"
-        )
-    return text + f"\nHoy es {(today or date.today()).isoformat()}."
+    return SYSTEM_PROMPT + f"\nHoy es {(today or date.today()).isoformat()}."
 
 
 def user_message(
