@@ -101,6 +101,40 @@ class TestLogUsage:
         assert _recorded(repo).question == "x" * 200
 
     @pytest.mark.asyncio
+    async def test_an_answer_keeps_its_model_and_cost(self) -> None:
+        repo = AsyncMock()
+        await usage_log.log_usage(
+            repo,
+            _key(),
+            _request(),
+            endpoint="/api/v1/ask",
+            mode="respuestas",
+            tool="consultar_datos_publicos",
+            status_code=200,
+            question="¿Inflación de agosto?",
+            model="us.anthropic.claude-sonnet-4-6",
+            cost_usd=0.0412,
+        )
+        row = _recorded(repo)
+        assert (row.model, row.cost_usd) == ("us.anthropic.claude-sonnet-4-6", 0.0412)
+
+    @pytest.mark.asyncio
+    async def test_without_a_model_both_stay_empty(self) -> None:
+        repo = AsyncMock()
+        await usage_log.log_usage(
+            repo,
+            _key(),
+            _request(),
+            endpoint="/api/v1/ask",
+            mode="respuestas",
+            tool="consultar_datos_publicos",
+            status_code=200,
+            model="",
+        )
+        row = _recorded(repo)
+        assert (row.model, row.cost_usd) == (None, None)
+
+    @pytest.mark.asyncio
     async def test_a_database_failure_does_not_break_the_response(self) -> None:
         repo = AsyncMock()
         repo.record_usage.side_effect = RuntimeError("db down")

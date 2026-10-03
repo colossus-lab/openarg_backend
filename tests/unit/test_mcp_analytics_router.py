@@ -89,6 +89,8 @@ def test_overview_shape(rows, monkeypatch: pytest.MonkeyPatch) -> None:
             }
         ]
     )
+    # Las 10 respuestas son del motor viejo: sin costo guardado, se estiman.
+    queue.append([{"model": None, "respuestas": 10, "medidas": 0, "usd": 0}])
     result = mod.overview(days=30)
 
     assert result["uso"]["pedidos_datos"] == 120
@@ -136,9 +138,61 @@ def test_overview_on_an_empty_database(rows) -> None:
             )
         ]
     )
+    queue.append([])
     result = mod.overview(days=7)
     assert result["uso"]["preguntas"] == 0
     assert result["costo"]["estimado_usd"] == 0
+
+
+def test_the_cost_adds_what_was_measured_and_estimates_the_rest() -> None:
+    rows = [
+        # Agente con Sonnet: costo medido en cada fila.
+        {"model": "us.anthropic.claude-sonnet-4-6", "respuestas": 4, "medidas": 4, "usd": 0.16},
+        # Motor viejo: sin costo, a US$ 0,034 cada una.
+        {"model": None, "respuestas": 10, "medidas": 0, "usd": 0},
+    ]
+    costo = mod.cost_summary(rows, 0.034)
+    assert costo["medido_usd"] == 0.16
+    assert costo["respuestas_medidas"] == 4
+    assert costo["respuestas_estimadas"] == 10
+    assert costo["estimado_usd"] == 0.5
+    assert costo["usd_por_respuesta"] == round(0.5 / 14, 4)
+    assert costo["por_modelo"] == [
+        {
+            "modelo": "sin medir",
+            "respuestas": 10,
+            "usd": 0.34,
+            "usd_por_respuesta": 0.034,
+            "medido": False,
+        },
+        {
+            "modelo": "Sonnet 4.6",
+            "respuestas": 4,
+            "usd": 0.16,
+            "usd_por_respuesta": 0.04,
+            "medido": True,
+        },
+    ]
+
+
+def test_without_answers_the_cost_per_answer_is_the_fixed_one() -> None:
+    costo = mod.cost_summary([], 0.034)
+    assert costo["estimado_usd"] == 0
+    assert costo["usd_por_respuesta"] == 0.034
+    assert costo["por_modelo"] == []
+
+
+@pytest.mark.parametrize(
+    ("model", "label"),
+    [
+        ("us.anthropic.claude-sonnet-4-6", "Sonnet 4.6"),
+        ("us.anthropic.claude-haiku-4-5-20251001-v1:0", "Haiku 4.5"),
+        ("otro-modelo", "otro-modelo"),
+        (None, "sin medir"),
+    ],
+)
+def test_model_label(model: str | None, label: str) -> None:
+    assert mod.model_label(model) == label
 
 
 def test_timeline_serialises_the_day(rows) -> None:
