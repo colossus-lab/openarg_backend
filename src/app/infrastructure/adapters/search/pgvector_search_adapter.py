@@ -12,8 +12,128 @@ class PgVectorSearchAdapter(IVectorSearch):
     _RETRIEVAL_VECTOR_ONLY = "vector_only"
     _RETRIEVAL_HYBRID_FULL = "hybrid_full"
 
+    # Chunks fetched through the HNSW index before grouping by dataset. The
+    # catalog repeats datasets (the datos.gob.ar migration regenerated ids),
+    # so it takes a few hundred chunks to yield a few dozen distinct ones.
+    _ANN_MIN_CANDIDATES = 200
+    _ANN_CANDIDATES_PER_RESULT = 10
+    # pgvector's ceiling for hnsw.ef_search.
+    _ANN_MAX_CANDIDATES = 1000
+
+    # pgvector version, read once per process: iterative index scans (needed
+    # to filter by portal inside the index scan) exist from 0.8.0 on.
+    _pgvector_version: tuple[int, ...] | None = None
+
     def __init__(self, session: MainAsyncSession) -> None:
         self._session = session
+
+    async def reset(self) -> None:
+        """Rollback the request session after a failed or cancelled query.
+
+        A query cancelled mid-flight (an agent tool timeout) leaves the session
+        in an invalid transaction, and every later query in the same request
+        fails with ``PendingRollbackError`` until someone rolls it back.
+        """
+        try:
+            await self._session.rollback()
+        except Exception:  # noqa: BLE001 — best effort; the caller already failed
+            pass
+
+    async def _supports_iterative_scan(self) -> bool:
+        cls = type(self)
+        if cls._pgvector_version is None:
+            raw = (
+                await self._session.execute(
+                    text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                )
+            ).scalar()
+            cls._pgvector_version = tuple(int(p) for p in re.findall(r"\d+", str(raw or "0")))
+        return cls._pgvector_version >= (0, 8)
+
+    async def search_datasets_ann(
+        self,
+        query_embedding: list[float],
+        limit: int = 10,
+        portal_filter: str | None = None,
+        min_similarity: float = 0.40,
+    ) -> list[SearchResult]:
+        """Approximate nearest neighbours through the HNSW index.
+
+        ``ORDER BY embedding <=> q LIMIT n`` is what the index answers; a
+        similarity threshold in the WHERE clause is not, and turns the search
+        into a scan of every chunk (staging, 76k chunks: 9-16 s and up to the
+        60 s statement timeout for ``search_datasets``, 0.3-1.6 s here, same
+        top 20). Grouping by dataset and the threshold apply afterwards.
+
+        Two pgvector settings make the index return what the query asks for:
+
+        - ``hnsw.ef_search`` caps how many rows one index scan returns (40 by
+          default). Left at 40, ``LIMIT 200`` yields 40 chunks, and for
+          "personas con discapacidad" none of the right datasets.
+        - With a portal filter, ``hnsw.iterative_scan`` keeps scanning until
+          enough chunks of that portal turn up. Filtering after the fetch
+          instead returned nothing for small portals (caba, neuquen_legislatura)
+          even with 1000 candidates. Before pgvector 0.8 there is no iterative
+          scan; the exact search, which a portal filter keeps small, is used.
+
+        Both are set with ``is_local`` and end with the transaction.
+        """
+        if portal_filter and not await self._supports_iterative_scan():
+            return await self.search_datasets(query_embedding, limit, portal_filter, min_similarity)
+
+        candidates = min(
+            max(self._ANN_MIN_CANDIDATES, limit * self._ANN_CANDIDATES_PER_RESULT),
+            self._ANN_MAX_CANDIDATES,
+        )
+        await self._session.execute(
+            text("SELECT set_config('hnsw.ef_search', :ef, true)"), {"ef": str(candidates)}
+        )
+        embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+        params: dict = {
+            "embedding": embedding_str,
+            "candidates": candidates,
+            "min_sim": min_similarity,
+            "limit": limit,
+        }
+        portal_clause = ""
+        if portal_filter:
+            await self._session.execute(
+                text("SELECT set_config('hnsw.iterative_scan', 'relaxed_order', true)")
+            )
+            portal_clause = (
+                " WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)"
+            )
+            params["portal"] = portal_filter
+
+        query = text(
+            "WITH nn AS ("
+            " SELECT dc.dataset_id, dc.embedding <=> CAST(:embedding AS vector) AS dist"
+            " FROM dataset_chunks dc"
+            f"{portal_clause}"
+            " ORDER BY dc.embedding <=> CAST(:embedding AS vector)"
+            " LIMIT :candidates"
+            ")"
+            " SELECT CAST(d.id AS text) AS dataset_id, d.title, d.description, d.portal,"
+            "        d.download_url, d.columns, 1 - min(nn.dist) AS score"
+            " FROM nn JOIN datasets d ON d.id = nn.dataset_id"
+            " GROUP BY d.id"
+            " HAVING 1 - min(nn.dist) >= :min_sim"
+            " ORDER BY score DESC"
+            " LIMIT :limit"
+        )
+        result = await self._session.execute(query, params)
+        return [
+            SearchResult(
+                dataset_id=row.dataset_id,
+                title=row.title,
+                description=row.description or "",
+                portal=row.portal,
+                download_url=row.download_url or "",
+                columns=row.columns or "",
+                score=float(row.score),
+            )
+            for row in result.fetchall()
+        ]
 
     async def search_datasets(
         self,

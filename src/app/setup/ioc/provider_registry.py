@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import AsyncIterator, Iterable
 
@@ -19,6 +20,7 @@ from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.connectors.staff import IStaffConnector
 from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.dataset.dataset_repository import IDatasetRepository
+from app.domain.ports.llm.agent_llm import IAgentLLM
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
@@ -361,7 +363,23 @@ class LangGraphProvider(Provider):  # type: ignore[misc]
             metrics=MetricsCollector(),
             serving_port=serving_port,
             llm_deep=llm_deep,
+            agent_llm=_agent_llm(settings.bedrock.REGION, settings.bedrock.AGENT_MODEL),
         )
+
+
+@functools.lru_cache(maxsize=4)
+def _agent_llm(region: str, model: str) -> IAgentLLM:
+    """Un cliente por proceso y modelo: lleva su propio pool de conexiones.
+
+    Construirlo es barato, pero hacerlo en cada request abriría un pool HTTP
+    nuevo por pregunta. Se arma la primera vez que se pide, así que con
+    `ANSWERS_ENGINE=legacy` no se usa nunca.
+    """
+    from app.infrastructure.adapters.llm.anthropic_bedrock_agent_adapter import (
+        AnthropicBedrockAgentAdapter,
+    )
+
+    return AnthropicBedrockAgentAdapter(region=region, model=model)
 
 
 class ApiKeyProvider(Provider):  # type: ignore[misc]

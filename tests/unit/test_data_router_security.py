@@ -85,7 +85,7 @@ def _default_sandbox() -> AsyncMock:
 
 def _default_vector_search() -> AsyncMock:
     mock = AsyncMock(spec=IVectorSearch)
-    mock.search_datasets.return_value = []
+    mock.search_datasets_ann.return_value = []
     return mock
 
 

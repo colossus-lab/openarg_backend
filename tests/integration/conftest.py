@@ -22,6 +22,7 @@ from app.domain.ports.connectors.georef import IGeorefConnector
 from app.domain.ports.connectors.series_tiempo import ISeriesTiempoConnector
 from app.domain.ports.connectors.sesiones import ISesionesConnector
 from app.domain.ports.connectors.staff import IStaffConnector
+from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider, ILLMProvider
 from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
 from app.domain.ports.search.vector_search import IVectorSearch
@@ -157,6 +158,15 @@ class MockProvider(Provider):
     def chat_repo(self) -> IChatRepository:
         mock = MagicMock(spec=IChatRepository)
         mock.get_conversation_messages = AsyncMock(return_value=[])
+        return mock
+
+    @provide
+    def credit_repo(self) -> ICreditRepository:
+        """Sin Fundadores ni créditos. Lo pide el cupo del chat web en /smart."""
+        mock = MagicMock(spec=ICreditRepository)
+        mock.get_active_supporter = AsyncMock(return_value=None)
+        mock.balance = AsyncMock(return_value={"preguntas": 0, "datos": 0})
+        mock.debit = AsyncMock(return_value=False)
         return mock
 
     @provide

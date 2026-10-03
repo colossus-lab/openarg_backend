@@ -25,7 +25,6 @@ from typing import Any
 import pytest
 
 from app.presentation.http.controllers.query.smart_query_v2_router import (
-    _build_complete_event,
     _filter_stream_payload,
     _safe_send_json,
 )
@@ -185,46 +184,7 @@ async def test_safe_send_json_normalizes_unknown_type_in_single_pass(
     assert parsed["meta"]["weird"] == "<weird-object>"
 
 
-def test_build_complete_event_uses_state_shape_for_terminal_nodes() -> None:
-    update = {
-        "clean_answer": "ok",
-        "sources": [{"name": "x", "url": "", "portal": "p"}],
-        "warnings": ["warn"],
-        "tokens_used": 42,
-    }
-
-    assert _build_complete_event("finalize", update) == {
-        "type": "complete",
-        "answer": "ok",
-        "sources": [{"name": "x", "url": "", "portal": "p"}],
-        "chart_data": None,
-        "map_data": None,
-        "citations": [],
-        "documents": None,
-        "warnings": ["warn"],
-        # CONTRACT-03 (round v46): tokens_used added for parity with the
-        # HTTP /smart response. confidence intentionally stays out.
-        "tokens_used": 42,
-    }
-
-
-def test_build_complete_event_tokens_used_defaults_to_zero() -> None:
-    """A pipeline run that never set tokens_used must still produce a
-    well-formed complete event — defensive zero default avoids the
-    frontend seeing `undefined` and rendering it as '0' anyway."""
-    update = {"clean_answer": "ok"}
-    event = _build_complete_event("finalize", update)
-    assert event is not None
-    assert event["tokens_used"] == 0
-
-
-def test_build_complete_event_ignores_non_terminal_analyst_update() -> None:
-    update = {
-        "clean_answer": "respuesta parcial",
-        "confidence": 0.45,
-    }
-
-    assert _build_complete_event("analyst", update) is None
+# La construcción del `complete` se mudó al motor: ver test_answer_engine.py.
 
 
 def test_filter_stream_payload_keeps_connector_metadata() -> None:

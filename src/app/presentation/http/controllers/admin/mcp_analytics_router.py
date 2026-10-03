@@ -22,7 +22,15 @@ from app.presentation.http.controllers.admin.tasks_router import verify_admin_ke
 
 router = APIRouter(prefix="/admin/analytics/mcp", tags=["admin-analytics"])
 
-_DEFAULT_COST_PER_ANSWER_USD = 0.034  # medido en CloudWatch, septiembre 2026
+# Para respuestas sin costo medido (filas anteriores a la 0066 y el motor
+# viejo): medido en CloudWatch en septiembre de 2026, pipeline viejo con Haiku.
+_DEFAULT_COST_PER_ANSWER_USD = 0.034
+
+# Nombre corto de los modelos que conocemos, para el tablero.
+_MODEL_LABELS = {
+    "claude-sonnet-4-6": "Sonnet 4.6",
+    "claude-haiku-4-5": "Haiku 4.5",
+}
 
 # `mode` explícito, o inferido para las filas viejas (sólo `/ask` se registraba).
 _MODE = "COALESCE(u.mode, CASE WHEN u.endpoint = '/api/v1/ask' THEN 'respuestas' ELSE 'datos' END)"
@@ -38,6 +46,7 @@ _WINDOW = f"""
     WITH w AS (
         SELECT u.api_key_id, u.endpoint, u.question, u.status_code, u.tokens_used,
                u.duration_ms, u.tool, u.via, u.client, u.created_at,
+               u.model, u.cost_usd,
                {_MODE} AS mode
         FROM api_usage u
         WHERE u.created_at > NOW() - make_interval(days => :days)
@@ -55,6 +64,61 @@ def cost_per_answer_usd() -> float:
     except ValueError:
         return _DEFAULT_COST_PER_ANSWER_USD
     return value if value >= 0 else _DEFAULT_COST_PER_ANSWER_USD
+
+
+def model_label(model: str | None) -> str:
+    """'us.anthropic.claude-sonnet-4-6' → 'Sonnet 4.6'. Sin dato: el motor viejo."""
+    if not model:
+        return "sin medir"
+    return next((label for key, label in _MODEL_LABELS.items() if key in model), model)
+
+
+def cost_summary(rows: list[dict[str, Any]], fallback: float) -> dict[str, Any]:
+    """El gasto del período: lo medido respuesta por respuesta, más una
+    estimación con el costo fijo para las que no tienen costo guardado.
+
+    ``rows``: una por modelo, con ``model``, ``respuestas``, ``medidas`` (las
+    que tienen costo) y ``usd`` (la suma de lo medido).
+    """
+    medido = sum(float(r["usd"] or 0) for r in rows)
+    medidas = sum(int(r["medidas"] or 0) for r in rows)
+    respuestas = sum(int(r["respuestas"] or 0) for r in rows)
+    sin_medir = respuestas - medidas
+    total = medido + sin_medir * fallback
+
+    por_modelo: dict[str, dict[str, float]] = {}
+    for r in rows:
+        label = model_label(r["model"])
+        entry = por_modelo.setdefault(label, {"respuestas": 0, "medidas": 0, "usd": 0.0})
+        entry["respuestas"] += int(r["respuestas"] or 0)
+        entry["medidas"] += int(r["medidas"] or 0)
+        entry["usd"] += float(r["usd"] or 0)
+    detalle = []
+    for label, e in sorted(por_modelo.items(), key=lambda kv: -kv[1]["respuestas"]):
+        usd = e["usd"] + (e["respuestas"] - e["medidas"]) * fallback
+        detalle.append(
+            {
+                "modelo": label,
+                "respuestas": int(e["respuestas"]),
+                "usd": round(usd, 2),
+                "usd_por_respuesta": round(usd / e["respuestas"], 4) if e["respuestas"] else 0.0,
+                "medido": e["medidas"] == e["respuestas"],
+            }
+        )
+    return {
+        "estimado_usd": round(total, 2),
+        "usd_por_respuesta": round(total / respuestas, 4) if respuestas else fallback,
+        "medido_usd": round(medido, 2),
+        "respuestas_medidas": medidas,
+        "respuestas_estimadas": sin_medir,
+        "usd_fijo_por_respuesta": fallback,
+        "por_modelo": detalle,
+        "nota": (
+            "Medido con los tokens de cada respuesta y el precio de lista del modelo; "
+            f"las que no tienen costo guardado se estiman a US$ {fallback} cada una. "
+            "La factura real está en AWS (Bedrock)."
+        ),
+    }
 
 
 def _rows(sql: str, params: dict | None = None) -> list[dict[str, Any]]:
@@ -134,7 +198,19 @@ def overview(days: int = _days()) -> dict[str, Any]:
         {"days": days},
     )[0]
 
-    cost = cost_per_answer_usd()
+    by_model = _rows(
+        _WINDOW
+        + """
+        SELECT model,
+               COUNT(*)                     AS respuestas,
+               COUNT(cost_usd)              AS medidas,
+               COALESCE(SUM(cost_usd), 0)   AS usd
+        FROM w
+        WHERE mode = 'respuestas' AND status_code = 200
+        GROUP BY model
+        """,
+        {"days": days},
+    )
     preguntas_ok = int(usage["preguntas_ok"] or 0)
     return {
         "days": days,
@@ -168,11 +244,7 @@ def overview(days: int = _days()) -> dict[str, Any]:
             "usado": int(keys["preguntas_hoy"] or 0),
             "tope": global_free_daily_cap(),
         },
-        "costo": {
-            "estimado_usd": round(preguntas_ok * cost, 2),
-            "usd_por_respuesta": cost,
-            "nota": "Estimado. El costo real está en CloudWatch (AWS/Bedrock).",
-        },
+        "costo": cost_summary(by_model, cost_per_answer_usd()),
     }
 
 

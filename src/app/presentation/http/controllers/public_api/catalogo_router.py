@@ -170,8 +170,10 @@ async def buscar(
     """Búsqueda semántica en el catálogo (un embedding, sin LLM).
 
     Semántica y no híbrida: en staging la híbrida tardaba 3,5 s por pedido y
-    la semántica 0,5 s, que es la misma que usa `/data/search`. Se pide el
-    doble de resultados porque después se agrupan los duplicados.
+    la semántica 0,5 s, que es la misma que usa `/data/search`. Por el índice
+    HNSW (`search_datasets_ann`): la exacta recorría todos los chunks y
+    tardaba de 1 a más de 60 s. Se pide el doble de resultados porque después
+    se agrupan los duplicados.
     """
     endpoint, tool = "/api/v1/catalogo/buscar", "buscar_datasets"
     api_key = await _authorize(request, api_key_repo, cache, credits, endpoint=endpoint, tool=tool)
@@ -181,7 +183,7 @@ async def buscar(
         except Exception:
             logger.exception("catalogo/buscar: embedding falló")
             raise HTTPException(status_code=503, detail="La búsqueda no está disponible ahora.")
-        hits = await vector_search.search_datasets(
+        hits = await vector_search.search_datasets_ann(
             query_embedding=vector,
             limit=limite * 2,
             portal_filter=portal,

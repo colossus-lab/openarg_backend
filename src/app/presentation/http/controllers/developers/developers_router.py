@@ -20,6 +20,7 @@ from app.application.public_quota import (
     monthly_counter_key,
     resolve_tier,
 )
+from app.application.web_quota import web_quota
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.entities.credits.credits import CreditType
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
@@ -195,10 +196,13 @@ async def get_usage(
 
     preguntas_usadas = min(await used("preguntas"), tier.preguntas)
     datos_usados = min(await used("datos"), tier.datos)
+    # El chat web tiene su propio contador (30 por mes) y comparte los créditos.
+    web = (await web_quota(user.id, cache, credits)).to_wire()
     return {
         **summary,
         "preguntas": {"usadas": preguntas_usadas, "limite": tier.preguntas},
         "datos": {"usadas": datos_usados, "limite": tier.datos},
+        "web": web,
         "renueva": first_of_next_month_utc().isoformat(),
         "creditos": balance,
         "fundador": (

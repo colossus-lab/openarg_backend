@@ -6,6 +6,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Table,
     func,
@@ -81,6 +82,8 @@ def map_api_key_tables() -> None:
         Column("via", String(8), nullable=True),
         Column("client", String(32), nullable=True),
         Column("user_agent", String(160), nullable=True),
+        Column("model", String(100), nullable=True),
+        Column("cost_usd", Numeric(12, 6), nullable=True),
         Column("created_at", DateTime(timezone=True), server_default=func.now()),
     )
 

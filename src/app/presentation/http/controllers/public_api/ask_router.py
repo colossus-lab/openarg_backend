@@ -7,30 +7,25 @@ per plan, and does NOT save conversations.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
 from typing import Any
-from uuid import uuid4
 
 from dishka.integrations.fastapi import FromDishka, inject
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-import app.application.pipeline.nodes as nodes_pkg
+from app.application.answers.engine import CHANNEL_ASK, EngineRequest
+from app.application.answers.runner import EngineRunner
 from app.application.api_key_service import check_rate_limit, verify_api_key
 from app.application.pipeline.nodes import PipelineDeps
-from app.application.pipeline.state import OpenArgState
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.presentation.http.controllers.public_api.usage_log import log_rejection, log_usage
-from app.presentation.http.controllers.query.smart_query_v2_router import (
-    _get_checkpointer,
-    _get_or_compile_graph,
-)
+from app.presentation.http.controllers.query.smart_query_v2_router import _answer_engine
 
 logger = logging.getLogger(__name__)
 
@@ -106,36 +101,21 @@ async def public_ask(
         )
         raise
 
-    # 3. Reuse the same compiled graph as the frontend endpoint.
-    # `_get_checkpointer()` (no el atributo del módulo) reintenta la init
-    # después del TTL, igual que en /smart.
-    checkpointer = await _get_checkpointer()
-    compiled_graph = await _get_or_compile_graph(deps, checkpointer)
-    nodes_pkg.set_deps(deps)
+    # 3. Mismo motor que el chat y /smart. La API pública no expone el modo
+    # profundo ni guarda conversaciones.
+    req = EngineRequest(
+        question=body.question,
+        user_id=f"apikey:{api_key.id}",
+        mode="normal",
+        deadline_s=_pipeline_timeout(),
+        channel=CHANNEL_ASK,
+    )
 
-    # 4. Run pipeline
+    # 4. Run the engine
     start_time = time.monotonic()
-    initial_state: OpenArgState = {
-        "question": body.question,
-        "user_id": f"apikey:{api_key.id}",
-        "conversation_id": "",
-        # La API pública no expone el modo profundo.
-        "mode": "normal",
-        "replan_count": 0,
-    }
-
-    # Un grafo compilado con checkpointer rechaza la invocación sin
-    # `thread_id` (`ValueError: Checkpointer requires ... 'configurable'
-    # keys`), y eso salía como un 500 en TODAS las consultas de la API
-    # pública. Es el mismo arreglo que tiene /smart: un thread efímero por
-    # request, que no se reutiliza porque la API no guarda conversaciones.
-    invoke_config: dict[str, Any] = {}
-    if checkpointer:
-        invoke_config["configurable"] = {"thread_id": f"efimero-{uuid4()}"}
-
     try:
-        async with asyncio.timeout(_pipeline_timeout()):
-            result = await compiled_graph.ainvoke(initial_state, config=invoke_config)
+        runner = EngineRunner(await _answer_engine(deps), deps)
+        result = await runner.run(req)
     except TimeoutError:
         logger.error("Pipeline timeout for API key %s", api_key.key_prefix)
         await _usage(api_key_repo, api_key, request, body.question, 408, 0, 0)
@@ -146,16 +126,26 @@ async def public_ask(
         raise HTTPException(status_code=500, detail="Pipeline execution failed")
 
     duration_ms = int((time.monotonic() - start_time) * 1000)
-    tokens_used = result.get("tokens_used", 0)
+    tokens_used = result.tokens_used
 
     # Injection blocked → 400, como en /smart. Sin esto la API devolvía un
     # 200 con la respuesta de rechazo como si fuera un dato.
-    if result.get("plan_intent", "") == "injection_blocked":
+    if result.injection_blocked:
         await _usage(api_key_repo, api_key, request, body.question, 400, 0, duration_ms)
         raise HTTPException(status_code=400, detail="Potential prompt injection detected")
 
     # 5. Log usage (post-pipeline, fire-and-forget errors)
-    await _usage(api_key_repo, api_key, request, body.question, 200, tokens_used, duration_ms)
+    await _usage(
+        api_key_repo,
+        api_key,
+        request,
+        body.question,
+        200,
+        tokens_used,
+        duration_ms,
+        model=result.model,
+        cost_usd=result.cost_usd,
+    )
 
     try:
         await api_key_repo.update_last_used(api_key.id)
@@ -164,12 +154,12 @@ async def public_ask(
 
     # 6. Build response
     return {
-        "answer": result.get("clean_answer", ""),
-        "sources": result.get("sources", []),
-        "chart_data": result.get("chart_data"),
-        "map_data": result.get("map_data"),
-        "citations": result.get("citations", []),
-        "warnings": result.get("warnings", []),
+        "answer": result.answer,
+        "sources": result.sources,
+        "chart_data": result.chart_data,
+        "map_data": result.map_data,
+        "citations": result.citations,
+        "warnings": result.warnings,
         "usage": {
             "tokens": tokens_used,
             "duration_ms": duration_ms,
@@ -195,6 +185,9 @@ async def _usage(
     status_code: int,
     tokens_used: int,
     duration_ms: int,
+    *,
+    model: str | None = None,
+    cost_usd: float | None = None,
 ) -> None:
     await log_usage(
         repo,
@@ -207,4 +200,6 @@ async def _usage(
         question=question,
         tokens_used=tokens_used,
         duration_ms=duration_ms,
+        model=model,
+        cost_usd=cost_usd,
     )

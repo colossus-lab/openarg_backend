@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -340,3 +341,136 @@ class TestPgVectorSearchAdapter:
 
         assert len(results) == 1
         assert mock_session.execute.await_count == 1
+
+
+def _scripted_session(extversion: str = "0.8.1", rows: list | None = None) -> AsyncMock:
+    """Session double that answers by statement: version lookup, set_config, search."""
+    session = AsyncMock()
+
+    async def _execute(statement, params=None):
+        sql = str(statement)
+        result = MagicMock()
+        if "pg_extension" in sql:
+            result.scalar.return_value = extversion
+        else:
+            result.fetchall.return_value = rows or []
+        return result
+
+    session.execute.side_effect = _execute
+    return session
+
+
+def _statements(session: AsyncMock) -> list[tuple[str, dict]]:
+    return [
+        (str(c.args[0]), c.args[1] if len(c.args) > 1 else {})
+        for c in session.execute.await_args_list
+    ]
+
+
+class TestSearchDatasetsAnn:
+    """``search_datasets_ann``: the shape the HNSW index can answer, and the
+    two pgvector settings without which the index answers something else."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_version_cache(self, monkeypatch):
+        monkeypatch.setattr(PgVectorSearchAdapter, "_pgvector_version", None)
+
+    async def test_orders_by_distance_with_limit_and_thresholds_afterwards(self):
+        session = _scripted_session()
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        sql, params = _statements(session)[-1]
+        # The index answers ORDER BY distance LIMIT n ...
+        assert "ORDER BY dc.embedding <=> CAST(:embedding AS vector) LIMIT :candidates" in " ".join(
+            sql.split()
+        )
+        # ... and not a similarity predicate in the WHERE (that is a full scan).
+        assert "WHERE 1 -" not in sql
+        assert "HAVING 1 - min(nn.dist) >= :min_sim" in sql
+        assert "GROUP BY d.id" in sql
+        assert params["min_sim"] == 0.40
+        assert params["limit"] == 20
+
+    async def test_raises_ef_search_to_the_candidates_it_asks_for(self):
+        """With hnsw.ef_search at its default of 40 an index scan returns 40
+        rows whatever the LIMIT; on staging that dropped every relevant
+        dataset for "personas con discapacidad"."""
+        session = _scripted_session()
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        stmts = _statements(session)
+        ef = [p["ef"] for s, p in stmts if "hnsw.ef_search" in s]
+        assert ef == ["200"]
+        assert stmts[-1][1]["candidates"] == 200
+        # Set inside the transaction only, and before the search runs.
+        assert "set_config('hnsw.ef_search', :ef, true)" in stmts[0][0]
+
+    @pytest.mark.parametrize(("limit", "expected"), [(5, 200), (50, 500), (500, 1000)])
+    async def test_candidates_scale_with_limit_up_to_pgvector_ceiling(self, limit, expected):
+        session = _scripted_session()
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=limit)
+
+        stmts = _statements(session)
+        assert stmts[-1][1]["candidates"] == expected
+        assert [p["ef"] for s, p in stmts if "hnsw.ef_search" in s] == [str(expected)]
+
+    async def test_without_portal_skips_version_lookup_and_iterative_scan(self):
+        session = _scripted_session()
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8)
+
+        sqls = [s for s, _ in _statements(session)]
+        assert not any("pg_extension" in s for s in sqls)
+        assert not any("iterative_scan" in s for s in sqls)
+        assert ":portal" not in sqls[-1]
+
+    async def test_portal_filter_goes_inside_the_index_scan(self):
+        """Filtering after fetching N neighbours returned nothing for small
+        portals (caba, neuquen_legislatura) on staging, even with 1000."""
+        session = _scripted_session(extversion="0.8.1")
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, portal_filter="caba")
+
+        stmts = _statements(session)
+        assert any("'hnsw.iterative_scan', 'relaxed_order', true" in s for s, _ in stmts)
+        sql, params = stmts[-1]
+        nn_cte = sql.split(") SELECT")[0]
+        assert "WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)" in nn_cte
+        assert params["portal"] == "caba"
+
+    async def test_portal_filter_falls_back_to_exact_search_before_pgvector_0_8(self):
+        session = _scripted_session(extversion="0.7.4")
+        await PgVectorSearchAdapter(session).search_datasets_ann(
+            [0.1] * 8, limit=7, portal_filter="caba", min_similarity=0.4
+        )
+
+        stmts = _statements(session)
+        assert not any("iterative_scan" in s or "ef_search" in s for s, _ in stmts)
+        sql, params = stmts[-1]
+        assert "PARTITION BY d.id" in sql  # search_datasets' query
+        assert params["portal"] == "caba"
+        assert params["limit"] == 7
+
+    async def test_pgvector_version_is_read_once_per_process(self):
+        adapter_a = PgVectorSearchAdapter(_scripted_session())
+        await adapter_a.search_datasets_ann([0.1] * 8, portal_filter="caba")
+        session_b = _scripted_session()
+        await PgVectorSearchAdapter(session_b).search_datasets_ann([0.1] * 8, portal_filter="caba")
+
+        assert not any("pg_extension" in s for s, _ in _statements(session_b))
+
+    async def test_maps_rows_to_search_results(self):
+        row = SimpleNamespace(
+            dataset_id="abc-123",
+            title="Estudio Nacional sobre el Perfil de las Personas con Discapacidad",
+            description=None,
+            portal="datos_gob_ar",
+            download_url=None,
+            columns=None,
+            score=0.674,
+        )
+        session = _scripted_session(rows=[row])
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8)
+
+        assert len(results) == 1
+        r = results[0]
+        assert (r.dataset_id, r.portal, r.score) == ("abc-123", "datos_gob_ar", 0.674)
+        assert (r.description, r.download_url, r.columns) == ("", "", "")
