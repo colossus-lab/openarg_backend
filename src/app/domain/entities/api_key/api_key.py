@@ -48,3 +48,7 @@ class ApiUsage(BaseEntity):
     via: str | None = None  # mcp | api
     client: str | None = None  # normalised family, see public_api_clients
     user_agent: str | None = None
+    # Con qué modelo y a qué costo se respondió (modo respuestas, motor agente).
+    # None = no se sabe: filas viejas, modo datos o el motor viejo.
+    model: str | None = None
+    cost_usd: float | None = None

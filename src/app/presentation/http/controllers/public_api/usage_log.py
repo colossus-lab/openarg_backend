@@ -73,6 +73,8 @@ async def log_usage(
     question: str | None = None,
     tokens_used: int = 0,
     duration_ms: int = 0,
+    model: str | None = None,
+    cost_usd: float | None = None,
 ) -> None:
     via, client, user_agent = request_origin(request)
     try:
@@ -89,6 +91,8 @@ async def log_usage(
                 via=via,
                 client=client,
                 user_agent=user_agent,
+                model=model or None,
+                cost_usd=cost_usd,
             )
         )
     except Exception:

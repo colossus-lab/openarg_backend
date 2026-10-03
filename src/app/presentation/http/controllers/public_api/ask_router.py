@@ -135,7 +135,17 @@ async def public_ask(
         raise HTTPException(status_code=400, detail="Potential prompt injection detected")
 
     # 5. Log usage (post-pipeline, fire-and-forget errors)
-    await _usage(api_key_repo, api_key, request, body.question, 200, tokens_used, duration_ms)
+    await _usage(
+        api_key_repo,
+        api_key,
+        request,
+        body.question,
+        200,
+        tokens_used,
+        duration_ms,
+        model=result.model,
+        cost_usd=result.cost_usd,
+    )
 
     try:
         await api_key_repo.update_last_used(api_key.id)
@@ -175,6 +185,9 @@ async def _usage(
     status_code: int,
     tokens_used: int,
     duration_ms: int,
+    *,
+    model: str | None = None,
+    cost_usd: float | None = None,
 ) -> None:
     await log_usage(
         repo,
@@ -187,4 +200,6 @@ async def _usage(
         question=question,
         tokens_used=tokens_used,
         duration_ms=duration_ms,
+        model=model,
+        cost_usd=cost_usd,
     )
