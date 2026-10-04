@@ -82,7 +82,10 @@ def result_from_state(state: dict[str, Any]) -> EngineResult:
         documents=state.get("documents"),
         warnings=state.get("warnings") or [],
         tokens_used=int(state.get("tokens_used") or 0),
-        intent=state.get("plan_intent") or "",
+        # Las respuestas rápidas del grafo (saludo, pregunta sobre OpenArg,
+        # explicación fija) dejan `plan_intent` vacío; la clasificación dice qué
+        # fueron, y el cupo web no las descuenta.
+        intent=state.get("plan_intent") or state.get("classification") or "",
         confidence=float(confidence) if confidence is not None else 1.0,
     )
 
