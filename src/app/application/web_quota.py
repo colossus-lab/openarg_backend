@@ -59,11 +59,12 @@ _DEFAULTS = {
 _DAY_TTL = 48 * 3600
 
 # Turnos que no descuentan: respuestas sin modelo (saludos, preguntas sobre
-# OpenArg, bloqueos) y pedidos de aclaración.
+# OpenArg, explicaciones fijas, bloqueos) y pedidos de aclaración.
 NON_BILLABLE_INTENTS = frozenset(
     {
         "casual",
         "meta",
+        "educational",
         "clarification",
         "injection_blocked",
         "off_topic",
