@@ -97,7 +97,7 @@ def _limits(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize(
-    "intent", ["casual", "meta", "clarification", "injection_blocked", "off_topic"]
+    "intent", ["casual", "meta", "educational", "clarification", "injection_blocked", "off_topic"]
 )
 def test_saludos_aclaraciones_y_bloqueos_no_descuentan(intent: str) -> None:
     assert not counts_against_quota(_answer(intent))
@@ -232,3 +232,30 @@ def test_el_mensaje_dice_cuando_se_renueva() -> None:
 
     message = exhausted_message(WebQuota(usadas=30, limite=30, creditos=0, fundador=False))
     assert "Se renuevan el 1 de " in message
+
+
+# ── el motor viejo también marca sus respuestas rápidas ────
+
+
+@pytest.mark.parametrize("classification", ["casual", "meta", "educational"])
+def test_una_respuesta_rapida_del_motor_viejo_no_descuenta(classification: str) -> None:
+    from app.application.answers.legacy_engine import result_from_state
+
+    # Lo que deja `fast_reply_node`: `plan_intent` vacío y la clasificación.
+    state = {
+        "clean_answer": "¡Hola! ¿Qué dato público buscás?",
+        "plan_intent": "",
+        "classification": classification,
+    }
+    assert not counts_against_quota(result_from_state(state))
+
+
+def test_una_respuesta_con_datos_del_motor_viejo_descuenta() -> None:
+    from app.application.answers.legacy_engine import result_from_state
+
+    state = {
+        "clean_answer": "La inflación fue 1,66 %.",
+        "plan_intent": "series",
+        "classification": None,
+    }
+    assert counts_against_quota(result_from_state(state))
