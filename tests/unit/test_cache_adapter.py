@@ -92,3 +92,12 @@ class TestRedisCacheAdapter:
         mock_redis.pipeline = lambda: pipe
 
         assert await cache.increment_with_ttl("fresh", 60) == 1
+
+    async def test_ttl_is_the_seconds_left_or_none(self, cache, mock_redis):
+        """Para el `Retry-After` real del límite por minuto (QW10)."""
+        mock_redis.ttl.return_value = 17
+        assert await cache.ttl("rl:user:x:catalog:min") == 17
+        mock_redis.ttl.return_value = -2  # no existe
+        assert await cache.ttl("nada") is None
+        mock_redis.ttl.return_value = -1  # no vence
+        assert await cache.ttl("eterna") is None

@@ -44,3 +44,8 @@ class RedisCacheAdapter(ICacheService):
         pipe.expire(key, ttl_seconds, nx=True)
         results = await pipe.execute()
         return int(results[0])
+
+    async def ttl(self, key: str) -> int | None:
+        # Redis: -2 if the key does not exist, -1 if it has no expiry.
+        seconds = int(await self._redis.ttl(key))
+        return seconds if seconds >= 0 else None

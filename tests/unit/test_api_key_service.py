@@ -131,6 +131,8 @@ class FakeCache:
     def __init__(self) -> None:
         self.counters: dict[str, int] = {}
         self.ttls: dict[str, int] = {}
+        # Segundos que le quedan a cada clave, si el test los fija.
+        self.remaining: dict[str, int] = {}
         self.down = False
 
     async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
@@ -139,6 +141,9 @@ class FakeCache:
         self.counters[key] = self.counters.get(key, 0) + 1
         self.ttls.setdefault(key, ttl_seconds)  # EXPIRE NX
         return self.counters[key]
+
+    async def ttl(self, key: str) -> int | None:
+        return self.remaining.get(key)
 
 
 class FakeCredits:
@@ -443,6 +448,31 @@ class TestRateLimit:
             await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 429
         assert "per minute" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_what_is_left_of_the_minute(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """QW10: era 60 fijo, aunque la ventana se abriera en 5 segundos."""
+        user = free_key.user_id
+        cache.remaining = {f"rl:user:{user}:min": 23, f"rl:user:{user}:catalog:min": 7}
+        cache.counters[f"rl:user:{user}:min"] = PLAN_LIMITS["free"]["per_min"]
+        cache.counters[f"rl:user:{user}:catalog:min"] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as preguntas:
+            await check_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as datos:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert preguntas.value.headers["Retry-After"] == "23"
+        assert datos.value.headers["Retry-After"] == "7"
+
+    @pytest.mark.asyncio
+    async def test_retry_after_falls_back_to_the_whole_minute(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        cache.counters[f"rl:user:{free_key.user_id}:catalog:min"] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as exc_info:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.headers["Retry-After"] == "60"
 
 
 class TestMonthHelpers:

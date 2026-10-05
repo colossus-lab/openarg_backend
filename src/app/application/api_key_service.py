@@ -141,6 +141,23 @@ def _too_many(detail: str, headers: dict[str, str]) -> HTTPException:
     return HTTPException(status_code=429, detail=detail, headers=headers)
 
 
+async def _seconds_left(cache: ICacheService, key: str, window: int) -> int:
+    """Segundos hasta que se abra la ventana de `key`: su TTL, entre 1 y `window`.
+
+    La ventana arranca con el primer pedido (EXPIRE NX), así que el
+    `Retry-After: 60` fijo de antes hacía esperar de más a quien chocaba el
+    límite al final del minuto. Si el caché no sabe el TTL, la ventana entera.
+    """
+    try:
+        left = await cache.ttl(key)
+    except Exception:
+        logger.debug("Cache TTL lookup failed for %s", key, exc_info=True)
+        left = None
+    if not isinstance(left, int) or left <= 0:
+        return window
+    return min(left, window)
+
+
 async def check_rate_limit(
     api_key: ApiKey,
     cache: ICacheService,
@@ -166,14 +183,15 @@ async def check_rate_limit(
     user_id = str(api_key.user_id)
     day = _utc_day()
 
-    min_count = await _incr_fail_open(cache, f"rl:user:{user_id}:min", _MIN_TTL)
+    min_key = f"rl:user:{user_id}:min"
+    min_count = await _incr_fail_open(cache, min_key, _MIN_TTL)
     if min_count > limits["per_min"]:
         raise _too_many(
             f"Rate limit exceeded: {limits['per_min']} requests per minute",
             {
                 "X-RateLimit-Limit-Minute": str(limits["per_min"]),
                 "X-RateLimit-Remaining-Minute": "0",
-                "Retry-After": "60",
+                "Retry-After": str(await _seconds_left(cache, min_key, _MIN_TTL)),
             },
         )
 
@@ -264,11 +282,12 @@ async def check_catalog_rate_limit(
 ) -> None:
     """Enforce the per-person limits on data-mode (no-LLM) endpoints."""
     user_id = api_key.user_id
-    minute = await _incr_fail_open(cache, f"rl:user:{user_id}:catalog:min", _MIN_TTL)
+    min_key = f"rl:user:{user_id}:catalog:min"
+    minute = await _incr_fail_open(cache, min_key, _MIN_TTL)
     if minute > CATALOG_MINUTE_LIMIT:
         raise _too_many(
             f"Rate limit exceeded: {CATALOG_MINUTE_LIMIT} catalog requests per minute",
-            {"Retry-After": "60"},
+            {"Retry-After": str(await _seconds_left(cache, min_key, _MIN_TTL))},
         )
     tier = await resolve_tier(user_id, credits)
     count = await _incr_fail_open(cache, monthly_counter_key(user_id, "datos"), MONTH_TTL)
