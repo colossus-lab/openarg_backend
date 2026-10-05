@@ -711,8 +711,10 @@ async def test_el_prompt_que_recibe_el_modelo_trae_las_reglas_nuevas() -> None:
     assert "No atribuyas causas" in system
     assert 'Nunca uses "actual"' in system
     assert "coparticipación federal" in system
-    # Sin la herramienta del BCRA, el prompt no la nombra: el modelo la pediría.
-    assert "variables_bcra" not in system
+    # El prompt nombra variables_bcra si y sólo si se le ofrece al modelo: si
+    # no está, la pediría y perdería una vuelta.
+    offered = {t.name for t in llm.calls[0]["tools"]}
+    assert ("variables_bcra" in system) == ("variables_bcra" in offered)
 
 
 async def test_una_busqueda_que_falla_deja_la_sesion_usable() -> None:
