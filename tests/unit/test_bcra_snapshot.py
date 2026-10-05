@@ -118,6 +118,13 @@ def test_sin_fecha_no_se_escribe_nada(mock_engine, mock_fetch, mock_upsert) -> N
     assert result == {"tables": []}
 
 
+@pytest.fixture
+def _hoy(monkeypatch: pytest.MonkeyPatch) -> date:
+    hoy = date(2026, 10, 4)
+    monkeypatch.setattr(bcra_tasks, "_today_ar", lambda: hoy)
+    return hoy
+
+
 @patch("app.infrastructure.celery.tasks._db.register_via_b_table")
 @patch.object(bcra_tasks, "_register_dataset", return_value=None)
 @patch.object(bcra_tasks, "_upsert", return_value=(500, 600, date(2026, 10, 2)))
@@ -125,18 +132,141 @@ def test_sin_fecha_no_se_escribe_nada(mock_engine, mock_fetch, mock_upsert) -> N
 @patch.object(bcra_tasks, "_fetch_bcra_data")
 @patch.object(bcra_tasks, "get_sync_engine")
 def test_el_backfill_pide_la_historia_de_cada_moneda(
-    mock_engine, mock_fetch, mock_hist, mock_upsert, mock_register, mock_rtv
+    mock_engine, mock_fetch, mock_hist, mock_upsert, mock_register, mock_rtv, _hoy
 ) -> None:
     mock_fetch.return_value = _cotizaciones()
-    mock_hist.return_value = [
-        {"fecha": "2026-09-30", "codigoMoneda": "USD", "tipoCotizacion": 1517.0},
-        {"fecha": "2026-10-01", "codigoMoneda": "USD", "tipoCotizacion": 1524.5},
-    ]
-    snapshot_bcra.run(backfill_desde="2025-10-01")
+    mock_hist.return_value = (
+        [
+            {"fecha": "2026-09-30", "codigoMoneda": "USD", "tipoCotizacion": 1517.0},
+            {"fecha": "2026-10-01", "codigoMoneda": "USD", "tipoCotizacion": 1524.5},
+        ],
+        [],
+    )
+    result = snapshot_bcra.run(backfill_desde="2026-01-02")
 
-    mock_hist.assert_called_once_with(["REF", "USD"], "2025-10-01", "2026-10-02")
-    fechas = sorted({r["fecha"] for r in mock_upsert.call_args.args[1]})
-    assert fechas == [date(2026, 9, 30), date(2026, 10, 1), date(2026, 10, 2)]
+    mock_hist.assert_called_once_with(["REF", "USD"], "2026-01-02", "2026-10-02")
+    # El día va primero, en su transacción; después el tramo histórico.
+    dia, tramo = (c.args[1] for c in mock_upsert.call_args_list)
+    assert {r["fecha"] for r in dia} == {date(2026, 10, 2)}
+    assert sorted({r["fecha"] for r in tramo}) == [date(2026, 9, 30), date(2026, 10, 1)]
+    assert result["backfill"]["inserted"] == 500
+    assert result["backfill"]["pendiente"] is None
+
+
+@patch("app.infrastructure.celery.tasks._db.register_via_b_table")
+@patch.object(bcra_tasks, "_register_dataset", return_value=None)
+@patch.object(bcra_tasks, "_upsert", return_value=(10, 600, date(2026, 10, 2)))
+@patch.object(bcra_tasks, "_fetch_historicas", return_value=([], []))
+@patch.object(bcra_tasks, "_fetch_bcra_data")
+@patch.object(bcra_tasks, "get_sync_engine")
+def test_un_backfill_largo_va_por_tramos_del_mas_nuevo_al_mas_viejo(
+    mock_engine, mock_fetch, mock_hist, mock_upsert, mock_register, mock_rtv, _hoy
+) -> None:
+    """Desde 2002 eran unas 230 mil filas en una sola transacción, contra 300 s."""
+    mock_fetch.return_value = _cotizaciones()
+    snapshot_bcra.run(backfill_desde="2023-01-01", backfill_hasta="2025-12-31")
+
+    tramos = [(c.args[1], c.args[2]) for c in mock_hist.call_args_list]
+    assert tramos == [
+        ("2025-01-01", "2025-12-31"),
+        ("2024-01-01", "2024-12-31"),
+        ("2023-01-01", "2023-12-31"),
+    ]
+    assert mock_upsert.call_count == 1 + len(tramos)  # una transacción por tramo
+
+
+@patch("app.infrastructure.celery.tasks._db.register_via_b_table")
+@patch.object(bcra_tasks, "_register_dataset", return_value=None)
+@patch.object(bcra_tasks, "_upsert", return_value=(2, 41, date(2026, 10, 2)))
+@patch.object(bcra_tasks, "_fetch_historicas", return_value=([], []))
+@patch.object(bcra_tasks, "_fetch_bcra_data")
+@patch.object(bcra_tasks, "get_sync_engine")
+def test_si_se_pasa_del_presupuesto_deja_dicho_lo_que_falta(
+    mock_engine, mock_fetch, mock_hist, mock_upsert, mock_register, mock_rtv, _hoy, monkeypatch
+) -> None:
+    monkeypatch.setattr(bcra_tasks, "BACKFILL_PRESUPUESTO_S", -1.0)
+    mock_fetch.return_value = _cotizaciones()
+    result = snapshot_bcra.run(backfill_desde="2025-01-01")
+
+    mock_hist.assert_not_called()
+    assert result["backfill"]["pendiente"] == {
+        "backfill_desde": "2025-01-01",
+        "backfill_hasta": "2026-10-02",
+    }
+    assert result["tables"][0]["last_date"] == "2026-10-02"  # el día igual entró
+
+
+@patch.object(bcra_tasks, "_upsert", return_value=(2, 41, date(2026, 10, 2)))
+@patch.object(bcra_tasks, "_fetch_historicas", return_value=([], ["REF", "USD"]))
+@patch.object(bcra_tasks, "_fetch_bcra_data")
+@patch.object(bcra_tasks, "get_sync_engine")
+def test_si_no_responde_ninguna_moneda_la_tarea_falla(
+    mock_engine, mock_fetch, mock_hist, mock_upsert, _hoy
+) -> None:
+    """Antes terminaba "bien" con cero filas históricas y un warning por moneda."""
+    mock_fetch.return_value = _cotizaciones()
+    with pytest.raises(RuntimeError, match="ninguna moneda"):
+        snapshot_bcra.run(backfill_desde="2026-01-01")
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta"),
+    [
+        ("01/09/2025", None),  # no ISO: cada moneda fallaba por su lado
+        ("2025-9-1", None),
+        ("20250901", None),
+        ("2026-10-10", None),  # futura
+        ("2026-09-01", "2026-08-01"),  # desde > hasta
+        ("2002-01-01", None),  # más de cinco años de una
+        (None, "2026-09-01"),  # hasta sin desde
+    ],
+)
+@patch.object(bcra_tasks, "_fetch_bcra_data")
+@patch.object(bcra_tasks, "get_sync_engine")
+def test_un_backfill_mal_pedido_falla_antes_de_tocar_nada(
+    mock_engine, mock_fetch, desde, hasta, _hoy
+) -> None:
+    with pytest.raises(ValueError):
+        snapshot_bcra.run(backfill_desde=desde, backfill_hasta=hasta)
+    mock_fetch.assert_not_called()
+    mock_engine.assert_not_called()
+
+
+def test_cinco_anios_justos_se_aceptan(_hoy) -> None:
+    assert bcra_tasks.parse_backfill("2021-10-05") == (date(2021, 10, 5), None)
+    assert bcra_tasks.parse_backfill(None) is None
+
+
+async def test_el_endpoint_de_admin_rechaza_un_backfill_mal_escrito() -> None:
+    from fastapi import HTTPException
+
+    from app.presentation.http.controllers.admin import tasks_router
+
+    with (
+        patch.object(tasks_router.celery_app, "send_task") as send,
+        pytest.raises(HTTPException) as err,
+    ):
+        await tasks_router.run_task("snapshot_bcra", {"backfill_desde": "01/09/2025"})
+    assert err.value.status_code == 422
+    send.assert_not_called()
+
+    with patch.object(tasks_router.celery_app, "send_task") as send:
+        await tasks_router.run_task(
+            "snapshot_bcra", {"backfill_desde": "2025-10-01", "backfill_hasta": "2026-09-30"}
+        )
+    assert send.call_args.kwargs["kwargs"] == {
+        "backfill_desde": "2025-10-01",
+        "backfill_hasta": "2026-09-30",
+    }
+
+
+def test_el_registro_de_admin_dice_la_cola_real() -> None:
+    """send_task usa task_routes: la tarea va a `ingest`, no a `collector`."""
+    from app.infrastructure.celery.app import celery_app
+    from app.presentation.http.controllers.admin.tasks_router import TASK_REGISTRY
+
+    route = celery_app.conf.task_routes["openarg.snapshot_bcra"]
+    assert TASK_REGISTRY["snapshot_bcra"]["queue"] == route["queue"] == "ingest"
 
 
 def _engine() -> tuple[MagicMock, MagicMock]:
@@ -170,6 +300,47 @@ def test_last_updated_at_es_la_fecha_del_dato(mock_finalize) -> None:
     assert params["rows"] == 41
     assert mock_finalize.call_args.kwargs["row_count"] == 41
     assert mock_finalize.call_args.kwargs["columns"] == bcra_tasks.COLUMNS
+
+
+@patch.object(bcra_tasks, "_finalize_cached_dataset", return_value={"ok": True})
+def test_la_descripcion_dice_que_es_historia_diaria(mock_finalize) -> None:
+    """Después del backfill, un SELECT sin filtro de fecha da un día cualquiera."""
+    engine, conn = _engine()
+    _register_dataset(
+        engine,
+        "bcra-cotizaciones",
+        "Cotizaciones Cambiarias BCRA",
+        "cache_bcra_cotizaciones",
+        pd.DataFrame(columns=bcra_tasks.COLUMNS),
+        description=bcra_tasks.DESCRIPTION,
+    )
+    sql, params = conn.execute.call_args_list[0].args
+    assert params["desc"] == bcra_tasks.DESCRIPTION
+    assert "historia diaria" in params["desc"] and "max(fecha)" in params["desc"]
+    # La fila ya existe en staging y prod: el ON CONFLICT la tiene que pisar.
+    assert "description = EXCLUDED.description" in str(sql)
+
+
+@patch("app.infrastructure.celery.tasks._db.register_via_b_table")
+@patch.object(bcra_tasks, "_register_dataset", return_value=None)
+@patch.object(bcra_tasks, "_upsert", return_value=(2, 41, date(2026, 10, 2)))
+@patch.object(bcra_tasks, "_fetch_bcra_data")
+@patch.object(bcra_tasks, "get_sync_engine")
+def test_el_snapshot_registra_la_descripcion_nueva(
+    mock_engine, mock_fetch, mock_upsert, mock_register, mock_rtv
+) -> None:
+    mock_fetch.return_value = _cotizaciones()
+    snapshot_bcra.run()
+    assert mock_register.call_args.kwargs["description"] == bcra_tasks.DESCRIPTION
+
+
+def test_la_nota_del_modo_legacy_avisa_que_hay_varias_fechas() -> None:
+    from app.application.pipeline.connectors.cache_table_selection import (
+        build_table_compat_notes,
+    )
+
+    notas = build_table_compat_notes(["raw.cache_bcra_cotizaciones"])
+    assert "max(fecha)" in notas
 
 
 def test_la_fecha_del_dato_es_la_misma_en_utc_y_en_argentina() -> None:

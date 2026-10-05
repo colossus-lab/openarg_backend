@@ -181,10 +181,12 @@ TASK_REGISTRY: dict[str, dict] = {
         "celery_name": "openarg.snapshot_bcra",
         "description": (
             "Daily BCRA exchange rates, accumulated by date; "
-            '{"backfill_desde": "AAAA-MM-DD"} also loads each currency\'s history'
+            '{"backfill_desde": "AAAA-MM-DD", "backfill_hasta": "AAAA-MM-DD"} also loads '
+            "each currency's history (up to 5 years per run; hasta defaults to the last day)"
         ),
-        "params": ["backfill_desde"],
-        "queue": "collector",
+        "params": ["backfill_desde", "backfill_hasta"],
+        # Informativo: send_task usa task_routes, que la manda a `ingest`.
+        "queue": "ingest",
     },
     "ingest_bac": {
         "celery_name": "openarg.ingest_bac",
@@ -353,6 +355,16 @@ async def run_task(task_id: str, params: dict | None = None):
                 args.append(val)
             else:
                 kwargs[param_name] = val
+
+    if task_id == "snapshot_bcra" and kwargs:
+        # Un rango mal escrito se rechaza acá: en la tarea fallaría en
+        # segundo plano y este endpoint igual respondería "dispatched".
+        from app.infrastructure.celery.tasks.bcra_tasks import parse_backfill
+
+        try:
+            parse_backfill(kwargs.get("backfill_desde"), kwargs.get("backfill_hasta"))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     result = celery_app.send_task(celery_name, args=args, kwargs=kwargs)
 

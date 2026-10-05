@@ -19,8 +19,12 @@ corrida aunque los datos fueran del viernes (ítem 2.4 de la auditoría). Ahora:
   corrida;
 - el mart ``series_economicas`` (v0.4) lee sólo la última fecha.
 
-``snapshot_bcra(backfill_desde="AAAA-MM-DD")`` completa la historia de cada
-moneda desde esa fecha con el endpoint histórico, sin pisar lo que ya está.
+``snapshot_bcra(backfill_desde="AAAA-MM-DD", backfill_hasta=None)`` completa
+la historia de cada moneda en ese rango con el endpoint histórico, sin pisar lo
+que ya está: por año calendario, del más nuevo al más viejo, cada tramo en su
+propia transacción (lo que se bajó queda escrito aunque la tarea se corte). Las
+fechas se validan antes de tocar nada y un rango de más de cinco años se
+rechaza: se hace en partes con ``backfill_hasta``.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import time
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 
@@ -49,6 +55,77 @@ COLUMNS = ["codigoMoneda", "descripcion", "tipoPase", "tipoCotizacion", "fecha"]
 _DOWNLOAD_URL = "https://www.bcra.gob.ar/Estadisticas/Datos_Abiertos.asp"
 # Argentina no tiene horario de verano desde 2009.
 _AR = timezone(timedelta(hours=-3))
+# Lo que leen buscar_datos y el modo datos: la tabla dejó de ser una foto de 39
+# filas y una consulta sin filtro de fecha devuelve la cotización de un día
+# cualquiera.
+DESCRIPTION = (
+    "Cotizaciones cambiarias diarias del BCRA (Estadísticas Cambiarias v1.0): una fila "
+    'por fecha y moneda ("codigoMoneda"), con "tipoCotizacion" en pesos por unidad de '
+    'moneda y "tipoPase" en dólares por unidad. Es historia diaria, no una foto: para la '
+    "cotización vigente filtrá fecha = (SELECT max(fecha) FROM raw.cache_bcra_cotizaciones) "
+    "o usá mart.series_economicas. REF es el dólar mayorista de referencia (Comunicación "
+    "A 3500)."
+)
+# Backfill: el soft_time_limit de la tarea es de 300 s y 12 meses de las 39
+# monedas tardaron unos 11 s (medido el 04-oct). Más de cinco años por corrida
+# se rechaza; cada año va en su propia transacción y, si se pasa el
+# presupuesto, lo que falta queda logueado para otra corrida.
+BACKFILL_MAX_DIAS = 5 * 366
+BACKFILL_PRESUPUESTO_S = 200.0
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _today_ar() -> date:
+    return datetime.now(_AR).date()
+
+
+def _strict_date(value: Any, name: str) -> date:
+    text_value = str(value).strip()
+    try:
+        if not _ISO_DAY.fullmatch(text_value):
+            raise ValueError
+        return date.fromisoformat(text_value)
+    except ValueError:
+        raise ValueError(f"{name} tiene que ser una fecha AAAA-MM-DD: {value!r}") from None
+
+
+def parse_backfill(
+    desde: Any, hasta: Any = None, today: date | None = None
+) -> tuple[date, date | None] | None:
+    """El rango del backfill validado, o None si no se pidió.
+
+    Se valida antes de bajar nada: con una fecha mal escrita cada moneda
+    fallaba por su lado, se logueaba como warning y la tarea terminaba "bien"
+    con cero filas históricas.
+    """
+    if not desde:
+        if hasta:
+            raise ValueError("backfill_hasta sin backfill_desde")
+        return None
+    today = today or _today_ar()
+    start = _strict_date(desde, "backfill_desde")
+    end = _strict_date(hasta, "backfill_hasta") if hasta else None
+    if start > today or (end is not None and end > today):
+        raise ValueError("el backfill no puede pedir fechas futuras")
+    if end is not None and start > end:
+        raise ValueError(f"backfill_desde {start} es posterior a backfill_hasta {end}")
+    if ((end or today) - start).days > BACKFILL_MAX_DIAS:
+        raise ValueError(
+            f"el backfill pide más de {BACKFILL_MAX_DIAS} días: hacelo por partes con "
+            "backfill_hasta (cada corrida tiene 300 s)"
+        )
+    return start, end
+
+
+def _tramos(desde: date, hasta: date) -> list[tuple[date, date]]:
+    """El rango por año calendario, del más nuevo al más viejo."""
+    out: list[tuple[date, date]] = []
+    fin = hasta
+    while fin >= desde:
+        ini = max(desde, date(fin.year, 1, 1))
+        out.append((ini, fin))
+        fin = ini - timedelta(days=1)
+    return out
 
 
 def _data_as_of(fecha: date | None) -> datetime | None:
@@ -67,6 +144,7 @@ def _register_dataset(
     *,
     data_as_of: datetime | None = None,
     row_count: int | None = None,
+    description: str | None = None,
 ):
     """Upsert into datasets and cached_datasets tables.
 
@@ -97,14 +175,15 @@ def _register_dataset(
                     (:sid, :title, :desc, :org, :portal, :url, '', 'json', :cols, :tags,
                      :last_updated, false, :rows)
                 ON CONFLICT (source_id, portal) DO UPDATE SET
-                    title = EXCLUDED.title, is_cached = false, row_count = EXCLUDED.row_count,
+                    title = EXCLUDED.title, description = EXCLUDED.description,
+                    is_cached = false, row_count = EXCLUDED.row_count,
                     columns = EXCLUDED.columns, last_updated_at = :last_updated,
                     updated_at = :now
             """),
             {
                 "sid": source_id,
                 "title": title,
-                "desc": f"Datos del BCRA: {title}",
+                "desc": description or f"Datos del BCRA: {title}",
                 "org": "Banco Central de la República Argentina",
                 "portal": portal,
                 "url": _DOWNLOAD_URL,
@@ -154,23 +233,30 @@ def _fetch_bcra_data():
     return asyncio.run(_run())
 
 
-def _fetch_historicas(monedas: list[str], desde: str, hasta: str) -> list[dict[str, Any]]:
-    """La historia de cada moneda entre ``desde`` y ``hasta``, en un solo loop."""
+def _fetch_historicas(
+    monedas: list[str], desde: str, hasta: str
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """La historia de cada moneda entre ``desde`` y ``hasta``, en un solo loop.
+
+    Devuelve (registros, monedas que fallaron).
+    """
     from app.domain.exceptions.connector_errors import ConnectorError
     from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
 
     adapter = BCRAAdapter()
 
-    async def _run() -> list[dict[str, Any]]:
+    async def _run() -> tuple[list[dict[str, Any]], list[str]]:
         out: list[dict[str, Any]] = []
+        failed: list[str] = []
         for moneda in monedas:
             try:
                 result = await adapter.get_cotizaciones_historicas(moneda, desde, hasta)
             except ConnectorError:
                 logger.warning("BCRA backfill: no pude bajar la historia de %s", moneda)
+                failed.append(moneda)
                 continue
             out.extend(result.records)
-        return out
+        return out, failed
 
     return asyncio.run(_run())
 
@@ -282,6 +368,49 @@ def _upsert(engine, rows: list[dict[str, Any]]) -> tuple[int, int, date | None]:
     return int(total or 0) - int(before or 0), int(total or 0), _parse_date(last)
 
 
+def _backfill(
+    engine, monedas: list[str], desde: date, hasta: date
+) -> tuple[int, int | None, date | None, dict[str, Any]]:
+    """Carga la historia por tramos; devuelve (insertadas, total, último dato, resumen).
+
+    Cada tramo es una transacción: si la tarea se corta, lo bajado queda. Si se
+    pasa ``BACKFILL_PRESUPUESTO_S``, lo que falta queda en el log y en el
+    resumen para otra corrida (con ``backfill_hasta``).
+    """
+    started = time.monotonic()
+    inserted = 0
+    total: int | None = None
+    last: date | None = None
+    fallidas: set[str] = set()
+    pendiente: dict[str, str] | None = None
+    for ini, fin in _tramos(desde, hasta):
+        if time.monotonic() - started > BACKFILL_PRESUPUESTO_S:
+            pendiente = {"backfill_desde": desde.isoformat(), "backfill_hasta": fin.isoformat()}
+            logger.warning(
+                "BCRA backfill parcial: falta de %s a %s; volvé a correrlo con %s",
+                desde,
+                fin,
+                pendiente,
+            )
+            break
+        records, failed = _fetch_historicas(monedas, ini.isoformat(), fin.isoformat())
+        if monedas and len(failed) == len(monedas):
+            # Ninguna respondió: no es una moneda rara, es la API. Que reintente.
+            raise RuntimeError(f"BCRA backfill: ninguna moneda respondió entre {ini} y {fin}")
+        fallidas.update(failed)
+        nuevas, total, last = _upsert(engine, _normalize(records))
+        inserted += nuevas
+        logger.info("BCRA backfill %s a %s: %d filas nuevas", ini, fin, nuevas)
+    resumen: dict[str, Any] = {
+        "desde": desde.isoformat(),
+        "hasta": hasta.isoformat(),
+        "inserted": inserted,
+        "monedas_fallidas": sorted(fallidas),
+        "pendiente": pendiente,
+    }
+    return inserted, total, last, resumen
+
+
 @celery_app.task(
     name="openarg.snapshot_bcra",
     bind=True,
@@ -289,8 +418,10 @@ def _upsert(engine, rows: list[dict[str, Any]]) -> tuple[int, int, date | None]:
     soft_time_limit=300,
     time_limit=360,
 )
-def snapshot_bcra(self, backfill_desde: str | None = None):
-    """Cotizaciones del último día hábil (y, si se pide, la historia desde una fecha)."""
+def snapshot_bcra(self, backfill_desde: str | None = None, backfill_hasta: str | None = None):
+    """Cotizaciones del último día hábil (y, si se pide, la historia de un rango)."""
+    # Un rango mal escrito falla acá, sin reintentos y antes de escribir nada.
+    rango = parse_backfill(backfill_desde, backfill_hasta)
     engine = get_sync_engine()
 
     try:
@@ -306,18 +437,8 @@ def snapshot_bcra(self, backfill_desde: str | None = None):
             )
             return results
 
-        if backfill_desde:
-            hasta = max(r["fecha"] for r in rows).isoformat()
-            monedas = sorted({r["codigoMoneda"] for r in rows})
-            historicas = _normalize(_fetch_historicas(monedas, backfill_desde, hasta))
-            logger.info(
-                "BCRA backfill desde %s: %d filas de %d monedas",
-                backfill_desde,
-                len(historicas),
-                len(monedas),
-            )
-            rows = historicas + rows
-
+        # El día primero, en su propia transacción: un backfill que falla no
+        # se lleva puesto el dato de hoy.
         inserted, total, last = _upsert(engine, rows)
         logger.info(
             "BCRA cotizaciones: %d filas nuevas, %d en total, último dato %s",
@@ -325,6 +446,17 @@ def snapshot_bcra(self, backfill_desde: str | None = None):
             total,
             last,
         )
+
+        if rango is not None:
+            desde, hasta = rango
+            monedas = sorted({r["codigoMoneda"] for r in rows})
+            fin = hasta or max(r["fecha"] for r in rows)
+            nuevas, total_bf, last_bf, resumen = _backfill(engine, monedas, desde, fin)
+            inserted += nuevas
+            if total_bf is not None:
+                # `_upsert` cuenta la tabla entera: el último de todos es éste.
+                total, last = total_bf, last_bf or last
+            results["backfill"] = resumen
 
         dataset_id = _register_dataset(
             engine,
@@ -334,6 +466,7 @@ def snapshot_bcra(self, backfill_desde: str | None = None):
             pd.DataFrame(columns=COLUMNS),
             data_as_of=_data_as_of(last),
             row_count=total,
+            description=DESCRIPTION,
         )
         if dataset_id and inserted:
             from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
