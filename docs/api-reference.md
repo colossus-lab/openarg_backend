@@ -602,7 +602,8 @@ consumed a question.
 - `402` — Monthly quota exceeded and no credits left (`X-Quota-Reset`, `Retry-After`)
 - `408` — Pipeline timeout, or a repeat that waited for an identical run that
   failed and had no time left to run it (not charged)
-- `429` — Per-minute (questions or repeats) or per-IP limit (`Retry-After`)
+- `429` — Per-minute (questions or repeats) or per-IP limit (`Retry-After`:
+  for the per-minute limits, the seconds left until that window opens, 1 to 60)
 - `500` — Pipeline execution failed (not charged)
 - `503` — Two different causes, told apart by `detail`:
   `"Free tier daily capacity reached. Try again tomorrow."` (the shared daily

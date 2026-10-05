@@ -15,6 +15,7 @@ import ipaddress
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 KEY_URL = "https://openarg.org/desarrolladores"
@@ -51,6 +52,44 @@ def renewal_label(now: datetime | None = None) -> str:
 
 KEY_PREFIX = "oarg_sk_"
 MAX_QUESTION_CHARS = 2000
+
+# Los límites, en un solo lugar: van en las `instructions` del servidor, que es
+# lo que leen los clientes al conectarse. Antes no estaban en ningún lado que
+# el modelo viera, y la integración de n8n reintentaba la misma pregunta cada
+# 21 s hasta agotar el mes (auditoría 3.5). Los números son los del backend
+# (`api_key_service`, `public_quota`); un test los compara.
+LIMITE_DATOS_POR_MINUTO = 30
+LIMITE_DATOS_POR_MES = 200
+LIMITE_DATOS_FUNDADOR = 2000
+LIMITE_PREGUNTAS_POR_MINUTO = 2
+LIMITE_PREGUNTAS_POR_MES = 10
+LIMITE_PREGUNTAS_FUNDADOR = 100
+# La misma pregunta repetida dentro de los 5 minutos devuelve la respuesta
+# guardada sin cobrarla ni contar las 2 por minuto, con su propio tope.
+LIMITE_REPETICIONES_POR_MINUTO = 10
+LIMITE_FILAS_POR_PEDIDO = 500
+# Grupos por pedido de `agregar_datos`.
+LIMITE_GRUPOS_AGREGAR = 200
+
+
+def _miles(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+LIMITES = (
+    "LÍMITES (por persona, sumando todas sus claves): "
+    f"modo datos {LIMITE_DATOS_POR_MINUTO} pedidos por minuto y {LIMITE_DATOS_POR_MES} por mes "
+    f"(Fundadores: {_miles(LIMITE_DATOS_FUNDADOR)}); cada llamada a una herramienta del modo "
+    f"datos cuenta 1. Modo respuestas {LIMITE_PREGUNTAS_POR_MINUTO} preguntas por minuto y "
+    f"{LIMITE_PREGUNTAS_POR_MES} por mes (Fundadores: {LIMITE_PREGUNTAS_FUNDADOR}). "
+    f"obtener_datos trae hasta {LIMITE_FILAS_POR_PEDIDO} filas por pedido. Los cupos del mes "
+    "se renuevan el 1° a las 00:00 UTC. Si te frena el límite por minuto, el error dice "
+    "cuántos segundos esperar: esperá eso y reintentá una sola vez. En el modo respuestas "
+    "se descuenta la respuesta, no el intento: un error o un corte por tiempo no descuentan, "
+    "y la misma pregunta repetida dentro de los 5 minutos devuelve la respuesta ya calculada "
+    f"sin descontar (hasta {LIMITE_REPETICIONES_POR_MINUTO} repeticiones por minuto). "
+    "Igual no repitas la misma pregunta en bucle."
+)
 
 _KEY_PATTERN = re.compile(r"oarg_sk_[A-Za-z0-9_\-]+")
 
@@ -156,13 +195,58 @@ def backend_headers(key: str, ip: str | None, client: str | None = None) -> dict
     return headers
 
 
-def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> str:
+def _segundos(retry_after: str | int | None) -> int | None:
+    """El `Retry-After` del backend en segundos (1 a 3600), o None si no sirve."""
+    try:
+        seconds = int(str(retry_after).strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if 0 < seconds <= 3600 else None
+
+
+_MAX_DETAIL_422 = 3
+
+
+def error_detail(detail: Any) -> str:
+    """El `detail` de una respuesta de error del backend, como texto.
+
+    Un 400/404 del modo datos trae un texto nuestro. Un 422 es la validación
+    de FastAPI: una lista de errores de Pydantic (`loc`, `msg`). Antes se
+    pasaba como `str(lista)` y se tiraba: el modelo veía «La consulta no
+    tiene un formato válido.» sin saber qué corregir, por ejemplo un
+    `offset` arriba del tope o 4 columnas en `agrupar_por` (revisión del PR
+    #139). Ahora sale «`offset`: Input should be less than or equal to 10000».
+    """
+    if isinstance(detail, list):
+        partes = []
+        for err in detail[:_MAX_DETAIL_422]:
+            if not isinstance(err, Mapping):
+                continue
+            loc = [str(p) for p in err.get("loc") or [] if p not in ("body", "query")]
+            msg = str(err.get("msg") or "").strip()
+            if msg:
+                partes.append(f"`{'.'.join(loc)}`: {msg}" if loc else msg)
+        return "; ".join(partes)
+    return "" if detail is None else str(detail)
+
+
+def error_message(
+    status: int,
+    detail: str = "",
+    *,
+    data_mode: bool = False,
+    retry_after: str | int | None = None,
+) -> str:
     """Traduce una respuesta de error del backend a un mensaje para el usuario.
 
     En el modo datos (`/catalogo/*`) los 400/404/503 traen un `detail` que
     armamos nosotros en castellano ("Columnas que no existen en la tabla: …")
     y que le dice al modelo cómo corregir el pedido: se pasa tal cual. En el
     modo respuestas el detalle de esos códigos no es para el usuario.
+
+    `retry_after` es el header del backend: en un 429 por minuto son los
+    segundos que faltan para que se abra la ventana (antes el mensaje decía
+    siempre "esperá un minuto" y el backend mandaba 60 fijo).
     """
     detail_l = (detail or "").lower()
     if data_mode and status in (400, 404, 503) and detail:
@@ -182,13 +266,21 @@ def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> 
         else:
             head = (
                 f"Usaste {cuantas} preguntas de este mes. Mientras tanto podés seguir con "
-                "el modo datos (buscar_datasets, describir_tabla, obtener_datos), que "
-                "tiene su propio cupo."
+                "el modo datos (buscar_datasets, describir_tabla, obtener_datos, "
+                "agregar_datos), que tiene su propio cupo."
             )
         return f"{head} Se renuevan el {renewal_label()}." + SUPPORT_LINE + HARDSHIP_LINE
     if status == 429:
         if "minute" in detail_l:
-            return "Demasiadas consultas seguidas: esperá un minuto y volvé a intentar."
+            n = _first_int(detail)
+            limite = f" (máximo {n} por minuto)" if n else ""
+            seconds = _segundos(retry_after)
+            espera = (
+                f"esperá {seconds} segundo{'s' if seconds != 1 else ''}"
+                if seconds
+                else "esperá un minuto"
+            )
+            return f"Demasiadas consultas seguidas{limite}: {espera} y volvé a intentar una vez."
         if "this ip" in detail_l:
             return (
                 "Se alcanzó el límite diario de consultas desde esta conexión. "
@@ -218,6 +310,9 @@ def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> 
     if status == 400:
         return "OpenArg no puede procesar esa pregunta. Reformulala como una consulta sobre datos públicos."
     if status == 422:
+        if data_mode and detail:
+            # Qué parámetro y por qué (`error_detail`): el modelo puede corregirlo.
+            return f"La consulta no tiene un formato válido: {detail}."
         return "La consulta no tiene un formato válido."
     return "OpenArg no pudo responder en este momento. Probá de nuevo en unos minutos."
 
@@ -280,8 +375,23 @@ def format_sources(payload: Mapping[str, Any]) -> str:
 _MAX_CELL = 120
 
 
+def _number_text(value: float) -> str:
+    """Un float sin notación científica: `str(1.2e16)` es "1.2e+16".
+
+    Los totales de `agregar_datos` llegan como número (antes, como texto) y
+    un monto en pesos pasa fácil de 10^16.
+    """
+    text = repr(value)
+    if "e" not in text or value != value or value in (float("inf"), float("-inf")):
+        return text
+    return format(Decimal(text), "f")
+
+
 def _cell(value: Any) -> str:
-    text = "" if value is None else str(value)
+    if isinstance(value, float):
+        text = _number_text(value)
+    else:
+        text = "" if value is None else str(value)
     text = text.replace("\r", " ").replace("\n", " ")
     if len(text) > _MAX_CELL:
         text = text[: _MAX_CELL - 1] + "…"
@@ -331,7 +441,12 @@ def format_search(payload: Mapping[str, Any]) -> str:
             )
             lines.append(f"   Tablas consultables: {listed}")
         else:
-            lines.append("   Sin tabla consultable en OpenArg")
+            # El backend ya los manda al fondo; acá queda claro que no sirven
+            # para las otras herramientas (QW11).
+            lines.append(
+                "   Sin tabla consultable en OpenArg: sólo el link de descarga (no sirve para "
+                "describir_tabla, obtener_datos ni agregar_datos)"
+            )
         url = str(r.get("url") or "")
         if url:
             lines.append(f"   Fuente: {_link('descarga oficial', url)}")
@@ -353,13 +468,45 @@ def format_table(payload: Mapping[str, Any]) -> str:
         )
     if payload.get("aviso_fecha"):
         lines.append(f"Aviso: {payload.get('aviso_fecha')}")
+    if payload.get("aviso"):
+        lines.append(f"Aviso: {payload.get('aviso')}")
+    frescura = _freshness_line(payload.get("frescura"))
+    if frescura:
+        lines.append(frescura)
     cols = [c for c in payload.get("columnas") or [] if isinstance(c, Mapping)]
     lines.append("Columnas:\n" + "\n".join(f"- {c.get('nombre')} ({c.get('tipo')})" for c in cols))
     sample = [r for r in payload.get("muestra") or [] if isinstance(r, Mapping)]
     if sample:
         names = [str(c.get("nombre")) for c in cols] or list(sample[0].keys())
         lines.append("Muestra:\n```csv\n" + rows_to_csv(names, sample) + "\n```")
-    lines.append("Pedí las filas con `obtener_datos` (columnas, desde, hasta, filtros, limite).")
+    lines.append(
+        "Pedí las filas con `obtener_datos` (columnas, desde, hasta, filtros, limite) o un "
+        "total, promedio, conteo o ranking con `agregar_datos`."
+    )
+    return "\n".join(lines)
+
+
+def _freshness_line(frescura: Any) -> str | None:
+    """La línea «Último dato: … · Leída de la fuente por OpenArg: …» (auditoría 3.4)."""
+    if not isinstance(frescura, Mapping):
+        return None
+    parts: list[str] = []
+    if frescura.get("ultimo_dato") and frescura.get("serie"):
+        # De una muestra de la tabla: puede haber datos posteriores.
+        aprox = " (aproximado)" if frescura.get("aproximado") else ""
+        parts.append(f"Último dato{aprox}: {frescura.get('ultimo_dato')}")
+    if frescura.get("fecha_corte"):
+        parts.append(f"Fecha de corte: {frescura.get('fecha_corte')}")
+    if frescura.get("actualizada"):
+        parts.append(f"Leída de la fuente por OpenArg: {frescura.get('actualizada')}")
+    nota = str(frescura.get("nota") or "").strip()
+    if not parts and not nota:
+        return None
+    lines = ["Frescura: " + " · ".join(parts)] if parts else []
+    if nota:
+        # Que es una foto, o que hace meses que no se relee: cambia lo que se
+        # puede afirmar con la tabla.
+        lines.append(f"Nota: {nota}")
     return "\n".join(lines)
 
 
@@ -382,9 +529,39 @@ def format_rows(payload: Mapping[str, Any]) -> str:
     if applied:
         head += "\n" + "\n".join(applied)
     if payload.get("truncado"):
+        siguiente = payload.get("siguiente_offset")
+        pagina = f" o pedí las siguientes con `offset={siguiente}`" if siguiente else ""
         head += (
-            "\nHay más filas: acotá con `desde`/`hasta` o `filtros`, o subí `limite` (máximo 500)."
+            "\nHay más filas: acotá con `desde`/`hasta` o `filtros`, subí `limite` (máximo 500)"
+            f"{pagina}. Para un total, un promedio o un ranking usá `agregar_datos` en vez de "
+            "sumar filas."
         )
+    return head + "\n```csv\n" + rows_to_csv(columns, rows) + "\n```"
+
+
+def format_aggregate(payload: Mapping[str, Any]) -> str:
+    """El resultado de `agregar_datos`: sobre cuántas filas, los grupos en CSV y la fuente."""
+    source = _link(
+        str(payload.get("fuente") or payload.get("tabla") or ""), str(payload.get("url") or "")
+    )
+    calculo = str(payload.get("calculo") or "cálculo")
+    tabla = payload.get("tabla")
+    notas = [str(n) for n in payload.get("notas") or [] if str(n).strip()]
+    rows = [r for r in payload.get("filas") or [] if isinstance(r, Mapping)]
+    if not rows:
+        # Ningún valor que citar: cero filas cumplen los filtros o ninguna
+        # tiene un número. Nunca un "0" que parezca un dato.
+        lines = [f"Sin resultado para {calculo} en `{tabla}`. Fuente: {source}"]
+        if payload.get("aviso"):
+            lines.append(str(payload["aviso"]))
+        lines.extend(notas)
+        return "\n".join(lines)
+    usadas = payload.get("filas_usadas")
+    sobre = f" sobre {_miles(int(usadas))} filas" if isinstance(usadas, int) else ""
+    head = f"{calculo} en `{tabla}`{sobre}, calculado por OpenArg. Fuente: {source}"
+    if notas:
+        head += "\n" + "\n".join(notas)
+    columns = [str(c) for c in payload.get("columnas") or []] or list(rows[0].keys())
     return head + "\n```csv\n" + rows_to_csv(columns, rows) + "\n```"
 
 

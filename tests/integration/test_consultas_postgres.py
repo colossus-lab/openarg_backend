@@ -23,6 +23,13 @@ from app.application.consultas.fechas import expresion_fecha, fecha_iso
 from app.application.consultas.numeros import expresion_numero, leer_numero
 from app.application.public_catalog import DataRequest, build_data_query
 
+# A nivel de módulo: dishka resuelve las anotaciones de los providers (con
+# `from __future__ import annotations` son texto) en los globales del módulo.
+from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
+from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
+from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+
 FECHAS = [
     "2026-03-05T00:00:00",
     "2024-03",
@@ -229,3 +236,188 @@ def test_calcular_agrupado_informa_el_total_de_todos_los_grupos(tabla: str) -> N
 
 def test_leer_numero_es_decimal() -> None:
     assert leer_numero("1.500.000,50") == Decimal("1500000.50")
+
+
+# ── modo datos: truncado exacto, orden estable y offset (QW12 / ok.3) ──────
+
+
+def test_desempate_por_ctid_y_offset_pasan_el_sandbox(tabla: str) -> None:
+    """El validador real acepta `ctid` y `OFFSET`; las páginas no se pisan."""
+    todas = _run(tabla, orden="desc", columns=["fecha", "entidad"], una_de_mas=True)
+    primera = _run(tabla, orden="desc", limite=2, columns=["fecha", "entidad"], una_de_mas=True)
+    segunda = _run(
+        tabla, orden="desc", limite=2, offset=2, columns=["fecha", "entidad"], una_de_mas=True
+    )
+    assert len(primera) == 3  # limite + 1: hay más
+    assert primera[:2] + segunda[:2] == todas[:4]
+
+
+def test_sin_fecha_orden_fisico_es_el_del_archivo(tabla: str) -> None:
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    sin_fecha = ["funcion_desc", "entidad", "monto"]  # como si la tabla no tuviera `fecha`
+    q = build_data_query(
+        DataRequest(
+            table=tabla,
+            available_columns=sin_fecha,
+            column_types=[(c, "text") for c in sin_fecha],
+            columns=["entidad"],
+            orden_fisico=True,
+            offset=1,
+        )
+    )
+    assert q.orden == "fisico"
+    result = PgSandboxAdapter()._execute_sync(q.sql, 10, q.params)
+    assert result.error is None, (result.error, q.sql)
+    assert [r["entidad"] for r in result.rows] == ["Banco Nación", "Call Center", "Otro"]
+
+
+def test_una_columna_que_ya_no_existe_tiene_su_propio_error(tabla: str) -> None:
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    result = PgSandboxAdapter()._execute_sync(f'SELECT "no_existe" FROM public."{tabla}"', 10, {})
+    assert result.error_kind == "missing_column"
+    result = PgSandboxAdapter()._execute_sync('SELECT 1 FROM public."cache_no_existe_xyz"', 10, {})
+    assert result.error_kind == "missing_table"
+
+
+# ── agregar_datos (3.1): la cuenta en la base, de punta a punta ────────────
+
+
+async def _agregar(tabla: str, **kw):  # type: ignore[no-untyped-def]
+    from app.application.consultas.agregar import PedidoAgregado, agregar
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    sandbox = PgSandboxAdapter()
+
+    async def run(sql, params):  # type: ignore[no-untyped-def]
+        result = await sandbox.execute_readonly(sql, params=params)
+        assert result.error is None, (result.error, sql)
+        return result.rows
+
+    return await agregar(
+        sandbox,
+        PedidoAgregado(
+            tabla=tabla,
+            tipos=[(c, "text") for c in ("funcion_desc", "entidad", "monto", "fecha")],
+            **kw,
+        ),
+        run,
+    )
+
+
+async def test_agregar_suma_un_monto_argentino_filtrado(tabla: str) -> None:
+    """Educación y Cultura: 1.500.000,50 + 900.000, con la igualdad sin acentos."""
+    res = await _agregar(
+        tabla,
+        operacion="suma",
+        columna="monto",
+        filtros={"funcion_desc": "educacion y cultura"},
+    )
+    assert res.grupos == [{"valor": Decimal("2400000.50")}]
+    assert res.filas_usadas == 2 and res.filas_con_valor == 2 and not res.truncado
+
+
+async def test_agregar_ranking_dice_el_total_de_todos_los_grupos(tabla: str) -> None:
+    res = await _agregar(
+        tabla, operacion="suma", columna="monto", agrupar_por=["funcion_desc"], limite=2
+    )
+    assert [g["funcion_desc"] for g in res.grupos] == ["Educación y Cultura", "Salud"]
+    assert res.truncado and res.filas_usadas == 4
+    assert any("Hay más de 2 grupos" in a for a in res.avisos)
+
+
+async def test_agregar_sin_coincidencias_explica_en_vez_de_dar_cero(tabla: str) -> None:
+    res = await _agregar(tabla, operacion="conteo", filtros={"funcion_desc": "Educacion"})
+    assert res.vacio and res.filas_usadas == 0 and res.grupos == []
+    assert res.aviso is not None and "Ninguna fila" in res.aviso
+    assert "Educación y Cultura" in [s["valor"] for s in res.sugerencias["funcion_desc"]]
+
+
+async def test_agregar_por_http_devuelve_el_valor_como_numero(tabla: str) -> None:
+    """Revisión del PR #139: la suma sale de Postgres como Decimal y el router la
+    pasaba cruda a `list[dict[str, Any]]`, que Pydantic serializa como texto
+    ("valor": "2400000.50"). Los tests del router usan floats y la prueba en
+    staging fue con la función: acá es el endpoint con el sandbox real."""
+    from unittest.mock import AsyncMock
+
+    from dishka import Provider, Scope, make_async_container, provide
+    from dishka.integrations.fastapi import setup_dishka
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from app.application.api_key_service import generate_api_key
+    from app.domain.entities.api_key.api_key import ApiKey
+    from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+    from app.presentation.http.controllers.public_api.catalogo_router import router
+
+    class Sandbox(PgSandboxAdapter):
+        # El catálogo (`cached_datasets`) no conoce la tabla de prueba: el
+        # resto (consulta, estadísticas) es el adaptador real.
+        async def find_tables(self, *, dataset_ids=None, table_names=None):  # type: ignore[no-untyped-def,override]
+            return [CachedTableInfo(table_name=tabla, dataset_id="ds", row_count=4, columns=[])]
+
+        async def get_column_types(self, table_names):  # type: ignore[no-untyped-def,override]
+            cols = [(c, "text") for c in ("funcion_desc", "entidad", "monto", "fecha")]
+            return {n: cols for n in table_names}
+
+        async def get_table_sources(self, table_names):  # type: ignore[no-untyped-def,override]
+            return {}
+
+    class Cache:
+        async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
+            return 1
+
+        async def ttl(self, key: str) -> int | None:
+            return None
+
+    raw, key_hash = generate_api_key()
+    repo = AsyncMock(spec=IApiKeyRepository)
+    repo.get_by_key_hash.return_value = ApiKey(
+        user_id=uuid.uuid4(), key_hash=key_hash, plan="free", is_active=True
+    )
+    credits = AsyncMock(spec=ICreditRepository)
+    credits.get_active_supporter.return_value = None
+    sandbox = Sandbox()
+
+    class P(Provider):
+        scope = Scope.REQUEST
+
+        @provide
+        def s(self) -> ISQLSandbox:
+            return sandbox
+
+        @provide
+        def c(self) -> ICacheService:
+            return Cache()  # type: ignore[return-value]
+
+        @provide
+        def r(self) -> IApiKeyRepository:
+            return repo
+
+        @provide
+        def cr(self) -> ICreditRepository:
+            return credits
+
+    app = FastAPI()
+    app.include_router(router)
+    setup_dishka(container=make_async_container(P()), app=app)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        r = await client.post(
+            "/catalogo/agregar",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "tabla": tabla,
+                "operacion": "suma",
+                "columna": "monto",
+                "agrupar_por": ["funcion_desc"],
+            },
+        )
+    assert r.status_code == 200, r.text
+    filas = {f["funcion_desc"]: f for f in r.json()["filas"]}
+    educacion = filas["Educación y Cultura"]
+    assert educacion["valor"] == 2400000.5 and isinstance(educacion["valor"], float)
+    assert educacion["filas_usadas"] == 2
+    # Una suma entera sale entera.
+    assert filas["Salud"]["valor"] == 2000000 and isinstance(filas["Salud"]["valor"], int)

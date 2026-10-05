@@ -41,11 +41,17 @@ class FakeCache:
     def __init__(self) -> None:
         self.counters: dict[str, int] = {}
         self.values: dict[str, Any] = {}
+        # Segundos que le quedan a una clave, si el test los fija (`ttl`).
+        self.remaining: dict[str, int] = {}
         self.down = False
 
     def _check(self) -> None:
         if self.down:
             raise ConnectionError("redis down")
+
+    async def ttl(self, key: str) -> int | None:
+        self._check()
+        return self.remaining.get(key)
 
     async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
         self._check()
@@ -286,6 +292,24 @@ class TestAsk:
         assert r.status_code == 402
         assert r.json()["detail"] == "Monthly quota exceeded: 10 questions per month"
         assert "X-Quota-Reset" in r.headers
+
+    async def test_third_question_in_a_minute_says_how_long_to_wait(
+        self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache, graph: FakeGraph
+    ) -> None:
+        """QW10 sobre el cobro al terminar: el 429 del límite por minuto trae
+        lo que le queda a la ventana (no 60 fijo), no corre el motor y no
+        reserva nada del mes."""
+        user = key[1].user_id
+        for q in ("a", "b"):
+            assert (
+                await client.post("/ask", json={"question": q}, headers=_auth(key[0]))
+            ).status_code == 200
+        cache.remaining[f"rl:user:{user}:min"] = 9
+        r = await client.post("/ask", json={"question": "c"}, headers=_auth(key[0]))
+        assert r.status_code == 429
+        assert r.headers["Retry-After"] == "9"
+        assert len(graph.states) == 2
+        assert cache.month(user) == 2
 
     async def test_injection_blocked_is_400_not_a_data_answer(
         self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph
@@ -621,10 +645,12 @@ class TestAskDedupe:
         assert (await self._ask(client, key[0])).status_code == 200
         for _ in range(10):
             assert (await self._ask(client, key[0])).status_code == 200
+        # Lo que le queda a la ventana de las repeticiones, no 60 fijo (QW10).
+        cache.remaining[f"rl:user:{key[1].user_id}:replay:min"] = 38
         r = await self._ask(client, key[0])
         assert r.status_code == 429
-        assert "minute" in r.json()["detail"]  # el MCP muestra "esperá un minuto"
-        assert r.headers["Retry-After"] == "60"
+        assert "minute" in r.json()["detail"]  # el MCP muestra "esperá N segundos"
+        assert r.headers["Retry-After"] == "38"
         # El límite de las preguntas no se tocó: sigue el de la primera.
         assert cache.counters[f"rl:user:{key[1].user_id}:min"] == 1
         rows = [c.args[0] for c in repo.record_usage.await_args_list]

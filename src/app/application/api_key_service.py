@@ -152,6 +152,25 @@ def _too_many(detail: str, headers: dict[str, str]) -> HTTPException:
     return HTTPException(status_code=429, detail=detail, headers=headers)
 
 
+async def _seconds_left(cache: ICacheService, key: str, window: int) -> int:
+    """Segundos hasta que se abra la ventana de `key`: su TTL, entre 1 y `window`.
+
+    La ventana arranca con el primer pedido (EXPIRE NX), así que el
+    `Retry-After: 60` fijo de antes hacía esperar de más a quien chocaba el
+    límite al final del minuto. Si el caché no sabe el TTL, la ventana entera.
+    Un TTL 0 es la clave que vence en este segundo (Redis redondea): 1, no
+    la ventana entera.
+    """
+    try:
+        left = await cache.ttl(key)
+    except Exception:
+        logger.debug("Cache TTL lookup failed for %s", key, exc_info=True)
+        left = None
+    if not isinstance(left, int) or left < 0:
+        return window
+    return max(1, min(left, window))
+
+
 # El 503 del modo respuestas tiene dos causas que el usuario tiene que poder
 # distinguir: el tope global del día (esperar a mañana) y Redis caído (es un
 # problema nuestro, que se arregla en minutos). Antes el MCP mostraba las dos
@@ -273,18 +292,19 @@ def replay_per_min(api_key: ApiKey) -> int:
 async def check_replay_rate(api_key: ApiKey, cache: ICacheService) -> None:
     """El límite por minuto de las preguntas repetidas (falla abierto).
 
-    Raises HTTPException 429. El detalle dice "minute", así el MCP muestra
-    "esperá un minuto".
+    Raises HTTPException 429. El detalle dice "minute" y el ``Retry-After`` es
+    el TTL de este contador, así el MCP muestra cuántos segundos esperar.
     """
     limit = replay_per_min(api_key)
-    count = await _incr_fail_open(cache, _replay_minute_key(api_key.user_id), _MIN_TTL)
+    replay_key = _replay_minute_key(api_key.user_id)
+    count = await _incr_fail_open(cache, replay_key, _MIN_TTL)
     if count > limit:
         raise _too_many(
             f"Rate limit exceeded: {limit} repeated questions per minute",
             {
                 "X-RateLimit-Limit-Minute": str(limit),
                 "X-RateLimit-Remaining-Minute": "0",
-                "Retry-After": "60",
+                "Retry-After": str(await _seconds_left(cache, replay_key, _MIN_TTL)),
             },
         )
 
@@ -295,14 +315,15 @@ async def check_question_rate(api_key: ApiKey, cache: ICacheService) -> MinuteWi
     Raises HTTPException 429.
     """
     per_min = _plan_per_min(api_key)
-    count = await _incr_fail_open(cache, _minute_key(api_key.user_id), _MIN_TTL)
+    min_key = _minute_key(api_key.user_id)
+    count = await _incr_fail_open(cache, min_key, _MIN_TTL)
     if count > per_min:
         raise _too_many(
             f"Rate limit exceeded: {per_min} requests per minute",
             {
                 "X-RateLimit-Limit-Minute": str(per_min),
                 "X-RateLimit-Remaining-Minute": "0",
-                "Retry-After": "60",
+                "Retry-After": str(await _seconds_left(cache, min_key, _MIN_TTL)),
             },
         )
     return MinuteWindow(per_min, count)
@@ -585,11 +606,12 @@ async def check_catalog_rate_limit(
 ) -> None:
     """Enforce the per-person limits on data-mode (no-LLM) endpoints."""
     user_id = api_key.user_id
-    minute = await _incr_fail_open(cache, f"rl:user:{user_id}:catalog:min", _MIN_TTL)
+    min_key = f"rl:user:{user_id}:catalog:min"
+    minute = await _incr_fail_open(cache, min_key, _MIN_TTL)
     if minute > CATALOG_MINUTE_LIMIT:
         raise _too_many(
             f"Rate limit exceeded: {CATALOG_MINUTE_LIMIT} catalog requests per minute",
-            {"Retry-After": "60"},
+            {"Retry-After": str(await _seconds_left(cache, min_key, _MIN_TTL))},
         )
     tier = await resolve_tier(user_id, credits)
     count = await _incr_fail_open(cache, monthly_counter_key(user_id, "datos"), MONTH_TTL)

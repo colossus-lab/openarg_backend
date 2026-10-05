@@ -7,6 +7,9 @@ los bugs de la auditoría del 04-oct (fechas, igualdad tolerante, operadores).
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
+
 import pytest
 
 from app.application.public_catalog import (
@@ -17,6 +20,7 @@ from app.application.public_catalog import (
     build_date_range_query,
     build_sample_query,
     date_column,
+    json_rows,
     resolve_table,
 )
 from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
@@ -59,7 +63,8 @@ class TestBuildDataQuery:
             'SELECT "indice_tiempo", "tasas_interes_call", "tasas_interes_badlar" '
             'FROM "raw"."datos_gob_ar__principales_tasas_de_interes__6335b6d1__v1"'
         )
-        assert q.sql.endswith("ASC NULLS LAST LIMIT 100")
+        # Desempate por posición física: filas con la misma fecha, siempre igual.
+        assert q.sql.endswith("ASC NULLS LAST, ctid LIMIT 100")
         assert q.params == {}
 
     def test_period_filter_overlaps_and_values_are_bound(self) -> None:
@@ -67,7 +72,7 @@ class TestBuildDataQuery:
         assert q.params == {"p0": "2025-12-01", "p1": "2026-06-18"}
         assert ">= :p0" in q.sql and "<= :p1" in q.sql
         assert "2025-12" not in q.sql
-        assert q.sql.endswith("DESC NULLS LAST LIMIT 50")
+        assert q.sql.endswith("DESC NULLS LAST, ctid LIMIT 50")
 
     def test_the_period_is_not_a_lexicographic_left(self) -> None:
         """`left(col::text, 7) >= '2025-12'` daba 0 filas con "1/10/2017"."""
@@ -163,6 +168,50 @@ class TestBuildDataQuery:
             DataRequest(table=_T, available_columns=['raro"nombre'], columns=['raro"nombre'])
         )
         assert '"raro""nombre"' in q.sql
+
+
+class TestTruncadoOrdenYOffset:
+    """Auditoría ok.3 / QW12: `truncado = cantidad >= limite` daba falsos
+    positivos, sin fecha no había ORDER BY y no había forma de pedir la página
+    siguiente."""
+
+    def test_pide_una_fila_de_mas_para_saber_si_hay_mas(self) -> None:
+        q = build_data_query(_req(limite=100, una_de_mas=True))
+        assert q.sql.endswith("LIMIT 101") and q.limite == 100
+
+    def test_offset_va_despues_del_limite(self) -> None:
+        q = build_data_query(_req(limite=50, offset=200, una_de_mas=True))
+        assert q.sql.endswith("LIMIT 51 OFFSET 200")
+
+    @pytest.mark.parametrize("offset", [-1, 10_001])
+    def test_offset_acotado(self, offset: int) -> None:
+        with pytest.raises(CatalogRequestError, match="offset"):
+            build_data_query(_req(offset=offset))
+
+    def test_sin_fecha_y_chica_ordena_por_posicion_fisica(self) -> None:
+        q = build_data_query(
+            DataRequest(table=_PRESUPUESTO, available_columns=["a", "b"], orden_fisico=True)
+        )
+        assert q.sql.endswith("ORDER BY ctid LIMIT 100") and q.orden == "fisico"
+
+    def test_sin_fecha_y_grande_no_ordena(self) -> None:
+        """Ordenar una tabla sin índices la recorre entera (11 s en 300.000 filas)."""
+        q = build_data_query(DataRequest(table=_PRESUPUESTO, available_columns=["a", "b"]))
+        assert "ORDER BY" not in q.sql and q.orden is None
+
+    def test_un_mart_no_desempata_por_ctid(self) -> None:
+        q = build_data_query(
+            DataRequest(table="mart.inflacion", available_columns=["fecha", "v"], orden_fisico=True)
+        )
+        assert "ctid" not in q.sql and q.orden == "fecha"
+
+    def test_el_validador_acepta_ctid_y_offset(self) -> None:
+        q = build_data_query(_req(offset=100, una_de_mas=True))
+        assert _validate_sql(q.sql, built=True) is None
+        q = build_data_query(
+            DataRequest(table=_PRESUPUESTO, available_columns=["a"], orden_fisico=True, offset=5)
+        )
+        assert _validate_sql(q.sql, built=True) is None
 
 
 class TestFechasQueAntesNoSeReconocian:
@@ -266,3 +315,33 @@ class TestAuxQueries:
         assert "count(f) AS reconocidas" in sql and "count(c) AS con_valor" in sql
         # La expresión se calcula una vez por fila, no una por agregado.
         assert sql.count("(CASE WHEN") == 1 and "OFFSET 0" in sql
+
+
+# ── json_rows: números de JSON en el modo datos ─────────────────────────────
+
+
+def test_json_rows_convierte_decimal_en_numero():
+    """Pydantic serializa un Decimal dentro de dict[str, Any] como texto."""
+    (fila,) = json_rows(
+        [
+            {
+                "valor": Decimal("5793524.174913833"),
+                "entero": Decimal("505.000"),
+                "texto": "Educación y Cultura",
+                "dia": date(2026, 10, 5),
+                "nada": None,
+                "real": 1.5,
+            }
+        ]
+    )
+    assert fila["valor"] == 5793524.174913833 and isinstance(fila["valor"], float)
+    assert fila["entero"] == 505 and isinstance(fila["entero"], int)
+    # Lo que no es Decimal no se toca (las fechas las pasa a ISO Pydantic).
+    assert fila["texto"] == "Educación y Cultura" and fila["dia"] == date(2026, 10, 5)
+    assert fila["nada"] is None and fila["real"] == 1.5
+
+
+def test_json_rows_nan_e_infinito_no_rompen_el_json():
+    """`numeric` admite NaN e Infinity: el JSON no."""
+    (fila,) = json_rows([{"a": Decimal("NaN"), "b": Decimal("Infinity")}])
+    assert fila == {"a": None, "b": None}

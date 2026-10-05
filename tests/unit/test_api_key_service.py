@@ -20,6 +20,7 @@ from app.application.api_key_service import (
     answer_used_model,
     charged_counter_key,
     check_catalog_rate_limit,
+    check_question_rate,
     check_replay_rate,
     generate_api_key,
     global_free_daily_cap,
@@ -141,6 +142,8 @@ class FakeCache:
     def __init__(self) -> None:
         self.counters: dict[str, int] = {}
         self.ttls: dict[str, int] = {}
+        # Segundos que le quedan a cada clave, si el test los fija.
+        self.remaining: dict[str, int] = {}
         self.down = False
 
     async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
@@ -177,6 +180,9 @@ class FakeCache:
         self.counters[key] = int(value)
         self.ttls[key] = ttl_seconds
         return True
+
+    async def ttl(self, key: str) -> int | None:
+        return self.remaining.get(key)
 
 
 class FakeCredits:
@@ -507,6 +513,70 @@ class TestRateLimit:
             await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
         assert exc_info.value.status_code == 429
         assert "per minute" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_what_is_left_of_the_minute(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """QW10: era 60 fijo, aunque la ventana se abriera en 5 segundos.
+
+        Vale para los tres límites por minuto: preguntas, repeticiones de una
+        pregunta ya respondida (cada uno con el TTL de SU contador) y datos.
+        """
+        user = free_key.user_id
+        cache.remaining = {
+            f"rl:user:{user}:min": 23,
+            f"rl:user:{user}:replay:min": 41,
+            f"rl:user:{user}:catalog:min": 7,
+        }
+        cache.counters[f"rl:user:{user}:min"] = PLAN_LIMITS["free"]["per_min"]
+        cache.counters[f"rl:user:{user}:replay:min"] = REPLAY_PER_MIN
+        cache.counters[f"rl:user:{user}:catalog:min"] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as preguntas:
+            await check_question_rate(free_key, cache)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as repeticiones:
+            await check_replay_rate(free_key, cache)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as datos:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert preguntas.value.headers["Retry-After"] == "23"
+        assert repeticiones.value.headers["Retry-After"] == "41"
+        assert datos.value.headers["Retry-After"] == "7"
+
+    @pytest.mark.asyncio
+    async def test_reserve_question_carries_the_real_retry_after(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """`/ask` llega al límite por minuto vía `reserve_question` (#137): el
+        429 sale con el TTL real y sin reservar nada del mes."""
+        key = f"rl:user:{free_key.user_id}:min"
+        cache.remaining = {key: 12}
+        cache.counters[key] = PLAN_LIMITS["free"]["per_min"]
+        with pytest.raises(HTTPException) as exc_info:
+            await reserve_question(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.headers["Retry-After"] == "12"
+        assert _month_key(free_key.user_id) not in cache.counters
+
+    @pytest.mark.asyncio
+    async def test_retry_after_in_the_last_second_is_one_not_sixty(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """Redis redondea: una clave que vence en este segundo tiene TTL 0."""
+        key = f"rl:user:{free_key.user_id}:catalog:min"
+        cache.remaining = {key: 0}
+        cache.counters[key] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as exc_info:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.headers["Retry-After"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_retry_after_falls_back_to_the_whole_minute(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        cache.counters[f"rl:user:{free_key.user_id}:catalog:min"] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as exc_info:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.headers["Retry-After"] == "60"
 
 
 class TestChargeOnlyWhenAnswered:

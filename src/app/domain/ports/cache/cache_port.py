@@ -69,3 +69,14 @@ class ICacheService(ABC):
         Returns True if the key was deleted.
         """
         ...
+
+    async def ttl(self, key: str) -> int | None:
+        """Segundos que le quedan a ``key``, o None si no existe o no vence.
+
+        Para el ``Retry-After`` real de un límite por minuto: la ventana
+        empieza con el primer pedido (EXPIRE NX), así que lo que falta para
+        que se abra no es 60 sino el TTL del contador. No es abstracto: un
+        caché que no lo sepa (un fake de test) devuelve None y quien llama
+        usa la ventana entera.
+        """
+        return None

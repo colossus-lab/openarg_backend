@@ -100,8 +100,10 @@ class SandboxResult:
     error: str | None = None
     # Qué clase de error, para que el llamador no tenga que adivinarlo por el
     # texto: "timeout", "validation" (el validador rechazó el SQL), "blocked"
-    # (tabla con un hallazgo de calidad abierto o mart retirado) o
-    # "execution". None si no hubo error.
+    # (tabla con un hallazgo de calidad abierto o mart retirado),
+    # "missing_column" / "missing_table" (la tabla cambió o se reemplazó entre
+    # que se leyó su esquema y se consultó) o "execution". None si no hubo
+    # error.
     error_kind: str | None = None
 
 

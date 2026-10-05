@@ -226,6 +226,111 @@ def data_age_for(engine: Engine, served: str | None) -> DataAge | None:
     return DataAge(as_of=as_of, days=max(days, 0), source=source)
 
 
+@dataclass(frozen=True)
+class TableFreshness:
+    """Qué tan fresca es una tabla del catálogo, para ``describir_tabla``.
+
+    Dos fechas que no hay que confundir (auditoría 3.4):
+
+    - ``actualizada``: la última vez que OpenArg leyó la tabla de su fuente
+      (``data_age_for``: ``cached_datasets.updated_at`` de la fila lista). Si
+      el archivo no había cambiado, se conservó el contenido: igual cuenta,
+      porque la copia era la vigente ese día. No es ``raw_table_versions.
+      created_at``: en staging, 654 tablas tienen una versión "creada" el
+      01-ago por un backfill del registro, sin que nadie las leyera, y en las
+      tablas vía B (presupuesto, BCRA) queda congelada en mayo aunque se
+      reescriban todos los días (verificado el 05-oct).
+    - ``ultimo_dato``: el último período con datos según la columna de fecha.
+      Una serie leída ayer puede terminar en 2023.
+
+    Una tabla sin serie temporal (sin columna de fecha, o con un solo período,
+    como el crédito presupuestario de un ejercicio) es una foto: su
+    ``fecha_corte`` es el día en que se leyó.
+
+    ``serie`` es None cuando la tabla tiene columna de fecha pero no se pudo
+    calcular qué período cubre (fechas en un formato que no se reconoce, una
+    tabla enorme sin fechas en la muestra de ``pg_stats``). No es una foto:
+    puede ser una serie que termina en 2019, y declararla vigente a la fecha
+    de lectura es justo la confusión que 3.4 quería evitar.
+    """
+
+    actualizada: date | None
+    dias_desde_actualizacion: int | None
+    ultimo_dato: str | None
+    fecha_corte: date | None
+    serie: bool | None
+    nota: str | None = None
+    # El período sale de la muestra de `pg_stats`: puede haber datos
+    # posteriores a `ultimo_dato`.
+    aproximado: bool = False
+
+
+def _fecha_es(day: date) -> str:
+    return f"{day.day} de {_MONTHS_ES[day.month - 1]} de {day.year}"
+
+
+def table_freshness(
+    age: DataAge | None,
+    *,
+    columna_fecha: str | None,
+    desde: str | None,
+    hasta: str | None,
+    aproximado: bool = False,
+) -> TableFreshness:
+    """Combina la fecha de lectura (``data_age_for``) con el período de la tabla.
+
+    ``desde``/``hasta`` son los de la columna de fecha (``describir_periodo``,
+    que ya acota el costo: timeout y, en tablas enormes, el rango de la
+    muestra de ``pg_stats``, con ``aproximado``). Puro: se puede probar sin base.
+    """
+    actualizada = age.as_of.date() if age else None
+    dias = age.days if age else None
+    con_rango = bool(desde and hasta)
+    serie: bool | None
+    if not columna_fecha:
+        serie = False
+    elif not con_rango:
+        # Tiene fechas pero no se sabe cuáles: ni serie ni foto.
+        serie = None
+    else:
+        serie = desde != hasta
+    ultimo = hasta if columna_fecha and con_rango else None
+    aproximado = bool(aproximado and ultimo)
+    corte = actualizada if serie is False else None
+    partes: list[str] = []
+    if serie is None:
+        partes.append(
+            f"La tabla tiene columna de fecha ({columna_fecha}) pero no se pudo determinar qué "
+            "período cubre: no se sabe cuál es el último dato. No la presentes como vigente; "
+            'para ver las fechas más recientes pedí las filas con orden="desc".'
+        )
+    if corte is not None:
+        partes.append(
+            "Es una foto, sin serie temporal: los datos son los vigentes al "
+            f"{_fecha_es(corte)}, cuando OpenArg la leyó de su fuente."
+        )
+    if aproximado:
+        partes.append(
+            f"El último dato ({ultimo}) es aproximado: sale de una muestra de la tabla, que es "
+            "muy grande para recorrerla entera, y puede haber datos posteriores."
+        )
+    if age is not None and age.is_stale and actualizada is not None:
+        partes.append(
+            f"OpenArg la leyó de su fuente por última vez hace {age.days} días "
+            f"({_fecha_es(actualizada)}): el portal puede tener datos más nuevos."
+        )
+    nota = " ".join(partes) or None
+    return TableFreshness(
+        actualizada=actualizada,
+        dias_desde_actualizacion=dias,
+        ultimo_dato=ultimo,
+        fecha_corte=corte,
+        serie=serie,
+        nota=nota,
+        aproximado=aproximado,
+    )
+
+
 def staleness_warning(engine: Engine, served: str | None) -> str | None:
     """The sentence to show, or `None` when the data is current enough.
 

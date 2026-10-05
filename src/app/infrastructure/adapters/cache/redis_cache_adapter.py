@@ -74,3 +74,8 @@ class RedisCacheAdapter(ICacheService):
 
     async def delete_if_equals(self, key: str, value: str) -> bool:
         return bool(await self._redis.eval(_DELETE_IF_EQUALS, 1, key, value))
+
+    async def ttl(self, key: str) -> int | None:
+        # Redis: -2 if the key does not exist, -1 if it has no expiry.
+        seconds = int(await self._redis.ttl(key))
+        return seconds if seconds >= 0 else None

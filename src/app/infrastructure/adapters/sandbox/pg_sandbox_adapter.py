@@ -674,8 +674,10 @@ class PgSandboxAdapter(ISQLSandbox):
                 kind = "timeout"
             elif "relation" in error_lower and "does not exist" in error_lower:
                 error_msg = "The requested table does not exist."
+                kind = "missing_table"
             elif "column" in error_lower and "does not exist" in error_lower:
                 error_msg = "One or more referenced columns do not exist."
+                kind = "missing_column"
             elif "syntax error" in error_lower:
                 error_msg = "SQL syntax error in the query."
             else:

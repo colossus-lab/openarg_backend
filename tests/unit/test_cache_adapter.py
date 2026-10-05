@@ -123,3 +123,12 @@ class TestRedisCacheAdapter:
         assert "GET" in script and "DEL" in script
         mock_redis.eval.return_value = 0
         assert await cache.delete_if_equals("ask:dedupe:fp:lock", "other") is False
+
+    async def test_ttl_is_the_seconds_left_or_none(self, cache, mock_redis):
+        """Para el `Retry-After` real del límite por minuto (QW10)."""
+        mock_redis.ttl.return_value = 17
+        assert await cache.ttl("rl:user:x:catalog:min") == 17
+        mock_redis.ttl.return_value = -2  # no existe
+        assert await cache.ttl("nada") is None
+        mock_redis.ttl.return_value = -1  # no vence
+        assert await cache.ttl("eterna") is None
