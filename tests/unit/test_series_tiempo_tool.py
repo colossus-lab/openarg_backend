@@ -7,7 +7,11 @@
   2023 con "las últimas 3 de 1000", y un aviso de que la fuente está parada;
 - `agregacion` llega a la API (exportaciones anuales: suma, no promedio);
 - `variacion` compone sobre los valores: la acumulada de marzo a agosto de
-  2026 es 14,58 % y no la suma de las tasas (13,77);
+  2026 es 14,58 % y no la suma de las tasas (13,77); entre años de un flujo
+  avisa que diciembre contra diciembre no es el total anual;
+- un error de la API que no es el de frecuencia inválida no se reintenta
+  sin la agregación pedida;
+- con varias series, el aviso de atraso nombra cada serie con su fecha;
 - `buscar_series` compara sin acentos y por palabra completa, y el catálogo
   ya no rotula el EMAE de comercio como "actividad industrial".
 """
@@ -25,12 +29,18 @@ from app.application.answers.engine import EngineRequest
 from app.application.answers.tools.base import ToolContext, ToolInputError
 from app.application.answers.tools.conectores import BuscarSeries, SeriesTiempo, _tail_for_model
 from app.domain.entities.connectors.data_result import DataResult
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from tests.unit.series_tiempo_fake import (
+    DESEMPLEO_ID,
+    EXPO_ID,
     IPC_ID,
     RESERVAS_ID,
     TIPO_CAMBIO_ID,
     FakeSeriesApi,
+    desempleo,
     diaria,
+    exportaciones_reales,
     ipc_real,
     reservas_mensuales,
     serie,
@@ -133,8 +143,13 @@ async def test_la_variacion_compone_sobre_los_valores(
     # Vuelve como un resultado citable, con el cálculo dicho.
     computed = outcome.results[0]
     assert computed.records[0]["variacion_pct"] == esperado
-    assert computed.metadata["unidad"] == "porcentaje"
     assert "valor_hasta / valor_desde" in payload["calculo"]
+    # valor_desde / valor_hasta están en las unidades de la serie (el índice,
+    # 10.121,37): el resultado no se rotula entero como porcentaje, sólo
+    # las columnas que lo son.
+    assert "unidad" not in computed.metadata
+    assert computed.metadata["columnas_porcentaje"] == ["variacion_pct"]
+    assert "escala" not in payload
 
 
 async def test_la_variacion_no_es_la_suma_de_las_tasas() -> None:
@@ -213,6 +228,141 @@ async def test_la_variacion_ignora_una_representacion_y_lo_dice() -> None:
     assert all("representation_mode" not in r for r in api.series_requests())
 
 
+# ── variación entre años: dic. contra dic. no es el total anual ──
+
+
+async def test_la_variacion_entre_anios_de_un_flujo_sin_frecuencia_lo_avisa() -> None:
+    # «¿Cuánto crecieron las exportaciones en 2025 respecto de 2024?»: sin
+    # frecuencia compara diciembre contra diciembre (7.049 → 7.482, +6,15 %).
+    # Es una cifra que parece del año y no lo es: el total creció 9,29 %.
+    payload, outcome = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {"ids": [EXPO_ID], "variacion": {"desde": "2024", "hasta": "2025"}},
+    )
+    fila = payload["filas"][0]
+    assert (fila["desde"], fila["hasta"]) == ("2024-12-01", "2025-12-01")
+    assert fila["variacion_pct"] == 6.15
+    assert "frecuencia=year y agregacion=sum" in payload["nota"]
+    assert "no para el total del año" in payload["nota"]
+    assert outcome.results[0].metadata["advertencias"]
+
+
+async def test_la_variacion_del_total_anual_con_year_y_sum_da_9_29() -> None:
+    api = FakeSeriesApi(exportaciones_reales())
+    payload, _ = await _run(
+        api,
+        {
+            "ids": [EXPO_ID],
+            "frecuencia": "year",
+            "agregacion": "sum",
+            "variacion": {"desde": "2024", "hasta": "2025"},
+        },
+    )
+    fila = payload["filas"][0]
+    assert round(fila["valor_desde"], 1) == 79703.2
+    assert round(fila["valor_hasta"], 1) == 87111.2
+    assert fila["variacion_pct"] == 9.29
+    assert "nota" not in payload
+    assert api.series_requests()[0]["collapse_aggregation"] == "sum"
+
+
+async def test_la_variacion_con_el_anio_final_incompleto_lo_avisa() -> None:
+    # IPC 2025 → 2026: el año 2026 llega a agosto. Diciembre contra agosto
+    # está bien para precios, pero hay que decir que el año no terminó.
+    payload, _ = await _run(
+        FakeSeriesApi(ipc_real()),
+        {"ids": [IPC_ID], "variacion": {"desde": "2025", "hasta": "2026"}},
+    )
+    fila = payload["filas"][0]
+    assert (fila["desde"], fila["hasta"]) == ("2025-12-01", "2026-08-01")
+    assert fila["variacion_pct"] == 21.3
+    assert "no está completo en la serie" in payload["nota"]
+    assert "2026-08-01" in payload["nota"]
+
+
+async def test_la_variacion_de_un_mes_completo_no_avisa_nada() -> None:
+    payload, _ = await _run(
+        FakeSeriesApi(ipc_real()),
+        {"ids": [IPC_ID], "variacion": {"desde": "2026-02", "hasta": "2026-08"}},
+    )
+    assert "nota" not in payload
+
+
+async def test_la_variacion_anual_con_el_anio_en_curso_explica_por_que_no_hay_dato() -> None:
+    # Con collapse=year la API deja afuera 2026, que no terminó.
+    with pytest.raises(ToolInputError, match="deja afuera el período que todavía no terminó"):
+        await _run(
+            FakeSeriesApi(exportaciones_reales()),
+            {
+                "ids": [EXPO_ID],
+                "frecuencia": "year",
+                "agregacion": "sum",
+                "variacion": {"desde": "2025", "hasta": "2026"},
+            },
+        )
+
+
+# ── reintento sin frecuencia: sólo con el 400 de frecuencia inválida ──
+
+
+async def test_un_timeout_con_frecuencia_no_se_reintenta_sin_agregar() -> None:
+    # Antes, cualquier error con `collapse` se reintentaba sin collapse ni
+    # agregación: un timeout en exportaciones year+sum devolvía la mensual y
+    # la variación salía de diciembre contra diciembre (6,15 en vez de 9,29).
+    timeout = ConnectorError(
+        error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
+        details={"series_ids": [EXPO_ID], "reason": "ReadTimeout('The read operation timed out')"},
+    )
+    series = SimpleNamespace(fetch=AsyncMock(side_effect=timeout))
+    with pytest.raises(ConnectorError):
+        await SeriesTiempo().run(
+            {
+                "ids": [EXPO_ID],
+                "frecuencia": "year",
+                "agregacion": "sum",
+                "variacion": {"desde": "2024", "hasta": "2025"},
+            },
+            _ctx(series),
+        )
+    assert series.fetch.await_count == 1
+
+
+async def test_una_frecuencia_mas_fina_que_la_serie_vuelve_a_la_suya_y_lo_dice() -> None:
+    # Mensual sobre el desempleo trimestral: la API da 400 ("Intervalo de
+    # collapse inválido…") y se pide sin frecuencia, diciéndolo.
+    api = FakeSeriesApi(desempleo())
+    payload, _ = await _run(api, {"ids": [DESEMPLEO_ID], "frecuencia": "month", "ultimos": 2})
+    assert [r.get("collapse") for r in api.series_requests()] == ["month", None]
+    assert "no admite `frecuencia=month`" in payload["nota"]
+    assert payload["filas"][-1]["fecha"] == "2026-04-01"
+    # Y el desempleo llega en %, no como fracción.
+    assert 7.9 in payload["filas"][-1].values()
+    assert "33,54 %" in payload["escala"]
+
+
+# ── varias series: el atraso de cada una ───────────────────
+
+
+async def test_con_varias_series_el_aviso_nombra_la_desactualizada_con_su_fecha() -> None:
+    # Tipo de cambio (desactualizado en la fuente, llega al 31-08) + IPC (al
+    # día, llega a 2026-08-01). El aviso decía «su último dato es del
+    # 2026-08-01»: la fecha del IPC por el atraso del tipo de cambio.
+    payload, _ = await _run(
+        FakeSeriesApi(diaria(400), ipc_real()), {"ids": [TIPO_CAMBIO_ID, IPC_ID], "ultimos": 3}
+    )
+    assert "Tipo de cambio" in payload["aviso"]
+    assert "2026-08-31" in payload["aviso"]
+    assert "2026-08-01" not in payload["aviso"]
+    assert "IPC" not in payload["aviso"]
+    por_serie = {s["serie"][:3]: s for s in payload["por_serie"]}
+    assert por_serie["Tip"]["la_fuente_llega_hasta"] == "2026-08-31"
+    assert por_serie["Tip"]["actualizada_en_fuente"] is False
+    assert por_serie["IPC"]["la_fuente_llega_hasta"] == "2026-08-01"
+    assert por_serie["IPC"]["actualizada_en_fuente"] is True
+    # El agregado (la fecha de la más atrasada) ya no va suelto.
+    assert "la_fuente_llega_hasta" not in payload
+
+
 # ── _tail_for_model con resultados de otros conectores ─────
 
 
@@ -284,6 +434,8 @@ async def test_buscar_series_marca_la_discontinuada_y_dice_hasta_cuando_llega() 
     assert payload["series"][0]["hasta"] == "2023-01-01"
 
 
-async def test_buscar_series_reservas_ofrece_tambien_la_diaria() -> None:
-    ids = _ids(await _buscar("reservas internacionales del BCRA"))
-    assert {RESERVAS_ID, "92.2_RESERVAS_IRES_0_0_32_40"} <= ids
+async def test_buscar_series_reservas_ofrece_primero_la_diaria() -> None:
+    payload = await _buscar("reservas internacionales del BCRA")
+    assert {RESERVAS_ID, "92.2_RESERVAS_IRES_0_0_32_40"} <= _ids(payload)
+    # La que llega más lejos va primero; la mensual está parada en abril.
+    assert payload["verificadas"][0]["ids"] == ["92.2_RESERVAS_IRES_0_0_32_40"]

@@ -114,25 +114,60 @@ def _is_dated_by_end(last_fecha: str, step: int, today: date) -> bool:
     return date(end_year, end_month, 1) > today
 
 
+def _short(text: Any, limit: int = 80) -> str:
+    clean = " ".join(str(text or "").split())
+    return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
+
+
 def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
     """Hasta cuándo llega el dato y si la fuente lo da por actualizado.
 
     Sale del contrato de metadatos de los conectores; sin esto el modelo no
     tenía cómo saber que reservas 174.1 está parada en abril en la fuente y
     la presentaba como "actual".
+
+    Con varias series va el estado de cada una (``metadata["series"]``): el
+    agregado junta la fecha de la más atrasada con el «desactualizada» de
+    cualquiera, y el aviso de tipo de cambio + IPC decía «su último dato es
+    del 2026-08-01» (el IPC, que está al día) por el tipo de cambio, que
+    llega al 31-08.
     """
     out: dict[str, Any] = {}
     if meta.get("ultima_observacion"):
         out["ultima_observacion"] = meta["ultima_observacion"]
     if meta.get("frecuencia"):
         out["frecuencia"] = meta["frecuencia"]
-    if meta.get("fecha_fin_fuente"):
-        out["la_fuente_llega_hasta"] = meta["fecha_fin_fuente"]
-    if meta.get("actualizada_en_fuente") is not None:
-        out["actualizada_en_fuente"] = meta["actualizada_en_fuente"]
+    series = [s for s in (meta.get("series") or []) if isinstance(s, dict)]
+    if len(series) > 1:
+        out["por_serie"] = [
+            {
+                "serie": _short(s.get("titulo") or s.get("id")),
+                "la_fuente_llega_hasta": s.get("fecha_fin_fuente"),
+                "actualizada_en_fuente": s.get("actualizada_en_fuente"),
+            }
+            for s in series
+        ]
+    else:
+        if meta.get("fecha_fin_fuente"):
+            out["la_fuente_llega_hasta"] = meta["fecha_fin_fuente"]
+        if meta.get("actualizada_en_fuente") is not None:
+            out["actualizada_en_fuente"] = meta["actualizada_en_fuente"]
     if meta.get("unidad") == "porcentaje":
         out["escala"] = "Los valores ya están en %: 33.54 es 33,54 %."
-    if meta.get("actualizada_en_fuente") is False:
+    stale = [s for s in series if s.get("actualizada_en_fuente") is False]
+    if len(series) > 1 and stale:
+        detalle = " y ".join(
+            f"«{_short(s.get('titulo') or s.get('id'))}» (su último dato es del "
+            f"{s.get('fecha_fin_fuente') or 'sin fecha'})"
+            for s in stale
+        )
+        plural = len(stale) > 1
+        out["aviso"] = (
+            f"De las series pedidas, la fuente marca como desactualizada{'s' if plural else ''} "
+            f"{detalle}: no {'las' if plural else 'la'} presentes como el dato actual; decí de "
+            f"qué fecha es{' cada una' if plural else ''}."
+        )
+    elif meta.get("actualizada_en_fuente") is False:
         hasta = meta.get("fecha_fin_fuente") or meta.get("ultima_observacion")
         out["aviso"] = (
             f"La fuente marca esta serie como desactualizada (su último dato es del {hasta}): "
@@ -196,6 +231,26 @@ def _period_bounds(text: str) -> tuple[str, str] | None:
     return start, start
 
 
+def _is_year(text: str) -> bool:
+    return len(text.strip().split("-")) == 1
+
+
+def _observation_end(fecha: str, step_months: int | None) -> date | None:
+    """El último día que cubre la observación fechada en `fecha`.
+
+    Una diaria o semanal (sin `step_months`) cubre una semana: tolera un fin
+    de semana largo sin dato.
+    """
+    try:
+        obs = date.fromisoformat(fecha[:10])
+    except ValueError:
+        return None
+    if step_months:
+        year, month = _shift_months(obs.year, obs.month, step_months)
+        return date.fromordinal(date(year, month, 1).toordinal() - 1)
+    return date.fromordinal(obs.toordinal() + 7)
+
+
 def _covers(fecha: str, step_months: int | None, period_start: str) -> bool:
     """¿La observación fechada en `fecha` cubre algún día del período pedido?
 
@@ -203,18 +258,23 @@ def _covers(fecha: str, step_months: int | None, period_start: str) -> bool:
     "junio de 2026". El IPC de agosto no sirve para septiembre: si la serie
     todavía no publicó el período, no se usa el anterior en silencio.
     """
+    obs_end = _observation_end(fecha, step_months)
     try:
-        obs = date.fromisoformat(fecha[:10])
-        start = date.fromisoformat(period_start)
+        return obs_end is not None and obs_end >= date.fromisoformat(period_start)
     except ValueError:
         return False
-    if step_months:
-        year, month = _shift_months(obs.year, obs.month, step_months)
-        obs_end = date.fromordinal(date(year, month, 1).toordinal() - 1)
-    else:
-        # Diaria o semanal: tolera un fin de semana largo sin dato.
-        obs_end = date.fromordinal(obs.toordinal() + 7)
-    return obs_end >= start
+
+
+def _leaves_period_open(fecha: str, step_months: int | None, period_end: str) -> bool:
+    """¿El período pedido sigue después de la observación usada?
+
+    `hasta=2026` en el IPC usa agosto de 2026: el año todavía no terminó.
+    """
+    obs_end = _observation_end(fecha, step_months)
+    try:
+        return obs_end is not None and obs_end < date.fromisoformat(period_end)
+    except ValueError:
+        return False
 
 
 def _pick(
@@ -341,7 +401,11 @@ class SeriesTiempo:
             "(el id de un índice de precios, p. ej. el IPC 148.3_INIVELNAL_DICI_M_26), también "
             "la real: usala para acumuladas de varios meses, variaciones punta a punta y "
             "comparaciones entre años. `desde` es el período base: la inflación acumulada de "
-            "marzo a agosto es desde=AAAA-02, hasta=AAAA-08. No sumes ni compongas tasas vos."
+            "marzo a agosto es desde=AAAA-02, hasta=AAAA-08. Con años (AAAA) y sin `frecuencia` "
+            "compara la última observación de cada año (diciembre contra diciembre: lo que va "
+            "para precios y saldos); para el total anual de un flujo pedila con frecuencia=year "
+            "y agregacion=sum (la API deja afuera el año en curso). No sumes ni compongas tasas "
+            "vos."
         ),
         input_schema={
             "type": "object",
@@ -424,7 +488,13 @@ class SeriesTiempo:
         result = await _fetch_series(ctx, ids, kwargs)
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "La serie no devolvió datos."}))
-        return ToolOutcome(to_json(_tail_for_model(result, last)), results=[result])
+        payload = _tail_for_model(result, last)
+        dropped = (result.metadata or {}).get(_DROPPED_FREQUENCY)
+        if dropped:
+            payload["nota"] = " ".join(
+                n for n in (payload.get("nota"), _dropped_frequency_note(dropped)) if n
+            )
+        return ToolOutcome(to_json(payload), results=[result])
 
     async def _variation(
         self,
@@ -452,6 +522,12 @@ class SeriesTiempo:
         if base_bounds[1] >= end_bounds[0]:
             raise ToolInputError("`desde` tiene que ser un período anterior a `hasta`.")
         deflator = str_arg(spec, "deflactar_con", max_len=80)
+        # Lo que el modelo tiene que saber del cálculo, en `nota`.
+        notes: list[str] = []
+        if ignored_representation:
+            notes.append(
+                "La variación se calcula sobre los valores de la serie: se ignoró `representacion`."
+            )
 
         base_kwargs: dict[str, Any] = {"collapse": frequency, "representation": None}
         if frequency and aggregation:
@@ -464,9 +540,15 @@ class SeriesTiempo:
         )
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "La serie no devolvió datos."}))
-        step = _STEP_MONTHS.get(str((result.metadata or {}).get("frecuencia")))
+        meta = result.metadata or {}
+        dropped = meta.get(_DROPPED_FREQUENCY)
+        if dropped:
+            notes.append(_dropped_frequency_note(dropped))
+            base_kwargs = {"collapse": None, "representation": None}
+        applied_frequency = None if dropped else frequency
+        step = _STEP_MONTHS.get(str(meta.get("frecuencia")))
         base_rows = result.records
-        if (result.metadata or {}).get("truncada"):
+        if meta.get("truncada"):
             # Un rango largo de una diaria no entra en una página: el período
             # base se pide aparte.
             head = await _fetch_series(
@@ -483,7 +565,7 @@ class SeriesTiempo:
                 ctx,
                 [deflator],
                 {
-                    "collapse": frequency,
+                    "collapse": applied_frequency,
                     "representation": None,
                     "start_date": window_start,
                     "end_date": end_bounds[1],
@@ -491,6 +573,11 @@ class SeriesTiempo:
             )
             if defl is None or not defl.records:
                 raise ToolInputError(f"El índice `{deflator}` no devolvió datos.")
+            if (defl.metadata or {}).get(_DROPPED_FREQUENCY):
+                notes.append(
+                    f"El índice `{deflator}` no admite `frecuencia={applied_frequency}`: se "
+                    "usó en su frecuencia original."
+                )
             defl_step = _STEP_MONTHS.get(str((defl.metadata or {}).get("frecuencia")))
             deflator_label = _value_columns(defl)[0]
             d0 = _pick(defl.records, deflator_label, base_bounds, defl_step)
@@ -526,11 +613,35 @@ class SeriesTiempo:
                 row["inflacion_pct"] = _pct(inflation)
                 row["variacion_real_pct"] = _pct((1 + ratio) / (1 + inflation) - 1)
             rows.append(row)
-        meta = result.metadata or {}
         if not rows:
             raise ToolInputError(
                 f"La serie no tiene dato para {desde} y {hasta} "
                 f"(llega hasta {meta.get('ultima_observacion')})."
+                + (
+                    " Con `frecuencia`, la API deja afuera el período que todavía no terminó "
+                    "(con `year`, el año en curso)."
+                    if applied_frequency
+                    else ""
+                )
+            )
+        if _is_year(desde) and _is_year(hasta) and not applied_frequency:
+            if meta.get("frecuencia") != "anual":
+                # Exportaciones 2024 → 2025 daba +6,15 % (diciembre contra
+                # diciembre) y el total anual creció 9,29 %.
+                notes.append(
+                    "Con años y sin `frecuencia` se comparó la última observación de cada año "
+                    f"({rows[0]['desde']} contra {rows[0]['hasta']}): vale para precios, índices "
+                    "y saldos, no para el total del año. Para comparar el total anual de un flujo "
+                    "(exportaciones, importaciones, recaudación, gasto) volvé a pedirla con "
+                    "frecuencia=year y agregacion=sum."
+                )
+        open_end = [
+            r["hasta"] for r in rows if _leaves_period_open(r["hasta"], step, end_bounds[1])
+        ]
+        if open_end:
+            notes.append(
+                f"El período final ({hasta}) no está completo en la serie: se usó su último "
+                f"dato, del {max(open_end)}. Decilo en la respuesta."
             )
 
         computed = DataResult(
@@ -560,21 +671,25 @@ class SeriesTiempo:
                 "actualizada_en_fuente": meta.get("actualizada_en_fuente"),
                 "total_fuente": None,
                 "truncada": False,
-                "unidad": "porcentaje",
+                # Sin `unidad`: valor_desde y valor_hasta están en las unidades
+                # de la serie; sólo estas columnas son porcentajes.
+                "columnas_porcentaje": [
+                    c
+                    for c in ("variacion_pct", "inflacion_pct", "variacion_real_pct")
+                    if c in rows[0]
+                ],
                 "oficial": True,
                 "series": meta.get("series", []),
             },
         )
+        if notes:
+            computed.metadata["advertencias"] = notes
         payload = result_for_model(computed, calculo=computed.metadata["calculo"])
         if missing:
             payload["sin_dato"] = missing
-        if ignored_representation:
-            payload["nota"] = (
-                "La variación se calcula sobre los valores de la serie: se ignoró `representacion`."
-            )
-        # Sin la nota de escala: valor_desde y valor_hasta están en las
-        # unidades de la serie; sólo las columnas *_pct son porcentajes.
-        payload.update(_freshness_for_model({**computed.metadata, "unidad": None}))
+        if notes:
+            payload["nota"] = " ".join(notes)
+        payload.update(_freshness_for_model(computed.metadata))
         return ToolOutcome(
             to_json(payload),
             results=[computed],
@@ -582,18 +697,40 @@ class SeriesTiempo:
         )
 
 
+# Lo que dice la API (en el cuerpo del 400) cuando la frecuencia pedida es
+# más fina que la de la serie: "Intervalo de collapse inválido para la(s)
+# serie(s) seleccionadas: month. Pruebe con un intervalo mayor".
+_INVALID_COLLAPSE = "Intervalo de collapse"
+# Marca en la metadata de un resultado que vino sin la frecuencia pedida.
+_DROPPED_FREQUENCY = "frecuencia_descartada"
+
+
+def _dropped_frequency_note(frequency: str) -> str:
+    return (
+        f"La serie no admite `frecuencia={frequency}` (es más fina que la suya): vino en su "
+        "frecuencia original, sin agregar."
+    )
+
+
 async def _fetch_series(
     ctx: ToolContext, ids: list[str], kwargs: dict[str, Any]
 ) -> DataResult | None:
     try:
         return await ctx.deps.series.fetch(series_ids=ids, **kwargs)
-    except ConnectorError:
-        # La API da 400 cuando la frecuencia pedida es más fina que la de
-        # la serie (p. ej. mensual sobre una trimestral).
-        if not kwargs.get("collapse"):
+    except ConnectorError as exc:
+        # Se reintenta sin frecuencia SÓLO con el 400 de frecuencia inválida
+        # (p. ej. mensual sobre una trimestral). Un timeout o un 5xx no: con
+        # frecuencia=year y agregacion=sum, el reintento devolvía la mensual
+        # y la variación de exportaciones salía de diciembre contra
+        # diciembre (6,15 %) en vez del total anual (9,29 %), sin aviso.
+        collapse = kwargs.get("collapse")
+        if not collapse or _INVALID_COLLAPSE not in str(exc.details.get("reason", "")):
             raise
         retry = {k: v for k, v in kwargs.items() if k != "collapse_aggregation"}
-        return await ctx.deps.series.fetch(series_ids=ids, **{**retry, "collapse": None})
+        result = await ctx.deps.series.fetch(series_ids=ids, **{**retry, "collapse": None})
+        if result is not None:
+            result.metadata = {**(result.metadata or {}), _DROPPED_FREQUENCY: collapse}
+        return result
 
 
 def _shift_iso_months(iso: str, delta: int) -> str:
