@@ -21,6 +21,7 @@ from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
     ISQLSandbox,
     SandboxResult,
+    TableProfile,
     TableSource,
 )
 from app.domain.ports.search.vector_search import IVectorSearch, SearchResult
@@ -70,6 +71,11 @@ class FakeSandbox:
         return [
             t for t in self.tables if t.dataset_id in ids or t.table_name.split(".")[-1] in names
         ]
+
+    profiles: dict[str, TableProfile] = {}
+
+    async def table_profiles(self, names: list[str]) -> dict[str, TableProfile]:
+        return {n.split(".")[-1]: p for n in names if (p := self.profiles.get(n.split(".")[-1]))}
 
     async def get_column_types(self, names: list[str]) -> dict[str, list[tuple[str, str]]]:
         cols = [
@@ -254,7 +260,8 @@ async def test_buscar_goes_through_the_hnsw_index(client: AsyncClient, search: A
     search.search_datasets.assert_not_awaited()
     kwargs = search.search_datasets_ann.await_args.kwargs
     assert kwargs["portal_filter"] == "caba"
-    assert kwargs["limit"] == 10  # el doble: después se agrupan los duplicados
+    # Cuatro por resultado: después se juntan las copias del mismo archivo.
+    assert kwargs["limit"] == 20
     assert kwargs["min_similarity"] == 0.40
 
 
@@ -434,3 +441,73 @@ async def test_lookups_are_targeted_not_a_full_listing(
     assert sandbox.find_calls[0]["dataset_ids"] == ["ds-1", "ds-1b", "ds-sin-tabla"]
     assert sandbox.find_calls[1]["table_names"] == [_T]
     assert sandbox.find_calls[2]["table_names"] == [_T]
+
+
+async def test_buscar_shows_one_copy_of_a_file_even_when_both_have_rows(
+    client: AsyncClient, sandbox: FakeSandbox, search: AsyncMock
+) -> None:
+    """Prod, 04-oct: los gemelos de la migración de datos.gob.ar tienen las dos
+    tablas con filas (8.467 la vieja, 8.582 la nueva). El filtro `filas != 0`
+    sólo las separaba en staging, donde la vieja quedó con row_count=0 por un
+    artefacto; en prod el resultado salía con las dos y el modelo adivinaba."""
+    url = "https://infra.datos.gob.ar/catalog/sspm/dataset/92/distribution/92.2/download/r.csv"
+    search.search_datasets_ann.return_value = [
+        SearchResult("vieja", "Reservas internacionales", "", "datos_gob_ar", url, "", 0.77),
+        SearchResult("nueva", "Reservas internacionales", "", "datos_gob_ar", url, "", 0.76),
+    ]
+    sandbox.tables = [
+        CachedTableInfo("raw.reservas__bebd015a__v1", "vieja", 8467, []),
+        CachedTableInfo("reservas_rf3719b94d1", "nueva", 8582, []),
+    ]
+
+    r = await client.get("/catalogo/buscar", params={"q": "reservas internacionales"})
+
+    assert r.status_code == 200, r.text
+    [only] = r.json()["resultados"]
+    assert only["tablas"] == [{"tabla": "reservas_rf3719b94d1", "filas": 8582}]
+    assert only["archivo"] == "r.csv" and only["formato"] == "CSV"
+
+
+async def test_buscar_uses_the_live_version_rows_and_sends_tableless_to_the_bottom(
+    client: AsyncClient, sandbox: FakeSandbox, search: AsyncMock
+) -> None:
+    """Staging tiene `row_count=0` en 18.134 tablas con filas (Votaciones
+    Nominales: 231.043), y el filtro las escondía como "sin tabla"."""
+    search.search_datasets_ann.return_value = [
+        SearchResult("sin", "Elecciones 2025 CABA", "", "caba", "https://c/e.csv", "", 0.70),
+        SearchResult("vn", "Votaciones Nominales", "", "diputados", "https://d/vn.csv", "", 0.67),
+    ]
+    sandbox.tables = [CachedTableInfo("raw.vn__v3", "vn", 0, [])]
+    sandbox.profiles = {"vn__v3": TableProfile("vn__v3", rows=231_043)}
+
+    r = await client.get("/catalogo/buscar", params={"q": "votaciones"})
+
+    first, second = r.json()["resultados"]
+    assert first["titulo"] == "Votaciones Nominales"
+    assert first["tablas"] == [{"tabla": "raw.vn__v3", "filas": 231_043}]
+    assert second["tablas"] == []
+
+
+async def test_an_unknown_portal_is_a_400_with_the_valid_ones(
+    client: AsyncClient, search: AsyncMock
+) -> None:
+    """Un portal que no existe vaciaba el filtro y la respuesta era una lista
+    vacía con 200: el MCP decía "No encontré datasets" (4.4.5)."""
+    search.search_datasets_ann.return_value = []
+    search.known_portals.return_value = ["caba", "datos_gob_ar", "indec"]
+
+    r = await client.get("/catalogo/buscar", params={"q": "soja", "portal": "INDEC"})
+
+    assert r.status_code == 400
+    assert "'INDEC'" in r.json()["detail"] and "indec" in r.json()["detail"]
+
+
+async def test_a_real_portal_with_nothing_similar_is_still_an_empty_list(
+    client: AsyncClient, search: AsyncMock
+) -> None:
+    search.search_datasets_ann.return_value = []
+    search.known_portals.return_value = ["caba", "indec"]
+
+    r = await client.get("/catalogo/buscar", params={"q": "soja", "portal": "caba"})
+
+    assert r.status_code == 200 and r.json()["resultados"] == []

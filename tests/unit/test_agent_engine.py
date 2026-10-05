@@ -97,6 +97,9 @@ class FakeSandbox:
     async def describe_marts(self, names: list[str]) -> dict[str, Any]:
         return {}
 
+    async def table_profiles(self, names: list[str]) -> dict[str, Any]:
+        return {}
+
     async def find_marts(self, emb: list[float], limit: int = 5) -> list[Any]:
         return []
 

@@ -16,6 +16,7 @@ qué y qué valores existen (`app.application.consultas.sugerencias`).
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -24,6 +25,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.api_key_service import check_catalog_rate_limit
+from app.application.catalog.collapse import collapse_hits
+from app.application.catalog.national_prior import national_prior
 from app.application.consultas.fechas import aviso_formato_guardado
 from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import Preparado, describir_periodo, ejecutar, preparar
@@ -60,6 +63,9 @@ _MAX_TABLES_PER_DATASET = 5
 _DESCRIPTION_CHARS = 400
 # Mismo umbral que `/data/search`.
 _MIN_SIMILARITY = 0.40
+# Datasets pedidos por resultado mostrado: varios son el mismo archivo
+# (gemelos, espejos, CSV y JSON) y se juntan en `collapse_hits`.
+_CANDIDATES_PER_RESULT = 4
 
 
 class TablaResumen(BaseModel):
@@ -74,6 +80,10 @@ class DatasetEncontrado(BaseModel):
     portal: str
     url: str
     tablas: list[TablaResumen]
+    # Varios recursos de un package comparten título y descripción; el
+    # archivo es lo que los distingue ("actas-cabecera-137-2.0.csv").
+    archivo: str | None = None
+    formato: str | None = None
 
 
 class BuscarResponse(BaseModel):
@@ -218,58 +228,78 @@ async def buscar(
 ) -> BuscarResponse:
     """Búsqueda semántica en el catálogo (un embedding, sin LLM).
 
-    Semántica y no híbrida: en staging la híbrida tardaba 3,5 s por pedido y
-    la semántica 0,5 s, que es la misma que usa `/data/search`. Por el índice
-    HNSW (`search_datasets_ann`): la exacta recorría todos los chunks y
-    tardaba de 1 a más de 60 s. Se pide el doble de resultados porque después
-    se agrupan los duplicados.
+    Semántica y no híbrida: en staging la híbrida tardaba 3,5 s por pedido.
+    Por `search_datasets_ann`: el índice HNSW con la búsqueda exacta detrás
+    cuando su respuesta no convence. Se piden varios datasets por resultado
+    porque muchos son el mismo archivo y `collapse_hits` los junta en uno,
+    mostrando una sola copia; los que no tienen tabla consultable van al
+    fondo. Loguea cuánto tardó cada etapa (sin la consulta).
     """
     endpoint, tool = "/api/v1/catalogo/buscar", "buscar_datasets"
     api_key = await _authorize(request, api_key_repo, cache, credits, endpoint=endpoint, tool=tool)
     async with track_usage(api_key_repo, api_key, request, endpoint=endpoint, tool=tool):
+        t0 = time.perf_counter()
         try:
             vector = await embedding.embed(q)
         except Exception:
             logger.exception("catalogo/buscar: embedding falló")
             raise HTTPException(status_code=503, detail="La búsqueda no está disponible ahora.")
+        t_embed = time.perf_counter()
         hits = await vector_search.search_datasets_ann(
             query_embedding=vector,
-            limit=limite * 2,
+            limit=limite * _CANDIDATES_PER_RESULT,
             portal_filter=portal,
             min_similarity=_MIN_SIMILARITY,
         )
-
-        tables_by_dataset: dict[str, list[TablaResumen]] = {}
-        for t in await sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits]):
-            # Una tabla con 0 filas es una versión vieja o una descarga fallida:
-            # no sirve para consultar y confunde al modelo.
-            if t.dataset_id and t.row_count != 0:
-                tables_by_dataset.setdefault(str(t.dataset_id), []).append(
-                    TablaResumen(tabla=t.table_name, filas=t.row_count)
+        t_search = time.perf_counter()
+        if portal and not hits:
+            # Un portal que no existe vacía el filtro: antes salía una lista
+            # vacía con 200 y el MCP decía "no encontré datasets".
+            portals = await vector_search.known_portals()
+            if portals and portal not in portals:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"No existe el portal {portal!r}. Portales válidos: "
+                        + ", ".join(portals)
+                        + ". O buscá sin filtrar por portal."
+                    ),
                 )
+        tables = await sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits])
+        profiles = await sandbox.table_profiles([t.table_name for t in tables])
+        t_tables = time.perf_counter()
 
-        # El catálogo tiene el mismo dataset varias veces (la migración de
-        # datos.gob.ar regeneró IDs). Mismo título + misma URL = el mismo dataset:
-        # se muestra una vez, con todas sus tablas.
-        merged: dict[tuple[str, str], DatasetEncontrado] = {}
-        for h in hits:
-            key = (h.title.strip().lower(), (h.download_url or "").strip())
-            tables = tables_by_dataset.get(str(h.dataset_id), [])
-            if key in merged:
-                known = {t.tabla for t in merged[key].tablas}
-                merged[key].tablas.extend(t for t in tables if t.tabla not in known)
-                continue
-            merged[key] = DatasetEncontrado(
-                dataset_id=str(h.dataset_id),
-                titulo=h.title,
-                descripcion=(h.description or "")[:_DESCRIPTION_CHARS],
-                portal=h.portal,
-                url=h.download_url or "",
-                tablas=list(tables),
+        collapsed = collapse_hits(hits, tables, profiles, prior=national_prior(q))
+        # Sin tabla consultable al fondo (orden estable): ocupaban lugares con
+        # "Sin tabla consultable en OpenArg" y el modelo no puede usarlos.
+        collapsed.sort(key=lambda c: not c.tables)
+        results = [
+            DatasetEncontrado(
+                dataset_id=str(c.hit.dataset_id),
+                titulo=c.hit.title,
+                descripcion=(c.hit.description or "")[:_DESCRIPTION_CHARS],
+                portal=c.hit.portal,
+                url=c.hit.download_url or "",
+                tablas=[
+                    TablaResumen(tabla=t.table_name, filas=t.row_count)
+                    for t in c.tables[:_MAX_TABLES_PER_DATASET]
+                ],
+                archivo=c.archivo,
+                formato=c.formato,
             )
-        results = list(merged.values())[:limite]
-        for r in results:
-            r.tablas = sorted(r.tablas, key=lambda t: -(t.filas or 0))[:_MAX_TABLES_PER_DATASET]
+            for c in collapsed[:limite]
+        ]
+        logger.info(
+            "catalogo/buscar: embed_ms=%.0f busqueda_ms=%.0f tablas_ms=%.0f total_ms=%.0f "
+            "hits=%d archivos=%d resultados=%d",
+            (t_embed - t0) * 1000,
+            (t_search - t_embed) * 1000,
+            (t_tables - t_search) * 1000,
+            (time.perf_counter() - t0) * 1000,
+            len(hits),
+            len(collapsed),
+            len(results),
+        )
         return BuscarResponse(resultados=results)
 
 

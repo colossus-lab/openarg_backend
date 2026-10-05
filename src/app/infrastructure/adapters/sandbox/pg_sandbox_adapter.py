@@ -21,6 +21,7 @@ from app.domain.ports.sandbox.sql_sandbox import (
     ISQLSandbox,
     MartInfo,
     SandboxResult,
+    TableProfile,
     TableSource,
     TableValueStats,
 )
@@ -1151,4 +1152,66 @@ class PgSandboxAdapter(ISQLSandbox):
         return await loop.run_in_executor(
             self._executor,
             partial(self._get_table_sources_sync, table_names),
+        )
+
+    # ── perfil de tablas para elegir entre copias (búsqueda) ──────────────
+
+    # One row per requested ready table: the live version's own row count and
+    # truncation flag, when its dataset was created, its format, and the names
+    # of its first columns straight from the catalog (`columns_json` is null
+    # for some tables, e.g. every diputados table on staging).
+    _TABLE_PROFILES_SQL = text(
+        """
+        SELECT cd.table_name,
+               rtv.row_count,
+               COALESCE(rtv.is_truncated, FALSE) AS is_truncated,
+               rtv.created_at AS loaded_at,
+               d.created_at AS dataset_created_at,
+               d.format,
+               cols.names AS column_names
+        FROM raw.cached_datasets cd
+        LEFT JOIN public.raw_table_versions rtv
+          ON rtv.table_name = cd.table_name
+         AND rtv.superseded_at IS NULL
+        LEFT JOIN public.datasets d ON d.id = cd.dataset_id
+        LEFT JOIN LATERAL (
+            SELECT array_agg(a.attname::text ORDER BY a.attnum) AS names
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_attribute a ON a.attrelid = c.oid
+            WHERE c.relname = cd.table_name
+              AND n.nspname = COALESCE(rtv.schema_name, 'public')
+              AND a.attnum BETWEEN 1 AND 15
+              AND NOT a.attisdropped
+        ) cols ON TRUE
+        WHERE cd.status = 'ready'
+          AND cd.table_name = ANY(:names)
+        """
+    )
+
+    def _table_profiles_sync(self, table_names: list[str]) -> dict[str, TableProfile]:
+        names = sorted({bare_name(n) for n in table_names if n})
+        if not names:
+            return {}
+        engine = self._get_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(self._TABLE_PROFILES_SQL, {"names": names}).fetchall()
+            conn.rollback()
+        return {
+            str(row.table_name): TableProfile(
+                table_name=str(row.table_name),
+                rows=int(row.row_count) if row.row_count is not None else None,
+                truncated=bool(row.is_truncated),
+                loaded_at=row.loaded_at,
+                dataset_created_at=row.dataset_created_at,
+                format=row.format,
+                columns=[str(c) for c in (row.column_names or [])],
+            )
+            for row in rows
+        }
+
+    async def table_profiles(self, table_names: list[str]) -> dict[str, TableProfile]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, partial(self._table_profiles_sync, list(table_names))
         )

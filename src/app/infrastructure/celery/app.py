@@ -116,6 +116,7 @@ def create_celery() -> Celery:
             "app.infrastructure.celery.tasks.parse_repair_tasks",
             "app.infrastructure.celery.tasks.registry_reconcile_tasks",
             "app.infrastructure.celery.tasks.quality_alert_tasks",
+            "app.infrastructure.celery.tasks.search_canary_tasks",
             "app.infrastructure.celery.tasks.columns_backfill",
             "app.infrastructure.celery.tasks.identity_reconcile",
             "app.infrastructure.celery.tasks.retry_our_failures",
@@ -209,6 +210,7 @@ def create_celery() -> Celery:
         "openarg.check_mart_expectations": {"queue": "ingest"},
         "openarg.backfill_dataset_columns": {"queue": "ingest"},
         "openarg.portal_canary": {"queue": "ingest"},
+        "openarg.search_recall_canary": {"queue": "ingest"},
         "openarg.reconcile_dataset_identities": {"queue": "ingest"},
         "openarg.cleanup_duplicate_tables": {"queue": "ingest"},
         "openarg.retry_our_own_failures": {"queue": "ingest"},
@@ -472,6 +474,16 @@ def create_celery() -> Celery:
                 # finds out by reading a list of failures.
                 "task": "openarg.portal_canary",
                 "schedule": crontab(hour=8, minute=40),
+                "options": {"queue": "ingest"},
+            },
+            "search-recall-canary": {
+                # Nightly, before the 03:00 scrapes start re-embedding: the
+                # catalogue search's HNSW index against the exact search on
+                # ~20 fixed queries, alerting if recall@10 drops below 0.95.
+                # The index changed from one day to the next (SMVM was found on
+                # 03-Oct and lost on 04-Oct) and nothing watched it.
+                "task": "openarg.search_recall_canary",
+                "schedule": crontab(hour=2, minute=40),
                 "options": {"queue": "ingest"},
             },
             "quality-alerts": {
