@@ -268,8 +268,17 @@ def _readings(num: str) -> list[tuple[float, float]]:
     Formato argentino por defecto. Un solo separador con tres dígitos detrás
     es ambiguo: "46.092" son 46 mil (AR) o 46,092 (EN); "1,234" es 1,234 (AR)
     o 1.234 (EN). Se prueban las dos lecturas.
-    """
 
+    Un token mal formado ("1.1,1.2", de la descripción de un dataset) no tiene
+    lecturas: antes tiraba ValueError y se llevaba la respuesta entera.
+    """
+    try:
+        return _parse_readings(num)
+    except ValueError:
+        return []
+
+
+def _parse_readings(num: str) -> list[tuple[float, float]]:
     def _make(int_part: str, dec_part: str) -> tuple[float, float]:
         value = float(f"{int_part}.{dec_part}" if dec_part else int_part)
         tol = 0.5 * 10 ** -len(dec_part) if dec_part else 0.5
@@ -343,6 +352,8 @@ def extract_figures(text: str) -> list[Figure]:
     for i, m in enumerate(matches):
         num = m.group("num")
         readings = _readings(num)
+        if not readings:
+            continue
         after = blanked[m.end() : m.end() + 40]
         # Sin las marcas de Markdown: "más de **$31.218 millones**".
         before = blanked[max(0, m.start() - 60) : m.start()].replace("*", " ")
@@ -437,6 +448,12 @@ class EvidenceValue:
     # Posición de la columna en la fila: el orden natural de una resta entre
     # columnas (exportaciones − importaciones, bienes − deudas).
     col: int = 0
+    # En qué escala vienen las tasas del resultado (``_percent_scale``):
+    # "porcentaje" (1,66 es 1,66 %), "fraccion" (0,3354 es 33,54 %) o "" si no
+    # se sabe.
+    pct: str = ""
+    # De un valor ``written``, el que trajo la fuente: es el que va en la cita.
+    source_value: float | None = None
 
     @property
     def path(self) -> str:
@@ -481,10 +498,38 @@ def _is_rate_result(meta: dict[str, Any]) -> bool:
     return (
         meta.get("unidad") == "porcentaje"
         or meta.get("unit") == "percent"
+        or meta.get("value_scale") == "percentage_points"
         or representation.startswith("percent_change")
         or "%" in units
         or "porcentaje" in units
     )
+
+
+PCT_POINTS = "porcentaje"
+PCT_FRACTION = "fraccion"
+
+
+def _percent_scale(meta: dict[str, Any]) -> str:
+    """En qué escala vienen las tasas de un resultado, si se sabe.
+
+    - "porcentaje": el contrato de metadatos (``unidad``) o la marca del
+      adaptador de series (``value_scale``/``unit``) dicen que los valores ya
+      están multiplicados por 100. "166 %" contra 1,66 es un error.
+    - "fraccion": una representación ``percent_change*`` sin esa marca llega
+      tal como la da la API (0,3354 es 33,54 %). "0,34 %" contra 0,3354 es un
+      error.
+    - "": no se sabe (una columna «tasa» de una tabla cualquiera): se aceptan
+      las dos lecturas.
+    """
+    if (
+        meta.get("unidad") == "porcentaje"
+        or meta.get("value_scale") == "percentage_points"
+        or meta.get("unit") == "percent"
+    ):
+        return PCT_POINTS
+    if str(meta.get("representation") or "").startswith("percent_change"):
+        return PCT_FRACTION
+    return ""
 
 
 def _parse_day(value: Any) -> date | None:
@@ -596,6 +641,7 @@ class EvidenceIndex:
             records = list(getattr(result, "records", None) or [])
             scale = _unit_scale(str(meta.get("units") or ""))
             rate_result = _is_rate_result(meta)
+            pct = _percent_scale(meta)
             visible = seen[i] if seen is not None and i < len(seen) else None
             lags[i] = _step_lags([r for r in records if isinstance(r, dict)])
             shown: list[dict[str, Any]] = []
@@ -615,7 +661,9 @@ class EvidenceIndex:
                         if visible is not None and _key(value) not in visible:
                             continue
                         row_seen = True
-                        values.append(EvidenceValue(i, j, str(key), value, rate, scale, col=col))
+                        values.append(
+                            EvidenceValue(i, j, str(key), value, rate, scale, col=col, pct=pct)
+                        )
                 if row_seen or visible is None:
                     shown.append(record)
             # Cantidad de filas: "257 diputados" puede salir de contar la lista.
@@ -629,7 +677,8 @@ class EvidenceIndex:
             values.extend(_year_aggregates(i, shown, scale))
             # Las cifras de la descripción que vio el modelo ("localidades de
             # 5.000 y más habitantes"): no son datos de la tabla, pero están a
-            # la vista y no son inventadas.
+            # la vista y no son inventadas. Un token mal formado ("1.1,1.2")
+            # no tiene lecturas y no cuenta (``_readings``).
             description = str(meta.get("description") or "")[:400]
             for token in _DESCRIPTION_NUMBER_RE.findall(description):
                 for value, _ in _readings(token) if re.fullmatch(r"[\d.,]+", token) else []:
@@ -671,27 +720,35 @@ def _tolerance(fig: Figure, bare: float, tol: float) -> float:
     return tol
 
 
-def _magnitude_matches(fig: Figure, magnitude: float, *, rate_ok: bool, scale: float) -> bool:
+def _magnitude_matches(
+    fig: Figure, magnitude: float, *, rate_ok: bool, scale: float, pct: str = ""
+) -> bool:
     """¿La cifra escrita (sin signo) corresponde a ``magnitude`` (sin signo)?
 
     ``magnitude`` es el valor de la evidencia en sus propias unidades;
     ``scale`` lo lleva a unidades completas ("Millones de…" → ×1e6).
+    ``pct``: la escala de una tasa (``_percent_scale``). Una cifra en % contra
+    una tasa ya en puntos no se lee ×100 ("166 %" contra 1,66), y contra una
+    fracción sólo se lee ×100 ("0,34 %" contra 0,3354 es un error de unidad).
     """
     for bare, raw_tol in fig.readings:
         tol = _tolerance(fig, bare, raw_tol)
-        full, full_tol = bare * fig.multiplier, tol * fig.multiplier
-        candidates: list[tuple[float, float, float]] = [(full, full_tol, magnitude * scale)]
-        if fig.multiplier == 1.0 and scale != 1.0:
-            # "las reservas son 49.700" con la serie en millones.
-            candidates.append((bare, tol, magnitude))
-        if fig.multiplier != 1.0 and scale == 1.0:
-            # "49.700 millones" contra una columna que ya está en millones.
-            candidates.append((bare, tol, magnitude))
-        if (fig.percent or fig.points) and rate_ok:
-            # La API devuelve la interanual como fracción: 0,3354 → 33,5 %.
-            candidates.append((bare, tol, magnitude * 100))
+        candidates: list[tuple[float, float, float]] = []
         if fig.percent or fig.points:
-            candidates.append((bare, tol, magnitude))
+            if rate_ok and pct != PCT_POINTS:
+                # La API devuelve la interanual como fracción: 0,3354 → 33,5 %.
+                candidates.append((bare, tol, magnitude * 100))
+            if not (rate_ok and pct == PCT_FRACTION):
+                candidates.append((bare, tol, magnitude))
+        else:
+            full, full_tol = bare * fig.multiplier, tol * fig.multiplier
+            candidates.append((full, full_tol, magnitude * scale))
+            if fig.multiplier == 1.0 and scale != 1.0:
+                # "las reservas son 49.700" con la serie en millones.
+                candidates.append((bare, tol, magnitude))
+            if fig.multiplier != 1.0 and scale == 1.0:
+                # "49.700 millones" contra una columna que ya está en millones.
+                candidates.append((bare, tol, magnitude))
         for target, t, got in candidates:
             if fig.bound == "gt":
                 if target < got <= target * (1 + _BOUND_MARGIN) + t:
@@ -729,7 +786,9 @@ def _value_matches(fig: Figure, ev: EvidenceValue) -> bool:
         return False
     if not _sign_ok(fig, ev.value):
         return False
-    return _magnitude_matches(fig, abs(ev.value), rate_ok=True, scale=ev.scale)
+    return _magnitude_matches(
+        fig, abs(ev.value), rate_ok=True, scale=ev.scale, pct=ev.pct if ev.rate else ""
+    )
 
 
 @dataclass(frozen=True)
@@ -861,7 +920,11 @@ def _derived_step(
             ok = _magnitude_matches(fig, abs(r), rate_ok=False, scale=1.0)
         elif fig.points:
             r = cur.value - prev.value
-            ok = prev.rate and cur.rate and _magnitude_matches(fig, abs(r), rate_ok=True, scale=1.0)
+            ok = (
+                prev.rate
+                and cur.rate
+                and _magnitude_matches(fig, abs(r), rate_ok=True, scale=1.0, pct=cur.pct)
+            )
         elif not fig.times and not prev.rate and not cur.rate:
             r = cur.value - prev.value
             ok = _magnitude_matches(fig, abs(r), rate_ok=False, scale=prev.scale)
@@ -888,6 +951,8 @@ def _written(fig: Figure, ev: EvidenceValue) -> EvidenceValue:
         ev.scale,
         written=True,
         col=ev.col,
+        pct=ev.pct,
+        source_value=ev.source_value if ev.written else ev.value,
     )
 
 
@@ -916,7 +981,9 @@ def _derived(fig: Figure, pool: list[EvidenceValue]) -> tuple[EvidenceValue, ...
                     (a.value / b.value * 100, False, 1.0),
                 ]
             elif fig.points:
-                candidates = [(a.value - b.value, a.rate and b.rate, 1.0)]
+                # Una tasa en fracción menos una en puntos no es una cuenta.
+                if a.pct == b.pct:
+                    candidates = [(a.value - b.value, a.rate and b.rate, 1.0)]
             elif fig.times:
                 candidates = [(a.value / b.value, False, 1.0)]
             elif not (a.rate or b.rate or a.scale != b.scale):
@@ -925,9 +992,9 @@ def _derived(fig: Figure, pool: list[EvidenceValue]) -> tuple[EvidenceValue, ...
                     (a.value + b.value, False, a.scale),
                 ]
             for r, rate_ok, scale in candidates:
-                if _magnitude_matches(fig, abs(r), rate_ok=rate_ok, scale=scale) and _sign_fits(
-                    fig, r, a, b
-                ):
+                if _magnitude_matches(
+                    fig, abs(r), rate_ok=rate_ok, scale=scale, pct=a.pct if rate_ok else ""
+                ) and _sign_fits(fig, r, a, b):
                     return (a, b)
     return None
 
@@ -1017,6 +1084,11 @@ def select_evidence(
     04-oct, 92.1 y 92.2 se llaman igual ("Reservas internacionales y pasivos
     del BCRA") y sólo una aportó las cifras.
 
+    El título tiene que aparecer en palabras completas, y un título genérico
+    contenido en el de una evidencia que aportó cifras no alcanza: "tipo de
+    cambio" en una respuesta hecha con «Tipo de cambio mayorista Comunicación
+    A 3500» no cita además una serie vieja llamada «Tipo de cambio».
+
     Si la respuesta no tiene cifras ni nombra ninguna evidencia, no hay forma
     de saber qué se usó: se citan todas, como antes.
     """
@@ -1025,13 +1097,16 @@ def select_evidence(
         return [], []
     check = verification if verification is not None else verify_figures(answer, items)
     by_figures = check.used_results()
-    text = _norm(answer)
+    text = f" {_norm(answer)} "
     keys = [_title_key(str(getattr(r, "dataset_title", "") or "")) for r in items]
-    figure_keys = {keys[i] for i in by_figures}
+    figure_keys = [f" {keys[i]} " for i in by_figures]
     by_title = {
         i
         for i, key in enumerate(keys)
-        if i not in by_figures and len(key) >= 10 and key in text and key not in figure_keys
+        if i not in by_figures
+        and len(key) >= 10
+        and f" {key} " in text
+        and not any(f" {key} " in fk for fk in figure_keys)
     }
     used_idx = by_figures | by_title
     if not used_idx:
@@ -1039,6 +1114,19 @@ def select_evidence(
     used = [r for i, r in enumerate(items) if i in used_idx]
     consulted = [r for i, r in enumerate(items) if i not in used_idx]
     return used, consulted
+
+
+def figure_evidence(evidence: Sequence[Any], verification: Verification | None) -> list[Any]:
+    """Las evidencias que aportaron alguna cifra respaldada.
+
+    De acá sale el aviso de atraso: una evidencia citada sólo porque su título
+    aparece en el texto no tiene que poner "**Dato atrasado:**" arriba de una
+    respuesta hecha con datos frescos de otra fuente.
+    """
+    if verification is None:
+        return []
+    used = verification.used_results()
+    return [r for i, r in enumerate(evidence) if i in used]
 
 
 # ── las citas estructuradas ────────────────────────────────
@@ -1074,6 +1162,9 @@ def build_citations(
                 continue
             r = items[ev.result]
             meta = getattr(r, "metadata", None) or {}
+            # De una cuenta hecha con las cifras redondeadas de la respuesta
+            # (6.140 − 5.864), la cita muestra lo que trajo la fuente (6.139,70).
+            value = ev.source_value if ev.written and ev.source_value is not None else ev.value
             grounding.append(
                 {
                     "source_name": getattr(r, "dataset_title", ""),
@@ -1081,7 +1172,7 @@ def build_citations(
                     "url": getattr(r, "portal_url", ""),
                     "accessed_at": str(meta.get("fetched_at", "")),
                     "path": ev.path,
-                    "value": ev.value,
+                    "value": value,
                 }
             )
         if not grounding:

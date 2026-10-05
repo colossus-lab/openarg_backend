@@ -702,6 +702,98 @@ async def test_en_modo_off_no_se_registra_ni_se_corrige(
     assert not any("answers.verify" in r.getMessage() for r in caplog.records)
 
 
+# ── lo que encontró la revisión del PR (05-oct) ────────────
+
+
+async def test_una_descripcion_mal_formada_no_se_lleva_la_respuesta() -> None:
+    """«secciones 1.1,1.2» en la descripción de una serie: la verificación
+    tiraba ValueError, `_safe_verify` la atrapaba, pero `select_evidence` la
+    repetía sin red y el usuario se quedaba sin respuesta."""
+    rara = DataResult(
+        source=RESERVAS_MENSUAL.source,
+        portal_name=RESERVAS_MENSUAL.portal_name,
+        portal_url=RESERVAS_MENSUAL.portal_url,
+        dataset_title=RESERVAS_MENSUAL.dataset_title,
+        format=RESERVAS_MENSUAL.format,
+        records=RESERVAS_MENSUAL.records,
+        metadata={**RESERVAS_MENSUAL.metadata, "description": "Ver secciones 1.1,1.2."},
+    )
+    answer = "Las reservas fueron de **USD 49.700 millones** en agosto de 2026."
+    events = await _run(AgentEngine(_reservas_llm(answer), _deps_series(RESERVAS_DIARIA, rara)))
+    assert isinstance(events[-1], CompleteEvent)
+    assert events[-1].result.answer == answer
+    assert events[-1].result.cited_evidence == [rara]
+
+
+async def test_si_la_verificacion_revienta_la_respuesta_sale_igual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallar abierto de punta a punta: sin verificación se cita toda la
+    evidencia, como antes, y no se vuelve a verificar fuera de la red."""
+    from app.application.answers import verification as verification_module
+
+    def _boom(*a: Any, **kw: Any) -> Any:
+        raise RuntimeError("bug del verificador")
+
+    monkeypatch.setattr(agent_module, "verify_figures", _boom)
+    monkeypatch.setattr(verification_module, "verify_figures", _boom)
+    answer = "Las reservas fueron de **USD 49.700 millones** en agosto de 2026."
+    events = await _run(
+        AgentEngine(_reservas_llm(answer), _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))
+    )
+    result = events[-1].result
+    assert result.answer == answer
+    assert result.cited_evidence == [RESERVAS_DIARIA, RESERVAS_MENSUAL]
+    assert result.citations == [] and result.verification is None
+
+
+async def test_la_verificacion_corre_fuera_del_event_loop_y_una_sola_vez(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Con 120 cifras tarda ~0,5 s: en el event loop frenaba a los demás
+    usuarios del worker. En modo correct, si la respuesta no cambia, no se
+    verifica dos veces. Y el log dice cuánto tardó."""
+    import threading
+
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
+    original = agent_module.verify_figures
+    threads: list[int] = []
+
+    def _spy(*a: Any, **kw: Any) -> Any:
+        threads.append(threading.get_ident())
+        return original(*a, **kw)
+
+    monkeypatch.setattr(agent_module, "verify_figures", _spy)
+    answer = "Las reservas fueron de **USD 49.700 millones** en agosto de 2026."
+    events = await _run(
+        AgentEngine(_reservas_llm(answer), _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))
+    )
+    result = events[-1].result
+    assert result.answer == answer
+    assert len(threads) == 1
+    assert threads[0] != threading.get_ident()
+    assert isinstance(result.verification["ms"], int)
+
+
+async def test_lo_citado_por_titulo_no_es_lo_que_aporto_cifras() -> None:
+    """Una serie que sólo se nombra se cita, pero el aviso de atraso
+    (`figure_evidence`) y `served_table` salen de la que aportó las cifras."""
+    nombrada = _serie(
+        "116.4_TCRZE_2015_D_36_4",
+        "Índice de tipo de cambio real multilateral",
+        [("2005-09-26", 140.0)],
+    )
+    answer = (
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026. El índice de "
+        "tipo de cambio real multilateral es otra referencia."
+    )
+    llm = _reservas_llm(answer)
+    result = (await _run(AgentEngine(llm, _deps_series(nombrada, RESERVAS_MENSUAL))))[-1].result
+    assert result.cited_evidence == [nombrada, RESERVAS_MENSUAL]
+    assert result.figure_evidence == [RESERVAS_MENSUAL]
+    assert result.row_count == 3  # la mensual, no la nombrada (1 fila)
+
+
 async def test_el_prompt_que_recibe_el_modelo_trae_las_reglas_nuevas() -> None:
     """El prompt medido en uso: lo que de verdad le llega al modelo."""
     llm = ScriptedLLM([_turn("Ok.")])

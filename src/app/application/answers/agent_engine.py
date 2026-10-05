@@ -66,6 +66,7 @@ from app.application.answers.verification import (
     claim_for,
     confidence_for,
     correction_note,
+    figure_evidence,
     seen_numbers,
     select_evidence,
     unverified_notice,
@@ -100,6 +101,13 @@ _NO_ANSWER = (
     "acotándola a un lugar o período."
 )
 _REFUSAL = "No puedo ayudarte con esa consulta. Preguntame por datos públicos de Argentina."
+
+
+class _Unchecked:
+    """``_result`` sin la verificación hecha: la hace él."""
+
+
+_UNCHECKED = _Unchecked()
 
 
 # Los pasos que ve el usuario. Usan nombres de paso que el frontend ya conoce
@@ -279,6 +287,9 @@ class AgentEngine:
         final: AgentTurn | None = None
         mode = verify_mode()
         first_check: Verification | None = None
+        # El texto que ya se verificó en el bucle (modo correct) y su resultado:
+        # si es la respuesta final, no se verifica dos veces.
+        checked: tuple[str, Verification | None, float] | None = None
 
         while True:
             out_of_budget = calls_made >= max_calls or (self._clock() - started) > time_budget
@@ -325,7 +336,9 @@ class AgentEngine:
                     and turn.stop_reason == "end_turn"
                     and self._can_correct(req, started)
                 ):
-                    check = _safe_verify(turn.text, evidence, evidence_seen, context_seen)
+                    text = _answer_of(turn)[0]
+                    check, ms = await _verify_off_loop(text, evidence, evidence_seen, context_seen)
+                    checked = (text, check, ms)
                     if check is not None and check.unsupported:
                         first_check = check
                         if streamed:
@@ -391,9 +404,30 @@ class AgentEngine:
                 }
             )
 
+        # La verificación de la respuesta final, fuera del event loop.
+        final_check: Verification | None = None
+        verify_ms: float | None = None
+        if evidence and final.stop_reason != "refusal":
+            text = _answer_of(final)[0]
+            if checked is not None and checked[0] == text:
+                _, final_check, verify_ms = checked
+            else:
+                final_check, verify_ms = await _verify_off_loop(
+                    text, evidence, evidence_seen, context_seen
+                )
+
         yield CompleteEvent(
             self._result(
-                final, evidence, usage, req, evidence_seen, mode, first_check, context_seen
+                final,
+                evidence,
+                usage,
+                req,
+                evidence_seen,
+                mode,
+                first_check,
+                context_seen,
+                check=final_check,
+                verify_ms=verify_ms,
             )
         )
 
@@ -407,30 +441,30 @@ class AgentEngine:
         mode: str = VERIFY_OFF,
         first_check: Verification | None = None,
         context_seen: set[float] | None = None,
+        *,
+        check: Verification | None | _Unchecked = _UNCHECKED,
+        verify_ms: float | None = None,
     ) -> EngineResult:
+        """El resultado del turno. ``check`` es la verificación de la respuesta
+        ya hecha en ``stream`` (None si no hubo o falló); sin pasarla, se hace
+        acá."""
         from app.application.pipeline.chart_builder import build_deterministic_charts
         from app.application.pipeline.citation_guard import quality_ceiling
         from app.application.pipeline.nodes.analyst import _build_map_data
         from app.application.pipeline.nodes.finalize import _extract_documents
 
-        warnings: list[str] = []
-        if turn.stop_reason == "refusal":
-            answer = _REFUSAL
-        else:
-            answer = turn.text.strip() or _NO_ANSWER
-            if turn.stop_reason == "max_tokens":
-                warnings.append("La respuesta se cortó por largo; puede estar incompleta.")
-
-        check = (
-            _safe_verify(answer, evidence, evidence_seen, context_seen)
-            if evidence and turn.stop_reason != "refusal"
-            else None
-        )
-        # Las mismas evidencias para fuentes, gráficos, `served_table`, el
-        # aviso de atraso y lo que se guarda para el turno siguiente.
-        cited, consulted = select_evidence(answer, evidence, check) if evidence else ([], [])
-        citations = build_citations(answer, check, evidence) if check else []
-        summary = _verification_log(mode, answer, check, first_check, cited, consulted)
+        answer, warnings = _answer_of(turn)
+        if isinstance(check, _Unchecked):
+            check = (
+                _safe_verify(answer, evidence, evidence_seen, context_seen)
+                if evidence and turn.stop_reason != "refusal"
+                else None
+            )
+        # Las mismas evidencias para fuentes, gráficos, `served_table` y lo que
+        # se guarda para el turno siguiente. El aviso de atraso mira sólo las
+        # que aportaron cifras (`figures`), si hay.
+        cited, consulted, citations, figures = _choose_sources(answer, evidence, check)
+        summary = _verification_log(mode, answer, check, first_check, cited, consulted, verify_ms)
         if mode == VERIFY_CORRECT and check is not None and check.unsupported:
             # Después de la vuelta correctiva (o sin tiempo para hacerla):
             # nunca se borra una cifra; se avisa arriba cuáles no se pudieron
@@ -448,7 +482,8 @@ class AgentEngine:
             logger.debug("agent: map building failed", exc_info=True)
             map_data = None
 
-        first = cited[0] if cited else None
+        # La tabla con la que se respondió: la primera que aportó cifras.
+        first = (figures or cited or [None])[0]
         _record_tokens(self._llm.model, req.mode, usage)
         return EngineResult(
             answer=answer,
@@ -472,11 +507,22 @@ class AgentEngine:
             no_data=not evidence,
             evidence=evidence,
             cited_evidence=cited,
+            figure_evidence=figures,
             consulted=[r.dataset_title for r in consulted],
             verification=summary,
             model=self._llm.model,
             cost_usd=cost_usd(self._llm.model, usage),
         )
+
+
+def _answer_of(turn: AgentTurn) -> tuple[str, list[str]]:
+    """El texto de la respuesta (el que se verifica y se entrega) y sus avisos."""
+    if turn.stop_reason == "refusal":
+        return _REFUSAL, []
+    warnings: list[str] = []
+    if turn.stop_reason == "max_tokens":
+        warnings.append("La respuesta se cortó por largo; puede estar incompleta.")
+    return turn.text.strip() or _NO_ANSWER, warnings
 
 
 def _safe_verify(
@@ -493,6 +539,54 @@ def _safe_verify(
         return None
 
 
+async def _verify_off_loop(
+    answer: str,
+    evidence: list[DataResult],
+    seen: list[frozenset[float] | None],
+    context: set[float],
+) -> tuple[Verification | None, float]:
+    """La verificación en un hilo, y cuánto tardó (ms).
+
+    Es CPU puro: una tabla de 120 cifras sobre una serie de 24×10 tarda ~0,5 s
+    (medido en la revisión del 05-oct), y en el event loop frenaba los demás
+    WebSocket y /ask del worker. Se le pasan copias: el bucle no las toca
+    mientras espera, pero así no depende de eso.
+    """
+    started = time.perf_counter()
+    try:
+        check = await asyncio.to_thread(
+            _safe_verify, answer, list(evidence), list(seen), set(context)
+        )
+    except Exception:
+        logger.warning("agent: figure verification thread failed", exc_info=True)
+        check = None
+    return check, (time.perf_counter() - started) * 1000
+
+
+def _choose_sources(
+    answer: str, evidence: list[DataResult], check: Verification | None
+) -> tuple[list[DataResult], list[DataResult], list[dict[str, Any]], list[DataResult]]:
+    """Lo citado, lo sólo consultado, las citas y lo que aportó cifras.
+
+    Sin verificación (falló, o la respuesta es un rechazo) se cita toda la
+    evidencia, como antes, sin volver a verificar: si la verificación tiró una
+    excepción, repetirla tiraría la misma, fuera de la red de ``_safe_verify``.
+    Y si algo de esto falla, lo mismo: la respuesta sale igual.
+    """
+    if not evidence:
+        return [], [], [], []
+    if check is None:
+        return list(evidence), [], [], []
+    try:
+        cited, consulted = select_evidence(answer, evidence, check)
+        citations = build_citations(answer, check, evidence)
+        figures = figure_evidence(evidence, check)
+    except Exception:
+        logger.warning("agent: source selection failed", exc_info=True)
+        return list(evidence), [], [], []
+    return cited, consulted, citations, figures
+
+
 def _verification_log(
     mode: str,
     answer: str,
@@ -500,23 +594,30 @@ def _verification_log(
     first_check: Verification | None,
     cited: list[DataResult],
     consulted: list[DataResult],
+    verify_ms: float | None = None,
 ) -> dict[str, Any] | None:
     """El registro de la verificación (``answers.verify``), para medir el modo sombra.
 
     Una línea JSON por respuesta con cifras: cuántas, cuáles sin respaldo y en
-    qué oración, si hubo vuelta correctiva y qué marcaba antes.
+    qué oración, si hubo vuelta correctiva, qué marcaba antes y cuánto tardó
+    la verificación de la respuesta final (``ms``).
     """
     if check is None or not check.checks:
         return None
-    summary: dict[str, Any] = {
-        "modo": mode,
-        **check.summary(),
-        "contexto_sin_respaldo": [claim_for(answer, f) for f in check.unsupported[:8]],
-        "vuelta_correctiva": first_check is not None,
-        "sin_respaldo_antes": first_check.summary()["sin_respaldo"] if first_check else None,
-        "fuentes_citadas": len(cited),
-        "consultadas": len(consulted),
-    }
+    try:
+        summary: dict[str, Any] = {
+            "modo": mode,
+            **check.summary(),
+            "contexto_sin_respaldo": [claim_for(answer, f) for f in check.unsupported[:8]],
+            "vuelta_correctiva": first_check is not None,
+            "sin_respaldo_antes": first_check.summary()["sin_respaldo"] if first_check else None,
+            "fuentes_citadas": len(cited),
+            "consultadas": len(consulted),
+            "ms": round(verify_ms) if verify_ms is not None else None,
+        }
+    except Exception:
+        logger.warning("agent: verification summary failed", exc_info=True)
+        return None
     if mode != VERIFY_OFF:
         logger.info("answers.verify %s", json.dumps(summary, ensure_ascii=False))
     return summary

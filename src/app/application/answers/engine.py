@@ -155,6 +155,10 @@ class EngineResult:
     # (``answers.verification.select_evidence``). De acá salen las fuentes, los
     # gráficos, `served_table` y el aviso de atraso. Vacío = toda la evidencia.
     cited_evidence: list[Any] = field(default_factory=list, repr=False)
+    # De las citadas, las que aportaron alguna cifra respaldada. El aviso de
+    # atraso mira éstas: una citada sólo por el título no lo dispara. Vacío =
+    # las citadas.
+    figure_evidence: list[Any] = field(default_factory=list, repr=False)
     # Los títulos de lo que se leyó y no se citó ("consultadas").
     consulted: list[str] = field(default_factory=list)
     # El resumen de la verificación de cifras (cuántas, cuáles sin respaldo,

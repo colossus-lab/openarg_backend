@@ -277,7 +277,11 @@ class EngineRunner:
         result.answer = _scrub(result.answer)
         result.sources = [_with_portal(s) for s in result.sources]
         warnings = list(result.warnings)
-        cited = list(result.cited_evidence or result.evidence)
+        # El atraso se mide sobre lo que aportó cifras (si nada aportó, sobre lo
+        # citado): una fuente citada sólo porque su título aparece en el texto
+        # no pone "Dato atrasado" arriba de una respuesta hecha con datos
+        # frescos de otra.
+        dated = list(result.figure_evidence or result.cited_evidence or result.evidence)
 
         if result.evidence:
             try:
@@ -285,14 +289,14 @@ class EngineRunner:
             except Exception:
                 logger.warning("EngineRunner: coverage warning failed", exc_info=True)
 
-        if cited and result.answer.strip() and result.intent != "clarification":
-            notices = _freshness_notices(cited, req.question)
+        if dated and result.answer.strip() and result.intent != "clarification":
+            notices = _freshness_notices(dated, req.question)
             if notices and not result.answer.startswith(notices[0]):
                 result.answer = "\n\n".join([*notices, result.answer])
 
         # Las tablas del catálogo no traen la fecha de su último dato: para
         # ellas, cuándo las leyó OpenArg por última vez.
-        stale = await _staleness_line(_served_catalog_table(cited))
+        stale = await _staleness_line(_served_catalog_table(dated))
         if stale and stale not in warnings:
             warnings.append(stale)
         result.warnings = warnings

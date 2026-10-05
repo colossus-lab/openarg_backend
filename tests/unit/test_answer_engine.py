@@ -547,6 +547,28 @@ async def test_el_aviso_se_calcula_sobre_lo_citado(rec: Recorder) -> None:
     assert out.answer == "Cotiza a $1.540."
 
 
+async def test_el_aviso_mira_lo_que_aporto_cifras_y_no_lo_nombrado(rec: Recorder) -> None:
+    """Revisión del 05-oct: una serie vieja citada sólo porque su título
+    aparece en el texto ponía «Dato atrasado» arriba de una respuesta hecha
+    con datos de ayer de otra fuente."""
+    from datetime import date, timedelta
+
+    stale = _evidence(["2005-09-26", "2005-09-27"])
+    fresh = _evidence([(date.today() - timedelta(days=1)).isoformat()], realtime=True)
+    result = EngineResult(
+        answer="Cotiza a $1.540.",
+        evidence=[stale, fresh],
+        cited_evidence=[stale, fresh],
+        figure_evidence=[fresh],
+    )
+    out = await EngineRunner(FakeEngine(result), MagicMock()).run(_req())
+    assert out.answer == "Cotiza a $1.540."
+    # Sin cifras respaldadas, el aviso sigue mirando todo lo citado.
+    result = EngineResult(answer="Ver la serie.", evidence=[stale], cited_evidence=[stale])
+    out = await EngineRunner(FakeEngine(result), MagicMock()).run(_req())
+    assert out.answer.startswith("**Dato atrasado:**")
+
+
 async def test_la_edad_de_tabla_es_la_de_la_tabla_citada(
     rec: Recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:

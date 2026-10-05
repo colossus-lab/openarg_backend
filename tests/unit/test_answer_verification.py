@@ -352,6 +352,77 @@ def test_el_resultado_de_la_operacion_de_variacion_es_evidencia() -> None:
     assert not any(m.rate for c in check.checks[:2] for m in c.matches)
 
 
+# ── lo que encontró la revisión del PR (05-oct) ────────────
+
+
+def test_un_token_mal_formado_en_la_descripcion_no_rompe_nada() -> None:
+    """«secciones 1.1,1.2» en la descripción tiraba ValueError: verify_figures
+    y select_evidence reventaban, y con ellos la respuesta entera."""
+    ev = _dr("Clasificador", [{"total": 1234.0}], description="Incluye las secciones 1.1,1.2.")
+    assert _status("El total es 1.234.", [ev]) == {"1.234": "directa"}
+    cited, _ = select_evidence("El total es 1.234.", [ev])
+    assert cited == [ev]
+    assert v._readings("1.1,1.2") == [] and v._readings("1,2.3,4") == []
+
+
+def test_la_escala_de_la_tasa_sale_del_contrato_de_metadatos() -> None:
+    """`unidad="porcentaje"` dice que 1,66 ya es 1,66 %: «166 %» es un error de
+    unidad, no una lectura ×100. Y contra una fracción (0,3354) sólo vale la
+    lectura ×100: «0,34 %» tampoco tiene respaldo."""
+    puntos = _dr("IPC", [{"fecha": "2026-08-01", "valor": 1.66}], unidad="porcentaje")
+    assert _status("La mensual fue de 1,66 %.", [puntos]) == {"1,66 %": "directa"}
+    assert _status("La mensual fue de 166 %.", [puntos]) == {"166 %": "sin_respaldo"}
+    # La marca del adaptador de series de staging dice lo mismo.
+    marcada = _dr("IPC", [{"fecha": "2026-08-01", "valor": 1.66}], value_scale="percentage_points")
+    assert _status("La mensual fue de 166 %.", [marcada]) == {"166 %": "sin_respaldo"}
+    assert _status("La interanual fue de 0,34 %.", [_ipc_interanual()]) == {
+        "0,34 %": "sin_respaldo"
+    }
+    assert _status("La interanual fue de 33,5 %.", [_ipc_interanual()]) == {"33,5 %": "directa"}
+    # Sin contrato (una columna «tasa» cualquiera) se aceptan las dos lecturas.
+    fraccion = _dr("Tabla", [{"tasa": 0.3354}])
+    puntos_sueltos = _dr("Tabla", [{"tasa": 33.54}])
+    assert _status("La tasa es 33,5 %.", [fraccion]) == {"33,5 %": "directa"}
+    assert _status("La tasa es 33,5 %.", [puntos_sueltos]) == {"33,5 %": "directa"}
+
+
+def test_la_cita_de_una_cuenta_muestra_el_valor_de_la_fuente() -> None:
+    """series_008: el saldo 276 sale de 6.140 − 5.864 tal como se escribieron;
+    la cita tiene que mostrar 6.139,70 y 5.864,29, lo que dice la fuente."""
+    fila = _dr(
+        "Intercambio Comercial Argentino",
+        [{"fecha": "2025-02-01", "expo": 6139.7040571, "impo": 5864.28756064}],
+        units="Millones de dólares",
+    )
+    answer = "| Febrero | 6.140 | 5.864 | +276 |"
+    check = verify_figures(answer, [fila])
+    derivada = next(c for c in build_citations(answer, check, [fila]) if c["derived"])
+    values = sorted(g["value"] for g in derivada["grounding"])
+    assert values == pytest.approx([5864.28756064, 6139.7040571])
+    assert {g["path"] for g in derivada["grounding"]} == {"records[0].expo", "records[0].impo"}
+
+
+def test_un_titulo_generico_no_cita_una_serie_vieja() -> None:
+    """La respuesta usa el A3500 del BCRA y dice «tipo de cambio»: una serie
+    vieja llamada «Tipo de cambio» no entra por el título (y no pone el aviso
+    de atraso arriba)."""
+    a3500 = _dr(
+        "Tipo de cambio mayorista Comunicación A 3500 (BCRA)",
+        [{"fecha": "2026-09-30", "valor": 1523.09}],
+    )
+    vieja = _dr("Tipo de cambio", [{"fecha": "2019-12-01", "valor": 59.9}])
+    answer = "El tipo de cambio mayorista A3500 cerró en $1.523,09 el 30 de septiembre."
+    check = verify_figures(answer, [vieja, a3500])
+    cited, consulted = select_evidence(answer, [vieja, a3500], check)
+    assert cited == [a3500] and consulted == [vieja]
+    assert v.figure_evidence([vieja, a3500], check) == [a3500]
+    # En palabras completas: «Base monetaria» no se cita por «base monetarias».
+    base = _dr("Base monetaria", [{"fecha": "2026-05-01", "v": 1.0}])
+    otra = _dr("Otra", [{"fecha": "2026-05-01", "v": 2.0}])
+    cited, _ = select_evidence("Las base monetarias provinciales no existen.", [base, otra])
+    assert cited == [base, otra]  # nada nombrado ni con cifras: se citan todas
+
+
 def test_seen_numbers_lee_json_y_texto_argentino() -> None:
     seen = seen_numbers('{"a":49700.26,"b":"1.543,18","c":-0.22,"d":1e-05}')
     assert {49700.26, 1543.18, 0.22, 1e-05} <= set(seen)
