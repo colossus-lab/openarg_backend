@@ -326,6 +326,8 @@ def format_table(payload: Mapping[str, Any]) -> str:
         lines.append(
             f"Período ({payload.get('columna_fecha')}): {payload.get('desde')} a {payload.get('hasta')}"
         )
+    if payload.get("aviso_fecha"):
+        lines.append(f"Aviso: {payload.get('aviso_fecha')}")
     cols = [c for c in payload.get("columnas") or [] if isinstance(c, Mapping)]
     lines.append("Columnas:\n" + "\n".join(f"- {c.get('nombre')} ({c.get('tipo')})" for c in cols))
     sample = [r for r in payload.get("muestra") or [] if isinstance(r, Mapping)]
@@ -342,9 +344,18 @@ def format_rows(payload: Mapping[str, Any]) -> str:
     source = _link(
         str(payload.get("fuente") or payload.get("tabla") or ""), str(payload.get("url") or "")
     )
+    applied = [str(n) for n in payload.get("filtros_aplicados") or []]
     if not rows:
-        return f"La consulta no devolvió filas. Fuente: {source}"
+        # El backend explica por qué no hubo filas y qué valores existen.
+        # Antes este mensaje fijo era todo lo que veía el modelo cliente.
+        lines = [f"La consulta no devolvió filas. Fuente: {source}"]
+        if payload.get("aviso"):
+            lines.append(str(payload["aviso"]))
+        lines.extend(applied)
+        return "\n".join(lines)
     head = f"{len(rows)} filas de `{payload.get('tabla')}`. Fuente: {source}"
+    if applied:
+        head += "\n" + "\n".join(applied)
     if payload.get("truncado"):
         head += (
             "\nHay más filas: acotá con `desde`/`hasta` o `filtros`, o subí `limite` (máximo 500)."
