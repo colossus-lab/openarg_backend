@@ -18,6 +18,14 @@ if v <= 0 then return v end
 return redis.call('DECR', KEYS[1])
 """
 
+# Compare-and-delete: release a lock only while it still holds our token.
+_DELETE_IF_EQUALS = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
 
 class RedisCacheAdapter(ICacheService):
     def __init__(self, redis_url: str = "redis://localhost:6379/2") -> None:
@@ -59,3 +67,10 @@ class RedisCacheAdapter(ICacheService):
         # EVAL runs atomically on the Redis side: no other command can land
         # between the GET and the DECR. DECR keeps the key's TTL.
         return int(await self._redis.eval(_DECREMENT_FLOOR_ZERO, 1, key))
+
+    async def set_if_absent(self, key: str, value: str, ttl_seconds: int) -> bool:
+        # SET NX EX is a single atomic command: the key and its TTL land together.
+        return bool(await self._redis.set(key, value, ex=ttl_seconds, nx=True))
+
+    async def delete_if_equals(self, key: str, value: str) -> bool:
+        return bool(await self._redis.eval(_DELETE_IF_EQUALS, 1, key, value))

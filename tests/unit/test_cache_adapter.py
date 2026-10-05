@@ -103,3 +103,23 @@ class TestRedisCacheAdapter:
         script, numkeys, key = mock_redis.eval.await_args.args
         assert (numkeys, key) == (1, "rl:user:u:month:2026-10")
         assert "DECR" in script and "GET" in script
+
+    async def test_set_if_absent_is_one_set_nx_ex(self, cache, mock_redis):
+        """The dedupe lock and the charged-counter seed: key and TTL land in
+        one command, and only if the key did not exist."""
+        mock_redis.set.return_value = True
+        assert await cache.set_if_absent("ask:dedupe:fp:lock", "tok", 45) is True
+        mock_redis.set.assert_awaited_once_with("ask:dedupe:fp:lock", "tok", ex=45, nx=True)
+        mock_redis.set.return_value = None  # redis-py: NX not met
+        assert await cache.set_if_absent("ask:dedupe:fp:lock", "tok2", 45) is False
+
+    async def test_delete_if_equals_is_one_atomic_script(self, cache, mock_redis):
+        """Compare-and-delete in Lua: a lock is released only while it still
+        holds the caller's token (real semantics in the integration test)."""
+        mock_redis.eval.return_value = 1
+        assert await cache.delete_if_equals("ask:dedupe:fp:lock", "tok") is True
+        script, numkeys, key, token = mock_redis.eval.await_args.args
+        assert (numkeys, key, token) == (1, "ask:dedupe:fp:lock", "tok")
+        assert "GET" in script and "DEL" in script
+        mock_redis.eval.return_value = 0
+        assert await cache.delete_if_equals("ask:dedupe:fp:lock", "other") is False
