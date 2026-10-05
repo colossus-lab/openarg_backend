@@ -13,16 +13,24 @@ Cada turno:
 3. con los resultados a la vista vuelve a pedir o contesta. El texto final
    sale en streaming (``chunk``), limpio de nombres internos;
 4. si se agota el presupuesto (vueltas o tiempo), se le pide la respuesta con
-   lo que tiene.
+   lo que tiene;
+5. cada cifra de la respuesta se busca en lo que devolvieron las herramientas
+   (``answers.verification``). Con ``ANSWERS_VERIFY_MODE=correct``, si hay
+   cifras sin respaldo el modelo hace UNA vuelta más con esa lista (el texto
+   que ya salió se borra con ``clear_answer``); si después siguen, la
+   respuesta lleva un aviso arriba que las nombra. Con ``shadow`` (el modo
+   por defecto) sólo se registran en el log ``answers.verify``.
 
-Las fuentes, los gráficos, el mapa y la verificación de cifras salen sólo de
-lo que devolvieron las herramientas que leen datos. Lo transversal (caché,
-historial, analytics, auditoría) lo hace ``EngineRunner``.
+Las fuentes, los gráficos, el mapa y `served_table` salen sólo de las
+evidencias que la respuesta usó: las que aportaron una cifra o se nombran en
+el texto. Lo demás quedó "consultado" y no se cita. Lo transversal (caché,
+historial, aviso de atraso, analytics, auditoría) lo hace ``EngineRunner``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -50,6 +58,20 @@ from app.application.answers.tools.base import (
     count,
     quoted,
 )
+from app.application.answers.verification import (
+    VERIFY_CORRECT,
+    VERIFY_OFF,
+    Verification,
+    build_citations,
+    claim_for,
+    confidence_for,
+    correction_note,
+    seen_numbers,
+    select_evidence,
+    unverified_notice,
+    verify_figures,
+    verify_mode,
+)
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.ports.llm.agent_llm import AgentTurn, AgentUsage, IAgentLLM, TextDelta, ToolCall
@@ -66,6 +88,12 @@ SOFT_TIME_BUDGET_S = 35.0
 _ANSWER_MARGIN_S = 10.0
 TOOL_TIMEOUT_S = 25.0
 MAX_ANSWER_TOKENS = 2048
+# La vuelta correctiva cuesta ~US$ 0,01 y 2-4 s (medido con la última vuelta de
+# la reproducción del 04-oct). Con un tope de canal (/ask) sólo arranca si
+# quedan al menos estos segundos: pasarse del tope pierde la respuesta entera.
+CORRECTION_RESERVE_S = 8.0
+# Sin tope de canal (chat web), no arranca si el turno ya lleva esto.
+CORRECTION_SOFT_LIMIT_S = 45.0
 
 _NO_ANSWER = (
     "No pude armar una respuesta para esta consulta. Probá reformulándola o "
@@ -83,6 +111,7 @@ STEP_TOOL = "searching"
 STEP_WRITING = "generating"
 THINKING_TEXT = "Pensando…"
 WRITING_TEXT = "Escribiendo la respuesta…"
+CHECKING_TEXT = "Revisando las cifras…"
 
 
 def _describe(tool: AgentToolImpl | None, call: ToolCall) -> str:
@@ -215,13 +244,20 @@ class AgentEngine:
             budget = min(budget, max(1.0, req.deadline_s - _ANSWER_MARGIN_S))
         return budget
 
+    def _can_correct(self, req: EngineRequest, started: float) -> bool:
+        """¿Queda tiempo para la vuelta correctiva sin pasarse del tope del canal?"""
+        elapsed = self._clock() - started
+        if req.deadline_s:
+            return req.deadline_s - elapsed > CORRECTION_RESERVE_S
+        return elapsed < CORRECTION_SOFT_LIMIT_S
+
     async def stream(self, req: EngineRequest) -> AsyncGenerator[EngineEvent, None]:
         started = self._clock()
         tools = build_tools(self._deps)
         by_name = {t.spec.name: t for t in tools}
         specs = [t.spec for t in tools]
         ctx = ToolContext(deps=self._deps, req=req)
-        system = system_prompt()
+        system = system_prompt(tool_names=set(by_name))
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -235,8 +271,14 @@ class AgentEngine:
         time_budget = self._time_budget(req)
         usage = AgentUsage()
         evidence: list[DataResult] = []
+        # Los números que el modelo tuvo a la vista de cada evidencia, y de
+        # todo lo que leyó (también lo que no es evidencia: describir_tabla).
+        evidence_seen: list[frozenset[float] | None] = []
+        context_seen: set[float] = set()
         calls_made = 0
         final: AgentTurn | None = None
+        mode = verify_mode()
+        first_check: Verification | None = None
 
         while True:
             out_of_budget = calls_made >= max_calls or (self._clock() - started) > time_budget
@@ -272,7 +314,28 @@ class AgentEngine:
             if not turn.tool_calls or out_of_budget or turn.stop_reason != "tool_use":
                 tail = cleaner.flush()
                 if tail:
+                    streamed = streamed or bool(tail.strip())
                     yield ChunkEvent(tail)
+                # Una sola vuelta correctiva, y sólo si el modelo terminó bien
+                # (no cortado por largo ni negándose) y queda tiempo.
+                if (
+                    mode == VERIFY_CORRECT
+                    and first_check is None
+                    and evidence
+                    and turn.stop_reason == "end_turn"
+                    and self._can_correct(req, started)
+                ):
+                    check = _safe_verify(turn.text, evidence, evidence_seen, context_seen)
+                    if check is not None and check.unsupported:
+                        first_check = check
+                        if streamed:
+                            yield ClearAnswerEvent()
+                        yield StatusEvent(STEP_THINKING, CHECKING_TEXT)
+                        messages.append({"role": "assistant", "content": turn.content})
+                        messages.append(
+                            {"role": "user", "content": correction_note(check.unsupported)}
+                        )
+                        continue
                 final = turn
                 break
 
@@ -310,7 +373,14 @@ class AgentEngine:
                 return
 
             for outcome in outcomes:
-                evidence.extend(r for r in outcome.results if r.records)
+                # Lo que el modelo leyó de verdad: las últimas filas de la
+                # serie, no las 1.000 que trae la evidencia.
+                numbers = seen_numbers(outcome.content)
+                context_seen.update(numbers)
+                for r in outcome.results:
+                    if r.records:
+                        evidence.append(r)
+                        evidence_seen.append(numbers)
             messages.append(
                 {
                     "role": "user",
@@ -321,7 +391,11 @@ class AgentEngine:
                 }
             )
 
-        yield CompleteEvent(self._result(final, evidence, usage, req))
+        yield CompleteEvent(
+            self._result(
+                final, evidence, usage, req, evidence_seen, mode, first_check, context_seen
+            )
+        )
 
     def _result(
         self,
@@ -329,8 +403,13 @@ class AgentEngine:
         evidence: list[DataResult],
         usage: AgentUsage,
         req: EngineRequest,
+        evidence_seen: list[frozenset[float] | None] | None = None,
+        mode: str = VERIFY_OFF,
+        first_check: Verification | None = None,
+        context_seen: set[float] | None = None,
     ) -> EngineResult:
         from app.application.pipeline.chart_builder import build_deterministic_charts
+        from app.application.pipeline.citation_guard import quality_ceiling
         from app.application.pipeline.nodes.analyst import _build_map_data
         from app.application.pipeline.nodes.finalize import _extract_documents
 
@@ -342,28 +421,46 @@ class AgentEngine:
             if turn.stop_reason == "max_tokens":
                 warnings.append("La respuesta se cortó por largo; puede estar incompleta.")
 
+        check = (
+            _safe_verify(answer, evidence, evidence_seen, context_seen)
+            if evidence and turn.stop_reason != "refusal"
+            else None
+        )
+        # Las mismas evidencias para fuentes, gráficos, `served_table`, el
+        # aviso de atraso y lo que se guarda para el turno siguiente.
+        cited, consulted = select_evidence(answer, evidence, check) if evidence else ([], [])
+        citations = build_citations(answer, check, evidence) if check else []
+        summary = _verification_log(mode, answer, check, first_check, cited, consulted)
+        if mode == VERIFY_CORRECT and check is not None and check.unsupported:
+            # Después de la vuelta correctiva (o sin tiempo para hacerla):
+            # nunca se borra una cifra; se avisa arriba cuáles no se pudieron
+            # verificar.
+            answer = f"{unverified_notice(check.unsupported)}\n\n{answer}"
+
         try:
-            charts = build_deterministic_charts(evidence) or None
+            charts = build_deterministic_charts(cited) or None
         except Exception:
             logger.debug("agent: chart building failed", exc_info=True)
             charts = None
         try:
-            map_data = _build_map_data(evidence)
+            map_data = _build_map_data(cited)
         except Exception:
             logger.debug("agent: map building failed", exc_info=True)
             map_data = None
 
-        first = evidence[0] if evidence else None
+        first = cited[0] if cited else None
         _record_tokens(self._llm.model, req.mode, usage)
         return EngineResult(
             answer=answer,
-            sources=_sources(evidence),
+            sources=_sources(cited),
             chart_data=charts,
             map_data=map_data,
-            documents=_extract_documents(evidence),
+            citations=citations,
+            documents=_extract_documents(cited),
             warnings=warnings,
             tokens_used=usage.total,
             intent="agent",
+            confidence=confidence_for(check, quality_ceiling(evidence)),
             served_table=(
                 (first.metadata or {}).get("served_table") or first.source if first else None
             ),
@@ -374,9 +471,55 @@ class AgentEngine:
             # vuelve a servir a cada reformulación, aunque el dato aparezca.
             no_data=not evidence,
             evidence=evidence,
+            cited_evidence=cited,
+            consulted=[r.dataset_title for r in consulted],
+            verification=summary,
             model=self._llm.model,
             cost_usd=cost_usd(self._llm.model, usage),
         )
+
+
+def _safe_verify(
+    answer: str,
+    evidence: list[DataResult],
+    seen: list[frozenset[float] | None] | None,
+    context: set[float] | None = None,
+) -> Verification | None:
+    """La verificación nunca le cuesta la respuesta a nadie."""
+    try:
+        return verify_figures(answer, evidence, seen, frozenset(context or ()))
+    except Exception:
+        logger.warning("agent: figure verification failed", exc_info=True)
+        return None
+
+
+def _verification_log(
+    mode: str,
+    answer: str,
+    check: Verification | None,
+    first_check: Verification | None,
+    cited: list[DataResult],
+    consulted: list[DataResult],
+) -> dict[str, Any] | None:
+    """El registro de la verificación (``answers.verify``), para medir el modo sombra.
+
+    Una línea JSON por respuesta con cifras: cuántas, cuáles sin respaldo y en
+    qué oración, si hubo vuelta correctiva y qué marcaba antes.
+    """
+    if check is None or not check.checks:
+        return None
+    summary: dict[str, Any] = {
+        "modo": mode,
+        **check.summary(),
+        "contexto_sin_respaldo": [claim_for(answer, f) for f in check.unsupported[:8]],
+        "vuelta_correctiva": first_check is not None,
+        "sin_respaldo_antes": first_check.summary()["sin_respaldo"] if first_check else None,
+        "fuentes_citadas": len(cited),
+        "consultadas": len(consulted),
+    }
+    if mode != VERIFY_OFF:
+        logger.info("answers.verify %s", json.dumps(summary, ensure_ascii=False))
+    return summary
 
 
 def _record_tokens(model: str, mode: str, usage: AgentUsage) -> None:

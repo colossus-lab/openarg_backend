@@ -75,6 +75,7 @@ class ScriptedLLM:
     ) -> AsyncGenerator[Any, None]:
         self.calls.append(
             {
+                "system": system,
                 "messages": json.loads(json.dumps(messages)),
                 "allow_tools": allow_tools,
                 "tools": tools,
@@ -540,6 +541,178 @@ async def test_dos_busquedas_en_paralelo_no_comparten_la_sesion() -> None:
     await _run(AgentEngine(llm, deps))
     results = llm.calls[1]["messages"][-1]["content"]
     assert not any(r.get("is_error") for r in results)
+
+
+# ── fuentes por uso y verificación de cifras (04-oct) ──────
+
+
+def _serie(sid: str, title: str, rows: list[tuple[str, float]], units: str = "") -> DataResult:
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url=f"https://datos.gob.ar/series/api/series/?ids={sid}",
+        dataset_title=title,
+        format="time_series",
+        records=[{"fecha": f, "Reservas": x} for f, x in rows],
+        metadata={"units": units},
+    )
+
+
+RESERVAS_DIARIA = _serie(
+    "92.2_RESERVAS_IRES_0_0_32_40",
+    "Reservas internacionales y pasivos del BCRA",
+    [("2005-09-26", 25530.0), ("2005-09-27", 25557.0)],
+    "Millones de dólares",
+)
+RESERVAS_MENSUAL = _serie(
+    "92.1_RID_0_0_32",
+    "Reservas internacionales y pasivos del BCRA",
+    [("2026-06-01", 47467.31), ("2026-07-01", 48661.88), ("2026-08-01", 49700.26)],
+    "Millones de dólares",
+)
+
+
+def _deps_series(*results: DataResult) -> MagicMock:
+    deps = _deps()
+    deps.series.fetch = AsyncMock(side_effect=list(results))
+    return deps
+
+
+def _reservas_llm(*answers: str) -> ScriptedLLM:
+    return ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["92.2_RESERVAS_IRES_0_0_32_40"]),
+                    _call("series_tiempo", 2, ids=["92.1_RID_0_0_32"]),
+                ]
+            ),
+            *[_turn(a) for a in answers],
+        ]
+    )
+
+
+async def test_se_citan_solo_las_fuentes_que_aportaron_cifras() -> None:
+    """Reproducción del 04-oct, reservas corrida 1: citaba las tres series
+    leídas y sólo una aportó las cifras. Gráficos y `served_table` salen de
+    la misma lista."""
+    llm = _reservas_llm(
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
+    )
+    deps = _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL)
+    result = (await _run(AgentEngine(llm, deps)))[-1].result
+    assert [s["url"] for s in result.sources] == [RESERVAS_MENSUAL.portal_url]
+    assert result.cited_evidence == [RESERVAS_MENSUAL]
+    assert result.consulted == [RESERVAS_DIARIA.dataset_title]
+    assert result.row_count == 3
+    # Toda la evidencia leída sigue disponible para verificar.
+    assert result.evidence == [RESERVAS_DIARIA, RESERVAS_MENSUAL]
+    # Las citas estructuradas salen de las coincidencias.
+    [cita] = result.citations
+    assert cita["verified"] is True
+    assert cita["grounding"][0]["url"] == RESERVAS_MENSUAL.portal_url
+
+
+async def test_en_modo_sombra_la_respuesta_no_cambia_y_queda_registrada(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("ANSWERS_VERIFY_MODE", raising=False)
+    answer = "Las reservas fueron de **USD 51.191 millones** en agosto de 2026."
+    llm = _reservas_llm(answer)
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL)))
+    result = events[-1].result
+    assert result.answer == answer
+    assert len(llm.calls) == 2
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    assert result.verification["sin_respaldo"] == ["51.191 millones"]
+    assert result.verification["modo"] == "shadow"
+    [line] = [r.getMessage() for r in caplog.records if "answers.verify" in r.getMessage()]
+    assert "51.191 millones" in line
+
+
+async def test_en_modo_correct_hay_una_vuelta_correctiva(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
+    llm = _reservas_llm(
+        "Las reservas fueron de **USD 51.191 millones** en agosto de 2026.",
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual).",
+    )
+    events = await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL)))
+    result = events[-1].result
+    assert result.answer.startswith("Las reservas fueron de **USD 49.700 millones**")
+    assert len(llm.calls) == 3
+    # Al modelo le llegó la lista de cifras sin respaldo, después de su respuesta.
+    pedido = llm.calls[2]["messages"][-1]["content"]
+    assert "51.191 millones" in pedido
+    assert llm.calls[2]["messages"][-2]["role"] == "assistant"
+    # Lo que ya había salido en streaming se borró antes de la respuesta nueva.
+    kinds = [type(e).__name__ for e in events]
+    first_clear = kinds.index("ClearAnswerEvent")
+    assert "ChunkEvent" in kinds[:first_clear]
+    assert "ChunkEvent" in kinds[first_clear:]
+    assert StatusEvent("coordination", "Revisando las cifras…") in events
+    assert result.verification["vuelta_correctiva"] is True
+    assert result.verification["sin_respaldo"] == []
+    assert result.verification["sin_respaldo_antes"] == ["51.191 millones"]
+
+
+async def test_si_sigue_sin_respaldo_va_un_aviso_arriba_y_la_cifra_queda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
+    wrong = "Las reservas fueron de **USD 51.191 millones** en agosto de 2026."
+    llm = _reservas_llm(wrong, wrong)
+    result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
+        -1
+    ].result
+    assert len(llm.calls) == 3  # una sola vuelta correctiva
+    assert result.answer.startswith("**Aviso:** no pude verificar")
+    assert "51.191 millones" in result.answer.split("\n\n", 1)[0]
+    # Nunca se borra una cifra del texto.
+    assert result.answer.endswith(wrong)
+
+
+async def test_sin_tiempo_no_hay_vuelta_correctiva(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pasarse del tope de /ask pierde la respuesta entera: mejor el aviso."""
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
+    # El reloj: arranque, dos vueltas del ciclo y la consulta de la vuelta
+    # correctiva, cuando ya pasaron 25 de los 30 s de /ask.
+    ticks = iter([0.0, 0.0, 1.0, 25.0])
+    wrong = "Las reservas fueron de **USD 51.191 millones** en agosto de 2026."
+    llm = _reservas_llm(wrong)
+    engine = AgentEngine(
+        llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL), clock=lambda: next(ticks, 25.0)
+    )
+    result = (await _run(engine, EngineRequest("q", "u", deadline_s=30)))[-1].result
+    assert len(llm.calls) == 2
+    assert result.answer.startswith("**Aviso:** no pude verificar")
+
+
+async def test_en_modo_off_no_se_registra_ni_se_corrige(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "off")
+    wrong = "Las reservas fueron de **USD 51.191 millones** en agosto de 2026."
+    llm = _reservas_llm(wrong)
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
+            -1
+        ].result
+    assert result.answer == wrong
+    assert not any("answers.verify" in r.getMessage() for r in caplog.records)
+
+
+async def test_el_prompt_que_recibe_el_modelo_trae_las_reglas_nuevas() -> None:
+    """El prompt medido en uso: lo que de verdad le llega al modelo."""
+    llm = ScriptedLLM([_turn("Ok.")])
+    await _run(AgentEngine(llm, _deps()))
+    system = llm.calls[0]["system"]
+    assert "Las tasas no se suman ni se restan" in system
+    assert "No atribuyas causas" in system
+    assert 'Nunca uses "actual"' in system
+    assert "coparticipación federal" in system
+    # Sin la herramienta del BCRA, el prompt no la nombra: el modelo la pediría.
+    assert "variables_bcra" not in system
 
 
 async def test_una_busqueda_que_falla_deja_la_sesion_usable() -> None:
