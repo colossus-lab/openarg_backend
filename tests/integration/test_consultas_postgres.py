@@ -229,3 +229,99 @@ def test_calcular_agrupado_informa_el_total_de_todos_los_grupos(tabla: str) -> N
 
 def test_leer_numero_es_decimal() -> None:
     assert leer_numero("1.500.000,50") == Decimal("1500000.50")
+
+
+# ── modo datos: truncado exacto, orden estable y offset (QW12 / ok.3) ──────
+
+
+def test_desempate_por_ctid_y_offset_pasan_el_sandbox(tabla: str) -> None:
+    """El validador real acepta `ctid` y `OFFSET`; las páginas no se pisan."""
+    todas = _run(tabla, orden="desc", columns=["fecha", "entidad"], una_de_mas=True)
+    primera = _run(tabla, orden="desc", limite=2, columns=["fecha", "entidad"], una_de_mas=True)
+    segunda = _run(
+        tabla, orden="desc", limite=2, offset=2, columns=["fecha", "entidad"], una_de_mas=True
+    )
+    assert len(primera) == 3  # limite + 1: hay más
+    assert primera[:2] + segunda[:2] == todas[:4]
+
+
+def test_sin_fecha_orden_fisico_es_el_del_archivo(tabla: str) -> None:
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    sin_fecha = ["funcion_desc", "entidad", "monto"]  # como si la tabla no tuviera `fecha`
+    q = build_data_query(
+        DataRequest(
+            table=tabla,
+            available_columns=sin_fecha,
+            column_types=[(c, "text") for c in sin_fecha],
+            columns=["entidad"],
+            orden_fisico=True,
+            offset=1,
+        )
+    )
+    assert q.orden == "fisico"
+    result = PgSandboxAdapter()._execute_sync(q.sql, 10, q.params)
+    assert result.error is None, (result.error, q.sql)
+    assert [r["entidad"] for r in result.rows] == ["Banco Nación", "Call Center", "Otro"]
+
+
+def test_una_columna_que_ya_no_existe_tiene_su_propio_error(tabla: str) -> None:
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    result = PgSandboxAdapter()._execute_sync(f'SELECT "no_existe" FROM public."{tabla}"', 10, {})
+    assert result.error_kind == "missing_column"
+    result = PgSandboxAdapter()._execute_sync('SELECT 1 FROM public."cache_no_existe_xyz"', 10, {})
+    assert result.error_kind == "missing_table"
+
+
+# ── agregar_datos (3.1): la cuenta en la base, de punta a punta ────────────
+
+
+async def _agregar(tabla: str, **kw):  # type: ignore[no-untyped-def]
+    from app.application.consultas.agregar import PedidoAgregado, agregar
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    sandbox = PgSandboxAdapter()
+
+    async def run(sql, params):  # type: ignore[no-untyped-def]
+        result = await sandbox.execute_readonly(sql, params=params)
+        assert result.error is None, (result.error, sql)
+        return result.rows
+
+    return await agregar(
+        sandbox,
+        PedidoAgregado(
+            tabla=tabla,
+            tipos=[(c, "text") for c in ("funcion_desc", "entidad", "monto", "fecha")],
+            **kw,
+        ),
+        run,
+    )
+
+
+async def test_agregar_suma_un_monto_argentino_filtrado(tabla: str) -> None:
+    """Educación y Cultura: 1.500.000,50 + 900.000, con la igualdad sin acentos."""
+    res = await _agregar(
+        tabla,
+        operacion="suma",
+        columna="monto",
+        filtros={"funcion_desc": "educacion y cultura"},
+    )
+    assert res.grupos == [{"valor": Decimal("2400000.50")}]
+    assert res.filas_usadas == 2 and res.filas_con_valor == 2 and not res.truncado
+
+
+async def test_agregar_ranking_dice_el_total_de_todos_los_grupos(tabla: str) -> None:
+    res = await _agregar(
+        tabla, operacion="suma", columna="monto", agrupar_por=["funcion_desc"], limite=2
+    )
+    assert [g["funcion_desc"] for g in res.grupos] == ["Educación y Cultura", "Salud"]
+    assert res.truncado and res.filas_usadas == 4
+    assert any("Hay más de 2 grupos" in a for a in res.avisos)
+
+
+async def test_agregar_sin_coincidencias_explica_en_vez_de_dar_cero(tabla: str) -> None:
+    res = await _agregar(tabla, operacion="conteo", filtros={"funcion_desc": "Educacion"})
+    assert res.vacio and res.filas_usadas == 0 and res.grupos == []
+    assert res.aviso is not None and "Ninguna fila" in res.aviso
+    assert "Educación y Cultura" in [s["valor"] for s in res.sugerencias["funcion_desc"]]

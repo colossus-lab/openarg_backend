@@ -59,7 +59,8 @@ class TestBuildDataQuery:
             'SELECT "indice_tiempo", "tasas_interes_call", "tasas_interes_badlar" '
             'FROM "raw"."datos_gob_ar__principales_tasas_de_interes__6335b6d1__v1"'
         )
-        assert q.sql.endswith("ASC NULLS LAST LIMIT 100")
+        # Desempate por posición física: filas con la misma fecha, siempre igual.
+        assert q.sql.endswith("ASC NULLS LAST, ctid LIMIT 100")
         assert q.params == {}
 
     def test_period_filter_overlaps_and_values_are_bound(self) -> None:
@@ -67,7 +68,7 @@ class TestBuildDataQuery:
         assert q.params == {"p0": "2025-12-01", "p1": "2026-06-18"}
         assert ">= :p0" in q.sql and "<= :p1" in q.sql
         assert "2025-12" not in q.sql
-        assert q.sql.endswith("DESC NULLS LAST LIMIT 50")
+        assert q.sql.endswith("DESC NULLS LAST, ctid LIMIT 50")
 
     def test_the_period_is_not_a_lexicographic_left(self) -> None:
         """`left(col::text, 7) >= '2025-12'` daba 0 filas con "1/10/2017"."""
@@ -163,6 +164,50 @@ class TestBuildDataQuery:
             DataRequest(table=_T, available_columns=['raro"nombre'], columns=['raro"nombre'])
         )
         assert '"raro""nombre"' in q.sql
+
+
+class TestTruncadoOrdenYOffset:
+    """Auditoría ok.3 / QW12: `truncado = cantidad >= limite` daba falsos
+    positivos, sin fecha no había ORDER BY y no había forma de pedir la página
+    siguiente."""
+
+    def test_pide_una_fila_de_mas_para_saber_si_hay_mas(self) -> None:
+        q = build_data_query(_req(limite=100, una_de_mas=True))
+        assert q.sql.endswith("LIMIT 101") and q.limite == 100
+
+    def test_offset_va_despues_del_limite(self) -> None:
+        q = build_data_query(_req(limite=50, offset=200, una_de_mas=True))
+        assert q.sql.endswith("LIMIT 51 OFFSET 200")
+
+    @pytest.mark.parametrize("offset", [-1, 10_001])
+    def test_offset_acotado(self, offset: int) -> None:
+        with pytest.raises(CatalogRequestError, match="offset"):
+            build_data_query(_req(offset=offset))
+
+    def test_sin_fecha_y_chica_ordena_por_posicion_fisica(self) -> None:
+        q = build_data_query(
+            DataRequest(table=_PRESUPUESTO, available_columns=["a", "b"], orden_fisico=True)
+        )
+        assert q.sql.endswith("ORDER BY ctid LIMIT 100") and q.orden == "fisico"
+
+    def test_sin_fecha_y_grande_no_ordena(self) -> None:
+        """Ordenar una tabla sin índices la recorre entera (11 s en 300.000 filas)."""
+        q = build_data_query(DataRequest(table=_PRESUPUESTO, available_columns=["a", "b"]))
+        assert "ORDER BY" not in q.sql and q.orden is None
+
+    def test_un_mart_no_desempata_por_ctid(self) -> None:
+        q = build_data_query(
+            DataRequest(table="mart.inflacion", available_columns=["fecha", "v"], orden_fisico=True)
+        )
+        assert "ctid" not in q.sql and q.orden == "fecha"
+
+    def test_el_validador_acepta_ctid_y_offset(self) -> None:
+        q = build_data_query(_req(offset=100, una_de_mas=True))
+        assert _validate_sql(q.sql, built=True) is None
+        q = build_data_query(
+            DataRequest(table=_PRESUPUESTO, available_columns=["a"], orden_fisico=True, offset=5)
+        )
+        assert _validate_sql(q.sql, built=True) is None
 
 
 class TestFechasQueAntesNoSeReconocian:

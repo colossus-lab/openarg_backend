@@ -39,6 +39,8 @@ __all__ = [
     "MAX_COLUMNS",
     "MAX_FILTERS",
     "MAX_LIMIT",
+    "MAX_OFFSET",
+    "ORDEN_FISICO_MAX_FILAS",
     "CatalogRequestError",
     "DataQuery",
     "DataRequest",
@@ -58,6 +60,17 @@ MAX_COLUMNS = 30
 MAX_FILTERS = 5
 MAX_FILTER_VALUE = 200
 SAMPLE_ROWS = 5
+# Paginar más allá no tiene sentido con 500 filas por pedido: para eso están
+# los filtros, el período o `agregar_datos`. Y con orden por fecha, Postgres
+# guarda en memoria `offset + limite` filas para ordenarlas.
+MAX_OFFSET = 10_000
+# Hasta cuántas filas una tabla sin columna de fecha se ordena por su posición
+# física (`ctid`, el orden del archivo). Las tablas del catálogo no tienen
+# índices: `ORDER BY ctid` las recorre enteras. Medido en staging el 05-oct:
+# de 80 ms a 6 s en 100.000 filas según la carga, 11 s en 300.000 y más del
+# timeout en 600.000, contra 10-120 ms sin ordenar. Por encima se lee en el
+# orden en que están guardadas y la respuesta lo dice.
+ORDEN_FISICO_MAX_FILAS = 50_000
 
 
 def is_internal_column(name: str) -> bool:
@@ -117,6 +130,15 @@ class DataRequest:
     tolerante: bool = True
     # Formato de las columnas de texto que se comparan como número.
     formatos: Mapping[str, str | None] | None = None
+    # Filas a saltear, para pedir la página siguiente.
+    offset: int = 0
+    # Pedir `limite + 1` filas: si llegan todas, hay más. Antes `truncado` era
+    # `cantidad >= limite` y una tabla de exactamente 100 filas decía que
+    # había más (auditoría ok.3).
+    una_de_mas: bool = False
+    # Sin columna de fecha, ordenar por la posición física (`ctid`). Lo decide
+    # quien llama según el tamaño de la tabla (`ORDEN_FISICO_MAX_FILAS`).
+    orden_fisico: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,6 +152,15 @@ class DataQuery:
     tipos: dict[str, str]
     desde: str | None = None
     hasta: str | None = None
+    limite: int = DEFAULT_LIMIT
+    # Cómo quedaron ordenadas las filas: "fecha", "fisico" (la posición en la
+    # tabla, que es el orden del archivo) o None (el orden en que Postgres
+    # las lea: estable en la práctica, sin garantía).
+    orden: str | None = None
+
+
+def _es_mart(table: str) -> bool:
+    return table.strip().lower().replace('"', "").startswith("mart.")
 
 
 def visible_types(
@@ -164,6 +195,11 @@ def build_data_query(req: DataRequest) -> DataQuery:
 
     if not 1 <= req.limite <= MAX_LIMIT:
         raise CatalogRequestError(f"`limite` tiene que estar entre 1 y {MAX_LIMIT}.")
+    if not 0 <= req.offset <= MAX_OFFSET:
+        raise CatalogRequestError(
+            f"`offset` tiene que estar entre 0 y {MAX_OFFSET}. Para recorrer más filas acotá con "
+            "`desde`/`hasta` o `filtros`, o calculá totales con agregar_datos."
+        )
     orden = (req.orden or "asc").lower()
     if orden not in ("asc", "desc"):
         raise CatalogRequestError("`orden` es 'asc' o 'desc'.")
@@ -194,12 +230,26 @@ def build_data_query(req: DataRequest) -> DataQuery:
     sql = f"SELECT {', '.join(quote_ident(c) for c in columns)} FROM {quote_qualified(req.table)}"
     if where:
         sql += " WHERE " + " AND ".join(where)
+    # Desempate por posición física: dos filas con la misma fecha (una serie
+    # por provincia) salían en cualquier orden, y la página siguiente podía
+    # repetir o saltear filas. Los marts son vistas materializadas (tienen
+    # `ctid`), pero una vista común no: ahí no se arriesga.
+    desempate = "" if _es_mart(req.table) else "ctid"
+    criterio: str | None = None
     if fecha is not None:
         # Las fechas que no se reconocen van al final en los dos sentidos:
         # antes, con el orden del texto crudo, "1/9/2025" quedaba como el
         # último dato de una serie que llega a 2026.
         sql += f" ORDER BY {orden_fecha(fecha)} {orden.upper()} NULLS LAST"
-    sql += f" LIMIT {int(req.limite)}"
+        if desempate:
+            sql += f", {desempate}"
+        criterio = "fecha"
+    elif req.orden_fisico and desempate:
+        sql += f" ORDER BY {desempate}"
+        criterio = "fisico"
+    sql += f" LIMIT {int(req.limite) + (1 if req.una_de_mas else 0)}"
+    if req.offset:
+        sql += f" OFFSET {int(req.offset)}"
     return DataQuery(
         sql=sql,
         params=params.values,
@@ -209,6 +259,8 @@ def build_data_query(req: DataRequest) -> DataQuery:
         tipos=tipos,
         desde=desde,
         hasta=hasta,
+        limite=int(req.limite),
+        orden=criterio,
     )
 
 
