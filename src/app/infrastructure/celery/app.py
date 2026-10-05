@@ -172,6 +172,7 @@ def create_celery() -> Celery:
         "openarg.scrape_senado_staff": {"queue": "scraper"},
         "openarg.ingest_georef": {"queue": "ingest"},
         "openarg.ingest_series_tiempo": {"queue": "ingest"},
+        "openarg.check_series_freshness": {"queue": "ingest"},
         "openarg.run_pipeline": {"queue": "scraper"},
         "openarg.scrape_mapa_estado": {"queue": "scraper"},
         "openarg.scrape_gobernadores": {"queue": "scraper"},
@@ -834,8 +835,23 @@ def create_celery() -> Celery:
                 "options": {"queue": "ingest"},
             },
             "ingest-series-tiempo": {
+                # Diario 18:45 ART: el INDEC publica a las 16 y el BCRA carga
+                # durante el día. Era mensual (día 1) y además salteaba toda
+                # serie ya cacheada, así que las 12 tablas quedaron congeladas
+                # desde mayo. Ahora sólo reescribe si la API tiene algo nuevo:
+                # una corrida sin novedades son 12 pedidos livianos.
+                # `ingest` la consumen `openarg_worker_ingest` en staging y en
+                # prod (`-Q ingest,orchestrator`, docker inspect 04-oct-2026).
                 "task": "openarg.ingest_series_tiempo",
-                "schedule": crontab(day_of_month=1, hour=1, minute=30),  # Monthly, day 1
+                "schedule": crontab(hour=18, minute=45),  # 18:45 ART = 21:45 UTC
+                "options": {"queue": "ingest"},
+            },
+            "check-series-freshness": {
+                # 45 minutos después de la ingesta: si la tabla sigue atrás de
+                # la API, la ingesta ya tuvo su oportunidad. Separa la tabla
+                # atrasada (bug nuestro) de la fuente atrasada.
+                "task": "openarg.check_series_freshness",
+                "schedule": crontab(hour=19, minute=30),  # 19:30 ART
                 "options": {"queue": "ingest"},
             },
             "scrape-mapa-estado": {

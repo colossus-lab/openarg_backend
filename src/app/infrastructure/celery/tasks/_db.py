@@ -184,10 +184,19 @@ def register_via_b_table(
     row_count: int | None = None,
     parser_version: str | None = None,
     normalization_version: str | None = None,
-) -> None:
+) -> bool:
     """Register a vía-B table (transparency / senado / staff / bcra ingest)
     in `public.raw_table_versions` so the medallion mart layer can `live_table()`
     it and the Serving Port can find it.
+
+    Returns whether the registry row was written. The failure is still only
+    logged — for most connectors the data write is the job and the registry is
+    best-effort — but a caller that cannot call itself done without the row
+    (series de tiempo: no row means no per-resource heartbeat and no
+    `catalog_resources` reconciliation) can now see it. Before this the
+    `uq_raw_table_versions_table_name` clash of the series ETL — a second
+    identity for an already-registered table — was swallowed here and the task
+    reported success.
 
     Vía-B tables are populated by specialized connectors (`staff_tasks`,
     `senado_tasks`, `presupuesto_tasks`, `bcra_tasks`...) that bypass the
@@ -206,7 +215,7 @@ def register_via_b_table(
     forever even though the underlying table updates daily.
     """
     if not resource_identity or not table_name:
-        return
+        return False
     registered = False
     try:
         with engine.begin() as conn:
@@ -332,6 +341,8 @@ def register_via_b_table(
             )
 
         _trigger_marts_for_portal(engine, resource_identity)
+
+    return registered
 
 
 _BCRA_PROD_DEBOUNCE_SECONDS = 110

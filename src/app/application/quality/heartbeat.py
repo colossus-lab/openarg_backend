@@ -30,6 +30,7 @@ reason an ingest fails.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +46,15 @@ LATE_MULTIPLE = 3.0
 # Nothing is called late before this, whatever its cadence says. An hourly job
 # that misses three hours is not news; the sweep runs daily anyway.
 FLOOR_HOURS = 36.0
+
+# The most a resource may run past its own cadence before it is late, however
+# long that cadence is. Without a ceiling the multiple scales with the period:
+# three times a month is ninety days, so a monthly task that stopped would be
+# reported a quarter later — `ingest_series_tiempo` ran monthly doing nothing
+# and nothing here could have caught it in time. A week overdue is overdue for
+# a monthly task and for a yearly one alike; daily and faster cadences never
+# reach the ceiling, so their threshold is unchanged.
+MAX_SLACK_HOURS = 7 * 24.0
 
 # Weight of the newest observed gap in the running mean. Low, so one delayed run
 # does not move the estimate much and a genuine schedule change still lands
@@ -91,20 +101,42 @@ _BEAT_SQL = text(
 
 # Only resources that have arrived enough times to have a cadence worth
 # trusting. Two sightings give one gap, which is an anecdote; four give three.
+#
+# Except when the cadence is *declared*: a scheduled task's period is written in
+# the beat schedule, so it needs no history to be judged — the first run is
+# enough. Learning it instead meant a monthly task needed four months of
+# sightings before it could be called late at all, and a manual run between two
+# scheduled ones dragged the learned cadence down to a day.
+#
+# The threshold is the multiple of the cadence, capped at cadence plus
+# `max_slack`, and never below the floor.
 _STALE_SQL = text(
     """
-    SELECT resource_identity,
-           last_ok_at,
-           cadence_seconds,
-           times_seen,
-           EXTRACT(EPOCH FROM (now() - last_ok_at)) AS gap_seconds
-    FROM public.ingest_heartbeat
-    WHERE times_seen >= :min_seen
-      AND cadence_seconds IS NOT NULL
+    WITH declarada AS (
+        SELECT d.resource_identity, d.cadence_seconds
+        FROM unnest(CAST(:declared_ids AS text[]),
+                    CAST(:declared_cadences AS double precision[]))
+             AS d(resource_identity, cadence_seconds)
+    ),
+    juzgable AS (
+        SELECT h.resource_identity,
+               h.last_ok_at,
+               COALESCE(d.cadence_seconds, h.cadence_seconds) AS cadence_seconds,
+               h.times_seen,
+               EXTRACT(EPOCH FROM (now() - h.last_ok_at)) AS gap_seconds
+        FROM public.ingest_heartbeat h
+        LEFT JOIN declarada d ON d.resource_identity = h.resource_identity
+        WHERE d.resource_identity IS NOT NULL OR h.times_seen >= :min_seen
+    )
+    SELECT resource_identity, last_ok_at, cadence_seconds, times_seen, gap_seconds
+    FROM juzgable
+    WHERE cadence_seconds IS NOT NULL
       AND cadence_seconds > 0
-      AND EXTRACT(EPOCH FROM (now() - last_ok_at))
-          > GREATEST(cadence_seconds * :multiple, :floor_seconds)
-    ORDER BY EXTRACT(EPOCH FROM (now() - last_ok_at)) / cadence_seconds DESC
+      AND gap_seconds > GREATEST(
+              LEAST(cadence_seconds * :multiple, cadence_seconds + :max_slack_seconds),
+              :floor_seconds
+          )
+    ORDER BY gap_seconds / cadence_seconds DESC
     LIMIT :limit
     """
 )
@@ -163,10 +195,18 @@ def find_late(
     *,
     multiple: float = LATE_MULTIPLE,
     floor_hours: float = FLOOR_HOURS,
+    max_slack_hours: float = MAX_SLACK_HOURS,
     min_seen: int = 4,
     limit: int = 50,
+    declared: Mapping[str, float] | None = None,
 ) -> list[Late]:
-    """Which sources are late by their own standards. Never raises."""
+    """Which sources are late by their own standards. Never raises.
+
+    `declared` maps an identity to the cadence it is *known* to have, in
+    seconds — the beat schedule's period for `task:` rows. Those are judged by
+    it from their first sighting instead of by a learned estimate.
+    """
+    declarada = {k: float(v) for k, v in (declared or {}).items() if k and v and v > 0}
     try:
         with engine.begin() as conn:
             conn.execute(_ENSURE_SQL)
@@ -175,8 +215,11 @@ def find_late(
                 {
                     "multiple": multiple,
                     "floor_seconds": floor_hours * 3600,
+                    "max_slack_seconds": max_slack_hours * 3600,
                     "min_seen": min_seen,
                     "limit": limit,
+                    "declared_ids": list(declarada),
+                    "declared_cadences": list(declarada.values()),
                 },
             ).fetchall()
     except Exception:

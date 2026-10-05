@@ -178,7 +178,12 @@ def test_recover_stuck_tasks_corre_en_una_cola_viva() -> None:
 
 @pytest.mark.parametrize(
     "tarea",
-    ["openarg.recover_stuck_tasks", "openarg.cleanup_orphan_catalog_entries"],
+    [
+        "openarg.recover_stuck_tasks",
+        "openarg.cleanup_orphan_catalog_entries",
+        "openarg.ingest_series_tiempo",
+        "openarg.check_series_freshness",
+    ],
 )
 def test_las_tareas_de_mantenimiento_estan_agendadas(tarea: str) -> None:
     """Ruteada a una cola viva pero sin agendar tampoco corre sola."""
@@ -186,6 +191,21 @@ def test_las_tareas_de_mantenimiento_estan_agendadas(tarea: str) -> None:
 
     agendadas = {e["task"] for e in (celery_app.conf.beat_schedule or {}).values()}
     assert tarea in agendadas
+
+
+@pytest.mark.parametrize(
+    "tarea", ["openarg.ingest_series_tiempo", "openarg.check_series_freshness"]
+)
+def test_las_series_corren_en_una_cola_viva(tarea: str) -> None:
+    """El ETL de series y su alarma, por el destino efectivo (options del beat).
+
+    El ETL pasó de mensual a diario el 04-oct-2026. `ingest` la consume
+    `openarg_worker_ingest` (`-Q ingest,orchestrator`) en staging y en prod,
+    verificado con docker inspect; acá se fija contra el repo.
+    """
+    destino = _colas_despachadas()[tarea]
+    assert destino == {"ingest"}, destino
+    assert destino <= _colas_consumidas()
 
 
 def test_la_limpieza_de_tmp_cubre_las_tres_colas_de_colector() -> None:
