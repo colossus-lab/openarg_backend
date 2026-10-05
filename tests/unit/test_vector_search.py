@@ -343,8 +343,29 @@ class TestPgVectorSearchAdapter:
         assert mock_session.execute.await_count == 1
 
 
-def _scripted_session(extversion: str = "0.8.1", rows: list | None = None) -> AsyncMock:
-    """Session double that answers by statement: version lookup, set_config, search."""
+def _row(i: int, score: float) -> SimpleNamespace:
+    return SimpleNamespace(
+        dataset_id=f"ds-{i}",
+        title=f"Dataset {i}",
+        description=None,
+        portal="datos_gob_ar",
+        download_url=None,
+        columns=None,
+        score=score,
+    )
+
+
+def _scripted_session(
+    extversion: str = "0.8.1",
+    rows: list | None = None,
+    exact_rows: list | None = None,
+) -> AsyncMock:
+    """Session double that answers by statement.
+
+    The version lookup gets ``extversion``; the HNSW search (the one with
+    ``LIMIT :candidates``) gets ``rows``; the exact search (grouped over every
+    chunk) gets ``exact_rows``.
+    """
     session = AsyncMock()
 
     async def _execute(statement, params=None):
@@ -352,8 +373,12 @@ def _scripted_session(extversion: str = "0.8.1", rows: list | None = None) -> As
         result = MagicMock()
         if "pg_extension" in sql:
             result.scalar.return_value = extversion
-        else:
+        elif "LIMIT :candidates" in sql:
             result.fetchall.return_value = rows or []
+        elif "GROUP BY dc.dataset_id" in sql:
+            result.fetchall.return_value = exact_rows or []
+        else:
+            result.fetchall.return_value = []
         return result
 
     session.execute.side_effect = _execute
@@ -367,19 +392,32 @@ def _statements(session: AsyncMock) -> list[tuple[str, dict]]:
     ]
 
 
+def _hnsw_sql(session: AsyncMock) -> tuple[str, dict]:
+    [stmt] = [(s, p) for s, p in _statements(session) if "LIMIT :candidates" in s]
+    return stmt
+
+
+def _exact_sqls(session: AsyncMock) -> list[tuple[str, dict]]:
+    return [(s, p) for s, p in _statements(session) if "GROUP BY dc.dataset_id" in s]
+
+
+# Enough strong hits for any limit used below: the index's answer is trusted.
+_GOOD = [_row(i, 0.74 - i * 0.001) for i in range(40)]
+
+
 class TestSearchDatasetsAnn:
-    """``search_datasets_ann``: the shape the HNSW index can answer, and the
-    two pgvector settings without which the index answers something else."""
+    """``search_datasets_ann``: the HNSW index, walked wide enough to find what
+    the exact search finds, and the exact search when its answer looks wrong."""
 
     @pytest.fixture(autouse=True)
     def _fresh_version_cache(self, monkeypatch):
         monkeypatch.setattr(PgVectorSearchAdapter, "_pgvector_version", None)
 
     async def test_orders_by_distance_with_limit_and_thresholds_afterwards(self):
-        session = _scripted_session()
+        session = _scripted_session(rows=_GOOD)
         await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
 
-        sql, params = _statements(session)[-1]
+        sql, params = _hnsw_sql(session)
         # The index answers ORDER BY distance LIMIT n ...
         assert "ORDER BY dc.embedding <=> CAST(:embedding AS vector) LIMIT :candidates" in " ".join(
             sql.split()
@@ -387,56 +425,95 @@ class TestSearchDatasetsAnn:
         # ... and not a similarity predicate in the WHERE (that is a full scan).
         assert "WHERE 1 -" not in sql
         assert "HAVING 1 - min(nn.dist) >= :min_sim" in sql
-        assert "GROUP BY d.id" in sql
+        assert "GROUP BY nn.dataset_id" in sql
         assert params["min_sim"] == 0.40
         assert params["limit"] == 20
+        assert _exact_sqls(session) == []
 
-    async def test_raises_ef_search_to_the_candidates_it_asks_for(self):
-        """With hnsw.ef_search at its default of 40 an index scan returns 40
-        rows whatever the LIMIT; on staging that dropped every relevant
-        dataset for "personas con discapacidad"."""
-        session = _scripted_session()
-        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
-
-        stmts = _statements(session)
-        ef = [p["ef"] for s, p in stmts if "hnsw.ef_search" in s]
-        assert ef == ["200"]
-        assert stmts[-1][1]["candidates"] == 200
-        # Set inside the transaction only, and before the search runs.
-        assert "set_config('hnsw.ef_search', :ef, true)" in stmts[0][0]
-
-    @pytest.mark.parametrize(("limit", "expected"), [(5, 200), (50, 500), (500, 1000)])
-    async def test_candidates_scale_with_limit_up_to_pgvector_ceiling(self, limit, expected):
-        session = _scripted_session()
+    @pytest.mark.parametrize("limit", [5, 16, 20, 40, 500])
+    async def test_ef_search_is_pgvector_ceiling_whatever_the_limit(self, limit):
+        """It was max(200, limit*10): 200 for the MCP (20) and the agent (16).
+        At 200, prod's "salario mínimo vital y móvil" topped at 0.517 with five
+        Córdoba municipalities while the exact search puts SMVM first (0.746)."""
+        session = _scripted_session(rows=[_row(i, 0.7) for i in range(limit)])
         await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=limit)
 
         stmts = _statements(session)
-        assert stmts[-1][1]["candidates"] == expected
-        assert [p["ef"] for s, p in stmts if "hnsw.ef_search" in s] == [str(expected)]
+        assert [p["ef"] for s, p in stmts if "hnsw.ef_search" in s] == ["1000"]
+        assert _hnsw_sql(session)[1]["candidates"] == 1000
+        # Set inside the transaction only, and before the search runs.
+        first_set = next(s for s, _ in stmts if "set_config" in s)
+        assert "set_config('hnsw.ef_search', :ef, true)" in first_set
 
-    async def test_without_portal_skips_version_lookup_and_iterative_scan(self):
-        session = _scripted_session()
-        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8)
+    async def test_iterative_scan_is_on_without_a_portal_too(self):
+        session = _scripted_session(rows=_GOOD)
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
 
         sqls = [s for s, _ in _statements(session)]
-        assert not any("pg_extension" in s for s in sqls)
-        assert not any("iterative_scan" in s for s in sqls)
-        assert ":portal" not in sqls[-1]
+        assert any("'hnsw.iterative_scan', 'relaxed_order', true" in s for s in sqls)
+        assert ":portal" not in _hnsw_sql(session)[0]
 
     async def test_portal_filter_goes_inside_the_index_scan(self):
         """Filtering after fetching N neighbours returned nothing for small
         portals (caba, neuquen_legislatura) on staging, even with 1000."""
-        session = _scripted_session(extversion="0.8.1")
-        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, portal_filter="caba")
+        session = _scripted_session(extversion="0.8.1", rows=_GOOD)
+        await PgVectorSearchAdapter(session).search_datasets_ann(
+            [0.1] * 8, limit=10, portal_filter="caba"
+        )
 
         stmts = _statements(session)
         assert any("'hnsw.iterative_scan', 'relaxed_order', true" in s for s, _ in stmts)
-        sql, params = stmts[-1]
-        nn_cte = sql.split(") SELECT")[0]
+        sql, params = _hnsw_sql(session)
+        nn_cte = sql.split("), best AS (")[0]
         assert "WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)" in nn_cte
         assert params["portal"] == "caba"
 
-    async def test_portal_filter_falls_back_to_exact_search_before_pgvector_0_8(self):
+    async def test_weak_best_score_runs_the_exact_search_and_serves_it(self):
+        """A trapped walk comes back full, with the wrong neighbours: staging's
+        "votaciones nominales" topped at 0.479 at ef_search=200 against 0.675."""
+        trapped = [_row(100 + i, 0.479 - i * 0.001) for i in range(20)]
+        exact = [_row(i, 0.675 - i * 0.001) for i in range(20)]
+        session = _scripted_session(rows=trapped, exact_rows=exact)
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        assert [r.dataset_id for r in results] == [r.dataset_id for r in exact]
+        [(sql, params)] = _exact_sqls(session)
+        assert params["limit"] == 20 and params["min_sim"] == 0.40
+
+    async def test_fewer_datasets_than_asked_runs_the_exact_search(self):
+        session = _scripted_session(rows=_GOOD[:3], exact_rows=_GOOD[:10])
+
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=10)
+
+        assert len(results) == 10
+        assert len(_exact_sqls(session)) == 1
+
+    async def test_trusted_answer_does_not_pay_for_the_exact_search(self):
+        session = _scripted_session(rows=_GOOD[:10], exact_rows=_GOOD[:10])
+
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=10)
+
+        assert _exact_sqls(session) == []
+
+    async def test_exact_search_is_a_shape_the_index_cannot_answer(self):
+        """No `SET LOCAL enable_indexscan = off`: it would stay on for the rest
+        of the transaction, which the agent shares across a whole turn."""
+        session = _scripted_session()
+        await PgVectorSearchAdapter(session).search_datasets_exact(
+            [0.1] * 8, limit=7, portal_filter="caba", min_similarity=0.4
+        )
+
+        [(sql, params)] = _exact_sqls(session)
+        flat = " ".join(sql.split())
+        assert "min(dc.embedding <=> CAST(:embedding AS vector))" in flat
+        assert "ORDER BY dc.embedding <=>" not in flat
+        assert "WHERE 1 -" not in flat
+        assert not any("enable_indexscan" in s for s, _ in _statements(session))
+        assert "WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)" in flat
+        assert (params["portal"], params["limit"], params["min_sim"]) == ("caba", 7, 0.4)
+
+    async def test_portal_filter_goes_straight_to_the_exact_search_before_pgvector_0_8(self):
         session = _scripted_session(extversion="0.7.4")
         await PgVectorSearchAdapter(session).search_datasets_ann(
             [0.1] * 8, limit=7, portal_filter="caba", min_similarity=0.4
@@ -444,15 +521,22 @@ class TestSearchDatasetsAnn:
 
         stmts = _statements(session)
         assert not any("iterative_scan" in s or "ef_search" in s for s, _ in stmts)
-        sql, params = stmts[-1]
-        assert "PARTITION BY d.id" in sql  # search_datasets' query
+        [(sql, params)] = _exact_sqls(session)
         assert params["portal"] == "caba"
         assert params["limit"] == 7
 
+    async def test_without_iterative_scan_and_without_portal_the_index_still_answers(self):
+        session = _scripted_session(extversion="0.7.4", rows=_GOOD)
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        sqls = [s for s, _ in _statements(session)]
+        assert not any("iterative_scan" in s for s in sqls)
+        assert _hnsw_sql(session)[1]["candidates"] == 1000
+
     async def test_pgvector_version_is_read_once_per_process(self):
-        adapter_a = PgVectorSearchAdapter(_scripted_session())
+        adapter_a = PgVectorSearchAdapter(_scripted_session(rows=_GOOD))
         await adapter_a.search_datasets_ann([0.1] * 8, portal_filter="caba")
-        session_b = _scripted_session()
+        session_b = _scripted_session(rows=_GOOD)
         await PgVectorSearchAdapter(session_b).search_datasets_ann([0.1] * 8, portal_filter="caba")
 
         assert not any("pg_extension" in s for s, _ in _statements(session_b))
@@ -468,7 +552,7 @@ class TestSearchDatasetsAnn:
             score=0.674,
         )
         session = _scripted_session(rows=[row])
-        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8)
+        results = await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=1)
 
         assert len(results) == 1
         r = results[0]
