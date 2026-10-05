@@ -29,8 +29,18 @@ auditoría y 20 más, mirando el top 5 con 0; 0,02; 0,03 y 0,04:
   Federal de Córdoba);
 - "cantidad de empleados públicos nacionales" necesita 0,04 para que "Puestos
   de trabajo en la APN" (0,629) pase al listado de agentes de Córdoba (0,663).
-  Por eso, cuando la consulta dice "nacional", "nación", "Argentina" o "país",
-  el prior es el doble: el usuario lo pidió explícitamente.
+  Por eso, cuando la consulta dice "nacional" o "nación", el prior es el
+  doble: el usuario lo pidió explícitamente. "Argentina" y "país" no cuentan:
+  el agente se los agrega a casi cualquier búsqueda ("desempleo Argentina") y
+  con eso el 0,04, que la calibración marcó como ruido sin pedido explícito,
+  pasaba a ser el caso común.
+
+Los nombres de lugar que también son palabras comunes ("gastos corrientes",
+"resistencia antimicrobiana", "posadas turísticas", "misiones diplomáticas",
+el río Paraná) cuentan sólo con una preposición adelante ("en Corrientes",
+"provincia de Misiones"). "Provincia de residencia", "ciudad de origen" o
+"por provincia de destino" no nombran un lugar, y "partido de los
+trabajadores" tampoco.
 """
 
 from __future__ import annotations
@@ -82,14 +92,12 @@ _PLACES = (
     "chaco",
     "chubut",
     "cordoba",
-    "corrientes",
     "entre rios",
     "formosa",
     "jujuy",
     "la pampa",
     "la rioja",
     "mendoza",
-    "misiones",
     "neuquen",
     "rio negro",
     "salta",
@@ -117,11 +125,7 @@ _PLACES = (
     # Ciudades con portal o pedidas seguido.
     "rosario",
     "mar del plata",
-    "la plata",
     "bahia blanca",
-    "parana",
-    "resistencia",
-    "posadas",
     "ushuaia",
     "rawson",
     "viedma",
@@ -135,17 +139,26 @@ _PLACES = (
     "san rafael",
 )
 _PLACE_RE = re.compile(r"\b(" + "|".join(re.escape(p) for p in _PLACES) + r")\b")
+# Lugares que también son palabras comunes: sólo con una preposición adelante.
+# "La Plata" sí suelta, salvo en "Río de la Plata".
+_AMBIGUOUS_PLACES = ("corrientes", "misiones", "parana", "resistencia", "posadas")
+_AMBIGUOUS_PLACE_RE = re.compile(
+    r"\b(en|de|del|desde|hasta|para)\s+(" + "|".join(_AMBIGUOUS_PLACES) + r")\b"
+    r"|(?<!rio de )\bla plata\b"
+)
 # "provincia de X", "municipio de X"...: nombra un lugar aunque no esté en la
-# lista. "por provincia" no: pide el dato nacional abierto por provincia.
+# lista. "por provincia" no: pide el dato nacional abierto por provincia; y
+# tampoco "por/cada provincia de residencia", "ciudad de origen" o un partido
+# político ("partido de los trabajadores").
 _JURISDICTION_RE = re.compile(
+    r"(?<!\bpor )(?<!\bcada )"
     r"\b(provincia|municipio|municipalidad|partido|localidad|departamento|ciudad|comuna)"
-    r"\s+de\s+\w"
+    r"\s+de\s+"
+    r"(?!(?:origen|residencia|nacimiento|destino|procedencia|radicacion|los|las)\b)\w"
 )
 
 
-_EXPLICIT_NATIONAL_RE = re.compile(
-    r"\b(nacional|nacionales|nacion|argentina|argentino|argentinos|pais)\b"
-)
+_EXPLICIT_NATIONAL_RE = re.compile(r"\b(nacional|nacionales|nacion)\b")
 
 
 def _plain(text: str) -> str:
@@ -155,8 +168,12 @@ def _plain(text: str) -> str:
 
 def names_a_place(query: str) -> bool:
     """Si la consulta pide algo de una provincia, ciudad o jurisdicción."""
-    plain = _plain(query)
-    return bool(_PLACE_RE.search(plain) or _JURISDICTION_RE.search(plain))
+    plain = " ".join(_plain(query).split())
+    return bool(
+        _PLACE_RE.search(plain)
+        or _AMBIGUOUS_PLACE_RE.search(plain)
+        or _JURISDICTION_RE.search(plain)
+    )
 
 
 def asks_for_national(query: str) -> bool:

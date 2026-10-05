@@ -435,6 +435,21 @@ def test_no_national_prior_when_the_query_names_a_place() -> None:
         ("deuda pública nacional", False),
         ("tasa de desempleo", False),
         ("exportaciones de soja", False),
+        # Lugares que también son palabras comunes: sólo con preposición.
+        ("homicidios en Corrientes", True),
+        ("escuelas de la provincia de Misiones", True),
+        ("hospitales de Posadas", True),
+        ("Universidad Nacional de La Plata", True),
+        ("gastos corrientes de la administración nacional", False),
+        ("resistencia antimicrobiana", False),
+        ("posadas turísticas", False),
+        ("misiones diplomáticas", False),
+        ("pesca en el Río de la Plata", False),
+        # Jurisdicciones que no nombran un lugar.
+        ("partido de La Matanza", True),
+        ("turistas por provincia de residencia", False),
+        ("ciudad de origen de los turistas", False),
+        ("votos del partido de los trabajadores", False),
     ],
 )
 def test_names_a_place(query: str, expected: bool) -> None:
@@ -467,14 +482,23 @@ def test_asking_for_national_doubles_the_prior() -> None:
     ("query", "expected"),
     [
         ("deuda pública nacional", True),
-        ("inflación en la Argentina", True),
         ("cuánto gasta la Nación en universidades", True),
         ("tasa de desempleo", False),
         ("coparticipación federal", False),
+        # El agente agrega "Argentina" a casi todo: no es un pedido explícito.
+        ("desempleo Argentina", False),
+        ("inflación en la Argentina", False),
+        ("exportaciones del país", False),
     ],
 )
 def test_asks_for_national(query: str, expected: bool) -> None:
     assert asks_for_national(query) is expected
+
+
+def test_the_agent_adding_argentina_keeps_the_ordinary_prior() -> None:
+    hit = _hit("nac", "Tasa de desocupación", "https://n/t.csv", 0.6, "datos_gob_ar")
+    assert national_prior("desempleo Argentina")(hit) == pytest.approx(0.02)
+    assert national_prior("desempleo nacional")(hit) == pytest.approx(0.04)
 
 
 # ── el perfil que trae el sandbox ───────────────────────────
