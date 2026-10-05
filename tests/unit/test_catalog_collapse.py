@@ -190,6 +190,129 @@ def test_mirrors_across_portals_are_one_result() -> None:
     assert only.copies == 2
 
 
+# ── la misma URL no siempre es la misma tabla ───────────────
+#
+# Staging, 05-oct: 133 URLs las comparten datasets con títulos distintos. INDEC
+# publica cada cuadro de un .xls como un dataset con la misma URL y su propia
+# tabla; una carpeta de SharePoint es la "URL" de diez años de "Base de Datos
+# por Escuela". Juntarlos por URL escondía tablas distintas detrás de la de más
+# filas, y la elegida heredaba el mejor puntaje del grupo.
+
+_EPH = "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_tasas_indicadores_eph_09_25.xls"
+_EPH_T = "INDEC - EPH — Tasas e indicadores laborales — "
+
+
+def test_indec_sheets_of_one_xls_are_separate_results_with_their_own_score() -> None:
+    hits = [
+        _hit("c11", _EPH_T + "Cuadro 1.1", _EPH, 0.70, "indec"),
+        _hit("c16", _EPH_T + "Cuadro 1.6", _EPH, 0.69, "indec"),
+        _hit("c33", _EPH_T + "Cuadro 3.3", _EPH, 0.68, "indec"),
+        _hit("c14", _EPH_T + "Cuadro 1.4", _EPH, 0.60, "indec"),
+    ]
+    tables = [
+        _table(
+            "cache_indec_eph_tasas_cuadro_1_1",
+            "c11",
+            12,
+            ["Cuadro 1.1 Principales tasas", "1° trimestre"],
+        ),
+        _table(
+            "cache_indec_eph_tasas_cuadro_1_6",
+            "c16",
+            64,
+            ["Cuadro 1.6 Composición desocupación", "1° trimestre"],
+        ),
+        _table(
+            "cache_indec_eph_tasas_cuadro_3_3",
+            "c33",
+            44,
+            ["Área geográfica", "Tasa de desocupación"],
+        ),
+        _table(
+            "cache_indec_eph_tasas_cuadro_1_4",
+            "c14",
+            85,
+            ["Cuadro 1.4 Composición empleo", "1° trimestre"],
+        ),
+    ]
+
+    out = collapse_hits(hits, tables, {})
+
+    assert [(r.hit.dataset_id, r.copies) for r in out] == [
+        ("c11", 1),
+        ("c16", 1),
+        ("c33", 1),
+        ("c14", 1),
+    ]
+    assert [r.score for r in out] == pytest.approx([0.70, 0.69, 0.68, 0.60])
+    assert [len(r.tables) for r in out] == [1, 1, 1, 1]
+
+
+def test_the_biggest_sheet_does_not_stand_in_for_the_poverty_table() -> None:
+    """ "Informe de Pobreza": 19 datasets con la misma URL; la regla de más
+    filas elegía "Series canastas anexo" (124) en lugar del Cuadro 1."""
+    url = "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_informe_pobreza_09_25.xls"
+    hits = [
+        _hit("c1", "Informe de Pobreza — Cuadro 1", url, 0.72, "indec"),
+        _hit("anexo", "Informe de Pobreza — Series canastas anexo", url, 0.61, "indec"),
+    ]
+    tables = [
+        _table("pobreza_cuadro_1", "c1", 9, ["Cuadro 1. Incidencia de la pobreza", "Hogares"]),
+        _table("pobreza_canastas", "anexo", 124, ["Período", "CBA", "CBT"]),
+    ]
+
+    out = collapse_hits(hits, tables, {})
+
+    assert [r.hit.dataset_id for r in out] == ["c1", "anexo"]
+    assert out[0].tables[0].table_name == "raw.pobreza_cuadro_1"
+
+
+def test_a_shared_link_that_is_not_a_file_does_not_merge_datasets() -> None:
+    """Una carpeta de SharePoint es la URL de diez años de la misma base."""
+    url = "https://ministeriodeeducaciondelanacion-my.sharepoint.com/:x:/g/personal/x/EaBc"
+    hits = [
+        _hit("e17", "Base de Datos por Escuela 2017", url, 0.66),
+        _hit("e22", "Base de Datos por Escuela 2022", url, 0.65),
+    ]
+
+    out = collapse_hits(hits, [], {})
+    assert [r.hit.dataset_id for r in out] == ["e17", "e22"]
+
+
+def test_the_same_csv_under_different_titles_is_still_one_result() -> None:
+    """``clae_agg.csv`` lo publican nueve datasets con títulos distintos: es
+    la misma tabla (mismas filas y columnas) y se muestra una vez."""
+    url = "https://cdn.produccion.gob.ar/cdn-cep/clae_agg.csv"
+    cols = ["clae2", "clae2_desc", "letra", "letra_desc"]
+    hits = [
+        _hit("exp", "Exportaciones de bienes por sector de actividad", url, 0.64),
+        _hit("pue", "Puestos de trabajo asalariados registrados", url, 0.63),
+        _hit("sal", "Salarios promedio y mediano", url, 0.62, "produccion"),
+    ]
+    tables = [_table("a", "exp", 950, cols), _table("b", "pue", 950, cols), _table("c", "sal", 950, cols)]  # fmt: skip
+
+    [only] = collapse_hits(hits, tables, {})
+    assert only.copies == 3
+
+
+def test_a_csv_of_one_sheet_does_not_pull_the_other_sheets_together() -> None:
+    """El mismo archivo en .xlsx (dos hojas, dos datasets) y en .csv (una
+    hoja): el CSV va con su hoja, la otra queda aparte."""
+    xlsx = _HCDN.format(rid="r1", file="cuadros.xlsx")
+    csv = _HCDN.format(rid="r2", file="cuadros.csv")
+    cols1, cols2 = ["anio", "valor"], ["provincia", "total"]
+    hits = [
+        _hit("h1", "Cuadro 1", xlsx, 0.7),
+        _hit("h2", "Cuadro 2", xlsx, 0.69),
+        _hit("c1", "Cuadro 1 (CSV)", csv, 0.68),
+    ]
+    tables = [_table("h1", "h1", 30, cols1), _table("h2", "h2", 24, cols2), _table("c1", "c1", 30, cols1)]  # fmt: skip
+
+    out = collapse_hits(hits, tables, {})
+    # A igualdad de todo, se muestra el CSV.
+    assert sorted((r.copies, r.hit.title) for r in out) == [(1, "Cuadro 2"), (2, "Cuadro 1 (CSV)")]
+
+
 def test_url_spelling_differences_do_not_split_a_file() -> None:
     hits = [
         _hit("a", "T", "https://datos.hcdn.gob.ar:443/dataset/p/resource/r/download/f.csv", 0.7),

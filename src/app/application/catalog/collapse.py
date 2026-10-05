@@ -17,10 +17,19 @@ dos. Medido en prod el 04-oct:
 
 Qué se junta (``_Families``):
 
-- la misma URL de descarga;
+- la misma URL de descarga **con el mismo título o la misma tabla** (mismas
+  filas reales y columnas). La URL sola no alcanza: INDEC publica cada cuadro
+  de un .xls como un dataset aparte con la misma URL ("EPH — Tasas e
+  indicadores laborales — Cuadro 1.1 … 3.3", 11 hojas con tablas distintas), y
+  hay URLs que no son un archivo (una carpeta de SharePoint con "Base de Datos
+  por Escuela 2011 … 2024", una página de categoría). Con el mismo título son
+  los gemelos de la migración; con la misma tabla y otro título, el mismo CSV
+  publicado varias veces (``clae_agg.csv`` con nueve títulos, los espejos de
+  PAMI);
 - el mismo archivo en otra extensión dentro del mismo package (sólo si las
   extensiones difieren: "Reservas internacionales" 92.1 mensual y 92.2 diaria
-  comparten nombre de archivo y son series distintas);
+  comparten nombre de archivo y son series distintas), con la misma condición
+  de título o tabla;
 - gemelos con distinta URL: mismo título, portal, nombre de archivo, filas y
   columnas.
 
@@ -253,13 +262,35 @@ def collapse_hits(
 
     families = _Families(len(hits))
 
+    # La forma de las tablas de cada hit: (filas reales, columnas) de cada una.
+    # None si no tiene tablas o alguna no trae columnas: sin forma no se puede
+    # afirmar que dos datasets sean la misma tabla.
+    shapes: list[tuple | None] = []
+    for h in hits:
+        own = by_dataset.get(str(h.dataset_id), [])
+        shape = tuple(sorted((t.row_count or 0, tuple(t.columns)) for t in own))
+        shapes.append(shape if own and all(cols for _, cols in shape) else None)
+    titles = [_norm_title(h.title) for h in hits]
+
+    def _alike(a: int, b: int) -> bool:
+        if titles[a] and titles[a] == titles[b]:
+            return True
+        return shapes[a] is not None and shapes[a] == shapes[b]
+
+    def _join_alike(members: Sequence[int]) -> None:
+        """Dentro de un mismo archivo, junta sólo lo que es la misma cosa."""
+        for x, a in enumerate(members):
+            for b in members[x + 1 :]:
+                if _alike(a, b):
+                    families.union(a, b)
+
     by_url: dict[str, list[int]] = {}
     for i, h in enumerate(hits):
         key = _url_key(h.download_url)
         if key:
             by_url.setdefault(key, []).append(i)
     for members in by_url.values():
-        families.join_all(members)
+        _join_alike(members)
 
     # El mismo archivo en otra extensión. Si una extensión se repite dentro del
     # package (dos .csv con el mismo nombre), no se sabe qué va con qué: nada.
@@ -275,7 +306,7 @@ def collapse_hits(
         urls_per_ext = [{_url_key(hits[i].download_url) for i in ids} for ids in exts.values()]
         if any(len(u) > 1 for u in urls_per_ext):
             continue
-        families.join_all([i for ids in exts.values() for i in ids])
+        _join_alike([i for ids in exts.values() for i in ids])
 
     # Gemelos con distinta URL: mismo título, portal, archivo, filas y
     # columnas. El nombre de archivo es lo que impide juntar recursos
@@ -283,14 +314,10 @@ def collapse_hits(
     # elección por categoría tienen una fila por mesa y las mismas columnas).
     by_twin: dict[tuple, list[int]] = {}
     for i, h in enumerate(hits):
-        own = by_dataset.get(str(h.dataset_id), [])
         name = (_file_name(h.download_url) or "").lower()
-        if not own or not name:
+        if shapes[i] is None or not name:
             continue
-        shape = tuple(sorted((t.row_count or 0, tuple(t.columns)) for t in own))
-        if any(not cols for _, cols in shape):
-            continue
-        by_twin.setdefault((_norm_title(h.title), h.portal, name, shape), []).append(i)
+        by_twin.setdefault((titles[i], h.portal, name, shapes[i]), []).append(i)
     for members in by_twin.values():
         families.join_all(members)
 
