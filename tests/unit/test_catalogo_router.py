@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from app.application.api_key_service import generate_api_key
+from app.application.public_catalog import MAX_OFFSET
 from app.application.quality.data_age import DataAge
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
@@ -21,6 +23,7 @@ from app.domain.ports.credits.credit_repository import ICreditRepository
 from app.domain.ports.llm.llm_provider import IEmbeddingProvider
 from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
+    ColumnValueStats,
     ISQLSandbox,
     SandboxResult,
     TableProfile,
@@ -632,16 +635,45 @@ async def test_datos_sin_fecha_en_tabla_grande_no_la_ordena_entera_y_lo_dice(
     sin_fecha.estimated_rows = 8_427_643  # molinetes del subte
     r = await client.post("/catalogo/datos", json={"tabla": _T, "limite": 2})
     assert "ORDER BY" not in sin_fecha.sql[-1]
-    assert any("orden en que están guardadas" in n for n in r.json()["filtros_aplicados"])
+    (nota,) = r.json()["filtros_aplicados"]
+    assert "demasiado grande" in nota and "no está garantizado" in nota
 
 
 async def test_datos_sin_fecha_y_tamano_desconocido_no_arriesga_el_orden(
     client: AsyncClient, sin_fecha: FakeSandbox
 ) -> None:
-    """Staging tiene `row_count=0` en tablas de millones de filas."""
+    """Staging tiene `row_count=0` en tablas de millones de filas. La nota no
+    dice que sea grande (revisión del PR #139): no se sabe."""
     sin_fecha.tables = [CachedTableInfo(table_name=_T, dataset_id="ds-1", row_count=0, columns=[])]
-    await client.post("/catalogo/datos", json={"tabla": _T})
+    r = await client.post("/catalogo/datos", json={"tabla": _T, "limite": 2})
     assert "ORDER BY" not in sin_fecha.sql[-1]
+    (nota,) = r.json()["filtros_aplicados"]
+    assert "no se sabe cuántas filas" in nota and "demasiado grande" not in nota
+
+
+async def test_datos_no_ofrece_una_pagina_mas_alla_del_tope_de_offset(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """offset 9.900 + 500 filas daba siguiente_offset=10.400, que el propio
+    servidor rechaza con un 422 (revisión del PR #139)."""
+    sandbox.data_rows = _filas(3)
+    r = await client.post(
+        "/catalogo/datos", json={"tabla": _T, "limite": 2, "offset": MAX_OFFSET - 1}
+    )
+    body = r.json()
+    assert body["truncado"] is True and body["siguiente_offset"] is None
+    assert any(f"offset={MAX_OFFSET}" in n for n in body["filtros_aplicados"])
+    # Justo en el tope todavía se puede pedir.
+    r = await client.post(
+        "/catalogo/datos", json={"tabla": _T, "limite": 2, "offset": MAX_OFFSET - 2}
+    )
+    assert r.json()["siguiente_offset"] == MAX_OFFSET
+
+
+async def test_datos_un_numeric_sale_como_numero(client: AsyncClient, sandbox: FakeSandbox) -> None:
+    sandbox.data_rows = [{"indice_tiempo": "2026-06-18", "tasas_interes_call": Decimal("33.14")}]
+    r = await client.post("/catalogo/datos", json={"tabla": _T})
+    assert r.json()["filas"][0]["tasas_interes_call"] == 33.14
 
 
 async def test_datos_offset_mas_alla_del_final(client: AsyncClient, sandbox: FakeSandbox) -> None:
@@ -724,6 +756,42 @@ async def test_tabla_sin_serie_es_una_foto_con_fecha_de_corte(
     assert frescura["serie"] is False and frescura["ultimo_dato"] is None
     assert frescura["fecha_corte"] == "2026-09-05"
     assert "foto" in frescura["nota"]
+
+
+async def test_tabla_con_fecha_y_periodo_desconocido_no_es_una_foto(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """El rango exacto pasó el timeout y la muestra no tiene fechas: antes
+    salía «Es una foto… vigentes al» día de lectura (revisión del PR #139)."""
+    sandbox.error, sandbox.error_kind = "Query timed out after 10 seconds.", "timeout"
+    sandbox.error_only_for = "AS reconocidas"
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    assert r.status_code == 200, r.text
+    frescura = r.json()["frescura"]
+    assert frescura["serie"] is None
+    assert frescura["fecha_corte"] is None and frescura["ultimo_dato"] is None
+    assert "foto" not in frescura["nota"] and "no se pudo determinar" in frescura["nota"]
+    assert frescura["actualizada"] == "2026-09-05"
+
+
+async def test_tabla_con_periodo_de_la_muestra_lo_marca_aproximado(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    sandbox.error, sandbox.error_kind = "Query timed out after 10 seconds.", "timeout"
+    sandbox.error_only_for = "AS reconocidas"
+    stats = TableValueStats(
+        estimated_rows=11_600_000,
+        columns={
+            "indice_tiempo": ColumnValueStats(
+                column="indice_tiempo", histogram_bounds=["2019-01-01", "2023-05-01", "2025-11-01"]
+            )
+        },
+    )
+    sandbox.get_value_stats = AsyncMock(return_value=stats)  # type: ignore[method-assign]
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    frescura = r.json()["frescura"]
+    assert frescura["serie"] is True and frescura["aproximado"] is True
+    assert frescura["ultimo_dato"] == "2025-11-01" and "aproximado" in frescura["nota"]
 
 
 async def test_tabla_leida_hace_mucho_lo_avisa(
@@ -885,6 +953,47 @@ async def test_agregar_timeout_tiene_su_mensaje(
     presupuesto.error_only_for = "AS valor"
     r = await client.post("/catalogo/agregar", json={"tabla": _T, "operacion": "conteo"})
     assert r.status_code == 400 and r.headers["x-openarg-error"] == "timeout"
+    # No le sugiere la herramienta que acaba de usar (un modelo reintentaba en
+    # bucle): acotar o agrupar por menos columnas.
+    detail = r.json()["detail"]
+    assert "agregar_datos" not in detail and "agrupá por menos columnas" in detail
+
+
+async def test_agregar_el_valor_es_un_numero_en_el_json(
+    client: AsyncClient, presupuesto: FakeSandbox
+) -> None:
+    """Los números se leen como ::numeric y psycopg devuelve Decimal, que
+    Pydantic serializaba como texto: "valor": "5793524.174913833" (revisión
+    del PR #139). Medido en staging: Educación y Cultura 2026."""
+    presupuesto.agg_rows = [
+        {
+            "funcion_desc": "Educación y Cultura",
+            "valor": Decimal("5793524.174913833"),
+            "__filas": 505,
+            "__filas_con_valor": 505,
+        },
+        {
+            "funcion_desc": "Salud",
+            "valor": Decimal("1200.000000000"),
+            "__filas": 3,
+            "__filas_con_valor": 3,
+        },
+    ]
+    r = await client.post(
+        "/catalogo/agregar",
+        json={
+            "tabla": _T,
+            "operacion": "suma",
+            "columna": "credito_devengado",
+            "agrupar_por": ["funcion_desc"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    educacion, salud = r.json()["filas"]
+    assert isinstance(educacion["valor"], float) and educacion["valor"] == 5793524.174913833
+    # Un total entero sale entero, no 1200.0.
+    assert salud["valor"] == 1200 and isinstance(salud["valor"], int)
+    assert '"valor":5793524.174913833' in r.text.replace(" ", "")
 
 
 async def test_el_limite_por_minuto_dice_cuanto_falta(

@@ -59,6 +59,7 @@ from app.application.public_catalog import (
     build_data_query,
     build_sample_query,
     is_internal_column,
+    json_rows,
     resolve_date_column,
     resolve_table,
 )
@@ -124,7 +125,11 @@ class Frescura(BaseModel):
     ultimo_dato: str | None = None
     # Sólo las fotos (sin serie temporal): el día al que corresponden los datos.
     fecha_corte: str | None = None
-    serie: bool = False
+    # None: tiene columna de fecha pero no se pudo calcular qué período cubre
+    # (ni serie ni foto: no se sabe cuál es el último dato).
+    serie: bool | None = False
+    # `ultimo_dato` sale de una muestra de la tabla: puede haber posteriores.
+    aproximado: bool = False
     nota: str | None = None
 
 
@@ -279,23 +284,30 @@ async def _authorize(
 ERROR_HEADER = "X-OpenArg-Error"
 
 
-def _error_detail(result: SandboxResult) -> tuple[int, str, str]:
+def _error_detail(result: SandboxResult, *, agregado: bool = False) -> tuple[int, str, str]:
     """``(status, código, mensaje)`` según qué falló: el mensaje dice qué hacer.
 
     Antes todo era un 400 con "Probá con otros filtros o menos columnas",
     también un timeout en una tabla de millones de filas, una tabla bloqueada
     por un problema de calidad o el rechazo del validador, donde el consejo
-    lleva por mal camino.
+    lleva por mal camino. ``agregado``: el pedido ya era ``agregar_datos``, y
+    sugerirle esa misma herramienta lo hacía reintentar en bucle.
     """
     kind = result.error_kind
     error = (result.error or "").strip()
     if kind == "timeout":
+        consejo = (
+            "Acotá con `desde`/`hasta` o con `filtros` más específicos, o agrupá por menos "
+            "columnas: sobre la tabla entera la cuenta no entra en el tiempo límite."
+            if agregado
+            else "Acotá con `desde`/`hasta` o con `filtros` más específicos; para un total o un "
+            "ranking usá agregar_datos, que no trae las filas."
+        )
         return (
             400,
             "timeout",
             "La consulta tardó demasiado y se cortó: la tabla es muy grande para ese pedido. "
-            "Acotá con `desde`/`hasta` o con `filtros` más específicos; para un total o un "
-            "ranking usá agregar_datos, que no trae las filas.",
+            + consejo,
         )
     if kind == "blocked":
         return (
@@ -335,14 +347,18 @@ def _error_detail(result: SandboxResult) -> tuple[int, str, str]:
 
 
 async def _run(
-    sandbox: ISQLSandbox, sql: str, params: Mapping[str, Any] | None = None
+    sandbox: ISQLSandbox,
+    sql: str,
+    params: Mapping[str, Any] | None = None,
+    *,
+    agregado: bool = False,
 ) -> list[dict[str, Any]]:
     result = await ejecutar(sandbox, sql, params or {})
     if result.error:
         # No es un error del servidor: un timeout, una tabla bloqueada, un
         # rechazo del validador o una tabla que cambió en el medio.
         logger.info("catalogo: consulta rechazada (%s): %s", result.error_kind, result.error[:200])
-        status, code, detail = _error_detail(result)
+        status, code, detail = _error_detail(result, agregado=agregado)
         raise HTTPException(status_code=status, detail=detail, headers={ERROR_HEADER: code})
     return result.rows
 
@@ -493,6 +509,7 @@ async def describir_tabla(
             columna_fecha=fecha.nombre if fecha else None,
             desde=periodo.desde,
             hasta=periodo.hasta,
+            aproximado=periodo.aproximado,
         )
 
         return TablaResponse(
@@ -505,7 +522,7 @@ async def describir_tabla(
             columna_fecha=fecha.nombre if fecha else None,
             desde=periodo.desde,
             hasta=periodo.hasta,
-            muestra=[] if sample.error else sample.rows,
+            muestra=[] if sample.error else json_rows(sample.rows),
             aviso_fecha=periodo.aviso,
             frescura=None
             if bloqueada
@@ -515,6 +532,7 @@ async def describir_tabla(
                 ultimo_dato=frescura.ultimo_dato,
                 fecha_corte=frescura.fecha_corte.isoformat() if frescura.fecha_corte else None,
                 serie=frescura.serie,
+                aproximado=frescura.aproximado,
                 nota=frescura.nota,
             ),
             aviso=(sample.error or "La tabla no se puede consultar.") if bloqueada else None,
@@ -574,14 +592,15 @@ async def obtener_datos(
                     fecha=query.fecha,
                 )
             orden_fisico = False
+            filas_tabla: int | None = None
             if query.fecha is None:
                 # Sin fecha, el orden estable es la posición física, que sólo
                 # es barata en una tabla chica (ver ORDEN_FISICO_MAX_FILAS).
                 # Sin saber el tamaño no se arriesga: el catálogo dice 0 filas
                 # en tablas que tienen millones.
                 stats = prep.stats or await estadisticas(sandbox, table.table_name, [])
-                filas = filas_estimadas(stats, table.row_count)
-                orden_fisico = filas is not None and filas <= ORDEN_FISICO_MAX_FILAS
+                filas_tabla = filas_estimadas(stats, table.row_count)
+                orden_fisico = filas_tabla is not None and filas_tabla <= ORDEN_FISICO_MAX_FILAS
             query = build_data_query(
                 replace(
                     req,
@@ -595,7 +614,7 @@ async def obtener_datos(
         except CatalogRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
 
-        rows = await _run(sandbox, query.sql, query.params)
+        rows = json_rows(await _run(sandbox, query.sql, query.params))
         truncado = len(rows) > query.limite
         rows = rows[: query.limite]
         aviso: str | None = None
@@ -629,7 +648,17 @@ async def obtener_datos(
         aviso_fecha = aviso_formato_guardado(query.fecha)
         if aviso_fecha:
             notas.append(aviso_fecha)
-        notas.extend(_notas_de_orden(query.orden, body, truncado))
+        notas.extend(_notas_de_orden(query.orden, body, truncado, filas_tabla))
+        siguiente: int | None = body.offset + len(rows) if truncado else None
+        if siguiente is not None and siguiente > MAX_OFFSET:
+            # Esa página la rechazaría la validación del pedido (422): no se
+            # la ofrece.
+            siguiente = None
+            notas.append(
+                f"Hay más filas, pero no se pagina más allá de offset={MAX_OFFSET}: para "
+                "seguir acotá con `desde`/`hasta` o `filtros`, o calculá totales con "
+                "agregar_datos."
+            )
         source = (await sandbox.get_table_sources([table.table_name])).get(
             bare_name(table.table_name)
         )
@@ -644,11 +673,13 @@ async def obtener_datos(
             aviso=aviso,
             sugerencias=sugerencias,
             filtros_aplicados=notas or None,
-            siguiente_offset=body.offset + len(rows) if truncado else None,
+            siguiente_offset=siguiente,
         )
 
 
-def _notas_de_orden(orden: str | None, body: DatosRequest, truncado: bool) -> list[str]:
+def _notas_de_orden(
+    orden: str | None, body: DatosRequest, truncado: bool, filas_tabla: int | None = None
+) -> list[str]:
     """Lo que hay que saber del orden para no sacar una conclusión equivocada.
 
     El orden por defecto es ascendente: en una serie larga, las primeras 100
@@ -665,11 +696,19 @@ def _notas_de_orden(orden: str | None, body: DatosRequest, truncado: bool) -> li
             ]
         return []
     if orden is None and (truncado or body.offset):
+        # Sin tamaño conocido (catálogo en 0 y sin estadísticas) no se puede
+        # decir que sea grande: no se ordena porque no se sabe.
+        por_que = (
+            "y es demasiado grande para ordenarla entera"
+            if filas_tabla
+            else "y no se sabe cuántas filas tiene, así que no se la ordena entera (en una "
+            "tabla grande eso pasa el tiempo límite)"
+        )
         return [
-            "La tabla no tiene columna de fecha y es demasiado grande para ordenarla entera: "
-            "las filas salen en el orden en que están guardadas (el del archivo original), "
-            "que no está garantizado entre pedidos. Para recorrerla con `offset` acotá antes "
-            "con `filtros`; para totales usá agregar_datos."
+            f"La tabla no tiene columna de fecha {por_que}: las filas salen en el orden en "
+            "que Postgres las lea, que no está garantizado entre pedidos (una página "
+            "siguiente puede repetir o saltear filas). Para recorrerla con `offset` acotá "
+            "antes con `filtros`; para totales usá agregar_datos."
         ]
     return []
 
@@ -706,7 +745,7 @@ async def agregar_datos(
             raw_filters = [f.model_dump(exclude_none=True) for f in body.filtros]
 
         async def run_sql(sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
-            return await _run(sandbox, sql, params)
+            return await _run(sandbox, sql, params, agregado=True)
 
         try:
             res = await agregar(
@@ -735,8 +774,11 @@ async def agregar_datos(
         source = (await sandbox.get_table_sources([table.table_name])).get(
             bare_name(table.table_name)
         )
+        # `valor` llega como Decimal (los números se leen como ::numeric): sin
+        # `json_rows` salía en el JSON como texto.
         grupos = [
-            {**g, "filas_usadas": n} for g, n in zip(res.grupos, res.filas_por_grupo, strict=True)
+            {**g, "filas_usadas": n}
+            for g, n in zip(json_rows(res.grupos), res.filas_por_grupo, strict=True)
         ]
         notas = [*res.avisos, *res.notas]
         if res.parcial:

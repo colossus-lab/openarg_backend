@@ -244,3 +244,36 @@ def test_sin_fecha_de_lectura_no_inventa_una():
     f = table_freshness(None, columna_fecha="fecha", desde="2020-01-01", hasta="2026-08-01")
     assert f.actualizada is None and f.dias_desde_actualizacion is None and f.nota is None
     assert f.ultimo_dato == "2026-08-01"
+
+
+def test_con_columna_de_fecha_y_sin_rango_no_es_una_foto():
+    """Revisión del PR #139: fechas en un formato que no se reconoce, o una tabla
+    enorme sin fechas en la muestra. Antes salía como foto «vigente al» día de
+    lectura, y podía ser una serie que termina en 2019."""
+    f = table_freshness(
+        _leida(2026, 10, 2, 3), columna_fecha="indice_tiempo", desde=None, hasta=None
+    )
+    assert f.serie is None
+    assert f.fecha_corte is None and f.ultimo_dato is None
+    assert f.nota is not None
+    assert "foto" not in f.nota and "vigentes" not in f.nota
+    assert "no se pudo determinar" in f.nota and "indice_tiempo" in f.nota
+    # La fecha de lectura se informa igual: es cierta.
+    assert f.actualizada is not None and f.actualizada.isoformat() == "2026-10-02"
+
+
+def test_un_periodo_sacado_de_la_muestra_es_aproximado():
+    f = table_freshness(
+        _leida(2026, 10, 4, 1),
+        columna_fecha="fecha",
+        desde="2019-01-01",
+        hasta="2025-11-01",
+        aproximado=True,
+    )
+    assert f.serie and f.aproximado and f.ultimo_dato == "2025-11-01"
+    assert f.nota is not None and "aproximado" in f.nota and "2025-11-01" in f.nota
+
+
+def test_aproximado_sin_rango_no_marca_nada():
+    f = table_freshness(None, columna_fecha=None, desde=None, hasta=None, aproximado=True)
+    assert not f.aproximado

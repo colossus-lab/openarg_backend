@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Any
 
 from app.application.consultas.fechas import (
@@ -49,6 +50,7 @@ __all__ = [
     "build_sample_query",
     "date_column",
     "is_internal_column",
+    "json_rows",
     "quote_ident",
     "resolve_date_column",
     "resolve_table",
@@ -76,6 +78,32 @@ ORDEN_FISICO_MAX_FILAS = 50_000
 def is_internal_column(name: str) -> bool:
     """Columnas de bookkeeping del colector (`_source_url`, `_ingested_at`…)."""
     return name.startswith("_")
+
+
+def _json_number(value: Decimal) -> int | float | None:
+    if not value.is_finite():
+        # `numeric` admite NaN e Infinity, que no son JSON.
+        return None
+    if value == value.to_integral_value():
+        return int(value)
+    return float(value)
+
+
+def json_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Filas con números de JSON: un ``Decimal`` sale como número, no como texto.
+
+    Los agregados leen los números como ``::numeric`` y psycopg devuelve
+    ``Decimal``, que Pydantic serializa como string dentro de un
+    ``dict[str, Any]``: ``/catalogo/agregar`` devolvía
+    ``"valor": "5793524.174913833"`` y un cliente que sumara o comparara
+    valores concatenaba texto u ordenaba alfabéticamente (revisión del PR
+    #139). Un entero sale como entero (``505``, no ``505.0``); el resto como
+    float, la misma precisión que ya usa el agente (``plain_rows``).
+    """
+    return [
+        {k: _json_number(v) if isinstance(v, Decimal) else v for k, v in row.items()}
+        for row in rows
+    ]
 
 
 def resolve_table(requested: str, tables: Iterable[CachedTableInfo]) -> CachedTableInfo | None:

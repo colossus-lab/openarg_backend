@@ -7,6 +7,9 @@ los bugs de la auditoría del 04-oct (fechas, igualdad tolerante, operadores).
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
+
 import pytest
 
 from app.application.public_catalog import (
@@ -17,6 +20,7 @@ from app.application.public_catalog import (
     build_date_range_query,
     build_sample_query,
     date_column,
+    json_rows,
     resolve_table,
 )
 from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
@@ -311,3 +315,33 @@ class TestAuxQueries:
         assert "count(f) AS reconocidas" in sql and "count(c) AS con_valor" in sql
         # La expresión se calcula una vez por fila, no una por agregado.
         assert sql.count("(CASE WHEN") == 1 and "OFFSET 0" in sql
+
+
+# ── json_rows: números de JSON en el modo datos ─────────────────────────────
+
+
+def test_json_rows_convierte_decimal_en_numero():
+    """Pydantic serializa un Decimal dentro de dict[str, Any] como texto."""
+    (fila,) = json_rows(
+        [
+            {
+                "valor": Decimal("5793524.174913833"),
+                "entero": Decimal("505.000"),
+                "texto": "Educación y Cultura",
+                "dia": date(2026, 10, 5),
+                "nada": None,
+                "real": 1.5,
+            }
+        ]
+    )
+    assert fila["valor"] == 5793524.174913833 and isinstance(fila["valor"], float)
+    assert fila["entero"] == 505 and isinstance(fila["entero"], int)
+    # Lo que no es Decimal no se toca (las fechas las pasa a ISO Pydantic).
+    assert fila["texto"] == "Educación y Cultura" and fila["dia"] == date(2026, 10, 5)
+    assert fila["nada"] is None and fila["real"] == 1.5
+
+
+def test_json_rows_nan_e_infinito_no_rompen_el_json():
+    """`numeric` admite NaN e Infinity: el JSON no."""
+    (fila,) = json_rows([{"a": Decimal("NaN"), "b": Decimal("Infinity")}])
+    assert fila == {"a": None, "b": None}

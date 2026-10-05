@@ -23,6 +23,13 @@ from app.application.consultas.fechas import expresion_fecha, fecha_iso
 from app.application.consultas.numeros import expresion_numero, leer_numero
 from app.application.public_catalog import DataRequest, build_data_query
 
+# A nivel de módulo: dishka resuelve las anotaciones de los providers (con
+# `from __future__ import annotations` son texto) en los globales del módulo.
+from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
+from app.domain.ports.cache.cache_port import ICacheService
+from app.domain.ports.credits.credit_repository import ICreditRepository
+from app.domain.ports.sandbox.sql_sandbox import ISQLSandbox
+
 FECHAS = [
     "2026-03-05T00:00:00",
     "2024-03",
@@ -325,3 +332,92 @@ async def test_agregar_sin_coincidencias_explica_en_vez_de_dar_cero(tabla: str) 
     assert res.vacio and res.filas_usadas == 0 and res.grupos == []
     assert res.aviso is not None and "Ninguna fila" in res.aviso
     assert "Educación y Cultura" in [s["valor"] for s in res.sugerencias["funcion_desc"]]
+
+
+async def test_agregar_por_http_devuelve_el_valor_como_numero(tabla: str) -> None:
+    """Revisión del PR #139: la suma sale de Postgres como Decimal y el router la
+    pasaba cruda a `list[dict[str, Any]]`, que Pydantic serializa como texto
+    ("valor": "2400000.50"). Los tests del router usan floats y la prueba en
+    staging fue con la función: acá es el endpoint con el sandbox real."""
+    from unittest.mock import AsyncMock
+
+    from dishka import Provider, Scope, make_async_container, provide
+    from dishka.integrations.fastapi import setup_dishka
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from app.application.api_key_service import generate_api_key
+    from app.domain.entities.api_key.api_key import ApiKey
+    from app.domain.ports.sandbox.sql_sandbox import CachedTableInfo
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+    from app.presentation.http.controllers.public_api.catalogo_router import router
+
+    class Sandbox(PgSandboxAdapter):
+        # El catálogo (`cached_datasets`) no conoce la tabla de prueba: el
+        # resto (consulta, estadísticas) es el adaptador real.
+        async def find_tables(self, *, dataset_ids=None, table_names=None):  # type: ignore[no-untyped-def,override]
+            return [CachedTableInfo(table_name=tabla, dataset_id="ds", row_count=4, columns=[])]
+
+        async def get_column_types(self, table_names):  # type: ignore[no-untyped-def,override]
+            cols = [(c, "text") for c in ("funcion_desc", "entidad", "monto", "fecha")]
+            return {n: cols for n in table_names}
+
+        async def get_table_sources(self, table_names):  # type: ignore[no-untyped-def,override]
+            return {}
+
+    class Cache:
+        async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
+            return 1
+
+        async def ttl(self, key: str) -> int | None:
+            return None
+
+    raw, key_hash = generate_api_key()
+    repo = AsyncMock(spec=IApiKeyRepository)
+    repo.get_by_key_hash.return_value = ApiKey(
+        user_id=uuid.uuid4(), key_hash=key_hash, plan="free", is_active=True
+    )
+    credits = AsyncMock(spec=ICreditRepository)
+    credits.get_active_supporter.return_value = None
+    sandbox = Sandbox()
+
+    class P(Provider):
+        scope = Scope.REQUEST
+
+        @provide
+        def s(self) -> ISQLSandbox:
+            return sandbox
+
+        @provide
+        def c(self) -> ICacheService:
+            return Cache()  # type: ignore[return-value]
+
+        @provide
+        def r(self) -> IApiKeyRepository:
+            return repo
+
+        @provide
+        def cr(self) -> ICreditRepository:
+            return credits
+
+    app = FastAPI()
+    app.include_router(router)
+    setup_dishka(container=make_async_container(P()), app=app)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        r = await client.post(
+            "/catalogo/agregar",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "tabla": tabla,
+                "operacion": "suma",
+                "columna": "monto",
+                "agrupar_por": ["funcion_desc"],
+            },
+        )
+    assert r.status_code == 200, r.text
+    filas = {f["funcion_desc"]: f for f in r.json()["filas"]}
+    educacion = filas["Educación y Cultura"]
+    assert educacion["valor"] == 2400000.5 and isinstance(educacion["valor"], float)
+    assert educacion["filas_usadas"] == 2
+    # Una suma entera sale entera.
+    assert filas["Salud"]["valor"] == 2000000 and isinstance(filas["Salud"]["valor"], int)

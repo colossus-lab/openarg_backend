@@ -151,6 +151,9 @@ class Periodo:
     desde: str | None = None
     hasta: str | None = None
     aviso: str | None = None
+    # El rango sale de la muestra de `pg_stats`, no de recorrer la tabla: el
+    # máximo real puede ser posterior a `hasta`.
+    aproximado: bool = False
 
 
 async def describir_periodo(sandbox: Any, tabla: str, fecha: ColumnaFecha | None) -> Periodo:
@@ -182,6 +185,7 @@ async def describir_periodo(sandbox: Any, tabla: str, fecha: ColumnaFecha | None
                     "Período aproximado (sale de una muestra de la tabla, que es muy grande "
                     "para recorrerla entera)."
                 ),
+                aproximado=True,
             )
         return Periodo(aviso="No pude calcular el período que cubre la tabla.")
     fila = result.rows[0]
