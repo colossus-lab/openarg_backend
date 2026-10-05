@@ -494,6 +494,9 @@ class SeriesTiempo:
             payload["nota"] = " ".join(
                 n for n in (payload.get("nota"), _dropped_frequency_note(dropped)) if n
             )
+        complete = _complete_periods_note(result.metadata or {}, frequency)
+        if complete:
+            payload["periodos"] = complete
         return ToolOutcome(to_json(payload), results=[result])
 
     async def _variation(
@@ -689,6 +692,9 @@ class SeriesTiempo:
             payload["sin_dato"] = missing
         if notes:
             payload["nota"] = " ".join(notes)
+        complete = _complete_periods_note(meta, applied_frequency)
+        if complete:
+            payload["periodos"] = complete
         payload.update(_freshness_for_model(computed.metadata))
         return ToolOutcome(
             to_json(payload),
@@ -710,6 +716,39 @@ def _dropped_frequency_note(frequency: str) -> str:
         f"La serie no admite `frecuencia={frequency}` (es más fina que la suya): vino en su "
         "frecuencia original, sin agregar."
     )
+
+
+_COLLAPSE_NOUNS = {
+    "month": (1, "meses", "mes"),
+    "quarter": (3, "trimestres", "trimestre"),
+    "semester": (6, "semestres", "semestre"),
+    "year": (12, "años", "año"),
+}
+_NATIVE_MONTHS = {"mensual": 1, "trimestral": 3, "semestral": 6, "anual": 12}
+
+
+def _complete_periods_note(meta: dict[str, Any], frequency: str | None) -> str | None:
+    """Que la API agrega sólo períodos completos, dicho para que el modelo no lo verifique.
+
+    Medido el 05-oct: con `collapse` la API deja afuera el período en curso
+    (exportaciones con year llegan a 2025) y el primero si la serie arranca
+    a mitad de período (el IPC, desde 2016-12, empieza en 2017). Sin decirlo,
+    después de «exportaciones 2025, year+sum» el modelo pedía los 12 meses
+    para comprobar que el año estaba entero: una vuelta más. Sólo desde
+    series mensuales o más gruesas (de una diaria no está medido).
+    """
+    nouns = _COLLAPSE_NOUNS.get(frequency or "")
+    if nouns is None or meta.get(_DROPPED_FREQUENCY):
+        return None
+    target, plural, singular = nouns
+    natives = [
+        _NATIVE_MONTHS.get(str(s.get("frecuencia")))
+        for s in meta.get("series") or []
+        if isinstance(s, dict)
+    ]
+    if not natives or any(n is None or n >= target for n in natives):
+        return None
+    return f"Cada fila es un {singular} completo: la API no agrega {plural} sin terminar."
 
 
 async def _fetch_series(

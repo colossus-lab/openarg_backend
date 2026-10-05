@@ -95,10 +95,31 @@ async def test_la_interanual_llega_en_porcentaje_con_la_escala_dicha() -> None:
 
 async def test_la_agregacion_llega_a_la_api_con_la_frecuencia() -> None:
     api = FakeSeriesApi(ipc_real())
-    await _run(api, {"ids": [IPC_ID], "frecuencia": "year", "agregacion": "sum"})
+    payload, _ = await _run(api, {"ids": [IPC_ID], "frecuencia": "year", "agregacion": "sum"})
     params = api.series_requests()[-1]
     assert params["collapse"] == "year"
     assert params["collapse_aggregation"] == "sum"
+    # El IPC arranca en 2016-12: el primer año agregado es 2017, entero.
+    assert payload["filas"][0]["fecha"] == "2017-01-01"
+
+
+async def test_con_frecuencia_dice_que_los_periodos_estan_completos() -> None:
+    # Después de «exportaciones 2025, year+sum» el modelo pedía los 12 meses
+    # para comprobar que el año estaba entero (staging, 04 y 05-oct): una
+    # vuelta más. La API sólo agrega períodos completos; se lo dice.
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {"ids": [EXPO_ID], "frecuencia": "year", "agregacion": "sum", "desde": "2025-01-01"},
+    )
+    assert [f["fecha"] for f in payload["filas"]] == ["2025-01-01"]
+    assert payload["periodos"] == (
+        "Cada fila es un año completo: la API no agrega años sin terminar."
+    )
+
+
+async def test_sin_frecuencia_no_habla_de_periodos() -> None:
+    payload, _ = await _run(FakeSeriesApi(exportaciones_reales()), {"ids": [EXPO_ID]})
+    assert "periodos" not in payload
 
 
 async def test_la_agregacion_sin_frecuencia_no_se_manda() -> None:
@@ -264,6 +285,7 @@ async def test_la_variacion_del_total_anual_con_year_y_sum_da_9_29() -> None:
     assert fila["variacion_pct"] == 9.29
     assert "nota" not in payload
     assert api.series_requests()[0]["collapse_aggregation"] == "sum"
+    assert "año completo" in payload["periodos"]
 
 
 async def test_la_variacion_con_el_anio_final_incompleto_lo_avisa() -> None:
@@ -338,6 +360,8 @@ async def test_una_frecuencia_mas_fina_que_la_serie_vuelve_a_la_suya_y_lo_dice()
     # Y el desempleo llega en %, no como fracción.
     assert 7.9 in payload["filas"][-1].values()
     assert "33,54 %" in payload["escala"]
+    # No se agregó nada: no hay períodos agregados de los que hablar.
+    assert "periodos" not in payload
 
 
 # ── varias series: el atraso de cada una ───────────────────

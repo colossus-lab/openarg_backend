@@ -13,12 +13,16 @@ Las mañas que imita se midieron contra apis.datos.gob.ar el 04-oct-2026:
 - ``sort=desc`` con una representación descarta los períodos más recientes.
   El adaptador no tiene que mandarlo nunca: los tests lo verifican.
 
-``collapse`` (medido el 05-oct): agrega con ``collapse_aggregation`` (por
-defecto el promedio), fecha cada período por su primer día, deja afuera el
-período incompleto (exportaciones con ``collapse=year`` llegan hasta 2025),
-``count`` cuenta las filas YA agregadas, y una frecuencia más fina que la de
-la serie da 400 ("Intervalo de collapse inválido…"). Sólo se simula desde
-series mensuales o más gruesas; de una diaria se agrega sin descartar nada.
+``collapse`` (medido el 05-oct): agrega TODA la serie con
+``collapse_aggregation`` (por defecto el promedio), deja afuera los períodos
+incompletos (exportaciones con ``collapse=year`` llegan hasta 2025; el IPC,
+que arranca en 2016-12, empieza en 2017) y fecha cada período por su primer
+día; después filtra por esa fecha contra [start_date, end_date]: con
+start_date=2023-06-01 no aparece 2023, y con end_date=2025-06-30 aparece
+2025 entero. ``count`` cuenta las filas YA agregadas, y una frecuencia más
+fina que la de la serie da 400 ("Intervalo de collapse inválido…"). Sólo se
+simula desde series mensuales o más gruesas; de una diaria se agrega sin
+descartar nada.
 """
 
 from __future__ import annotations
@@ -204,7 +208,8 @@ def _collapse(
     return [
         (period, _AGGREGATE[how](values))
         for period, values in groups.items()
-        # Como la API: el período incompleto (el año en curso) queda afuera.
+        # Como la API: los períodos incompletos (el año en curso, el primero
+        # si la serie arranca a mitad de año) quedan afuera.
         if expected is None or len(values) >= expected
     ]
 
@@ -233,11 +238,7 @@ class FakeSeriesApi:
         chosen = [self.series[i] for i in ids]
         windows = []
         for s in chosen:
-            window = [
-                (f, v)
-                for f, v in s["data"]
-                if (not start_date or f >= start_date) and (not end_date or f <= end_date)
-            ]
+            window = list(s["data"])
             if collapse:
                 source = _SOURCE_MONTHS[s["field"]["frequency"]]
                 target = _COLLAPSE_MONTHS[collapse]
@@ -254,7 +255,15 @@ class FakeSeriesApi:
                         },
                     )
                 window = _collapse(window, source, target, how)
-            windows.append(window)
+            # La ventana se aplica después de agregar, sobre la fecha de cada
+            # período, y antes de la representación.
+            windows.append(
+                [
+                    (f, v)
+                    for f, v in window
+                    if (not start_date or f >= start_date) and (not end_date or f <= end_date)
+                ]
+            )
         # Eje de tiempo común: la unión de las fechas, como la API. `count`
         # cuenta las filas ya agregadas.
         dates = sorted({f for window in windows for f, _ in window})

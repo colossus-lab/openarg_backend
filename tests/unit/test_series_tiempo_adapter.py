@@ -248,3 +248,20 @@ async def test_collapse_year_suma_y_deja_afuera_el_anio_en_curso() -> None:
     assert result.metadata["agregacion"] == "sum"
     assert result.metadata["truncada"] is False
     assert "unidad" not in result.metadata
+
+    # La ventana se aplica sobre la fecha de cada período ya agregado: desde
+    # 2023-06 no aparece 2023, y hasta 2025-06 aparece 2025 entero.
+    result = await api.adapter().fetch(
+        [EXPO_ID], start_date="2023-06-01", collapse="year", collapse_aggregation="sum"
+    )
+    assert result is not None
+    assert [r["fecha"] for r in result.records] == ["2024-01-01", "2025-01-01"]
+    result = await api.adapter().fetch(
+        [EXPO_ID],
+        start_date="2024-01-01",
+        end_date="2025-06-30",
+        collapse="year",
+        collapse_aggregation="sum",
+    )
+    assert result is not None
+    assert round(result.records[-1][label], 1) == 87111.2
