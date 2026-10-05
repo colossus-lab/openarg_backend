@@ -471,6 +471,24 @@ class TestAgregarDatosYLimites:
         assert result.is_error
         assert "esperá 17 segundos" in _text(result)
 
+    async def test_a_422_tells_the_model_which_parameter_to_fix(self, backend: FakeBackend) -> None:
+        """Revisión del PR #139: el 422 de FastAPI llegaba como «formato no válido»."""
+        backend.catalog_status = 422
+        backend.catalog_detail = [  # type: ignore[assignment]
+            {
+                "type": "too_long",
+                "loc": ["body", "agrupar_por"],
+                "msg": "List should have at most 3 items after validation, not 4",
+            }
+        ]
+        result = await _call(
+            "agregar_datos",
+            {"tabla": "t", "operacion": "suma", "agrupar_por": ["a", "b", "c", "d"]},
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        assert result.is_error
+        assert "`agrupar_por`: List should have at most 3 items" in _text(result)
+
     async def test_obtener_datos_sends_offset_and_leaves_the_order_to_the_backend(
         self, backend: FakeBackend
     ) -> None:

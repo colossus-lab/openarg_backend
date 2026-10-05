@@ -124,8 +124,8 @@ async def _call_backend(
 
     if resp.status_code != 200:
         try:
-            detail = str(resp.json().get("detail", ""))
-        except ValueError:
+            detail = core.error_detail(resp.json().get("detail", ""))
+        except (ValueError, AttributeError):
             detail = ""
         logger.info("backend %s %s -> %s", method, path, resp.status_code)
         raise ToolError(

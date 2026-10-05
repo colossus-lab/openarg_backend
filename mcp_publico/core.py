@@ -15,6 +15,7 @@ import ipaddress
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 KEY_URL = "https://openarg.org/desarrolladores"
@@ -197,6 +198,32 @@ def _segundos(retry_after: str | int | None) -> int | None:
     return seconds if 0 < seconds <= 3600 else None
 
 
+_MAX_DETAIL_422 = 3
+
+
+def error_detail(detail: Any) -> str:
+    """El `detail` de una respuesta de error del backend, como texto.
+
+    Un 400/404 del modo datos trae un texto nuestro. Un 422 es la validación
+    de FastAPI: una lista de errores de Pydantic (`loc`, `msg`). Antes se
+    pasaba como `str(lista)` y se tiraba: el modelo veía «La consulta no
+    tiene un formato válido.» sin saber qué corregir, por ejemplo un
+    `offset` arriba del tope o 4 columnas en `agrupar_por` (revisión del PR
+    #139). Ahora sale «`offset`: Input should be less than or equal to 10000».
+    """
+    if isinstance(detail, list):
+        partes = []
+        for err in detail[:_MAX_DETAIL_422]:
+            if not isinstance(err, Mapping):
+                continue
+            loc = [str(p) for p in err.get("loc") or [] if p not in ("body", "query")]
+            msg = str(err.get("msg") or "").strip()
+            if msg:
+                partes.append(f"`{'.'.join(loc)}`: {msg}" if loc else msg)
+        return "; ".join(partes)
+    return "" if detail is None else str(detail)
+
+
 def error_message(
     status: int,
     detail: str = "",
@@ -267,6 +294,9 @@ def error_message(
     if status == 400:
         return "OpenArg no puede procesar esa pregunta. Reformulala como una consulta sobre datos públicos."
     if status == 422:
+        if data_mode and detail:
+            # Qué parámetro y por qué (`error_detail`): el modelo puede corregirlo.
+            return f"La consulta no tiene un formato válido: {detail}."
         return "La consulta no tiene un formato válido."
     return "OpenArg no pudo responder en este momento. Probá de nuevo en unos minutos."
 
@@ -325,8 +355,23 @@ def format_sources(payload: Mapping[str, Any]) -> str:
 _MAX_CELL = 120
 
 
+def _number_text(value: float) -> str:
+    """Un float sin notación científica: `str(1.2e16)` es "1.2e+16".
+
+    Los totales de `agregar_datos` llegan como número (antes, como texto) y
+    un monto en pesos pasa fácil de 10^16.
+    """
+    text = repr(value)
+    if "e" not in text or value != value or value in (float("inf"), float("-inf")):
+        return text
+    return format(Decimal(text), "f")
+
+
 def _cell(value: Any) -> str:
-    text = "" if value is None else str(value)
+    if isinstance(value, float):
+        text = _number_text(value)
+    else:
+        text = "" if value is None else str(value)
     text = text.replace("\r", " ").replace("\n", " ")
     if len(text) > _MAX_CELL:
         text = text[: _MAX_CELL - 1] + "…"
@@ -427,7 +472,9 @@ def _freshness_line(frescura: Any) -> str | None:
         return None
     parts: list[str] = []
     if frescura.get("ultimo_dato") and frescura.get("serie"):
-        parts.append(f"Último dato: {frescura.get('ultimo_dato')}")
+        # De una muestra de la tabla: puede haber datos posteriores.
+        aprox = " (aproximado)" if frescura.get("aproximado") else ""
+        parts.append(f"Último dato{aprox}: {frescura.get('ultimo_dato')}")
     if frescura.get("fecha_corte"):
         parts.append(f"Fecha de corte: {frescura.get('fecha_corte')}")
     if frescura.get("actualizada"):

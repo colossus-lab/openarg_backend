@@ -369,6 +369,74 @@ class TestModoDatosCore:
         assert out.startswith("Sin resultado para suma de x") and "«Salud»" in out
         assert "```csv" not in out
 
+    def test_a_big_total_is_not_written_in_scientific_notation(self) -> None:
+        """`valor` ahora llega como número: str(1.2e16) era "1.2e+16"."""
+        out = core.format_aggregate(
+            {
+                "tabla": "t",
+                "calculo": "suma de monto",
+                "columnas": ["valor", "filas_usadas"],
+                "filas": [{"valor": 12345678901234568.0, "filas_usadas": 3}],
+                "filas_usadas": 3,
+            }
+        )
+        assert "12345678901234568,3" in out and "e+" not in out
+        assert core.rows_to_csv(["v"], [{"v": 1e-7}]).endswith("0.0000001")
+        assert core.rows_to_csv(["v"], [{"v": 33.14}]).endswith("33.14")
+
+    def test_an_approximate_last_datum_says_so(self) -> None:
+        out = core.format_table(
+            {
+                "tabla": "t",
+                "columnas": [],
+                "frescura": {"ultimo_dato": "2025-11-01", "serie": True, "aproximado": True},
+            }
+        )
+        assert "Último dato (aproximado): 2025-11-01" in out
+
+    def test_unknown_period_shows_no_last_datum_nor_cutoff(self) -> None:
+        """Con columna de fecha pero sin rango, el backend manda serie=None."""
+        out = core.format_table(
+            {
+                "tabla": "t",
+                "columnas": [],
+                "frescura": {
+                    "actualizada": "2026-10-02",
+                    "serie": None,
+                    "nota": "No se pudo determinar qué período cubre.",
+                },
+            }
+        )
+        assert "Último dato" not in out and "Fecha de corte" not in out
+        assert "Leída de la fuente por OpenArg: 2026-10-02" in out
+
+    def test_a_422_in_data_mode_says_which_parameter(self) -> None:
+        """Antes «La consulta no tiene un formato válido.» y nada más: el modelo no
+        sabía que el offset pasaba el tope o que agrupar_por admite 3 columnas."""
+        detail = core.error_detail(
+            [
+                {
+                    "type": "less_than_equal",
+                    "loc": ["body", "offset"],
+                    "msg": "Input should be less than or equal to 10000",
+                    "input": 10400,
+                    "ctx": {"le": 10000},
+                }
+            ]
+        )
+        assert detail == "`offset`: Input should be less than or equal to 10000"
+        msg = core.error_message(422, detail, data_mode=True)
+        assert "formato válido" in msg and "`offset`" in msg and "10000" in msg
+        # El modo respuestas no cambia.
+        assert core.error_message(422, detail) == "La consulta no tiene un formato válido."
+
+    def test_error_detail_keeps_our_text_and_survives_junk(self) -> None:
+        assert core.error_detail("Columnas que no existen: x.") == "Columnas que no existen: x."
+        assert core.error_detail(None) == ""
+        assert core.error_detail([{"loc": ["body", "agrupar_por"], "msg": "too long"}, 3]) == (
+            "`agrupar_por`: too long"
+        )
+
 
 class TestClientLabel:
     def test_client_info_wins_over_user_agent(self) -> None:
