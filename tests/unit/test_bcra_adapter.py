@@ -13,27 +13,41 @@ Lo que se prueba:
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.infrastructure.adapters.connectors import bcra_adapter as bcra_module
 from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
-from app.infrastructure.resilience.circuit_breaker import get_circuit_breaker
-from tests.unit.bcra_fake_api import SERIES, FakeBCRA
+from app.infrastructure.resilience import retry as retry_module
+from app.infrastructure.resilience.circuit_breaker import CircuitState, get_circuit_breaker
+from tests.unit.bcra_fake_api import HOY, SERIES, FakeBCRA
+
+_BREAKERS = ("bcra_api", "bcra_api_catalogo")
+
+
+def _cerrar_circuitos() -> None:
+    for name in _BREAKERS:
+        breaker = get_circuit_breaker(name)
+        breaker.state = CircuitState.CLOSED
+        breaker.failure_count = 0
+        breaker.success_count = 0
 
 
 @pytest.fixture(autouse=True)
-def _breaker_cerrado():
+def _breaker_cerrado(monkeypatch: pytest.MonkeyPatch):
     """El circuito es global por proceso: que un test no abra el de otro."""
-    breaker = get_circuit_breaker("bcra_api")
-    breaker.record_success()
-    breaker.failure_count = 0
+    _cerrar_circuitos()
+    # Los reintentos sin espera: el backoff real (con jitter) no se prueba acá.
+    monkeypatch.setattr(retry_module, "_backoff_delay", lambda *a: 0.0)
     yield
-    breaker.failure_count = 0
+    _cerrar_circuitos()
 
 
 def _adapter(fake: FakeBCRA) -> BCRAAdapter:
-    return BCRAAdapter(client=fake.client())
+    return BCRAAdapter(client=fake.client(), today=lambda: HOY)
 
 
 # ── cotizaciones (estadísticas cambiarias v1.0) ────────────
@@ -106,6 +120,27 @@ async def test_la_historia_se_pagina_hasta_el_final(monkeypatch) -> None:
     assert result.metadata["truncada"] is False
     assert result.records[-1]["fecha"] == "2026-10-02"
     assert result.dataset_title == "Cotizaciones Cambiarias - USD"
+
+
+async def test_una_moneda_desde_una_fecha_trae_hasta_hoy() -> None:
+    """El planner legacy pide query_bcra {moneda, fecha_desde}: era un solo día."""
+    fake = FakeBCRA()
+    result = await _adapter(fake).get_cotizaciones(moneda="USD", fecha_desde="2026-09-01")
+
+    request = fake.requests[-1]
+    assert request.url.path == "/estadisticascambiarias/v1.0/Cotizaciones/USD"
+    assert request.url.params["fechadesde"] == "2026-09-01"
+    assert request.url.params["fechahasta"] == HOY.isoformat()
+    fechas = [r["fecha"] for r in result.records]
+    assert fechas[0] == "2026-09-01" and fechas[-1] == "2026-10-02"
+    assert len(fechas) > 20
+
+
+async def test_un_rango_sin_moneda_no_devuelve_un_solo_dia_callado() -> None:
+    fake = FakeBCRA()
+    with pytest.raises(ConnectorError):
+        await _adapter(fake).get_cotizaciones(fecha_desde="2026-09-01", fecha_hasta="2026-10-02")
+    assert fake.requests == []
 
 
 async def test_una_fecha_que_no_es_iso_no_llega_a_la_api() -> None:
@@ -195,6 +230,74 @@ async def test_sin_catalogo_los_datos_igual_llegan() -> None:
     assert result.records[-1] == {"fecha": "2026-10-02", "valor": 1543.18}
     assert result.dataset_title == "Minorista"
     assert result.metadata["frecuencia"] is None
+
+
+async def test_un_catalogo_colgado_no_demora_los_datos(monkeypatch) -> None:
+    """La herramienta se corta a los 25 s: antes los datos esperaban al catálogo
+    (20 s de timeout por intento, con reintentos)."""
+    monkeypatch.setattr(bcra_module, "CATALOG_WAIT_S", 0.05)
+    adapter = _adapter(FakeBCRA(catalog_delay=30))
+    started = time.monotonic()
+    try:
+        result = await asyncio.wait_for(adapter.get_variable(1), timeout=5)
+    finally:
+        if adapter._catalog_task is not None:
+            adapter._catalog_task.cancel()
+    assert time.monotonic() - started < 2
+    assert result.records[-1] == {"fecha": "2026-09-30", "valor": 46092.0}
+    assert result.metadata["frecuencia"] is None  # sin ficha, pero con datos
+
+
+async def test_un_catalogo_lento_queda_en_cache_para_la_proxima(monkeypatch) -> None:
+    monkeypatch.setattr(bcra_module, "CATALOG_WAIT_S", 0.01)
+    fake = FakeBCRA(catalog_delay=0.2)
+    adapter = _adapter(fake)
+    first = await adapter.get_variable(7)
+    assert "unidad" not in first.metadata  # el catálogo no llegó a tiempo
+    await asyncio.sleep(0.4)  # siguió cargando en segundo plano
+    second = await adapter.get_variable(7)
+    assert second.metadata["unidad"] == "porcentaje"
+    assert fake.catalog_requests() == 1
+
+
+async def test_un_catalogo_caido_no_se_pide_en_cada_consulta() -> None:
+    fake = FakeBCRA(catalog_down=True)
+    adapter = _adapter(fake)
+    await adapter.get_variable(4)
+    pedidos = fake.catalog_requests()
+    assert pedidos == 2  # un intento y un reintento
+    await adapter.get_variable(5)
+    await adapter.get_variable(1)
+    assert fake.catalog_requests() == pedidos
+
+
+async def test_el_catalogo_caido_no_abre_el_circuito_de_los_datos(monkeypatch) -> None:
+    """Catálogo y datos compartían el circuito: con el catálogo caído, a la
+    quinta falla se cortaban también los datos."""
+    monkeypatch.setattr(bcra_module, "CATALOG_RETRY_S", 0.0)
+    adapter = _adapter(FakeBCRA(catalog_down=True))
+    for _ in range(7):
+        result = await adapter.get_variable(4)
+        assert result.records[-1]["valor"] == 1543.18
+    assert get_circuit_breaker("bcra_api").state == CircuitState.CLOSED
+
+
+async def test_un_pedido_mal_armado_no_abre_el_circuito() -> None:
+    """Un 400 (variable inexistente, fecha futura) es del pedido, no de la API."""
+    adapter = _adapter(FakeBCRA())
+    for _ in range(6):
+        with pytest.raises(ConnectorError):
+            await adapter.get_variable(9999)
+    result = await adapter.get_variable(1)
+    assert result.records[-1]["valor"] == 46092.0
+
+
+async def test_con_hasta_y_sin_catalogo_la_fuente_igual_dice_hasta_donde_llega() -> None:
+    """Sin la ficha, un período pasado parecía un dato atrasado de meses."""
+    fake = FakeBCRA(catalog_down=True)
+    result = await _adapter(fake).get_variable(1, hasta="2026-06-30", limit=10)
+    assert result.metadata["ultima_observacion"] <= "2026-06-30"
+    assert result.metadata["fecha_fin_fuente"] == "2026-09-30"
 
 
 async def test_el_catalogo_se_pagina_y_se_cachea(monkeypatch) -> None:

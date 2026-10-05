@@ -16,6 +16,7 @@ Copia lo que se midió contra la API real el 04-oct (sin token):
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, timedelta
 from typing import Any
 
@@ -49,14 +50,19 @@ def _serie_diaria(hasta: date, ultimo: float, n: int = 400) -> list[tuple[str, f
     return serie
 
 
-def _serie_uva() -> list[tuple[str, float]]:
-    # La UVA se publica por adelantado: hay valores de días que no llegaron.
-    d, out, v = date(2026, 6, 1), [], 2000.0
-    while d <= date(2026, 10, 15):
-        out.append((d.isoformat(), round(v, 2)))
+def _serie_adelantada(inicio: float, paso: float, hasta: date) -> list[tuple[str, float]]:
+    # UVA, CER e ICL se publican por adelantado: hay valores de días que no
+    # llegaron (la UVA, hasta el 15 del mes siguiente).
+    d, out, v = date(2026, 6, 1), [], inicio
+    while d <= hasta:
+        out.append((d.isoformat(), round(v, 4)))
         d += timedelta(days=1)
-        v += 1.0
+        v += paso
     return out
+
+
+def _serie_uva() -> list[tuple[str, float]]:
+    return _serie_adelantada(2000.0, 1.0, date(2026, 10, 15))
 
 
 SERIES: dict[int, list[tuple[str, float]]] = {
@@ -65,7 +71,9 @@ SERIES: dict[int, list[tuple[str, float]]] = {
     5: _serie_diaria(date(2026, 10, 2), 1523.0868),
     7: _serie_diaria(date(2026, 10, 1), 23.1875),
     15: _serie_diaria(date(2026, 9, 30), 46909419.0),
+    30: _serie_adelantada(700.0, 0.25, date(2026, 11, 3)),
     31: _serie_uva(),
+    40: _serie_adelantada(30.0, 0.01, date(2026, 11, 3)),
 }
 
 CATALOGO: list[dict[str, Any]] = [
@@ -177,13 +185,29 @@ def _iso(value: str | None) -> date | None:
 class FakeBCRA:
     """Handler para ``httpx.MockTransport`` que registra cada pedido."""
 
-    def __init__(self, *, fail_ids: set[int] | None = None, catalog_down: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_ids: set[int] | None = None,
+        catalog_down: bool = False,
+        catalog_delay: float = 0.0,
+    ) -> None:
         self.requests: list[httpx.Request] = []
         self.fail_ids = fail_ids or set()
         self.catalog_down = catalog_down
+        # Segundos que tarda el catálogo en responder (uno colgado: 30).
+        self.catalog_delay = catalog_delay
 
     def transport(self) -> httpx.MockTransport:
-        return httpx.MockTransport(self.handle)
+        return httpx.MockTransport(self.ahandle)
+
+    async def ahandle(self, request: httpx.Request) -> httpx.Response:
+        if self.catalog_delay and request.url.path == "/estadisticas/v4.0/monetarias":
+            await asyncio.sleep(self.catalog_delay)
+        return self.handle(request)
+
+    def catalog_requests(self) -> int:
+        return sum(1 for r in self.requests if r.url.path == "/estadisticas/v4.0/monetarias")
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=self.transport())

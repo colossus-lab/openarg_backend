@@ -14,6 +14,10 @@ Son dos APIs, las dos sin token:
   tasas, base monetaria. Devuelve las observaciones de la más nueva a la más
   vieja, paginadas con ``limit`` (máximo 3000) y ``offset``. La v2 y la v3
   responden 410.
+
+El catálogo de la v4 (título, unidad, periodicidad) es un adorno de los
+datos: se carga en segundo plano con su propio circuito, se espera unos
+segundos como mucho y, si falla, no se vuelve a pedir por unos minutos.
 """
 
 from __future__ import annotations
@@ -21,7 +25,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import UTC, date, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -50,6 +55,15 @@ CAMBIARIAS_MAX_ROWS = 20_000
 # El catálogo de la v4 cambia poco (descripciones, unidades). Se cachea para
 # no pedir 1.600 variables en cada consulta del agente.
 CATALOG_TTL_S = 6 * 3600
+# Cuánto se espera al catálogo una vez que llegaron los datos. La herramienta
+# del agente se corta a los 25 s: un catálogo colgado (20 s de timeout por
+# intento) no puede llevarse puestos los datos que ya están.
+CATALOG_WAIT_S = 3.0
+# Después de un fallo del catálogo no se lo vuelve a pedir por este tiempo.
+CATALOG_RETRY_S = 300.0
+
+# Argentina no tiene horario de verano desde 2009.
+_AR = timezone(timedelta(hours=-3), "ART")
 
 _FREQUENCIES = {
     "D": "diaria",
@@ -77,16 +91,26 @@ def _iso_date(value: str | None, name: str) -> str | None:
         ) from None
 
 
+def _today_ar() -> date:
+    return datetime.now(_AR).date()
+
+
 class BCRAAdapter(IBCRAConnector):
     """Adapter para la API del BCRA — cotizaciones y variables monetarias."""
 
     BASE_URL = "https://api.bcra.gob.ar"
 
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        today: Callable[[], date] | None = None,
+    ) -> None:
         self._client: httpx.AsyncClient | None = client
+        self._today = today or _today_ar
         self._catalog: list[dict[str, Any]] | None = None
         self._catalog_at = 0.0
-        self._catalog_lock: asyncio.Lock | None = None
+        self._catalog_failed_at: float | None = None
+        self._catalog_task: asyncio.Task[list[dict[str, Any]] | None] | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -99,10 +123,32 @@ class BCRAAdapter(IBCRAConnector):
             )
         return self._client
 
-    @with_retry(max_retries=2, service_name="bcra_api")
-    async def _get_json(self, url: str, params: dict[str, str] | None = None) -> Any:
-        """GET con reintentos ante 5xx/429 y cortes de red. Un 400 no se reintenta."""
+    async def _send(self, url: str, params: dict[str, str] | None) -> httpx.Response:
         resp = await self._get_client().get(url, params=params or None)
+        if resp.status_code == 429 or resp.status_code >= 500:
+            resp.raise_for_status()  # with_retry reintenta y lo cuenta como falla
+        return resp
+
+    @with_retry(max_retries=2, service_name="bcra_api")
+    async def _send_data(self, url: str, params: dict[str, str] | None) -> httpx.Response:
+        return await self._send(url, params)
+
+    @with_retry(max_retries=1, service_name="bcra_api_catalogo")
+    async def _send_catalog(self, url: str, params: dict[str, str] | None) -> httpx.Response:
+        return await self._send(url, params)
+
+    async def _get_json(
+        self, url: str, params: dict[str, str] | None = None, *, catalog: bool = False
+    ) -> Any:
+        """GET con reintentos ante 5xx/429 y cortes de red.
+
+        Un 4xx (fecha futura, ``limit`` fuera de rango) es un pedido mal
+        armado, no una API caída: se levanta acá, fuera de ``with_retry``, para
+        que no se reintente ni abra el circuito. El catálogo tiene su propio
+        circuito: si se cae, los datos siguen andando.
+        """
+        send = self._send_catalog if catalog else self._send_data
+        resp = await send(url, params)
         resp.raise_for_status()
         return resp.json()
 
@@ -118,16 +164,33 @@ class BCRAAdapter(IBCRAConnector):
 
         - Sin fechas: el último día publicado, todas las monedas (filtradas por
           ``moneda`` del lado nuestro: la API ya no acepta ese parámetro acá).
-        - Con un rango y una moneda: la historia de esa moneda.
-        - Con una fecha y sin moneda: ese día, todas las monedas. Un sábado o un
-          feriado no tiene cotización y vuelve vacío.
+        - Con una moneda y ``fecha_desde``: la historia de esa moneda desde esa
+          fecha hasta ``fecha_hasta`` o, si no viene, hasta hoy.
+        - Con una moneda y sólo ``fecha_hasta``: ese día.
+        - Sin moneda: un solo día (``fecha_desde == fecha_hasta``, o la que
+          venga), todas las monedas. Un sábado o un feriado no tiene cotización
+          y vuelve vacío. Un rango de varios días sin moneda es un error: la
+          historia de la API es por moneda.
         """
         try:
             desde = _iso_date(fecha_desde, "fecha_desde")
             hasta = _iso_date(fecha_hasta, "fecha_hasta")
-            if moneda and (desde or hasta):
+            if moneda and desde:
                 return await self.get_cotizaciones_historicas(
-                    moneda, desde or hasta or "", hasta or desde or ""
+                    moneda, desde, hasta or self._today().isoformat()
+                )
+            if moneda and hasta:
+                return await self.get_cotizaciones_historicas(moneda, hasta, hasta)
+            if desde and hasta and desde != hasta:
+                raise ConnectorError(
+                    error_code=ErrorCode.CN_BCRA_UNAVAILABLE,
+                    details={
+                        "action": "get_cotizaciones",
+                        "reason": (
+                            f"un rango ({desde} a {hasta}) necesita una moneda: la "
+                            "historia del BCRA es por moneda"
+                        ),
+                    },
                 )
 
             params: dict[str, str] = {}
@@ -250,54 +313,104 @@ class BCRAAdapter(IBCRAConnector):
 
     # ── variables monetarias (estadísticas v4.0) ────────────────
 
-    async def list_variables(self) -> list[dict[str, Any]]:
-        """El catálogo v4 completo (unas 1.600 variables, en dos páginas)."""
+    def _catalog_fresh(self) -> list[dict[str, Any]] | None:
         if self._catalog is not None and time.monotonic() - self._catalog_at < CATALOG_TTL_S:
             return self._catalog
-        if self._catalog_lock is None:
-            self._catalog_lock = asyncio.Lock()
-        async with self._catalog_lock:
-            if self._catalog is not None and time.monotonic() - self._catalog_at < CATALOG_TTL_S:
-                return self._catalog
-            try:
-                url = f"{self.BASE_URL}/estadisticas/v4.0/monetarias"
-                variables: list[dict[str, Any]] = []
-                offset = 0
-                while True:
-                    data = await self._get_json(
-                        url, {"limit": str(V4_PAGE_LIMIT), "offset": str(offset)}
-                    )
-                    page = data.get("results") if isinstance(data, dict) else None
-                    if not page:
-                        break
-                    variables.extend(page)
-                    offset += len(page)
-                    total = _resultset_count(data)
-                    if total is None or offset >= total:
-                        break
-            except ConnectorError:
-                raise
-            except Exception as exc:
-                raise ConnectorError(
-                    error_code=ErrorCode.CN_BCRA_UNAVAILABLE,
-                    details={"action": "list_variables", "reason": str(exc)},
-                ) from exc
-            self._catalog = variables
-            self._catalog_at = time.monotonic()
-            return variables
+        return None
 
-    async def _catalog_entry(self, id_variable: int) -> dict[str, Any] | None:
-        """La ficha de la variable en el catálogo, o None si no se pudo leer.
-
-        Sólo da el título y la unidad: que el catálogo no responda no tiene que
-        tirar abajo una consulta que sí trajo los datos.
-        """
+    async def _load_catalog(self) -> list[dict[str, Any]] | None:
+        """Baja el catálogo entero; None si falló (y lo anota para no insistir)."""
+        url = f"{self.BASE_URL}/estadisticas/v4.0/monetarias"
+        variables: list[dict[str, Any]] = []
+        offset = 0
         try:
-            catalog = await self.list_variables()
-        except ConnectorError:
-            logger.info("BCRA: catálogo v4 no disponible; sigo sin título", exc_info=True)
+            while True:
+                data = await self._get_json(
+                    url, {"limit": str(V4_PAGE_LIMIT), "offset": str(offset)}, catalog=True
+                )
+                page = data.get("results") if isinstance(data, dict) else None
+                if not page:
+                    break
+                variables.extend(page)
+                offset += len(page)
+                total = _resultset_count(data)
+                if total is None or offset >= total:
+                    break
+        except Exception:
+            self._catalog_failed_at = time.monotonic()
+            logger.info(
+                "BCRA: catálogo v4 no disponible; no lo pido por %.0f s",
+                CATALOG_RETRY_S,
+                exc_info=True,
+            )
+            return None
+        self._catalog = variables
+        self._catalog_at = time.monotonic()
+        self._catalog_failed_at = None
+        return variables
+
+    def _start_catalog(self, *, force: bool = False) -> asyncio.Task[Any] | None:
+        """La carga del catálogo en segundo plano, compartida entre consultas.
+
+        None si ya está fresco o si falló hace menos de ``CATALOG_RETRY_S``
+        (salvo ``force``). Una sola carga a la vez: las variables de una misma
+        pregunta no lo piden cada una por su lado.
+        """
+        if self._catalog_fresh() is not None:
+            return None
+        failed_at = self._catalog_failed_at
+        if not force and failed_at is not None and time.monotonic() - failed_at < CATALOG_RETRY_S:
+            return None
+        loop = asyncio.get_running_loop()
+        task = self._catalog_task
+        if task is None or task.done() or task.get_loop() is not loop:
+            task = loop.create_task(self._load_catalog())
+            self._catalog_task = task
+        return task
+
+    async def list_variables(self) -> list[dict[str, Any]]:
+        """El catálogo v4 completo (unas 1.600 variables)."""
+        fresh = self._catalog_fresh()
+        if fresh is not None:
+            return fresh
+        task = self._start_catalog(force=True)
+        catalog = await asyncio.shield(task) if task is not None else self._catalog_fresh()
+        if catalog is None:
+            raise ConnectorError(
+                error_code=ErrorCode.CN_BCRA_UNAVAILABLE,
+                details={"action": "list_variables", "reason": "catálogo v4 no disponible"},
+            )
+        return catalog
+
+    async def _catalog_entry(
+        self, id_variable: int, task: asyncio.Task[Any] | None
+    ) -> dict[str, Any] | None:
+        """La ficha de la variable en el catálogo, o None si no está a tiempo.
+
+        Sólo da título, unidad y periodicidad: los datos no esperan al catálogo
+        más de ``CATALOG_WAIT_S``. Si tarda, la carga sigue en segundo plano y
+        la próxima consulta lo encuentra en caché.
+        """
+        catalog = self._catalog_fresh()
+        if catalog is None and task is not None:
+            done, _ = await asyncio.wait({task}, timeout=CATALOG_WAIT_S)
+            if not done:
+                logger.info("BCRA: el catálogo v4 tarda; sigo sin la ficha de %s", id_variable)
+                return None
+            catalog = None if task.cancelled() else task.result()
+        if not catalog:
             return None
         return next((v for v in catalog if v.get("idVariable") == id_variable), None)
+
+    async def _newest_date(self, url: str) -> str | None:
+        """La última fecha que publicó el BCRA para una variable (sin catálogo)."""
+        try:
+            data = await self._get_json(url, {"limit": "10"})
+        except Exception:
+            return None
+        page = _v4_detail(data)
+        fechas = [str(r.get("fecha"))[:10] for r in page if r.get("fecha")]
+        return max(fechas) if fechas else None
 
     async def get_variable(
         self,
@@ -330,29 +443,27 @@ class BCRAAdapter(IBCRAConnector):
                 base["hasta"] = end
             wanted = V4_MAX_ROWS if start else max(10, min(limit or 60, V4_PAGE_LIMIT))
 
-            entry_task = asyncio.create_task(self._catalog_entry(int(id_variable)))
+            catalog_task = self._start_catalog()
             rows: list[dict[str, Any]] = []
             total: int | None = None
             offset = 0
-            try:
-                while len(rows) < wanted:
-                    page_limit = min(V4_PAGE_LIMIT, wanted - len(rows))
-                    data = await self._get_json(
-                        url,
-                        {**base, "limit": str(max(10, page_limit)), "offset": str(offset)},
-                    )
-                    if total is None:
-                        total = _resultset_count(data)
-                    page = _v4_detail(data)
-                    if not page:
-                        break
-                    rows.extend(page)
-                    offset += len(page)
-                    if total is not None and offset >= total:
-                        break
-            finally:
-                entry = await entry_task
+            while len(rows) < wanted:
+                page_limit = min(V4_PAGE_LIMIT, wanted - len(rows))
+                data = await self._get_json(
+                    url,
+                    {**base, "limit": str(max(10, page_limit)), "offset": str(offset)},
+                )
+                if total is None:
+                    total = _resultset_count(data)
+                page = _v4_detail(data)
+                if not page:
+                    break
+                rows.extend(page)
+                offset += len(page)
+                if total is not None and offset >= total:
+                    break
             rows = rows[:wanted]
+            entry = await self._catalog_entry(int(id_variable), catalog_task)
 
             records: list[dict[str, Any]] = sorted(
                 (
@@ -363,13 +474,15 @@ class BCRAAdapter(IBCRAConnector):
                 key=lambda r: str(r["fecha"]),
             )
             newest_fetched = records[-1]["fecha"] if records else None
-            source_end: str | None
-            if end is None:
-                # Sin `hasta`, la primera fila de la primera página es la última
-                # que publicó el BCRA: es más fresca que el catálogo cacheado.
-                source_end = newest_fetched or (entry or {}).get("ultFechaInformada")
-            else:
-                source_end = (entry or {}).get("ultFechaInformada") or newest_fetched
+            catalog_end = str((entry or {}).get("ultFechaInformada") or "")[:10] or None
+            if end is not None and catalog_end is None:
+                # Con `hasta`, lo traído no dice hasta dónde llega la serie. Sin
+                # la ficha del catálogo, una consulta de un período pasado
+                # parecería un dato atrasado: se pregunta la última fecha.
+                catalog_end = await self._newest_date(url)
+            # Sin `hasta`, la primera fila de la primera página es la última que
+            # publicó el BCRA: puede ser más nueva que el catálogo cacheado.
+            source_end = max((d for d in (newest_fetched, catalog_end) if d), default=None)
             units = (entry or {}).get("unidadExpresion") or ""
             descripcion = ((entry or {}).get("descripcion") or "").strip()
             frecuencia = _FREQUENCIES.get(str((entry or {}).get("periodicidad") or "").upper())
