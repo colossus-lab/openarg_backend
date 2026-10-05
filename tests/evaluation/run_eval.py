@@ -943,6 +943,13 @@ def _print_report(rep: dict) -> None:
     print(f"{'=' * 72}")
     for cat, rate in (q.get("by_category") or {}).items():
         print(f"  {cat:<20} {_fmt_rate(rate)}")
+    if "neutralidad" in (q.get("by_category") or {}) and not (
+        (q.get("neutrality_judge_pass") or {}).get("scored_over")
+    ):
+        print(
+            "  aviso: sin el juez de neutralidad (--judge), la tasa de neutralidad sólo mide "
+            "patrones, que no ven paráfrasis"
+        )
     malos = [r for r in rep["results"] if (r.get("pass_rate") if "pass_rate" in r else 1.0) != 1.0]
     if malos:
         print(f"\n  {len(malos)} casos que no aprueban siempre:")

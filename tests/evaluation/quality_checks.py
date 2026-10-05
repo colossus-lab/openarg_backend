@@ -144,6 +144,55 @@ def _targets(spec: dict[str, Any]) -> list[float]:
     return [float(v) for v in value] if isinstance(value, list) else [float(value)]
 
 
+_MULTIPLIERS = (
+    ("billones", 1e12),
+    ("billón", 1e12),
+    ("millones", 1e6),
+    ("millón", 1e6),
+    ("miles", 1e3),
+    ("mil", 1e3),
+)
+_TRAILING_ZEROS_RE = re.compile(r"(0+)\D*$")
+
+
+def _multiplier(raw: str) -> float:
+    low = raw.lower()
+    return next((f for suffix, f in _MULTIPLIERS if low.endswith(suffix)), 1.0)
+
+
+def _rounding_unit(n: NumberInText) -> tuple[float, bool]:
+    """``(media unidad del último dígito escrito, si es un redondeo explícito)``.
+
+    Un entero con tres ceros o más al final ("46.000 millones") o con
+    multiplicador ("46 mil millones", "4 millones") está redondeado: "46 mil"
+    vale lo mismo que "46.000". Un entero corto sin multiplicador ("2 %",
+    "1.540") no: su media unidad es 0,5, pero no dice que se haya redondeado.
+    El redondeo se lee hasta los miles: "50.000 millones" es ±500, no
+    ±5.000 (si no, cubría las reservas de 47.960 de "oscilaron en torno a
+    los USD 50.000 millones").
+    """
+    mult = _multiplier(n.raw)
+    digits = re.sub(r"[^\d]", "", n.raw.split()[0]) if n.raw.split() else ""
+    zeros = len(m.group(1)) if (m := _TRAILING_ZEROS_RE.search(digits)) else 0
+    zeros = 3 if zeros >= 3 else 0
+    return 0.5 * 10**zeros * mult, zeros >= 3 or mult > 1
+
+
+def implied_rounding(n: NumberInText) -> float:
+    """El redondeo con que la respuesta escribió la cifra, o 0 si la dio exacta.
+
+    Los decimales lo dicen solos ("46,1 mil" → ±50); un entero, sólo si tiene
+    ceros finales o multiplicador (ver ``_rounding_unit``). Es lo mismo que
+    tolera ``fuente_sin_cifra``, para que las dos vistas de una cifra
+    coincidan, salvo la media unidad de los enteros cortos: "2 %" no cubre un
+    1,66 % esperado con tolerancia 0,15.
+    """
+    if n.rounding:
+        return n.rounding
+    unit, explicit = _rounding_unit(n)
+    return unit if explicit else 0.0
+
+
 def _close(
     target: float, spec: dict[str, Any], number: NumberInText, scale: float, value: float
 ) -> bool:
@@ -151,7 +200,7 @@ def _close(
     tolerance = max(
         float(spec.get("tolerance") or 0.0) * scale,
         float(spec.get("rel_tolerance") or 0.0) * abs(target),
-        number.rounding,
+        implied_rounding(number),
     )
     return abs(value - target) <= tolerance + 1e-9
 
@@ -198,6 +247,25 @@ def find_value(spec: dict[str, Any], text: str) -> NumberInText | None:
 
 def _value_label(spec: dict[str, Any]) -> str:
     return str(spec.get("label") or spec["value"])
+
+
+# Sufijo con que ``oracles.resolve_entry`` rotula las cifras de una cuenta mal
+# hecha (sumar tasas, promediar en vez de sumar, acumular desde enero).
+CUENTA_MAL_HECHA = " (cuenta mal hecha)"
+
+
+def _excused_by(spec: dict[str, Any]) -> str | None:
+    """La cifra esperada cuya presencia disculpa a esta cifra prohibida.
+
+    Una cuenta mal hecha sólo es un error si se presenta en lugar de la
+    correcta: "87.111 millones en 2025, unos 7.259 por mes" está bien. Los
+    reportes congelados antes del 05-oct no tienen ``salvo_si_aparece``: se
+    reconoce por el rótulo.
+    """
+    if spec.get("salvo_si_aparece"):
+        return str(spec["salvo_si_aparece"])
+    label = str(spec.get("label") or "")
+    return label[: -len(CUENTA_MAL_HECHA)] if label.endswith(CUENTA_MAL_HECHA) else None
 
 
 def _fmt_value(value: Any) -> str:
@@ -423,13 +491,22 @@ _DE = r"(?:\s+(?:de|del)\s+|\s*[/,-]?\s*)"
 
 @dataclass(frozen=True)
 class Period:
-    """Un período nombrado en la respuesta: "agosto de 2026", "2T 2026", "30/09/2026"."""
+    """Un período nombrado en la respuesta: "agosto de 2026", "2T 2026", "30/09/2026".
+
+    ``inferido``: la respuesta no dijo el año ("en agosto", "al 30/9") y se
+    tomó el más reciente hasta hoy.
+    """
 
     start: date
     end: date
     granularity: str  # dia | mes | trimestre | semestre | anio
     raw: str
     pos: int
+    inferido: bool = False
+
+    @property
+    def endpos(self) -> int:
+        return self.pos + len(self.raw)
 
 
 def _year(text: str) -> int:
@@ -452,6 +529,11 @@ def _semester(year: int, s: int) -> tuple[date, date]:
 def _ordinal(text: str) -> int:
     t = text.lower().rstrip("°º")
     return _ORD.get(t) or int(t)
+
+
+def _month_number(text: str) -> int:
+    t = text.lower().rstrip(".")
+    return _MESES.get(t) or _ABREV[t]
 
 
 def _p_day(m: re.Match[str], day: int, month: int, year: int) -> tuple[date, date, str] | None:
@@ -494,8 +576,11 @@ _PERIOD_PATTERNS: list[tuple[re.Pattern[str], Any]] = [
         re.compile(rf"\b({_ORD_RE})\s+trimestre(?:\s+(?:de|del)\s+|\s+)(\d{{4}})\b", re.I),
         lambda m: (*_quarter(int(m[2]), _ordinal(m[1])), "trimestre"),
     ),
+    # "2T 2026", "1T26", "4T-2025": la T en mayúscula y pegada al número.
+    # Con espacios y sin distinguir mayúsculas, "pagó 1 t 26 kilos" era el
+    # primer trimestre de 2026.
     (
-        re.compile(r"\b([1-4])\s?[Tt]\s?[-/]?\s?(\d{4}|\d{2})\b"),
+        re.compile(r"\b([1-4])[°º]?T(?:\s?[-/]\s?|\s)?(\d{4}|\d{2})\b"),
         lambda m: (*_quarter(_year(m[2]), int(m[1])), "trimestre"),
     ),
     (
@@ -513,8 +598,9 @@ _PERIOD_PATTERNS: list[tuple[re.Pattern[str], Any]] = [
         ),
         lambda m: (*_semester(int(m[2]), _ordinal(m[1])), "semestre"),
     ),
+    # "1S26", "2S 2025": ídem ("US$ 2 S 50" era el segundo semestre de 2050).
     (
-        re.compile(r"\b([12])\s?S\s?[-/]?\s?(\d{4}|\d{2})\b"),
+        re.compile(r"\b([12])[°º]?S(?:\s?[-/]\s?|\s)?(\d{4}|\d{2})\b"),
         lambda m: (*_semester(_year(m[2]), int(m[1])), "semestre"),
     ),
     (
@@ -533,6 +619,15 @@ _PERIOD_PATTERNS: list[tuple[re.Pattern[str], Any]] = [
         re.compile(rf"\b({_ABREV_RE})\.?[-/'’](\d{{2}})\b", re.I),
         lambda m: _p_month(_year(m[2]), _ABREV[m[1].lower()]),
     ),
+    # "IPC agosto 26: 1,66 %", "| Ago 26 |": mes y año de dos dígitos, sólo
+    # si lo que sigue cierra el rótulo. "En agosto 15 provincias…" no es 2015.
+    (
+        re.compile(
+            rf"\b({_MES_RE}|{_ABREV_RE})\.?\s+(\d{{2}})\b(?=\s*(?:[:|)\],;]|$))",
+            re.I | re.M,
+        ),
+        lambda m: _p_month(_year(m[2]), _month_number(m[1])),
+    ),
     (
         re.compile(r"\b(\d{4})[-/](\d{1,2})\b"),
         lambda m: _p_month(int(m[1]), int(m[2])),
@@ -548,33 +643,8 @@ _PERIOD_PATTERNS: list[tuple[re.Pattern[str], Any]] = [
 ]
 
 
-_BARE_MONTH_RE = re.compile(
-    rf"\b(?:en|de|a|para|durante|hasta|desde)\s+({_MES_RE})\b(?!\s*(?:de\s+|del\s+|[/,-]\s*)?\d)",
-    re.IGNORECASE,
-)
-
-
-def bare_months(text: str, today: date) -> list[Period]:
-    """Meses sin año ("1,66 % en agosto"), leídos como el más reciente hasta ``today``.
-
-    Sólo como respaldo de ``check_fecha_del_dato`` cuando la respuesta no
-    nombra ningún período con año: "en agosto" dicho en octubre es agosto de
-    este año.
-    """
-    out: list[Period] = []
-    for m in _BARE_MONTH_RE.finditer(text or ""):
-        month = _MESES[m[1].lower()]
-        year = today.year if month <= today.month else today.year - 1
-        out.append(Period(date(year, month, 1), _month_end(year, month), "mes", m[1], m.start(1)))
-    return out
-
-
-def periods_in_answer(text: str) -> list[Period]:
-    """Los períodos que nombra la respuesta, de cualquier granularidad.
-
-    No mira los meses sin año ("en julio eran…"): sin el año no se puede
-    saber si es el último dato o uno de hace diez años.
-    """
+def _scan(text: str) -> tuple[list[Period], str]:
+    """Los períodos con año y el texto con esos períodos borrados."""
     work = (text or "").replace("’", "'")
     found: list[Period] = []
     for pattern, build in _PERIOD_PATTERNS:
@@ -588,7 +658,234 @@ def periods_in_answer(text: str) -> list[Period]:
             return " " * len(m.group(0))
 
         work = pattern.sub(repl, work)
-    return sorted(found, key=lambda p: p.pos)
+    return sorted(found, key=lambda p: p.pos), work
+
+
+def periods_in_answer(text: str) -> list[Period]:
+    """Los períodos que nombra la respuesta con su año, de cualquier granularidad.
+
+    Los que no dicen el año ("en julio", "al 30/9") los agrega
+    ``dated_periods``, que sabe qué día es hoy.
+    """
+    return _scan(text)[0]
+
+
+_SIN_ANIO = r"(?!\s*(?:de\s+|del\s+|[/,-]\s*)?\d)"
+# "al 30 de septiembre", "el 2 de octubre": día y mes, sin año.
+_BARE_DAY_RE = re.compile(rf"\b(\d{{1,2}})[°º]?\s+de\s+({_MES_RE})\b{_SIN_ANIO}", re.I)
+# "(dato del 30/9)": día/mes sin año, sólo después de "al", "del", "el"…; si
+# no, "1/2" o "24/7" serían fechas.
+_BARE_DM_RE = re.compile(
+    r"\b(?:al|del|el|hasta|desde|d[ií]a)\s+(\d{1,2})/(\d{1,2})\b(?!\s*[/.-]\s*\d)", re.I
+)
+# "1,66 % en agosto", "la inflación de agosto".
+_BARE_MONTH_RE = re.compile(
+    rf"\b(?:en|de|a|al|para|durante|hasta|desde)\s+({_MES_RE})\b{_SIN_ANIO}", re.I
+)
+
+
+def _latest(today: date, month: int, day: int | None = None) -> tuple[date, date] | None:
+    """El ``month`` (o el día) más reciente que no sea posterior a ``today``."""
+    for year in (today.year, today.year - 1):
+        try:
+            start = date(year, month, day or 1)
+        except ValueError:
+            return None
+        if start <= today:
+            return (start, start) if day else (start, _month_end(year, month))
+    return None
+
+
+_YEAR_CONTEXT_CHARS = 300
+_ESTE_ANIO_RE = re.compile(r"\s+(?:de|del)\s+(?:este|corriente)\s+a[nñ]o", re.IGNORECASE)
+
+
+def _year_context(text: str, pos: int, explicit: list[Period]) -> int | None:
+    """El año del que viene hablando la respuesta, si lo hay.
+
+    "Exportó USD 79.703 millones en 2024. … Ese total resulta de sumar los
+    doce meses, con picos en mayo": ese mayo es de 2024, no el último mayo
+    (respuesta real del agente, 05-oct). Cuenta sólo si el período anterior
+    más cercano (a menos de 300 caracteres) es un año suelto y no la base de
+    una comparación: "en diciembre de 2025 eran 30.000; al 30 de
+    septiembre, 46.092" no hace de septiembre un mes de 2025, ni "comparado
+    con 2023… en agosto" un agosto de 2023.
+    """
+    before = [p for p in explicit if p.endpos <= pos and pos - p.endpos <= _YEAR_CONTEXT_CHARS]
+    if not before:
+        return None
+    last = max(before, key=lambda p: p.pos)
+    if last.granularity != "anio" or _is_base(text, last):
+        return None
+    return last.start.year
+
+
+def _bare_span(
+    text: str,
+    span: tuple[int, int],
+    explicit: list[Period],
+    today: date,
+    month: int,
+    day: int | None = None,
+) -> tuple[date, date] | None:
+    """Fechas de un día o mes sin año (``span``: dónde está en el texto)."""
+    year = None if _ESTE_ANIO_RE.match(text, span[1]) else _year_context(text, span[0], explicit)
+    if year is None:
+        return _latest(today, month, day)
+    try:
+        start = date(year, month, day or 1)
+    except ValueError:
+        return None
+    return (start, start) if day else (start, _month_end(year, month))
+
+
+def bare_periods(text: str, today: date) -> list[Period]:
+    """Días y meses sin año: del año del que viene hablando la respuesta o, si
+    no, los más recientes hasta ``today``.
+
+    "En agosto" dicho en octubre es agosto de este año; "al 30 de
+    septiembre", el último 30 de septiembre; "en 2024… en mayo", mayo de
+    2024 (``_year_context``). Se leen sobre el texto sin los períodos que sí
+    tienen año (``_scan``), así "30 de septiembre de 2026" no cuenta además
+    como "30 de septiembre".
+    """
+    explicit, work = _scan(text)
+    out: list[Period] = []
+    for m in _BARE_DAY_RE.finditer(work):
+        span = _bare_span(work, m.span(), explicit, today, _MESES[m[2].lower()], int(m[1]))
+        if span:
+            out.append(Period(*span, "dia", m.group(0), m.start(), inferido=True))
+    for m in _BARE_DM_RE.finditer(work):
+        if not 1 <= int(m[2]) <= 12:
+            continue
+        span = _bare_span(work, (m.start(1), m.end()), explicit, today, int(m[2]), int(m[1]))
+        if span:
+            out.append(Period(*span, "dia", f"{m[1]}/{m[2]}", m.start(1), inferido=True))
+    taken = [(p.pos, p.endpos) for p in out]
+    for m in _BARE_MONTH_RE.finditer(work):
+        if any(a <= m.start(1) < b for a, b in taken):
+            continue
+        span = _bare_span(work, m.span(1), explicit, today, _MESES[m[1].lower()])
+        if span:
+            out.append(Period(*span, "mes", m[1], m.start(1), inferido=True))
+    return sorted(out, key=lambda p: p.pos)
+
+
+def dated_periods(text: str, today: date) -> list[Period]:
+    """Todos los períodos de la respuesta: con año y sin año (inferido)."""
+    return sorted(periods_in_answer(text) + bare_periods(text, today), key=lambda p: p.pos)
+
+
+# ── qué período es el del dato ─────────────────────────────
+
+# Fin de oración: un punto seguido de espacio (no el de "46.092") o un salto
+# de línea (cada fila de una tabla es su propia "oración").
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s|$)|\n")
+# El período es la fecha de hoy o de la consulta, no la del dato: "Hoy, 5 de
+# octubre de 2026, el último dato es de abril de 2023".
+_HOY_CUE_RE = re.compile(
+    r"(?:\bhoy|\bconsultad[oa]s?(?:\s+(?:el|al))?|\bfecha\s+de\s+(?:hoy|consulta)|"
+    r"\bal\s+d[ií]a\s+de\s+hoy)[\s,:(]*"
+    r"(?:(?:es|lunes|martes|mi[ée]rcoles|jueves|viernes|s[áa]bado|domingo|el|del)[\s,]+){0,2}$",
+    re.IGNORECASE,
+)
+# El período es justo el que no hay: "No tengo datos para septiembre 2026",
+# "aún no se publicó el dato de septiembre". "No hay datos posteriores a
+# abril de 2023" no entra: ahí abril de 2023 sí es el dato.
+_SIN_DATO_CUE_RE = re.compile(
+    r"\b(?:no|sin|tampoco)\b(?:\s+\w+){0,4}?\s+(?:datos?|informaci[oó]n|cifras?|registros?|"
+    r"valor(?:es)?|publicad[oa]s?|publicaci[oó]n|disponibles?)\b(?:\s+\w+){0,2}?\s+"
+    r"(?:para|de|del|sobre|en|correspondientes?\s+a)\s+(?:(?:el|la|los|las)\s+)?"
+    r"(?:mes\s+de\s+|a[nñ]o\s+|per[ií]odo\s+)?$",
+    re.IGNORECASE,
+)
+# Proyecciones: "el REM proyecta 1,8 % para septiembre de 2026" no es un dato
+# publicado (y septiembre ya terminó, así que el filtro de futuro no alcanza).
+_PROYECCION_CUE_RE = re.compile(
+    r"\b(?:proyect\w*|prev[eé]n?|pronostic\w*|se\s+espera\w*|REM|expectativas?)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_CHARS = 100
+
+
+def _clause_before(text: str, pos: int) -> str:
+    """Lo que viene antes de ``pos`` en la misma oración (hasta 100 caracteres)."""
+    start = max(0, pos - _CLAUSE_CHARS)
+    cut = [m.end() for m in _SENTENCE_END_RE.finditer(text, start, pos)]
+    return text[cut[-1] if cut else start : pos]
+
+
+def descarte(text: str, p: Period, hoy: date, frecuencia: str | None) -> str | None:
+    """Por qué ``p`` no puede ser el período del dato, o None si puede serlo."""
+    if p.start > hoy or (p.end > hoy and frecuencia != "diaria"):
+        return "futuro"
+    before = _clause_before(text, p.pos)
+    if _HOY_CUE_RE.search(before):
+        return "hoy"
+    if _SIN_DATO_CUE_RE.search(before):
+        return "sin dato"
+    if _PROYECCION_CUE_RE.search(before):
+        return "proyección"
+    return None
+
+
+def _sentence_span(text: str, pos: int) -> tuple[int, int]:
+    """Dónde empieza y termina la oración que contiene ``pos``."""
+    start = 0
+    for m in _SENTENCE_END_RE.finditer(text, 0, pos):
+        start = m.end()
+    end = _SENTENCE_END_RE.search(text, pos)
+    return start, (end.start() if end else len(text))
+
+
+def _distance(p: Period, n: NumberInText) -> int:
+    if p.endpos <= n.start:
+        return n.start - p.endpos
+    if p.pos >= n.end:
+        return p.pos - n.end
+    return 0
+
+
+# Cuánto se mira hacia atrás (títulos, encabezados de tabla) y hacia adelante
+# ("…USD 46.092 millones. El dato es del 30 de septiembre") cuando la
+# oración de la cifra no nombra ningún período.
+_LOOKBACK_CHARS = 300
+_LOOKAHEAD_CHARS = 150
+
+
+# La base de una comparación: "cayó 4,9 % interanual respecto de julio de
+# 2025" habla de julio de 2026, no de 2025.
+_BASE_CUE_RE = re.compile(
+    r"(?:respecto\s+(?:de|a|al|del)|contra|frente\s+a[l]?|comparad[oa]s?\s+con|"
+    r"en\s+comparaci[oó]n\s+con|vs\.?|versus|con\s+relaci[oó]n\s+a[l]?|desde|"
+    r"que\s+en)\s+(?:(?:el|la|los|las|del|al|igual\s+mes\s+de|mismo\s+mes\s+de)\s+)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_base(text: str, p: Period) -> bool:
+    return _BASE_CUE_RE.search(text[max(0, p.pos - 40) : p.pos]) is not None
+
+
+def period_of(n: NumberInText, periods: list[Period], text: str) -> Period | None:
+    """El período al que se refiere una cifra.
+
+    El más cercano en la misma oración ("La inflación de agosto fue 1,66 %,
+    contra 3,5 % en agosto de 2025": el 1,66 es de agosto y el 3,5 de
+    2025), salvo que sea la base de una comparación ("respecto de julio de
+    2025"). Si la oración no nombra ninguno, el más reciente de los
+    alrededores: un título o el encabezado de una tabla.
+    """
+    s0, s1 = _sentence_span(text, n.start)
+    same = [p for p in periods if p.pos < s1 and p.endpos > s0]
+    if same:
+        return min(same, key=lambda p: (_is_base(text, p), _distance(p, n), p.pos > n.start))
+    near = [
+        p
+        for p in periods
+        if 0 <= n.start - p.endpos <= _LOOKBACK_CHARS or 0 <= p.pos - n.end <= _LOOKAHEAD_CHARS
+    ]
+    return max(near, key=lambda p: p.end) if near else None
 
 
 # Lo que dice una respuesta que avisa que el dato de la fuente es viejo.
@@ -600,28 +897,51 @@ _ATRASO_RE = re.compile(
 )
 
 
-def check_fecha_del_dato(text: str, expected: dict[str, Any]) -> Check:
+def check_fecha_del_dato(
+    text: str, expected: dict[str, Any], anchors: list[dict[str, Any]] | None = None
+) -> Check:
     """¿La respuesta dice de cuándo es el dato, y es el último disponible?
 
     ``expected`` sale de ``oracles.resolve_entry``: el último período de la
     fuente, su frecuencia, desde qué período todavía cuenta como vigente y si
-    la fuente misma está atrasada. Falla si:
+    la fuente misma está atrasada. ``anchors`` son las cifras esperadas del
+    caso (``expected_values`` ya resueltos), si las tiene.
 
-    - la respuesta no nombra ningún período (un año suelto no alcanza para un
-      dato mensual o diario);
-    - el período más reciente que nombra es anterior a ``aceptable_desde``:
-      presenta como actual un dato atrasado ("35.001 en abril de 2023" cuando
-      el BCRA publica el 30-sep-2026);
-    - la fuente misma está atrasada y la respuesta no lo avisa.
+    El período del dato es el que acompaña a la cifra, no el más nuevo del
+    texto: "llega solo hasta abril de 2023 (USD 35.001 millones)… No tengo
+    datos para septiembre 2026" aprobaba por "septiembre 2026" (respuesta
+    real del agente, 05-oct). Por eso:
+
+    - se descartan los períodos que no pueden ser el del dato (futuros, la
+      fecha de hoy, los que la respuesta dice no tener y las proyecciones;
+      ver ``descarte``);
+    - si la respuesta tiene la cifra esperada, cuenta el período que la
+      acompaña (``period_of``): una coincidencia casual de valor con fecha
+      vieja falla;
+    - si no, el más reciente entre los que acompañan a alguna cifra (una
+      comparación con el año anterior no tapa el dato actual);
+    - y si ninguna cifra tiene período cerca, el más reciente del texto.
+
+    Falla si no nombra ningún período (un año suelto no alcanza para un dato
+    mensual o diario), si el período del dato es anterior a
+    ``aceptable_desde`` ("35.001 en abril de 2023" cuando el BCRA publica el
+    30-sep-2026) o si la fuente misma está atrasada y la respuesta no lo
+    avisa.
     """
-    periods = periods_in_answer(text)
-    if expected.get("frecuencia") != "anual":
+    hoy = date.fromisoformat(str(expected.get("hoy") or date.today().isoformat())[:10])
+    frecuencia = expected.get("frecuencia")
+    periods = dated_periods(text, hoy)
+    if frecuencia != "anual":
         periods = [p for p in periods if p.granularity != "anio"]
-    if not periods and expected.get("hoy"):
-        periods = bare_months(text, date.fromisoformat(str(expected["hoy"])[:10]))
+    periods = [p for p in periods if descarte(text, p, hoy, frecuencia) is None]
     if not periods:
         return Check("fecha_del_dato", False, "no dice de cuándo es el dato")
-    newest = max(periods, key=lambda p: p.end)
+    figures = [n for n in numbers_in_answer(text) if not _small_counter(n)]
+    anchored = [n for n in figures if any(_value_matches(s, n, text) for s in anchors or [])]
+    dated = [p for n in anchored if (p := period_of(n, periods, text))]
+    if not dated:
+        dated = [p for n in figures if (p := period_of(n, periods, text))] or periods
+    newest = max(dated, key=lambda p: p.end)
     desde = date.fromisoformat(str(expected["aceptable_desde"])[:10])
     if newest.end < desde:
         return Check(
@@ -647,14 +967,6 @@ _SECTION_RE = re.compile(
 )
 _LINK_TARGET_RE = re.compile(r"\]\([^)]*\)")
 _URL_RE = re.compile(r"https?://\S+")
-_MULTIPLIERS = (
-    ("billones", 1e12),
-    ("billón", 1e12),
-    ("millones", 1e6),
-    ("millón", 1e6),
-    ("miles", 1e3),
-    ("mil", 1e3),
-)
 # Escalas entre la cifra escrita y el dato: fracción → porcentaje, y datos
 # en miles, millones o miles de millones ("US$ 46.092 millones" contra 46092).
 _SCALES = (1.0, 100.0, 1e3, 1e6, 1e9, 1e12)
@@ -670,30 +982,22 @@ def main_text(text: str) -> str:
     return _URL_RE.sub(" ", body)
 
 
-def _multiplier(raw: str) -> float:
-    low = raw.lower()
-    return next((f for suffix, f in _MULTIPLIERS if low.endswith(suffix)), 1.0)
+def _small_counter(n: NumberInText) -> bool:
+    """ "Los últimos 3 meses", "las 2 series": un entero menor a 32 sin % ni
+    multiplicador no es un dato."""
+    return (
+        n.rounding == 0
+        and abs(n.value) < 32
+        and "%" not in n.raw
+        and _multiplier(n.raw) == 1.0
+        and float(n.value).is_integer()
+    )
 
 
 def figures_for_sourcing(text: str) -> list[NumberInText]:
-    """Las cifras que tienen que venir de alguna fuente.
-
-    Sin contadores chicos ("los últimos 3 meses", "las 2 series"): un entero
-    menor a 32 sin % ni multiplicador no es un dato.
-    """
+    """Las cifras que tienen que venir de alguna fuente (sin contadores chicos)."""
     clean = main_text(answer_body(text)).replace("−", "-")
-    out = []
-    for n in numbers_in_answer(clean):
-        small_counter = (
-            n.rounding == 0
-            and abs(n.value) < 32
-            and "%" not in n.raw
-            and _multiplier(n.raw) == 1.0
-            and float(n.value).is_integer()
-        )
-        if not small_counter:
-            out.append(n)
-    return out
+    return [n for n in numbers_in_answer(clean) if not _small_counter(n)]
 
 
 _NUMERIC_STR_RE = re.compile(r"[-+]?\d[\d.,]*")
@@ -741,7 +1045,56 @@ def evidence_numbers(
     return out
 
 
-_TRAILING_ZEROS_RE = re.compile(r"(0+)\D*$")
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float | Decimal):
+        return float(value)
+    return None
+
+
+# Variaciones que el modelo puede calcular de una serie que vino sin columna
+# de variación: contra la fila anterior y contra 12 filas antes (la
+# interanual de una serie mensual), sobre las últimas 13 filas. Más rezagos o
+# más filas y casi cualquier porcentaje "saldría" de alguna fuente.
+_DERIVED_TAIL = 13
+_DERIVED_LAGS = (1, 12)
+
+
+def derived_variations(records: list[Any]) -> list[float]:
+    """Variaciones % calculables desde la cola de una serie, columna por columna.
+
+    Además de los rezagos de ``_DERIVED_LAGS``, la acumulada en el año
+    (contra el diciembre anterior) cuando las filas traen ``fecha``. Con
+    esto ``fuente_sin_cifra`` no marca como "citada sin cifra" la serie de
+    la que el modelo calculó la interanual.
+    """
+    rows = [r for r in (records or []) if isinstance(r, dict)]
+    window = rows[-(_DERIVED_TAIL + max(_DERIVED_LAGS)) :]
+    if len(window) < 2:
+        return []
+    columns = [k for k in window[-1] if k != "fecha" and _number(window[-1][k]) is not None]
+    out: set[float] = set()
+
+    def add(a: Any, b: Any) -> None:
+        x, y = _number(a), _number(b)
+        if x is not None and y:
+            out.add(round((x / y - 1.0) * 100.0, 6))
+
+    first = max(0, len(window) - _DERIVED_TAIL)
+    for col in columns:
+        for i in range(first, len(window)):
+            for lag in _DERIVED_LAGS:
+                if i - lag >= 0:
+                    add(window[i].get(col), window[i - lag].get(col))
+            fecha = str(window[i].get("fecha") or "")
+            dic = f"{int(fecha[:4]) - 1}-12" if fecha[:4].isdigit() else None
+            base = next(
+                (r for r in window[:i] if dic and str(r.get("fecha") or "").startswith(dic)), None
+            )
+            if base is not None:
+                add(window[i].get(col), base.get(col))
+    return sorted(out)
 
 
 def _figure_tolerance(n: NumberInText) -> float:
@@ -750,14 +1103,12 @@ def _figure_tolerance(n: NumberInText) -> float:
     Sin tolerancia relativa a propósito: contra una serie de 1.000 filas, un
     0,05 % encontraba siempre algún vecino (el 47.467 de la reproducción
     "salía" de un 47.460 de 2011 en la 174.1). Un entero redondeado a miles
-    ("46.000 millones") sí se lee con esa precisión.
+    ("46.000 millones", "46 mil millones") sí se lee con esa precisión, igual
+    que en el chequeo de valor (``implied_rounding``).
     """
     if n.rounding:
         return n.rounding
-    mult = _multiplier(n.raw)
-    digits = re.sub(r"[^\d]", "", n.raw.split()[0]) if n.raw.split() else ""
-    zeros = len(m.group(1)) if (m := _TRAILING_ZEROS_RE.search(digits)) else 0
-    return 0.5 * (10**zeros if zeros >= 3 else 1) * mult
+    return _rounding_unit(n)[0]
 
 
 def _figure_matches(n: NumberInText, values: list[float]) -> bool:
@@ -771,6 +1122,9 @@ def _figure_matches(n: NumberInText, values: list[float]) -> bool:
     return False
 
 
+_Evidence = tuple[list[float], list[float]]  # (números, variaciones derivadas)
+
+
 def sources_without_figures(
     answer: str,
     sources: list[dict[str, Any]] | list[str],
@@ -780,23 +1134,31 @@ def sources_without_figures(
 
     Una fuente aportó si alguna cifra de la respuesta coincide con un número
     de su evidencia (con el redondeo de la respuesta y las escalas de
-    ``_SCALES``). Las fuentes sin números en la evidencia (texto) no se
-    juzgan. Reproducción del 04-oct: el agente citó tres series de reservas
-    y las tres cifras salían de una sola.
+    ``_SCALES``), o si un porcentaje de la respuesta es una variación
+    calculable desde la cola de la serie (``derivadas``, ver
+    ``derived_variations``). Las fuentes sin números en la evidencia (texto)
+    no se juzgan. Reproducción del 04-oct: el agente citó tres series de
+    reservas y las tres cifras salían de una sola.
     """
     figures = figures_for_sourcing(answer)
     if not figures:
         return [], []
-    by_pair: dict[tuple[str, str], list[float]] = {}
-    by_title: dict[str, list[float]] = {}
-    by_url: dict[str, list[float]] = {}
+    percents = [f for f in figures if "%" in f.raw]
+    by_pair: dict[tuple[str, str], _Evidence] = {}
+    by_title: dict[str, _Evidence] = {}
+    by_url: dict[str, _Evidence] = {}
     for item in evidence_items or []:
         title = str(item.get("title") or "").strip().lower()
         url = str(item.get("url") or "").strip()
         item_numbers = [float(n) for n in item.get("numbers") or []]
-        by_pair.setdefault((title, url), []).extend(item_numbers)
-        by_title.setdefault(title, []).extend(item_numbers)
-        by_url.setdefault(url, []).extend(item_numbers)
+        item_derived = [float(n) for n in item.get("derivadas") or []]
+        for nums, derived in (
+            by_pair.setdefault((title, url), ([], [])),
+            by_title.setdefault(title, ([], [])),
+            by_url.setdefault(url, ([], [])),
+        ):
+            nums.extend(item_numbers)
+            derived.extend(item_derived)
     sin_cifra: list[str] = []
     sin_evidencia: list[str] = []
     for s in sources or []:
@@ -805,27 +1167,80 @@ def sources_without_figures(
         else:
             name, url = str(s), ""
         key = name.strip().lower()
-        nums: list[float] | None = by_pair.get((key, url))
-        if nums is None:
-            nums = by_title.get(key) if key in by_title else by_url.get(url) if url else None
-        if nums is None:
+        ev: _Evidence | None = by_pair.get((key, url))
+        if ev is None:
+            ev = by_title.get(key) if key in by_title else by_url.get(url) if url else None
+        if ev is None:
             sin_evidencia.append(name)
             continue
+        nums, derived = ev
         if not nums:
             continue
-        if not any(_figure_matches(f, nums) for f in figures):
-            sin_cifra.append(name)
+        if any(_figure_matches(f, nums) for f in figures):
+            continue
+        if any(
+            abs(abs(f.value) - abs(d)) <= _figure_tolerance(f) + 1e-9
+            for f in percents
+            for d in derived
+        ):
+            continue
+        sin_cifra.append(name)
     return sin_cifra, sin_evidencia
 
 
 # ── fuentes no oficiales ───────────────────────────────────
 
 _NO_OFICIAL_SOURCE_RE = re.compile(r"dolar\s?api|argentina\s?datos", re.IGNORECASE)
+# El rótulo que pidió Dante ("pizarra del Banco Nación vía DolarApi", no
+# oficial) o cualquier forma de decir que no es la referencia oficial.
+# "Banco Nación" solo no alcanza: "el dólar oficial en el Banco Nación" no
+# rotula nada.
 _NO_OFICIAL_LABEL_RE = re.compile(
-    r"no\s+(?:es\s+|son\s+)?oficial|pizarra|banco\s+naci[oó]n|\bBNA\b|complement|agregador|"
-    r"referencia\s+(?:informal|no\s+oficial)",
+    r"\bno\s+(?:es\s+|son\s+|constituye\s+|representa\s+)?(?:una?\s+|la\s+)?"
+    r"(?:referencia\s+|cotizaci[oó]n\s+|fuente\s+|dato\s+)?oficial|pizarra|complement|"
+    r"agregador|extraoficial",
     re.IGNORECASE,
 )
+# Quién publica cada cotización, para saber de cuál se dice "oficial".
+_MENCION_NO_OFICIAL_RE = re.compile(
+    r"dolar\s?api|argentina\s?datos|banco\s+(?:de\s+la\s+)?naci[oó]n|\bBNA\b|pizarra",
+    re.IGNORECASE,
+)
+_MENCION_OFICIAL_RE = re.compile(
+    r"\bBCRA\b|banco\s+central|\bA\s?3500\b|comunicaci[oó]n\s+a\b|minorista\s+promedio|"
+    r"mayorista\s+de\s+referencia",
+    re.IGNORECASE,
+)
+_OFICIAL_RE = re.compile(r"\boficial(?:es)?\b", re.IGNORECASE)
+# "no es la referencia oficial", "ni oficial": a menos de 30 caracteres.
+_NEGACION_RE = re.compile(r"\b(?:no|ni)\b[^.;\n]{0,30}$", re.IGNORECASE)
+
+
+def _oficial_de_dolarapi(text: str, kinds: list[str]) -> str | None:
+    """La primera vez que se llama "oficial" a la cotización de DolarApi.
+
+    Un "oficial" sin negar cuenta como dicho de la cotización de DolarApi si,
+    en su oración, la fuente más cercana es DolarApi / Banco Nación / la
+    pizarra y no el BCRA: "El dólar oficial en el Banco Nación está a $1.540"
+    falla; "El dólar oficial del BCRA (A3500) es $1.480; la pizarra del Banco
+    Nación (no oficial) marca $1.540" aprueba. Si la oración no nombra
+    ninguna fuente y la respuesta no usa el BCRA en ningún lado, la única
+    cotización que hay es la de DolarApi.
+    """
+    sin_bcra = "bcra" not in kinds and not _MENCION_OFICIAL_RE.search(text)
+    for m in _OFICIAL_RE.finditer(text):
+        if _NEGACION_RE.search(text[max(0, m.start() - 40) : m.start()]):
+            continue
+        s0, s1 = _sentence_span(text, m.start())
+        sentence = text[s0:s1]
+        offset = m.start() - s0
+        menciones = [
+            (abs(x.start() - offset), "no_oficial")
+            for x in _MENCION_NO_OFICIAL_RE.finditer(sentence)
+        ] + [(abs(x.start() - offset), "oficial") for x in _MENCION_OFICIAL_RE.finditer(sentence)]
+        if (menciones and min(menciones)[1] == "no_oficial") or (not menciones and sin_bcra):
+            return sentence.strip()[:120]
+    return None
 
 
 def check_rotulo_no_oficial(answer: str, kinds: list[str]) -> Check | None:
@@ -833,17 +1248,39 @@ def check_rotulo_no_oficial(answer: str, kinds: list[str]) -> Check | None:
 
     El agente del 04-oct contestó "el dólar oficial está hoy a $1.490 /
     $1.540. Fuente: DolarApi": es la pizarra del Banco Nación, no una
-    referencia oficial (BCRA, Comunicación A 3500 o minorista).
+    referencia oficial (BCRA, Comunicación A 3500 o minorista). Falla si no
+    dice que no es la referencia oficial, o si igual la llama "oficial".
     """
-    uses = "argentina_datos" in kinds or _NO_OFICIAL_SOURCE_RE.search(answer or "")
+    text = answer or ""
+    uses = "argentina_datos" in kinds or _NO_OFICIAL_SOURCE_RE.search(text)
     if not uses:
         return None
-    ok = _NO_OFICIAL_LABEL_RE.search(answer or "") is not None
-    return Check(
-        "rotulo_no_oficial",
-        ok,
-        "" if ok else "usa DolarApi/ArgentinaDatos sin decir que no es la referencia oficial",
-    )
+    if _NO_OFICIAL_LABEL_RE.search(text) is None:
+        return Check(
+            "rotulo_no_oficial",
+            False,
+            "usa DolarApi/ArgentinaDatos sin decir que no es la referencia oficial",
+        )
+    dicho = _oficial_de_dolarapi(text, kinds)
+    if dicho:
+        return Check("rotulo_no_oficial", False, f"llama oficial a la de DolarApi: {dicho!r}")
+    return Check("rotulo_no_oficial", True)
+
+
+# ── patrones ───────────────────────────────────────────────
+
+_LINE_START_GUARD = "(?m)^[^¿\\n]*?"
+_LOOKBEHIND_RE = re.compile(r"\(\?<![^)]*\)")
+
+
+def pattern_label(pattern: str) -> str:
+    """El patrón sin las guardas (inicio de línea, negaciones), para el reporte.
+
+    Los cebos de neutralidad comparten 250 caracteres de guardas; sin
+    sacarlas, todos los chequeos se ven iguales.
+    """
+    label = pattern.removeprefix(_LINE_START_GUARD)
+    return _LOOKBEHIND_RE.sub("", label)
 
 
 # ── grupos de alternativas ─────────────────────────────────
@@ -1017,8 +1454,11 @@ def assess(
         resolved.get("forbidden_values") or []
     )
 
+    found_labels: set[str] = set()
     for spec in expected_values:
         hit = find_value(spec, body)
+        if hit is not None:
+            found_labels.add(_value_label(spec))
         q.checks.append(
             Check(
                 f"valor:{_value_label(spec)}",
@@ -1028,7 +1468,13 @@ def assess(
         )
 
     if resolved.get("expected_period") and not q.deflected:
-        q.checks.append(check_fecha_del_dato(main_text(body), resolved["expected_period"]))
+        q.checks.append(
+            check_fecha_del_dato(
+                main_text(body),
+                resolved["expected_period"],
+                list(resolved.get("expected_values") or []),
+            )
+        )
 
     if entry.get("rotular_no_oficial"):
         label_check = check_rotulo_no_oficial(main_text(answer), q.source_kinds)
@@ -1051,6 +1497,18 @@ def assess(
 
     for spec in forbidden_values:
         hit = find_value(spec, answer)
+        unless = _excused_by(spec)
+        if hit is not None and unless in found_labels:
+            # "USD 87.111 millones en 2025; en promedio, 7.259 por mes": la
+            # cuenta mal hecha aparece, pero al lado de la correcta.
+            q.checks.append(
+                Check(
+                    f"valor_prohibido:{_value_label(spec)}",
+                    True,
+                    f"aparece {hit.raw!r}, pero también la cifra correcta",
+                )
+            )
+            continue
         q.checks.append(
             Check(
                 f"valor_prohibido:{_value_label(spec)}",
@@ -1093,7 +1551,13 @@ def assess(
     for pattern in entry.get("forbidden_answer_patterns") or []:
         m = re.search(pattern, answer or "", re.IGNORECASE)
         q.checks.append(
-            Check(f"patron_prohibido:{pattern}", m is None, f"aparece {m.group(0)!r}" if m else "")
+            Check(
+                f"patron_prohibido:{pattern_label(pattern)}",
+                m is None,
+                # Los patrones que arrancan en el principio de la línea (para no
+                # mirar preguntas) agarran la línea entera: alcanza con el final.
+                f"aparece {m.group(0)[-90:].strip()!r}" if m else "",
+            )
         )
 
     lower = (answer or "").lower()

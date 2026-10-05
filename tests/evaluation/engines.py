@@ -301,9 +301,11 @@ def evidence_items(results: list[Any]) -> list[dict[str, Any]]:
 
     Las fuentes del agente salen de los mismos ``DataResult`` (título y
     ``portal_url``), así que la batería puede cruzar cada fuente citada con
-    lo que esa fuente devolvió.
+    lo que esa fuente devolvió. ``derivadas`` son las variaciones que el
+    modelo puede calcular de la cola de la serie (interanual sobre el
+    índice, por ejemplo): también cuentan como aporte de la fuente.
     """
-    from tests.evaluation.quality_checks import evidence_numbers
+    from tests.evaluation.quality_checks import derived_variations, evidence_numbers
 
     out: list[dict[str, Any]] = []
     for r in results or []:
@@ -325,6 +327,7 @@ def evidence_items(results: list[Any]) -> list[dict[str, Any]]:
                     None,
                 ),
                 "numbers": evidence_numbers(records),
+                "derivadas": derived_variations(records),
             }
         )
     return out

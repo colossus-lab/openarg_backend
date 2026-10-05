@@ -335,6 +335,8 @@ def serie_suma_anual(fetch: Fetch, hoy: date, **args: Any) -> Resolucion:
 
     La cifra prohibida es el **promedio** mensual: es lo que devuelve
     ``collapse=year`` de la API (exportaciones 2025: 7.259 en vez de 87.111).
+    Como toda cuenta mal hecha, sólo falla si la respuesta no da también la
+    suma: "unos 7.259 millones por mes" al lado del total está bien.
     """
     obs, freq = _serie(fetch, hoy, str(args["serie"]), last=40)
     by_year: dict[int, list[float]] = {}
@@ -514,6 +516,9 @@ def resolve_entry(entry: dict[str, Any], resolver: _Resolver) -> dict[str, Any]:
         )
         out["detalle"].append(f"{label}: {res.detalle}")
         for bad in res.prohibidos:
+            # Falla sólo si la respuesta da la cuenta mal hecha EN LUGAR de la
+            # correcta: "87.111 millones en 2025; unos 7.259 por mes" está bien
+            # (ver ``quality_checks._excused_by``).
             out["forbidden_values"].append(
                 {
                     "value": bad,
@@ -521,6 +526,7 @@ def resolve_entry(entry: dict[str, Any], resolver: _Resolver) -> dict[str, Any]:
                     "rel_tolerance": spec.get("forbidden_rel_tolerance", 0.0),
                     **({"scales": spec["scales"]} if "scales" in spec else {}),
                     "label": f"{label} (cuenta mal hecha)",
+                    "salvo_si_aparece": label,
                 }
             )
     for spec in entry.get("forbidden_values_from") or []:

@@ -17,9 +17,10 @@ búsqueda:
 
 - **mcp**: lo que devuelve ``GET /catalogo/buscar`` (``buscar_datasets`` del
   MCP). Reproduce el armado de ``catalogo_router.buscar`` con sus mismas
-  constantes: ``search_datasets_ann`` → tablas con filas → agrupado por
-  (título, URL). Si ese armado se mueve a una función compartida, este
-  script tiene que llamarla en vez de reproducirlo.
+  constantes (``assemble_mcp``): ``search_datasets_ann`` → tablas con filas →
+  agrupado por (título, URL) → las ``_MAX_TABLES_PER_DATASET`` tablas con más
+  filas. Si ese armado se mueve a una función compartida, este script tiene
+  que llamarla en vez de reproducirlo.
 - **agente**: ``BuscarDatos.run`` del agente, la herramienta real.
 
 Uso, desde la raíz del repo::
@@ -145,6 +146,41 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def assemble_mcp(
+    hits: list[Any],
+    tables: dict[str, list[tuple[str, int | None]]],
+    limite: int,
+    max_tablas: int,
+) -> list[dict[str, Any]]:
+    """Los resultados de ``GET /catalogo/buscar``, armados igual que el endpoint.
+
+    ``hits``: lo que devolvió ``search_datasets_ann``; ``tables``: por
+    ``dataset_id``, las tablas con filas (nombre, filas). Se agrupa por
+    (título, URL), se corta en ``limite`` y cada resultado muestra sus
+    ``max_tablas`` tablas con más filas (``_MAX_TABLES_PER_DATASET``): una
+    tabla que el endpoint no muestra no puede contar como acierto.
+    """
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for h in hits:
+        key = (h.title.strip().lower(), (h.download_url or "").strip())
+        found = tables.get(str(h.dataset_id), [])
+        if key in merged:
+            known = {t for t, _ in merged[key]["_tablas"]}
+            merged[key]["_tablas"] += [t for t in found if t[0] not in known]
+            continue
+        merged[key] = {
+            "titulo": h.title,
+            "portal": h.portal,
+            "score": round(float(h.score), 4),
+            "_tablas": list(found),
+        }
+    out = list(merged.values())[:limite]
+    for r in out:
+        ranked = sorted(r.pop("_tablas"), key=lambda t: -(t[1] or 0))[:max_tablas]
+        r["tablas"] = [t for t, _ in ranked]
+    return out
+
+
 def load_gold() -> dict[str, Any]:
     if _EMBEDDED_GOLD is not None:
         data: dict[str, Any] = json.loads(_EMBEDDED_GOLD)
@@ -215,28 +251,17 @@ async def _run(gold: dict[str, Any], limite: int) -> list[dict[str, Any]]:
                 portal_filter=None,
                 min_similarity=router._MIN_SIMILARITY,
             )
-            tables: dict[str, list[str]] = {}
+            tables: dict[str, list[tuple[str, int | None]]] = {}
             for t in await sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits]):
                 if t.dataset_id and t.row_count != 0:
-                    tables.setdefault(str(t.dataset_id), []).append(t.table_name)
-            merged: dict[tuple[str, str], dict[str, Any]] = {}
-            for h in hits:
-                key = (h.title.strip().lower(), (h.download_url or "").strip())
-                found = tables.get(str(h.dataset_id), [])
-                if key in merged:
-                    merged[key]["tablas"] += [t for t in found if t not in merged[key]["tablas"]]
-                    continue
-                merged[key] = {
-                    "titulo": h.title,
-                    "portal": h.portal,
-                    "score": round(float(h.score), 4),
-                    "tablas": list(found),
-                }
-            mcp = list(merged.values())[:limite]
+                    tables.setdefault(str(t.dataset_id), []).append((t.table_name, t.row_count))
+            mcp = assemble_mcp(hits, tables, limite, router._MAX_TABLES_PER_DATASET)
             ms = int((time.monotonic() - started) * 1000)
             await session.rollback()
 
-            score_by_title = {r["titulo"].strip().lower(): r["score"] for r in merged.values()}
+            score_by_title = {
+                h.title.strip().lower(): round(float(h.score), 4) for h in reversed(hits)
+            }
             ctx = ToolContext(deps=deps, req=None)  # type: ignore[arg-type]
             outcome = await BuscarDatos().run({"texto": case["q"]}, ctx)
             await session.rollback()
