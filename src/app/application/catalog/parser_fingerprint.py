@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 # fingerprint that moves for unreconstructable reasons is no better than a date.
 _PARSER_MODULES: tuple[str, ...] = (
     "app.application.pipeline.parsers.column_normalization",
+    # La inferencia de encabezado vivía en `collector_tasks.py`, fuera de esta
+    # lista: el 04-oct-2026 se descubrió que promovía filas de datos a
+    # encabezado y el arreglo no habría movido la versión registrada. G1
+    # habría atribuido al portal un cambio de forma que era nuestro.
+    "app.application.pipeline.parsers.header_inference",
+    "app.application.pipeline.parsers.header_tokens",
     "app.application.pipeline.parsers.header_recovery",
     "app.application.pipeline.parsers.hierarchical_headers",
     "app.application.pipeline.parsers.time_pivot",

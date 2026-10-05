@@ -30,7 +30,7 @@ import psycopg
 from celery.exceptions import SoftTimeLimitExceeded
 from celery.signals import worker_process_init
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DataError, DBAPIError
 
 from app.application.catalog.physical_namer import RawPhysicalName, RawPhysicalNamer
 from app.application.expander import MultiFileExpander
@@ -39,6 +39,52 @@ from app.application.pipeline.parsers import (
     promote_buried_headers,
     time_column_ratio,
     unpivot_if_time_pivoted,
+)
+
+# La inferencia de encabezado vive en la capa de aplicación desde el
+# 04-oct-2026 (ver el docstring del módulo). Los nombres privados se conservan
+# porque los usan este módulo, `_db.py` y los tests.
+from app.application.pipeline.parsers.header_inference import (
+    HEADER_DEGRADED as _HEADER_DEGRADED,
+)
+from app.application.pipeline.parsers.header_inference import (
+    HEADER_INVALID as _HEADER_INVALID,
+)
+from app.application.pipeline.parsers.header_inference import (
+    LAYOUT_SIMPLE as _LAYOUT_SIMPLE,
+)
+from app.application.pipeline.parsers.header_inference import (
+    LAYOUT_WIDE as _LAYOUT_WIDE,
+)
+from app.application.pipeline.parsers.header_inference import (
+    HeaderDecision as _HeaderDecision,
+)
+from app.application.pipeline.parsers.header_inference import (
+    apply_header_decision as _apply_header_decision,
+)
+from app.application.pipeline.parsers.header_inference import (
+    decide_header as _decide_header,
+)
+from app.application.pipeline.parsers.header_inference import (
+    header_quality as _header_quality,  # noqa: F401  (reexportado)
+)
+from app.application.pipeline.parsers.header_inference import (
+    header_quality_label as _header_quality_label,
+)
+from app.application.pipeline.parsers.header_inference import (
+    infer_layout_profile as _infer_layout_profile,  # noqa: F401  (reexportado)
+)
+from app.application.pipeline.parsers.header_inference import (
+    is_placeholder_column_name as _is_placeholder_column_name,
+)
+from app.application.pipeline.parsers.header_inference import (
+    make_unique_columns as _make_unique_columns,
+)
+from app.application.pipeline.parsers.header_inference import (
+    maybe_promote_header_row as _maybe_promote_header_row,  # noqa: F401  (reexportado)
+)
+from app.application.pipeline.parsers.header_inference import (
+    normalize_header_token as _normalize_header_token,
 )
 from app.application.validation.collector_hooks import (
     is_critical as _ws0_is_critical,
@@ -140,16 +186,6 @@ _DOMAINS_SKIP_SSL = frozenset(
 
 
 logger = logging.getLogger(__name__)
-
-_LAYOUT_SIMPLE = "simple_tabular"
-_LAYOUT_PRESENTATION = "presentation_sheet"
-_LAYOUT_MULTILINE = "header_multiline"
-_LAYOUT_SPARSE = "header_sparse"
-_LAYOUT_WIDE = "wide_csv"
-
-_HEADER_GOOD = "good"
-_HEADER_DEGRADED = "degraded"
-_HEADER_INVALID = "invalid"
 
 _OUTCOME_MATERIALIZED_READY = "materialized_ready"
 _OUTCOME_MATERIALIZED_DEGRADED = "materialized_degraded"
@@ -2520,6 +2556,33 @@ def _read_csv_preview(
     return _post_parse_normalize(retry)
 
 
+def _chunk_dtype_conflicts(first_kinds: dict[str, str], chunk_df: pd.DataFrame) -> list[str]:
+    """Columns of a later chunk that the table its first chunk created would corrupt.
+
+    pandas infers dtypes per chunk. A column that was all integers in the first
+    chunk becomes a BIGINT column, and a later chunk with `1.5` in it is not
+    rejected: Postgres rounds it on the assignment cast, silently. Text in a
+    numeric column does fail, but only after the chunks before it were written.
+    Either way the answer is the same — reload the file as text — and it is
+    cheaper to see it coming here than to find it in the data.
+    """
+    conflicts: list[str] = []
+    for column in chunk_df.columns:
+        first = first_kinds.get(str(column))
+        if first not in ("i", "u", "f"):
+            continue
+        series = chunk_df[column]
+        kind = series.dtype.kind
+        if kind == "O":
+            if series.dropna().size:
+                conflicts.append(str(column))
+        elif first in ("i", "u") and kind == "f":
+            values = series.dropna()
+            if values.size and bool((values % 1 != 0).any()):
+                conflicts.append(str(column))
+    return conflicts
+
+
 def _csv_load_inner(
     file_path: str,
     table_name: str,
@@ -2534,23 +2597,31 @@ def _csv_load_inner(
 ) -> tuple[int, list[str], bool]:
     """Inner CSV loading loop.
 
-    Returns ``(total_rows_written, columns, was_truncated)``.
+    Returns ``(total_rows_written, columns, was_truncated)``; ``columns`` are
+    the ones written to the table (the header decided on the first chunk).
     When *max_rows* > 0 the loader stops after writing that many rows.
     When *source_dataset_id* is provided, adds ``_source_dataset_id`` column.
     When *force_append* is True, all chunks use ``if_exists='append'``.
     `write_schema` selects which Postgres schema to materialize into; when
     None the legacy `public` default applies.
+
+    The header is decided ONCE, on the first chunk, and applied as-is to every
+    other chunk. Only the first chunk can create (or, with `force_append`,
+    recreate) the table; a later chunk that does not fit raises
+    `_ChunkAppendError` instead of dropping what is already written.
     """
     total_rows = 0
     columns: list[str] = []
     truncated = False
+    decision: _HeaderDecision | None = None
+    first_kinds: dict[str, str] = {}
 
     def _write_chunk(chunk_df: pd.DataFrame, is_first: bool) -> bool:
         """Write a single chunk, truncating if the cap would be exceeded.
 
         Returns True when the row cap has been reached.
         """
-        nonlocal total_rows, columns, truncated
+        nonlocal total_rows, columns, truncated, decision, first_kinds
         if max_rows:
             remaining = max_rows - total_rows
             if remaining <= 0:
@@ -2559,13 +2630,44 @@ def _csv_load_inner(
             if len(chunk_df) > remaining:
                 chunk_df = chunk_df.iloc[:remaining]
                 truncated = True
+        if is_first or decision is None:
+            chunk_df, decision = _decide_header(chunk_df)
+            first_kinds = {str(c): chunk_df[c].dtype.kind for c in chunk_df.columns}
+        else:
+            chunk_df = _apply_header_decision(chunk_df, decision)
+            conflicts = _chunk_dtype_conflicts(first_kinds, chunk_df)
+            if conflicts:
+                raise _ChunkAppendError(
+                    f"chunk dtypes differ from the first chunk in {conflicts[:5]}"
+                )
         if source_dataset_id:
             chunk_df = chunk_df.assign(_source_dataset_id=source_dataset_id)
         if force_append:
             mode = "append"
         else:
             mode = "replace" if is_first else "append"
-        _to_sql_safe(chunk_df, table_name, engine, schema=write_schema, if_exists=mode, index=False)
+        if is_first:
+            _to_sql_safe(
+                chunk_df, table_name, engine, schema=write_schema, if_exists=mode, index=False
+            )
+        else:
+            try:
+                _to_sql_safe(
+                    chunk_df,
+                    table_name,
+                    engine,
+                    schema=write_schema,
+                    if_exists=mode,
+                    index=False,
+                    allow_recreate=False,
+                )
+            except _ChunkAppendError:
+                raise
+            except DataError as exc:
+                # Text in a column the first chunk typed as numeric.
+                raise _ChunkAppendError(
+                    f"chunk append to {table_name} failed: {str(exc)[:300]}"
+                ) from exc
         total_rows += len(chunk_df)
         if is_first:
             columns = list(chunk_df.columns)
@@ -2599,67 +2701,6 @@ def _drop_table_if_exists(engine, table_name: str):
     with engine.begin() as conn:
         conn.execute(text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))  # noqa: S608
     logger.info("Dropped table %s for schema refresh", table_name)
-
-
-_PG_NAME_LIMIT = 63
-
-
-def _truncate_utf8_bytes(s: str, byte_limit: int) -> str:
-    """Truncate string to fit within byte_limit when UTF-8 encoded.
-
-    Postgres truncates identifiers at 63 bytes (NAMEDATALEN-1), not chars.
-    Multi-byte chars (e.g. acentos: 'á' = 2 bytes) caused two distinct
-    Python strings to collide in byte-space, raising DuplicateColumn.
-    """
-    encoded = s.encode("utf-8")
-    if len(encoded) <= byte_limit:
-        return s
-    return encoded[:byte_limit].decode("utf-8", errors="ignore")
-
-
-def _make_unique_columns(columns) -> list[str]:
-    """Normalize column names and guarantee uniqueness after cleanup.
-
-    Names are truncated to Postgres' 63-byte identifier limit *before*
-    dedup, using UTF-8 byte length (not char length) to match what
-    Postgres actually does. Without this, two long names that share their
-    first 63 chars look distinct in Python but collide once Postgres
-    truncates them at CREATE TABLE, raising DuplicateColumn. When
-    truncation creates a collision, the candidate is suffixed `_N` while
-    reserving space so the final name still fits in 63 bytes.
-    """
-    used: set[str] = set()
-    counters: dict[str, int] = {}
-    normalized: list[str] = []
-
-    for idx, raw in enumerate(columns):
-        if pd.isna(raw):
-            base = f"col_{idx}"
-        else:
-            base = str(raw).replace("\xa0", "").strip()
-            if not base or base.lower() == "nan":
-                base = f"col_{idx}"
-
-        if len(base.encode("utf-8")) > _PG_NAME_LIMIT:
-            base = _truncate_utf8_bytes(base, _PG_NAME_LIMIT)
-
-        counters[base] = counters.get(base, 0) + 1
-        if counters[base] == 1:
-            candidate = base
-        else:
-            suffix = f"_{counters[base]}"
-            trunc = _truncate_utf8_bytes(base, max(1, _PG_NAME_LIMIT - len(suffix)))
-            candidate = f"{trunc}{suffix}"
-        while candidate in used:
-            counters[base] += 1
-            suffix = f"_{counters[base]}"
-            trunc = _truncate_utf8_bytes(base, max(1, _PG_NAME_LIMIT - len(suffix)))
-            candidate = f"{trunc}{suffix}"
-
-        used.add(candidate)
-        normalized.append(candidate)
-
-    return normalized
 
 
 def _serialize_nested_value(value):
@@ -2697,13 +2738,6 @@ def _serialize_structured_cells(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @dataclass(frozen=True)
-class _LayoutCandidate:
-    profile: str
-    columns: list[str]
-    rows_consumed: int
-
-
-@dataclass(frozen=True)
 class _CollectorRunOutcome:
     result_kind: str
     cached_status: str
@@ -2712,285 +2746,7 @@ class _CollectorRunOutcome:
     should_prune_open: bool = False
 
 
-def _is_placeholder_column_name(value: object) -> bool:
-    text_value = str(value or "").strip()
-    if not text_value:
-        return True
-    lowered = text_value.lower()
-    if lowered.startswith("unnamed:"):
-        return True
-    if re.fullmatch(r"col_[0-9]+", lowered):
-        return True
-    if re.fullmatch(r"[0-9]+", lowered):
-        return True
-    return False
-
-
-def _header_quality(columns) -> tuple[int, int, int]:
-    normalized = [str(col or "").strip() for col in columns]
-    placeholder_count = sum(1 for col in normalized if _is_placeholder_column_name(col))
-    alpha_count = sum(1 for col in normalized if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", col or ""))
-    nonempty_count = sum(1 for col in normalized if col)
-    return placeholder_count, alpha_count, nonempty_count
-
-
-def _header_numeric_count(columns) -> int:
-    return sum(
-        1
-        for col in (str(col or "").strip() for col in columns)
-        if re.fullmatch(r"[0-9]+", col or "")
-    )
-
-
-def _header_quality_label(columns) -> str:
-    total_columns = max(len(columns), 1)
-    placeholder_count, alpha_count, nonempty_count = _header_quality(columns)
-    numeric_count = _header_numeric_count(columns)
-    placeholder_ratio = placeholder_count / total_columns
-    numeric_ratio = numeric_count / total_columns
-    min_nonempty = 1 if total_columns <= 2 else max(3, int(total_columns * 0.4))
-
-    if placeholder_ratio >= 0.35 or nonempty_count < min_nonempty:
-        return _HEADER_INVALID
-    if (
-        placeholder_count > 0
-        or numeric_ratio >= 0.25
-        or alpha_count < max(2, int(total_columns * 0.2))
-    ):
-        return _HEADER_DEGRADED
-    return _HEADER_GOOD
-
-
-def _normalize_header_token(value: object) -> str:
-    if pd.isna(value):
-        return ""
-    text_value = str(value).replace("\xa0", " ").strip()
-    if not text_value or text_value.lower() == "nan":
-        return ""
-    return re.sub(r"\s+", " ", text_value)
-
-
-def _forward_fill_header_tokens(values) -> list[str]:
-    filled: list[str] = []
-    last_seen = ""
-    for value in values:
-        token = _normalize_header_token(value)
-        if token and not _is_placeholder_column_name(token):
-            last_seen = token
-            filled.append(token)
-        else:
-            filled.append(last_seen if last_seen else token)
-    return filled
-
-
-def _token_looks_like_data(token: str) -> bool:
-    normalized = token.strip()
-    if not normalized:
-        return False
-    if re.fullmatch(r"[-+]?[\d.,/%]+", normalized):
-        return True
-    if re.fullmatch(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", normalized):
-        return True
-    return False
-
-
-def _row_looks_like_header(row: list[object]) -> bool:
-    tokens = [_normalize_header_token(value) for value in row]
-    nonempty = [token for token in tokens if token]
-    if not nonempty:
-        return False
-
-    placeholder_count = sum(1 for token in nonempty if _is_placeholder_column_name(token))
-    alpha_count = sum(1 for token in nonempty if re.search(r"[A-Za-zÁ-ÿ]", token))
-    dataish_count = sum(1 for token in nonempty if _token_looks_like_data(token))
-
-    if placeholder_count >= max(1, int(len(nonempty) * 0.6)):
-        return False
-    if alpha_count < max(1, int(len(nonempty) * 0.4)):
-        return False
-    if dataish_count > max(1, int(len(nonempty) * 0.5)):
-        return False
-    return True
-
-
-def _row_has_hierarchy_signal(row: list[object]) -> bool:
-    tokens = [
-        token
-        for token in (_normalize_header_token(value) for value in row)
-        if token and not _is_placeholder_column_name(token)
-    ]
-    if not tokens:
-        return False
-    if len(tokens) != len(row):
-        return True
-    return len(set(tokens)) < len(tokens)
-
-
-def _combine_header_rows(rows: list[list[object]], *, sparse: bool = False) -> list[str]:
-    prepared_rows: list[list[str]] = []
-    for row in rows:
-        tokens = [_normalize_header_token(value) for value in row]
-        if sparse:
-            tokens = _forward_fill_header_tokens(tokens)
-        prepared_rows.append(tokens)
-
-    combined: list[str | None] = []
-    for col_values in zip(*prepared_rows, strict=False):
-        parts: list[str] = []
-        for token in col_values:
-            if not token or _is_placeholder_column_name(token):
-                continue
-            if parts and token == parts[-1]:
-                continue
-            parts.append(token)
-        combined.append(" / ".join(parts) if parts else None)
-    return _make_unique_columns(combined)
-
-
-def _candidate_is_meaningfully_better(
-    current_columns: list[str],
-    candidate_columns: list[str],
-    *,
-    rows_consumed: int,
-) -> bool:
-    total_columns = max(len(current_columns), 1)
-    current_placeholder, current_alpha, current_nonempty = _header_quality(current_columns)
-    candidate_placeholder, candidate_alpha, candidate_nonempty = _header_quality(candidate_columns)
-
-    if candidate_nonempty < max(3, int(total_columns * 0.3)):
-        return False
-
-    if candidate_placeholder <= max(0, current_placeholder - 2) and candidate_alpha >= max(
-        3, current_alpha
-    ):
-        return True
-
-    if (
-        current_placeholder >= max(2, int(total_columns * 0.35))
-        and candidate_placeholder <= max(1, int(total_columns * 0.15))
-        and candidate_alpha >= max(2, current_alpha - 1)
-    ):
-        return True
-
-    if (
-        rows_consumed >= 2
-        and candidate_placeholder < current_placeholder
-        and candidate_alpha > current_alpha
-    ):
-        return True
-
-    return False
-
-
-def _infer_layout_profile(
-    df: pd.DataFrame,
-    *,
-    max_candidate_rows: int = 5,
-) -> _LayoutCandidate:
-    current_columns = _make_unique_columns(df.columns)
-    best = _LayoutCandidate(profile=_LAYOUT_SIMPLE, columns=current_columns, rows_consumed=0)
-
-    candidate_rows = min(max_candidate_rows, len(df))
-    if df.empty or candidate_rows == 0:
-        return best
-
-    for idx in range(candidate_rows):
-        row_values = list(df.iloc[idx])
-        if not _row_looks_like_header(row_values):
-            break
-        if idx > 0:
-            break
-        promoted_columns = _make_unique_columns(df.iloc[idx])
-        if _candidate_is_meaningfully_better(
-            current_columns,
-            promoted_columns,
-            rows_consumed=idx + 1,
-        ):
-            best = _LayoutCandidate(
-                profile=_LAYOUT_PRESENTATION,
-                columns=promoted_columns,
-                rows_consumed=idx + 1,
-            )
-
-    header_like_prefix = 0
-    for idx in range(candidate_rows):
-        if _row_looks_like_header(list(df.iloc[idx])):
-            header_like_prefix += 1
-        else:
-            break
-
-    for row_count in (2,):
-        if candidate_rows < row_count:
-            continue
-        if header_like_prefix < row_count:
-            continue
-        header_rows = [list(df.iloc[idx]) for idx in range(row_count)]
-        if _row_has_hierarchy_signal(header_rows[0]):
-            combined_columns = _combine_header_rows(header_rows, sparse=False)
-            if _candidate_is_meaningfully_better(
-                current_columns,
-                combined_columns,
-                rows_consumed=row_count,
-            ):
-                best = _LayoutCandidate(
-                    profile=_LAYOUT_MULTILINE,
-                    columns=combined_columns,
-                    rows_consumed=row_count,
-                )
-        if any(_normalize_header_token(value) == "" for row in header_rows for value in row):
-            sparse_columns = _combine_header_rows(header_rows, sparse=True)
-            if _candidate_is_meaningfully_better(
-                current_columns,
-                sparse_columns,
-                rows_consumed=row_count,
-            ):
-                best = _LayoutCandidate(
-                    profile=_LAYOUT_SPARSE,
-                    columns=sparse_columns,
-                    rows_consumed=row_count,
-                )
-
-    return best
-
-
-def _maybe_promote_header_row(df: pd.DataFrame, *, max_candidate_rows: int = 5) -> pd.DataFrame:
-    if df.empty:
-        return df
-
-    candidate = _infer_layout_profile(df, max_candidate_rows=max_candidate_rows)
-    if candidate.rows_consumed == 0:
-        return df
-
-    current_columns = _make_unique_columns(df.columns)
-    current_placeholder, current_alpha, _ = _header_quality(current_columns)
-    best_placeholder, best_alpha, _ = _header_quality(candidate.columns)
-
-    promoted = df.iloc[candidate.rows_consumed :].reset_index(drop=True).copy()
-    promoted.columns = candidate.columns
-    promoted.attrs["layout_profile"] = candidate.profile
-    promoted.attrs["header_quality"] = _header_quality_label(candidate.columns)
-    logger.info(
-        "Applied layout_profile=%s consuming %s header rows (placeholders %s -> %s, alpha %s -> %s)",
-        candidate.profile,
-        candidate.rows_consumed,
-        current_placeholder,
-        best_placeholder,
-        current_alpha,
-        best_alpha,
-    )
-    return promoted
-
-
-def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize columns using a profile-driven header strategy before SQL writes."""
-    df.columns = _make_unique_columns(df.columns)
-
-    df = _maybe_promote_header_row(df)
-    df.columns = _make_unique_columns(df.columns)
-    df.attrs.setdefault(
-        "layout_profile", _infer_layout_profile(df).profile if not df.empty else _LAYOUT_SIMPLE
-    )
-    df.attrs["header_quality"] = _header_quality_label(df.columns)
+def _flag_wide_layout(df: pd.DataFrame) -> pd.DataFrame:
     # Sprint 1.7: layout flip uses _WIDE_LAYOUT_COLUMN_THRESHOLD (default
     # 50) instead of the heavy-queue routing threshold (600). 53 ready
     # rows in staging had `simple_tabular` despite 100-600 cols — the
@@ -2998,9 +2754,47 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     # timeseries through with the wrong tag.
     if len(df.columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD:
         df.attrs["layout_profile"] = _LAYOUT_WIDE
+    return df
 
+
+def _infer_header(df: pd.DataFrame) -> pd.DataFrame:
+    """Decide the header ONCE per file, at parse time.
+
+    Was part of `_sanitize_columns`, which `_to_sql_safe` runs on every write
+    and every chunk. Re-inferring on each chunk is what promoted data rows of
+    good headers to column names and, in chunked CSVs, made each chunk come out
+    with different columns — append failed, the table was dropped and recreated,
+    and only the last chunk survived (`proyectos_parlamentarios`: 11,089 rows of
+    111,091). Callers that write in chunks use `_decide_header` on the first one
+    and `_apply_header_decision` on the rest.
+    """
+    decided, _decision = _decide_header(df)
+    return _flag_wide_layout(decided)
+
+
+def _sanitize_for_write(df: pd.DataFrame) -> pd.DataFrame:
+    """Write-time normalization only: unique names, JSON cells, column cap.
+
+    Never looks at the rows to guess a header — that was decided at parse time.
+    """
+    df.columns = _make_unique_columns(df.columns)
+    df.attrs.setdefault("layout_profile", _LAYOUT_SIMPLE)
+    df.attrs["header_quality"] = _header_quality_label(df.columns)
+    _flag_wide_layout(df)
     df = _serialize_structured_cells(df)
     return _compact_wide_dataframe(df)
+
+
+def _sanitize_columns(df: pd.DataFrame, *, infer_header: bool = True) -> pd.DataFrame:
+    """Normalize columns before SQL writes; optionally decide the header first.
+
+    `infer_header=True` is for a frame that IS the whole file (or its first
+    chunk). Anything already decided must pass False, or go straight to
+    `_sanitize_for_write`.
+    """
+    if infer_header:
+        df = _infer_header(df)
+    return _sanitize_for_write(df)
 
 
 def _detect_data_header_row(df_raw: pd.DataFrame, *, max_scan: int = 15) -> int:
@@ -3523,6 +3317,17 @@ class _ParseRegression(RuntimeError):
     """
 
 
+class _ChunkAppendError(RuntimeError):
+    """A later chunk of a file could not be appended to the table its first chunk created.
+
+    Raised instead of the DROP + recreate that `_to_sql_safe` does for a whole
+    frame: in a chunked load that recreate kept only the chunk that failed and
+    everything after it, and the catalog went on announcing the full row count
+    (`proyectos_parlamentarios`: 11,089 rows in the table, 111,091 announced).
+    The CSV loader answers it by reloading the whole file as text, once.
+    """
+
+
 def _existing_columns(engine, schema: str | None, table_name: str) -> list[str]:
     """Column names of the table as it stands, or empty if it does not exist."""
     try:
@@ -3546,8 +3351,24 @@ def _existing_columns(engine, schema: str | None, table_name: str) -> list[str]:
         return []
 
 
-def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | None = None, **kwargs):
+def _to_sql_safe(
+    df: pd.DataFrame,
+    table_name: str,
+    engine,
+    *,
+    schema: str | None = None,
+    allow_recreate: bool = True,
+    **kwargs,
+):
     """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs.
+
+    The header is NOT inferred here: it is decided once per file at parse time
+    (`_infer_header` / `_decide_header`). Inferring it on every write is what
+    turned good headers into data rows and chunked CSVs into their last chunk.
+
+    `allow_recreate=False` is for every chunk after the first of one file: a
+    schema mismatch raises `_ChunkAppendError` instead of dropping the table
+    the first chunk created.
 
     Before the write, inspect the existing table schema (if any) for
     drift — column additions, removals, or type shifts — and emit a
@@ -3564,7 +3385,7 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
     """
     if schema is None:
         schema = _current_write_schema.get()
-    df = _sanitize_columns(df)
+    df = _sanitize_for_write(df)
 
     if kwargs.get("if_exists") == "replace":
         drift = _detect_schema_drift(engine, table_name, df, schema=schema)
@@ -3619,6 +3440,14 @@ def _to_sql_safe(df: pd.DataFrame, table_name: str, engine, *, schema: str | Non
                     "duplicatecolumn",
                     "specified more than once",
                 )
+                if any(kw in exc_str for kw in schema_keywords) and not allow_recreate:
+                    # A later chunk of the same file. Its columns were applied
+                    # from the first chunk's decision, so a mismatch here is a
+                    # type or shape problem of this chunk — and dropping the
+                    # table would throw away every chunk already written.
+                    raise _ChunkAppendError(
+                        f"chunk append to {table_name} failed: {str(exc)[:300]}"
+                    ) from exc
                 if any(kw in exc_str for kw in schema_keywords):
                     # Before destroying what is there: is the new reading worse?
                     #
@@ -3832,54 +3661,77 @@ def _load_csv_chunked(
             file_path, encoding=csv_params.get("encoding", "utf-8")
         )
     effective_chunk_size = chunk_size or _CSV_MAX_CHUNK_SIZE
-    try:
-        return _csv_load_inner(
-            file_path,
-            table_name,
-            engine,
-            csv_params,
-            effective_chunk_size,
-            max_rows=MAX_TABLE_ROWS,
-            source_dataset_id=source_dataset_id,
-            force_append=force_append,
-            write_schema=write_schema,
-        )
-    except UnicodeDecodeError:
-        fallback_encoding = csv_params.get("encoding")
-        if fallback_encoding != "latin-1":
-            logger.warning(
-                "CSV decode failed for %s with encoding=%s, retrying with latin-1",
-                file_path,
-                fallback_encoding,
-            )
-            fallback_params = dict(csv_params)
-            fallback_params["encoding"] = "latin-1"
+
+    def _load_once(params: dict) -> tuple[int, list[str], bool]:
+        try:
             return _csv_load_inner(
                 file_path,
                 table_name,
                 engine,
-                fallback_params,
+                params,
                 effective_chunk_size,
                 max_rows=MAX_TABLE_ROWS,
                 source_dataset_id=source_dataset_id,
                 force_append=force_append,
                 write_schema=write_schema,
             )
-        raise
-    except pd.errors.ParserError:
-        logger.info("CSV C-parser failed, retrying with Python engine")
-        csv_params["engine"] = "python"
-        return _csv_load_inner(
-            file_path,
+        except UnicodeDecodeError:
+            fallback_encoding = params.get("encoding")
+            if fallback_encoding != "latin-1":
+                logger.warning(
+                    "CSV decode failed for %s with encoding=%s, retrying with latin-1",
+                    file_path,
+                    fallback_encoding,
+                )
+                fallback_params = dict(params)
+                fallback_params["encoding"] = "latin-1"
+                return _csv_load_inner(
+                    file_path,
+                    table_name,
+                    engine,
+                    fallback_params,
+                    effective_chunk_size,
+                    max_rows=MAX_TABLE_ROWS,
+                    source_dataset_id=source_dataset_id,
+                    force_append=force_append,
+                    write_schema=write_schema,
+                )
+            raise
+        except pd.errors.ParserError:
+            logger.info("CSV C-parser failed, retrying with Python engine")
+            params["engine"] = "python"
+            return _csv_load_inner(
+                file_path,
+                table_name,
+                engine,
+                params,
+                effective_chunk_size,
+                max_rows=MAX_TABLE_ROWS,
+                source_dataset_id=source_dataset_id,
+                force_append=force_append,
+                write_schema=write_schema,
+            )
+
+    try:
+        return _load_once(csv_params)
+    except _ChunkAppendError as exc:
+        # A later chunk did not fit the table the first one created — types
+        # inferred per chunk (BIGINT, then text). Before, `_to_sql_safe`
+        # dropped the table and kept only the tail of the file. Now the whole
+        # file is reloaded with every column as text, which fits by
+        # construction. Not with `force_append`: the first chunk appended to a
+        # table that other resources share, and replaying it would duplicate.
+        if force_append or csv_params.get("dtype") is str:
+            raise
+        logger.warning(
+            "Chunked CSV load into %s hit a chunk that does not fit (%s); "
+            "reloading the whole file as text",
             table_name,
-            engine,
-            csv_params,
-            effective_chunk_size,
-            max_rows=MAX_TABLE_ROWS,
-            source_dataset_id=source_dataset_id,
-            force_append=force_append,
-            write_schema=write_schema,
+            str(exc)[:200],
         )
+        text_params = dict(csv_params)
+        text_params["dtype"] = str
+        return _load_once(text_params)
 
 
 def _csv_chunk_size_for_columns(column_count: int) -> int:
@@ -4009,9 +3861,16 @@ def _load_json_record_map_chunked(
     engine,
     dataset_id: str,
 ) -> tuple[int, list[str], str, bool, str | None]:
-    """Load keyed-record JSON blobs in bounded chunks."""
+    """Load keyed-record JSON blobs in bounded chunks.
+
+    The header is decided on the first chunk; later chunks are aligned to the
+    first chunk's keys and get the same columns, and can never recreate the
+    table (`allow_recreate=False`).
+    """
     total_rows = 0
     columns: list[str] = []
+    source_keys: list[str] = []
+    decision: _HeaderDecision | None = None
     sampled_note: str | None = None
     current_table = table_name
     append_mode = False
@@ -4019,12 +3878,15 @@ def _load_json_record_map_chunked(
     chunk: list[dict] = []
 
     def _flush(rows: list[dict]) -> None:
-        nonlocal total_rows, columns, current_table, append_mode, first_chunk
+        nonlocal total_rows, columns, source_keys, decision, current_table
+        nonlocal append_mode, first_chunk
         if not rows:
             return
         df = pd.json_normalize(rows)
-        df["_source_dataset_id"] = dataset_id
         if first_chunk:
+            source_keys = [str(c) for c in df.columns]
+            df, decision = _decide_header(df)
+            df["_source_dataset_id"] = dataset_id
             current_table, append_mode, routed_status = _route_table_for_schema(
                 engine,
                 dataset_id,
@@ -4044,8 +3906,19 @@ def _load_json_record_map_chunked(
             )
             first_chunk = False
         else:
-            df = df.reindex(columns=columns, fill_value=None)
-            _to_sql_safe(df, current_table, engine, if_exists="append", index=False)
+            if decision is None:  # the first chunk always decides
+                raise RuntimeError("json_record_map: header not decided")
+            df = df.reindex(columns=source_keys, fill_value=None)
+            df = _apply_header_decision(df, decision)
+            df["_source_dataset_id"] = dataset_id
+            _to_sql_safe(
+                df,
+                current_table,
+                engine,
+                if_exists="append",
+                index=False,
+                allow_recreate=False,
+            )
         total_rows += len(df)
 
     for value in _iter_json_record_map_values(file_path):
@@ -6853,6 +6726,10 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                             MAX_TABLE_ROWS,
                         )
                         df = df.iloc[:MAX_TABLE_ROWS]
+                    # The header is decided here, once, from the frame as read. The write
+                    # path no longer guesses it (it used to, on every write) and the
+                    # columns recorded in `columns_json` are now the ones in the table.
+                    df = _infer_header(df)
                     df["_source_dataset_id"] = dataset_id
                     table_name, append_mode, routed_status = _route_table_for_schema(
                         engine,
@@ -6908,6 +6785,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         MAX_TABLE_ROWS,
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
+                df = _infer_header(df)
                 df["_source_dataset_id"] = dataset_id
                 table_name, append_mode, routed_status = _route_table_for_schema(
                     engine,
@@ -7012,6 +6890,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         dataset_id,
                         MAX_TABLE_ROWS,
                     )
+                df = _infer_header(df)
                 df["_source_dataset_id"] = dataset_id
                 table_name, append_mode, routed_status = _route_table_for_schema(
                     engine,
@@ -7093,6 +6972,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         MAX_TABLE_ROWS,
                     )
                     df = df.head(MAX_TABLE_ROWS)
+                df = _infer_header(df)
                 df["_source_dataset_id"] = dataset_id
                 table_name, append_mode, routed_status = _route_table_for_schema(
                     engine,
@@ -7138,6 +7018,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         dataset_id,
                         MAX_TABLE_ROWS,
                     )
+                df = _infer_header(df)
                 df["_source_dataset_id"] = dataset_id
                 table_name, append_mode, routed_status = _route_table_for_schema(
                     engine,
@@ -7190,6 +7071,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                         MAX_TABLE_ROWS,
                     )
                     df = df.iloc[:MAX_TABLE_ROWS]
+                df = _infer_header(df)
                 df["_source_dataset_id"] = dataset_id
                 table_name, append_mode, routed_status = _route_table_for_schema(
                     engine,
@@ -7418,17 +7300,15 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 }
 
             finalize_layout_profile = (
-                (getattr(df, "attrs", {}) or {}).get("layout_profile")
-                if "df" in locals()
-                else (
-                    _LAYOUT_WIDE if len(columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE
-                )
-            )
-            finalize_header_quality = (
-                (getattr(df, "attrs", {}) or {}).get("header_quality")
-                if "df" in locals()
-                else _header_quality_label(columns)
-            )
+                (getattr(df, "attrs", {}) or {}).get("layout_profile") if "df" in locals() else None
+            ) or _LAYOUT_SIMPLE
+            if len(columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD:
+                finalize_layout_profile = _LAYOUT_WIDE
+            # From the columns actually written (the decided header plus the
+            # lineage column), never from a frame's attrs: in the raw path those
+            # attrs lived on a copy and never came back, so the label was
+            # computed from whatever the parser read before writing.
+            finalize_header_quality = _header_quality_label(columns)
             finalize_result = _finalize_cached_dataset(
                 engine,
                 dataset_id=dataset_id,
