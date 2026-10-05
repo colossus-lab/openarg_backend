@@ -27,16 +27,8 @@ from decimal import Decimal
 from typing import Any
 
 from app.application.answers.aggregates import (
-    COLUMNAS_DE_CONTROL,
-    FILAS,
-    FILAS_CON_VALOR,
-    FILAS_CON_VALOR_TOTAL,
-    FILAS_TOTAL,
     FILTER_OPERATORS,
     OPERATIONS,
-    AggregateRequest,
-    build_aggregate_query,
-    numeric_columns,
 )
 from app.application.answers.aggregates import (
     MAX_FILTERS as MAX_AGG_FILTERS,
@@ -55,8 +47,9 @@ from app.application.answers.tools.base import (
 )
 from app.application.catalog.collapse import collapse_hits
 from app.application.catalog.national_prior import national_prior
+from app.application.consultas.agregar import PedidoAgregado, agregar
 from app.application.consultas.fechas import aviso_formato_guardado
-from app.application.consultas.filtros import leer_filtros, notas_de_filtros, validar_filtros
+from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import Preparado, describir_periodo, ejecutar, preparar
 from app.application.consultas.sugerencias import diagnosticar_vacio
 from app.application.public_catalog import (
@@ -67,7 +60,6 @@ from app.application.public_catalog import (
     is_internal_column,
     resolve_date_column,
     resolve_table,
-    visible_types,
 )
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.agent_llm import AgentTool
@@ -201,14 +193,6 @@ def _data_result(
             **({"description": table.mart.description} if table.mart else {}),
         },
     )
-
-
-def _filas_del_calculo(rows: list[dict[str, Any]], por_grupo: str, de_todos: str) -> int:
-    """Sobre cuántas filas se calculó: el total de todos los grupos si la consulta
-    lo trae (``aggregates.FILAS_TOTAL``), si no la suma de las filas recibidas."""
-    if rows[0].get(de_todos) is not None:
-        return int(rows[0][de_todos])
-    return sum(int(r.get(por_grupo) or 0) for r in rows)
 
 
 # Columnas que se muestran de cada tabla en la búsqueda. Un dataset puede traer
@@ -679,155 +663,79 @@ class Calcular:
         groups = args.get("agrupar_por") or []
         if not isinstance(raw_filters, list) or not isinstance(groups, list):
             raise ToolInputError("`filtros` y `agrupar_por` son listas.")
+
+        async def run_sql(sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+            return await _run_sql(sandbox, sql, params)
+
         try:
-            filters = validar_filtros(
-                leer_filtros(raw_filters, MAX_AGG_FILTERS),
-                visible_types([c for c, _ in types], types),
-            )
-            req = AggregateRequest(
-                table=table.name,
-                column_types=types,
-                operacion=str_arg(args, "operacion", required=True, max_len=20) or "",
-                columna=str_arg(args, "columna", max_len=200),
-                ponderar_por=str_arg(args, "ponderar_por", max_len=200),
-                agrupar_por=[str(g) for g in groups],
-                filtros=filters,
-                desde=str_arg(args, "desde", max_len=10),
-                hasta=str_arg(args, "hasta", max_len=10),
-                orden=str_arg(args, "orden", max_len=4) or "desc",
-                limite=int_arg(args, "limite", 50, 1, 200),
-                columna_fecha=str_arg(args, "columna_fecha", max_len=200),
-                ordenar_por=str_arg(args, "ordenar_por", max_len=200),
-            )
-            # Primero valida (puro); después mira el formato de los números y
-            # las estadísticas de los filtros, y arma la consulta definitiva.
-            query = build_aggregate_query(req)
-            prep = await preparar(
+            res = await agregar(
                 sandbox,
-                table.name,
-                query.tipos,
-                query.filtros,
-                numericas=numeric_columns(req),
-                row_count=table.row_count,
-                fecha=query.fecha if (query.desde or query.hasta) else None,
-            )
-            query = build_aggregate_query(
-                replace(
-                    req,
-                    filtros=prep.filtros,
-                    tolerante=prep.tolerante,
-                    formatos=prep.formatos,
-                    formato_fecha=prep.formato_fecha,
-                )
+                PedidoAgregado(
+                    tabla=table.name,
+                    tipos=types,
+                    operacion=str_arg(args, "operacion", required=True, max_len=20) or "",
+                    columna=str_arg(args, "columna", max_len=200),
+                    ponderar_por=str_arg(args, "ponderar_por", max_len=200),
+                    agrupar_por=[str(g) for g in groups],
+                    filtros=raw_filters,
+                    desde=str_arg(args, "desde", max_len=10),
+                    hasta=str_arg(args, "hasta", max_len=10),
+                    orden=str_arg(args, "orden", max_len=4) or "desc",
+                    limite=int_arg(args, "limite", 50, 1, 200),
+                    columna_fecha=str_arg(args, "columna_fecha", max_len=200),
+                    ordenar_por=str_arg(args, "ordenar_por", max_len=200),
+                    filas_tabla=table.row_count,
+                ),
+                run_sql,
             )
         except CatalogRequestError as exc:
             raise ToolInputError(str(exc)) from None
-        rows = await _run_sql(sandbox, query.sql, query.params)
-        what = req.operacion + (f" de {req.columna}" if req.columna else "")
-        if req.ponderar_por:
-            what += f" ponderado por {req.ponderar_por}"
+        req, query, what = res.req, res.query, res.calculo
         title = f"{table.title} — {what}"
         base: dict[str, Any] = {
             "tabla": table.name,
             "calculo": what,
             "agrupado_por": req.agrupar_por,
         }
-
-        truncado = len(rows) > query.limite
-        rows = rows[: query.limite]
-        # Sin las columnas de control (un sandbox de prueba que no las
-        # devuelve) se sigue como antes: no se sabe cuántas filas entraron.
-        controlado = bool(rows) and FILAS in rows[0]
-        total = _filas_del_calculo(rows, FILAS, FILAS_TOTAL) if controlado else None
-        con_valor = (
-            _filas_del_calculo(rows, FILAS_CON_VALOR, FILAS_CON_VALOR_TOTAL)
-            if controlado and FILAS_CON_VALOR in rows[0]
-            else None
-        )
-        # Con más grupos que `limite` y sin el total de todos los grupos (un
-        # sandbox que no lo devuelve), la suma es sólo de los grupos
-        # mostrados: no se la presenta como el total del cálculo.
-        parcial = truncado and not (rows and rows[0].get(FILAS_TOTAL) is not None)
+        total, parcial = res.filas_usadas, res.parcial
         clave_filas = "filas_usadas_en_grupos_mostrados" if parcial else "filas_usadas"
-        notas: list[str] = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
-        aviso_fecha = aviso_formato_guardado(query.fecha) if (query.desde or query.hasta) else None
-        if aviso_fecha:
-            notas.append(aviso_fecha)
 
-        if not rows or total == 0:
-            # Ninguna fila cumplió los filtros: no hay valor que citar. Antes
-            # salía `valor: 0` (conteo) o `None` (suma) como un dato más.
-            try:
-                diag = await diagnosticar_vacio(
-                    sandbox,
-                    tabla=table.name,
-                    tipos=query.tipos,
-                    filtros=query.filtros,
-                    fecha=query.fecha,
-                    desde=query.desde,
-                    hasta=query.hasta,
-                    tolerante=prep.tolerante,
-                    formatos=prep.formatos,
-                    stats=prep.stats,
-                    filas_estimadas=prep.filas_estimadas,
-                )
-            except CatalogRequestError as exc:
-                raise ToolInputError(str(exc)) from None
-            payload = {**base, "filas_usadas": 0, "resultado": None, "aviso": diag.aviso}
-            if diag.sugerencias:
-                payload["sugerencias"] = diag.sugerencias
-            if notas:
-                payload["notas"] = notas
+        if res.vacio:
+            payload = {**base, "filas_usadas": 0, "resultado": None, "aviso": res.aviso}
+            if res.sugerencias:
+                payload["sugerencias"] = res.sugerencias
+            if res.notas:
+                payload["notas"] = res.notas
             return ToolOutcome(
                 to_json(payload),
                 summary=f"Ninguna fila cumplió los filtros en {quoted(table.title, 80)}",
             )
 
-        valued = req.ponderar_por if req.operacion == "conteo" else req.columna
-        if con_valor == 0:
-            payload = {
-                **base,
-                clave_filas: total,
-                "resultado": None,
-                "aviso": (
-                    f"Ninguna de las {total} filas que cumplen los filtros tiene un número "
-                    f"reconocible en {valued!r}: no hay valor que informar."
-                ),
-            }
+        if res.sin_numeros:
+            payload = {**base, clave_filas: total, "resultado": None, "aviso": res.aviso}
             return ToolOutcome(
                 to_json(payload),
-                summary=f"{valued} no tiene números en {quoted(table.title, 80)}",
+                summary=f"{res.columna_valorada} no tiene números en {quoted(table.title, 80)}",
             )
 
-        clean = [{k: v for k, v in r.items() if k not in COLUMNAS_DE_CONTROL} for r in rows]
+        clean = plain_rows(res.grupos)
+        controlado = total is not None
         for_model = [
-            {**c, "filas_usadas": r.get(FILAS)} if controlado else c
-            for c, r in zip(clean, rows, strict=True)
+            {**c, "filas_usadas": n} if controlado else c
+            for c, n in zip(clean, res.filas_por_grupo, strict=True)
         ]
-        avisos: list[str] = []
-        if con_valor is not None and total is not None and con_valor < total:
-            donde = " de los grupos mostrados" if parcial else ""
-            avisos.append(
-                f"Se calculó sobre {con_valor} de {total} filas{donde}: las otras "
-                f"{total - con_valor} no tienen un número reconocible en {valued!r}."
-            )
-        if truncado:
-            avisos.append(
-                f"Hay más de {query.limite} grupos: se muestran los primeros {query.limite} "
-                "según el orden pedido."
-                + ("" if parcial else f" `filas_usadas` ({total}) es de todos los grupos.")
-            )
+        avisos = list(res.avisos)
         if len(for_model) > MAX_ROWS_FOR_MODEL:
             avisos.append(f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(for_model)} grupos.")
-        notas = [*avisos, *notas]
+        notas = [*avisos, *res.notas]
 
         result = _data_result(table, clean, query.sql, title, query.params)
         if total is not None:
             result.metadata[clave_filas] = total
-        if con_valor is not None and not parcial:
-            result.metadata["filas_con_valor"] = con_valor
+        if res.filas_con_valor is not None and not parcial:
+            result.metadata["filas_con_valor"] = res.filas_con_valor
         # Contrato de metadatos (lo lee la verificación de cifras).
-        result.metadata["truncada"] = truncado
+        result.metadata["truncada"] = res.truncado
         payload = {
             **base,
             "columnas": [*req.agrupar_por, "valor", *(["filas_usadas"] if controlado else [])],
