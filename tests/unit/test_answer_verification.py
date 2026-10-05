@@ -320,6 +320,38 @@ def test_lo_que_el_modelo_leyo_fuera_de_la_evidencia_es_contexto() -> None:
     }
 
 
+def test_el_resultado_de_la_operacion_de_variacion_es_evidencia() -> None:
+    """La operación `variacion` de series_tiempo devuelve un DataResult con la
+    variación calculada en código: una cifra que sale de ahí está respaldada,
+    y los niveles de la misma fila no se toman como tasas."""
+    variacion = DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url="https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26",
+        dataset_title="Variación entre 2026-02-01 y 2026-08-01: IPC",
+        format="json",
+        records=[
+            {
+                "serie": IPC,
+                "desde": "2026-02-01",
+                "valor_desde": 10714.6255,
+                "hasta": "2026-08-01",
+                "valor_hasta": 12276.766,
+                "variacion_pct": 14.58,
+            }
+        ],
+        metadata={"units": "variación en %; valores en Índice", "unidad": "porcentaje"},
+    )
+    answer = "De febrero a agosto el índice pasó de 10.714,63 a 12.276,77: la acumulada es 14,58 %."
+    check = verify_figures(answer, [variacion])
+    assert {c.figure.raw: c.status for c in check.checks} == {
+        "10.714,63": "directa",
+        "12.276,77": "directa",
+        "14,58 %": "directa",
+    }
+    assert not any(m.rate for c in check.checks[:2] for m in c.matches)
+
+
 def test_seen_numbers_lee_json_y_texto_argentino() -> None:
     seen = seen_numbers('{"a":49700.26,"b":"1.543,18","c":-0.22,"d":1e-05}')
     assert {49700.26, 1543.18, 0.22, 1e-05} <= set(seen)

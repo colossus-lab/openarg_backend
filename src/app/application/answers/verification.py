@@ -603,10 +603,14 @@ class EvidenceIndex:
                 if not isinstance(record, dict):
                     continue
                 row_seen = False
+                # Una fila que marca sus columnas de tasas (la operación de
+                # variación: `variacion_pct` junto a `valor_desde`) dice cuáles
+                # son; las demás son niveles aunque el resultado diga "%".
+                per_key = any(str(k).endswith("_pct") for k in record)
                 for col, (key, raw) in enumerate(record.items()):
                     if _SKIP_KEY_RE.match(str(key)):
                         continue
-                    rate = rate_result or bool(_RATE_KEY_RE.search(str(key)))
+                    rate = bool(_RATE_KEY_RE.search(str(key))) or (rate_result and not per_key)
                     for value in _to_float(raw):
                         if visible is not None and _key(value) not in visible:
                             continue
