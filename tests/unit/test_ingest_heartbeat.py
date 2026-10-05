@@ -157,3 +157,32 @@ def test_a_sender_without_a_name_is_ignored():
     from app.infrastructure.celery import heartbeat_signals as hs
 
     hs._record(sender=None)
+
+
+# ── cadencias declaradas y techo de holgura ────────────────────
+
+
+def test_declared_cadences_and_the_slack_ceiling_reach_the_query():
+    # Una tarea mensual tardaba 4 meses en tener historia y 90 días en ser
+    # "tarde" (3 x 30). Con la cadencia del beat y el techo de una semana,
+    # salta a los ~38 días desde la primera corrida.
+    engine, ctx = _engine([])
+    find_late(engine, declared={"task:openarg.mensual": 31 * 86400.0})
+    params = ctx.execute.call_args_list[-1][0][1]
+    assert params["declared_ids"] == ["task:openarg.mensual"]
+    assert params["declared_cadences"] == [31 * 86400.0]
+    assert params["max_slack_seconds"] == 7 * 24 * 3600
+
+
+def test_declared_cadences_ignore_empty_or_non_positive_entries():
+    engine, ctx = _engine([])
+    find_late(engine, declared={"": 10.0, "task:a": 0.0, "task:b": -1.0, "task:c": 60.0})
+    params = ctx.execute.call_args_list[-1][0][1]
+    assert params["declared_ids"] == ["task:c"]
+
+
+def test_without_declared_cadences_the_arrays_are_empty():
+    engine, ctx = _engine([])
+    find_late(engine)
+    params = ctx.execute.call_args_list[-1][0][1]
+    assert params["declared_ids"] == [] and params["declared_cadences"] == []
