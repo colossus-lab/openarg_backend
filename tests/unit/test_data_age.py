@@ -19,8 +19,13 @@ from app.application.quality.data_age import (
 
 
 class _Conn:
-    def __init__(self, registry=None, mart=None, raises=False):
+    """Answers each lookup by what it reads: the collector's last read
+    (`cached_datasets`), the registry, the matview's sources (`pg_depend`) or
+    the mart definition."""
+
+    def __init__(self, registry=None, mart=None, raises=False, cached=None, mart_sources=None):
         self.registry, self.mart, self.raises = registry, mart, raises
+        self.cached, self.mart_sources = cached, mart_sources
         self.queried: list[str] = []
 
     def execute(self, stmt, params=None):
@@ -28,9 +33,15 @@ class _Conn:
             raise RuntimeError("pg is down")
         sql = str(stmt)
         self.queried.append(sql)
-        if "raw_table_versions" in sql:
-            return SimpleNamespace(fetchone=lambda: SimpleNamespace(as_of=self.registry))
-        return SimpleNamespace(fetchone=lambda: SimpleNamespace(as_of=self.mart))
+        if "pg_depend" in sql:
+            value = self.mart_sources
+        elif "cached_datasets" in sql:
+            value = self.cached
+        elif "raw_table_versions" in sql:
+            value = self.registry
+        else:
+            value = self.mart
+        return SimpleNamespace(fetchone=lambda: SimpleNamespace(as_of=value))
 
     def rollback(self):
         pass
@@ -82,20 +93,50 @@ def test_mart_falls_back_to_its_source_dates_not_its_rebuild_time():
     """The distinction the whole module exists for.
 
     A mart rebuilt this morning over sources last read in May holds May's data.
-    The registry has no row for a mart view, so the lookup moves on to
-    `mart_definitions.source_data_oldest` — which is recorded from the tables
-    the macros resolved to, never from `last_refreshed_at`.
+    With no source the collector knows, the lookup ends at
+    `mart_definitions.source_data_oldest` — recorded from the tables the
+    macros resolved to, never from `last_refreshed_at`.
     """
     conn = _Conn(registry=None, mart=datetime(2026, 5, 6, tzinfo=UTC))
     age = data_age_for(_Engine(conn), "mart.pobreza_indec_aglomerados")
     assert age is not None
-    assert age.source == "mart"
+    assert age.source == "mart_definition"
     assert age.is_stale
-    # It asked the registry first and only then the mart.
-    assert "raw_table_versions" in conn.queried[0]
+    # It asked the matview's own sources first and only then the definition.
+    assert "pg_depend" in conn.queried[0]
     assert "mart_definitions" in conn.queried[1]
     # And it never consulted the rebuild time.
     assert not any("last_refreshed_at" in q for q in conn.queried)
+
+
+def test_a_table_read_this_morning_is_not_reported_as_may():
+    """Staging, 04-oct: `cache_bcra_cotizaciones` is re-read every day by its
+    vía-B writer, but the registry's `created_at` stayed at 2026-05-05 (the
+    upsert never touches it), so the notice said "mayo de 2026". The last read
+    is `cached_datasets.updated_at`."""
+    conn = _Conn(cached=_ago(0), registry=datetime(2026, 5, 5, tzinfo=UTC))
+    assert staleness_warning(_Engine(conn), "raw.cache_bcra_cotizaciones") is None
+    age = data_age_for(_Engine(conn), "raw.cache_bcra_cotizaciones")
+    assert age is not None and age.source == "cached"
+
+
+def test_a_table_the_collector_does_not_know_falls_back_to_the_registry():
+    conn = _Conn(cached=None, registry=datetime(2026, 5, 6, tzinfo=UTC))
+    age = data_age_for(_Engine(conn), "raw.cache_x")
+    assert age is not None and age.source == "registry"
+    assert "cached_datasets" in conn.queried[0]
+
+
+def test_a_mart_is_as_old_as_its_oldest_source_read():
+    """`presupuesto_consolidado` was rebuilt on 04-oct and its sources read in
+    September: it said "mayo" because `source_data_oldest` froze at build
+    time. Its age now comes from the tables the matview reads today."""
+    conn = _Conn(mart_sources=_ago(29), mart=datetime(2026, 5, 5, tzinfo=UTC))
+    age = data_age_for(_Engine(conn), "mart.presupuesto_consolidado")
+    assert age is not None
+    assert age.source == "mart"
+    assert age.days == 29
+    assert not age.is_stale
 
 
 def test_the_stale_threshold_matches_the_collector_backstop():
