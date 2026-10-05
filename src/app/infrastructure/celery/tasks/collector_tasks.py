@@ -1295,8 +1295,29 @@ def _detect_format_from_url(url: str, metadata_fmt: str) -> str:
     return _ext_map.get(ext, metadata_fmt)
 
 
+def _reparse_on_parser_change() -> bool:
+    """`OPENARG_REPARSE_ON_PARSER_CHANGE=1`: an unchanged file is re-parsed when
+    the parser that loaded its live version is not the current one.
+
+    Off by default, and on purpose: the parser version is a fingerprint of the
+    parser modules, so ANY change to them would send every resource through a
+    full parse, a new raw version, re-embedding and re-enrichment (Bedrock) on
+    its next collection. Targeted backfills use `collect_dataset(...,
+    force_reparse=True)` on a listed set instead (`header_backfill`).
+    """
+    return os.getenv("OPENARG_REPARSE_ON_PARSER_CHANGE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _unchanged_since_last_collect(
-    engine, *, resource_identity: str | None, file_hash: str | None
+    engine,
+    *,
+    resource_identity: str | None,
+    file_hash: str | None,
+    parser_version: str | None = None,
 ) -> str | None:
     """The name of the live table when this exact file is already loaded.
 
@@ -1315,24 +1336,35 @@ def _unchanged_since_last_collect(
     rows. Otherwise a resource whose parse failed — or whose table was dropped
     by a sweep — would be skipped forever on the grounds that its source never
     moved, which is exactly how a gap becomes permanent.
+
+    **Nor is an unchanged file a reason to keep an old parse.** With
+    `parser_version` the key is (file, parser): a live version loaded by a
+    different parser does not count as "already loaded", so a parser fix
+    reaches tables whose source never moves. Without it (the default, see
+    `_reparse_on_parser_change`) the key is the file alone, as before.
     """
     if not resource_identity or not file_hash:
         return None
+    parser_clause = "AND v.parser_version = :pv" if parser_version else ""
+    params: dict[str, object] = {"ri": resource_identity, "h": file_hash}
+    if parser_version:
+        params["pv"] = parser_version
     try:
         with engine.connect() as conn:
             row = conn.execute(
                 text(
-                    """
+                    f"""
                     SELECT v.schema_name, v.table_name, v.row_count
                     FROM public.raw_table_versions v
                     WHERE v.resource_identity = :ri
                       AND v.superseded_at IS NULL
                       AND v.source_file_hash = :h
+                      {parser_clause}
                     ORDER BY v.version DESC
                     LIMIT 1
-                    """
+                    """  # noqa: S608 - parser_clause is one of two literals
                 ),
-                {"ri": resource_identity, "h": file_hash},
+                params,
             ).fetchone()
             if row is None:
                 conn.rollback()
@@ -5931,10 +5963,16 @@ def _size_cap_for_format(declared_format: str | None, *, tier: str = "normal") -
 @celery_app.task(
     name="openarg.collect_data", bind=True, max_retries=3, soft_time_limit=1200, time_limit=1380
 )
-def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
+def collect_dataset(self, dataset_id: str, force_heavy: bool = False, force_reparse: bool = False):
     """
     Descarga un dataset real, lo parsea y lo guarda como tabla SQL.
     Esto permite al Analyst hacer queries SQL reales sobre los datos.
+
+    `force_reparse=True` parsea aunque el archivo sea idéntico al de la versión
+    viva (saltea `_unchanged_since_last_collect` y `already_cached`). Lo usa el
+    backfill de encabezados rotos (`header_backfill`): el archivo nunca estuvo
+    mal, lo leímos mal, así que sin esto un arreglo del parser no le llega
+    nunca a una tabla cuya fuente no cambia.
     """
 
     logger.info(f"Collecting dataset: {dataset_id}")
@@ -6000,9 +6038,12 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             table_name,
             reason=reason,
         )
+        reroute_kwargs: dict[str, Any] = {"force_heavy": True}
+        if force_reparse:
+            reroute_kwargs["force_reparse"] = True
         apply_kwargs: dict[str, Any] = {
             "args": [dataset_id],
-            "kwargs": {"force_heavy": True},
+            "kwargs": reroute_kwargs,
             "queue": queue,
         }
         if countdown is not None:
@@ -6229,7 +6270,7 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
                 {"id": dataset_id},
             ).fetchone()
 
-        if cached:
+        if cached and not force_reparse:
             cached_did = str(cached.dataset_id)
             if cached_did == dataset_id:
                 # Same resource — truly already cached, skip
@@ -6339,11 +6380,21 @@ def collect_dataset(self, dataset_id: str, force_heavy: bool = False):
             # stop here. The download had to happen — the digest is of those
             # bytes — but the parse, the write and the embeddings did not, and
             # those are where the cost is.
-            _unchanged_table = _unchanged_since_last_collect(
-                engine,
-                resource_identity=destination.resource_identity,
-                file_hash=source_file_hash,
-            )
+            if force_reparse:
+                _unchanged_table = None
+                logger.info(
+                    "Dataset %s: force_reparse, parsing even if the file is unchanged",
+                    dataset_id,
+                )
+            else:
+                _unchanged_table = _unchanged_since_last_collect(
+                    engine,
+                    resource_identity=destination.resource_identity,
+                    file_hash=source_file_hash,
+                    parser_version=(
+                        _default_parser_version() if _reparse_on_parser_change() else None
+                    ),
+                )
             if _unchanged_table:
                 # Antes acá sólo se movía `updated_at`, y eso dejaba la fila
                 # reservada colgada en `downloading` para siempre.
