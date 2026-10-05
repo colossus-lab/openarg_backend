@@ -4,7 +4,7 @@ import logging
 import re
 import unicodedata
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -383,6 +383,110 @@ def catalog_mismatches(api_descriptions: Mapping[str, str | None]) -> list[str]:
     return problems
 
 
+# ── pedidos a /series ──────────────────────────────────────
+
+# La documentación dice que `limit` llega a 1000; la API en vivo acepta hasta
+# 5000 (con 10000 responde 400). Las páginas nunca bajan de 500 filas: con una
+# representación, `count` cuenta las observaciones ANTES de transformar y el
+# offset `start` se aplica DESPUÉS (la interanual mensual pierde las primeras
+# 12), así que una página chica pedida en `count − página` puede caer más allá
+# de la última fila transformada y volver vacía.
+_PAGE_MIN = 500
+_PAGE_MAX = 5000
+
+# Con `desde` y una representación, la API calcula la variación DENTRO de la
+# ventana pedida: la interanual con start_date=2026-07-01 vuelve vacía y la
+# mensual pierde el primer mes. Se pide desde 13 meses antes (cubre la
+# interanual, la mensual y la acumulada en el año de cualquier frecuencia) y
+# se recorta acá.
+_LOOKBACK_MONTHS = 13
+
+# La API tiene `percent_change_since_beginning_of_year`, pero la calcula contra
+# ENERO del mismo año, no contra el cierre del anterior: para agosto de 2026 da
+# 17,90 % y la acumulada que publica el INDEC (agosto contra diciembre de 2025)
+# es 21,30 %. Se pierde la variación de enero. Se calcula acá sobre los
+# valores (medido el 04-oct; en 2025 la de la API daba 16,90 % y el INDEC
+# publicó 19,5 %).
+YEAR_TO_DATE = "percent_change_since_beginning_of_year"
+
+_FREQUENCY_NAMES = {
+    "day": "diaria",
+    "week": "semanal",
+    "month": "mensual",
+    "quarter": "trimestral",
+    "semester": "semestral",
+    "year": "anual",
+}
+_ISO_FREQUENCY_NAMES = {
+    "R/P1D": "diaria",
+    "R/P1W": "semanal",
+    "R/P1M": "mensual",
+    "R/P3M": "trimestral",
+    "R/P6M": "semestral",
+    "R/P1Y": "anual",
+}
+
+_DATE_RE = re.compile(r"(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?")
+
+
+def iso_date(text: str | None) -> str | None:
+    """'2020', '2020-03' o '2020-03-15' → fecha ISO completa; None si no es fecha."""
+    if not text:
+        return None
+    match = _DATE_RE.fullmatch(str(text).strip())
+    if not match:
+        return None
+    year, month, day = int(match.group(1)), int(match.group(2) or 1), int(match.group(3) or 1)
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _months_back(iso: str, months: int) -> str:
+    year, month = int(iso[:4]), int(iso[5:7])
+    total = year * 12 + (month - 1) - months
+    return date(total // 12, total % 12 + 1, 1).isoformat()
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    return None
+
+
+def _year_to_date(rows: list[list[Any]]) -> list[list[Any]]:
+    """Variación acumulada en el año, como fracción: valor / último del año anterior − 1.
+
+    Las filas sin dato del año anterior (el primer año de lo traído) quedan
+    afuera, como hace la API con las primeras filas de cualquier variación.
+    """
+    width = max((len(r) for r in rows), default=1) - 1
+    last_by_year: list[dict[int, float]] = [{} for _ in range(width)]
+    out: list[list[Any]] = []
+    for row in rows:
+        year = int(str(row[0])[:4])
+        new_row: list[Any] = [row[0]]
+        for i in range(width):
+            value = row[i + 1] if i + 1 < len(row) else None
+            base = last_by_year[i].get(year - 1)
+            new_row.append(value / base - 1 if value is not None and base else None)
+            if value is not None:
+                last_by_year[i][year] = value
+        if any(v is not None for v in new_row[1:]):
+            out.append(new_row)
+    return out
+
+
 class SeriesTiempoAdapter(ISeriesTiempoConnector):
     def __init__(self, http_client: httpx.AsyncClient) -> None:
         self._http = http_client
@@ -390,7 +494,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
     async def search(self, query: str, limit: int = 10) -> list[dict]:
         try:
             resp = await self._http.get(
-                f"{BASE_URL}/search",
+                f"{BASE_URL}/search/",
                 params={"q": query, "limit": limit},
             )
             resp.raise_for_status()
@@ -404,6 +508,8 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     "description": item["field"].get("description", ""),
                     "units": item["field"].get("units", ""),
                     "frequency": item["field"].get("frequency", ""),
+                    "time_index_start": item["field"].get("time_index_start", ""),
+                    "time_index_end": item["field"].get("time_index_end", ""),
                     "dataset_title": item["dataset"].get("title", ""),
                     "source": item["dataset"].get("source", ""),
                 }
@@ -417,6 +523,11 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 details={"query": query[:100], "reason": str(exc)},
             ) from exc
 
+    async def _get_series(self, params: dict[str, str]) -> dict[str, Any]:
+        resp = await self._http.get(f"{BASE_URL}/series/", params=params)
+        resp.raise_for_status()
+        return resp.json() or {}
+
     async def fetch(
         self,
         series_ids: list[str],
@@ -425,39 +536,89 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
         collapse: str | None = None,
         representation: str | None = None,
         limit: int = 1000,
+        collapse_aggregation: str | None = None,
     ) -> DataResult | None:
+        """Las observaciones MÁS RECIENTES del rango pedido, en orden ascendente.
+
+        La API ordena ascendente y corta en `limit`: en una serie de más
+        observaciones que la página, el primer pedido trae las más viejas
+        (reservas 174.1 terminaba en 2023-04, el tipo de cambio diario en
+        2005-09). Si `count` dice que hay más, se vuelve a pedir la cola con
+        `start = count − página`, en el MISMO orden ascendente. Nunca
+        `sort=desc` ni `last`: combinados con una representación, la API
+        descarta los períodos más recientes (la mensual pierde el último mes y
+        la interanual los últimos 12).
+        """
         try:
+            page = min(max(limit, _PAGE_MIN), _PAGE_MAX)
+            start_iso = iso_date(start_date)
+            query_start = start_date
+            trim_before: str | None = None
+            if representation and start_iso:
+                query_start = _months_back(start_iso, _LOOKBACK_MONTHS)
+                trim_before = start_iso
+            local_ytd = representation == YEAR_TO_DATE
+
             params: dict[str, str] = {
                 "ids": ",".join(series_ids),
                 "format": "json",
-                "limit": str(limit),
+                "limit": str(page),
                 "metadata": "full",
             }
-            if start_date:
-                params["start_date"] = start_date
+            if query_start:
+                params["start_date"] = query_start
             if end_date:
                 params["end_date"] = end_date
-            if representation:
+            if representation and not local_ytd:
                 params["representation_mode"] = representation
             if collapse:
                 params["collapse"] = collapse
+                if collapse_aggregation:
+                    params["collapse_aggregation"] = collapse_aggregation
 
-            resp = await self._http.get(f"{BASE_URL}/series", params=params)
-            resp.raise_for_status()
-            raw = resp.json()
+            raw = await self._get_series(params)
+            data = raw.get("data") or []
+            total = _as_int(raw.get("count"))
+            tail_start = 0
+            if total is not None and len(data) >= page and total > len(data):
+                tail_start = max(0, total - page)
+                raw = await self._get_series({**params, "start": str(tail_start)})
+                data = raw.get("data") or []
+                if not data and tail_start > 0:
+                    # La representación se comió más filas que la página:
+                    # se retrocede una página más (ver _PAGE_MIN).
+                    tail_start = max(0, tail_start - page)
+                    raw = await self._get_series({**params, "start": str(tail_start)})
+                    data = raw.get("data") or []
 
-            if not raw or not raw.get("data"):
+            if not data:
                 return None
 
-            # Build human-readable labels from metadata
-            # meta[0] is the time axis, meta[1..N] are series fields
+            # Se perdió el principio de lo pedido sólo si la cola arranca
+            # después de `desde` (o si no había `desde`: falta el comienzo
+            # de la serie).
+            truncated = tail_start > 0 and (start_iso is None or str(data[0][0])[:10] > start_iso)
+            if local_ytd:
+                data = _year_to_date(data)
+            if trim_before:
+                data = [row for row in data if str(row[0])[:10] >= trim_before]
+            if not data:
+                return None
+
+            # Labels a partir de la metadata: meta[0] es el eje de tiempo
+            # (con la frecuencia de la respuesta), meta[1..N] las series.
             meta_list = raw.get("meta", [])
+            axis = meta_list[0] if meta_list else {}
             id_to_label: dict[str, str] = {}
             field_descriptions: list[str] = []
             field_units = ""
+            representation_units = ""
             dataset_title = ""
+            organism = ""
+            per_series: list[dict[str, Any]] = []
             for m in meta_list[1:]:
                 field = m.get("field", {})
+                ds = m.get("dataset", {})
                 sid = field.get("id", "")
                 label = field.get("description") or field.get("title") or sid
                 if sid:
@@ -466,46 +627,110 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     field_descriptions.append(field["description"])
                 if not field_units and field.get("units"):
                     field_units = field["units"]
+                if not representation_units and field.get("representation_mode_units"):
+                    representation_units = field["representation_mode_units"]
                 if not dataset_title:
-                    ds = m.get("dataset", {})
                     dataset_title = ds.get("title", "")
+                if not organism and ds.get("source"):
+                    organism = ds["source"]
+                if sid:
+                    per_series.append(
+                        {
+                            "id": sid,
+                            "titulo": label,
+                            "fecha_fin_fuente": field.get("time_index_end"),
+                            "actualizada_en_fuente": _as_bool(field.get("is_updated")),
+                            "dias_sin_datos": _as_int(field.get("days_without_data")),
+                            "unidades": field.get("units"),
+                            "frecuencia": _ISO_FREQUENCY_NAMES.get(field.get("frequency", "")),
+                            "organismo": ds.get("source"),
+                        }
+                    )
 
             if not dataset_title:
                 dataset_title = ", ".join(series_ids)
 
-            is_percent = representation == "percent_change"
+            # Toda representación percent_* llega como fracción (0,3354 =
+            # 33,54 %). Antes sólo se escalaba percent_change y la interanual
+            # le llegaba al modelo como 0,3354 con unidades «Índice».
+            is_percent = (representation or "").startswith("percent_change")
             records = []
-            for row in raw["data"]:
+            for row in data:
                 record: dict = {"fecha": row[0]}
                 for idx, sid in enumerate(series_ids):
-                    val = row[idx + 1]
+                    val = row[idx + 1] if idx + 1 < len(row) else None
                     if val is not None and is_percent:
-                        # API returns percent_change as a fraction (0.152 = 15.2%).
-                        # We multiply by 100 so downstream consumers get a human
-                        # number ("15.2"). The unit is signaled via metadata.unit
-                        # and metadata.value_scale so the analyst prompt, charts,
-                        # and UI know not to display "15.2%" as "1520%".
+                        # Se multiplica por 100 para que el modelo, los
+                        # gráficos y la UI reciban "33.54" y no "0.3354"; la
+                        # escala va en metadata.unit / unidad / value_scale.
                         val = round(val * 100, 2)
                     label = id_to_label.get(sid, sid)
                     record[label] = val
                 records.append(record)
 
-            if not records:
-                return None
+            if len(records) > limit:
+                records = records[-limit:]
+                truncated = True
+
+            last_observation = next(
+                (
+                    str(r["fecha"])[:10]
+                    for r in reversed(records)
+                    if any(v is not None for k, v in r.items() if k != "fecha")
+                ),
+                str(records[-1]["fecha"])[:10],
+            )
+            source_ends = [s["fecha_fin_fuente"] for s in per_series if s["fecha_fin_fuente"]]
+            updated_flags = [s["actualizada_en_fuente"] for s in per_series]
+            if any(flag is False for flag in updated_flags):
+                updated: bool | None = False
+            elif updated_flags and all(flag is True for flag in updated_flags):
+                updated = True
+            else:
+                updated = None
+            frequency = _FREQUENCY_NAMES.get(str(axis.get("frequency", ""))) or next(
+                (s["frecuencia"] for s in per_series if s["frecuencia"]), None
+            )
+
+            units = field_units
+            if local_ytd:
+                units = (
+                    "Variación porcentual acumulada en el año (contra el cierre del año anterior)"
+                )
+            elif representation and representation_units:
+                units = representation_units
+            if is_percent:
+                units = f"{units} (en %)" if units else "%"
 
             metadata: dict[str, Any] = {
                 "total_records": len(records),
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "description": "; ".join(field_descriptions),
-                "units": field_units,
+                "units": units,
+                # Contrato de frescura (lo leen el aviso de atraso y la
+                # verificación de cifras). Con varias series, la fecha de la
+                # fuente es la de la más atrasada.
+                "ultima_observacion": last_observation,
+                "frecuencia": frequency,
+                "fecha_fin_fuente": min(source_ends) if source_ends else None,
+                "actualizada_en_fuente": updated,
+                "total_fuente": total,
+                "truncada": truncated,
+                "oficial": True,
+                "series": per_series,
             }
+            if organism:
+                metadata["organismo"] = organism
             if representation:
                 metadata["representation"] = representation
+            if collapse and collapse_aggregation:
+                metadata["agregacion"] = collapse_aggregation
             if is_percent:
-                # Explicit contract for downstream consumers: values are already
-                # scaled to percentage points (e.g., 15.2 means 15.2%).
+                # Contrato explícito: los valores ya están en puntos
+                # porcentuales (15.2 es 15,2 %).
                 metadata["unit"] = "percent"
                 metadata["value_scale"] = "percentage_points"
+                metadata["unidad"] = "porcentaje"
 
             return DataResult(
                 source="series_tiempo",
