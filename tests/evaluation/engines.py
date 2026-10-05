@@ -196,6 +196,13 @@ class EngineOutput:
     # Diagnóstico propio de cada motor (plan, clasificación…). La batería no
     # lo puntúa salvo para la comparación con baselines viejos.
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    # Las advertencias que el canal le muestra al usuario ("Advertencias" en
+    # el MCP): la batería las guarda para poder juzgarlas.
+    warnings: list[str] = field(default_factory=list)
+    # La evidencia fuente por fuente, con sus números: con esto se chequea
+    # que cada fuente citada haya aportado alguna cifra (`fuente_sin_cifra`)
+    # y se puede re-juzgar una corrida sin volver a gastar.
+    evidence_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 class EvalEngine(Protocol):
@@ -212,36 +219,115 @@ class EvalEngine(Protocol):
 
 # Tope del resumen de evidencia para el juez: alcanza para ver las cifras que
 # se citaron sin mandarle al juez tablas enteras.
-_EVIDENCE_MAX_CHARS = 12_000
+_EVIDENCE_MAX_CHARS = 20_000
 # De una tabla larga se muestran el principio y, sobre todo, el final: en una
 # serie el dato que se cita es el último. Con sólo las primeras 12 filas, el
 # juez del 01-oct marcó como inventado el -6,28 % de julio de 2026, que era la
-# última fila.
-_EVIDENCE_HEAD_ROWS = 5
+# última fila. Y el principio tiene que cubrir lo que ve el modelo de una
+# tabla (`MAX_ROWS_FOR_MODEL`, 60 filas): con 5, el juez marcó como
+# inventados los diputados del listado de ckan_004 (0,7-0,8), y desde que el
+# juez vota eso desaprobaría una respuesta correcta.
+_EVIDENCE_HEAD_ROWS = 60
 _EVIDENCE_TAIL_ROWS = 25
 
 
+def _item_summary(r: Any, budget: int) -> str:
+    """Una fuente para el juez, dentro de ``budget`` caracteres.
+
+    La cola entra siempre (es lo que se cita de una serie); el principio,
+    lo que quepa.
+    """
+    title = getattr(r, "dataset_title", "") or ""
+    portal = getattr(r, "portal_name", "") or ""
+    meta = getattr(r, "metadata", {}) or {}
+    records = getattr(r, "records", []) or []
+    total = max(len(records), int(meta.get("total_records") or 0))
+    header = f"## {title} — {portal} ({total} filas"
+    header += f", unidades: {meta['units']})" if meta.get("units") else ")"
+    if meta.get("generated_sql"):
+        header += f"\nSQL: {str(meta['generated_sql'])[:400]}"
+    if len(records) <= _EVIDENCE_HEAD_ROWS + _EVIDENCE_TAIL_ROWS:
+        body = "\n".join(str(rec) for rec in records)
+        room = max(0, budget - len(header) - 1)
+        return header + "\n" + (body if len(body) <= room else "…" + body[-room:])
+    tail = "\n".join(str(rec) for rec in records[-_EVIDENCE_TAIL_ROWS:])
+    room = budget - len(header) - len(tail) - 40
+    head_rows: list[str] = []
+    for rec in records[:_EVIDENCE_HEAD_ROWS]:
+        line = str(rec)
+        if len(line) + 1 > room:
+            break
+        head_rows.append(line)
+        room -= len(line) + 1
+    skipped = len(records) - len(head_rows) - _EVIDENCE_TAIL_ROWS
+    parts = [header, *head_rows, f"… {skipped} filas sin mostrar …", tail]
+    text = "\n".join(parts)
+    return (
+        text if len(text) <= budget else header + "\n…" + tail[-max(0, budget - len(header) - 2) :]
+    )
+
+
 def summarize_evidence(results: list[Any]) -> str:
-    parts: list[str] = []
+    """Lo que el motor tuvo a la vista, para el juez de alucinación.
+
+    Cada fuente tiene su parte del tope: el 05-oct, dos series de 1.000 filas
+    llenaban los 20.000 caracteres y la serie de donde salía el 49.700 de
+    reservas (92.1) quedaba afuera, así que el juez marcaba la cifra como
+    inventada (1,0). Los resultados repetidos (la misma llamada dos veces)
+    se muestran una vez.
+    """
+    unique: list[Any] = []
+    seen: set[tuple[str, str, int, str]] = set()
     for r in results or []:
-        title = getattr(r, "dataset_title", "") or ""
-        portal = getattr(r, "portal_name", "") or ""
+        records = getattr(r, "records", []) or []
+        key = (
+            getattr(r, "dataset_title", "") or "",
+            getattr(r, "portal_url", "") or "",
+            len(records),
+            str(records[-1]) if records else "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(r)
+    if not unique:
+        return ""
+    budget = _EVIDENCE_MAX_CHARS // len(unique) - 2
+    return "\n\n".join(_item_summary(r, budget) for r in unique)[:_EVIDENCE_MAX_CHARS]
+
+
+def evidence_items(results: list[Any]) -> list[dict[str, Any]]:
+    """La evidencia como la cita el motor: título y URL de la fuente, y sus números.
+
+    Las fuentes del agente salen de los mismos ``DataResult`` (título y
+    ``portal_url``), así que la batería puede cruzar cada fuente citada con
+    lo que esa fuente devolvió.
+    """
+    from tests.evaluation.quality_checks import evidence_numbers
+
+    out: list[dict[str, Any]] = []
+    for r in results or []:
         meta = getattr(r, "metadata", {}) or {}
         records = getattr(r, "records", []) or []
-        total = max(len(records), int(meta.get("total_records") or 0))
-        head = f"## {title} — {portal} ({total} filas"
-        head += f", unidades: {meta['units']})" if meta.get("units") else ")"
-        if meta.get("generated_sql"):
-            head += f"\nSQL: {str(meta['generated_sql'])[:400]}"
-        if len(records) > _EVIDENCE_HEAD_ROWS + _EVIDENCE_TAIL_ROWS:
-            skipped = len(records) - _EVIDENCE_HEAD_ROWS - _EVIDENCE_TAIL_ROWS
-            shown = [str(rec) for rec in records[:_EVIDENCE_HEAD_ROWS]]
-            shown.append(f"… {skipped} filas sin mostrar …")
-            shown += [str(rec) for rec in records[-_EVIDENCE_TAIL_ROWS:]]
-        else:
-            shown = [str(rec) for rec in records]
-        parts.append(head + "\n" + "\n".join(shown))
-    return "\n\n".join(parts)[:_EVIDENCE_MAX_CHARS]
+        out.append(
+            {
+                "title": getattr(r, "dataset_title", "") or "",
+                "url": getattr(r, "portal_url", "") or "",
+                "portal": getattr(r, "portal_name", "") or "",
+                "rows": len(records),
+                "total_records": meta.get("total_records"),
+                "last_date": next(
+                    (
+                        str(rec.get("fecha"))
+                        for rec in reversed(records)
+                        if isinstance(rec, dict) and rec.get("fecha")
+                    ),
+                    None,
+                ),
+                "numbers": evidence_numbers(records),
+            }
+        )
+    return out
 
 
 class LegacyGraphEngine:
@@ -312,6 +398,8 @@ class LegacyGraphEngine:
                 "classification": out.get("classification"),
                 "plan_actions": [getattr(s, "action", "") for s in steps],
             },
+            warnings=[str(w) for w in out.get("warnings") or []],
+            evidence_items=evidence_items(out.get("data_results") or []),
         )
 
     async def aclose(self) -> None:
@@ -442,6 +530,8 @@ class AgentEngine:
                 # existen en el agente: no se comparan.
                 "routing_comparable": False,
             },
+            warnings=[str(w) for w in getattr(result, "warnings", None) or []],
+            evidence_items=evidence_items(getattr(result, "evidence", None) or []),
         )
 
     async def aclose(self) -> None:
