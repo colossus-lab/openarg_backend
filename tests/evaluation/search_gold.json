@@ -1,0 +1,560 @@
+{
+ "version": "1.0",
+ "descripcion": "Gold set de búsqueda (04-oct-2026). Cada consulta positiva declara la tabla correcta por título del dataset (regex, sin distinguir mayúsculas) y, si hace falta, el portal: el hit cuenta si un resultado del top-k matchea y tiene al menos una tabla con filas. Las tablas correctas se identificaron por catálogo (título + raw.cached_datasets con row_count > 0) en staging, no con la búsqueda vectorial que se evalúa. Las negativas son datos que OpenArg no tiene (verificado por título en staging): la búsqueda no debería devolver nada por encima de umbral_negativo. Prod no se pudo leer al armarlo; correr run_search_gold.py en prod y revisar a mano los casos que fallen antes de tomarlos como regresión.",
+ "umbral_negativo": 0.62,
+ "calibracion_umbral": "staging, 04-oct-2026, mismo índice y mismas 62 consultas: puntaje del primer resultado de las positivas mediana 0,712 y mínimo 0,578 (Merval); de las negativas mediana 0,546 y máximo 0,674 (Mendoza para 'deuda pública nacional'). Con 0,62 queda una sola positiva por debajo. La búsqueda hoy nunca dice 'no tengo': min_similarity es 0,40.",
+ "casos": [
+  {
+   "id": "busq_001",
+   "q": "salario mínimo vital y móvil",
+   "esperado": [
+    {
+     "titulo": "salario m[ií]nimo,? vital y m[oó]vil"
+    }
+   ]
+  },
+  {
+   "id": "busq_002",
+   "q": "precios de los combustibles en surtidor por estación de servicio",
+   "esperado": [
+    {
+     "titulo": "precios en surtidor"
+    }
+   ]
+  },
+  {
+   "id": "busq_003",
+   "q": "producción de petróleo y gas por pozo",
+   "esperado": [
+    {
+     "titulo": "producci[oó]n de petr[oó]leo y gas"
+    }
+   ]
+  },
+  {
+   "id": "busq_004",
+   "q": "cantidad de viajes con la tarjeta SUBE por día",
+   "esperado": [
+    {
+     "titulo": "\\bSUBE\\b"
+    }
+   ]
+  },
+  {
+   "id": "busq_005",
+   "q": "pasajeros del subte por molinete",
+   "esperado": [
+    {
+     "titulo": "subte: viajes molinetes",
+     "portal": [
+      "caba"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_006",
+   "q": "trenes despachados del subte",
+   "esperado": [
+    {
+     "titulo": "subte: trenes despachados",
+     "portal": [
+      "caba"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_007",
+   "q": "árboles en las veredas de la Ciudad de Buenos Aires",
+   "esperado": [
+    {
+     "titulo": "arbolado p[uú]blico",
+     "portal": [
+      "caba"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_008",
+   "q": "estadísticas criminales por departamento",
+   "esperado": [
+    {
+     "titulo": "\\bSNIC\\b|estad[ií]sticas criminales"
+    }
+   ]
+  },
+  {
+   "id": "busq_009",
+   "q": "padrón de escuelas de todo el país",
+   "esperado": [
+    {
+     "titulo": "establecimientos educativos"
+    }
+   ]
+  },
+  {
+   "id": "busq_010",
+   "q": "graduados universitarios por carrera",
+   "esperado": [
+    {
+     "titulo": "graduados universitarios"
+    }
+   ]
+  },
+  {
+   "id": "busq_011",
+   "q": "casos de dengue por semana epidemiológica",
+   "esperado": [
+    {
+     "titulo": "dengue"
+    }
+   ]
+  },
+  {
+   "id": "busq_012",
+   "q": "listado de hospitales y centros de salud registrados",
+   "esperado": [
+    {
+     "titulo": "establecimientos de salud"
+    }
+   ]
+  },
+  {
+   "id": "busq_013",
+   "q": "empleo registrado en el sector privado por actividad",
+   "esperado": [
+    {
+     "titulo": "empleo registrado|trabajadores registrados"
+    }
+   ]
+  },
+  {
+   "id": "busq_014",
+   "q": "encuesta de viajes y turismo de los hogares",
+   "esperado": [
+    {
+     "titulo": "viajes y turismo de los hogares|EVyTH"
+    }
+   ]
+  },
+  {
+   "id": "busq_015",
+   "q": "encuesta de turismo internacional",
+   "esperado": [
+    {
+     "titulo": "turismo internacional"
+    }
+   ]
+  },
+  {
+   "id": "busq_016",
+   "q": "faena de ganado bovino",
+   "esperado": [
+    {
+     "titulo": "faena"
+    }
+   ]
+  },
+  {
+   "id": "busq_017",
+   "q": "estimaciones de siembra y cosecha de soja y maíz",
+   "esperado": [
+    {
+     "titulo": "estimaciones agr[ií]colas|siembra, cosecha"
+    }
+   ]
+  },
+  {
+   "id": "busq_018",
+   "q": "mapa de inversiones y obras públicas",
+   "esperado": [
+    {
+     "titulo": "mapa de inversiones"
+    }
+   ]
+  },
+  {
+   "id": "busq_019",
+   "q": "beneficiarios de la asignación universal por hijo",
+   "esperado": [
+    {
+     "titulo": "asignaci[oó]n universal por hijo"
+    }
+   ]
+  },
+  {
+   "id": "busq_020",
+   "q": "haber mínimo jubilatorio histórico",
+   "esperado": [
+    {
+     "titulo": "haber m[ií]nimo jubilatorio"
+    }
+   ]
+  },
+  {
+   "id": "busq_021",
+   "q": "gasto en publicidad oficial del gobierno nacional",
+   "esperado": [
+    {
+     "titulo": "publicidad oficial"
+    }
+   ]
+  },
+  {
+   "id": "busq_022",
+   "q": "pauta publicitaria de la Ciudad de Buenos Aires",
+   "esperado": [
+    {
+     "titulo": "pauta publicitaria",
+     "portal": [
+      "caba"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_023",
+   "q": "viajes en bicicletas públicas de la ciudad",
+   "esperado": [
+    {
+     "titulo": "bicicletas p[uú]blicas",
+     "portal": [
+      "caba"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_024",
+   "q": "normativa nacional de Infoleg: leyes y decretos",
+   "esperado": [
+    {
+     "titulo": "infoleg"
+    }
+   ]
+  },
+  {
+   "id": "busq_025",
+   "q": "bloques políticos de la legislatura de Neuquén",
+   "esperado": [
+    {
+     "titulo": "\\bbloques\\b",
+     "portal": [
+      "neuquen_legislatura"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_026",
+   "q": "diputados de la legislatura de Neuquén",
+   "esperado": [
+    {
+     "titulo": "^diputados",
+     "portal": [
+      "neuquen_legislatura"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_027",
+   "q": "deuda pública de la provincia de Mendoza",
+   "esperado": [
+    {
+     "titulo": "deuda p[uú]blica",
+     "portal": [
+      "mendoza"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "busq_028",
+   "q": "desembarques de la pesca marítima por especie",
+   "esperado": [
+    {
+     "titulo": "desembarques"
+    }
+   ]
+  },
+  {
+   "id": "busq_029",
+   "q": "datos del mercado eléctrico mayorista CAMMESA",
+   "esperado": [
+    {
+     "titulo": "CAMMESA"
+    }
+   ]
+  },
+  {
+   "id": "busq_030",
+   "q": "reclamos de usuarios del servicio de gas natural",
+   "esperado": [
+    {
+     "titulo": "reclamos resueltos"
+    }
+   ]
+  },
+  {
+   "id": "busq_031",
+   "q": "importaciones de bienes por sector de actividad",
+   "esperado": [
+    {
+     "titulo": "importaciones de bienes"
+    }
+   ]
+  },
+  {
+   "id": "busq_032",
+   "q": "recaudación tributaria por impuesto",
+   "esperado": [
+    {
+     "titulo": "recaudaci[oó]n tributaria|recaudaci[oó]n"
+    }
+   ]
+  },
+  {
+   "id": "busq_033",
+   "q": "salarios promedio por departamento y sector de actividad",
+   "esperado": [
+    {
+     "titulo": "salarios por departamento"
+    }
+   ]
+  },
+  {
+   "id": "busq_034",
+   "q": "compras y contrataciones electrónicas del Estado",
+   "esperado": [
+    {
+     "titulo": "contrataciones electr[oó]nicas"
+    }
+   ]
+  },
+  {
+   "id": "busq_035",
+   "q": "nacimientos por provincia de residencia de la madre",
+   "esperado": [
+    {
+     "titulo": "nacidos vivos"
+    }
+   ]
+  },
+  {
+   "id": "busq_036",
+   "q": "defunciones registradas en la Argentina",
+   "esperado": [
+    {
+     "titulo": "defunciones"
+    }
+   ]
+  },
+  {
+   "id": "busq_037",
+   "q": "farmacias habilitadas en el país",
+   "esperado": [
+    {
+     "titulo": "farmacias"
+    }
+   ]
+  },
+  {
+   "id": "busq_038",
+   "q": "conectividad aérea entre ciudades argentinas",
+   "esperado": [
+    {
+     "titulo": "conectividad a[eé]rea"
+    }
+   ]
+  },
+  {
+   "id": "busq_039",
+   "q": "estaciones de tren activas",
+   "esperado": [
+    {
+     "titulo": "estaciones de trenes"
+    }
+   ]
+  },
+  {
+   "id": "busq_040",
+   "q": "listado de aeropuertos del país",
+   "esperado": [
+    {
+     "titulo": "aeropuertos"
+    }
+   ]
+  },
+  {
+   "id": "busq_041",
+   "q": "tasa de desocupación de la EPH",
+   "esperado": [
+    {
+     "titulo": "desocupaci[oó]n|desempleo|tasas e indicadores laborales"
+    }
+   ]
+  },
+  {
+   "id": "busq_042",
+   "q": "pobreza e indigencia serie histórica",
+   "esperado": [
+    {
+     "titulo": "pobreza"
+    }
+   ]
+  },
+  {
+   "id": "busq_043",
+   "q": "canasta básica total y alimentaria",
+   "esperado": [
+    {
+     "titulo": "canasta b[aá]sica"
+    }
+   ]
+  },
+  {
+   "id": "busq_044",
+   "q": "índice de precios al consumidor de Mendoza",
+   "esperado": [
+    {
+     "titulo": "precios al consumidor.*mendoza"
+    }
+   ]
+  },
+  {
+   "id": "busq_045",
+   "q": "exportaciones por provincia de origen",
+   "esperado": [
+    {
+     "titulo": "exportaciones por provincia"
+    }
+   ]
+  },
+  {
+   "id": "busq_046",
+   "q": "declaraciones juradas patrimoniales de funcionarios",
+   "esperado": [
+    {
+     "titulo": "declaraciones juradas patrimoniales"
+    }
+   ]
+  },
+  {
+   "id": "busq_047",
+   "q": "personas con discapacidad, estudio nacional 2018",
+   "esperado": [
+    {
+     "titulo": "perfil de las personas con discapacidad"
+    }
+   ]
+  },
+  {
+   "id": "busq_048",
+   "q": "población del censo 2022",
+   "esperado": [
+    {
+     "titulo": "censo nacional de poblaci[oó]n.*2022"
+    }
+   ]
+  },
+  {
+   "id": "busq_049",
+   "q": "femicidios registrados en la Argentina",
+   "esperado": [
+    {
+     "titulo": "femicidio"
+    }
+   ]
+  },
+  {
+   "id": "busq_050",
+   "q": "datos meteorológicos horarios del Servicio Meteorológico Nacional",
+   "esperado": [
+    {
+     "titulo": "meteorol[oó]gic"
+    }
+   ]
+  },
+  {
+   "id": "busq_051",
+   "q": "cotización del índice Merval y de las acciones en la bolsa",
+   "esperado": [
+    {
+     "titulo": "[ií]ndices burs[aá]tiles"
+    }
+   ]
+  },
+  {
+   "id": "busq_052",
+   "q": "pronóstico del tiempo para los próximos días",
+   "esperado": [
+    {
+     "titulo": "pr[oó]n[oó]stico del tiempo"
+    }
+   ]
+  },
+  {
+   "id": "neg_001",
+   "q": "rating de los canales de televisión abierta",
+   "negativo": true,
+   "nota": "0 títulos de audiencia televisiva: 'Registro Único de Audiencias de Gestión de Intereses' con puntaje alto sería basura."
+  },
+  {
+   "id": "neg_002",
+   "q": "resultados de los partidos de fútbol de primera división",
+   "negativo": true,
+   "nota": "Ningún dataset de fútbol."
+  },
+  {
+   "id": "neg_003",
+   "q": "encuestas de intención de voto para las elecciones presidenciales de 2027",
+   "negativo": true,
+   "nota": "Hay resultados de elecciones pasadas (Entre Ríos 2013, provisionales 2017), no encuestas: devolverlos con puntaje alto es basura."
+  },
+  {
+   "id": "neg_004",
+   "q": "precio actual del bitcoin y otras criptomonedas",
+   "negativo": true,
+   "nota": "Ningún dataset de criptomonedas."
+  },
+  {
+   "id": "neg_005",
+   "q": "cantidad de suscriptores de Netflix y plataformas de streaming en Argentina",
+   "negativo": true,
+   "nota": "Ningún dataset de streaming."
+  },
+  {
+   "id": "neg_006",
+   "q": "patentes de invención otorgadas por el INPI",
+   "negativo": true,
+   "nota": "Ningún dataset del INPI (0 títulos con propiedad industrial/patentes/marcas)."
+  },
+  {
+   "id": "neg_007",
+   "q": "montos diarios de coparticipación federal transferidos a cada provincia",
+   "negativo": true,
+   "nota": "Hueco de cobertura del plan (ítem 4.6): 0 títulos con coparticipación."
+  },
+  {
+   "id": "neg_008",
+   "q": "resultados de la quiniela de hoy",
+   "negativo": true,
+   "nota": "0 títulos con quiniela/lotería/juegos de azar."
+  },
+  {
+   "id": "neg_009",
+   "q": "becas Progresar: cantidad de becarios por provincia",
+   "negativo": true,
+   "nota": "0 títulos con beca/progresar."
+  },
+  {
+   "id": "neg_010",
+   "q": "stock de deuda pública nacional",
+   "negativo": true,
+   "nota": "Sólo hay deuda pública de Mendoza y deuda externa privada del BCRA: el plan vio a Mendoza como respuesta a 'deuda pública nacional'."
+  }
+ ]
+}
