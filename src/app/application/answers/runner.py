@@ -2,10 +2,21 @@
 
 Contestar la pregunta es trabajo del motor. Todo lo demás —descartar un
 saludo o una inyección sin gastar el modelo, leer y escribir el caché, cargar
-el historial, verificar las cifras citadas, avisar que un dato es viejo,
-registrar el turno en ``query_analytics``, contar tokens, auditar— hoy está
-repartido entre los nodos del grafo. El motor nuevo no tiene esos nodos, y no
-tendría por qué reimplementarlos: lo hace el runner.
+el historial, avisar que un dato está atrasado, registrar el turno en
+``query_analytics``, contar tokens, auditar— hoy está repartido entre los
+nodos del grafo. El motor nuevo no tiene esos nodos, y no tendría por qué
+reimplementarlos: lo hace el runner.
+
+Las cifras las verifica el agente (``answers.verification``), que es el que
+puede pedirle al modelo una vuelta correctiva. El runner ya no llama a
+``ground_citations``: sin citas estructuradas, lo único que producía era
+"verificación parcial" en toda respuesta con números, sin verificar ninguna.
+
+El aviso de dato atrasado va ARRIBA de la respuesta, en el texto, calculado
+sobre la evidencia que se citó (la fecha de la última observación y su
+frecuencia). Si el texto ya había salido en streaming, se reemplaza
+(``clear_answer`` + el texto final): el chat web muestra lo que le llegó en
+streaming, no el ``answer`` del ``complete``.
 
 Para el grafo actual (``handles_cross_cutting = True``) el runner no repite
 nada de eso; sólo agrega lo que antes vivía en los routers:
@@ -25,12 +36,15 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import replace
+from datetime import date
 from typing import Any
 from urllib.parse import urlparse
 
 from app.application.answers.engine import (
     CHANNEL_WS,
     AnswerEngine,
+    ChunkEvent,
+    ClearAnswerEvent,
     CompleteEvent,
     EngineEvent,
     EngineIncomplete,
@@ -40,13 +54,14 @@ from app.application.answers.engine import (
     StatusEvent,
 )
 from app.application.pipeline.cache_manager import check_cache, write_cache
-from app.application.pipeline.citation_guard import ground_citations
+from app.application.pipeline.citation_guard import coverage_warnings
 from app.application.pipeline.classifiers import classify_request
 from app.application.pipeline.history import (
     load_chat_history,
     load_previous_sources,
     record_terminal_analytics,
 )
+from app.application.quality.data_age import freshness_notices
 from app.infrastructure.audit.audit_logger import audit_query
 
 logger = logging.getLogger(__name__)
@@ -201,14 +216,24 @@ class EngineRunner:
                 return
 
         engine_req = replace(req, history=history, previous_sources=previous_sources)
+        # Lo que el usuario ya tiene en pantalla: si `_finish` cambia el
+        # texto (el aviso de atraso va arriba), hay que reemplazarlo.
+        shown = ""
         async with contextlib.aclosing(self._engine.stream(engine_req)) as events:
             async for event in events:
                 if isinstance(event, CompleteEvent):
                     result = await self._finish(
                         engine_req, event.result, started, cacheable, embedding
                     )
+                    if shown.strip() and _squash(shown) != _squash(result.answer):
+                        yield ClearAnswerEvent()
+                        yield ChunkEvent(result.answer)
                     yield CompleteEvent(result)
                     return
+                if isinstance(event, ChunkEvent):
+                    shown += event.content
+                elif isinstance(event, ClearAnswerEvent):
+                    shown = ""
                 yield event
 
     async def _cache_lookup(self, req: EngineRequest) -> tuple[dict[str, Any] | None, Any]:
@@ -248,22 +273,30 @@ class EngineRunner:
         cacheable: bool,
         embedding: Any,
     ) -> EngineResult:
-        """Limpia y verifica la respuesta del motor, y deja registro del turno."""
+        """Limpia la respuesta del motor, le pone los avisos y deja registro del turno."""
         result.answer = _scrub(result.answer)
         result.sources = [_with_portal(s) for s in result.sources]
         warnings = list(result.warnings)
+        # El atraso se mide sobre lo que aportó cifras (si nada aportó, sobre lo
+        # citado): una fuente citada sólo porque su título aparece en el texto
+        # no pone "Dato atrasado" arriba de una respuesta hecha con datos
+        # frescos de otra.
+        dated = list(result.figure_evidence or result.cited_evidence or result.evidence)
 
         if result.evidence:
             try:
-                citations, extra, confidence = ground_citations(
-                    result.answer, result.citations, result.evidence, result.confidence
-                )
-                result.citations, result.confidence = citations, confidence
-                warnings += [w for w in extra if w not in warnings]
+                warnings += [w for w in coverage_warnings(result.evidence) if w not in warnings]
             except Exception:
-                logger.warning("EngineRunner: citation grounding failed", exc_info=True)
+                logger.warning("EngineRunner: coverage warning failed", exc_info=True)
 
-        stale = await _staleness_line(result.served_table)
+        if dated and result.answer.strip() and result.intent != "clarification":
+            notices = _freshness_notices(dated, req.question)
+            if notices and not result.answer.startswith(notices[0]):
+                result.answer = "\n\n".join([*notices, result.answer])
+
+        # Las tablas del catálogo no traen la fecha de su último dato: para
+        # ellas, cuándo las leyó OpenArg por última vez.
+        stale = await _staleness_line(_served_catalog_table(dated))
         if stale and stale not in warnings:
             warnings.append(stale)
         result.warnings = warnings
@@ -350,8 +383,31 @@ def _with_portal(source: dict[str, Any]) -> dict[str, Any]:
     return {**source, "portal": host} if host else source
 
 
+def _squash(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _freshness_notices(evidence: list[Any], question: str) -> list[str]:
+    """Los avisos de atraso de la evidencia citada. Si falla, no hay aviso."""
+    try:
+        return freshness_notices(evidence, date.today(), question)
+    except Exception:
+        logger.warning("EngineRunner: freshness notices failed", exc_info=True)
+        return []
+
+
+def _served_catalog_table(evidence: list[Any]) -> str | None:
+    """La primera tabla del catálogo (sandbox) entre la evidencia citada."""
+    for r in evidence:
+        if str(getattr(r, "source", "") or "").startswith("sandbox:"):
+            served = (getattr(r, "metadata", None) or {}).get("served_table")
+            if served:
+                return str(served)
+    return None
+
+
 async def _staleness_line(served_table: str | None) -> str | None:
-    """El aviso de dato viejo de la tabla servida. Si falla, no hay aviso."""
+    """Cuándo se leyó por última vez la tabla servida, si hace mucho. Si falla, no hay aviso."""
     if not served_table:
         return None
     try:
