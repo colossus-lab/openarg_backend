@@ -108,7 +108,7 @@
     </table>
     </div>
     <p><strong>Devuelve</strong> las columnas con su tipo, la cantidad de filas, el período cubierto (si tiene fechas), una muestra de 5 filas y la fuente oficial.</p>
-    <p><strong>Frescura:</strong> cuándo leyó OpenArg la tabla de su fuente por última vez, cuál es el último dato de la serie y, si la tabla es una foto sin serie temporal (un padrón, el crédito presupuestario de un ejercicio), su <strong>fecha de corte</strong>. Si hace más de 90 días que no se relee, lo avisa: el portal puede tener datos más nuevos.</p>
+    <p><strong>Frescura:</strong> cuándo leyó OpenArg la tabla de su fuente por última vez, cuál es el último dato de la serie y, si la tabla es una foto sin serie temporal (un padrón, el crédito presupuestario de un ejercicio), su <strong>fecha de corte</strong>. Si el período sale de una muestra (tablas muy grandes), marca el último dato como aproximado; si la tabla tiene fechas pero no se pudo calcular qué período cubre, lo dice en vez de presentarla como vigente. Si hace más de 90 días que no se relee, lo avisa: el portal puede tener datos más nuevos.</p>
 
     <h2 id="obtener_datos"><span class="tool-mode">Datos</span><code>obtener_datos</code></h2>
     <p>Trae filas de una tabla, en CSV. No se escribe SQL: se eligen columnas, período y filtros.</p>
@@ -127,7 +127,7 @@
       </tbody>
     </table>
     </div>
-    <p><strong>Devuelve</strong> las filas en CSV y la fuente oficial con su link. Si hay más filas que las pedidas lo dice y da el <code>offset</code> de la página siguiente. Las filas salen en un orden estable: por fecha (y, entre filas de la misma fecha, en el orden del archivo) o, si la tabla no tiene fecha, en el orden del archivo. Si ninguna fila cumple los filtros, dice qué valores existen.</p>
+    <p><strong>Devuelve</strong> las filas en CSV y la fuente oficial con su link. Si hay más filas que las pedidas lo dice y da el <code>offset</code> de la página siguiente. Con columna de fecha, las filas salen en un orden estable: por fecha y, entre filas de la misma fecha, en el orden del archivo. Sin columna de fecha, el orden del archivo se garantiza sólo en tablas de hasta 50.000 filas; en las más grandes (o si no se sabe cuántas filas tienen) las filas salen en el orden en que se leen, que puede cambiar entre pedidos, y la respuesta lo avisa: para recorrerlas acotá con filtros. La paginación llega hasta <code>offset</code> 10.000. Si ninguna fila cumple los filtros, dice qué valores existen.</p>
     <p class="muted">Para un total, un promedio o un ranking no traigas filas para sumarlas: usá <code>agregar_datos</code>.</p>
 
     <h2 id="agregar_datos"><span class="tool-mode">Datos</span><code>agregar_datos</code></h2>
@@ -216,6 +216,10 @@ curl https://api.openarg.org/api/v1/catalogo/datos \
 curl https://api.openarg.org/api/v1/catalogo/agregar \
   -H "Authorization: Bearer oarg_sk_TU_CLAVE" -H "Content-Type: application/json" \
   -d '{"tabla": "TABLA", "operacion": "suma", "columna": "monto", "agrupar_por": ["provincia"]}'</code></pre></div>
+    <p class="muted">
+      En el JSON, <code>valor</code> y las columnas numéricas son números (no texto), con la
+      precisión de un número de punto flotante.
+    </p>
   </div>
 
   <nav class="next" aria-label="Siguiente">
