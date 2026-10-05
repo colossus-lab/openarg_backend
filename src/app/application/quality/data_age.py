@@ -31,7 +31,9 @@ which is the state we are in today anyway.
   date. Now it is `raw.cached_datasets.updated_at` of the ready row — the last
   read or verification against the source — and, for a mart, the oldest of
   that over the tables the matview actually reads (`pg_depend`), so a mart is
-  as old as its oldest source and never younger.
+  as old as its oldest source and never younger. A source with no ready row
+  counts by its registry date, and one with neither pulls in
+  `source_data_oldest` (05-oct: ignoring it made a mart look fresher).
 - *How old is the observation itself?* (`observation_staleness`,
   `freshness_notices`). A live connector has no table to look up; what it has
   is the date of the last observation and the frequency. "Reservas: USD
@@ -118,23 +120,35 @@ _REGISTRY_SQL = text(
 
 # A mart is as old as the oldest table it reads. The matview's own rewrite rule
 # says which tables those are, today — no need to trust a list recorded at
-# build time. The LEFT JOIN keeps a source with no ready row from making the
-# mart look fresher than it is: it is simply not counted, and if no source has
-# one the mart falls back to `source_data_oldest`.
+# build time. Each source is dated the way it would be if it were served
+# directly: its ready row in `cached_datasets`, else its live version in the
+# registry. A source with neither is counted in `undated`, and the caller then
+# takes the older of this and `source_data_oldest`: ignoring it could make the
+# mart look fresher than it is (staging, 05-oct: `presupuesto_consolidado`
+# said "read today" while one of its 11 sources, with no ready row, was last
+# registered in May). Both joins hit unique indexes — (table_name) and
+# (schema_name, table_name) —; joining the registry on `table_name` alone
+# seq-scanned it and took 10 s on a mart with 287 sources, 49 ms this way.
 _MART_SOURCES_SQL = text(
     """
     WITH src AS (
-        SELECT DISTINCT t.relname AS table_name
+        SELECT DISTINCT tn.nspname AS schema_name, t.relname AS table_name
         FROM pg_class v
         JOIN pg_namespace vn ON vn.oid = v.relnamespace
         JOIN pg_rewrite r ON r.ev_class = v.oid
         JOIN pg_depend d ON d.objid = r.oid AND d.classid = 'pg_rewrite'::regclass
         JOIN pg_class t ON t.oid = d.refobjid AND t.oid <> v.oid
+        JOIN pg_namespace tn ON tn.oid = t.relnamespace
         WHERE vn.nspname = 'mart' AND v.relname = :name AND t.relkind IN ('r', 'p', 'm', 'v')
     )
-    SELECT min(cd.updated_at) AS as_of
+    SELECT min(coalesce(cd.updated_at, rtv.created_at)) AS as_of,
+           count(*) FILTER (WHERE cd.updated_at IS NULL AND rtv.created_at IS NULL) AS undated
     FROM src
-    JOIN raw.cached_datasets cd ON cd.table_name = src.table_name AND cd.status = 'ready'
+    LEFT JOIN raw.cached_datasets cd
+           ON cd.table_name = src.table_name AND cd.status = 'ready'
+    LEFT JOIN public.raw_table_versions rtv
+           ON rtv.schema_name = src.schema_name AND rtv.table_name = src.table_name
+          AND rtv.superseded_at IS NULL
     """
 )
 
@@ -150,6 +164,12 @@ _MART_SQL = text(
 
 def _strip_schema(name: str) -> str:
     return name.split(".")[-1].strip().strip('"')
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
 
 
 def data_age_for(engine: Engine, served: str | None) -> DataAge | None:
@@ -184,7 +204,14 @@ def data_age_for(engine: Engine, served: str | None) -> DataAge | None:
             for source, sql in lookups:
                 params = {"name": name} if source.startswith("mart") else {"table": name}
                 row = conn.execute(sql, params).fetchone()
-                as_of = row.as_of if row else None
+                as_of = _aware(row.as_of) if row else None
+                if source == "mart" and row is not None and row.undated:
+                    # A source we cannot date: the date recorded at build time
+                    # may be older, and the older one wins.
+                    recorded = conn.execute(_MART_SQL, {"name": name}).fetchone()
+                    recorded_at = _aware(recorded.as_of) if recorded else None
+                    if recorded_at is not None and (as_of is None or recorded_at < as_of):
+                        as_of, source = recorded_at, "mart_definition"
                 if as_of is not None:
                     break
             conn.rollback()
@@ -195,8 +222,6 @@ def data_age_for(engine: Engine, served: str | None) -> DataAge | None:
 
     if as_of is None:
         return None
-    if as_of.tzinfo is None:
-        as_of = as_of.replace(tzinfo=UTC)
     days = (datetime.now(UTC) - as_of).days
     return DataAge(as_of=as_of, days=max(days, 0), source=source)
 
