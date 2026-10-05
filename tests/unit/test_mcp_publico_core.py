@@ -187,6 +187,33 @@ class TestModoDatosCore:
         msg = core.error_message(429, "Rate limit exceeded: 30 catalog requests per minute")
         assert "minuto" in msg
 
+    def test_minute_quota_says_how_many_seconds_to_wait(self) -> None:
+        """QW10: el backend manda los segundos reales en `Retry-After`; antes el
+        MCP los descartaba y decía siempre "esperá un minuto"."""
+        msg = core.error_message(
+            429, "Rate limit exceeded: 30 catalog requests per minute", retry_after="17"
+        )
+        assert "esperá 17 segundos" in msg and "30 por minuto" in msg
+        assert "esperá 1 segundo " in core.error_message(429, "2 per minute", retry_after=1)
+
+    @pytest.mark.parametrize("retry_after", [None, "", "mañana", "0", "-5", "99999"])
+    def test_a_useless_retry_after_falls_back_to_a_minute(self, retry_after: str | None) -> None:
+        msg = core.error_message(429, "2 requests per minute", retry_after=retry_after)
+        assert "esperá un minuto" in msg
+
+    def test_the_limits_are_spelled_out_for_the_client(self) -> None:
+        for fragment in (
+            "30 pedidos por minuto",
+            "200 por mes",
+            "2.000",
+            "2 preguntas por minuto",
+            "10 por mes",
+            "100)",
+            "500 filas",
+            "segundos esperar",
+        ):
+            assert fragment in core.LIMITES, fragment
+
     def test_data_mode_passes_our_validation_message(self) -> None:
         msg = core.error_message(404, "No existe esa tabla en el catálogo.", data_mode=True)
         assert msg == "No existe esa tabla en el catálogo."
@@ -258,6 +285,89 @@ class TestModoDatosCore:
     def test_table_shows_the_date_warning(self) -> None:
         out = core.format_table({"tabla": "t", "columnas": [], "aviso_fecha": "formato raro"})
         assert "Aviso: formato raro" in out
+
+    def test_table_shows_its_freshness(self) -> None:
+        """Auditoría 3.4: no había ni fecha de lectura ni fecha de corte."""
+        out = core.format_table(
+            {
+                "tabla": "t",
+                "columnas": [],
+                "frescura": {
+                    "actualizada": "2026-05-09",
+                    "ultimo_dato": "2023-04-01",
+                    "serie": True,
+                    "nota": "OpenArg la leyó de su fuente por última vez hace 149 días.",
+                },
+            }
+        )
+        assert "Último dato: 2023-04-01" in out
+        assert "Leída de la fuente por OpenArg: 2026-05-09" in out
+        assert "Nota: OpenArg la leyó" in out
+        foto = core.format_table(
+            {
+                "tabla": "t",
+                "columnas": [],
+                "frescura": {"actualizada": "2026-10-05", "fecha_corte": "2026-10-05"},
+            }
+        )
+        assert "Fecha de corte: 2026-10-05" in foto and "Último dato" not in foto
+
+    def test_table_without_freshness_keeps_the_old_shape(self) -> None:
+        assert "Frescura" not in core.format_table({"tabla": "t", "columnas": []})
+
+    def test_search_marks_datasets_without_a_table(self) -> None:
+        """QW11: el modelo no puede usarlos con las otras herramientas."""
+        out = core.format_search({"resultados": [{"titulo": "X", "portal": "p", "tablas": []}]})
+        assert "Sin tabla consultable" in out and "sólo el link de descarga" in out
+
+    def test_truncated_rows_give_the_next_offset(self) -> None:
+        out = core.format_rows(
+            {
+                "filas": [{"a": 1}],
+                "columnas": ["a"],
+                "fuente": "X",
+                "truncado": True,
+                "siguiente_offset": 100,
+            }
+        )
+        assert "`offset=100`" in out and "agregar_datos" in out
+
+    def test_aggregate_says_over_how_many_rows(self) -> None:
+        out = core.format_aggregate(
+            {
+                "tabla": "raw.cache_presupuesto_credito_2026",
+                "calculo": "suma de credito_devengado",
+                "columnas": ["jurisdiccion_desc", "valor", "filas_usadas"],
+                "filas": [
+                    {
+                        "jurisdiccion_desc": "Ministerio de Capital Humano",
+                        "valor": 60622921.86,
+                        "filas_usadas": 412,
+                    },
+                ],
+                "filas_usadas": 4905,
+                "fuente": "Crédito 2026",
+                "url": "https://presupuestoabierto.gob.ar/x",
+                "notas": ["Hay más de 1 grupos: se muestran los primeros 1 según el orden pedido."],
+            }
+        )
+        assert "sobre 4.905 filas" in out and "calculado por OpenArg" in out
+        assert "[Crédito 2026](https://presupuestoabierto.gob.ar/x)" in out
+        assert "Ministerio de Capital Humano,60622921.86,412" in out
+        assert "Hay más de 1 grupos" in out
+
+    def test_aggregate_without_rows_is_not_a_zero(self) -> None:
+        out = core.format_aggregate(
+            {
+                "tabla": "t",
+                "calculo": "suma de x",
+                "filas": [],
+                "filas_usadas": 0,
+                "aviso": "Ninguna fila cumple los filtros pedidos. Valores parecidos: «Salud».",
+            }
+        )
+        assert out.startswith("Sin resultado para suma de x") and "«Salud»" in out
+        assert "```csv" not in out
 
 
 class TestClientLabel:
