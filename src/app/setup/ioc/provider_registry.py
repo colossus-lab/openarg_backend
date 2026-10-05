@@ -141,7 +141,11 @@ class LLMProvider(Provider):  # type: ignore[misc]
             ),
         )
 
-    @provide  # type: ignore[untyped-decorator]
+    # APP, no REQUEST: con REQUEST cada búsqueda armaba un boto3.client nuevo,
+    # sin reusar conexiones (un handshake TLS por pedido) y con los timeouts
+    # de 60 s de botocore. El cliente es thread-safe y la caché de Redis que lo
+    # envuelve también es APP.
+    @provide(scope=Scope.APP)  # type: ignore[untyped-decorator]
     def embedding_provider(self, settings: AppSettings, cache: ICacheService) -> IEmbeddingProvider:
         base = BedrockEmbeddingAdapter(
             region=settings.bedrock.REGION,
