@@ -44,6 +44,9 @@ _MAX_VARIABLES = 5
 # Observaciones que se piden cuando no hay `desde`: alcanzan para el último
 # dato, para comparar con hace un par de meses y para el gráfico.
 _VENTANA_RECIENTE = 60
+# Valores publicados por adelantado que se le muestran al modelo (la UVA llega
+# hasta el día 15 del mes siguiente: unas 40 filas).
+_MAX_ADELANTADOS = 45
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,10 @@ class Variable:
     titulo: str
     corto: str  # para los pasos que ve el usuario
     unidades: str
+    # Los valores ya vienen en puntos porcentuales (23,19 = 23,19 %). Va al
+    # contrato de metadatos (`unidad: "porcentaje"`) aunque el catálogo del
+    # BCRA, que también lo dice, no haya respondido.
+    porcentaje: bool = False
 
 
 # Las variables curadas. Los ids salen del catálogo v4
@@ -83,18 +90,21 @@ VARIABLES: dict[str, Variable] = {
         "Tasa BADLAR de bancos privados (BCRA)",
         "tasa BADLAR",
         "% nominal anual",
+        porcentaje=True,
     ),
     "tamar": Variable(
         44,
         "Tasa TAMAR de bancos privados (BCRA)",
         "tasa TAMAR",
         "% nominal anual",
+        porcentaje=True,
     ),
     "tasa_plazo_fijo": Variable(
         12,
         "Tasa de depósitos a plazo fijo a 30 días, promedio de entidades (BCRA)",
         "tasa de plazo fijo",
         "% nominal anual",
+        porcentaje=True,
     ),
     "base_monetaria": Variable(
         15,
@@ -218,14 +228,52 @@ def _resumen(records: list[dict[str, Any]], max_periodos: int) -> tuple[str, lis
     return "resumen_anual", _agrupar(records, 4)[-max_periodos:]
 
 
+def _separar_adelantados(
+    records: list[dict[str, Any]], today: date
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(hasta hoy, posteriores a hoy). UVA, CER e ICL se publican por adelantado."""
+    hoy = today.isoformat()
+    al_dia = [r for r in records if str(r.get("fecha", "")) <= hoy]
+    adelantados = [r for r in records if str(r.get("fecha", "")) > hoy]
+    return al_dia, adelantados
+
+
+def _sin_adelantados(
+    result: DataResult, al_dia: list[dict[str, Any]], adelantados: list[dict[str, Any]]
+) -> None:
+    """Deja en la evidencia sólo lo que ya pasó.
+
+    El DataResult alimenta el gráfico del motor, el aviso de atraso y la
+    verificación de cifras: con los valores de días que no llegaron, el gráfico
+    de la UVA terminaba el 15-oct y ``ultima_observacion`` decía 15-oct un 05-oct.
+    Los adelantados quedan aparte, en la metadata y en lo que ve el modelo.
+    """
+    meta = result.metadata
+    ultima = str(al_dia[-1].get("fecha"))
+    result.records = al_dia
+    meta["total_records"] = len(al_dia)
+    meta["last_updated"] = ultima
+    meta["ultima_observacion"] = ultima
+    meta["publicado_hasta"] = str(adelantados[-1].get("fecha"))
+    meta["publicados_por_adelantado"] = adelantados
+    if str(meta.get("fecha_fin_fuente") or "") > ultima:
+        # La serie llega hasta hoy: lo posterior no es un dato que falte.
+        meta["fecha_fin_fuente"] = ultima
+
+
 def _payload(
-    key: str, var: Variable, result: DataResult, shown: int, today: date, max_periodos: int
+    key: str,
+    var: Variable,
+    result: DataResult,
+    shown: int,
+    max_periodos: int,
+    adelantados: list[dict[str, Any]],
+    max_adelantados: int,
 ) -> dict:
     """Una variable como la ve el modelo: el último dato con su fecha, arriba."""
     records = result.records or []
     meta = result.metadata or {}
-    al_dia = [r for r in records if str(r.get("fecha", "")) <= today.isoformat()]
-    ultimo = al_dia[-1] if al_dia else records[-1]
+    ultimo = records[-1]
     payload: dict[str, Any] = {
         "variable": key,
         "titulo": result.dataset_title,
@@ -237,14 +285,19 @@ def _payload(
         "filas": records[-shown:],
     }
     if len(records) > shown:
-        nombre, resumen = _resumen(al_dia or records, max_periodos)
+        nombre, resumen = _resumen(records, max_periodos)
         payload[nombre] = resumen
-    if len(al_dia) < len(records):
-        # UVA, CER e ICL se conocen por adelantado: el BCRA publica valores de
-        # días que todavía no llegaron. El de hoy es el último que no es futuro.
+    if adelantados:
+        # El de hoy es el último que no es futuro; los que siguen ya los
+        # publicó el BCRA y sirven si preguntan por una fecha que viene.
+        if len(adelantados) > max_adelantados:
+            # Los más cercanos y el último publicado.
+            adelantados = adelantados[: max_adelantados - 1] + adelantados[-1:]
+        payload["publicados_por_adelantado"] = adelantados
         payload["nota"] = (
-            f"El BCRA ya publicó valores hasta el {_fecha_ar(records[-1].get('fecha'))} "
-            "(se conocen por adelantado); el de hoy es `ultimo_dato`."
+            f"El BCRA ya publicó valores hasta el {_fecha_ar(adelantados[-1].get('fecha'))} "
+            "(se conocen por adelantado, van en `publicados_por_adelantado`); el de hoy es "
+            "`ultimo_dato`."
         )
     elif len(records) > shown:
         payload["nota"] = (
@@ -320,6 +373,7 @@ class VariablesBCRA:
         # Que entren todas en el tope de texto de la herramienta.
         shown = min(ultimos, max(10, 200 // len(keys)))
         max_periodos = max(12, 36 // len(keys))
+        max_adelantados = max(10, _MAX_ADELANTADOS // len(keys))
 
         bcra = ctx.deps.bcra
         fetched = await asyncio.gather(
@@ -356,7 +410,16 @@ class VariablesBCRA:
             meta["units"] = meta.get("units") or var.unidades
             meta["frecuencia"] = meta.get("frecuencia") or "diaria"
             meta["oficial"] = True
-            payloads.append(_payload(key, var, got, shown, today, max_periodos))
+            if var.porcentaje:
+                meta["unidad"] = "porcentaje"
+            al_dia, adelantados = _separar_adelantados(got.records, today)
+            if al_dia and adelantados:
+                _sin_adelantados(got, al_dia, adelantados)
+            else:
+                adelantados = []
+            payloads.append(
+                _payload(key, var, got, shown, max_periodos, adelantados, max_adelantados)
+            )
             results.append(got)
 
         if failures == len(keys):

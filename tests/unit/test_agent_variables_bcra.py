@@ -27,10 +27,12 @@ from app.application.answers.tools import build_tools
 from app.application.answers.tools.base import ToolContext, ToolInputError
 from app.application.answers.tools.bcra import VARIABLES, VariablesBCRA
 from app.application.answers.tools.conectores import Cotizaciones
+from app.application.pipeline.chart_builder import build_deterministic_charts
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.ports.llm.agent_llm import AgentTurn, AgentUsage, TextDelta, ToolCall
 from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
-from app.infrastructure.resilience.circuit_breaker import get_circuit_breaker
+from app.infrastructure.resilience import retry as retry_module
+from app.infrastructure.resilience.circuit_breaker import CircuitState, get_circuit_breaker
 from tests.unit.bcra_fake_api import HOY, FakeBCRA
 
 _HOY_AR_REAL = bcra_tool.hoy_ar
@@ -40,9 +42,11 @@ _HOY_AR_REAL = bcra_tool.hoy_ar
 def _hoy_y_circuito(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bcra_tool, "hoy_ar", lambda: HOY)
     monkeypatch.setattr(agent_module, "_record_tokens", lambda *a: None)
-    breaker = get_circuit_breaker("bcra_api")
-    breaker.record_success()
-    breaker.failure_count = 0
+    monkeypatch.setattr(retry_module, "_backoff_delay", lambda *a: 0.0)
+    for name in ("bcra_api", "bcra_api_catalogo"):
+        breaker = get_circuit_breaker(name)
+        breaker.state = CircuitState.CLOSED
+        breaker.failure_count = 0
 
 
 def _ctx(fake: FakeBCRA) -> ToolContext:
@@ -128,6 +132,47 @@ async def test_la_uva_de_hoy_no_es_la_publicada_por_adelantado() -> None:
     assert "adelantado" in payload["nota"]
     assert "15/10/2026" in payload["nota"]
     assert "04/10/2026" in (out.summary or "")
+
+
+async def test_lo_publicado_por_adelantado_no_entra_en_la_evidencia() -> None:
+    """El gráfico de la UVA llegaba al 15-oct y ultima_observacion decía 15-oct
+    un día 05-oct: el DataResult es evidencia, gráfico y aviso de atraso."""
+    out = await _run(FakeBCRA(), variables=["uva"])
+    result = out.results[0]
+    assert result.records[-1]["fecha"] == HOY.isoformat()
+    meta = result.metadata
+    assert meta["ultima_observacion"] == HOY.isoformat()
+    assert meta["fecha_fin_fuente"] == HOY.isoformat()
+    assert meta["total_records"] == len(result.records)
+    assert meta["publicado_hasta"] == "2026-10-15"
+    adelantados = meta["publicados_por_adelantado"]
+    assert adelantados[0]["fecha"] == "2026-10-05" and adelantados[-1]["fecha"] == "2026-10-15"
+    # El modelo igual los ve, aparte.
+    payload = json.loads(out.content)["variables"][0]
+    assert payload["publicados_por_adelantado"][-1]["fecha"] == "2026-10-15"
+    assert all(f["fecha"] <= HOY.isoformat() for f in payload["filas"])
+    charts = json.dumps(build_deterministic_charts(out.results))
+    assert "2026-10-04" in charts and "2026-10-15" not in charts
+
+
+async def test_cinco_variables_con_adelantados_entran_sin_cortar() -> None:
+    out = await _run(
+        FakeBCRA(), variables=["uva", "cer", "icl", "reservas", "dolar_minorista"], ultimos=40
+    )
+    assert "cortado" not in out.content
+    payloads = {p["variable"]: p for p in json.loads(out.content)["variables"]}
+    assert set(payloads) == {"uva", "cer", "icl", "reservas", "dolar_minorista"}
+    cer = payloads["cer"]["publicados_por_adelantado"]
+    assert len(cer) == 10 and cer[-1]["fecha"] == "2026-11-03"
+
+
+async def test_una_tasa_es_porcentaje_aunque_el_catalogo_no_responda() -> None:
+    """La marca `unidad` del contrato salía sólo del catálogo."""
+    out = await _run(FakeBCRA(catalog_down=True), variables=["badlar", "reservas"])
+    metas = {r.metadata["id_variable"]: r.metadata for r in out.results}
+    assert metas[7]["unidad"] == "porcentaje"
+    assert "unidad" not in metas[1]
+    assert {VARIABLES[k].porcentaje for k in ("badlar", "tamar", "tasa_plazo_fijo")} == {True}
 
 
 async def test_con_desde_trae_la_historia() -> None:
