@@ -56,7 +56,7 @@ def table():
         yield engine, name
     finally:
         with engine.begin() as conn:
-            conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))  # noqa: S608
+            conn.execute(text(f'DROP TABLE IF EXISTS public."{name}" CASCADE'))  # noqa: S608
         engine.dispose()
 
 
@@ -109,38 +109,215 @@ def test_csv_por_chunks_llega_entero_y_con_su_encabezado(table, tmp_path):
     assert _count(engine, name) == 230
 
 
-def test_un_chunk_con_texto_en_una_columna_numerica_recarga_como_texto(table, tmp_path):
+def _types(engine, name) -> dict[str, str]:
+    with engine.connect() as conn:
+        return {
+            r[0]: r[1]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = :t"
+                ),
+                {"t": name},
+            ).fetchall()
+        }
+
+
+def _scalar(engine, sql: str):
+    with engine.connect() as conn:
+        return conn.execute(text(sql)).scalar()
+
+
+def _write_csv(path, header: str, rows: list[str]) -> str:
+    path.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+    return str(path)
+
+
+_PARAMS = {"sep": ",", "encoding": "utf-8"}
+
+
+def test_un_chunk_con_texto_en_una_columna_numerica_relee_solo_esa_columna(table, tmp_path):
     """El primer chunk crea `valor` como BIGINT; uno posterior trae `s/d`.
 
-    Antes: o fallaba la colecta o, si el error mencionaba la columna, DROP +
-    recreate y quedaba la cola del archivo. Ahora se recarga entero como texto.
+    Antes del PR: o fallaba la colecta o, si el error mencionaba la columna,
+    DROP + recreate y quedaba la cola del archivo. En la primera versión del PR
+    se recargaba TODO el archivo como texto y `poblacion` también quedaba en
+    TEXT (revisión, hallazgo menor). Ahora se relee sólo `valor` como texto.
     """
     engine, name = table
-    lines = ["provincia,valor"]
-    lines += [f"Provincia {i},{i}" for i in range(120)]
-    lines += ["Provincia s/d,s/d"]
-    lines += [f"Provincia {i},{i}" for i in range(120, 150)]
-    csv_path = tmp_path / "valores.csv"
-    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    rows_ = [f"Provincia {i},{i},{1000 + i}" for i in range(120)]
+    rows_ += ["Provincia s/d,s/d,999"]
+    rows_ += [f"Provincia {i},{i},{1000 + i}" for i in range(120, 150)]
+    csv_path = _write_csv(tmp_path / "valores.csv", "provincia,valor,poblacion", rows_)
 
     rows, columns, truncated = ct._load_csv_chunked(
-        str(csv_path),
+        csv_path,
         name,
         engine,
         chunk_size=40,
         source_dataset_id=DATASET_ID,
-        csv_params_override={"sep": ",", "encoding": "utf-8"},
+        csv_params_override=dict(_PARAMS),
     )
 
     assert (rows, truncated) == (151, False)
-    assert columns == ["provincia", "valor", "_source_dataset_id"]
+    assert columns == ["provincia", "valor", "poblacion", "_source_dataset_id"]
     assert _count(engine, name) == 151
-    with engine.connect() as conn:
-        tipo = conn.execute(
+    tipos = _types(engine, name)
+    assert tipos["valor"] == "text"
+    assert tipos["poblacion"] == "bigint"
+    assert _scalar(engine, f"SELECT count(*) FROM public.\"{name}\" WHERE valor = 's/d'") == 1  # noqa: S608
+
+
+def test_decimales_tarde_en_una_columna_entera_se_ensanchan_sin_redondear(table, tmp_path):
+    """Postgres redondeaba `100.5` a `101` al apendear a la columna BIGINT que
+    creó el primer chunk. Ahora la columna pasa a double en el lugar."""
+    engine, name = table
+    rows_ = [f"2024-01-01,prod {i},{100 + i}" for i in range(120)]
+    rows_ += [f"2024-01-02,prod {i},{100 + i}.5" for i in range(30)]
+    csv_path = _write_csv(tmp_path / "precios.csv", "fecha,producto,precio", rows_)
+
+    rows, _columns, _truncated = ct._load_csv_chunked(
+        csv_path,
+        name,
+        engine,
+        chunk_size=40,
+        source_dataset_id=DATASET_ID,
+        csv_params_override=dict(_PARAMS),
+    )
+
+    assert rows == 150 and _count(engine, name) == 150
+    tipos = _types(engine, name)
+    assert tipos["precio"] == "double precision"
+    assert tipos["producto"] == "text"
+    expected = sum(100 + i for i in range(120)) + sum(100 + i + 0.5 for i in range(30))
+    assert _scalar(engine, f'SELECT sum(precio) FROM public."{name}"') == expected  # noqa: S608
+
+
+def _load_member(engine, name, csv_path, *, force_append):
+    return ct._load_csv_chunked(
+        csv_path,
+        name,
+        engine,
+        chunk_size=40,
+        source_dataset_id=DATASET_ID,
+        force_append=force_append,
+        csv_params_override=dict(_PARAMS),
+    )
+
+
+def test_miembro_de_zip_contra_una_columna_double_no_aborta(table, tmp_path):
+    """Revisión del PR #130, hallazgo importante, con el escenario del revisor:
+    el miembro 1 deja `precio` en double; el miembro 2 (force_append) trae
+    enteros en su primer chunk y decimales después. La rama abortaba el ZIP
+    entero con el primer chunk ya apendeado."""
+    engine, name = table
+    m1 = [f"2024-01-01,prod {i},{100 + i}.25" for i in range(50)]
+    m2 = [f"2024-02-01,prod {i},{200 + i}" for i in range(60)]
+    m2 += [f"2024-02-02,prod {i},{200 + i}.5" for i in range(60)]
+    _load_member(
+        engine,
+        name,
+        _write_csv(tmp_path / "m1.csv", "fecha,producto,precio", m1),
+        force_append=False,
+    )
+
+    rows, _c, _t = _load_member(
+        engine,
+        name,
+        _write_csv(tmp_path / "m2.csv", "fecha,producto,precio", m2),
+        force_append=True,
+    )
+
+    assert rows == 120
+    assert _count(engine, name) == 170
+    assert _types(engine, name)["precio"] == "double precision"
+    expected = (
+        sum(100 + i + 0.25 for i in range(50))
+        + sum(200 + i for i in range(60))
+        + sum(200 + i + 0.5 for i in range(60))
+    )
+    assert _scalar(engine, f'SELECT sum(precio) FROM public."{name}"') == expected  # noqa: S608
+
+
+def test_miembro_de_zip_con_decimales_contra_una_columna_bigint_la_ensancha(table, tmp_path):
+    engine, name = table
+    m1 = [f"2024-01-01,prod {i},{100 + i}" for i in range(50)]
+    m2 = [f"2024-02-01,prod {i},{200 + i}" for i in range(60)]
+    m2 += [f"2024-02-02,prod {i},{200 + i}.5" for i in range(60)]
+    _load_member(
+        engine,
+        name,
+        _write_csv(tmp_path / "m1.csv", "fecha,producto,precio", m1),
+        force_append=False,
+    )
+    assert _types(engine, name)["precio"] == "bigint"
+
+    rows, _c, _t = _load_member(
+        engine,
+        name,
+        _write_csv(tmp_path / "m2.csv", "fecha,producto,precio", m2),
+        force_append=True,
+    )
+
+    assert rows == 120 and _count(engine, name) == 170
+    assert _types(engine, name)["precio"] == "double precision"
+    fraccionarios = _scalar(
+        engine,
+        f'SELECT count(*) FROM public."{name}" WHERE precio <> trunc(precio)',  # noqa: S608
+    )
+    assert fraccionarios == 60  # ninguno redondeado
+
+
+def test_miembro_de_zip_con_texto_contra_una_columna_bigint_la_pasa_a_texto(table, tmp_path):
+    engine, name = table
+    m1 = [f"Provincia {i},{i}" for i in range(50)]
+    m2 = [f"Provincia {i},{i}" for i in range(60)] + ["Provincia s/d,s/d"]
+    _load_member(
+        engine, name, _write_csv(tmp_path / "m1.csv", "provincia,valor", m1), force_append=False
+    )
+
+    rows, _c, _t = _load_member(
+        engine, name, _write_csv(tmp_path / "m2.csv", "provincia,valor", m2), force_append=True
+    )
+
+    assert rows == 61 and _count(engine, name) == 111
+    assert _types(engine, name)["valor"] == "text"
+
+
+def test_zip_saltea_el_miembro_que_no_entra_y_conserva_lo_anterior(table, tmp_path):
+    """Revisión del PR #130, hallazgo menor: el primer chunk de un miembro N≥2
+    todavía podía hacer DROP + recreate de la tabla compartida. Acá el ensanche
+    no se puede (una vista depende de la columna): el miembro se saltea con una
+    nota, y la tabla conserva la fila previa y el miembro 1."""
+    import zipfile
+
+    engine, name = table
+    with engine.begin() as conn:
+        conn.execute(
             text(
-                "SELECT data_type FROM information_schema.columns "
-                "WHERE table_schema='public' AND table_name=:t AND column_name='valor'"
-            ),
-            {"t": name},
-        ).scalar()
-    assert tipo == "text"
+                f'CREATE TABLE public."{name}" '  # noqa: S608
+                '(codigo bigint, nombre text, "_source_dataset_id" text)'
+            )
+        )
+        conn.execute(text(f"INSERT INTO public.\"{name}\" VALUES (1, 'previo', 'otro')"))  # noqa: S608
+        conn.execute(text(f'CREATE VIEW public."{name}_v" AS SELECT codigo FROM public."{name}"'))  # noqa: S608
+    zip_path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("a.csv", "codigo,nombre\n" + "".join(f"{i},n{i}\n" for i in range(10)))
+        zf.writestr("b.csv", "codigo,nombre\nA12,x\nB13,y\n")
+
+    with zipfile.ZipFile(zip_path) as zf:
+        result = ct._parse_zip_archive(
+            zf,
+            zip_path=str(zip_path),
+            dataset_id=DATASET_ID,
+            table_name=name,
+            engine=engine,
+            append_mode=True,
+        )
+
+    assert result["parsed"] is True
+    assert result["row_count"] == 10
+    assert "b.csv" in (result["sampled_note"] or "")
+    assert _count(engine, name) == 11
+    assert _types(engine, name)["codigo"] == "bigint"

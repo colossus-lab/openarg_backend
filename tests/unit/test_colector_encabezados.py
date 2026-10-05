@@ -294,11 +294,16 @@ def test_un_chunk_que_no_entra_no_dropea_la_tabla():
     assert not any("DROP TABLE" in s for s in begin_sql)
 
 
-def test_si_un_chunk_no_entra_se_recarga_el_archivo_entero_como_texto():
+def test_si_un_chunk_trae_texto_se_relee_solo_esa_columna_como_texto():
+    """Revisión del PR #130: antes se recargaba TODO el archivo como texto y una
+    tabla numérica quedaba entera en TEXT por una sola columna."""
     with patch.object(
         ct,
         "_csv_load_inner",
-        side_effect=[ct._ChunkAppendError("dtype drift"), (30, ["a", "b"], False)],
+        side_effect=[
+            ct._ChunkAppendError("texto en valor", retype={1: str}),
+            (30, ["a", "b"], False),
+        ],
     ) as inner:
         result = ct._load_csv_chunked(
             "/tmp/fake.csv",
@@ -311,6 +316,45 @@ def test_si_un_chunk_no_entra_se_recarga_el_archivo_entero_como_texto():
     assert result == (30, ["a", "b"], False)
     assert inner.call_count == 2
     assert "dtype" not in inner.call_args_list[0].args[3]
+    assert inner.call_args_list[1].args[3]["dtype"] == {1: str}
+
+
+def test_las_columnas_a_texto_se_acumulan_y_con_tope_va_todo_a_texto():
+    side_effect = [
+        ct._ChunkAppendError("a", retype={1: str}),
+        ct._ChunkAppendError("b", retype={3: str}),
+        ct._ChunkAppendError("c", retype={4: str}),
+        ct._ChunkAppendError("d", retype={5: str}),
+        (30, ["a"], False),
+    ]
+    with patch.object(ct, "_csv_load_inner", side_effect=side_effect) as inner:
+        ct._load_csv_chunked(
+            "/tmp/fake.csv",
+            "cache_test",
+            MagicMock(),
+            chunk_size=10,
+            csv_params_override={"sep": ","},
+        )
+
+    dtypes = [c.args[3].get("dtype") for c in inner.call_args_list]
+    assert dtypes[:4] == [None, {1: str}, {1: str, 3: str}, {1: str, 3: str, 4: str}]
+    assert dtypes[4] is str  # pasado el tope de relecturas dirigidas
+
+
+def test_un_error_sin_columnas_identificadas_recarga_todo_como_texto():
+    with patch.object(
+        ct,
+        "_csv_load_inner",
+        side_effect=[ct._ChunkAppendError("no se pudo ensanchar"), (30, ["a"], False)],
+    ) as inner:
+        ct._load_csv_chunked(
+            "/tmp/fake.csv",
+            "cache_test",
+            MagicMock(),
+            chunk_size=10,
+            csv_params_override={"sep": ","},
+        )
+
     assert inner.call_args_list[1].args[3]["dtype"] is str
 
 
@@ -329,19 +373,206 @@ def test_con_force_append_no_se_recarga_para_no_duplicar():
         )
 
 
-def test_tipos_de_un_chunk_que_la_tabla_corromperia():
-    first_kinds = {"entero": "i", "real": "f", "texto": "O"}
+# ── tipos: contra la tabla real, no contra el primer chunk ────────────────
+
+
+def test_un_decimal_en_una_columna_double_entra_sin_conflicto():
+    """El falso positivo de la revisión: el primer chunk del miembro era todo
+    enteros, pero la tabla compartida ya tenía `precio` en double."""
+    chunk = pd.DataFrame({"precio": [100.5, 101.0], "producto": ["a", "b"]})
+    tipos = {"precio": "double precision", "producto": "text"}
+    assert ct._chunk_type_fixes(tipos, chunk) == {}
+
+
+def test_tipos_de_un_chunk_que_la_tabla_no_puede_guardar():
+    tipos = {
+        "entero": "bigint",
+        "entero_nan": "bigint",
+        "real": "double precision",
+        "texto": "text",
+        "grande": "bigint",
+        "bandera": "boolean",
+    }
     chunk = pd.DataFrame(
         {
-            "entero": [1.0, 2.5],  # Postgres redondearía 2.5 en silencio
-            "real": [1.5, None],
-            "texto": [1, 2],
+            "entero": [1.0, 2.5],  # Postgres redondearía 2.5 a 3 en silencio
+            "entero_nan": [1.0, None],  # enteros con NaN: entran
+            "real": ["s/d", None],  # el INSERT fallaría
+            "texto": [1, 2],  # a TEXT entra cualquier cosa
+            "grande": [1e19, 2.0],  # fuera de int64
+            "bandera": ["si", "no"],
         }
     )
-    assert ct._chunk_dtype_conflicts(first_kinds, chunk) == ["entero"]
+    assert ct._chunk_type_fixes(tipos, chunk) == {
+        "entero": "double precision",
+        "real": "text",
+        "grande": "double precision",
+        "bandera": "text",
+    }
 
-    nan_ints = pd.DataFrame({"entero": [1.0, None], "real": ["x", None], "texto": ["a", "b"]})
-    assert ct._chunk_dtype_conflicts(first_kinds, nan_ints) == ["real"]
+
+def test_numeros_en_una_columna_object_no_son_texto():
+    """json_normalize deja `object` columnas con números de distintos tipos."""
+    from decimal import Decimal
+
+    import numpy as np
+
+    chunk = pd.DataFrame({"monto": pd.Series([Decimal("1.5"), np.int64(3), None], dtype=object)})
+    assert ct._chunk_type_fixes({"monto": "double precision"}, chunk) == {}
+    con_bool = pd.DataFrame({"monto": pd.Series([True, 3], dtype=object)})
+    assert ct._chunk_type_fixes({"monto": "bigint"}, con_bool) == {"monto": "text"}
+
+
+def _csv_enteros_y_decimales(tmp_path):
+    path = tmp_path / "miembro.csv"
+    lines = ["fecha,producto,precio"]
+    lines += [f"2024-01-01,prod {i},{100 + i}" for i in range(6)]
+    lines += [f"2024-01-02,prod {i},{100 + i}.5" for i in range(6)]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def test_force_append_contra_una_columna_double_no_aborta_el_zip(tmp_path):
+    """Revisión del PR #130, hallazgo importante: un miembro N≥2 de un ZIP con
+    enteros en el primer chunk y decimales después abortaba la colecta entera,
+    aunque la tabla compartida ya tuviera `precio` en double."""
+    calls: list[dict] = []
+
+    def _fake_to_sql_safe(df, table_name, engine, **kwargs):
+        calls.append({"rows": len(df), **kwargs})
+
+    tipos = {"fecha": "text", "producto": "text", "precio": "double precision"}
+    with (
+        patch.object(ct, "_to_sql_safe", side_effect=_fake_to_sql_safe),
+        patch.object(ct, "_table_column_types", return_value=tipos),
+    ):
+        total, _cols, _trunc = ct._csv_load_inner(
+            _csv_enteros_y_decimales(tmp_path),
+            "cache_zip",
+            MagicMock(),
+            {"sep": ","},
+            4,
+            source_dataset_id=DATASET_ID,
+            force_append=True,
+        )
+
+    assert total == 12
+    assert all(c["if_exists"] == "append" for c in calls)
+    # Tampoco el primer chunk del miembro puede recrear la tabla compartida.
+    assert all(c["allow_recreate"] is False for c in calls)
+    assert all(c["widen"] is None for c in calls)
+
+
+def test_force_append_contra_una_columna_bigint_la_ensancha(tmp_path):
+    calls: list[dict] = []
+
+    def _fake_to_sql_safe(df, table_name, engine, **kwargs):
+        calls.append({"rows": len(df), **kwargs})
+
+    tipos = {"fecha": "text", "producto": "text", "precio": "bigint"}
+    with (
+        patch.object(ct, "_to_sql_safe", side_effect=_fake_to_sql_safe),
+        patch.object(ct, "_table_column_types", return_value=tipos),
+    ):
+        total, _cols, _trunc = ct._csv_load_inner(
+            _csv_enteros_y_decimales(tmp_path),
+            "cache_zip",
+            MagicMock(),
+            {"sep": ","},
+            4,
+            source_dataset_id=DATASET_ID,
+            force_append=True,
+        )
+
+    assert total == 12
+    # El tipo de la tabla está fijo en el mock: cada chunk con decimales pide el
+    # ensanche (en Postgres, el segundo ya encuentra double y no pide nada).
+    assert [c["widen"] for c in calls] == [
+        None,
+        {"precio": "double precision"},
+        {"precio": "double precision"},
+    ]
+
+
+def test_texto_en_una_tabla_propia_pide_releer_esa_columna(tmp_path):
+    path = tmp_path / "valores.csv"
+    lines = ["provincia,valor,otro"] + [f"P{i},{i},{i}" for i in range(4)] + ["Ps,s/d,9"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    written: list[int] = []
+
+    with (
+        patch.object(ct, "_to_sql_safe", side_effect=lambda df, *a, **k: written.append(len(df))),
+        patch.object(
+            ct,
+            "_table_column_types",
+            return_value={"provincia": "text", "valor": "bigint", "otro": "bigint"},
+        ),
+        pytest.raises(ct._ChunkAppendError) as info,
+    ):
+        ct._csv_load_inner(str(path), "cache_valores", MagicMock(), {"sep": ","}, 4)
+
+    assert info.value.retype == {1: str}
+    assert info.value.rows_written == 4
+    assert written == [4]
+
+
+def test_to_sql_safe_ensancha_en_la_misma_transaccion_y_sin_drop():
+    df = pd.DataFrame({"precio": [1.5]})
+    conn = MagicMock()
+    engine = MagicMock()
+    engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    conn.in_transaction.return_value = False
+    order: list[str] = []
+    conn.execute.side_effect = lambda stmt, *a, **k: order.append(str(stmt))
+
+    with patch.object(pd.DataFrame, "to_sql", side_effect=lambda *a, **k: order.append("INSERT")):
+        ct._to_sql_safe(
+            df,
+            "cache_test",
+            engine,
+            schema="raw",
+            if_exists="append",
+            index=False,
+            allow_recreate=False,
+            widen={"precio": "double precision"},
+        )
+
+    alter = [s for s in order if "ALTER TABLE" in s]
+    assert alter == [
+        'ALTER TABLE "raw"."cache_test" ALTER COLUMN "precio" '
+        'TYPE double precision USING "precio"::double precision'
+    ]
+    assert order.index(alter[0]) < order.index("INSERT")
+
+
+def test_si_no_se_puede_ensanchar_es_un_chunk_que_no_entra_no_un_drop():
+    df = pd.DataFrame({"codigo": ["A12"]})
+    conn = MagicMock()
+    engine = MagicMock()
+    engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    conn.in_transaction.return_value = False
+
+    def _execute(stmt, *a, **k):
+        if "ALTER TABLE" in str(stmt):
+            raise RuntimeError("cannot alter type of a column used by a view or rule")
+
+    conn.execute.side_effect = _execute
+    with (
+        patch.object(ct, "_record_cache_drop") as record_drop,
+        pytest.raises(ct._ChunkAppendError),
+    ):
+        ct._to_sql_safe(
+            df,
+            "cache_test",
+            engine,
+            if_exists="append",
+            index=False,
+            allow_recreate=False,
+            widen={"codigo": "text"},
+        )
+    record_drop.assert_not_called()
 
 
 def test_la_version_del_parser_cubre_la_inferencia_de_encabezado():

@@ -21,6 +21,7 @@ from collections import Counter
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from numbers import Number
 from typing import Any
 from urllib.parse import urlparse
 
@@ -259,6 +260,9 @@ _TEMP_SPACE_RESERVE_BYTES = 256 * 1024 * 1024  # keep 256MB free for worker stab
 _CSV_TARGET_CELLS_PER_CHUNK = int(os.getenv("OPENARG_CSV_TARGET_CELLS_PER_CHUNK", "250000"))
 _CSV_MIN_CHUNK_SIZE = int(os.getenv("OPENARG_CSV_MIN_CHUNK_SIZE", "500"))
 _CSV_MAX_CHUNK_SIZE = int(os.getenv("OPENARG_CSV_MAX_CHUNK_SIZE", "50000"))
+# Re-reads of a CSV with more columns as text before giving up and reading
+# every column as text (see `_load_csv_chunked`).
+_CSV_RETYPE_ATTEMPTS = 3
 _JSON_RECORD_MAP_STREAM_THRESHOLD_BYTES = int(
     os.getenv("OPENARG_JSON_RECORD_MAP_STREAM_THRESHOLD_BYTES", str(16 * 1024 * 1024))
 )
@@ -1907,13 +1911,35 @@ def _parse_zip_archive(
                 }
             return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
 
-        _to_sql_safe(
-            df,
-            table_name,
-            engine,
-            if_exists="append" if current_append_mode else "replace",
-            index=False,
+        # Appending to the table earlier members filled: widen what does not
+        # fit, and never DROP it — that recreate kept only this member.
+        fixes = (
+            _chunk_type_fixes(_table_column_types(engine, None, table_name), df)
+            if current_append_mode
+            else {}
         )
+        try:
+            _to_sql_safe(
+                df,
+                table_name,
+                engine,
+                if_exists="append" if current_append_mode else "replace",
+                index=False,
+                allow_recreate=not current_append_mode,
+                widen=fixes or None,
+            )
+        except _ChunkAppendError as exc:
+            # One write, one transaction: nothing of this member went in.
+            logger.warning(
+                "ZIP dataset=%s: skipping a member that does not fit %s: %s",
+                dataset_id,
+                table_name,
+                str(exc)[:200],
+            )
+            for member in parsed_members:
+                if member["table_name"] == table_name:
+                    member["sampled_note"] = f"zip member skipped ({str(exc)[:120]})"
+            return {"parsed": False, "result": None}
 
         member_result = {
             "parsed": True,
@@ -1931,7 +1957,9 @@ def _parse_zip_archive(
         current_append_mode = True
         return member_result
 
-    def _record_csv_file(file_path: str, *, sampled: str | None = None) -> dict:
+    def _record_csv_file(
+        file_path: str, *, sampled: str | None = None, member_name: str | None = None
+    ) -> dict:
         nonlocal table_name, current_append_mode
         csv_params = _detect_csv_params(file_path)
         # Recovery 2: use the helper that already includes latin-1 fallback
@@ -1971,15 +1999,37 @@ def _parse_zip_archive(
                 }
             return {"parsed": False, "result": {"dataset_id": dataset_id, "status": routed_status}}
 
-        row_count, columns, truncated = _load_csv_chunked(
-            file_path,
-            table_name,
-            engine,
-            chunk_size=chunk_size,
-            source_dataset_id=dataset_id,
-            force_append=current_append_mode,
-            csv_params_override=csv_params,
-        )
+        try:
+            row_count, columns, truncated = _load_csv_chunked(
+                file_path,
+                table_name,
+                engine,
+                chunk_size=chunk_size,
+                source_dataset_id=dataset_id,
+                force_append=current_append_mode,
+                csv_params_override=csv_params,
+            )
+        except _ChunkAppendError as exc:
+            # A member appended to the table earlier members filled, that does
+            # not fit even after widening its columns (a view on the column,
+            # names that do not match). If none of its rows went in, the table
+            # is exactly what the earlier members left: keep it and say which
+            # member is missing. Aborting threw away the whole ZIP; before
+            # that, a DROP + recreate threw away the earlier members.
+            if not current_append_mode or exc.rows_written:
+                raise
+            logger.warning(
+                "ZIP dataset=%s: skipping member %s, it does not fit %s: %s",
+                dataset_id,
+                member_name or file_path,
+                table_name,
+                str(exc)[:200],
+            )
+            skip_note = f"zip member skipped: {member_name or 'csv'} ({str(exc)[:120]})"
+            for member in parsed_members:
+                if member["table_name"] == table_name:
+                    member["sampled_note"] = skip_note
+            return {"parsed": False, "result": None}
         sampled_note = sampled
         if truncated:
             sampled_note = f"sampled: first {row_count} rows kept (limit {MAX_TABLE_ROWS})"
@@ -2094,7 +2144,7 @@ def _parse_zip_archive(
                         if not block:
                             break
                         out.write(block)
-                record_result = _record_csv_file(csv_tmp_path)
+                record_result = _record_csv_file(csv_tmp_path, member_name=name)
                 if record_result.get("result") is not None:
                     return record_result
             finally:
@@ -2588,33 +2638,6 @@ def _read_csv_preview(
     return _post_parse_normalize(retry)
 
 
-def _chunk_dtype_conflicts(first_kinds: dict[str, str], chunk_df: pd.DataFrame) -> list[str]:
-    """Columns of a later chunk that the table its first chunk created would corrupt.
-
-    pandas infers dtypes per chunk. A column that was all integers in the first
-    chunk becomes a BIGINT column, and a later chunk with `1.5` in it is not
-    rejected: Postgres rounds it on the assignment cast, silently. Text in a
-    numeric column does fail, but only after the chunks before it were written.
-    Either way the answer is the same — reload the file as text — and it is
-    cheaper to see it coming here than to find it in the data.
-    """
-    conflicts: list[str] = []
-    for column in chunk_df.columns:
-        first = first_kinds.get(str(column))
-        if first not in ("i", "u", "f"):
-            continue
-        series = chunk_df[column]
-        kind = series.dtype.kind
-        if kind == "O":
-            if series.dropna().size:
-                conflicts.append(str(column))
-        elif first in ("i", "u") and kind == "f":
-            values = series.dropna()
-            if values.size and bool((values % 1 != 0).any()):
-                conflicts.append(str(column))
-    return conflicts
-
-
 def _csv_load_inner(
     file_path: str,
     table_name: str,
@@ -2638,22 +2661,28 @@ def _csv_load_inner(
     None the legacy `public` default applies.
 
     The header is decided ONCE, on the first chunk, and applied as-is to every
-    other chunk. Only the first chunk can create (or, with `force_append`,
-    recreate) the table; a later chunk that does not fit raises
-    `_ChunkAppendError` instead of dropping what is already written.
+    other chunk. No write that appends can drop the table: not a later chunk
+    of this file, and — with `force_append` — not the first one either, whose
+    table holds what earlier files (earlier members of a ZIP) wrote.
+
+    Types are checked against the table, chunk by chunk (`_chunk_type_fixes`):
+    a decimal going into an integer column widens that column to `double
+    precision` in place. Text going into a numeric column widens it to `text`
+    when appending to someone else's rows; in a table this file created, it
+    raises `_ChunkAppendError` with the positions to re-read as text, so the
+    reload keeps that column exactly as the file has it and the rest typed.
     """
     total_rows = 0
     columns: list[str] = []
     truncated = False
     decision: _HeaderDecision | None = None
-    first_kinds: dict[str, str] = {}
 
     def _write_chunk(chunk_df: pd.DataFrame, is_first: bool) -> bool:
         """Write a single chunk, truncating if the cap would be exceeded.
 
         Returns True when the row cap has been reached.
         """
-        nonlocal total_rows, columns, truncated, decision, first_kinds
+        nonlocal total_rows, columns, truncated, decision
         if max_rows:
             remaining = max_rows - total_rows
             if remaining <= 0:
@@ -2664,42 +2693,48 @@ def _csv_load_inner(
                 truncated = True
         if is_first or decision is None:
             chunk_df, decision = _decide_header(chunk_df)
-            first_kinds = {str(c): chunk_df[c].dtype.kind for c in chunk_df.columns}
         else:
             chunk_df = _apply_header_decision(chunk_df, decision)
-            conflicts = _chunk_dtype_conflicts(first_kinds, chunk_df)
-            if conflicts:
+        appending = force_append or not is_first
+        fixes: dict[str, str] = {}
+        if appending:
+            names = _make_unique_columns(list(chunk_df.columns))
+            fixes = _chunk_type_fixes(
+                _table_column_types(engine, write_schema, table_name),
+                chunk_df.set_axis(names, axis=1),
+            )
+            to_text = [names.index(c) for c, t in fixes.items() if t == _PG_WIDEN_TEXT]
+            if to_text and not force_append:
                 raise _ChunkAppendError(
-                    f"chunk dtypes differ from the first chunk in {conflicts[:5]}"
+                    f"chunk has text in numeric columns {[names[p] for p in to_text][:5]}",
+                    retype=dict.fromkeys(to_text, str),
+                    rows_written=total_rows,
                 )
         if source_dataset_id:
             chunk_df = chunk_df.assign(_source_dataset_id=source_dataset_id)
-        if force_append:
-            mode = "append"
-        else:
-            mode = "replace" if is_first else "append"
-        if is_first:
+        try:
             _to_sql_safe(
-                chunk_df, table_name, engine, schema=write_schema, if_exists=mode, index=False
+                chunk_df,
+                table_name,
+                engine,
+                schema=write_schema,
+                if_exists="append" if appending else "replace",
+                index=False,
+                allow_recreate=not appending,
+                widen=fixes or None,
             )
-        else:
-            try:
-                _to_sql_safe(
-                    chunk_df,
-                    table_name,
-                    engine,
-                    schema=write_schema,
-                    if_exists=mode,
-                    index=False,
-                    allow_recreate=False,
-                )
-            except _ChunkAppendError:
+        except _ChunkAppendError as exc:
+            exc.rows_written = total_rows
+            raise
+        except DataError as exc:
+            if not appending:
                 raise
-            except DataError as exc:
-                # Text in a column the first chunk typed as numeric.
-                raise _ChunkAppendError(
-                    f"chunk append to {table_name} failed: {str(exc)[:300]}"
-                ) from exc
+            # A value the type check did not see coming (an integer past the
+            # column's range, say). Never a DROP: the caller decides.
+            raise _ChunkAppendError(
+                f"chunk append to {table_name} failed: {str(exc)[:300]}",
+                rows_written=total_rows,
+            ) from exc
         total_rows += len(chunk_df)
         if is_first:
             columns = list(chunk_df.columns)
@@ -3350,14 +3385,149 @@ class _ParseRegression(RuntimeError):
 
 
 class _ChunkAppendError(RuntimeError):
-    """A later chunk of a file could not be appended to the table its first chunk created.
+    """A chunk of a file could not be appended to the table it is landing in.
 
     Raised instead of the DROP + recreate that `_to_sql_safe` does for a whole
     frame: in a chunked load that recreate kept only the chunk that failed and
     everything after it, and the catalog went on announcing the full row count
     (`proyectos_parlamentarios`: 11,089 rows in the table, 111,091 announced).
-    The CSV loader answers it by reloading the whole file as text, once.
+
+    `retype` maps column positions to the dtype a reload should read them with
+    (`str`), so the CSV loader can re-read the file changing only those
+    columns. `rows_written` is how many rows of this file were
+    already in the table when it failed: zero means the table is exactly as it
+    was before this file.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retype: dict[int, Any] | None = None,
+        rows_written: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.retype: dict[int, Any] = dict(retype or {})
+        self.rows_written = rows_written
+
+
+_PG_INTEGER_TYPES = frozenset({"smallint", "integer", "bigint"})
+_PG_NUMERIC_TYPES = _PG_INTEGER_TYPES | {"real", "double precision", "numeric"}
+# The only types a column is ever widened to: both hold every value of the
+# narrower type they replace.
+_PG_WIDEN_DOUBLE = "double precision"
+_PG_WIDEN_TEXT = "text"
+_INT64_BOUND = 2**63
+
+
+def _table_column_types(engine, schema: str | None, table_name: str) -> dict[str, str]:
+    """`{column: data_type}` of the table as it stands; empty if it does not exist.
+
+    An empty answer also covers a failed lookup: the caller then has nothing
+    to compare against and the write goes ahead as before.
+    """
+    if schema is None:
+        schema, table_name = _resolve_physical_table_ref(table_name)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT column_name, data_type FROM information_schema.columns
+                    WHERE table_schema = :s AND table_name = :t
+                    """
+                ),
+                {"s": schema or "public", "t": table_name},
+            ).fetchall()
+            conn.rollback()
+        return {str(r[0]): str(r[1]) for r in rows}
+    except Exception:
+        logger.warning("could not read column types for %s", table_name, exc_info=True)
+        return {}
+
+
+def _holds_non_numbers(values: pd.Series) -> bool:
+    """True when some non-null value is not a number (text, a bool, a date)."""
+    return any(isinstance(v, bool) or not isinstance(v, Number) for v in values.dropna())
+
+
+def _chunk_type_fixes(table_types: dict[str, str], chunk_df: pd.DataFrame) -> dict[str, str]:
+    """Columns of a chunk the table cannot hold as typed, with the type that holds both.
+
+    pandas infers dtypes per chunk, and the table was typed by whatever wrote
+    it first — this file's first chunk or, when appending, an earlier file:
+
+    - an integer column and a chunk with decimals (or past int64): Postgres
+      takes `2.5` and rounds it to `3` on the assignment cast, silently. Fix:
+      `double precision`, which holds both.
+    - a numeric or boolean column and a chunk with text: the INSERT fails, and
+      only after the chunks before it were written. Fix: `text`.
+
+    Compared against the table's real types, not against the first chunk: a
+    chunk with decimals going into a `double precision` column is fine, even if
+    this file's first chunk happened to be all integers.
+    """
+    fixes: dict[str, str] = {}
+    for column in chunk_df.columns:
+        name = str(column)
+        pg_type = table_types.get(name)
+        if pg_type is None or pg_type in ("text", "character varying"):
+            continue
+        series = chunk_df[column]
+        kind = series.dtype.kind
+        if pg_type in _PG_INTEGER_TYPES:
+            if kind == "f":
+                values = series.dropna()
+                if values.size and bool(
+                    ((values % 1) != 0).any() or (values.abs() >= _INT64_BOUND).any()
+                ):
+                    fixes[name] = _PG_WIDEN_DOUBLE
+            elif kind == "u":
+                values = series.dropna()
+                if values.size and bool((values >= _INT64_BOUND).any()):
+                    fixes[name] = _PG_WIDEN_DOUBLE
+            elif kind == "b" or (kind == "O" and _holds_non_numbers(series)):
+                fixes[name] = _PG_WIDEN_TEXT
+        elif pg_type in _PG_NUMERIC_TYPES:
+            if kind == "b" or (kind == "O" and _holds_non_numbers(series)):
+                fixes[name] = _PG_WIDEN_TEXT
+        elif pg_type == "boolean":
+            if kind in ("i", "u", "f") or (
+                kind == "O" and any(not isinstance(v, bool) for v in series.dropna())
+            ):
+                fixes[name] = _PG_WIDEN_TEXT
+    return fixes
+
+
+def _widen_columns(conn, schema: str | None, table_name: str, fixes: dict[str, str]) -> None:
+    """ALTER the table's columns to the wider types in `fixes`, on `conn`'s transaction.
+
+    `bigint → double precision` and `numeric → text` keep every value already
+    written. A failure (a view depends on the column, say) is a chunk that does
+    not fit: `_ChunkAppendError`, never a DROP.
+    """
+    qualified = f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
+    for column, pg_type in fixes.items():
+        if pg_type not in (_PG_WIDEN_DOUBLE, _PG_WIDEN_TEXT):
+            raise ValueError(f"refusing to widen {column} to {pg_type}")
+        # `\:` keeps SQLAlchemy from reading a `:x` inside a column name as a bind.
+        quoted = '"' + column.replace('"', '""').replace(":", "\\:") + '"'
+        try:
+            conn.execute(
+                text(
+                    f"ALTER TABLE {qualified} ALTER COLUMN {quoted} "  # noqa: S608
+                    f"TYPE {pg_type} USING {quoted}::{pg_type}"
+                )
+            )
+        except Exception as exc:
+            raise _ChunkAppendError(
+                f"could not widen {table_name}.{column} to {pg_type}: {str(exc)[:200]}"
+            ) from exc
+    logger.warning(
+        "Widened columns of %s so a chunk fits without rounding or failing: %s",
+        table_name,
+        fixes,
+    )
 
 
 def _existing_columns(engine, schema: str | None, table_name: str) -> list[str]:
@@ -3390,6 +3560,7 @@ def _to_sql_safe(
     *,
     schema: str | None = None,
     allow_recreate: bool = True,
+    widen: dict[str, str] | None = None,
     **kwargs,
 ):
     """Write DataFrame to SQL, retrying with DROP if schema mismatch occurs.
@@ -3398,9 +3569,14 @@ def _to_sql_safe(
     (`_infer_header` / `_decide_header`). Inferring it on every write is what
     turned good headers into data rows and chunked CSVs into their last chunk.
 
-    `allow_recreate=False` is for every chunk after the first of one file: a
-    schema mismatch raises `_ChunkAppendError` instead of dropping the table
-    the first chunk created.
+    `allow_recreate=False` is for every write that appends to a table holding
+    rows that must survive — a later chunk of the same file, or any chunk of a
+    file appended to a table an earlier file filled: a schema mismatch raises
+    `_ChunkAppendError` instead of dropping the table.
+
+    `widen` (`{column: "double precision" | "text"}`, from `_chunk_type_fixes`)
+    ALTERs those columns in the same transaction and under the same lock as
+    the INSERT, so the chunk lands whole or not at all.
 
     Before the write, inspect the existing table schema (if any) for
     drift — column additions, removals, or type shifts — and emit a
@@ -3449,10 +3625,14 @@ def _to_sql_safe(
         try:
             tx = write_conn.begin()
             try:
+                if widen:
+                    _widen_columns(write_conn, schema, table_name, widen)
                 if schema is not None:
                     df.to_sql(table_name, write_conn, schema=schema, **kwargs)
                 else:
                     df.to_sql(table_name, write_conn, **kwargs)
+            except _ChunkAppendError:
+                raise
             except Exception as exc:
                 exc_str = str(exc).lower()
                 schema_keywords = (
@@ -3744,26 +3924,49 @@ def _load_csv_chunked(
                 write_schema=write_schema,
             )
 
-    try:
-        return _load_once(csv_params)
-    except _ChunkAppendError as exc:
-        # A later chunk did not fit the table the first one created — types
-        # inferred per chunk (BIGINT, then text). Before, `_to_sql_safe`
-        # dropped the table and kept only the tail of the file. Now the whole
-        # file is reloaded with every column as text, which fits by
-        # construction. Not with `force_append`: the first chunk appended to a
-        # table that other resources share, and replaying it would duplicate.
-        if force_append or csv_params.get("dtype") is str:
-            raise
-        logger.warning(
-            "Chunked CSV load into %s hit a chunk that does not fit (%s); "
-            "reloading the whole file as text",
-            table_name,
-            str(exc)[:200],
-        )
-        text_params = dict(csv_params)
-        text_params["dtype"] = str
-        return _load_once(text_params)
+    # A later chunk did not fit the table the first one created: pandas typed a
+    # column as numeric on the first chunk and a later one has text in it.
+    # Before, `_to_sql_safe` dropped the table and kept only the tail of the
+    # file. Now the file is re-read with just those columns as text — the rest
+    # keep their inferred types — and, if a different column trips later, again
+    # with that one added. Only past `_CSV_RETYPE_ATTEMPTS` does everything go
+    # to text. Never with `force_append`: the table holds rows of earlier files
+    # and a replay would duplicate them (that path widens in place instead).
+    text_positions: dict[int, Any] = {}
+    params = csv_params
+    for attempt in range(_CSV_RETYPE_ATTEMPTS + 1):
+        try:
+            return _load_once(params)
+        except _ChunkAppendError as exc:
+            if force_append or csv_params.get("dtype") is str:
+                raise
+            new_positions = {p: t for p, t in exc.retype.items() if p not in text_positions}
+            if new_positions and attempt < _CSV_RETYPE_ATTEMPTS:
+                text_positions.update(new_positions)
+                logger.warning(
+                    "Chunked CSV load into %s hit a chunk that does not fit (%s); "
+                    "re-reading with columns %s as text",
+                    table_name,
+                    str(exc)[:200],
+                    sorted(text_positions),
+                )
+                base_dtype = csv_params.get("dtype")
+                params = dict(csv_params)
+                params["dtype"] = {
+                    **(base_dtype if isinstance(base_dtype, dict) else {}),
+                    **text_positions,
+                }
+                continue
+            logger.warning(
+                "Chunked CSV load into %s still does not fit (%s); "
+                "reloading the whole file as text",
+                table_name,
+                str(exc)[:200],
+            )
+            break
+    text_params = dict(csv_params)
+    text_params["dtype"] = str
+    return _load_once(text_params)
 
 
 def _csv_chunk_size_for_columns(column_count: int) -> int:
@@ -3929,12 +4132,21 @@ def _load_json_record_map_chunked(
             if routed_status:
                 raise RuntimeError(f"json_record_map_routed:{routed_status}")
             columns = list(df.columns)
+            # Appending to a table another resource filled: same rule as any
+            # later chunk — widen, never drop what is there.
+            first_fixes = (
+                _chunk_type_fixes(_table_column_types(engine, None, current_table), df)
+                if append_mode
+                else {}
+            )
             _to_sql_safe(
                 df,
                 current_table,
                 engine,
                 if_exists="append" if append_mode else "replace",
                 index=False,
+                allow_recreate=not append_mode,
+                widen=first_fixes or None,
             )
             first_chunk = False
         else:
@@ -3942,6 +4154,12 @@ def _load_json_record_map_chunked(
                 raise RuntimeError("json_record_map: header not decided")
             df = df.reindex(columns=source_keys, fill_value=None)
             df = _apply_header_decision(df, decision)
+            # No reload here (the blob is streamed once): a column that does
+            # not fit is widened in place, text included.
+            fixes = _chunk_type_fixes(
+                _table_column_types(engine, None, current_table),
+                df.set_axis(_make_unique_columns(list(df.columns)), axis=1),
+            )
             df["_source_dataset_id"] = dataset_id
             _to_sql_safe(
                 df,
@@ -3950,6 +4168,7 @@ def _load_json_record_map_chunked(
                 if_exists="append",
                 index=False,
                 allow_recreate=False,
+                widen=fixes or None,
             )
         total_rows += len(df)
 
