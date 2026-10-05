@@ -17,6 +17,7 @@ from app.application.public_quota import (
     Tier,
     first_of_next_month_utc,
     has_credit,
+    month_key,
     monthly_counter_key,
     resolve_tier,
     seconds_until_next_month,
@@ -182,12 +183,24 @@ DAILY_CAPACITY_DETAIL = "Free tier daily capacity reached. Try again tomorrow."
 # los dos; el segundo débito falla y esa respuesta sale sin cobrarse. Es un
 # sobregiro acotado por el límite por minuto (2 en el plan gratis) y se loguea.
 #
+# Si una respuesta gasta un crédito NO se decide al reservar sino al cobrar,
+# con un contador aparte de respuestas cobradas del mes (`charged_counter_key`,
+# sólo sube, nunca se devuelve): la respuesta cobrada número N gasta un crédito
+# sólo si N supera el cupo. El contador de reservas no sirve para eso porque
+# incluye pedidos en curso que después pueden devolverse: con 9 de 10 usadas,
+# A reserva el 10 y B el 11; si A termina en timeout, B ocupa el lugar 10 y no
+# tiene que pagar un crédito, termine antes o después que A.
+#
 # El límite por minuto cuenta al entrar y no se devuelve nunca: es lo que
-# frena las ráfagas. La IP del día y el tope global del día no son el cupo de
-# la persona sino techos de volumen y de gasto de Bedrock: se devuelven si el
-# pedido termina rechazado por un control posterior o si el turno se resolvió
-# sin el modelo (caché, saludo, bloqueo). Un timeout o un error sí quedan
-# contados ahí, porque el modelo corrió y Bedrock cobró.
+# frena las ráfagas. Una pregunta repetida que ya tiene respuesta guardada no
+# lo cuenta (el reintento de n8n caía en 429), pero tiene su propio límite por
+# minuto, más laxo (`check_replay_rate`).
+#
+# La IP del día y el tope global del día no son el cupo de la persona sino
+# techos de volumen y de gasto de Bedrock: se devuelven si el pedido termina
+# rechazado por un control posterior o si el turno se resolvió sin el modelo
+# (caché, saludo, bloqueo). Un timeout o un error sí quedan contados ahí,
+# porque el modelo corrió y Bedrock cobró.
 
 
 @dataclass(frozen=True)
@@ -209,6 +222,10 @@ class QuestionReservation:
     Las claves son las de los contadores que efectivamente subieron. ``None``
     si no hay nada que devolver (o Redis no respondió y el contador falló
     abierto).
+
+    ``needs_credit`` es la decisión al entrar (el 402 sin saldo). Si la
+    respuesta gasta un crédito lo decide `settle_question` con el contador de
+    respuestas cobradas (``charged_key``), del mismo mes que ``month_counter``.
     """
 
     user_id: UUID
@@ -217,6 +234,8 @@ class QuestionReservation:
     month_key: str | None
     month_count: int
     needs_credit: bool
+    month_counter: str
+    charged_key: str
     ip_key: str | None = None
     global_key: str | None = None
     settled: bool = False
@@ -226,8 +245,48 @@ def _minute_key(user_id: object) -> str:
     return f"rl:user:{user_id}:min"
 
 
+def _replay_minute_key(user_id: object) -> str:
+    return f"rl:user:{user_id}:replay:min"
+
+
+def charged_counter_key(user_id: object, now: datetime | None = None) -> str:
+    """Respuestas de ``/ask`` cobradas en el mes (sólo sube; decide los créditos)."""
+    return f"rl:user:{user_id}:charged:month:{month_key(now)}"
+
+
 def _plan_per_min(api_key: ApiKey) -> int:
     return PLAN_LIMITS.get(api_key.plan, PLAN_LIMITS["free"])["per_min"]
+
+
+# Repeticiones de una pregunta ya respondida, por minuto. No corren el motor ni
+# cobran, pero cada una lee la base y deja rastro: sin tope, un bucle que manda
+# la misma pregunta cada 2 s llenaba `api_usage` a la velocidad del cliente.
+# Nunca por debajo del límite del plan: repetir no puede ser más caro que
+# preguntar algo nuevo.
+REPLAY_PER_MIN = 10
+
+
+def replay_per_min(api_key: ApiKey) -> int:
+    return max(REPLAY_PER_MIN, _plan_per_min(api_key))
+
+
+async def check_replay_rate(api_key: ApiKey, cache: ICacheService) -> None:
+    """El límite por minuto de las preguntas repetidas (falla abierto).
+
+    Raises HTTPException 429. El detalle dice "minute", así el MCP muestra
+    "esperá un minuto".
+    """
+    limit = replay_per_min(api_key)
+    count = await _incr_fail_open(cache, _replay_minute_key(api_key.user_id), _MIN_TTL)
+    if count > limit:
+        raise _too_many(
+            f"Rate limit exceeded: {limit} repeated questions per minute",
+            {
+                "X-RateLimit-Limit-Minute": str(limit),
+                "X-RateLimit-Remaining-Minute": "0",
+                "Retry-After": "60",
+            },
+        )
 
 
 async def check_question_rate(api_key: ApiKey, cache: ICacheService) -> MinuteWindow:
@@ -295,13 +354,19 @@ async def reserve_question(
     if minute is None:
         minute = await check_question_rate(api_key, cache)
     user_id = api_key.user_id
-    day = _utc_day()
+    now = datetime.now(UTC)
+    day = _utc_day(now)
 
     tier = await resolve_tier(user_id, credits)
-    month_key = monthly_counter_key(user_id, "preguntas")
-    month_count = await _incr_fail_open(cache, month_key, MONTH_TTL)
+    month_counter = monthly_counter_key(user_id, "preguntas", now)
+    charged_key = charged_counter_key(user_id, now)
+    month_count = await _incr_fail_open(cache, month_counter, MONTH_TTL)
     # 0 = el INCR falló y se dejó pasar: no quedó nada reservado.
-    reserved_month = month_key if month_count > 0 else None
+    reserved_month = month_counter if month_count > 0 else None
+    if month_count == 1:
+        # Primera reserva del mes: no hay nada cobrado ni en curso, así que
+        # las cobradas arrancan exactamente en 0.
+        await _seed_charged(cache, charged_key, 0)
     needs_credit = month_count > tier.preguntas
     # Sin saldo, se corta acá: si no, cada reintento de alguien que ya agotó su
     # mes sumaría al tope global del día y le comería lugar a los demás.
@@ -353,9 +418,36 @@ async def reserve_question(
         month_key=reserved_month,
         month_count=month_count,
         needs_credit=needs_credit,
+        month_counter=month_counter,
+        charged_key=charged_key,
         ip_key=reserved_ip,
         global_key=reserved_global,
     )
+
+
+async def _seed_charged(cache: ICacheService, key: str, value: int) -> None:
+    try:
+        await cache.set_if_absent(key, str(max(value, 0)), MONTH_TTL)
+    except Exception:
+        logger.warning("Charged counter seed failed for %s", key)
+
+
+async def _count_charged(reservation: QuestionReservation, cache: ICacheService) -> int | None:
+    """Suma esta respuesta a las cobradas del mes y devuelve cuántas van.
+
+    Si el contador todavía no existe (el mes del despliegue: las reservas de
+    antes ya estaban cobradas al entrar), arranca de las reservas del mes
+    menos la de este pedido. None si Redis no responde.
+    """
+    try:
+        if not await cache.exists(reservation.charged_key):
+            reserved = int(await cache.get(reservation.month_counter) or 0)
+            own = 1 if reservation.month_key else 0
+            await _seed_charged(cache, reservation.charged_key, reserved - own)
+        return await cache.increment_with_ttl(reservation.charged_key, MONTH_TTL)
+    except Exception:
+        logger.warning("Charged counter unavailable for %s", reservation.user_id)
+        return None
 
 
 async def settle_question(
@@ -368,10 +460,11 @@ async def settle_question(
 ) -> dict[str, Any]:
     """Cierra una reserva: la cobra (``charge``) o la devuelve.
 
-    Cobrar es dejar la reserva del mes como está y, si el mes ya estaba
-    usado, gastar un crédito. No cobrar es devolver la reserva del mes y,
-    si el turno no usó el modelo (``used_model=False``), también la de la IP
-    y el tope global. Idempotente: una reserva ya cerrada no se toca.
+    Cobrar es dejar la reserva del mes como está y sumar la respuesta a las
+    cobradas del mes; si es la número N y N supera el cupo, se gasta un
+    crédito. No cobrar es devolver la reserva del mes y, si el turno no usó
+    el modelo (``used_model=False``), también la de la IP y el tope global.
+    Idempotente: una reserva ya cerrada no se toca.
 
     Devuelve el cupo para la respuesta (mismas claves de siempre).
     """
@@ -381,7 +474,12 @@ async def settle_question(
         return quota_info(reservation.tier, reservation.minute, month_count, used_credit=False)
     reservation.settled = True
     if charge:
-        if reservation.needs_credit:
+        charged = await _count_charged(reservation, cache)
+        # Sin Redis, la decisión de la entrada (la única que hay).
+        needs_credit = (
+            reservation.needs_credit if charged is None else charged > reservation.tier.preguntas
+        )
+        if needs_credit:
             used_credit = await try_debit(reservation.user_id, "preguntas", credits)
             if not used_credit:
                 logger.info(

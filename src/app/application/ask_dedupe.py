@@ -9,20 +9,26 @@ cobraba igual y el siguiente volvía a correr el motor desde cero: del 01 al
 Ahora, por clave y pregunta normalizada:
 
 - si hay una respuesta de los últimos 5 minutos, se devuelve esa: sin cobrar,
-  sin correr el motor y sin contar el límite por minuto;
+  sin correr el motor y con un límite por minuto propio, más laxo que el de
+  las preguntas (``check_replay_rate``), para que un bucle no la martille;
 - si la misma pregunta está corriendo, se espera a que termine y se devuelve
-  la misma respuesta, sin cobrar;
+  la misma respuesta, sin cobrar (el que espera sí cuenta el límite por
+  minuto de las preguntas);
 - si la que corría falló (timeout, error), no hay nada guardado y el pedido
   siguiente la vuelve a correr: un error no se repite.
 
 La coordinación va en Redis, así funciona entre los workers de uvicorn:
 
 - ``ask:dedupe:{huella}:answer``: la respuesta (sin el cupo), 5 minutos;
-- ``ask:dedupe:{huella}:lock``: el turno en curso. Se toma con el mismo INCR
-  atómico de los contadores (el pedido que recibe 1 es el que corre) y vence
-  solo si el proceso muere a mitad de camino.
+- ``ask:dedupe:{huella}:lock``: el turno en curso. Se toma con ``SET NX EX``
+  y un token propio del pedido, y se suelta sólo si todavía tiene ese token
+  (compare-and-delete atómico). Así un pedido nunca le borra el candado a
+  otro: ni si el suyo venció (la base lenta después del motor) ni si se
+  declaró líder porque Redis falló al tomarlo. Vence solo si el proceso
+  muere a mitad de camino.
 
-Si Redis no responde no hay deduplicación: cada pedido corre como antes.
+Si Redis no responde no hay deduplicación: cada pedido corre como antes, y el
+que no pudo tomar el candado no intenta soltarlo.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import secrets
 import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -93,20 +100,32 @@ async def store_answer(cache: ICacheService, fingerprint: str, payload: dict[str
         logger.warning("Ask dedupe store failed", exc_info=True)
 
 
-async def release(cache: ICacheService, fingerprint: str) -> None:
-    """Suelta el turno. Va siempre después de guardar la respuesta (si la hubo)."""
+async def release(cache: ICacheService, fingerprint: str, token: str | None) -> None:
+    """Suelta el turno si todavía es de este pedido (``token``).
+
+    Va siempre después de guardar la respuesta (si la hubo). Sin token (el
+    pedido no llegó a tomar el candado) no hace nada.
+    """
+    if token is None:
+        return
     try:
-        await cache.delete(_lock_key(fingerprint))
+        await cache.delete_if_equals(_lock_key(fingerprint), token)
     except Exception:
         logger.warning("Ask dedupe lock release failed; it expires on its own", exc_info=True)
 
 
 @dataclass(frozen=True)
 class Turn:
-    """Qué le toca a un pedido: correr la pregunta, o la respuesta de otro."""
+    """Qué le toca a un pedido: correr la pregunta, o la respuesta de otro.
+
+    ``token``: el del candado, si este pedido lo tiene (para soltarlo).
+    ``waited``: si esperó a otra corrida antes de resolverse.
+    """
 
     leader: bool
     answer: dict[str, Any] | None = None
+    token: str | None = None
+    waited: bool = False
 
     @property
     def gave_up(self) -> bool:
@@ -130,22 +149,26 @@ async def lead_or_wait(
     loop = asyncio.get_running_loop()
     give_up_at = loop.time() + wait_s
     lock = _lock_key(fingerprint)
+    token = secrets.token_hex(16)
+    waited = False
     while True:
         try:
-            first = await cache.increment_with_ttl(lock, ttl_seconds=lock_ttl) == 1
+            acquired = await cache.set_if_absent(lock, token, lock_ttl)
         except Exception:
+            # Sin token: este pedido corre, pero no toca el candado de nadie.
             logger.warning("Ask dedupe lock unavailable; running the question", exc_info=True)
-            return Turn(leader=True)
-        if first:
-            # El anterior pudo guardar y soltar entre la lectura y el INCR.
+            return Turn(leader=True, waited=waited)
+        if acquired:
+            # El anterior pudo guardar y soltar entre la lectura y el SET.
             answer = await cached_answer(cache, fingerprint)
             if answer is not None:
-                await release(cache, fingerprint)
-                return Turn(leader=False, answer=answer)
-            return Turn(leader=True)
+                await release(cache, fingerprint, token)
+                return Turn(leader=False, answer=answer, waited=waited)
+            return Turn(leader=True, token=token, waited=waited)
         answer = await cached_answer(cache, fingerprint)
         if answer is not None:
-            return Turn(leader=False, answer=answer)
+            return Turn(leader=False, answer=answer, waited=waited)
         if loop.time() >= give_up_at:
-            return Turn(leader=False)
+            return Turn(leader=False, waited=waited)
+        waited = True
         await asyncio.sleep(poll_s)

@@ -10,6 +10,13 @@ cobra sólo si el turno termina con una respuesta completa que usó el modelo
 la misma clave repetida dentro de 5 minutos devuelve la respuesta ya
 calculada, o espera la que está en curso, sin cobrar ni correr el motor
 (``app.application.ask_dedupe``).
+
+Tiempo total: un pedido nunca tarda mucho más que el tope del turno
+(``PUBLIC_API_TIMEOUT_SECONDS``). El que espera una pregunta igual en curso
+espera como mucho el tope + 10 s; si esa corrida falla y le toca correrla,
+corre con lo que le queda del tope, y si le quedan menos de 10 s devuelve 408
+sin correr ni cobrar. El MCP corta a los ``MCP_BACKEND_TIMEOUT_SECONDS`` (75):
+el tope tiene que quedar por debajo de ~60 s.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from app.application.api_key_service import (
     answer_is_billable,
     answer_used_model,
     check_question_rate,
+    check_replay_rate,
     question_quota_snapshot,
     reserve_question,
     settle_question,
@@ -48,7 +56,11 @@ from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
 from app.domain.ports.credits.credit_repository import ICreditRepository
-from app.presentation.http.controllers.public_api.usage_log import log_rejection, log_usage
+from app.presentation.http.controllers.public_api.usage_log import (
+    log_rejection,
+    log_replay,
+    log_usage,
+)
 from app.presentation.http.controllers.query.smart_query_v2_router import _answer_engine
 
 logger = logging.getLogger(__name__)
@@ -61,6 +73,9 @@ _TOOL = "consultar_datos_publicos"
 _DEFAULT_TIMEOUT_SECONDS = 30
 # Lo que espera un pedido repetido, además del tope del turno que espera.
 _WAIT_MARGIN_SECONDS = 10
+# Lo mínimo que tiene que quedarle del tope a un pedido que esperó a una
+# corrida igual que falló para correrla él: con menos, 408 sin correr.
+_MIN_RUN_SECONDS = 10
 
 # Los campos de la respuesta que se guardan para los reintentos (el cupo no:
 # se calcula en cada pedido).
@@ -108,6 +123,8 @@ async def public_ask(
     Fundadores, then credits; see ``app.application.public_quota``), plus a
     per-IP daily limit and a shared daily cap for the free plan. A question
     is charged only when it ends in a complete answer that used the model.
+    A repeat of a question answered in the last 5 minutes gets that answer
+    for free, under its own per-minute limit (10, or the plan's if higher).
     Does NOT save conversations.
     """
     # 1. Authenticate Bearer token
@@ -117,7 +134,15 @@ async def public_ask(
 
     async def replay(stored: dict[str, Any]) -> dict[str, Any]:
         return await _replay(
-            stored, api_key, request, body.question, cache, api_key_repo, credits, received
+            stored,
+            api_key,
+            request,
+            body.question,
+            fingerprint,
+            cache,
+            api_key_repo,
+            credits,
+            received,
         )
 
     async def rejected(exc: HTTPException) -> None:
@@ -135,9 +160,15 @@ async def public_ask(
         )
 
     # 2. La misma pregunta, respondida hace menos de 5 minutos: se devuelve
-    # esa, sin cobrar ni contar el límite por minuto.
+    # esa, sin cobrar ni contar el límite por minuto de las preguntas, pero
+    # con su propio límite por minuto (más laxo) para frenar un bucle.
     previous = await cached_answer(cache, fingerprint)
     if previous is not None:
+        try:
+            await check_replay_rate(api_key, cache)
+        except HTTPException as exc:
+            await rejected(exc)
+            raise
         return await replay(previous)
 
     # 3. Límite por minuto: cuenta al entrar, también si después espera a otra.
@@ -165,7 +196,21 @@ async def public_ask(
 
     reservation: QuestionReservation | None = None
     try:
-        # 5. Cupo del mes, créditos, IP y tope global: se verifican y se
+        # 5. Si esperó a una corrida igual que falló, corre con lo que le
+        # queda del tope: el pedido entero no puede tardar el doble.
+        run_deadline_s = deadline_s
+        if turn.waited:
+            run_deadline_s = deadline_s - (time.monotonic() - received)
+            if run_deadline_s < min(_MIN_RUN_SECONDS, deadline_s):
+                logger.warning(
+                    "No time left after waiting for an identical question (key %s)",
+                    api_key.key_prefix,
+                )
+                waited_ms = int((time.monotonic() - received) * 1000)
+                await _usage(api_key_repo, api_key, request, body.question, 408, 0, waited_ms)
+                raise HTTPException(status_code=408, detail="Request timed out")
+
+        # 6. Cupo del mes, créditos, IP y tope global: se verifican y se
         # reservan, sin cobrar.
         client_ip = request.client.host if request.client else ""
         try:
@@ -176,14 +221,14 @@ async def public_ask(
             await rejected(exc)
             raise
 
-        # 6. Mismo motor que el chat y /smart. La API pública no expone el
+        # 7. Mismo motor que el chat y /smart. La API pública no expone el
         # modo profundo ni guarda conversaciones. Un timeout, un error o una
         # inyección bloqueada no se cobran.
         req = EngineRequest(
             question=body.question,
             user_id=f"apikey:{api_key.id}",
             mode="normal",
-            deadline_s=deadline_s,
+            deadline_s=run_deadline_s,
             channel=CHANNEL_ASK,
         )
         start_time = time.monotonic()
@@ -211,13 +256,13 @@ async def public_ask(
             await _usage(api_key_repo, api_key, request, body.question, 400, 0, duration_ms)
             raise HTTPException(status_code=400, detail="Potential prompt injection detected")
 
-        # 7. Se cobra sólo una respuesta completa que usó el modelo.
+        # 8. Se cobra sólo una respuesta completa que usó el modelo.
         charged = answer_is_billable(result)
         rate_info = await settle_question(
             reservation, cache, credits, charge=charged, used_model=answer_used_model(result)
         )
 
-        # 8. Log usage (post-pipeline, fire-and-forget errors)
+        # 9. Log usage (post-pipeline, fire-and-forget errors)
         await _usage(
             api_key_repo,
             api_key,
@@ -244,10 +289,10 @@ async def public_ask(
     finally:
         # Lo que no llegó a cobrarse (un error inesperado, un pedido
         # cancelado) devuelve la reserva. El turno se suelta siempre, después
-        # de guardar la respuesta.
+        # de guardar la respuesta, y sólo si sigue siendo de este pedido.
         if reservation is not None and not reservation.settled:
             await settle_question(reservation, cache, credits, charge=False)
-        await release(cache, fingerprint)
+        await release(cache, fingerprint, turn.token)
 
 
 async def _replay(
@@ -255,6 +300,7 @@ async def _replay(
     api_key: ApiKey,
     request: Request,
     question: str,
+    fingerprint: str,
     cache: ICacheService,
     repo: IApiKeyRepository,
     credits: ICreditRepository,
@@ -271,9 +317,20 @@ async def _replay(
     }
     rate_info = await question_quota_snapshot(api_key, cache, credits)
     duration_ms = int((time.monotonic() - received) * 1000)
-    # Costo medido en 0: no corrió el modelo (y el tablero no lo estima).
-    await _usage(repo, api_key, request, question, 200, 0, duration_ms, cost_usd=0.0)
-    await _touch(repo, api_key)
+    # Una fila (y un UPDATE de last_used_at) por clave, pregunta y minuto.
+    logged = await log_replay(
+        repo,
+        cache,
+        api_key,
+        request,
+        endpoint=_ENDPOINT,
+        tool=_TOOL,
+        question=question,
+        fingerprint=fingerprint,
+        duration_ms=duration_ms,
+    )
+    if logged:
+        await _touch(repo, api_key)
     return _response(
         answer,
         tokens=0,

@@ -49,6 +49,8 @@ class FakeCache:
 
     async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
         self._check()
+        if key not in self.counters and key in self.values:
+            self.counters[key] = int(self.values.pop(key))  # sembrado con SET NX
         self.counters[key] = self.counters.get(key, 0) + 1
         return self.counters[key]
 
@@ -72,6 +74,24 @@ class FakeCache:
         self.counters.pop(key, None)
         self.values.pop(key, None)
 
+    async def exists(self, key: str) -> bool:
+        self._check()
+        return key in self.counters or key in self.values
+
+    async def set_if_absent(self, key: str, value: str, ttl_seconds: int) -> bool:
+        self._check()
+        if key in self.counters or key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    async def delete_if_equals(self, key: str, value: str) -> bool:
+        self._check()
+        if self.values.get(key) != value:
+            return False
+        del self.values[key]
+        return True
+
     def month(self, user_id: object) -> int:
         return self.counters.get(monthly_counter_key(user_id, "preguntas"), 0)
 
@@ -87,9 +107,11 @@ class FakeGraph:
         }
         self.configs: list[dict[str, Any]] = []
         self.states: list[dict[str, Any]] = []
-        # Para las carreras: cuánto tarda el turno, y si revienta.
+        # Para las carreras: cuánto tarda el turno, y si revienta (una sola
+        # vez, con `error_once`).
         self.delay = 0.0
         self.error: Exception | None = None
+        self.error_once = False
 
     async def astream(
         self,
@@ -107,7 +129,10 @@ class FakeGraph:
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.error is not None:
-            raise self.error
+            error = self.error
+            if self.error_once:
+                self.error = None
+            raise error
         yield "updates", {"finalize": self.result}
 
 
@@ -587,6 +612,72 @@ class TestAskDedupe:
             r = await self._ask(client, key[0])
             assert r.status_code == 200
         assert cache.counters[f"rl:user:{key[1].user_id}:min"] == 1
+
+    async def test_a_loop_of_repeats_hits_its_own_limit_and_logs_once(
+        self, client: AsyncClient, key: tuple[str, ApiKey], repo: AsyncMock, cache: FakeCache
+    ) -> None:
+        """Una integración que manda la misma pregunta sin pausa: antes, 200
+        ilimitados durante 5 minutos y una fila de `api_usage` por pedido."""
+        assert (await self._ask(client, key[0])).status_code == 200
+        for _ in range(10):
+            assert (await self._ask(client, key[0])).status_code == 200
+        r = await self._ask(client, key[0])
+        assert r.status_code == 429
+        assert "minute" in r.json()["detail"]  # el MCP muestra "esperá un minuto"
+        assert r.headers["Retry-After"] == "60"
+        # El límite de las preguntas no se tocó: sigue el de la primera.
+        assert cache.counters[f"rl:user:{key[1].user_id}:min"] == 1
+        rows = [c.args[0] for c in repo.record_usage.await_args_list]
+        # La pregunta, UNA repetición (no 10) y el 429 (que ya tenía su freno).
+        assert [row.status_code for row in rows] == [200, 200, 429]
+        assert rows[1].cost_usd == 0.0
+        assert repo.update_last_used.await_count == 2
+
+    async def test_a_waiter_with_no_time_left_does_not_run_it_again(
+        self,
+        client: AsyncClient,
+        key: tuple[str, ApiKey],
+        graph: FakeGraph,
+        cache: FakeCache,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Antes, el que esperaba corría otro tope entero: ~2 × tope + 10 s, más
+        que el timeout del MCP, y se cobraba una respuesta que nadie veía."""
+        monkeypatch.setenv("PUBLIC_API_TIMEOUT_SECONDS", "0.5")
+        graph.delay = 0.3
+        graph.error = RuntimeError("boom")
+        a, b = await asyncio.gather(self._ask(client, key[0]), self._ask(client, key[0]))
+        assert sorted([a.status_code, b.status_code]) == [408, 500]
+        assert len(graph.states) == 1  # el motor no volvió a correr
+        assert cache.month(key[1].user_id) == 0
+
+    async def test_a_waiter_runs_it_with_what_is_left_of_the_deadline(
+        self,
+        client: AsyncClient,
+        key: tuple[str, ApiKey],
+        graph: FakeGraph,
+        cache: FakeCache,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.presentation.http.controllers.public_api import ask_router as ask_module
+
+        deadlines: list[float] = []
+
+        class _Spy(ask_module.EngineRunner):
+            async def run(self, req: Any) -> Any:
+                deadlines.append(req.deadline_s)
+                return await super().run(req)
+
+        monkeypatch.setattr(ask_module, "EngineRunner", _Spy)
+        monkeypatch.setenv("PUBLIC_API_TIMEOUT_SECONDS", "12")
+        graph.delay = 0.05
+        graph.error = RuntimeError("boom")
+        graph.error_once = True
+        a, b = await asyncio.gather(self._ask(client, key[0]), self._ask(client, key[0]))
+        assert sorted([a.status_code, b.status_code]) == [200, 500]
+        assert deadlines[0] == 12
+        assert 10 <= deadlines[1] < 12
+        assert cache.month(key[1].user_id) == 1
 
     async def test_a_repeat_while_running_waits_for_the_same_run(
         self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache

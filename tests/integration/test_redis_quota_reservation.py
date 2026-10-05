@@ -7,7 +7,11 @@ Lo que un test con dobles no ve:
 - que la reserva del cupo sea atómica con pedidos simultáneos de verdad (el
   INCR decide cuál entra cuando queda 1 sola pregunta);
 - que la respuesta guardada para los reintentos sobreviva la ida y vuelta por
-  Redis (JSON) y que `/ask` entero cobre una vez sola la misma pregunta.
+  Redis (JSON) y que `/ask` entero cobre una vez sola la misma pregunta;
+- que el candado de la dedupe sólo lo suelte su dueño (SET NX EX con token y
+  compare-and-delete en Lua);
+- que el crédito se decida al cobrar con el contador de cobradas, también con
+  pedidos simultáneos de verdad.
 
 Cada test usa claves propias y las borra al terminar.
 """
@@ -30,6 +34,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.application.api_key_service import (
     MinuteWindow,
+    charged_counter_key,
     reserve_question,
     settle_question,
 )
@@ -91,6 +96,32 @@ class TestDecrementScript:
             await redis_cache._redis.delete(key)
 
 
+class TestLockPrimitives:
+    async def test_set_if_absent_is_set_nx_with_ttl(self, redis_cache: RedisCacheAdapter) -> None:
+        key = f"test:lock:{uuid4()}"
+        try:
+            assert await redis_cache.set_if_absent(key, "a", ttl_seconds=60) is True
+            assert await redis_cache.set_if_absent(key, "b", ttl_seconds=60) is False
+            assert await redis_cache._redis.get(key) == "a"
+            assert 0 < await redis_cache._redis.ttl(key) <= 60
+        finally:
+            await redis_cache._redis.delete(key)
+
+    async def test_delete_if_equals_only_deletes_its_own(
+        self, redis_cache: RedisCacheAdapter
+    ) -> None:
+        key = f"test:lock:{uuid4()}"
+        try:
+            await redis_cache.set_if_absent(key, "mine", ttl_seconds=60)
+            assert await redis_cache.delete_if_equals(key, "someone-else") is False
+            assert await redis_cache._redis.get(key) == "mine"
+            assert await redis_cache.delete_if_equals(key, "mine") is True
+            assert not await redis_cache._redis.exists(key)
+            assert await redis_cache.delete_if_equals(key, "mine") is False  # ya no está
+        finally:
+            await redis_cache._redis.delete(key)
+
+
 class TestReservationRace:
     async def test_twenty_at_once_with_one_question_left(
         self, redis_cache: RedisCacheAdapter
@@ -122,6 +153,71 @@ class TestReservationRace:
         finally:
             await redis_cache._redis.delete(month_key)
 
+    async def test_a_freed_slot_is_not_paid_with_a_credit(
+        self, redis_cache: RedisCacheAdapter
+    ) -> None:
+        """9 de 10 usadas: A reserva el 10 y B el 11; B termina antes y A da
+        timeout. B ocupa el lugar 10: no gasta crédito."""
+        user = uuid4()
+        month_key = monthly_counter_key(user, "preguntas")
+        charged_key = charged_counter_key(user)
+        credits = AsyncMock(spec=ICreditRepository)
+        credits.get_active_supporter.return_value = None
+        credits.balance.return_value = {"preguntas": 3, "datos": 0}
+        credits.debit.return_value = True
+        try:
+            await redis_cache._redis.set(month_key, 9, ex=600)
+            await redis_cache._redis.set(charged_key, 9, ex=600)
+            minute = MinuteWindow(limit=100, count=1)
+            key = ApiKey(id=uuid4(), user_id=user, plan="pro")
+            first, second = await asyncio.gather(
+                reserve_question(key, redis_cache, credits=credits, minute=minute),
+                reserve_question(key, redis_cache, credits=credits, minute=minute),
+            )
+            # Cuál reservó el 11 lo decide Redis: ése es B.
+            a, b = (first, second) if second.needs_credit else (second, first)
+            assert not a.needs_credit and b.needs_credit
+            info = await settle_question(b, redis_cache, credits, charge=True)
+            await settle_question(a, redis_cache, credits, charge=False)  # timeout
+            assert info["used_credit"] is False
+            credits.debit.assert_not_awaited()
+            assert await redis_cache._redis.get(month_key) == "10"
+            assert await redis_cache._redis.get(charged_key) == "10"
+        finally:
+            await redis_cache._redis.delete(month_key, charged_key)
+
+    async def test_twenty_answers_at_once_past_the_month_spend_exact_credits(
+        self, redis_cache: RedisCacheAdapter
+    ) -> None:
+        """Con 8 de 10 cobradas, 20 respuestas simultáneas: 2 entran en el mes
+        y exactamente 18 gastan crédito (antes la cuenta dependía del orden)."""
+        user = uuid4()
+        month_key = monthly_counter_key(user, "preguntas")
+        charged_key = charged_counter_key(user)
+        credits = AsyncMock(spec=ICreditRepository)
+        credits.get_active_supporter.return_value = None
+        credits.balance.return_value = {"preguntas": 100, "datos": 0}
+        credits.debit.return_value = True
+        try:
+            await redis_cache._redis.set(month_key, 8, ex=600)
+            await redis_cache._redis.set(charged_key, 8, ex=600)
+            minute = MinuteWindow(limit=100, count=1)
+            key = ApiKey(id=uuid4(), user_id=user, plan="pro")
+            reservations = await asyncio.gather(
+                *(
+                    reserve_question(key, redis_cache, credits=credits, minute=minute)
+                    for _ in range(20)
+                )
+            )
+            infos = await asyncio.gather(
+                *(settle_question(r, redis_cache, credits, charge=True) for r in reservations)
+            )
+            assert sum(i["used_credit"] for i in infos) == 18
+            assert credits.debit.await_count == 18
+            assert await redis_cache._redis.get(charged_key) == "28"
+        finally:
+            await redis_cache._redis.delete(month_key, charged_key)
+
 
 class TestDedupeLock:
     async def test_one_leads_and_the_other_gets_its_answer(
@@ -135,7 +231,7 @@ class TestDedupeLock:
             async def finish() -> None:
                 await asyncio.sleep(0.1)
                 await store_answer(redis_cache, fp, {"answer": "7,6 %", "sources": [{"a": 1}]})
-                await release(redis_cache, fp)
+                await release(redis_cache, fp, leader.token)
 
             waiter, _ = await asyncio.gather(
                 lead_or_wait(redis_cache, fp, lock_ttl=60, wait_s=3, poll_s=0.02), finish()
@@ -143,6 +239,22 @@ class TestDedupeLock:
             assert not waiter.leader
             assert waiter.answer == {"answer": "7,6 %", "sources": [{"a": 1}]}
             assert not await redis_cache._redis.exists(f"ask:dedupe:{fp}:lock")
+        finally:
+            await _cleanup(redis_cache, f"ask:dedupe:{fp}:*")
+
+    async def test_an_expired_lock_taken_by_another_is_not_freed(
+        self, redis_cache: RedisCacheAdapter
+    ) -> None:
+        fp = f"test{uuid4().hex}"
+        lock = f"ask:dedupe:{fp}:lock"
+        try:
+            a = await lead_or_wait(redis_cache, fp, lock_ttl=1, wait_s=1)
+            await asyncio.sleep(1.2)  # venció en Redis de verdad
+            assert not await redis_cache._redis.exists(lock)
+            c = await lead_or_wait(redis_cache, fp, lock_ttl=60, wait_s=1)
+            assert c.leader
+            await release(redis_cache, fp, a.token)  # A termina tarde
+            assert await redis_cache._redis.get(lock) == c.token
         finally:
             await _cleanup(redis_cache, f"ask:dedupe:{fp}:*")
 
@@ -250,7 +362,9 @@ class TestAskEndToEnd:
             assert third.json()["chart_data"] == [{"periodo": "2025-T2", "valor": 7.6}]
             assert third.json()["usage"]["requests_remaining_month"] == 9
             assert await redis_cache._redis.get(monthly_counter_key(user, "preguntas")) == "1"
-            # El tercero no contó para el límite por minuto.
+            # El tercero no contó para el límite por minuto de las preguntas,
+            # sino para el de las repeticiones.
             assert await redis_cache._redis.get(f"rl:user:{user}:min") == "2"
+            assert await redis_cache._redis.get(f"rl:user:{user}:replay:min") == "1"
         finally:
             await _cleanup(redis_cache, f"rl:user:{user}:*", f"rl:ip:{ip}:*", f"ask:dedupe:{fp}:*")
