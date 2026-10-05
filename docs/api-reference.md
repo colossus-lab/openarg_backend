@@ -533,11 +533,19 @@ Execute a query using a public API key. Same pipeline as the frontend chat but s
 
 **Auth:** `Authorization: Bearer oarg_sk_xxx`
 
-**Rate Limits (Free Beta):**
-- 2 requests/minute per user
-- 5 requests/day per user
-- 20 requests/day per IP (anti-abuse)
-- 5,000 requests/day global free cap
+**Limits** (per person, not per key; see `app/application/public_quota.py`):
+- 2 questions/minute (counted on entry; a 429 never consumes the month)
+- 10 questions/month (Fundadores: 100), then credits if the person has any
+- 30 questions/day per IP and a shared daily cap for the free plan
+
+**What is charged** (since 2026-10-05): the month's question is reserved on
+entry and charged only when the request ends with a complete answer that used
+the model. Not charged (the reservation is given back): timeouts, errors,
+blocked prompt injections, fixed replies (greetings, questions about OpenArg,
+explanations), clarification requests and semantic-cache hits. The same
+question (normalized) from the same key within 5 minutes returns the answer
+already computed — or waits for the one in progress — without charging again
+and without counting against the per-minute limit.
 
 **Request:**
 ```json
@@ -553,24 +561,42 @@ Execute a query using a public API key. Same pipeline as the frontend chat but s
   "sources": [{"name": "Cotización Dólar", "url": "...", "portal": "ArgentinaDatos"}],
   "chart_data": [{"type": "line_chart", ...}],
   "map_data": null,
-  "confidence": 0.95,
   "citations": [{"claim": "...", "source": "..."}],
   "warnings": [],
   "usage": {
     "tokens": 1200,
     "duration_ms": 3400,
     "plan": "free",
-    "requests_remaining_today": 4,
-    "requests_remaining_minute": 1
+    "requests_remaining_today": 9,
+    "requests_remaining_month": 9,
+    "limit_month": 10,
+    "quota_resets_at": "2026-11-01T00:00:00+00:00",
+    "used_credit": false,
+    "tier": "gratis",
+    "founder_until": null,
+    "requests_remaining_minute": 1,
+    "charged": true
   }
 }
 ```
 
+`requests_remaining_today` is kept for old integrations: since 2026-09-30 it
+holds the same value as `requests_remaining_month` (what is left of the month
+after this request's actual charge). `charged` says whether this request
+consumed a question.
+
 **Error Responses:**
-- `401` — Invalid, revoked, or expired API key
-- `408` — Pipeline timeout (>30s)
-- `429` — Rate limit exceeded (includes `Retry-After` header)
-- `500` — Pipeline execution failed
+- `400` — Potential prompt injection detected (not charged)
+- `401` — Invalid or revoked API key
+- `402` — Monthly quota exceeded and no credits left (`X-Quota-Reset`, `Retry-After`)
+- `408` — Pipeline timeout (not charged)
+- `429` — Per-minute or per-IP limit (`Retry-After`)
+- `500` — Pipeline execution failed (not charged)
+- `503` — Two different causes, told apart by `detail`:
+  `"Free tier daily capacity reached. Try again tomorrow."` (the shared daily
+  cap; retry after UTC midnight) and `"Public API temporarily unavailable: the
+  quota service is not responding. Try again in a few minutes."` (an outage on
+  our side; `Retry-After: 300`)
 
 ---
 

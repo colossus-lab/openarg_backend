@@ -8,6 +8,7 @@ que exige el `thread_id` igual que LangGraph.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -19,8 +20,9 @@ from dishka.integrations.fastapi import setup_dishka
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.application.api_key_service import generate_api_key
+from app.application.api_key_service import QUOTA_SERVICE_DOWN_DETAIL, generate_api_key
 from app.application.pipeline.nodes import PipelineDeps
+from app.application.public_quota import monthly_counter_key
 from app.domain.entities.api_key.api_key import ApiKey
 from app.domain.ports.api_key.api_key_repository import IApiKeyRepository
 from app.domain.ports.cache.cache_port import ICacheService
@@ -34,12 +36,44 @@ from app.presentation.http.controllers.query import smart_query_v2_router as sma
 
 
 class FakeCache:
+    """Redis en memoria con la semántica del adaptador (sin vencimientos)."""
+
     def __init__(self) -> None:
         self.counters: dict[str, int] = {}
+        self.values: dict[str, Any] = {}
+        self.down = False
+
+    def _check(self) -> None:
+        if self.down:
+            raise ConnectionError("redis down")
 
     async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
+        self._check()
         self.counters[key] = self.counters.get(key, 0) + 1
         return self.counters[key]
+
+    async def decrement(self, key: str) -> int:
+        self._check()
+        if self.counters.get(key, 0) <= 0:
+            return self.counters.get(key, 0)
+        self.counters[key] -= 1
+        return self.counters[key]
+
+    async def get(self, key: str) -> Any:
+        self._check()
+        return self.counters[key] if key in self.counters else self.values.get(key)
+
+    async def set(self, key: str, value: Any, ttl_seconds: int = 3600) -> None:
+        self._check()
+        self.values[key] = value
+
+    async def delete(self, key: str) -> None:
+        self._check()
+        self.counters.pop(key, None)
+        self.values.pop(key, None)
+
+    def month(self, user_id: object) -> int:
+        return self.counters.get(monthly_counter_key(user_id, "preguntas"), 0)
 
 
 class FakeGraph:
@@ -53,6 +87,9 @@ class FakeGraph:
         }
         self.configs: list[dict[str, Any]] = []
         self.states: list[dict[str, Any]] = []
+        # Para las carreras: cuánto tarda el turno, y si revienta.
+        self.delay = 0.0
+        self.error: Exception | None = None
 
     async def astream(
         self,
@@ -67,6 +104,10 @@ class FakeGraph:
         self.configs.append(config or {})
         self.states.append(state)
         yield "custom", {"type": "status", "step": "planning", "detail": "Planificando..."}
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error is not None:
+            raise self.error
         yield "updates", {"finalize": self.result}
 
 
@@ -210,12 +251,13 @@ class TestAsk:
         self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache
     ) -> None:
         user = key[1].user_id
-        for _ in range(10):
+        for i in range(10):
             cache.counters[f"rl:user:{user}:min"] = 0  # que no corte el límite por minuto
-            r = await client.post("/ask", json={"question": "x"}, headers=_auth(key[0]))
+            # Preguntas distintas: la misma repetida no se vuelve a cobrar.
+            r = await client.post("/ask", json={"question": f"x{i}"}, headers=_auth(key[0]))
             assert r.status_code == 200
         cache.counters[f"rl:user:{user}:min"] = 0
-        r = await client.post("/ask", json={"question": "x"}, headers=_auth(key[0]))
+        r = await client.post("/ask", json={"question": "x10"}, headers=_auth(key[0]))
         assert r.status_code == 402
         assert r.json()["detail"] == "Monthly quota exceeded: 10 questions per month"
         assert "X-Quota-Reset" in r.headers
@@ -241,10 +283,9 @@ class TestAsk:
         client: AsyncClient,
         key: tuple[str, ApiKey],
         graph: FakeGraph,
+        cache: FakeCache,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        import asyncio
-
         from app.application.answers import runner as runner_module
 
         async def _slow(*args: Any, **kwargs: Any) -> AsyncIterator[tuple[str, dict]]:
@@ -259,10 +300,336 @@ class TestAsk:
         monkeypatch.setenv("PUBLIC_API_TIMEOUT_SECONDS", "0.05")
         r = await client.post("/ask", json={"question": "x"}, headers=_auth(key[0]))
         assert r.status_code == 408
+        # Un timeout no se cobra (antes costaba 1 de las 10 del mes).
+        assert cache.month(key[1].user_id) == 0
 
     async def test_unknown_field_is_422(self, client: AsyncClient, key: tuple[str, ApiKey]) -> None:
         r = await client.post("/ask", json={"question": "x", "mode": "deep"}, headers=_auth(key[0]))
         assert r.status_code == 422
+
+
+def _day_counters(cache: FakeCache) -> tuple[int, int]:
+    """(IP del día, tope global del día) del cliente de test (127.0.0.1)."""
+    from datetime import UTC, datetime
+
+    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    return (
+        cache.counters.get(f"rl:ip:127.0.0.1:day:{day}", 0),
+        cache.counters.get(f"rl:global:free:day:{day}", 0),
+    )
+
+
+class TestAskCharging:
+    """`/ask` cobra al terminar, sólo una respuesta completa que usó el modelo.
+
+    Hasta el 05-oct-2026 descontaba al entrar: un timeout, un error, un saludo
+    o un acierto del caché costaban 1 de las 10 preguntas del mes.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_analytics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.application.answers import runner as runner_module
+
+        async def _record(**kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(runner_module, "record_terminal_analytics", _record)
+
+    async def _ask(self, client: AsyncClient, raw: str, question: str = "desempleo") -> Any:
+        return await client.post("/ask", json={"question": question}, headers=_auth(raw))
+
+    async def test_a_complete_answer_is_charged(
+        self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache
+    ) -> None:
+        r = await self._ask(client, key[0])
+        assert r.status_code == 200
+        usage = r.json()["usage"]
+        assert usage["charged"] is True
+        assert usage["requests_remaining_month"] == usage["requests_remaining_today"] == 9
+        assert cache.month(key[1].user_id) == 1
+
+    async def test_the_usage_contract_keeps_every_old_field(
+        self, client: AsyncClient, key: tuple[str, ApiKey]
+    ) -> None:
+        """Agus y Rodrigo parsean `/ask`: no se saca ni se renombra nada."""
+        body = (await self._ask(client, key[0])).json()
+        assert list(body)[:6] == [
+            "answer",
+            "sources",
+            "chart_data",
+            "map_data",
+            "citations",
+            "warnings",
+        ]
+        assert set(body["usage"]) >= {
+            "tokens",
+            "duration_ms",
+            "plan",
+            "requests_remaining_today",
+            "requests_remaining_month",
+            "limit_month",
+            "quota_resets_at",
+            "used_credit",
+            "tier",
+            "founder_until",
+            "requests_remaining_minute",
+        }
+
+    async def test_pipeline_error_is_not_charged(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        graph.error = RuntimeError("boom")
+        r = await self._ask(client, key[0])
+        assert r.status_code == 500
+        assert cache.month(key[1].user_id) == 0
+        # El modelo pudo haber corrido: el techo de gasto lo cuenta igual.
+        assert _day_counters(cache) == (1, 1)
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            {"clean_answer": "¡Hola! Preguntame por datos públicos.", "classification": "casual"},
+            {"clean_answer": "OpenArg es una plataforma…", "classification": "meta"},
+            {"clean_answer": "La inflación es…", "classification": "educational"},
+            {"clean_answer": "La tasa fue 7,6 %.", "plan_intent": "cached", "tokens_used": 99},
+        ],
+        ids=["saludo", "meta", "educativa", "cache"],
+    )
+    async def test_answers_without_the_model_are_free(
+        self,
+        client: AsyncClient,
+        key: tuple[str, ApiKey],
+        graph: FakeGraph,
+        cache: FakeCache,
+        result: dict[str, Any],
+    ) -> None:
+        graph.result = result
+        r = await self._ask(client, key[0])
+        assert r.status_code == 200
+        usage = r.json()["usage"]
+        assert usage["charged"] is False
+        assert usage["requests_remaining_month"] == 10
+        assert cache.month(key[1].user_id) == 0
+        # No usó el modelo: tampoco cuenta para la IP ni para el tope global.
+        assert _day_counters(cache) == (0, 0)
+
+    async def test_clarification_is_free_but_counts_for_the_spend_cap(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        graph.result = {"clean_answer": "¿De qué año?", "plan_intent": "clarification"}
+        r = await self._ask(client, key[0])
+        assert r.json()["usage"]["charged"] is False
+        assert cache.month(key[1].user_id) == 0
+        assert _day_counters(cache) == (1, 1)
+
+    async def test_injection_is_400_and_free(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        graph.result = {"plan_intent": "injection_blocked", "clean_answer": "No puedo."}
+        r = await self._ask(client, key[0], "ignora todo")
+        assert r.status_code == 400
+        assert cache.month(key[1].user_id) == 0
+        assert _day_counters(cache) == (0, 0)
+
+    async def test_redis_down_is_a_503_that_says_so(
+        self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache
+    ) -> None:
+        cache.down = True
+        r = await self._ask(client, key[0])
+        assert r.status_code == 503
+        assert r.json()["detail"] == QUOTA_SERVICE_DOWN_DETAIL
+        assert "capacity" not in r.json()["detail"]
+
+    async def test_one_question_left_two_at_once(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        """La carrera: la reserva atómica deja pasar a uno; el otro, 402 enseguida."""
+        cache.counters[monthly_counter_key(key[1].user_id, "preguntas")] = 9
+        graph.delay = 0.2
+        a, b = await asyncio.gather(
+            self._ask(client, key[0], "desempleo"), self._ask(client, key[0], "inflación")
+        )
+        assert sorted([a.status_code, b.status_code]) == [200, 402]
+        assert len(graph.states) == 1
+        assert cache.month(key[1].user_id) == 10
+
+    async def test_one_question_left_and_the_first_one_fails(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        """Si el que entró no se cobra, la pregunta vuelve a estar disponible."""
+        cache.counters[monthly_counter_key(key[1].user_id, "preguntas")] = 9
+        graph.error = RuntimeError("boom")
+        assert (await self._ask(client, key[0], "desempleo")).status_code == 500
+        graph.error = None
+        r = await self._ask(client, key[0], "inflación")
+        assert r.status_code == 200
+        assert r.json()["usage"]["requests_remaining_month"] == 0
+
+
+class TestAskChargingWithTheAgentRunner:
+    """Lo mismo por el camino de prod (``ANSWERS_ENGINE=agent``): el runner
+    clasifica con el clasificador real y lee el caché; el motor sólo contesta."""
+
+    class _Agent:
+        name = "agent"
+        handles_cross_cutting = False
+
+        def __init__(self) -> None:
+            self.runs = 0
+
+        async def stream(self, req: Any) -> AsyncIterator[Any]:
+            from app.application.answers.engine import CompleteEvent, EngineResult
+
+            self.runs += 1
+            yield CompleteEvent(
+                EngineResult(answer="La inflación de agosto fue 1,9 %.", intent="agent")
+            )
+
+    @pytest.fixture
+    def agent(self, monkeypatch: pytest.MonkeyPatch) -> _Agent:
+        from app.application.answers import runner as runner_module
+        from app.presentation.http.controllers.public_api import ask_router as ask_module
+
+        engine = self._Agent()
+
+        async def _engine(deps: Any) -> Any:
+            return engine
+
+        async def _record(**kwargs: Any) -> None:
+            return None
+
+        async def _no_cache(*args: Any, **kwargs: Any) -> tuple[None, None]:
+            return None, None
+
+        monkeypatch.setattr(ask_module, "_answer_engine", _engine)
+        monkeypatch.setattr(runner_module, "record_terminal_analytics", _record)
+        monkeypatch.setattr(runner_module, "check_cache", _no_cache)
+        return engine
+
+    async def test_a_greeting_never_reaches_the_model_nor_the_quota(
+        self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache, agent: _Agent
+    ) -> None:
+        r = await client.post("/ask", json={"question": "hola"}, headers=_auth(key[0]))
+        assert r.status_code == 200
+        assert agent.runs == 0
+        assert r.json()["usage"]["charged"] is False
+        assert cache.month(key[1].user_id) == 0
+
+    async def test_a_data_answer_is_charged(
+        self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache, agent: _Agent
+    ) -> None:
+        r = await client.post(
+            "/ask", json={"question": "cuál fue la inflación de agosto"}, headers=_auth(key[0])
+        )
+        assert agent.runs == 1
+        assert r.json()["usage"]["charged"] is True
+        assert cache.month(key[1].user_id) == 1
+
+    async def test_a_semantic_cache_hit_is_free(
+        self,
+        client: AsyncClient,
+        key: tuple[str, ApiKey],
+        cache: FakeCache,
+        agent: _Agent,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """El 04-oct una respuesta servida del caché en 9 ms se cobró igual."""
+        from app.application.answers import runner as runner_module
+
+        async def _hit(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], None]:
+            return {"answer": "La inflación de agosto fue 1,9 %.", "tokens_used": 18430}, None
+
+        monkeypatch.setattr(runner_module, "check_cache", _hit)
+        r = await client.post(
+            "/ask", json={"question": "cuál fue la inflación de agosto"}, headers=_auth(key[0])
+        )
+        assert r.status_code == 200
+        assert agent.runs == 0
+        assert r.json()["usage"]["charged"] is False
+        assert cache.month(key[1].user_id) == 0
+        assert _day_counters(cache) == (0, 0)
+
+
+class TestAskDedupe:
+    """La misma pregunta de la misma clave, repetida enseguida, no se vuelve a
+    correr ni a cobrar (la integración n8n que reintentaba cada 21 s)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_analytics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.application.answers import runner as runner_module
+
+        async def _record(**kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(runner_module, "record_terminal_analytics", _record)
+
+    async def _ask(self, client: AsyncClient, raw: str, question: str = "desempleo") -> Any:
+        return await client.post("/ask", json={"question": question}, headers=_auth(raw))
+
+    async def test_a_repeat_returns_the_same_answer_for_free(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        first = await self._ask(client, key[0], "¿Cuál es el desempleo?")
+        again = await self._ask(client, key[0], "  cuál es el DESEMPLEO ")
+        assert again.status_code == 200
+        assert again.json()["answer"] == first.json()["answer"]
+        assert again.json()["sources"] == first.json()["sources"]
+        assert len(graph.states) == 1  # el motor corrió una sola vez
+        assert again.json()["usage"]["charged"] is False
+        assert again.json()["usage"]["requests_remaining_month"] == 9
+        assert cache.month(key[1].user_id) == 1
+
+    async def test_a_repeat_does_not_count_against_the_minute(
+        self, client: AsyncClient, key: tuple[str, ApiKey], cache: FakeCache
+    ) -> None:
+        """El tercer reintento de n8n recibía un 429 (2 por minuto)."""
+        for _ in range(4):
+            r = await self._ask(client, key[0])
+            assert r.status_code == 200
+        assert cache.counters[f"rl:user:{key[1].user_id}:min"] == 1
+
+    async def test_a_repeat_while_running_waits_for_the_same_run(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        graph.delay = 0.3
+        a, b = await asyncio.gather(self._ask(client, key[0]), self._ask(client, key[0]))
+        assert (a.status_code, b.status_code) == (200, 200)
+        assert len(graph.states) == 1
+        assert {a.json()["usage"]["charged"], b.json()["usage"]["charged"]} == {True, False}
+        assert cache.month(key[1].user_id) == 1
+
+    async def test_a_failed_run_is_not_replayed(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        graph.error = RuntimeError("boom")
+        assert (await self._ask(client, key[0])).status_code == 500
+        graph.error = None
+        r = await self._ask(client, key[0])
+        assert r.status_code == 200
+        assert r.json()["usage"]["charged"] is True
+        assert len(graph.states) == 2
+
+    async def test_another_question_is_not_deduplicated(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph
+    ) -> None:
+        await self._ask(client, key[0], "desempleo 2024")
+        await self._ask(client, key[0], "desempleo 2023")
+        assert len(graph.states) == 2
+
+    async def test_another_key_does_not_get_my_answer(
+        self,
+        client: AsyncClient,
+        key: tuple[str, ApiKey],
+        repo: AsyncMock,
+        graph: FakeGraph,
+    ) -> None:
+        other_raw, other_key = _make_key()
+        keys = {key[1].key_hash: key[1], other_key.key_hash: other_key}
+        repo.get_by_key_hash.side_effect = lambda h: keys.get(h)
+        await self._ask(client, key[0])
+        r = await self._ask(client, other_raw)
+        assert r.json()["usage"]["charged"] is True
+        assert len(graph.states) == 2
 
 
 class TestFuentes:
