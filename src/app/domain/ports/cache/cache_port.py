@@ -36,3 +36,16 @@ class ICacheService(ABC):
         See round v46 H8 for the previous race.
         """
         ...
+
+    @abstractmethod
+    async def decrement(self, key: str) -> int:
+        """Atomically undo one `increment_with_ttl` (a refund).
+
+        Used to give back a quota reservation that ended up not being
+        charged. It must be a single Redis-side atomic step (a Lua script):
+        it never creates the key — a DECR on a missing key would leave a
+        ``-1`` with no TTL forever — never goes below 0, and keeps the TTL.
+
+        Returns the post-decrement value (0 if the key was missing or 0).
+        """
+        ...

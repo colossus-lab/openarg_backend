@@ -92,3 +92,14 @@ class TestRedisCacheAdapter:
         mock_redis.pipeline = lambda: pipe
 
         assert await cache.increment_with_ttl("fresh", 60) == 1
+
+    async def test_decrement_is_one_atomic_script(self, cache, mock_redis):
+        """The refund of a quota reservation is a single EVAL: GET + DECR in
+        one step, so it never creates the key nor goes below 0. The real
+        semantics are checked against Redis in
+        tests/integration/test_redis_quota_reservation.py."""
+        mock_redis.eval.return_value = 4
+        assert await cache.decrement("rl:user:u:month:2026-10") == 4
+        script, numkeys, key = mock_redis.eval.await_args.args
+        assert (numkeys, key) == (1, "rl:user:u:month:2026-10")
+        assert "DECR" in script and "GET" in script
