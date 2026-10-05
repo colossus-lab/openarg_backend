@@ -179,8 +179,11 @@ TASK_REGISTRY: dict[str, dict] = {
     },
     "snapshot_bcra": {
         "celery_name": "openarg.snapshot_bcra",
-        "description": "Daily snapshot BCRA exchange rates + monetary variables",
-        "params": [],
+        "description": (
+            "Daily BCRA exchange rates, accumulated by date; "
+            '{"backfill_desde": "AAAA-MM-DD"} also loads each currency\'s history'
+        ),
+        "params": ["backfill_desde"],
         "queue": "collector",
     },
     "ingest_bac": {
