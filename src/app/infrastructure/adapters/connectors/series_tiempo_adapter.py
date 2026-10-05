@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import unicodedata
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,32 +18,57 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://apis.datos.gob.ar/series/api"
 
-# Curated catalog of verified Series de Tiempo IDs.
-# These IDs were validated against the live API and return real data.
+# Catálogo curado de series de la API de Series de Tiempo.
+#
+# - ``ids``: los ids que se piden juntos.
+# - ``description``: lo que ve el agente en ``buscar_series`` ("verificadas").
+#   Tiene que describir la serie que de verdad es, no la que se quería: en
+#   2026-02 se cargó ``11.3_AGCS_2004_M_41`` como "actividad industrial" y
+#   era el EMAE de comercio (verificado contra la API el 04-oct).
+# - ``expected_description``: por id, la descripción que da la API
+#   (``metadata=full``, ``field.description``). La fija un test contra datos
+#   grabados de la API: cambiar un id tiene que ser deliberado.
+# - ``keywords``: se comparan sin acentos y por palabra completa
+#   (``match_catalog``), nunca como subcadena: "emi" encontraba "emisiones".
+# - ``discontinued``: la fuente dejó de actualizar la serie.
+# - ``default_collapse`` / ``default_representation``: sólo los usa el
+#   pipeline viejo (``pipeline/connectors/series.py``).
 SERIES_CATALOG: dict[str, dict] = {
     "presupuesto": {
         "ids": ["451.3_GPNGPN_0_0_3_30"],
-        "description": "Gasto público nacional en millones de pesos (anual, desde 1980)",
+        "description": (
+            "Gasto público nacional consolidado en millones de pesos (anual, 1980-2023). "
+            "Serie discontinuada: la fuente no la actualiza desde 2023. Para el presupuesto "
+            "vigente buscá tablas con buscar_datos."
+        ),
+        "expected_description": {"451.3_GPNGPN_0_0_3_30": "Gasto público nacional"},
         "keywords": [
-            "presupuesto",
-            "gasto",
             "gasto publico",
-            "gasto nacional",
-            "presupuesto nacional",
-            "fiscal",
+            "gasto publico nacional",
+            "gasto publico consolidado",
         ],
+        "discontinued": True,
     },
     "inflacion": {
         "ids": ["148.3_INIVELNAL_DICI_M_26"],
         "description": "IPC Nacional Nivel General (índice base dic-2016=100). Usar con representation=percent_change para variación % mensual.",
+        "expected_description": {
+            "148.3_INIVELNAL_DICI_M_26": "IPC. Nivel General Nacional. Base dic 2016. Mensual."
+        },
         "keywords": ["inflacion", "ipc", "precios", "indice de precios", "costo de vida"],
         "default_collapse": "month",
         "default_representation": "percent_change",
     },
     "tipo_cambio": {
         "ids": ["92.2_TIPO_CAMBIION_0_0_21_24"],
-        "description": "Tipo de cambio peso/dólar de valuación BCRA (diario, desde 2003)",
-        "keywords": ["dolar", "tipo de cambio", "cambio", "divisa", "cotizacion"],
+        "description": (
+            "Tipo de cambio de valuación del BCRA, pesos por dólar (diario, desde 2003; los "
+            "fines de semana repiten el último dato hábil)"
+        ),
+        "expected_description": {
+            "92.2_TIPO_CAMBIION_0_0_21_24": "Tipo de cambio de valuación (peso por dólar)"
+        },
+        "keywords": ["dolar", "tipo de cambio", "divisa", "cotizacion"],
         "default_collapse": "month",
     },
     "ipc_regional": {
@@ -52,12 +79,23 @@ SERIES_CATALOG: dict[str, dict] = {
             "145.3_INGCUYUYO_DICI_M_11",
         ],
         "description": "IPC Regional: Nacional, GBA, NOA, y Cuyo (mensual)",
+        "expected_description": {
+            "148.3_INIVELNAL_DICI_M_26": "IPC. Nivel General Nacional. Base dic 2016. Mensual.",
+            "103.1_I2N_2016_M_19": "IPC-GBA. Nivel General. Base abr 2016. Mensual",
+            "148.3_INIVELNOA_DICI_M_21": "IPC. Nivel General Región noroeste. Base dic 2016. Mensual.",
+            "145.3_INGCUYUYO_DICI_M_11": "IPC. Nivel General Cuyo. Base dic 2016. Mensual.",
+        },
         "keywords": ["ipc regional", "precios regionales", "inflacion regional"],
         "default_collapse": "month",
     },
     "reservas": {
         "ids": ["174.1_RRVAS_IDOS_0_0_36"],
-        "description": "Reservas internacionales del BCRA en millones de dólares (mensual)",
+        "description": (
+            "Reservas internacionales del BCRA, saldo mensual en millones de dólares (desde "
+            "1940). La fuente la actualiza con meses de atraso: para el dato más reciente usá "
+            "la diaria 92.2_RESERVAS_IRES_0_0_32_40."
+        ),
+        "expected_description": {"174.1_RRVAS_IDOS_0_0_36": "Reservas Internacionales BCRA Saldos"},
         "keywords": [
             "reservas",
             "reservas internacionales",
@@ -68,13 +106,30 @@ SERIES_CATALOG: dict[str, dict] = {
         ],
         "default_collapse": "month",
     },
+    "reservas_diarias": {
+        "ids": ["92.2_RESERVAS_IRES_0_0_32_40"],
+        "description": (
+            "Reservas internacionales del BCRA, saldo diario en millones de dólares (desde 2003)"
+        ),
+        "expected_description": {
+            "92.2_RESERVAS_IRES_0_0_32_40": "Reservas internacionales del BCRA, en millones de dólares"
+        },
+        "keywords": [
+            "reservas",
+            "reservas internacionales",
+            "bcra reservas",
+            "reservas bcra",
+            "reservas del banco central",
+        ],
+    },
     "base_monetaria": {
         "ids": ["331.1_SALDO_BASERIA__15"],
         "description": "Base monetaria — saldo en millones de pesos (mensual)",
+        "expected_description": {"331.1_SALDO_BASERIA__15": "Saldo de la Base Monetaria"},
         "keywords": [
             "base monetaria",
-            "emision",
             "emision monetaria",
+            "emision de pesos",
             "dinero en circulacion",
             "masa monetaria",
             "agregados monetarios",
@@ -83,26 +138,31 @@ SERIES_CATALOG: dict[str, dict] = {
     },
     "leliq_pases": {
         "ids": ["331.1_PASES_REDELIQ_M_MONE_0_24_24"],
-        "description": "LELIQ y pases del BCRA en millones de pesos (mensual)",
+        "description": (
+            "Pases y redescuentos: LELIQ, como factor de explicación de la variación de la base "
+            "monetaria, en millones de pesos (mensual; vale 0 desde que se eliminaron las "
+            "LELIQ). No es la tasa de política monetaria ni el stock de LELIQ."
+        ),
+        "expected_description": {
+            "331.1_PASES_REDELIQ_M_MONE_0_24_24": "Pases y Redescuentos: Leliq"
+        },
         "keywords": [
             "leliq",
             "pases",
             "letras de liquidez",
             "pases pasivos",
-            "deuda bcra",
-            "pasivos remunerados",
-            "tasa de politica monetaria",
         ],
         "default_collapse": "month",
     },
     "emae": {
         "ids": ["143.3_NO_PR_2004_A_21"],
         "description": "EMAE — Estimador Mensual de Actividad Económica, índice base 2004 (mensual, desde 2004)",
+        "expected_description": {"143.3_NO_PR_2004_A_21": "EMAE. Base 2004"},
         "keywords": [
             "emae",
             "actividad economica",
             "pbi mensual",
-            "crecimiento",
+            "crecimiento economico",
             "recesion",
             "producto bruto",
         ],
@@ -110,19 +170,23 @@ SERIES_CATALOG: dict[str, dict] = {
     },
     "desempleo": {
         "ids": ["45.2_ECTDT_0_T_33"],
-        "description": "Tasa de desempleo total en porcentaje (trimestral, desde 2003)",
+        "description": (
+            "Tasa de desempleo total (trimestral, desde 2003). La API la da como fracción: "
+            "0,079 es 7,9 %."
+        ),
+        "expected_description": {"45.2_ECTDT_0_T_33": "Tasa de desempleo total. En porcentaje."},
         "keywords": [
             "desempleo",
             "desocupacion",
             "tasa de desempleo",
-            "empleo",
+            "tasa de desocupacion",
             "mercado laboral",
-            "trabajo",
         ],
     },
     "salarios": {
         "ids": ["149.1_TL_INDIIOS_OCTU_0_21"],
         "description": "Índice de Salarios nivel general, base oct-2016=100 (mensual)",
+        "expected_description": {"149.1_TL_INDIIOS_OCTU_0_21": "Índice de Salarios"},
         "keywords": [
             "salarios",
             "sueldos",
@@ -136,17 +200,29 @@ SERIES_CATALOG: dict[str, dict] = {
     "canasta_basica": {
         "ids": ["150.1_LA_POBREZA_0_D_13"],
         "description": "Canasta Básica Total (CBT) / Línea de pobreza por adulto equivalente en pesos (mensual, desde 2016)",
-        "keywords": ["canasta basica", "cbt", "linea de pobreza", "pobreza", "costo de vida"],
+        "expected_description": {
+            "150.1_LA_POBREZA_0_D_13": "Línea de pobreza desde 2016. Pesos corrientes."
+        },
+        "keywords": [
+            "canasta basica",
+            "canasta basica total",
+            "cbt",
+            "linea de pobreza",
+            "costo de vida",
+        ],
         "default_collapse": "month",
     },
     "canasta_alimentaria": {
         "ids": ["150.1_LA_INDICIA_0_D_16"],
         "description": "Canasta Básica Alimentaria (CBA) / Línea de indigencia por adulto equivalente en pesos (mensual, desde 2016)",
+        "expected_description": {
+            "150.1_LA_INDICIA_0_D_16": "Línea de indigencia desde 2016. Pesos corrientes."
+        },
         "keywords": [
             "canasta alimentaria",
+            "canasta basica alimentaria",
             "cba",
             "linea de indigencia",
-            "indigencia",
             "alimentos basicos",
         ],
         "default_collapse": "month",
@@ -154,18 +230,28 @@ SERIES_CATALOG: dict[str, dict] = {
     "exportaciones": {
         "ids": ["74.3_IET_0_M_16"],
         "description": "Exportaciones totales en millones de dólares (mensual, desde 1992)",
+        "expected_description": {
+            "74.3_IET_0_M_16": "Exportaciones totales. En millones de dólares."
+        },
         "keywords": ["exportaciones", "expo", "ventas externas", "comercio exterior"],
         "default_collapse": "month",
     },
     "importaciones": {
         "ids": ["74.3_IIT_0_M_25"],
         "description": "Importaciones totales en millones de dólares (mensual, desde 1992)",
+        "expected_description": {
+            "74.3_IIT_0_M_25": "Importaciones totales. En millones de dólares."
+        },
         "keywords": ["importaciones", "impo", "compras externas"],
         "default_collapse": "month",
     },
     "balanza_comercial": {
         "ids": ["74.3_IET_0_M_16", "74.3_IIT_0_M_25"],
         "description": "Balanza comercial: exportaciones e importaciones totales en millones de dólares (mensual)",
+        "expected_description": {
+            "74.3_IET_0_M_16": "Exportaciones totales. En millones de dólares.",
+            "74.3_IIT_0_M_25": "Importaciones totales. En millones de dólares.",
+        },
         "keywords": [
             "balanza comercial",
             "saldo comercial",
@@ -175,15 +261,40 @@ SERIES_CATALOG: dict[str, dict] = {
         "default_collapse": "month",
     },
     "actividad_industrial": {
-        "ids": ["11.3_AGCS_2004_M_41"],
-        "description": "EMAE Sector Industrial — Comercio mayorista/minorista y reparaciones, índice base 2004 (mensual)",
+        "ids": ["453.1_SERIE_ORIGNAL_0_0_14_46"],
+        "description": (
+            "Índice de Producción Industrial manufacturero (IPI) del INDEC, nivel general, "
+            "serie original (mensual, desde 2016)"
+        ),
+        "expected_description": {
+            "453.1_SERIE_ORIGNAL_0_0_14_46": "IPI Nivel General Serie Original"
+        },
         "keywords": [
             "industria",
+            "industria manufacturera",
             "produccion industrial",
             "actividad industrial",
             "manufactura",
+            "ipi",
             "emi",
             "fabrica",
+        ],
+        "default_collapse": "month",
+    },
+    "emae_comercio": {
+        "ids": ["11.3_AGCS_2004_M_41"],
+        "description": (
+            "EMAE: comercio mayorista, minorista y reparaciones, índice base 2004=100 "
+            "(mensual, desde 2004)"
+        ),
+        "expected_description": {
+            "11.3_AGCS_2004_M_41": "EMAE. Comercio mayorista y minorista y reparaciones"
+        },
+        "keywords": [
+            "comercio mayorista",
+            "comercio minorista",
+            "actividad comercial",
+            "emae comercio",
         ],
         "default_collapse": "month",
     },
@@ -194,24 +305,82 @@ def _strip_accents(text: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
 
 
-# Pre-strip keywords at module load (avoids re-stripping same keywords on every search)
-_CATALOG_NORMALIZED: list[tuple[str, dict]] = []
-for _entry in SERIES_CATALOG.values():
-    for _kw in _entry["keywords"]:
-        _CATALOG_NORMALIZED.append((_strip_accents(_kw), _entry))
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _stem(word: str) -> str:
+    """Un singular aproximado, igual para las dos puntas de la comparación.
+
+    Alcanza para que «exportación» encuentre «exportaciones» y «dólar»
+    encuentre «dólares», sin diccionario.
+    """
+    if len(word) > 4 and word.endswith(("ones", "res", "les", "des", "nes")):
+        return word[:-2]
+    if len(word) > 3 and word.endswith("s"):
+        return word[:-1]
+    return word
+
+
+def _tokens(text: str) -> list[str]:
+    return [_stem(w) for w in _WORD_RE.findall(_strip_accents(text.lower()))]
+
+
+def _contains_phrase(words: list[str], phrase: tuple[str, ...]) -> bool:
+    n = len(phrase)
+    return n > 0 and any(tuple(words[i : i + n]) == phrase for i in range(len(words) - n + 1))
+
+
+# Palabras clave tokenizadas una vez, en el orden del catálogo.
+_CATALOG_NORMALIZED: list[tuple[tuple[str, ...], str, dict]] = [
+    (tuple(_tokens(kw)), key, entry)
+    for key, entry in SERIES_CATALOG.items()
+    for kw in entry["keywords"]
+]
+
+
+def match_catalog(query: str) -> list[dict]:
+    """Las entradas del catálogo con alguna palabra clave entera en el texto.
+
+    Sin acentos y por palabra completa: «inflación» encuentra la inflación,
+    pero «emisiones» ya no encuentra la base monetaria ni «cambio climático»
+    el tipo de cambio. En el orden del catálogo, sin repetir.
+    """
+    words = _tokens(query)
+    found: list[dict] = []
+    seen: set[str] = set()
+    for phrase, key, entry in _CATALOG_NORMALIZED:
+        if key not in seen and _contains_phrase(words, phrase):
+            seen.add(key)
+            found.append(entry)
+    return found
 
 
 def find_catalog_match(query: str) -> dict | None:
-    """Find a catalog entry matching the query by keyword matching.
+    """La primera entrada del catálogo que corresponde al texto (pipeline viejo)."""
+    matches = match_catalog(query)
+    return matches[0] if matches else None
 
-    Uses pre-normalized keywords for O(keywords) substring checks
-    instead of re-stripping accents on every call.
+
+def catalog_mismatches(api_descriptions: Mapping[str, str | None]) -> list[str]:
+    """Ids del catálogo cuya descripción en la API no es la esperada.
+
+    ``api_descriptions`` va de id a ``field.description`` (``metadata=full``).
+    Lo usa el test contra datos grabados; sirve igual para un chequeo en vivo.
     """
-    normalized = _strip_accents(query.lower())
-    for kw_normalized, entry in _CATALOG_NORMALIZED:
-        if kw_normalized in normalized:
-            return entry
-    return None
+    problems: list[str] = []
+    for key, entry in SERIES_CATALOG.items():
+        expected = entry.get("expected_description") or {}
+        for sid in entry["ids"]:
+            if sid not in expected:
+                problems.append(f"{key}: {sid} no tiene expected_description")
+                continue
+            if sid not in api_descriptions:
+                problems.append(f"{key}: {sid} no está en la API")
+                continue
+            actual = api_descriptions[sid]
+            if actual != expected[sid]:
+                problems.append(f"{key}: {sid} es «{actual}», no «{expected[sid]}»")
+    return problems
 
 
 class SeriesTiempoAdapter(ISeriesTiempoConnector):
