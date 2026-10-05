@@ -15,6 +15,7 @@ from app.application.quality.data_age import (
     DataAge,
     data_age_for,
     staleness_warning,
+    table_freshness,
 )
 
 
@@ -202,3 +203,44 @@ def test_days_never_goes_negative_on_a_future_timestamp():
     age = DataAge(as_of=datetime.now(UTC) + timedelta(days=2), days=0, source="registry")
     assert age.days == 0
     assert not age.is_stale
+
+
+# ── table_freshness: lo que describir_tabla dice de una tabla (3.4) ──────
+
+
+def _leida(year: int, month: int, day: int, days: int) -> DataAge:
+    return DataAge(as_of=datetime(year, month, day, 3, 0, tzinfo=UTC), days=days, source="cached")
+
+
+def test_una_serie_da_su_ultimo_dato_y_cuando_se_leyo():
+    """Reservas en staging: leída el 09-may, último dato abril de 2023."""
+    f = table_freshness(
+        _leida(2026, 5, 9, 149),
+        columna_fecha="indice_tiempo",
+        desde="1940-01-01",
+        hasta="2023-04-01",
+    )
+    assert f.serie and f.ultimo_dato == "2023-04-01" and f.fecha_corte is None
+    assert f.actualizada is not None and f.actualizada.isoformat() == "2026-05-09"
+    assert f.nota is not None and "hace 149 días" in f.nota
+
+
+def test_un_solo_periodo_es_una_foto_con_su_fecha_de_corte():
+    """El crédito presupuestario 2026: ejercicio 2026 en todas las filas."""
+    f = table_freshness(
+        _leida(2026, 10, 5, 0), columna_fecha="ejercicio_presupuestario", desde="2026", hasta="2026"
+    )
+    assert not f.serie and f.fecha_corte is not None
+    assert f.fecha_corte.isoformat() == "2026-10-05" and f.ultimo_dato == "2026"
+    assert f.nota is not None and "foto" in f.nota and "hace" not in f.nota
+
+
+def test_sin_columna_de_fecha_no_hay_ultimo_dato():
+    f = table_freshness(_leida(2026, 10, 4, 1), columna_fecha=None, desde=None, hasta=None)
+    assert f.ultimo_dato is None and f.fecha_corte is not None and not f.serie
+
+
+def test_sin_fecha_de_lectura_no_inventa_una():
+    f = table_freshness(None, columna_fecha="fecha", desde="2020-01-01", hasta="2026-08-01")
+    assert f.actualizada is None and f.dias_desde_actualizacion is None and f.nota is None
+    assert f.ultimo_dato == "2026-08-01"
