@@ -5482,6 +5482,27 @@ def _apply_cached_outcome(
     return retry_count
 
 
+def _physical_columns(engine, table_name: str) -> list[str]:
+    """Columns of the table as it stands in Postgres, or [] if it cannot be read.
+
+    An unqualified name is looked up where `_current_write_schema` says it was
+    written, then in `raw` and `public` — the same places the retrospective
+    sweep looks.
+    """
+    try:
+        schema_name, bare_name = _resolve_physical_table_ref(table_name)
+    except Exception:
+        return []
+    candidates = [schema_name]
+    if "." not in (table_name or ""):
+        candidates += [s for s in ("raw", "public") if s != schema_name]
+    for candidate in candidates:
+        found = _existing_columns(engine, candidate, bare_name)
+        if found:
+            return [str(c) for c in found]
+    return []
+
+
 def _finalize_cached_dataset(
     engine,
     *,
@@ -5511,6 +5532,12 @@ def _finalize_cached_dataset(
     normalized_columns = [str(c) for c in columns]
     columns_json = json.dumps(normalized_columns)
 
+    # The gate used to see only the columns the parser *said* it wrote, and the
+    # write path could rename them afterwards — that is how ~414 tables went
+    # `ready` with data rows for headers while `columns_json` looked fine. The
+    # table's real columns go to the detectors that compare the two
+    # (`header_from_data`); the rest keep seeing what they always saw.
+    physical_columns = _physical_columns(engine, table_name)
     finding = _ws0_validate_post_parse(
         engine,
         dataset_id=dataset_id,
@@ -5523,6 +5550,7 @@ def _finalize_cached_dataset(
         materialized_row_count=row_count,
         declared_size_bytes=declared_size_bytes,
         columns_json=columns_json,
+        metadata={"physical_columns": physical_columns} if physical_columns else None,
     )
     resolved_layout_profile = layout_profile or (
         _LAYOUT_WIDE if len(normalized_columns) > _WIDE_LAYOUT_COLUMN_THRESHOLD else _LAYOUT_SIMPLE

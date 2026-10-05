@@ -1,10 +1,12 @@
 """Standard detector suite for ingestion validation (WS0).
 
-Importing this module gives access to all 14 detectors. `build_default_detectors()`
+Importing this module gives access to all 15 detectors. `build_default_detectors()`
 returns them in the order they should run inside `IngestionValidator`.
 """
 
-from app.application.validation.detector import Detector
+import os
+
+from app.application.validation.detector import Detector, Severity
 from app.application.validation.detectors.content import (
     EncodingMismatchDetector,
     GDriveScanWarningDetector,
@@ -13,6 +15,7 @@ from app.application.validation.detectors.content import (
     SeparatorMismatchDetector,
     SingleColumnDetector,
 )
+from app.application.validation.detectors.headers import HeaderFromDataDetector
 from app.application.validation.detectors.metadata import (
     MetadataIntegrityDetector,
     MissingKeyColumnDetector,
@@ -28,6 +31,17 @@ from app.application.validation.detectors.preingest import (
     HttpErrorDetector,
     MissingDownloadUrlDetector,
 )
+
+
+def _header_from_data_severity() -> Severity:
+    """CRITICAL por defecto; `OPENARG_HEADER_FROM_DATA_SEVERITY=warn` lo baja.
+
+    Un hallazgo crítico abierto hace que el sandbox se niegue a consultar la
+    tabla. Con `warn` el detector sigue registrando y no oculta nada: la palanca
+    para decidir, sin deploy, si las tablas rotas se ocultan antes del backfill.
+    """
+    raw = os.getenv("OPENARG_HEADER_FROM_DATA_SEVERITY", "").strip().lower()
+    return Severity.WARN if raw in {"warn", "warning"} else Severity.CRITICAL
 
 
 def build_default_detectors() -> list[Detector]:
@@ -49,6 +63,7 @@ def build_default_detectors() -> list[Detector]:
         SingleColumnDetector(),
         SeparatorMismatchDetector(),
         HeaderFlattenDetector(),
+        HeaderFromDataDetector(severity=_header_from_data_severity()),
         RowCountDetector(),
         MetadataIntegrityDetector(),
         MissingKeyColumnDetector(),
@@ -60,6 +75,7 @@ __all__ = [
     "FileTooLargeDetector",
     "GDriveScanWarningDetector",
     "HeaderFlattenDetector",
+    "HeaderFromDataDetector",
     "HtmlAsDataDetector",
     "HttpErrorDetector",
     "MetadataIntegrityDetector",
