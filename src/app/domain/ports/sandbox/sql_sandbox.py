@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -66,11 +68,69 @@ class SandboxResult:
     row_count: int
     truncated: bool
     error: str | None = None
+    # Qué clase de error, para que el llamador no tenga que adivinarlo por el
+    # texto: "timeout", "validation" (el validador rechazó el SQL), "blocked"
+    # (tabla con un hallazgo de calidad abierto o mart retirado) o
+    # "execution". None si no hubo error.
+    error_kind: str | None = None
+
+
+@dataclass
+class ColumnValueStats:
+    """Lo que ``pg_stats`` sabe de los valores de una columna.
+
+    Sale del ANALYZE de Postgres (una muestra al azar de la tabla), así que
+    cuesta milisegundos aun en tablas de millones de filas, donde un DISTINCT
+    pasa el timeout del sandbox (medido en staging: 30-142 ms contra más de
+    10 s en 11,6 M de filas).
+    """
+
+    column: str
+    null_frac: float | None = None
+    # Negativo = fracción de las filas (convención de Postgres).
+    n_distinct: float | None = None
+    most_common_vals: list[str] = field(default_factory=list)
+    most_common_freqs: list[float] = field(default_factory=list)
+    histogram_bounds: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TableValueStats:
+    # `pg_class.reltuples`; None si la tabla nunca se analizó.
+    estimated_rows: int | None
+    columns: dict[str, ColumnValueStats] = field(default_factory=dict)
 
 
 class ISQLSandbox(ABC):
     @abstractmethod
-    async def execute_readonly(self, sql: str, timeout_seconds: int = 10) -> SandboxResult: ...
+    async def execute_readonly(
+        self,
+        sql: str,
+        timeout_seconds: int = 10,
+        *,
+        params: Mapping[str, Any] | None = None,
+    ) -> SandboxResult:
+        """Ejecuta un SELECT en una transacción de sólo lectura.
+
+        ``params`` distingue los dos orígenes del SQL:
+
+        - ``None``: SQL escrito por un modelo (NL2SQL del pipeline viejo, el
+          SQL crudo de /sandbox). Pasa por el arreglo automático de enteros y
+          por el validador completo.
+        - un dict (aunque esté vacío): SQL armado por nuestro código, con los
+          valores del usuario como parámetros ligados (``:p0``). No se toca el
+          texto, y el validador no busca palabras prohibidas dentro de los
+          literales y los nombres citados, que vienen del esquema real.
+        """
+        ...
+
+    async def get_value_stats(self, table_name: str, columns: list[str]) -> TableValueStats | None:
+        """Estadísticas de valores (``pg_stats``) de algunas columnas de una tabla.
+
+        No es abstracto: un sandbox que no las tenga (un fake de test) devuelve
+        None y quien llama sigue sin ellas.
+        """
+        return None
 
     @abstractmethod
     async def list_cached_tables(self) -> list[CachedTableInfo]: ...

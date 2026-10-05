@@ -118,7 +118,9 @@ class FakeSandbox:
             ]
         }
 
-    async def execute_readonly(self, sql: str, timeout_seconds: int = 10) -> SandboxResult:
+    async def execute_readonly(
+        self, sql: str, timeout_seconds: int = 10, *, params: Any = None
+    ) -> SandboxResult:
         self.sqls.append(sql)
         if "sum(" in sql:
             rows = [{"valor": 3675564}]

@@ -150,6 +150,44 @@ class TestIndiceTiempo:
         assert charts[0]["type"] == "bar_chart"
 
 
+class TestFechasNoIso:
+    """Auditoría 4.1 / "lo que no vio" 8: `_sort_chart_rows` ordenaba con str()."""
+
+    def test_d_m_aaaa_se_ordena_por_fecha_no_por_texto(self):
+        records = [
+            {"Fecha": "1/10/2017", "valor": 3},
+            {"Fecha": "1/9/2017", "valor": 2},
+            {"Fecha": "15/1/2018", "valor": 4},
+            {"Fecha": "1/8/2017", "valor": 1},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert [r["valor"] for r in charts[0]["data"]] == [1, 2, 3, 4]
+
+    def test_meses_en_castellano(self):
+        records = [
+            {"periodo": "Junio de 2026", "valor": 6},
+            {"periodo": "Marzo de 2026", "valor": 3},
+            {"periodo": "Enero de 2027", "valor": 13},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert [r["valor"] for r in charts[0]["data"]] == [3, 6, 13]
+
+    def test_updated_at_no_es_el_eje_temporal(self):
+        records = [
+            {"updated_at": "2026-05-06", "nombre": "B", "valor": 2},
+            {"updated_at": "2026-05-06", "nombre": "A", "valor": 1},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert charts[0]["xKey"] == "nombre" and charts[0]["type"] == "bar_chart"
+
+    def test_publicacion_fecha_es_una_fecha(self):
+        from app.application.pipeline.chart_builder import is_date_column
+
+        assert is_date_column("PUBLICACION_FECHA")
+        assert not is_date_column("updated_ts")
+        assert not is_date_column("candidate")
+
+
 class TestAdoptLlmTitles:
     def test_generic_sql_title_takes_the_models_title(self):
         det = [{"title": "Consulta SQL: Mostrame las tasas", "xKey": "indice_tiempo", "data": [1]}]

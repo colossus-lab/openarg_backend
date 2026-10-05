@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from app.application.consultas.fechas import es_nombre_de_fecha, fecha_iso
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
@@ -20,13 +21,34 @@ DATE_COLUMNS = frozenset({"fecha", "indice_tiempo", "periodo"})
 
 
 def is_date_column(name: str) -> bool:
-    """True si la columna es una fecha que ordena una serie."""
-    lowered = name.lower()
-    return lowered in DATE_COLUMNS or "date" in lowered
+    """True si la columna es una fecha que ordena una serie.
+
+    La regla vive en ``consultas.fechas``: nombre exacto, o una palabra
+    "fecha"/"date" en el nombre (``PUBLICACION_FECHA``, ``start_date``), y nunca
+    una fecha de carga o auditoría. Antes alcanzaba la subcadena "date", y
+    ``updated_at``/``updated_ts`` (132 tablas en prod) se tomaban como la fecha
+    de la serie.
+    """
+    return es_nombre_de_fecha(name)
 
 
 def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, Any]]:
-    return sorted(rows, key=lambda row: str(row.get(x_key, "")))
+    """Ordena el eje temporal por la fecha normalizada, no por el texto.
+
+    Con ``str()``, "1/10/2017" quedaba antes que "1/9/2017" y "Junio de 2026"
+    antes que "Marzo de 2026": el gráfico de línea salía desordenado en las
+    respuestas del agente. Lo que no se reconoce como fecha va al final, en
+    su orden de texto.
+    """
+
+    def key(row: dict[str, Any]) -> tuple[int, str]:
+        value = row.get(x_key)
+        iso = fecha_iso(value, "inicio")
+        if iso is not None:
+            return (0, iso)
+        return (1, "" if value is None else str(value))
+
+    return sorted(rows, key=key)
 
 
 def _looks_like_mixed_quote_snapshot(

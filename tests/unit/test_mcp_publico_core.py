@@ -204,6 +204,32 @@ class TestModoDatosCore:
     def test_rows_without_results(self) -> None:
         assert "no devolvió filas" in core.format_rows({"filas": [], "fuente": "X"})
 
+    def test_rows_without_results_shows_why_and_what_exists(self) -> None:
+        """Auditoría 3.2: el modelo cliente no recibía ninguna pista."""
+        out = core.format_rows(
+            {
+                "filas": [],
+                "fuente": "X",
+                "aviso": "Ninguna fila cumple los filtros pedidos. Valores parecidos: «Educación y Cultura».",
+            }
+        )
+        assert "no devolvió filas" in out and "«Educación y Cultura»" in out
+
+    def test_rows_say_which_value_was_used(self) -> None:
+        out = core.format_rows(
+            {
+                "filas": [{"a": 1}],
+                "columnas": ["a"],
+                "fuente": "X",
+                "filtros_aplicados": ["funcion_desc: filtré por «Educación y Cultura»"],
+            }
+        )
+        assert "filtré por «Educación y Cultura»" in out
+
+    def test_table_shows_the_date_warning(self) -> None:
+        out = core.format_table({"tabla": "t", "columnas": [], "aviso_fecha": "formato raro"})
+        assert "Aviso: formato raro" in out
+
 
 class TestClientLabel:
     def test_client_info_wins_over_user_agent(self) -> None:

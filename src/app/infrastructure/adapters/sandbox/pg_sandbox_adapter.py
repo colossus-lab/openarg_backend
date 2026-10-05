@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
@@ -16,12 +17,14 @@ from sqlalchemy.engine import Engine
 
 from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
+    ColumnValueStats,
     ISQLSandbox,
     MartInfo,
     SandboxResult,
     TableSource,
+    TableValueStats,
 )
-from app.domain.value_objects.table_reference import bare_name
+from app.domain.value_objects.table_reference import bare_name, quote_qualified
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,48 @@ _FORBIDDEN_PATTERNS = re.compile(
     r"COMMENT|SECURITY|LOAD|IMPORT|REFRESH)\b",
     re.IGNORECASE,
 )
+
+# A single-quoted literal or a double-quoted identifier, with the doubled
+# quote as the only escape (standard_conforming_strings=on, verified on the
+# sandbox role). Used to keep text transformations away from them.
+_QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
+
+# The integer auto-fix for model-written SQL: `= 2024` → `= '2024'`, which
+# avoids "operator does not exist: text = integer" on text columns. The
+# lookahead keeps it off decimals: with `\b`, `> 1000000.5` became
+# `> '1000000'.5`, a syntax error (reproduced on staging through `calcular`).
+_BARE_INT_COMPARISON = re.compile(r"(=|<>|!=|>=|<=|>|<)\s*(\d{4,})(?![\w.'])")
+
+
+def _outside_quotes(sql: str, transform: Any) -> str:
+    """Apply ``transform`` to the SQL text outside literals and quoted names."""
+    out: list[str] = []
+    pos = 0
+    for m in _QUOTED.finditer(sql):
+        out.append(transform(sql[pos : m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(transform(sql[pos:]))
+    return "".join(out)
+
+
+def _autofix_bare_integers(sql: str) -> str:
+    """Quote bare 4+-digit integers after a comparison, never inside a literal.
+
+    Before, the regex also rewrote literals: a filter value like
+    `'x >= 2000 y'` came out as `'x >= '2000' y'`.
+    """
+    return _outside_quotes(sql, lambda part: _BARE_INT_COMPARISON.sub(r"\1 '\2'", part))
+
+
+def _mask_quoted(sql: str) -> str:
+    """The SQL with every literal and quoted identifier emptied."""
+    return _QUOTED.sub(lambda m: m.group(0)[0] * 2, sql)
+
+
+def _strip_comments(sql: str) -> str:
+    no_comments = re.sub(r"--[^\n]*", "", sql)
+    return re.sub(r"/\*.*?\*/", "", no_comments, flags=re.DOTALL).strip()
 
 
 # Caché de `list_cached_tables()` a nivel de PROCESO, no de instancia.
@@ -346,23 +391,31 @@ def _blocked_mart_error(engine: Engine, sql: str) -> str | None:
     )
 
 
-def _validate_sql(sql: str) -> str | None:
-    """Return an error message if the SQL is not allowed, else None."""
+def _validate_sql(sql: str, *, built: bool = False) -> str | None:
+    """Return an error message if the SQL is not allowed, else None.
+
+    ``built=True`` is SQL assembled by our own code (``public_catalog``,
+    ``aggregates``) with every user value bound as a parameter: its quoted
+    identifiers come from the real schema and its literals are our own
+    constants. The keyword scan skips them there — a column named "Set." made
+    `describir_tabla` fail on 13 prod tables — while every other layer (the
+    single SELECT, the AST walk, the table and function allowlists) runs
+    unchanged. Model-written SQL keeps the full scan.
+    """
     stripped = sql.strip().rstrip(";").strip()
     if not stripped:
         return "Empty SQL statement."
 
     # Remove SQL comments for validation
-    no_comments = re.sub(r"--[^\n]*", "", stripped)
-    no_comments = re.sub(r"/\*.*?\*/", "", no_comments, flags=re.DOTALL)
-    no_comments = no_comments.strip()
+    no_comments = _strip_comments(stripped)
 
     # Must start with SELECT or WITH (CTEs)
     if not re.match(r"^\s*(SELECT|WITH)\b", no_comments, re.IGNORECASE):
         return "Only SELECT queries are allowed."
 
     # Check for forbidden keywords (defense-in-depth layer 1)
-    match = _FORBIDDEN_PATTERNS.search(no_comments)
+    keyword_source = _strip_comments(_mask_quoted(stripped)) if built else no_comments
+    match = _FORBIDDEN_PATTERNS.search(keyword_source)
     if match:
         return f"Forbidden SQL operation: {match.group(0).upper()}"
 
@@ -531,21 +584,28 @@ class PgSandboxAdapter(ISQLSandbox):
 
         return self._engine
 
-    def _execute_sync(self, sql: str, timeout_seconds: int) -> SandboxResult:
-        """Execute the query synchronously in a read-only transaction."""
-        # Auto-fix: wrap bare integers in WHERE/AND/OR clauses with quotes
-        # Prevents "operator does not exist: text = integer" errors
-        # NOTE: This runs BEFORE validation so _validate_sql operates on the
-        # final SQL that will actually be executed (SEC-01 audit fix).
-        import re
+    def _execute_sync(
+        self,
+        sql: str,
+        timeout_seconds: int,
+        params: Mapping[str, Any] | None = None,
+    ) -> SandboxResult:
+        """Execute the query synchronously in a read-only transaction.
 
-        sql = re.sub(
-            r"(=|<>|!=|>=|<=|>|<)\s*(\d{4,})\b(?!')",
-            r"\1 '\2'",
-            sql,
-        )
+        ``params`` is None for model-written SQL and a dict for SQL built by
+        our code (see ``ISQLSandbox.execute_readonly``).
+        """
+        built = params is not None
+        if not built:
+            # Auto-fix: wrap bare integers in WHERE/AND/OR clauses with quotes.
+            # Prevents "operator does not exist: text = integer" errors in
+            # model-written SQL. Built SQL binds its values, so it never needs
+            # it — and running it there broke decimals (`> 1000000.5`).
+            # NOTE: This runs BEFORE validation so _validate_sql operates on the
+            # final SQL that will actually be executed (SEC-01 audit fix).
+            sql = _autofix_bare_integers(sql)
 
-        validation_error = _validate_sql(sql)
+        validation_error = _validate_sql(sql, built=built)
         if validation_error:
             return SandboxResult(
                 columns=[],
@@ -553,6 +613,7 @@ class PgSandboxAdapter(ISQLSandbox):
                 row_count=0,
                 truncated=False,
                 error=validation_error,
+                error_kind="validation",
             )
 
         engine = self._get_engine()
@@ -566,6 +627,7 @@ class PgSandboxAdapter(ISQLSandbox):
                 row_count=0,
                 truncated=False,
                 error=blocked_error,
+                error_kind="blocked",
             )
 
         try:
@@ -574,7 +636,10 @@ class PgSandboxAdapter(ISQLSandbox):
                 conn.execute(text("SET TRANSACTION READ ONLY"))
                 conn.execute(text(f"SET statement_timeout = {int(timeout_ms)}"))
 
-                result = conn.execute(text(sql))
+                if built:
+                    result = conn.execute(text(sql), dict(params or {}))
+                else:
+                    result = conn.execute(text(sql))
                 columns = list(result.keys())
 
                 rows_raw = result.fetchmany(MAX_ROWS + 1)
@@ -602,8 +667,10 @@ class PgSandboxAdapter(ISQLSandbox):
             logger.warning("Sandbox query failed: %s", raw_error)
             # Sanitize error messages — don't expose PostgreSQL internals
             error_lower = raw_error.lower()
+            kind = "execution"
             if "statement timeout" in error_lower or "canceling statement" in error_lower:
                 error_msg = f"Query timed out after {timeout_seconds} seconds."
+                kind = "timeout"
             elif "relation" in error_lower and "does not exist" in error_lower:
                 error_msg = "The requested table does not exist."
             elif "column" in error_lower and "does not exist" in error_lower:
@@ -618,15 +685,88 @@ class PgSandboxAdapter(ISQLSandbox):
                 row_count=0,
                 truncated=False,
                 error=error_msg,
+                error_kind=kind,
             )
 
     async def execute_readonly(
-        self, sql: str, timeout_seconds: int = _SANDBOX_TIMEOUT_MS // 1000
+        self,
+        sql: str,
+        timeout_seconds: int = _SANDBOX_TIMEOUT_MS // 1000,
+        *,
+        params: Mapping[str, Any] | None = None,
     ) -> SandboxResult:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             self._executor,
-            partial(self._execute_sync, sql, timeout_seconds),
+            partial(self._execute_sync, sql, timeout_seconds, params),
+        )
+
+    def _get_value_stats_sync(self, table_name: str, columns: list[str]) -> TableValueStats | None:
+        # The same table allowlist as a query: the values in pg_stats are
+        # data, and an internal table's most common values are not public.
+        probe = f"SELECT 1 FROM {quote_qualified(table_name)}"
+        if _validate_sql(probe, built=True):
+            return None
+        engine = self._get_engine()
+        # And the same serving gates: a mart withdrawn from serving or a table
+        # with an open critical finding must not leak its values (or a period
+        # derived from them) through the statistics either.
+        if _blocked_mart_error(engine, probe) or _findings_blocked_error(engine, probe):
+            return None
+        with engine.connect() as conn:
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+            conn.execute(text("SET statement_timeout = 5000"))
+            # `to_regclass` resolves the name with the sandbox search_path, the
+            # same way the query will: a bare `cache_x` may live in `raw`.
+            rel = conn.execute(
+                text(
+                    "SELECT n.nspname AS schema_name, c.relname AS table_name, c.reltuples "
+                    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE c.oid = to_regclass(:name)"
+                ),
+                {"name": quote_qualified(table_name)},
+            ).first()
+            if rel is None:
+                conn.rollback()
+                return None
+            rows: list[Any] = []
+            if columns:
+                rows = list(
+                    conn.execute(
+                        text(
+                            "SELECT attname, null_frac, n_distinct, "
+                            "       most_common_vals::text::text[] AS mcv, "
+                            "       most_common_freqs::float8[] AS mcf, "
+                            "       histogram_bounds::text::text[] AS hist "
+                            "FROM pg_stats "
+                            "WHERE schemaname = :schema AND tablename = :table "
+                            "  AND attname = ANY(:columns)"
+                        ),
+                        {"schema": rel.schema_name, "table": rel.table_name, "columns": columns},
+                    ).fetchall()
+                )
+            conn.rollback()
+        estimated = int(rel.reltuples) if rel.reltuples is not None and rel.reltuples >= 0 else None
+        return TableValueStats(
+            estimated_rows=estimated,
+            columns={
+                str(r.attname): ColumnValueStats(
+                    column=str(r.attname),
+                    null_frac=r.null_frac,
+                    n_distinct=r.n_distinct,
+                    most_common_vals=[str(v) for v in (r.mcv or []) if v is not None],
+                    most_common_freqs=[float(f) for f in (r.mcf or [])],
+                    histogram_bounds=[str(v) for v in (r.hist or []) if v is not None],
+                )
+                for r in rows
+            },
+        )
+
+    async def get_value_stats(self, table_name: str, columns: list[str]) -> TableValueStats | None:
+        """``pg_stats`` + ``reltuples``, read directly: the validator blocks ``pg_catalog``."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, partial(self._get_value_stats_sync, table_name, list(columns))
         )
 
     def _list_tables_sync(self) -> list[CachedTableInfo]:
@@ -836,7 +976,14 @@ class PgSandboxAdapter(ISQLSandbox):
         self, dataset_ids: list[str], table_names: list[str]
     ) -> list[CachedTableInfo]:
         ids = sorted({str(i) for i in dataset_ids if i})
-        names = sorted({bare_name(n) for n in table_names if n})
+        # Con y sin minúsculas: `resolve_table` compara en minúsculas, pero si
+        # el nombre pedido no llegaba igual hasta acá, "RAW.CACHE_X" daba 404.
+        # Los nombres del colector están en minúsculas; el original queda por
+        # si alguna tabla vieja no.
+        names = sorted(
+            {bare_name(n) for n in table_names if n}
+            | {bare_name(n).lower() for n in table_names if n}
+        )
         if not ids and not names:
             return []
         engine = self._get_engine()

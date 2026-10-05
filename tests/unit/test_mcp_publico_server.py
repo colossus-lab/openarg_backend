@@ -338,6 +338,23 @@ class TestModoDatos:
         assert "Hay más filas" in text
         assert "https://infra.datos.gob.ar/x.csv" in text
 
+    async def test_obtener_datos_forwards_operator_filters_and_date_column(
+        self, backend: FakeBackend
+    ) -> None:
+        """Auditoría 3.3: los filtros del modo datos eran sólo de igualdad."""
+        filtros = [
+            {"columna": "call", "operador": "mayor_que", "valor": "30"},
+            {"columna": "serie", "operador": "en", "valores": ["a", "b"]},
+        ]
+        await _call(
+            "obtener_datos",
+            {"tabla": "raw.tasas", "filtros": filtros, "columna_fecha": "indice_tiempo"},
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        body = json.loads(backend.requests[0].content)
+        assert body["filtros"] == filtros
+        assert body["columna_fecha"] == "indice_tiempo"
+
     async def test_backend_validation_message_reaches_the_model(self, backend: FakeBackend) -> None:
         backend.catalog_status = 400
         backend.catalog_detail = "Columnas que no existen en la tabla: password."

@@ -43,7 +43,13 @@ class FakeCache:
 class FakeSandbox:
     def __init__(self) -> None:
         self.sql: list[str] = []
+        self.params: list[Any] = []
         self.error: str | None = None
+        self.error_kind: str | None = None
+        # Si está, el error es sólo para las consultas que contienen este texto.
+        self.error_only_for: str | None = None
+        # La consulta principal de /datos no devuelve filas.
+        self.empty = False
 
     tables = [
         CachedTableInfo(table_name=_T, dataset_id="ds-1", row_count=8569, columns=[]),
@@ -74,14 +80,28 @@ class FakeSandbox:
         ]
         return {n: cols for n in names}
 
-    async def execute_readonly(self, sql: str, timeout_seconds: int = 10) -> SandboxResult:
+    async def execute_readonly(
+        self, sql: str, timeout_seconds: int = 10, *, params: Any = None
+    ) -> SandboxResult:
         self.sql.append(sql)
-        if self.error:
+        self.params.append(params)
+        if self.error and not (self.error_only_for and self.error_only_for not in sql):
             return SandboxResult(
-                columns=[], rows=[], row_count=0, truncated=False, error=self.error
+                columns=[],
+                rows=[],
+                row_count=0,
+                truncated=False,
+                error=self.error,
+                error_kind=self.error_kind,
             )
-        if "min(left(" in sql:
-            rows = [{"desde": "2003-01-02", "hasta": "2026-06-18"}]
+        if "AS reconocidas" in sql:
+            rows = [
+                {"desde": "2003-01-02", "hasta": "2026-06-18", "reconocidas": 9, "con_valor": 9}
+            ]
+        elif self.empty and "LIMIT 100" in sql:
+            return SandboxResult(columns=[], rows=[], row_count=0, truncated=False)
+        elif "GROUP BY 1" in sql:
+            rows = [{"valor": "Principales tasas", "filas": 12}, {"valor": "Otra cosa", "filas": 3}]
         else:
             rows = [
                 {
@@ -278,7 +298,9 @@ async def test_datos_returns_rows_and_source(client: AsyncClient, sandbox: FakeS
     body = r.json()
     assert body["cantidad"] == 2 and body["truncado"] is True
     assert body["fuente"] == "Principales tasas de interés"
-    assert "left(\"indice_tiempo\"::text, 7) >= '2026-06'" in sandbox.sql[-1]
+    assert ">= :p0" in sandbox.sql[-1] and "2026-06" not in sandbox.sql[-1]
+    assert sandbox.params[-1] == {"p0": "2026-06-01"}
+    assert body["aviso"] is None
 
 
 async def test_datos_rejects_invented_columns(client: AsyncClient, sandbox: FakeSandbox) -> None:
@@ -299,6 +321,93 @@ async def test_sandbox_rejection_is_a_400_not_a_500(
     sandbox.error = "Forbidden SQL operation: DO"
     r = await client.post("/catalogo/datos", json={"tabla": _T})
     assert r.status_code == 400
+
+
+async def test_a_timeout_says_the_table_is_too_big(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """Antes: 'Probá con otros filtros o menos columnas' también para un timeout."""
+    sandbox.error, sandbox.error_kind = "Query timed out after 10 seconds.", "timeout"
+    r = await client.post("/catalogo/datos", json={"tabla": _T})
+    assert r.status_code == 400
+    assert "muy grande" in r.json()["detail"]
+
+
+async def test_tabla_survives_a_failing_period_query(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """ok.1: el 400 genérico de describir_tabla venía de las consultas auxiliares."""
+    sandbox.error, sandbox.error_kind = "Query timed out after 10 seconds.", "timeout"
+    sandbox.error_only_for = "AS reconocidas"
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["columna_fecha"] == "indice_tiempo"
+    assert body["desde"] is None and body["aviso_fecha"]
+    assert len(body["muestra"]) == 2
+
+
+async def test_datos_with_no_rows_explains_and_suggests(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """3.2: cero filas venía sin ninguna pista."""
+    sandbox.empty = True
+    sandbox.get_column_types = AsyncMock(  # type: ignore[method-assign]
+        return_value={_T: [("indice_tiempo", "text"), ("serie", "text")]}
+    )
+    r = await client.post(
+        "/catalogo/datos",
+        json={"tabla": _T, "filtros": [{"columna": "serie", "operador": "=", "valor": "tasas"}]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["cantidad"] == 0
+    assert "Ninguna fila" in body["aviso"]
+    assert body["sugerencias"]["serie"][0] == {"valor": "Principales tasas", "filas": 12}
+    probe = next(s for s in sandbox.sql if "GROUP BY 1" in s)
+    assert '"serie" IS NOT NULL' in probe
+
+
+async def test_datos_accepts_operator_filters(client: AsyncClient, sandbox: FakeSandbox) -> None:
+    r = await client.post(
+        "/catalogo/datos",
+        json={
+            "tabla": _T,
+            "filtros": [
+                {"columna": "tasas_interes_call", "operador": "mayor_que", "valor": 30.5},
+                {"columna": "indice_tiempo", "operador": "en", "valores": ["2026-06-18"]},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert '"tasas_interes_call" > :p0' in sandbox.sql[-1]
+    assert str(sandbox.params[-1]["p0"]) == "30.5"
+
+
+async def test_datos_accepts_numbers_in_filters(client: AsyncClient, sandbox: FakeSandbox) -> None:
+    """Revisión del PR #133: `valores: [2020, 2021]` daba un 422 genérico."""
+    r = await client.post(
+        "/catalogo/datos",
+        json={
+            "tabla": _T,
+            "filtros": [{"columna": "indice_tiempo", "operador": "en", "valores": [2020, 2021]}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert sandbox.params[-1] == {"p0": ["2020", "2021"]}
+    r = await client.post("/catalogo/datos", json={"tabla": _T, "filtros": {"indice_tiempo": 2020}})
+    assert r.status_code == 200, r.text
+
+
+async def test_tabla_blocked_says_why_instead_of_a_period(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    sandbox.error = "La tabla tiene un problema de calidad sin resolver"
+    sandbox.error_kind, sandbox.error_only_for = "blocked", "AS reconocidas"
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["desde"] is None and "problema de calidad" in body["aviso_fecha"]
 
 
 async def test_catalog_quota_is_enforced(
