@@ -147,15 +147,17 @@ async def _seconds_left(cache: ICacheService, key: str, window: int) -> int:
     La ventana arranca con el primer pedido (EXPIRE NX), así que el
     `Retry-After: 60` fijo de antes hacía esperar de más a quien chocaba el
     límite al final del minuto. Si el caché no sabe el TTL, la ventana entera.
+    Un TTL 0 es la clave que vence en este segundo (Redis redondea): 1, no
+    la ventana entera.
     """
     try:
         left = await cache.ttl(key)
     except Exception:
         logger.debug("Cache TTL lookup failed for %s", key, exc_info=True)
         left = None
-    if not isinstance(left, int) or left <= 0:
+    if not isinstance(left, int) or left < 0:
         return window
-    return min(left, window)
+    return max(1, min(left, window))
 
 
 async def check_rate_limit(

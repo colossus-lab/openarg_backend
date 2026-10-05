@@ -466,6 +466,18 @@ class TestRateLimit:
         assert datos.value.headers["Retry-After"] == "7"
 
     @pytest.mark.asyncio
+    async def test_retry_after_in_the_last_second_is_one_not_sixty(
+        self, free_key: ApiKey, cache: FakeCache
+    ) -> None:
+        """Redis redondea: una clave que vence en este segundo tiene TTL 0."""
+        key = f"rl:user:{free_key.user_id}:catalog:min"
+        cache.remaining = {key: 0}
+        cache.counters[key] = CATALOG_MINUTE_LIMIT
+        with pytest.raises(HTTPException) as exc_info:
+            await check_catalog_rate_limit(free_key, cache)  # type: ignore[arg-type]
+        assert exc_info.value.headers["Retry-After"] == "1"
+
+    @pytest.mark.asyncio
     async def test_retry_after_falls_back_to_the_whole_minute(
         self, free_key: ApiKey, cache: FakeCache
     ) -> None:
