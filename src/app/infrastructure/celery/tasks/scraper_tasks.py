@@ -131,6 +131,48 @@ def _embedding_signature(
     ).hexdigest()
 
 
+def _has_columns(value: str | list[str] | None) -> bool:
+    """Whether a stored or incoming `columns` value actually lists columns.
+
+    `[]`, `null`, `""` and an empty string are the same absence written four
+    ways; `columns_backfill` uses the same test to pick what it fills.
+    """
+    if isinstance(value, list):
+        return bool(value)
+    return bool(value) and str(value).strip() not in ("", "[]", "null", '""')
+
+
+def _keep_known_columns(rows: list[dict], existing_columns: dict[str, str | None]) -> None:
+    """Do not let a portal that publishes no columns erase the ones we know.
+
+    Most CKAN portals do not publish a resource's columns
+    (`attributesDescription` is a datos.gob.ar extension), so the scrape sends
+    `[]` for them. The columns we do know come from the file itself:
+    `columns_backfill` copies the parsed header from `raw.cached_datasets`
+    every hour. Overwriting it with `[]` set up a loop that ran every day:
+
+    1. the scrape (03:00-05:50 ART) saw `[]` against the backfilled list,
+       counted the dataset as changed, wrote `[]` and re-embedded it;
+    2. the backfill (every hour at :20, 1,000 rows) found the column empty
+       again, refilled it and re-embedded it a second time.
+
+    Measured in prod on 2026-10-04: 60,042 chunks written in 24 h for 17,805
+    datasets, 06:00-23:00 UTC at ~3,300 an hour (the backfill's 1,000 rows of
+    ~3.3 chunks), concentrated in the portals without the extension
+    (cordoba_estadistica 8,142 of 8,811, caba 2,327, entre_rios 1,936) against
+    490 of 12,073 in datos_gob_ar. Staging showed the same rows re-embedded
+    at :20 with their columns refilled.
+
+    Keeping what we know when the portal sends nothing stops both halves: the
+    signature no longer sees a change and the backfill no longer finds a hole.
+    A portal that does publish columns still wins.
+    """
+    for row in rows:
+        known = existing_columns.get(row["sid"])
+        if not _has_columns(row["cols"]) and _has_columns(known):
+            row["cols"] = known
+
+
 @celery_app.task(
     name="openarg.scrape_catalog", bind=True, max_retries=2, soft_time_limit=900, time_limit=1080
 )
@@ -314,6 +356,9 @@ def scrape_catalog(self, portal: str = "datos_gob_ar", batch_size: int = 100):
                         )
                         for row in existing_rows
                     }
+                    _keep_known_columns(
+                        deduped_rows, {row.source_id: row.columns for row in existing_rows}
+                    )
 
                     conn.execute(
                         text("""
@@ -601,10 +646,40 @@ def _get_sample_rows_text(engine, dataset_id: str, title: str, portal_name: str)
         return None
 
 
+def _chunks_unchanged(engine, dataset_id: str, chunks: list[str]) -> bool:
+    """Whether the dataset already has exactly these chunk texts indexed.
+
+    Cohere returns the same vector for the same text, so re-embedding an
+    unchanged dataset buys nothing and costs three things: the Bedrock call,
+    a DELETE + INSERT churning the HNSW graph (6.98 M inserts and 6.94 M
+    deletes over ~112k live rows in prod), and a window in which the dataset
+    has no chunks at all. A dozen tasks dispatch `index_dataset_embedding`
+    (scrapers, the collector's reconcile, the columns backfill) and none of
+    them can know whether the text changed; this is the one place that can.
+
+    Any doubt — a failed read, a different count, one different text — means
+    re-embed, as before.
+    """
+    try:
+        with engine.connect() as conn:
+            stored = [
+                str(r[0])
+                for r in conn.execute(
+                    text("SELECT content FROM dataset_chunks WHERE dataset_id = :did"),
+                    {"did": dataset_id},
+                ).fetchall()
+            ]
+            conn.rollback()
+    except Exception:
+        logger.debug("Could not read stored chunks for %s", dataset_id, exc_info=True)
+        return False
+    return bool(stored) and sorted(stored) == sorted(chunks)
+
+
 @celery_app.task(
     name="openarg.index_dataset", bind=True, max_retries=3, soft_time_limit=120, time_limit=180
 )
-def index_dataset_embedding(self, dataset_id: str):
+def index_dataset_embedding(self, dataset_id: str, force: bool = False):
     """
     Genera múltiples chunks de embedding por dataset:
     1. Chunk principal: título + descripción + organización + tags + jurisdicción
@@ -613,6 +688,10 @@ def index_dataset_embedding(self, dataset_id: str):
     4. Chunk de estadísticas: datos reales (rangos, promedios, valores de ejemplo)
 
     Esto mejora la búsqueda vectorial al tener más puntos de entrada semánticos.
+
+    Si los textos son los mismos que ya están indexados no llama a Bedrock ni
+    reescribe los chunks (`_chunks_unchanged`). ``force=True`` re-embebe igual:
+    es para cuando cambia el modelo de embeddings, que el texto no refleja.
     """
     logger.info(f"Generating embeddings for dataset: {dataset_id}")
     engine = get_sync_engine()
@@ -705,6 +784,16 @@ def index_dataset_embedding(self, dataset_id: str):
             if sample_text:
                 chunks.append(sample_text)
 
+        # Cohere embed via Bedrock validates maxLength=2048 chars per text
+        chunks = [c[:2048] for c in chunks]
+        if not force and _chunks_unchanged(engine, dataset_id, chunks):
+            logger.info(
+                "Embedding skipped for dataset %s: its %d chunks are already indexed",
+                dataset_id,
+                len(chunks),
+            )
+            return {"dataset_id": dataset_id, "chunks_created": 0, "unchanged": True}
+
         # Generate embeddings in batch via Bedrock Cohere
         import json as _json
 
@@ -714,8 +803,6 @@ def index_dataset_embedding(self, dataset_id: str):
             "bedrock-runtime",
             region_name=os.getenv("AWS_REGION", "us-east-1"),
         )
-        # Cohere embed via Bedrock validates maxLength=2048 chars per text
-        chunks = [c[:2048] for c in chunks]
         embeddings = []
         batch_size = 96  # Cohere max batch size
         for batch_start in range(0, len(chunks), batch_size):
