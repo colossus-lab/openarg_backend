@@ -13,10 +13,10 @@ Tres clases:
   fecha-hora SAS, código `HCDN285290`, expediente `0011-PE-2024`, dígitos
   largos, geometría en hexadecimal, una hora distinta de medianoche).
 - `number`: número con formato de dato (`0.46`, `1.234.567`, `3812.0`, `45%`).
-  Un decimal suelto (`1.1`) NO: en las encuestas del INDEC es un código de
-  pregunta, y es también el `1` repetido que pandas desambigua.
+  `1.1`, `1.10` o `12.05` NO: en las encuestas del INDEC son códigos de
+  pregunta, y `1.1` es también el `1` repetido que pandas desambigua.
 - `period`: legítimo como columna de un cuadro ancho (años, `2015-11-01
-  00:00:00`, meses, trimestres, `2016.1` que es el segundo `2016`).
+  00:00:00`, `20240101`, meses, trimestres, `2016.1` que es el segundo `2016`).
 
 Módulo listado en `parser_fingerprint._PARSER_MODULES`.
 """
@@ -49,6 +49,13 @@ _CODE_RE = re.compile(r"^[A-Z]{2,6}\d{5,}$")
 _EXPEDIENTE_RE = re.compile(r"^\d{1,5}-[A-Z]{1,4}-\d{2,4}$")
 # Dígitos largos: CUIT, DNI, códigos de registro. Un año tiene 4.
 _LONG_DIGITS_RE = re.compile(r"^\d{7,}$")
+# Fecha AAAAMMDD válida: columna de un cuadro diario, no un DNI. Se mira antes
+# que los dígitos largos.
+_YYYYMMDD_RE = re.compile(r"^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$")
+# Código de pregunta de encuesta (`1.10`, `2.15`, `12.05`): uno o dos dígitos
+# sin cero adelante, punto y uno o dos dígitos. `0.46` sigue siendo número. Sólo
+# vale para el nombre entero (ver `classify_column_name`).
+_SURVEY_CODE_RE = re.compile(r"^[1-9]\d?\.\d{1,2}$")
 # Geometría PostGIS en hexadecimal (WKB).
 _HEX_BLOB_RE = re.compile(r"^[0-9A-F]{24,}$")
 
@@ -121,7 +128,7 @@ def _classify_token(token: str) -> str | None:
         return None
     # Antes que los números: pandas escribe un año de Excel leído como float
     # como `2020.0`, y eso es un pivot, no un dato.
-    if _YEAR_RE.match(token):
+    if _YEAR_RE.match(token) or _YYYYMMDD_RE.match(token):
         return KIND_PERIOD
     if (
         _UUID_RE.match(token)
@@ -167,7 +174,10 @@ def classify_column_name(name: object) -> str | None:
     es el segundo `2016` de un cuadro, no el número 2016,1.
     """
     value = normalize_name(name)
-    if not value:
+    if not value or _SURVEY_CODE_RE.match(value):
+        # Un código de pregunta sólo como nombre entero: dentro de un
+        # encabezado combinado (`AL. UNION PROVINCIAL / 1.31`) es un porcentaje
+        # de una fila de datos, y así lo mide staging (11 tablas de Entre Ríos).
         return None
     own = _classify_token(value)
     base = strip_dedup_suffix(value)

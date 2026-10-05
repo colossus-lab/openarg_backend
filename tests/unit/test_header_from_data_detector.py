@@ -82,6 +82,17 @@ LEYES_SANA = [
         ("Nombre_Bloque", None),
         ("1.1", None),  # código de pregunta en las encuestas del INDEC
         ("col_3", None),
+        # Revisión del PR #130: formas legítimas que caían como dato o número.
+        ("20240101", KIND_PERIOD),  # fecha AAAAMMDD de un cuadro diario
+        ("19991231", KIND_PERIOD),
+        ("20241301", KIND_DATA),  # mes 13: no es fecha, son dígitos largos
+        ("1.10", None),  # código de pregunta con dos decimales
+        ("2.15", None),
+        ("12.05", None),
+        # …pero dentro de un encabezado combinado sigue siendo el porcentaje de
+        # una fila de datos (Entre Ríos, medido en staging).
+        ("AL. UNION PROVINCIAL / 1.31", KIND_NUMBER),
+        ("COALICION CIVICA ARI / 1.44", KIND_NUMBER),
     ],
 )
 def test_clasificacion_de_nombres(name, kind):
@@ -178,6 +189,10 @@ def test_numeros_como_nombres_disparan_si_son_la_mitad_de_las_columnas():
         ["id", "provincia", "region", "pondera", "1.1", "1.2", "1.3", "2.1", "2.2", "3.1"],
         # Un número suelto en una tabla ancha no alcanza.
         ["acreedor", "id_acreedor", "saldo", "porcentaje", "moneda", "garantia", "1.732", "186.19"],
+        # Cuadro diario con fechas AAAAMMDD como columnas.
+        ["fecha", "20240101", "20240102", "20240103"],
+        # Encuesta con códigos de pregunta de dos decimales.
+        ["id", "provincia", "1.10", "1.11", "2.15", "12.05"],
     ],
 )
 def test_no_dispara_con_pivots_ni_codigos_legitimos(columns):
