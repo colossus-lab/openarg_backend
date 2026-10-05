@@ -48,25 +48,67 @@ def _today_ar() -> date:
     return datetime.now(_AR).date()
 
 
+def _fecha_ar(raw: Any) -> date | None:
+    """La fecha argentina de una fecha o de un instante.
+
+    ArgentinaDatos da fechas ("2026-10-04"); DolarApi da el instante de la
+    actualización en UTC ("2026-10-05T00:30:00.000Z", que en Argentina son las
+    21:30 del 04-oct). Cortar los primeros 10 caracteres daba la fecha UTC: de
+    21 a 24 h ART todo valor recién actualizado parecía de mañana.
+    """
+    if not raw:
+        return None
+    text = str(raw).strip()
+    try:
+        if len(text) > 10 and text[10] in "T ":
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return moment.astimezone(_AR).date() if moment.tzinfo else moment.date()
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _hora_ar(raw: Any) -> Any:
+    """Un instante con zona pasado a hora argentina; lo demás queda igual.
+
+    "2026-10-05T00:30:00.000Z" → "2026-10-04T21:30-03:00": el modelo lee la
+    fecha del texto y la del día argentino es la que corresponde.
+    """
+    text = str(raw or "").strip()
+    if len(text) <= 10 or text[10] not in "T ":
+        return raw
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if moment.tzinfo is None:
+        return raw
+    return moment.astimezone(_AR).isoformat(timespec="minutes")
+
+
 def _drop_future(items: list[Any], today: date) -> list[Any]:
     """Saca las filas con fecha posterior a hoy (en Argentina).
 
     El histórico de ArgentinaDatos trae días que todavía no llegaron,
     rellenados con el último valor: el domingo 04-oct terminaba en el lunes
     05-oct a 1.490/1.540. Con esas filas el modelo podía presentar
-    "05/10/2026" como el último dato. Una fila sin fecha legible se deja: la
-    descarta quien la lee.
+    "05/10/2026" como el último dato. Los instantes de DolarApi se comparan
+    en hora argentina. Una fila sin fecha legible se deja: la descarta quien
+    la lee.
     """
     kept: list[Any] = []
     for d in items:
         raw = (d.get("fechaActualizacion") or d.get("fecha")) if isinstance(d, dict) else None
-        try:
-            if raw and date.fromisoformat(str(raw)[:10]) > today:
-                continue
-        except ValueError:
-            pass
+        fecha = _fecha_ar(raw)
+        if fecha is not None and fecha > today:
+            continue
         kept.append(d)
     return kept
+
+
+def _ultima_observacion(records: list[dict[str, Any]]) -> str | None:
+    fechas = [f for f in (_fecha_ar(r.get("fecha")) for r in records) if f is not None]
+    return max(fechas).isoformat() if fechas else None
 
 
 def _dolar_title(casa: str | None, ultimo: bool) -> str:
@@ -124,7 +166,7 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     continue
                 records.append(
                     {
-                        "fecha": fecha,
+                        "fecha": _hora_ar(fecha),
                         "casa": d.get("casa", casa or ""),
                         "compra": d.get("compra"),
                         "venta": d.get("venta"),
@@ -164,7 +206,7 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     "fetched_at": datetime.now(UTC).isoformat(),
                     "description": description,
                     "last_updated": records[-1]["fecha"],
-                    "ultima_observacion": max(str(r["fecha"])[:10] for r in records),
+                    "ultima_observacion": _ultima_observacion(records),
                     "frecuencia": "diaria",
                     "realtime": ultimo,
                     "oficial": False,
@@ -209,7 +251,7 @@ class ArgentinaDatosAdapter(IArgentinaDatosConnector):
                     "total_records": len(records),
                     "fetched_at": datetime.now(UTC).isoformat(),
                     "description": "Índice de Riesgo País (EMBI+ Argentina, puntos básicos)",
-                    "ultima_observacion": str(records[-1]["fecha"])[:10],
+                    "ultima_observacion": _ultima_observacion(records),
                     "frecuencia": "diaria",
                     "oficial": False,
                 },

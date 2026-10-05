@@ -66,9 +66,10 @@ async def test_fetch_dolar_ultimo_uses_dolarapi() -> None:
     assert result.portal_name == "DolarApi (agregador no oficial)"
     assert result.dataset_title == "Cotización actual Dólar Blue vía DolarApi (no oficial)"
     assert result.metadata["oficial"] is False
+    # El instante UTC de DolarApi, en hora argentina.
     assert result.records == [
         {
-            "fecha": "2026-04-13T10:15:00.000Z",
+            "fecha": "2026-04-13T07:15-03:00",
             "casa": "blue",
             "compra": 1190,
             "venta": 1210,
@@ -76,7 +77,8 @@ async def test_fetch_dolar_ultimo_uses_dolarapi() -> None:
         }
     ]
     assert result.metadata["realtime"] is True
-    assert result.metadata["last_updated"] == "2026-04-13T10:15:00.000Z"
+    assert result.metadata["last_updated"] == "2026-04-13T07:15-03:00"
+    assert result.metadata["ultima_observacion"] == "2026-04-13"
 
 
 @pytest.mark.asyncio
@@ -240,3 +242,74 @@ def test_hoy_es_la_fecha_argentina_no_la_del_servidor(monkeypatch) -> None:
 
     monkeypatch.setattr(mod, "datetime", _Reloj)
     assert mod._today_ar() == date(2026, 10, 4)
+
+
+@pytest.mark.asyncio
+async def test_un_valor_de_dolarapi_de_las_21_30_es_de_hoy_y_no_de_manana() -> None:
+    """Domingo 04-oct, 21:30 en Argentina: DolarApi dice 2026-10-05T00:30Z.
+    Comparar la fecha UTC con el hoy argentino lo descartaba y la herramienta
+    contestaba "Sin datos" (cripto se actualiza todas las noches)."""
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "moneda": "USD",
+                "casa": "cripto",
+                "nombre": "Cripto",
+                "compra": 1530,
+                "venta": 1560,
+                "fechaActualizacion": "2026-10-05T00:30:00.000Z",
+            },
+        )
+
+    adapter, client = _adapter_hoy(_handler)
+    async with client:
+        result = await adapter.fetch_dolar(casa="cripto", ultimo=True)
+
+    assert result is not None
+    assert result.records[0]["fecha"] == "2026-10-04T21:30-03:00"
+    assert result.metadata["ultima_observacion"] == "2026-10-04"
+
+
+@pytest.mark.asyncio
+async def test_todas_las_casas_de_noche_no_pierden_blue_ni_cripto() -> None:
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "casa": "oficial",
+                    "compra": 1490,
+                    "venta": 1540,
+                    "fechaActualizacion": "2026-10-02T18:55:00.000Z",
+                },
+                {
+                    "casa": "blue",
+                    "compra": 1480,
+                    "venta": 1500,
+                    "fechaActualizacion": "2026-10-05T00:05:00.000Z",
+                },
+                {
+                    "casa": "cripto",
+                    "compra": 1530,
+                    "venta": 1560,
+                    "fechaActualizacion": "2026-10-05T02:59:00.000Z",
+                },
+                # 01:00 del lunes en Argentina: ése sí es de un día que no llegó.
+                {
+                    "casa": "bolsa",
+                    "compra": 1,
+                    "venta": 1,
+                    "fechaActualizacion": "2026-10-05T04:00:00.000Z",
+                },
+            ],
+        )
+
+    adapter, client = _adapter_hoy(_handler)
+    async with client:
+        result = await adapter.fetch_dolar(ultimo=True)
+
+    assert result is not None
+    assert [r["casa"] for r in result.records] == ["oficial", "blue", "cripto"]
+    assert result.metadata["ultima_observacion"] == "2026-10-04"
