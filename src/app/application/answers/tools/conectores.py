@@ -404,12 +404,14 @@ class SeriesTiempo:
         if aggregation and aggregation not in _AGGREGATIONS:
             raise ToolInputError(f"`agregacion` es una de {', '.join(_AGGREGATIONS)}.")
         if args.get("variacion") is not None:
-            if representation and representation != "value":
-                raise ToolInputError(
-                    "`variacion` se calcula sobre los valores de la serie: no la combines con "
-                    "`representacion`."
-                )
-            return await self._variation(ids, args["variacion"], frequency, aggregation, ctx)
+            # La variación se compone sobre los valores: una `representacion`
+            # pedida junto con ella se ignora y se dice, en vez de devolver un
+            # error que le cuesta una vuelta al modelo (pasó en staging con la
+            # acumulada marzo–agosto).
+            ignored = bool(representation and representation != "value")
+            return await self._variation(
+                ids, args["variacion"], frequency, aggregation, ctx, ignored_representation=ignored
+            )
         last = int_arg(args, "ultimos", 24, 1, 120)
         kwargs: dict[str, Any] = {
             "start_date": str_arg(args, "desde", max_len=10),
@@ -431,6 +433,8 @@ class SeriesTiempo:
         frequency: str | None,
         aggregation: str | None,
         ctx: ToolContext,
+        *,
+        ignored_representation: bool = False,
     ) -> ToolOutcome:
         """valor[hasta] / valor[desde] − 1, sobre los valores y no sobre tasas.
 
@@ -564,6 +568,10 @@ class SeriesTiempo:
         payload = result_for_model(computed, calculo=computed.metadata["calculo"])
         if missing:
             payload["sin_dato"] = missing
+        if ignored_representation:
+            payload["nota"] = (
+                "La variación se calcula sobre los valores de la serie: se ignoró `representacion`."
+            )
         # Sin la nota de escala: valor_desde y valor_hasta están en las
         # unidades de la serie; sólo las columnas *_pct son porcentajes.
         payload.update(_freshness_for_model({**computed.metadata, "unidad": None}))

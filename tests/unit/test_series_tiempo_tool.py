@@ -196,16 +196,21 @@ async def test_la_variacion_en_un_rango_largo_de_una_diaria_encuentra_la_base() 
     assert fila["valor_hasta"] == 2345.0
 
 
-async def test_la_variacion_no_se_combina_con_una_representacion() -> None:
-    with pytest.raises(ToolInputError):
-        await _run(
-            FakeSeriesApi(ipc_real()),
-            {
-                "ids": [IPC_ID],
-                "representacion": "percent_change",
-                "variacion": {"desde": "2026-02", "hasta": "2026-08"},
-            },
-        )
+async def test_la_variacion_ignora_una_representacion_y_lo_dice() -> None:
+    # Visto en staging: el modelo pidió la acumulada en el año junto con la
+    # variación; un error le costaba una vuelta.
+    api = FakeSeriesApi(ipc_real())
+    payload, _ = await _run(
+        api,
+        {
+            "ids": [IPC_ID],
+            "representacion": "percent_change_since_beginning_of_year",
+            "variacion": {"desde": "2026-02", "hasta": "2026-08"},
+        },
+    )
+    assert payload["filas"][0]["variacion_pct"] == 14.58
+    assert "se ignoró `representacion`" in payload["nota"]
+    assert all("representation_mode" not in r for r in api.series_requests())
 
 
 # ── _tail_for_model con resultados de otros conectores ─────
