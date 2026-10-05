@@ -14,6 +14,7 @@ import pytest
 
 from app.application.consultas.fechas import (
     ColumnaFecha,
+    aviso_formato_guardado,
     condiciones_periodo,
     es_nombre_de_fecha,
     expresion_fecha,
@@ -68,6 +69,29 @@ class TestQueColumnaEsLaFecha:
         assert col is not None and col.nombre == "fecha_fin"
         with pytest.raises(CatalogRequestError, match="columna_fecha"):
             resolver_columna_fecha(["fecha"], "no_existe")
+
+    @pytest.mark.parametrize("metadato", ["update_date", "last_update", "fecha_update"])
+    def test_la_fecha_de_la_ultima_edicion_no_es_la_del_dato(self, metadato: str) -> None:
+        """Revisión del PR #133: 'update' no estaba en la lista, sólo 'updated'."""
+        assert resolver_columna_fecha([("candidate", "text"), (metadato, "text")]) is None
+        assert not es_nombre_de_fecha(metadato)
+
+    def test_una_marca_de_tiempo_sola_es_la_fecha_del_dato(self) -> None:
+        """Sensores, viajes: `timestamp` es la única marca temporal de la fila."""
+        col = resolver_columna_fecha([("sensor", "text"), ("timestamp", "timestamp")])
+        assert col is not None and col.nombre == "timestamp"
+        col = resolver_columna_fecha([("sensor", "text"), ("event_ts", "timestamp with time zone")])
+        assert col is not None and col.nombre == "event_ts"
+        col = resolver_columna_fecha([("sensor", "text"), ("fecha_timestamp", "text")])
+        assert col is not None and col.nombre == "fecha_timestamp"
+
+    def test_una_marca_de_tiempo_no_le_gana_a_otra_candidata(self) -> None:
+        col = resolver_columna_fecha([("timestamp", "timestamp"), ("anio", "bigint")])
+        assert col is not None and col.nombre == "anio"
+        # `ingest_ts` de texto, sin otra señal: no se adivina.
+        assert resolver_columna_fecha([("ingest_ts", "text"), ("valor", "text")]) is None
+        # `created_ts`: metadato por `created`, aunque sea de tipo timestamp.
+        assert resolver_columna_fecha([("created_ts", "timestamp"), ("valor", "text")]) is None
 
 
 class TestMensajeSinFecha:
@@ -168,6 +192,15 @@ class TestCaminoRapido:
         sql = expresion_fecha("FECHA", "text", "inicio", "dmy*")
         assert sql.startswith("(CASE WHEN NULLIF(btrim(\"FECHA\"::text), '') ~ '")
         assert sql.count(" WHEN ") == 1
+
+    def test_la_guardada_avisa_que_filas_quedan_afuera(self) -> None:
+        """Revisión del PR #133: con la guarda, un cálculo con período excluía en
+        silencio hasta el 10 % de las filas (las de otra forma de fecha)."""
+        aviso = aviso_formato_guardado(ColumnaFecha("FECHA", "text", formato="dmy*")) or ""
+        assert "«FECHA»" in aviso and "forma dominante (d/m/aaaa)" in aviso
+        assert aviso_formato_guardado(ColumnaFecha("FECHA", "text", formato="dmy")) is None
+        assert aviso_formato_guardado(ColumnaFecha("FECHA", "text")) is None
+        assert aviso_formato_guardado(None) is None
 
     def test_el_orden_usa_la_columna_cruda_si_ya_ordena_bien(self) -> None:
         assert orden_fecha(ColumnaFecha("fecha", "text", formato="iso_dia")) == '"fecha"'

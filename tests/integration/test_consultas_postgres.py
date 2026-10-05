@@ -172,5 +172,60 @@ def test_en_es_una_lista(tabla: str) -> None:
     assert len(rows) == 2
 
 
+def test_tabla_grande_suma_lo_pedido_a_los_valores_de_pg_stats(tabla: str) -> None:
+    """Revisión del PR #133: en el camino de tablas grandes (`tolerante=False`)
+    el filtro se reemplazaba por los valores frecuentes de `pg_stats` y lo
+    pedido que no estaba entre ellos se perdía («Salud» acá: 2 filas en vez
+    de 3, sin aviso)."""
+    from app.application.consultas.filtros import Filter
+
+    filtro = Filter(
+        "funcion_desc",
+        "en",
+        ("EDUCACION Y CULTURA", "Salud"),
+        # Lo que `resolver_canonicos` saca de un most_common_vals sin «Salud».
+        canonicos=("Educación y Cultura",),
+    )
+    rows = _run(tabla, filtros=[filtro], tolerante=False)
+    assert sorted(r["funcion_desc"] for r in rows) == [
+        "Educación y Cultura",
+        "Educación y Cultura",
+        "Salud",
+    ]
+    distinto = Filter(
+        "funcion_desc", "!=", "EDUCACION Y CULTURA", canonicos=("Educación y Cultura",)
+    )
+    assert sorted(r["funcion_desc"] for r in _run(tabla, filtros=[distinto], tolerante=False)) == [
+        "Defensa",
+        "Salud",
+    ]
+
+
+def test_calcular_agrupado_informa_el_total_de_todos_los_grupos(tabla: str) -> None:
+    """Con más grupos que `limite`, la suma de los mostrados no es el total."""
+    from app.application.answers.aggregates import (
+        FILAS,
+        FILAS_TOTAL,
+        AggregateRequest,
+        build_aggregate_query,
+    )
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    q = build_aggregate_query(
+        AggregateRequest(
+            table=tabla,
+            column_types=[(c, "text") for c in ("funcion_desc", "entidad", "monto", "fecha")],
+            operacion="conteo",
+            agrupar_por=["funcion_desc"],
+            limite=1,
+        )
+    )
+    result = PgSandboxAdapter()._execute_sync(q.sql, 10, q.params)
+    assert result.error is None, (result.error, q.sql)
+    assert len(result.rows) == 2  # limite + 1: se sabe que hay más grupos
+    assert result.rows[0][FILAS] == 2  # Educación y Cultura, el grupo más grande
+    assert {int(r[FILAS_TOTAL]) for r in result.rows} == {4}  # las 4 filas de la tabla
+
+
 def test_leer_numero_es_decimal() -> None:
     assert leer_numero("1.500.000,50") == Decimal("1500000.50")

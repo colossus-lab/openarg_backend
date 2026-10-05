@@ -236,7 +236,7 @@ async def obtener_datos(
     columnas: list[str] | None = None,
     desde: str | None = None,
     hasta: str | None = None,
-    filtros: dict[str, str] | list[dict[str, Any]] | None = None,
+    filtros: dict[str, str | int | float] | list[dict[str, Any]] | None = None,
     orden: str = "asc",
     limite: int = 100,
     columna_fecha: str | None = None,
@@ -250,7 +250,8 @@ async def obtener_datos(
       [{"columna": "monto", "operador": "mayor_que", "valor": "1000000"},
       {"columna": "provincia", "operador": "en", "valores": ["Salta", "Jujuy"]}].
       Operadores: =, !=, mayor_que, menor_que, >=, <=, contiene y en. La igualdad y
-      `contiene` no distinguen mayúsculas ni acentos.
+      `contiene` no distinguen mayúsculas ni acentos (en tablas de más de un millón de
+      filas, sí: ahí la respuesta dice en `filtros_aplicados` qué se buscó tal cual).
     - `orden`: "asc" o "desc" por fecha. `limite`: 1 a 500 filas.
     - `columna_fecha`: opcional, otra columna de fecha para `desde`/`hasta` y el orden.
     Si ninguna fila cumple los filtros, la respuesta dice qué valores existen.

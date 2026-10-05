@@ -24,7 +24,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.api_key_service import check_catalog_rate_limit
-from app.application.consultas.filtros import describir_filtro
+from app.application.consultas.fechas import aviso_formato_guardado
+from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import Preparado, describir_periodo, ejecutar, preparar
 from app.application.consultas.sugerencias import diagnosticar_vacio
 from app.application.public_catalog import (
@@ -107,7 +108,9 @@ class FiltroItem(BaseModel):
     columna: str = Field(..., min_length=1, max_length=200)
     operador: str = Field(default="=", max_length=20)
     valor: str | int | float | None = None
-    valores: list[str] | None = Field(default=None, max_length=50)
+    # Números también: un cliente manda `en [2020, 2021]` sobre una columna de
+    # año. Con list[str] era un 422 genérico ("Input should be a valid string").
+    valores: list[str | int | float] | None = Field(default=None, max_length=50)
 
 
 class DatosRequest(BaseModel):
@@ -118,7 +121,9 @@ class DatosRequest(BaseModel):
     hasta: str | None = Field(default=None, max_length=10)
     # {columna: valor} (igualdad, la forma de siempre) o una lista de filtros
     # con operador.
-    filtros: dict[str, str] | list[FiltroItem] | None = Field(default=None, max_length=MAX_FILTERS)
+    filtros: dict[str, str | int | float] | list[FiltroItem] | None = Field(
+        default=None, max_length=MAX_FILTERS
+    )
     columna_fecha: str | None = Field(default=None, max_length=200)
     orden: str = "asc"
     limite: int = Field(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT)
@@ -135,7 +140,9 @@ class DatosResponse(BaseModel):
     # Con cero filas: por qué, y qué valores existen ({columna: [{valor, filas}]}).
     aviso: str | None = None
     sugerencias: dict[str, list[dict[str, Any]]] | None = None
-    # Los filtros que se aplicaron con otro valor que el pedido ("filtré por …").
+    # Cómo se aplicaron los filtros y el período: con qué valores de la tabla
+    # se comparó lo pedido, qué se buscó tal cual en una tabla grande, y si
+    # las fechas se leyeron sólo en su forma dominante.
     filtros_aplicados: list[str] | None = None
 
 
@@ -399,7 +406,10 @@ async def obtener_datos(
             except CatalogRequestError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             aviso, sugerencias = diag.aviso, diag.sugerencias or None
-        notas = [n for n in (describir_filtro(f) for f in query.filtros) if n]
+        notas = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
+        aviso_fecha = aviso_formato_guardado(query.fecha)
+        if aviso_fecha:
+            notas.append(aviso_fecha)
         source = (await sandbox.get_table_sources([table.table_name])).get(
             bare_name(table.table_name)
         )

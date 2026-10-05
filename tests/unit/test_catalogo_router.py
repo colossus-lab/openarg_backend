@@ -384,6 +384,32 @@ async def test_datos_accepts_operator_filters(client: AsyncClient, sandbox: Fake
     assert str(sandbox.params[-1]["p0"]) == "30.5"
 
 
+async def test_datos_accepts_numbers_in_filters(client: AsyncClient, sandbox: FakeSandbox) -> None:
+    """Revisión del PR #133: `valores: [2020, 2021]` daba un 422 genérico."""
+    r = await client.post(
+        "/catalogo/datos",
+        json={
+            "tabla": _T,
+            "filtros": [{"columna": "indice_tiempo", "operador": "en", "valores": [2020, 2021]}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert sandbox.params[-1] == {"p0": ["2020", "2021"]}
+    r = await client.post("/catalogo/datos", json={"tabla": _T, "filtros": {"indice_tiempo": 2020}})
+    assert r.status_code == 200, r.text
+
+
+async def test_tabla_blocked_says_why_instead_of_a_period(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    sandbox.error = "La tabla tiene un problema de calidad sin resolver"
+    sandbox.error_kind, sandbox.error_only_for = "blocked", "AS reconocidas"
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["desde"] is None and "problema de calidad" in body["aviso_fecha"]
+
+
 async def test_catalog_quota_is_enforced(
     client: AsyncClient, cache: FakeCache, monkeypatch: pytest.MonkeyPatch
 ) -> None:

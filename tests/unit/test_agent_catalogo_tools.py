@@ -70,7 +70,16 @@ class Sandbox:
         for key, rows in self.responses:
             if key in sql:
                 if isinstance(rows, str):
-                    return SandboxResult([], [], 0, False, error=rows, error_kind="timeout")
+                    kind, _, msg = (
+                        rows.partition(":")
+                        if rows.startswith("blocked:")
+                        else (
+                            "timeout",
+                            "",
+                            rows,
+                        )
+                    )
+                    return SandboxResult([], [], 0, False, error=msg, error_kind=kind)
                 return SandboxResult(list(rows[0]) if rows else [], rows, len(rows), False)
         return SandboxResult([], [], 0, False)
 
@@ -243,12 +252,16 @@ async def test_obtener_datos_en_tabla_grande_filtra_por_el_valor_real() -> None:
         _ctx(sandbox),
     )
     sql, params = next((s, p) for s, p in sandbox.calls if "LIMIT 100" in s)
-    # Igualdad exacta con el valor real: plegar 6 M de filas pasa el timeout.
+    # Igualdad exacta con el valor real y con lo pedido: plegar 6 M de filas
+    # pasa el timeout.
     assert '"funcion_desc"::text = ANY(:p0)' in sql
     assert 'lower(translate(btrim("funcion_desc"' not in sql
-    assert params == {"p0": ["Educación y Cultura"]}
+    assert params == {"p0": ["Educación y Cultura", "EDUCACION Y CULTURA"]}
     payload = json.loads(out.content)
-    assert "«Educación y Cultura»" in payload["filtros_aplicados"][0]
+    assert (
+        "«EDUCACION Y CULTURA» tal cual y como «Educación y Cultura»"
+        in (payload["filtros_aplicados"][0])
+    )
 
 
 async def test_obtener_datos_con_fechas_irreconocibles_es_un_error_explicito() -> None:
@@ -290,3 +303,135 @@ async def test_describir_tabla_no_se_cae_si_falla_el_periodo() -> None:
     assert payload["columna_fecha"] == "PUBLICACION_FECHA"
     assert payload["desde"] is None and "período" in payload["aviso_fecha"]
     assert payload["muestra"] == [{"TITULO": "x"}]
+
+
+# ── revisión del PR #133 ────────────────────────────────────
+
+
+async def test_calcular_en_tabla_grande_no_pierde_lo_pedido_fuera_de_pg_stats() -> None:
+    """Censo de hogares en staging (1,4 M de filas): `en [Gnral.Pueyrredon, Gnral
+    Viamonte]` contaba sólo el primero (110.822 en vez de 113.255), sin aviso."""
+    stats = TableValueStats(
+        estimated_rows=1_426_810,
+        columns={
+            "jurisdiccion_desc": ColumnValueStats(
+                "jurisdiccion_desc", most_common_vals=["Gnral.Pueyrredon", "La Matanza"]
+            )
+        },
+    )
+    sandbox = Sandbox(TYPES, [("AS valor", [{"valor": 113255, "__filas": 113255}])], stats=stats)
+    out = await Calcular().run(
+        {
+            "tabla": T,
+            "operacion": "conteo",
+            "filtros": [
+                {
+                    "columna": "jurisdiccion_desc",
+                    "operador": "en",
+                    "valores": ["Gnral.Pueyrredon", "Gnral Viamonte"],
+                }
+            ],
+        },
+        _ctx(sandbox),
+    )
+    sql, params = next((s, p) for s, p in sandbox.calls if "AS valor" in s)
+    assert '"jurisdiccion_desc"::text = ANY(:p0)' in sql
+    assert set(params["p0"]) == {"Gnral.Pueyrredon", "Gnral Viamonte"}
+    notas = json.loads(out.content)["notas"]
+    assert any("«Gnral Viamonte» tal cual" in n for n in notas)
+
+
+async def test_calcular_con_mas_grupos_que_el_limite_informa_el_total_de_todos() -> None:
+    rows = [
+        {
+            "jurisdiccion_desc": f"J{i}",
+            "valor": 10 - i,
+            "__filas": 5,
+            "__filas_con_valor": 5,
+            "__filas_total": 500,
+            "__filas_con_valor_total": 480,
+        }
+        for i in range(3)
+    ]
+    sandbox = Sandbox(TYPES, [("AS valor", rows)])
+    out = await Calcular().run(
+        {
+            "tabla": T,
+            "operacion": "suma",
+            "columna": "credito_devengado",
+            "agrupar_por": ["jurisdiccion_desc"],
+            "limite": 2,
+        },
+        _ctx(sandbox),
+    )
+    payload = json.loads(out.content)
+    [result] = out.results
+    # Antes: 10 (la suma de los dos grupos mostrados) presentado como el total.
+    assert payload["filas_usadas"] == 500 and result.metadata["filas_usadas"] == 500
+    assert result.metadata["truncada"] is True  # la clave del contrato de metadatos
+    assert any("480 de 500" in n for n in payload["notas"])
+    assert all("__filas" not in k for r in result.records for k in r)
+
+
+async def test_calcular_cortado_sin_el_total_no_lo_presenta_como_total() -> None:
+    rows = [
+        {"jurisdiccion_desc": f"J{i}", "valor": 10 - i, "__filas": 5, "__filas_con_valor": 5}
+        for i in range(3)
+    ]
+    sandbox = Sandbox(TYPES, [("AS valor", rows)])
+    out = await Calcular().run(
+        {
+            "tabla": T,
+            "operacion": "suma",
+            "columna": "credito_devengado",
+            "agrupar_por": ["jurisdiccion_desc"],
+            "limite": 2,
+        },
+        _ctx(sandbox),
+    )
+    payload = json.loads(out.content)
+    [result] = out.results
+    assert "filas_usadas" not in payload and "filas_usadas" not in result.metadata
+    assert payload["filas_usadas_en_grupos_mostrados"] == 10
+
+
+async def test_calcular_avisa_si_las_fechas_se_leen_solo_en_su_forma_dominante() -> None:
+    """Tabla grande con 92 % d/m/aaaa y 8 % ISO: con `desde`, las ISO quedaban
+    afuera en silencio (`filas_usadas` cuenta las que pasaron el WHERE)."""
+    muestra = [f"{d}/3/2025" for d in range(1, 24)] + ["2025-03-01", "2025-03-02"]
+    stats = TableValueStats(
+        estimated_rows=2_000_000,
+        columns={"fecha": ColumnValueStats("fecha", histogram_bounds=muestra)},
+    )
+    sandbox = Sandbox(
+        [("fecha", "text"), ("monto", "double precision")],
+        [("AS valor", [{"valor": 7, "__filas": 7, "__filas_con_valor": 7}])],
+        stats=stats,
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "monto", "desde": "2025-01"},
+        _ctx(sandbox),
+    )
+    assert "(CASE WHEN NULLIF(btrim(" in sandbox.sql_with("AS valor")  # la versión con guarda
+    notas = json.loads(out.content)["notas"]
+    assert any("forma dominante (d/m/aaaa)" in n for n in notas)
+
+
+async def test_describir_tabla_bloqueada_no_inventa_un_periodo_de_pg_stats() -> None:
+    stats = TableValueStats(
+        estimated_rows=10,
+        columns={
+            "PUBLICACION_FECHA": ColumnValueStats(
+                "PUBLICACION_FECHA", histogram_bounds=["2008-03-03", "2026-03-05"]
+            )
+        },
+    )
+    sandbox = Sandbox(
+        [("PUBLICACION_FECHA", "text"), ("TITULO", "text")],
+        [("AS reconocidas", "blocked:La tabla tiene un problema de calidad sin resolver")],
+        stats=stats,
+    )
+    out = await DescribirTabla().run({"tabla": T}, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["desde"] is None and payload["hasta"] is None
+    assert "problema de calidad" in payload["aviso_fecha"]

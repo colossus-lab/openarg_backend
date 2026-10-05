@@ -48,9 +48,11 @@ _PALABRAS_FECHA = frozenset({"fecha", "date"})
 _PALABRAS_ANIO = frozenset({"anio", "año", "ano", "year", "ejercicio"})
 # Fechas de carga o de auditoría, no del dato: `ultima_actualizacion_fecha`
 # (1.091 tablas en prod) es cuándo se publicó el archivo, no de cuándo es el
-# dato; `updated_ts`/`updated_at` son de la base.
+# dato; `updated_ts`/`updated_at` son de la base; `update_date`/`last_update`
+# son la fecha de la última edición del registro.
 _PALABRAS_METADATO = frozenset(
     {
+        "update",
         "updated",
         "created",
         "modified",
@@ -66,10 +68,13 @@ _PALABRAS_METADATO = frozenset(
         "procesamiento",
         "extraccion",
         "descarga",
-        "ts",
-        "timestamp",
     }
 )
+# Marcas de tiempo: casi siempre de la base (`ingest_ts`), pero en tablas de
+# sensores o viajes `timestamp` es la única marca del dato. Cuentan como
+# metadato salvo que la tabla no tenga otra candidata (ver
+# `resolver_columna_fecha`).
+_MARCAS_DE_TIEMPO = frozenset({"ts", "timestamp"})
 # Palabras que sugieren un período aunque no sean una fecha que sepamos
 # filtrar: se nombran en el mensaje de "no hay columna de fecha".
 _PALABRAS_PERIODO = frozenset({"mes", "trimestre", "semestre", "periodo", "bimestre", "dia"})
@@ -83,23 +88,39 @@ def _palabras(nombre: str) -> list[str]:
     return [p for p in _SEPARADORES.split(plegar(_CAMEL.sub("_", nombre))) if p]
 
 
+def _es_metadato_seguro(palabras: list[str]) -> bool:
+    if palabras[-1] == "at" and len(palabras) > 1:  # created_at, updated_at
+        return True
+    return any(p in _PALABRAS_METADATO for p in palabras)
+
+
 def es_metadato(nombre: str) -> bool:
     """Una fecha de carga, actualización o auditoría (``updated_at``, ``*_ts``)."""
     palabras = _palabras(nombre)
     if not palabras:
         return False
-    if palabras[-1] == "at" and len(palabras) > 1:  # created_at, updated_at
-        return True
-    return any(p in _PALABRAS_METADATO for p in palabras)
+    return _es_metadato_seguro(palabras) or any(p in _MARCAS_DE_TIEMPO for p in palabras)
+
+
+def _solo_marca_de_tiempo(nombre: str) -> bool:
+    """``timestamp``, ``fecha_ts``: metadato sólo por la marca, no por otra palabra."""
+    palabras = _palabras(nombre)
+    return (
+        bool(palabras)
+        and not _es_metadato_seguro(palabras)
+        and any(p in _MARCAS_DE_TIEMPO for p in palabras)
+    )
 
 
 def es_nombre_de_fecha(nombre: str) -> bool:
     """True si el nombre dice que es la fecha de la serie (sin mirar el tipo).
 
     La subcadena "date" ya no alcanza: tiene que ser una palabra del nombre
-    (``date``, ``start_date``), no ``candidate`` ni ``updated``.
+    (``date``, ``start_date``), no ``candidate`` ni ``updated``. Con una
+    marca de tiempo y nada más de metadato (``fecha_timestamp``), la palabra
+    "fecha" manda.
     """
-    if es_metadato(nombre):
+    if es_metadato(nombre) and not _solo_marca_de_tiempo(nombre):
         return False
     if plegar(nombre) in _NOMBRES_FECHA:
         return True
@@ -130,7 +151,9 @@ def resolver_columna_fecha(
     Orden de prioridad: nombre exacto de fecha (``fecha``, ``indice_tiempo``,
     ``periodo``); tipo date/timestamp; una palabra "fecha"/"date" en el nombre
     (``PUBLICACION_FECHA``, ``fecha_inicio``); una columna de año (``anio``,
-    ``ejercicio_presupuestario``). Las fechas de carga o auditoría nunca.
+    ``ejercicio_presupuestario``). Las fechas de carga o auditoría nunca. Una
+    marca de tiempo (``timestamp``, ``event_ts`` de tipo timestamp) sólo si
+    no hay ninguna otra: en una tabla de sensores es la fecha del dato.
 
     ``elegida`` es la que pidió el usuario (``columna_fecha``): tiene que
     existir, y se usa aunque el nombre no parezca de fecha.
@@ -145,7 +168,8 @@ def resolver_columna_fecha(
             f"`columna_fecha` {elegida!r} no es una columna de la tabla. "
             "Usá describir_tabla para ver las disponibles."
         )
-    candidatas = [(n, t) for n, t in pares if not es_metadato(n)]
+    # `fecha_timestamp` entra: la marca no la hace metadato si dice "fecha".
+    candidatas = [(n, t) for n, t in pares if not es_metadato(n) or es_nombre_de_fecha(n)]
     for nombre, tipo in candidatas:
         if plegar(nombre) in _NOMBRES_FECHA:
             return ColumnaFecha(nombre, tipo)
@@ -158,6 +182,11 @@ def resolver_columna_fecha(
     for nombre, tipo in candidatas:
         if es_nombre_de_anio(nombre):
             return ColumnaFecha(nombre, tipo, "anio")
+    for nombre, tipo in pares:
+        if _solo_marca_de_tiempo(nombre) and (
+            _DATE_TYPE.match(tipo or "") or plegar(nombre) == "timestamp"
+        ):
+            return ColumnaFecha(nombre, tipo)
     return None
 
 
@@ -310,6 +339,36 @@ def formato_uniforme(valores: Iterable[object], filas: int | None = None) -> str
     if dominante in FORMATOS_RAPIDOS and veces / len(ramas) >= _DOMINANTE:
         return dominante + GUARDADO
     return None
+
+
+_DESCRIPCION_FORMA = {
+    "iso_dia": "AAAA-MM-DD",
+    "iso_mes": "AAAA-MM",
+    "dmy": "d/m/aaaa",
+    "aaaammdd": "AAAAMMDD",
+    "aaaamm": "AAAAMM",
+    "anio": "AAAA",
+}
+
+
+def aviso_formato_guardado(columna: ColumnaFecha | None) -> str | None:
+    """Si la fecha se lee sólo en su forma dominante (``GUARDADO``), qué se pierde; si no, None.
+
+    Las filas con la fecha escrita de otra forma quedan en NULL: fuera de
+    cualquier ``desde``/``hasta`` y al final del orden. Sin este aviso, un
+    cálculo con período sobre esa tabla las excluía en silencio
+    (``filas_usadas`` cuenta las que pasaron el WHERE, así que no lo deja
+    ver).
+    """
+    if columna is None or not columna.formato or not columna.formato.endswith(GUARDADO):
+        return None
+    forma = columna.formato.rstrip(GUARDADO)
+    return (
+        f"La tabla es muy grande para reconocer todas las formas de fecha: «{columna.nombre}» "
+        f"se leyó sólo en su forma dominante ({_DESCRIPCION_FORMA.get(forma, forma)}). Las "
+        "filas con la fecha escrita de otra manera (hasta un 10 % en la muestra) quedaron "
+        "fuera del período y al final del orden."
+    )
 
 
 def _sufijo(modo: Modo, nivel: str) -> str:

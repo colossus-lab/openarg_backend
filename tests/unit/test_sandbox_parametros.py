@@ -152,6 +152,23 @@ class TestEstadisticas:
             MagicMock(first=MagicMock(return_value=rel)),
             MagicMock(fetchall=MagicMock(return_value=[stat])),
         ]
-        stats = _adapter_with(conn)._get_value_stats_sync("raw.cache_x", ["funcion_desc"])
+        with (
+            patch.object(adapter_module, "_blocked_mart_error", return_value=None),
+            patch.object(adapter_module, "_findings_blocked_error", return_value=None),
+        ):
+            stats = _adapter_with(conn)._get_value_stats_sync("raw.cache_x", ["funcion_desc"])
         assert stats is not None and stats.estimated_rows == 4794
         assert stats.columns["funcion_desc"].most_common_vals == ["Educación y Cultura", "Salud"]
+
+    @pytest.mark.parametrize("gate", ["_blocked_mart_error", "_findings_blocked_error"])
+    def test_no_lee_estadisticas_de_una_tabla_retirada(self, gate: str) -> None:
+        """Una tabla bloqueada no puede filtrar sus valores (ni un período) por pg_stats."""
+        conn = MagicMock()
+        with (
+            patch.object(adapter_module, "_blocked_mart_error", return_value=None),
+            patch.object(adapter_module, "_findings_blocked_error", return_value=None),
+            patch.object(adapter_module, gate, return_value="La tabla tiene un problema"),
+        ):
+            stats = _adapter_with(conn)._get_value_stats_sync("raw.cache_x", ["funcion_desc"])
+        assert stats is None
+        conn.execute.assert_not_called()

@@ -16,11 +16,14 @@ from app.application.consultas.filtros import (
     Filter,
     describir_filtro,
     leer_filtros,
+    notas_de_filtros,
     sql_filtro,
     validar_filtros,
 )
+from app.application.consultas.preparar import resolver_canonicos
 from app.application.consultas.sql import CatalogRequestError, Params
 from app.application.consultas.texto import plegar
+from app.domain.ports.sandbox.sql_sandbox import ColumnValueStats, TableValueStats
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
 
 TIPOS = {"funcion_desc": "text", "credito_devengado": "text", "monto": "numeric", "fecha": "text"}
@@ -94,11 +97,11 @@ class TestIgualdadTolerante:
     def test_la_enie_no_se_pliega(self) -> None:
         assert plegar("Peña") == "peña"
 
-    def test_tabla_grande_usa_el_valor_real_de_pg_stats(self) -> None:
+    def test_tabla_grande_suma_el_valor_real_de_pg_stats(self) -> None:
         f = Filter("funcion_desc", "=", "educacion y cultura", canonicos=("Educación y Cultura",))
         sql, params = _sql(f, tolerante=False)
         assert sql == '"funcion_desc"::text = ANY(:p0)'
-        assert params == {"p0": ["Educación y Cultura"]}
+        assert params == {"p0": ["Educación y Cultura", "educacion y cultura"]}
 
     def test_tabla_grande_sin_valor_real_es_igualdad_exacta(self) -> None:
         sql, params = _sql(Filter("funcion_desc", "=", "Salud"), tolerante=False)
@@ -116,10 +119,91 @@ class TestIgualdadTolerante:
         sql, params = _sql(Filter("monto", "=", "33.14"))
         assert sql == '"monto"::text = :p0' and params == {"p0": "33.14"}
 
-    def test_se_cuenta_con_que_valor_se_filtro(self) -> None:
+    def test_se_cuenta_con_que_valor_se_comparo(self) -> None:
         f = Filter("funcion_desc", "=", "educacion y cultura", canonicos=("Educación y Cultura",))
-        assert "«Educación y Cultura»" in (describir_filtro(f) or "")
-        assert describir_filtro(Filter("funcion_desc", "=", "Salud", canonicos=("Salud",))) is None
+        nota = describir_filtro(f, tolerante=True) or ""
+        assert "«educacion y cultura» coincide con «Educación y Cultura»" in nota
+        exacto = Filter("funcion_desc", "=", "Salud", canonicos=("Salud",))
+        assert describir_filtro(exacto, tolerante=True) is None
+        assert describir_filtro(exacto, tolerante=False) is None
+
+
+def _stats(columna: str, mcv: list[str], filas: int = 1_426_810) -> TableValueStats:
+    return TableValueStats(
+        estimated_rows=filas,
+        columns={columna: ColumnValueStats(columna, most_common_vals=mcv)},
+    )
+
+
+class TestTablaGrandeConValoresFrecuentesParciales:
+    """Revisión del PR #133, verificado en staging el 05-oct (sólo lectura).
+
+    En tablas de un millón de filas o más el filtro se REEMPLAZABA por los
+    valores de `pg_stats.most_common_vals`, y lo pedido que no estaba entre
+    los frecuentes desaparecía sin aviso: en el censo de hogares (1,4 M de
+    filas) `en [Gnral.Pueyrredon, Gnral Viamonte]` contaba 110.822 en vez de
+    113.255, y la nota decía «filtré por «Gnral.Pueyrredon»».
+    """
+
+    TIPOS = {"departamento": "text", "provincia": "text"}
+
+    def _sql_grande(self, f: Filter, mcv: list[str]) -> tuple[str, dict, Filter]:
+        (valido,) = validar_filtros([f], self.TIPOS)
+        (resuelto,) = resolver_canonicos([valido], self.TIPOS, _stats(f.columna, mcv))
+        params = Params()
+        sql = sql_filtro(resuelto, self.TIPOS, params, tolerante=False)
+        return sql, params.values, resuelto
+
+    def test_en_no_pierde_el_valor_que_no_esta_entre_los_frecuentes(self) -> None:
+        sql, params, _ = self._sql_grande(
+            Filter("departamento", "en", ("Gnral.Pueyrredon", "Gnral Viamonte")),
+            ["Gnral.Pueyrredon", "La Matanza"],
+        )
+        assert sql == '"departamento"::text = ANY(:p0)'
+        assert set(params["p0"]) == {"Gnral.Pueyrredon", "Gnral Viamonte"}
+
+    def test_igualdad_busca_lo_pedido_y_la_variante_frecuente(self) -> None:
+        sql, params, _ = self._sql_grande(
+            Filter("provincia", "=", "Córdoba"), ["Buenos Aires", "CORDOBA"]
+        )
+        assert set(params["p0"]) == {"CORDOBA", "Córdoba"}
+
+    def test_distinto_excluye_lo_pedido_y_la_variante(self) -> None:
+        sql, params, _ = self._sql_grande(
+            Filter("provincia", "!=", "Córdoba"), ["Buenos Aires", "CORDOBA"]
+        )
+        assert sql == 'NOT ("provincia"::text = ANY(:p0))'
+        assert set(params["p0"]) == {"CORDOBA", "Córdoba"}
+
+    def test_la_nota_va_valor_por_valor_y_dice_que_se_busco_tal_cual(self) -> None:
+        _, _, f = self._sql_grande(
+            Filter("provincia", "en", ("córdoba", "Tierra del Fuego", "Buenos Aires")),
+            ["Buenos Aires", "CORDOBA"],
+        )
+        nota = describir_filtro(f, tolerante=False) or ""
+        assert "«córdoba» tal cual y como «CORDOBA»" in nota
+        assert "«Tierra del Fuego» tal cual" in nota
+        assert "Buenos Aires" not in nota  # está tal cual en la tabla: nada que decir
+        assert "filtré por" not in nota  # nunca la lista parcial como el filtro entero
+
+    def test_en_tabla_chica_la_nota_no_presenta_una_lista_parcial(self) -> None:
+        """Con `en [salud, defensa]` y sólo «Salud» en pg_stats se filtra por los dos."""
+        f = Filter("funcion_desc", "en", ("salud", "defensa"), canonicos=("Salud",))
+        nota = describir_filtro(f, tolerante=True) or ""
+        assert "«salud» coincide con «Salud»" in nota
+        assert "filtré por" not in nota and "defensa" not in nota
+        assert notas_de_filtros([f], TIPOS, tolerante=True) == [nota]
+
+    def test_una_columna_no_de_texto_no_lleva_nota(self) -> None:
+        f = Filter("monto", "=", "33.14")
+        assert notas_de_filtros([f], TIPOS, tolerante=False) == []
+
+
+def test_los_numeros_de_un_json_son_texto_sin_punto_cero() -> None:
+    """Un cliente del MCP manda `en [2020, 2021.0]` sobre una columna de año."""
+    (f,) = leer_filtros([{"columna": "anio", "operador": "en", "valores": [2020, 2021.0]}], 5)
+    assert f.valor == ("2020", "2021")
+    assert leer_filtros({"anio": 2020.0}, 5) == [Filter("anio", "=", "2020")]
 
 
 class TestContiene:

@@ -48,8 +48,11 @@ from app.application.public_catalog import (
 from app.domain.value_objects.table_reference import quote_qualified
 
 __all__ = [
+    "COLUMNAS_DE_CONTROL",
     "FILAS",
     "FILAS_CON_VALOR",
+    "FILAS_CON_VALOR_TOTAL",
+    "FILAS_TOTAL",
     "FILTER_OPERATORS",
     "OPERATIONS",
     "AggregateQuery",
@@ -70,6 +73,12 @@ MAX_FILTER_VALUE = 200
 # columna agrupada que se llame "filas".
 FILAS = "__filas"
 FILAS_CON_VALOR = "__filas_con_valor"
+# Con agrupación: lo mismo sumado sobre TODOS los grupos (ventana sobre el
+# resultado agrupado, antes del LIMIT). Si hay más grupos que `limite`, la
+# suma de los grupos mostrados no es el total del cálculo.
+FILAS_TOTAL = "__filas_total"
+FILAS_CON_VALOR_TOTAL = "__filas_con_valor_total"
+COLUMNAS_DE_CONTROL = (FILAS, FILAS_CON_VALOR, FILAS_TOTAL, FILAS_CON_VALOR_TOTAL)
 
 
 @dataclass(frozen=True)
@@ -153,7 +162,9 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
 
     La columna del valor se llama ``valor``; las de agrupación conservan su
     nombre; ``__filas`` y ``__filas_con_valor`` dicen sobre cuántas filas se
-    calculó.
+    calculó cada grupo, y con agrupación ``__filas_total`` y
+    ``__filas_con_valor_total``, sobre cuántas en todos (también los que el
+    LIMIT deja afuera).
     """
     types = {c: t for c, t in req.column_types if not is_internal_column(c)}
     if not types:
@@ -212,6 +223,12 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
     if counted is not None:
         select.append(f"count({counted}) AS {FILAS_CON_VALOR}")
         columns.append(FILAS_CON_VALOR)
+    if groups:
+        select.append(f"sum(count(*)) OVER () AS {FILAS_TOTAL}")
+        columns.append(FILAS_TOTAL)
+        if counted is not None:
+            select.append(f"sum(count({counted})) OVER () AS {FILAS_CON_VALOR_TOTAL}")
+            columns.append(FILAS_CON_VALOR_TOTAL)
     sql = f"SELECT {', '.join(select)} FROM {quote_qualified(req.table)}"
     if where:
         sql += " WHERE " + " AND ".join(where)

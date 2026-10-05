@@ -25,8 +25,11 @@ from decimal import Decimal
 from typing import Any
 
 from app.application.answers.aggregates import (
+    COLUMNAS_DE_CONTROL,
     FILAS,
     FILAS_CON_VALOR,
+    FILAS_CON_VALOR_TOTAL,
+    FILAS_TOTAL,
     FILTER_OPERATORS,
     OPERATIONS,
     AggregateRequest,
@@ -48,7 +51,8 @@ from app.application.answers.tools.base import (
     str_arg,
     to_json,
 )
-from app.application.consultas.filtros import describir_filtro, leer_filtros, validar_filtros
+from app.application.consultas.fechas import aviso_formato_guardado
+from app.application.consultas.filtros import leer_filtros, notas_de_filtros, validar_filtros
 from app.application.consultas.preparar import Preparado, describir_periodo, ejecutar, preparar
 from app.application.consultas.sugerencias import diagnosticar_vacio
 from app.application.public_catalog import (
@@ -191,6 +195,14 @@ def _data_result(
             **({"description": table.mart.description} if table.mart else {}),
         },
     )
+
+
+def _filas_del_calculo(rows: list[dict[str, Any]], por_grupo: str, de_todos: str) -> int:
+    """Sobre cuántas filas se calculó: el total de todos los grupos si la consulta
+    lo trae (``aggregates.FILAS_TOTAL``), si no la suma de las filas recibidas."""
+    if rows[0].get(de_todos) is not None:
+        return int(rows[0][de_todos])
+    return sum(int(r.get(por_grupo) or 0) for r in rows)
 
 
 # Columnas que se muestran de cada tabla en la búsqueda. Un dataset puede traer
@@ -430,7 +442,8 @@ def _filters_schema(max_items: int) -> dict[str, Any]:
         "description": (
             "Filtros {columna, operador, valor}. Operadores: = y != (texto o número), >, >=, "
             "<, <= (números), contiene (parte del texto) y en (lista, en `valores`). = y "
-            "contiene no distinguen mayúsculas ni acentos."
+            "contiene no distinguen mayúsculas ni acentos, salvo en tablas de más de un millón "
+            "de filas (ahí `filtros_aplicados` dice qué se buscó tal cual)."
         ),
         "items": {
             "type": "object",
@@ -544,7 +557,10 @@ class ObtenerDatos:
         }
         if len(rows) > MAX_ROWS_FOR_MODEL:
             payload["nota"] = f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(rows)} filas."
-        notas = [n for n in (describir_filtro(f) for f in query.filtros) if n]
+        notas = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
+        aviso_fecha = aviso_formato_guardado(query.fecha)
+        if aviso_fecha:
+            notas.append(aviso_fecha)
         if notas:
             payload["filtros_aplicados"] = notas
         if not rows and (query.filtros or query.desde or query.hasta):
@@ -704,12 +720,21 @@ class Calcular:
         # Sin las columnas de control (un sandbox de prueba que no las
         # devuelve) se sigue como antes: no se sabe cuántas filas entraron.
         controlado = bool(rows) and FILAS in rows[0]
-        total = sum(int(r.get(FILAS) or 0) for r in rows) if controlado else None
+        total = _filas_del_calculo(rows, FILAS, FILAS_TOTAL) if controlado else None
         con_valor = (
-            sum(int(r.get(FILAS_CON_VALOR) or 0) for r in rows)
+            _filas_del_calculo(rows, FILAS_CON_VALOR, FILAS_CON_VALOR_TOTAL)
             if controlado and FILAS_CON_VALOR in rows[0]
             else None
         )
+        # Con más grupos que `limite` y sin el total de todos los grupos (un
+        # sandbox que no lo devuelve), la suma es sólo de los grupos
+        # mostrados: no se la presenta como el total del cálculo.
+        parcial = truncado and not (rows and rows[0].get(FILAS_TOTAL) is not None)
+        clave_filas = "filas_usadas_en_grupos_mostrados" if parcial else "filas_usadas"
+        notas: list[str] = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
+        aviso_fecha = aviso_formato_guardado(query.fecha) if (query.desde or query.hasta) else None
+        if aviso_fecha:
+            notas.append(aviso_fecha)
 
         if not rows or total == 0:
             # Ninguna fila cumplió los filtros: no hay valor que citar. Antes
@@ -733,6 +758,8 @@ class Calcular:
             payload = {**base, "filas_usadas": 0, "resultado": None, "aviso": diag.aviso}
             if diag.sugerencias:
                 payload["sugerencias"] = diag.sugerencias
+            if notas:
+                payload["notas"] = notas
             return ToolOutcome(
                 to_json(payload),
                 summary=f"Ninguna fila cumplió los filtros en {quoted(table.title, 80)}",
@@ -742,7 +769,7 @@ class Calcular:
         if con_valor == 0:
             payload = {
                 **base,
-                "filas_usadas": total,
+                clave_filas: total,
                 "resultado": None,
                 "aviso": (
                     f"Ninguna de las {total} filas que cumplen los filtros tiene un número "
@@ -754,40 +781,42 @@ class Calcular:
                 summary=f"{valued} no tiene números en {quoted(table.title, 80)}",
             )
 
-        clean = [{k: v for k, v in r.items() if k not in (FILAS, FILAS_CON_VALOR)} for r in rows]
+        clean = [{k: v for k, v in r.items() if k not in COLUMNAS_DE_CONTROL} for r in rows]
         for_model = [
             {**c, "filas_usadas": r.get(FILAS)} if controlado else c
             for c, r in zip(clean, rows, strict=True)
         ]
-        notas: list[str] = []
+        avisos: list[str] = []
         if con_valor is not None and total is not None and con_valor < total:
-            notas.append(
-                f"Se calculó sobre {con_valor} de {total} filas: las otras {total - con_valor} "
-                f"no tienen un número reconocible en {valued!r}."
+            donde = " de los grupos mostrados" if parcial else ""
+            avisos.append(
+                f"Se calculó sobre {con_valor} de {total} filas{donde}: las otras "
+                f"{total - con_valor} no tienen un número reconocible en {valued!r}."
             )
         if truncado:
-            notas.append(
+            avisos.append(
                 f"Hay más de {query.limite} grupos: se muestran los primeros {query.limite} "
                 "según el orden pedido."
+                + ("" if parcial else f" `filas_usadas` ({total}) es de todos los grupos.")
             )
         if len(for_model) > MAX_ROWS_FOR_MODEL:
-            notas.append(f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(for_model)} grupos.")
-        notas.extend(n for n in (describir_filtro(f) for f in query.filtros) if n)
+            avisos.append(f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(for_model)} grupos.")
+        notas = [*avisos, *notas]
 
         result = _data_result(table, clean, query.sql, title, query.params)
         if total is not None:
-            result.metadata["filas_usadas"] = total
-        if con_valor is not None:
+            result.metadata[clave_filas] = total
+        if con_valor is not None and not parcial:
             result.metadata["filas_con_valor"] = con_valor
-        if truncado:
-            result.metadata["truncado"] = True
+        # Contrato de metadatos (lo lee la verificación de cifras).
+        result.metadata["truncada"] = truncado
         payload = {
             **base,
             "columnas": [*req.agrupar_por, "valor", *(["filas_usadas"] if controlado else [])],
             "filas": for_model[:MAX_ROWS_FOR_MODEL],
         }
         if total is not None:
-            payload["filas_usadas"] = total
+            payload[clave_filas] = total
         if notas:
             payload["notas"] = notas
         return ToolOutcome(

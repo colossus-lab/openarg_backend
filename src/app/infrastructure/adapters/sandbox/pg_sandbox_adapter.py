@@ -704,9 +704,15 @@ class PgSandboxAdapter(ISQLSandbox):
     def _get_value_stats_sync(self, table_name: str, columns: list[str]) -> TableValueStats | None:
         # The same table allowlist as a query: the values in pg_stats are
         # data, and an internal table's most common values are not public.
-        if _validate_sql(f"SELECT 1 FROM {quote_qualified(table_name)}", built=True):
+        probe = f"SELECT 1 FROM {quote_qualified(table_name)}"
+        if _validate_sql(probe, built=True):
             return None
         engine = self._get_engine()
+        # And the same serving gates: a mart withdrawn from serving or a table
+        # with an open critical finding must not leak its values (or a period
+        # derived from them) through the statistics either.
+        if _blocked_mart_error(engine, probe) or _findings_blocked_error(engine, probe):
+            return None
         with engine.connect() as conn:
             conn.execute(text("SET TRANSACTION READ ONLY"))
             conn.execute(text("SET statement_timeout = 5000"))

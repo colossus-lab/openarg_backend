@@ -92,7 +92,9 @@ def resolver_canonicos(
 
     «educacion y cultura» → «Educación y Cultura», si ``pg_stats`` lo tiene
     entre los valores frecuentes. En tablas chicas sólo sirve para contarle
-    al usuario con qué valor se filtró; en las grandes es el filtro.
+    al usuario con qué valor se comparó; en las grandes se suma a lo pedido
+    en la igualdad exacta (``filtros.sql_filtro``), nunca lo reemplaza: un
+    valor pedido que no está entre los frecuentes existe igual.
     """
     if stats is None:
         return filtros
@@ -164,6 +166,10 @@ async def describir_periodo(sandbox: Any, tabla: str, fecha: ColumnaFecha | None
     stats = await estadisticas(sandbox, tabla, [fecha.nombre])
     fecha = con_formato(fecha, stats)
     result = await ejecutar(sandbox, consulta_rango(quote_qualified(tabla), fecha), {})
+    if result.error_kind == "blocked":
+        # Tabla retirada por un problema de calidad: no se informa un período
+        # sacado de sus estadísticas como si se pudiera usar. Se dice por qué.
+        return Periodo(aviso=result.error or "La tabla no se puede consultar.")
     if result.error or not result.rows:
         # Tabla grande: el rango exacto pasa el timeout. La muestra de
         # `pg_stats` da uno aproximado, que es mejor que nada.

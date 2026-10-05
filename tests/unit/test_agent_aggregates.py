@@ -15,6 +15,8 @@ import pytest
 from app.application.answers.aggregates import (
     FILAS,
     FILAS_CON_VALOR,
+    FILAS_CON_VALOR_TOTAL,
+    FILAS_TOTAL,
     AggregateRequest,
     Filter,
     build_aggregate_query,
@@ -79,7 +81,24 @@ def test_agrupar_ordena_por_el_valor() -> None:
     )
     assert 'GROUP BY "edad_agrupada"' in q.sql
     assert "ORDER BY valor DESC NULLS LAST" in q.sql
-    assert q.columns == ["edad_agrupada", "valor", FILAS, FILAS_CON_VALOR]
+    assert q.columns == [
+        "edad_agrupada",
+        "valor",
+        FILAS,
+        FILAS_CON_VALOR,
+        FILAS_TOTAL,
+        FILAS_CON_VALOR_TOTAL,
+    ]
+
+
+def test_con_agrupacion_cuenta_las_filas_de_todos_los_grupos() -> None:
+    """Revisión del PR #133: con más grupos que `limite`, `filas_usadas` sumaba
+    sólo los mostrados y se presentaba como el total del cálculo."""
+    q = build_aggregate_query(_req(agrupar_por=["edad_agrupada"], limite=10))
+    assert f"sum(count(*)) OVER () AS {FILAS_TOTAL}" in q.sql
+    assert _validate_sql(q.sql, built=True) is None
+    # Sin agrupación hay una sola fila: el total es la fila.
+    assert FILAS_TOTAL not in build_aggregate_query(_req()).sql
 
 
 def test_pide_una_fila_de_mas_para_saber_si_se_corto() -> None:

@@ -11,9 +11,9 @@ Ahora:
 - operadores ``=``, ``!=``, ``>``, ``>=``, ``<``, ``<=``, ``contiene`` y ``en``
   (con los alias ``igual``, ``distinto``, ``mayor_que``, ``menor_que``…);
 - igualdad y ``contiene`` sin distinguir mayúsculas ni acentos en las tablas
-  donde plegar cada fila no pasa el timeout (``tolerante``); si ``pg_stats``
-  ya conoce el valor real («Educación y Cultura» para «educacion y
-  cultura»), se filtra por igualdad exacta con él, que es lo más barato;
+  donde plegar cada fila no pasa el timeout (``tolerante``); en las grandes,
+  igualdad exacta con lo pedido MÁS los valores reales que ``pg_stats`` ya
+  conoce para eso («Educación y Cultura» para «educacion y cultura»);
 - las comparaciones de orden son numéricas y usan el formato de la columna
   (``numeros``);
 - todos los valores van como parámetros ligados.
@@ -62,7 +62,8 @@ class Filter:
     # Un texto; una tupla para `en`.
     valor: str | tuple[str, ...]
     # Valores reales de la columna que corresponden a lo pedido (de
-    # `pg_stats`). Si los hay, se filtra por igualdad exacta con ellos.
+    # `pg_stats`). En una tabla grande se suman a lo pedido en la igualdad
+    # exacta; nunca lo reemplazan.
     canonicos: tuple[str, ...] = field(default=())
 
     @property
@@ -77,6 +78,13 @@ def _texto(valor: Any, columna: str) -> str:
     if len(texto) > MAX_VALOR:
         raise CatalogRequestError(f"El valor del filtro sobre {columna!r} es demasiado largo.")
     return texto
+
+
+def _como_texto(valor: Any) -> str:
+    """El valor de un filtro como texto: ``2020.0`` (un JSON numérico) es "2020"."""
+    if isinstance(valor, float) and valor.is_integer():
+        return str(int(valor))
+    return "" if valor is None else str(valor)
 
 
 def normalizar_operador(operador: Any) -> str:
@@ -98,9 +106,9 @@ def leer_filtros(raw: Any, max_filtros: int) -> list[Filter]:
     if isinstance(raw, Mapping):
         for columna, crudo in raw.items():
             if isinstance(crudo, list | tuple):
-                filtros.append(Filter(str(columna), "en", tuple(str(v) for v in crudo)))
+                filtros.append(Filter(str(columna), "en", tuple(_como_texto(v) for v in crudo)))
             else:
-                filtros.append(Filter(str(columna), "=", "" if crudo is None else str(crudo)))
+                filtros.append(Filter(str(columna), "=", _como_texto(crudo)))
     elif isinstance(raw, list):
         for item in raw:
             if not isinstance(item, Mapping) or "columna" not in item:
@@ -119,13 +127,15 @@ def leer_filtros(raw: Any, max_filtros: int) -> list[Filter]:
                     raise CatalogRequestError(
                         f"El filtro `en` sobre {item['columna']!r} lleva una lista en `valores`."
                     )
-                filtros.append(Filter(str(item["columna"]), "en", tuple(str(v) for v in valor)))
+                filtros.append(
+                    Filter(str(item["columna"]), "en", tuple(_como_texto(v) for v in valor))
+                )
             else:
                 if valor is None:
                     raise CatalogRequestError(
                         f"Falta el `valor` del filtro sobre {item['columna']!r}."
                     )
-                filtros.append(Filter(str(item["columna"]), operador, str(valor)))
+                filtros.append(Filter(str(item["columna"]), operador, _como_texto(valor)))
     else:
         raise CatalogRequestError("`filtros` es un objeto {columna: valor} o una lista de filtros.")
     if len(filtros) > max_filtros:
@@ -199,12 +209,15 @@ def sql_filtro(
                 if len(plegados) == 1
                 else f"{plegar_sql(texto)} = ANY({params.bind(plegados)})"
             )
-        elif f.canonicos:
-            # Tabla grande: igualdad exacta con los valores reales que
-            # corresponden a lo pedido.
-            condicion = f"{texto} = ANY({params.bind(list(f.canonicos))})"
         else:
-            valores = list(dict.fromkeys(f.valores))
+            # Tabla grande (o columna no de texto): igualdad exacta con lo
+            # pedido y con los valores reales que `pg_stats` conoce para eso
+            # («CORDOBA» para «Córdoba»). Lo pedido va SIEMPRE: el most_common_vals
+            # lista sólo los frecuentes, y reemplazar el filtro por los
+            # canónicos perdía los demás sin aviso (censo de hogares, 1,4 M de
+            # filas, staging 05-oct: `en [Gnral.Pueyrredon, Gnral Viamonte]`
+            # contaba sólo el primero, 110.822 en vez de 113.255).
+            valores = list(dict.fromkeys([*f.canonicos, *f.valores]))
             condicion = (
                 f"{texto} = {params.bind(valores[0])}"
                 if len(valores) == 1
@@ -231,13 +244,53 @@ def sql_filtro(
     return f"{expresion_numero(f.columna, tipo, formato)} {f.operador} {params.bind(numero)}"
 
 
-def describir_filtro(f: Filter) -> str | None:
-    """Si el filtro se aplicó con otro valor que el pedido, cuál; si no, None.
+def describir_filtro(f: Filter, *, tolerante: bool, de_texto: bool = True) -> str | None:
+    """Con qué valores de la tabla se comparó cada valor pedido; None si con ninguno distinto.
 
     El legacy aprendió esto el 27-jul: si se le dice al modelo que hubo un
-    reemplazo sin decirle cuál, inventa la categoría.
+    reemplazo sin decirle cuál, inventa la categoría. La nota va valor por
+    valor y nunca presenta una lista parcial como el filtro entero: con
+    ``en [salud, defensa]`` y sólo «Salud» en ``pg_stats``, "filtré por
+    «Salud»" hacía creer que «defensa» había quedado afuera.
+
+    En una tabla grande (``tolerante=False``) dice además qué valores se
+    buscaron tal cual: ahí otra forma de escribirlos no entra.
     """
-    if f.canonicos and set(f.canonicos) != set(f.valores):
-        lista = ", ".join(f"«{c}»" for c in f.canonicos)
-        return f"{f.columna}: filtré por {lista}, el valor tal como figura en la tabla"
-    return None
+    if f.operador not in ("=", "!=", "en") or not de_texto:
+        return None
+    partes: list[str] = []
+    for pedido in dict.fromkeys(f.valores):
+        clave = plegar(pedido)
+        reales = [c for c in f.canonicos if c != pedido and plegar(c) == clave]
+        lista = ", ".join(f"«{c}»" for c in reales)
+        if tolerante:
+            if reales:
+                partes.append(f"«{pedido}» coincide con {lista}")
+        elif reales:
+            partes.append(f"«{pedido}» tal cual y como {lista}")
+        elif pedido not in f.canonicos:
+            partes.append(f"«{pedido}» tal cual")
+    if not partes:
+        return None
+    if tolerante:
+        return (
+            f"{f.columna}: {'; '.join(partes)}, como figura en la tabla "
+            "(comparé sin distinguir mayúsculas ni acentos)"
+        )
+    return (
+        f"{f.columna}: busqué {'; '.join(partes)}. La tabla es muy grande para ignorar "
+        "mayúsculas y acentos en cada fila: otra forma de escribir el valor no entra"
+    )
+
+
+def notas_de_filtros(
+    filtros: list[Filter], tipos: Mapping[str, str], *, tolerante: bool
+) -> list[str]:
+    """``describir_filtro`` de cada filtro, sin los que no tienen nada que decir."""
+    notas = (
+        describir_filtro(
+            f, tolerante=tolerante, de_texto=es_columna_de_texto(tipos.get(f.columna, "text"))
+        )
+        for f in filtros
+    )
+    return [n for n in notas if n]
