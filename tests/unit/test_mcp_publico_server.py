@@ -213,6 +213,35 @@ async def test_quota_exhausted_is_a_spanish_tool_error(backend: FakeBackend) -> 
     assert "modo datos" in _text(result)
 
 
+async def test_quota_service_down_is_not_shown_as_quota_exhausted(backend: FakeBackend) -> None:
+    """Un 503 por Redis caído decía "el cupo público de hoy está agotado"."""
+    backend.status = 503
+    backend.body = {
+        "detail": "Public API temporarily unavailable: the quota service is not "
+        "responding. Try again in a few minutes."
+    }
+    result = await _call(
+        "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
+    )
+    assert result.is_error
+    assert "no responde" in _text(result)
+    assert "agotado" not in _text(result)
+
+    backend.body = {"detail": "Free tier daily capacity reached. Try again tomorrow."}
+    result = await _call(
+        "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
+    )
+    assert "cupo público de OpenArg para hoy está agotado" in _text(result)
+
+
+async def test_an_answer_that_was_not_charged_says_so(backend: FakeBackend) -> None:
+    backend.body = {**backend.body, "usage": {"requests_remaining_month": 9, "charged": False}}
+    result = await _call(
+        "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
+    )
+    assert "te quedan este mes: 9 (esta no se descontó)" in _text(result)
+
+
 async def test_listar_fuentes(backend: FakeBackend) -> None:
     result = await _call("listar_fuentes", {}, {"Authorization": f"Bearer {KEY}"})
     assert "caba: 10 datasets" in _text(result)

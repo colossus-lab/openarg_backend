@@ -36,3 +36,36 @@ class ICacheService(ABC):
         See round v46 H8 for the previous race.
         """
         ...
+
+    @abstractmethod
+    async def decrement(self, key: str) -> int:
+        """Atomically undo one `increment_with_ttl` (a refund).
+
+        Used to give back a quota reservation that ended up not being
+        charged. It must be a single Redis-side atomic step (a Lua script):
+        it never creates the key — a DECR on a missing key would leave a
+        ``-1`` with no TTL forever — never goes below 0, and keeps the TTL.
+
+        Returns the post-decrement value (0 if the key was missing or 0).
+        """
+        ...
+
+    @abstractmethod
+    async def set_if_absent(self, key: str, value: str, ttl_seconds: int) -> bool:
+        """Set `key` to `value` only if it does not exist (SET NX EX).
+
+        Returns True if this call created the key. Used as a lock (the caller
+        that gets True owns it until it expires or is released with
+        `delete_if_equals`) and to seed a counter exactly once.
+        """
+        ...
+
+    @abstractmethod
+    async def delete_if_equals(self, key: str, value: str) -> bool:
+        """Delete `key` only if it still holds `value`, in one atomic step.
+
+        Releases a lock without deleting one that expired and was taken by
+        someone else meanwhile (a plain GET + DEL from Python is racy).
+        Returns True if the key was deleted.
+        """
+        ...

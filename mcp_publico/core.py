@@ -196,10 +196,20 @@ def error_message(status: int, detail: str = "", *, data_mode: bool = False) -> 
             )
         return "Demasiadas consultas: esperá un rato y volvé a intentar."
     if status == 503:
+        # Dos 503 distintos: el tope global del día ("daily capacity") y el
+        # servicio de cupos caído (Redis), o cualquier otro 503 sin ese
+        # detalle (p. ej. el proxy sin backend). Sólo el primero es "cupo
+        # agotado"; mostrar eso durante un incidente confundía a todos.
+        if "capacity" in detail_l:
+            return (
+                "El cupo público de OpenArg para hoy está agotado. Se renueva a las "
+                "21:00 (hora de Argentina). Los aportes son lo que nos permite ampliarlo."
+            ) + SUPPORT_LINE
         return (
-            "El cupo público de OpenArg para hoy está agotado. Se renueva a las "
-            "21:00 (hora de Argentina). Los aportes son lo que nos permite ampliarlo."
-        ) + SUPPORT_LINE
+            "El servicio de cupos de OpenArg no responde en este momento. Es una "
+            "falla nuestra, no tu cupo: probá de nuevo en unos minutos. Esta "
+            "consulta no descontó ninguna pregunta."
+        )
     if status == 408:
         return (
             "La consulta tardó demasiado y se cortó. Probá con una pregunta más "
@@ -245,8 +255,12 @@ def format_answer(payload: Mapping[str, Any]) -> str:
         if not isinstance(remaining, int):
             remaining = usage.get("requests_remaining_today")
         if isinstance(remaining, int):
+            # `charged` es False cuando la respuesta no descontó (repetida,
+            # del caché, un saludo). Un backend viejo no lo manda: no se dice nada.
+            free = " (esta no se descontó)" if usage.get("charged") is False else ""
             parts.append(
-                f"_Preguntas que te quedan este mes: {remaining}. Datos: OpenArg (openarg.org)._"
+                f"_Preguntas que te quedan este mes: {remaining}{free}. "
+                "Datos: OpenArg (openarg.org)._"
             )
     return "\n\n".join(parts)
 

@@ -37,7 +37,7 @@ Modo datos (el modelo del usuario razona con las filas):
 
 Modo respuestas (OpenArg razona):
 
-- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y preguntas restantes. Descuenta 1 de las preguntas del mes.
+- `consultar_datos_publicos(pregunta: str)`: respuesta en Markdown con fuentes (link al portal oficial), advertencias y preguntas restantes. Cada respuesta descuenta 1 de las preguntas del mes; los errores, los cortes por tiempo y la misma pregunta repetida dentro de los 5 minutos no descuentan.
 
 ## Docs
 
