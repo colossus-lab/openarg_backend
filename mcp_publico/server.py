@@ -58,8 +58,10 @@ server = MCPServer(
         "(tiene su propio cupo, más amplio).\n"
         "MODO RESPUESTAS: `consultar_datos_publicos` recibe una pregunta en "
         "lenguaje natural y OpenArg arma la respuesta con fuentes y advertencias. "
-        "Cada llamada descuenta 1 de las preguntas del mes del usuario (10 gratis): usala "
-        "cuando la pregunta necesite cruzar tablas o cuando el modo datos no alcance.\n"
+        "Cada respuesta descuenta 1 de las preguntas del mes del usuario (10 gratis); "
+        "no descuentan los errores, los cortes por tiempo ni repetir la misma pregunta "
+        "dentro de los 5 minutos. Usala cuando la pregunta necesite cruzar tablas o "
+        "cuando el modo datos no alcance.\n"
         "Citá siempre la fuente (título y link) de los datos que uses. "
         "`listar_fuentes` muestra qué portales cubre."
     ),
@@ -152,9 +154,10 @@ async def consultar_datos_publicos(pregunta: str, ctx: Context) -> str:
     "Presupuesto ejecutado por el Ministerio de Salud en 2024".
     La respuesta incluye los datasets usados (con link al portal oficial),
     advertencias sobre la calidad o cobertura del dato, y cuántas preguntas
-    le quedan este mes al usuario. Descuenta 1 de sus preguntas del mes (10
-    gratis): si podés responder con `buscar_datasets` + `obtener_datos`,
-    preferí esas.
+    le quedan este mes al usuario. Cada respuesta descuenta 1 de sus preguntas
+    del mes (10 gratis); un error, un corte por tiempo o la misma pregunta
+    repetida dentro de los 5 minutos no descuentan. Si podés responder con
+    `buscar_datasets` + `obtener_datos`, preferí esas.
     """
     try:
         question = core.validate_question(pregunta)

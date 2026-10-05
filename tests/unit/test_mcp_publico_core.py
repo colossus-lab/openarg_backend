@@ -106,6 +106,23 @@ class TestErrorMessages:
     def test_global_cap(self) -> None:
         assert "cupo público" in core.error_message(503, "Free tier daily capacity reached.")
 
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            # El backend nuevo, el viejo y un 503 sin detalle (el proxy sin backend).
+            "Public API temporarily unavailable: the quota service is not responding. "
+            "Try again in a few minutes.",
+            "Public API temporarily unavailable. Try again later.",
+            "",
+        ],
+    )
+    def test_quota_service_down_is_not_quota_exhausted(self, detail: str) -> None:
+        """Antes cualquier 503 decía "el cupo de hoy está agotado", también con Redis caído."""
+        msg = core.error_message(503, detail)
+        assert "no responde" in msg and "unos minutos" in msg
+        assert "agotado" not in msg
+        assert core.SUPPORT_URL not in msg
+
     def test_invalid_key(self) -> None:
         assert "revocada" in core.error_message(401)
 
@@ -140,6 +157,19 @@ class TestFormatAnswer:
 
     def test_empty_payload(self) -> None:
         assert "no devolvió" in core.format_answer({})
+
+    def test_says_when_the_answer_was_not_charged(self) -> None:
+        free = core.format_answer(
+            {"answer": "x", "usage": {"requests_remaining_month": 9, "charged": False}}
+        )
+        assert "te quedan este mes: 9 (esta no se descontó)" in free
+        charged = core.format_answer(
+            {"answer": "x", "usage": {"requests_remaining_month": 8, "charged": True}}
+        )
+        assert "no se descontó" not in charged
+        # Un backend viejo no manda `charged`: no se dice nada.
+        old = core.format_answer({"answer": "x", "usage": {"requests_remaining_month": 8}})
+        assert "no se descontó" not in old
 
 
 class TestFormatSources:
