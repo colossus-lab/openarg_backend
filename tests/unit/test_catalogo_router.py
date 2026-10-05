@@ -377,3 +377,28 @@ async def test_buscar_uses_the_live_version_rows_and_sends_tableless_to_the_bott
     assert first["titulo"] == "Votaciones Nominales"
     assert first["tablas"] == [{"tabla": "raw.vn__v3", "filas": 231_043}]
     assert second["tablas"] == []
+
+
+async def test_an_unknown_portal_is_a_400_with_the_valid_ones(
+    client: AsyncClient, search: AsyncMock
+) -> None:
+    """Un portal que no existe vaciaba el filtro y la respuesta era una lista
+    vacía con 200: el MCP decía "No encontré datasets" (4.4.5)."""
+    search.search_datasets_ann.return_value = []
+    search.known_portals.return_value = ["caba", "datos_gob_ar", "indec"]
+
+    r = await client.get("/catalogo/buscar", params={"q": "soja", "portal": "INDEC"})
+
+    assert r.status_code == 400
+    assert "'INDEC'" in r.json()["detail"] and "indec" in r.json()["detail"]
+
+
+async def test_a_real_portal_with_nothing_similar_is_still_an_empty_list(
+    client: AsyncClient, search: AsyncMock
+) -> None:
+    search.search_datasets_ann.return_value = []
+    search.known_portals.return_value = ["caba", "indec"]
+
+    r = await client.get("/catalogo/buscar", params={"q": "soja", "portal": "caba"})
+
+    assert r.status_code == 200 and r.json()["resultados"] == []

@@ -558,3 +558,21 @@ class TestSearchDatasetsAnn:
         r = results[0]
         assert (r.dataset_id, r.portal, r.score) == ("abc-123", "datos_gob_ar", 0.674)
         assert (r.description, r.download_url, r.columns) == ("", "", "")
+
+
+class TestKnownPortals:
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self, monkeypatch):
+        monkeypatch.setattr(PgVectorSearchAdapter, "_portals", None)
+
+    async def test_reads_distinct_portals_once_per_process(self):
+        session = AsyncMock()
+        result = MagicMock()
+        result.fetchall.return_value = [("caba",), ("datos_gob_ar",)]
+        session.execute.return_value = result
+
+        assert await PgVectorSearchAdapter(session).known_portals() == ["caba", "datos_gob_ar"]
+        other = AsyncMock()
+        assert await PgVectorSearchAdapter(other).known_portals() == ["caba", "datos_gob_ar"]
+        other.execute.assert_not_awaited()
+        assert "DISTINCT portal" in str(session.execute.await_args.args[0])

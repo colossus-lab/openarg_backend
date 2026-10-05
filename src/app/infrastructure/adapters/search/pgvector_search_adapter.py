@@ -43,6 +43,10 @@ class PgVectorSearchAdapter(IVectorSearch):
     # from 0.8.0 on.
     _pgvector_version: tuple[int, ...] | None = None
 
+    # Portals in the catalogue, read at most once an hour per process.
+    _PORTALS_TTL_S = 3600
+    _portals: tuple[float, list[str]] | None = None
+
     def __init__(self, session: MainAsyncSession) -> None:
         self._session = session
 
@@ -68,6 +72,23 @@ class PgVectorSearchAdapter(IVectorSearch):
             ).scalar()
             cls._pgvector_version = tuple(int(p) for p in re.findall(r"\d+", str(raw or "0")))
         return cls._pgvector_version >= (0, 8)
+
+    async def known_portals(self) -> list[str]:
+        """Distinct `datasets.portal` values (38 in prod), cached per process.
+
+        Only asked when a portal-filtered search comes back empty: an unknown
+        portal ("INDEC", "datos.gob.ar") empties the filter and the search
+        used to answer an empty list with a 200, which the MCP showed as "no
+        encontré datasets".
+        """
+        cls = type(self)
+        now = time.monotonic()
+        if cls._portals is None or now - cls._portals[0] > self._PORTALS_TTL_S:
+            rows = await self._session.execute(
+                text("SELECT DISTINCT portal FROM datasets WHERE portal IS NOT NULL ORDER BY 1")
+            )
+            cls._portals = (now, [str(r[0]) for r in rows.fetchall()])
+        return list(cls._portals[1])
 
     async def search_datasets_ann(
         self,

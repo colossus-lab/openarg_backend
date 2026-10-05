@@ -277,8 +277,19 @@ class BuscarDatos:
             if m.score >= _MIN_SIMILARITY
         ]
         if not datasets and not curated:
+            nota = "Nada parecido en el catálogo."
+            if portal and not hits:
+                # Un portal inexistente ("INDEC") vacía el filtro y parecía
+                # que el dato no estaba.
+                async with ctx.db_lock:
+                    portals = await deps.vector_search.known_portals()
+                if portals and portal not in portals:
+                    nota = (
+                        f"No existe el portal {portal!r}. Portales válidos: "
+                        f"{', '.join(portals)}. Probá sin portal."
+                    )
             return ToolOutcome(
-                to_json({"resultados": [], "nota": "Nada parecido en el catálogo."}),
+                to_json({"resultados": [], "nota": nota}),
                 summary="No encontró nada parecido en el catálogo",
             )
         found = count(len(datasets), "dataset", "datasets")

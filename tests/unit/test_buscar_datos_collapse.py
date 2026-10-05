@@ -82,3 +82,15 @@ async def test_live_version_rows_replace_a_zero_row_count() -> None:
 
     [dataset] = json.loads(out.content)["datasets"]
     assert dataset["tablas"][0]["filas"] == 231_043
+
+
+async def test_an_unknown_portal_is_named_in_the_note() -> None:
+    deps = _deps([], _Sandbox([], {}))
+    deps.vector_search.known_portals = AsyncMock(return_value=["datos_gob_ar", "indec"])
+
+    out = await BuscarDatos().run(
+        {"texto": "soja", "portal": "INDEC"}, ToolContext(deps, EngineRequest("q", "u"))
+    )
+
+    nota = json.loads(out.content)["nota"]
+    assert "'INDEC'" in nota and "indec" in nota

@@ -203,6 +203,19 @@ async def buscar(
             min_similarity=_MIN_SIMILARITY,
         )
         t_search = time.perf_counter()
+        if portal and not hits:
+            # Un portal que no existe vacía el filtro: antes salía una lista
+            # vacía con 200 y el MCP decía "no encontré datasets".
+            portals = await vector_search.known_portals()
+            if portals and portal not in portals:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"No existe el portal {portal!r}. Portales válidos: "
+                        + ", ".join(portals)
+                        + ". O buscá sin filtrar por portal."
+                    ),
+                )
         tables = await sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits])
         profiles = await sandbox.table_profiles([t.table_name for t in tables])
         t_tables = time.perf_counter()
