@@ -10,6 +10,7 @@ from app.application.catalog.search_canary import (
     CANARY_QUERIES,
     CanaryReport,
     QueryRecall,
+    recall_band,
     tie_aware_recall,
 )
 from app.domain.ports.search.vector_search import SearchResult
@@ -82,15 +83,32 @@ def _run_task(report: CanaryReport):
     return out, notify
 
 
-def test_a_degraded_index_alerts_once_a_day() -> None:
+def test_a_degraded_index_alerts_under_a_stable_identity() -> None:
+    """La clave es la del problema (el índice y su banda de recall), no la de
+    la noche: así `notify` deduplica y reabre a la 3ª/10ª/30ª vez."""
     out, notify = _run_task(_report(1.0, 0.0, 0.5))
 
     assert out["degraded"] is True and out["mean_recall"] == 0.5
     [alerts] = [c.args[1] for c in notify.call_args_list]
     [alert] = alerts
     assert alert.kind == "search_recall"
-    assert alert.key.startswith("recall:")
+    assert alert.key == "hnsw:50pct"
     assert "50%" in alert.title
+
+    # Otra noche con el mismo grado de degradación: la misma alerta.
+    _, again = _run_task(_report(1.0, 0.1, 0.4))
+    assert again.call_args.args[1][0].fingerprint() == alert.fingerprint()
+    # Si empeora, es otra.
+    _, worse = _run_task(_report(0.5, 0.0, 0.2))
+    assert worse.call_args.args[1][0].key == "hnsw:20pct"
+
+
+@pytest.mark.parametrize(
+    ("recall", "band"),
+    [(0.949, 90), (0.93, 90), (0.9, 90), (0.85, 85), (0.849, 80), (0.0, 0), (1.0, 100)],
+)
+def test_recall_band(recall: float, band: int) -> None:
+    assert recall_band(recall) == band
 
 
 def test_a_healthy_index_stays_quiet() -> None:

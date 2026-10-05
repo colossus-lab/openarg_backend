@@ -61,6 +61,16 @@ CANARY_QUERIES: tuple[str, ...] = (
 )
 
 
+def recall_band(mean_recall: float) -> int:
+    """La banda de 5 puntos del recall, para la identidad de la alerta.
+
+    0,93 → 90; 0,949 → 90; 0,85 → 85. Con la banda en la clave, el mismo
+    índice degradado en el mismo grado es la misma alerta (``notify`` la
+    reabre a la 3ª, 10ª y 30ª vez), y si empeora es una alerta nueva.
+    """
+    return max(0, min(100, int(round(mean_recall * 100, 6)) // 5 * 5))
+
+
 def tie_aware_recall(
     ann: Sequence[SearchResult], exact: Sequence[SearchResult], k: int = K
 ) -> float:

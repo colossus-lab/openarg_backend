@@ -15,7 +15,6 @@ import asyncio
 import logging
 import os
 import time
-from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -100,7 +99,7 @@ async def _measure(queries: tuple[str, ...]) -> Any:
 )
 def search_recall_canary(self, limit: int | None = None) -> dict[str, Any]:
     """Compare the index's top 10 with the exact search's, and alert if it drifts."""
-    from app.application.catalog.search_canary import CANARY_QUERIES
+    from app.application.catalog.search_canary import CANARY_QUERIES, recall_band
     from app.application.quality.alerting import Alert, notify
 
     queries = CANARY_QUERIES[:limit] if limit else CANARY_QUERIES
@@ -123,15 +122,18 @@ def search_recall_canary(self, limit: int | None = None) -> dict[str, Any]:
     }
     logger.info("search canary: %s", summary)
     if report.degraded:
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
         summary["alert"] = notify(
             get_sync_engine(),
             [
                 Alert(
                     kind="search_recall",
-                    # By day: a degraded index should say so once a day while
-                    # it lasts, not once and never again.
-                    key=f"recall:{today}",
+                    # Identity of the problem, not of the night: the index,
+                    # plus the 5-point band it fell to. A degradation that
+                    # stays put is reported once and re-opened by `notify` on
+                    # its 3rd/10th/30th sighting; one that gets worse lands in
+                    # a new band and is news again (same idea as the Redis
+                    # alert's `redis:{pct}pct`).
+                    key=f"hnsw:{recall_band(report.mean_recall)}pct",
                     title=(
                         f"Búsqueda: el índice HNSW trae {report.mean_recall:.0%} del top 10 "
                         f"de la exacta (piso {report.floor:.0%})"
