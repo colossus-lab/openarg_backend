@@ -201,6 +201,35 @@ class TestModoDatosCore:
     def test_search_without_results(self) -> None:
         assert "No encontré" in core.format_search({"resultados": []})
 
+    def test_search_names_the_file_so_siblings_can_be_told_apart(self) -> None:
+        """Cabecera y detalle de "Votaciones Nominales" tienen el mismo título."""
+        out = core.format_search(
+            {
+                "resultados": [
+                    {
+                        "titulo": "Votaciones Nominales",
+                        "portal": "diputados",
+                        "archivo": "actas-cabecera-137-2.0.csv",
+                        "formato": "CSV",
+                        "tablas": [{"tabla": "raw.a", "filas": 100}],
+                    },
+                    {
+                        "titulo": "Votaciones Nominales",
+                        "portal": "diputados",
+                        "archivo": "actas-detalle-137-2.0.csv",
+                        "formato": "CSV",
+                        "tablas": [{"tabla": "raw.b", "filas": 25700}],
+                    },
+                ]
+            }
+        )
+        assert "`actas-cabecera-137-2.0.csv` (CSV)" in out
+        assert "`actas-detalle-137-2.0.csv` (CSV)" in out
+
+    def test_search_without_file_keeps_the_old_shape(self) -> None:
+        out = core.format_search({"resultados": [{"titulo": "X", "portal": "p", "tablas": []}]})
+        assert "Archivo:" not in out
+
     def test_rows_without_results(self) -> None:
         assert "no devolvió filas" in core.format_rows({"filas": [], "fuente": "X"})
 

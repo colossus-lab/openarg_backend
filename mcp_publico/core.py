@@ -294,6 +294,17 @@ def format_search(payload: Mapping[str, Any]) -> str:
     parts = []
     for i, r in enumerate(results, 1):
         lines = [f"{i}. **{r.get('titulo') or 'Sin título'}** ({r.get('portal', '')})"]
+        # Varios recursos de un mismo package comparten título y descripción
+        # ("Votaciones Nominales": cabecera y detalle, período 137 y 129-137):
+        # el archivo es lo único que los distingue.
+        archivo = str(r.get("archivo") or "").strip()
+        formato = str(r.get("formato") or "").strip()
+        if archivo or formato:
+            lines.append(
+                "   Archivo: "
+                + (f"`{archivo}`" if archivo else "")
+                + (f" ({formato})" if formato and archivo else formato)
+            )
         desc = str(r.get("descripcion") or "").strip()
         if desc:
             lines.append(f"   {desc}")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -25,6 +26,35 @@ class CachedTableInfo:
     dataset_id: str
     row_count: int | None
     columns: list[str]
+
+
+@dataclass
+class TableProfile:
+    """Lo que hace falta para elegir entre copias de un mismo archivo.
+
+    El catálogo tiene el mismo archivo varias veces: gemelos de la migración de
+    datos.gob.ar (IDs regenerados, misma URL), espejos entre portales y el CSV
+    y el JSON de un mismo recurso. Elegir cuál mostrar pide datos que
+    ``CachedTableInfo`` no trae:
+
+    - ``rows``: las filas que registró el colector al materializar la versión
+      viva (``raw_table_versions.row_count``). ``cached_datasets.row_count``
+      no sirve para esto: en staging vale 0 en 18.134 de 31.221 tablas listas
+      y en prod difiere de la versión viva en 1.672 (Proyectos Parlamentarios
+      en CSV anuncia 111.091 y tiene 11.089).
+    - ``truncated``: la versión quedó cortada en ``MAX_TABLE_ROWS``.
+    - ``dataset_created_at``: separa la era vieja de datos.gob.ar de la nueva.
+    - ``columns``: los nombres reales de las primeras columnas, para notar un
+      encabezado que en realidad es una fila de datos.
+    """
+
+    table_name: str  # pelado, como ``get_table_sources``
+    rows: int | None = None
+    truncated: bool = False
+    loaded_at: datetime | None = None
+    dataset_created_at: datetime | None = None
+    format: str | None = None
+    columns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,6 +145,15 @@ class ISQLSandbox(ABC):
 
     async def describe_marts(self, table_names: list[str]) -> dict[str, MartInfo]:
         """``{"mart.<vista>": MartInfo}`` de los marts pedidos que se pueden servir."""
+        return {}
+
+    async def table_profiles(self, table_names: list[str]) -> dict[str, TableProfile]:
+        """``{nombre_pelado: TableProfile}`` de las tablas listas pedidas.
+
+        No es abstracto: un sandbox que no sepa resolverlo (un fake de test)
+        devuelve vacío, y la búsqueda elige entre copias con lo que trae
+        ``find_tables``.
+        """
         return {}
 
     async def get_table_sources(self, table_names: list[str]) -> dict[str, TableSource]:

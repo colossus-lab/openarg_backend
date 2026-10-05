@@ -17,7 +17,9 @@ Pinamar) y las unidades que declara el mart.
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -41,6 +43,8 @@ from app.application.answers.tools.base import (
     str_arg,
     to_json,
 )
+from app.application.catalog.collapse import collapse_hits
+from app.application.catalog.national_prior import national_prior
 from app.application.public_catalog import (
     CatalogRequestError,
     DataRequest,
@@ -55,6 +59,8 @@ from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.agent_llm import AgentTool
 from app.domain.ports.sandbox.sql_sandbox import MartInfo
 from app.domain.value_objects.table_reference import bare_name
+
+logger = logging.getLogger(__name__)
 
 # Mismo umbral que el modo datos y `/data/search`.
 _MIN_SIMILARITY = 0.40
@@ -215,12 +221,16 @@ class BuscarDatos:
         texto = str_arg(args, "texto", required=True)
         portal = str_arg(args, "portal", max_len=80)
         deps = ctx.deps
+        t0 = time.perf_counter()
         vector = await deps.embedding.embed(texto)
+        t_embed = time.perf_counter()
         async with ctx.db_lock:
             try:
+                # Varios datasets por resultado: muchos son el mismo archivo
+                # (gemelos, espejos, CSV y JSON) y `collapse_hits` los junta.
                 hits = await deps.vector_search.search_datasets_ann(
                     query_embedding=vector,
-                    limit=_MAX_DATASETS * 2,
+                    limit=_MAX_DATASETS * 4,
                     portal_filter=portal,
                     min_similarity=_MIN_SIMILARITY,
                 )
@@ -230,33 +240,30 @@ class BuscarDatos:
                 # siguientes del turno fallaban (staging, 01-oct).
                 await deps.vector_search.reset()
                 raise
-        tables: dict[str, list[dict[str, Any]]] = {}
-        for t in await deps.sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits]):
-            # Una tabla con 0 filas es una versión vieja o una descarga fallida.
-            if t.dataset_id and t.row_count != 0:
-                tables.setdefault(str(t.dataset_id), []).append(_table_summary(t))
-
-        # El catálogo tiene datasets repetidos (la migración de datos.gob.ar
-        # regeneró IDs): mismo título y URL = el mismo dataset.
-        merged: dict[tuple[str, str], dict[str, Any]] = {}
-        for h in hits:
-            key = (h.title.strip().lower(), (h.download_url or "").strip())
-            found = tables.get(str(h.dataset_id), [])
-            if key in merged:
-                known = {t["tabla"] for t in merged[key]["tablas"]}
-                merged[key]["tablas"].extend(t for t in found if t["tabla"] not in known)
-                continue
-            merged[key] = {
-                "titulo": h.title,
-                "portal": h.portal,
-                "descripcion": (h.description or "")[:_DESCRIPTION_CHARS],
-                "tablas": list(found),
+        t_search = time.perf_counter()
+        found_tables = await deps.sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits])
+        profiles = await deps.sandbox.table_profiles([t.table_name for t in found_tables])
+        # Una entrada por archivo, con la copia de más filas reales y
+        # encabezado sano; prioridad chica a lo nacional si no nombra lugar.
+        datasets = [
+            {
+                "titulo": c.hit.title,
+                "portal": c.hit.portal,
+                "descripcion": (c.hit.description or "")[:_DESCRIPTION_CHARS],
+                **({"archivo": c.archivo} if c.archivo else {}),
+                "tablas": [_table_summary(t) for t in c.tables[:_MAX_TABLES_PER_DATASET]],
             }
-        datasets = [d for d in merged.values() if d["tablas"]][:_MAX_DATASETS]
-        for d in datasets:
-            d["tablas"] = sorted(d["tablas"], key=lambda t: -(t["filas"] or 0))[
-                :_MAX_TABLES_PER_DATASET
-            ]
+            for c in collapse_hits(hits, found_tables, profiles, prior=national_prior(texto))
+            if c.tables
+        ][:_MAX_DATASETS]
+        logger.info(
+            "buscar_datos: embed_ms=%.0f busqueda_ms=%.0f tablas_ms=%.0f hits=%d datasets=%d",
+            (t_embed - t0) * 1000,
+            (t_search - t_embed) * 1000,
+            (time.perf_counter() - t_search) * 1000,
+            len(hits),
+            len(datasets),
+        )
 
         marts = await deps.sandbox.find_marts(vector, limit=_MAX_MARTS) if not portal else []
         curated = [
