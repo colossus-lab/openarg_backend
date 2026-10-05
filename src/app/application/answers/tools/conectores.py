@@ -264,10 +264,13 @@ class Cotizaciones:
     spec = AgentTool(
         name="cotizaciones",
         description=(
-            "Cotizaciones del dólar (oficial, blue, bolsa/MEP, contado con liqui, cripto, "
-            "mayorista, tarjeta) y riesgo país, de ArgentinaDatos/DolarApi. `solo_actual=true` "
-            "trae el último valor; si no, la historia. Para el tipo de cambio oficial de largo "
-            "plazo, preferí series_tiempo."
+            "Cotizaciones del dólar de agregadores no oficiales (DolarApi/ArgentinaDatos): "
+            "blue, bolsa/MEP, contado con liqui, cripto, tarjeta, y la pizarra del Banco "
+            "Nación (casa 'oficial'); su 'mayorista' no es la referencia A 3500. También el "
+            "riesgo país. Para el dólar oficial usá variables_bcra (minorista y mayorista de "
+            "referencia del BCRA); si sumás la pizarra del Banco Nación, nombrala así y "
+            "aclarala como no oficial. `solo_actual=true` trae el último valor; si no, la "
+            "historia."
         ),
         input_schema={
             "type": "object",
