@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.application.answers.tools.base import AgentToolImpl
+from app.application.answers.tools.bcra import VariablesBCRA
 from app.application.answers.tools.catalogo import (
     BuscarDatos,
     Calcular,
@@ -31,6 +32,8 @@ def build_tools(deps: Any) -> list[AgentToolImpl]:
     lista entra en el caché del prompt.
     """
     tools: list[AgentToolImpl] = [BuscarSeries(), SeriesTiempo()]
+    if getattr(deps, "bcra", None) is not None:
+        tools.append(VariablesBCRA())
     if deps.sandbox is not None:
         tools += [BuscarDatos(), DescribirTabla(), ObtenerDatos(), Calcular()]
     if deps.arg_datos is not None:

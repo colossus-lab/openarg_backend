@@ -151,6 +151,12 @@ def build_table_compat_notes(available_tables: list[str]) -> str:
         )
     if "cache_bcra_cotizaciones" in available_tables:
         notes.append("Alias legado: cache_bcra_principales_variables -> cache_bcra_cotizaciones.")
+        # Desde el 05-oct acumula historia: sin filtro de fecha, un LIMIT 1
+        # devuelve la cotización de un día cualquiera.
+        notes.append(
+            "cache_bcra_cotizaciones tiene una fila por fecha y moneda: para la cotización "
+            "vigente filtrá fecha = (SELECT max(fecha) FROM cache_bcra_cotizaciones)."
+        )
     if any(name.startswith("cache_presupuesto_credito_") for name in available_tables):
         notes.append(
             "No existe una tabla unica cache_presupuesto_nacional. "
