@@ -93,8 +93,19 @@ def test_la_serie_discontinuada_esta_rotulada() -> None:
 def test_el_viejo_sigue_encontrando_lo_de_siempre() -> None:
     """`find_catalog_match` (pipeline viejo) devuelve la primera entrada, como antes."""
     assert find_catalog_match("inflación de agosto")["ids"] == ["148.3_INIVELNAL_DICI_M_26"]
-    assert find_catalog_match("reservas del BCRA")["ids"] == ["174.1_RRVAS_IDOS_0_0_36"]
     assert find_catalog_match("balanza comercial 2025")["ids"] == [
         "74.3_IET_0_M_16",
         "74.3_IIT_0_M_25",
     ]
+
+
+@pytest.mark.parametrize("texto", ["reservas del BCRA", "¿cuántas reservas tiene el BCRA hoy?"])
+def test_el_viejo_responde_reservas_con_la_diaria(texto: str) -> None:
+    # La mensual 174.1 está parada en la fuente en 2026-04 (is_updated False)
+    # y el pipeline viejo no ve el aviso de atraso: la primera entrada que
+    # encuentra tiene que ser la diaria, que llega a 2026-08-31.
+    entry = find_catalog_match(texto)
+    assert entry is not None
+    assert entry["ids"] == ["92.2_RESERVAS_IRES_0_0_32_40"]
+    assert "default_collapse" not in entry
+    assert _api()["174.1_RRVAS_IDOS_0_0_36"]["is_updated"] == "False"

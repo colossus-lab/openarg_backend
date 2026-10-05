@@ -13,7 +13,12 @@ Las mañas que imita se midieron contra apis.datos.gob.ar el 04-oct-2026:
 - ``sort=desc`` con una representación descarta los períodos más recientes.
   El adaptador no tiene que mandarlo nunca: los tests lo verifican.
 
-``collapse`` no se simula: los tests que lo usan sólo miran los parámetros.
+``collapse`` (medido el 05-oct): agrega con ``collapse_aggregation`` (por
+defecto el promedio), fecha cada período por su primer día, deja afuera el
+período incompleto (exportaciones con ``collapse=year`` llegan hasta 2025),
+``count`` cuenta las filas YA agregadas, y una frecuencia más fina que la de
+la serie da 400 ("Intervalo de collapse inválido…"). Sólo se simula desde
+series mensuales o más gruesas; de una diaria se agrega sin descartar nada.
 """
 
 from __future__ import annotations
@@ -33,9 +38,22 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "series_tiempo_api
 IPC_ID = "148.3_INIVELNAL_DICI_M_26"
 RESERVAS_ID = "174.1_RRVAS_IDOS_0_0_36"
 TIPO_CAMBIO_ID = "92.2_TIPO_CAMBIION_0_0_21_24"
+EXPO_ID = "74.3_IET_0_M_16"
+DESEMPLEO_ID = "45.2_ECTDT_0_T_33"
 
 _AXIS_FREQUENCY = {"R/P1D": "day", "R/P1M": "month", "R/P3M": "quarter", "R/P1Y": "year"}
 _PERIODS_PER_YEAR = {"R/P1D": 365, "R/P1M": 12, "R/P3M": 4, "R/P1Y": 1}
+# Meses por observación: 0 para la diaria.
+_SOURCE_MONTHS = {"R/P1D": 0, "R/P1M": 1, "R/P3M": 3, "R/P6M": 6, "R/P1Y": 12}
+_COLLAPSE_MONTHS = {"month": 1, "quarter": 3, "semester": 6, "year": 12}
+_COLLAPSE_PER_YEAR = {"month": 12, "quarter": 4, "semester": 2, "year": 1}
+_AGGREGATE = {
+    "avg": lambda v: sum(v) / len(v),
+    "sum": sum,
+    "end_of_period": lambda v: v[-1],
+    "max": max,
+    "min": min,
+}
 _REPRESENTATION_UNITS = {
     "value": None,
     "change": "Variación respecto del período anterior",
@@ -73,15 +91,47 @@ def serie(
     }
 
 
-def ipc_real() -> dict[str, Any]:
-    """El IPC nacional tal como lo devolvió la API el 04-oct (117 meses)."""
-    raw = json.loads((FIXTURES / "ipc_148_3.json").read_text(encoding="utf-8"))
+def _grabada(nombre: str, sid: str) -> dict[str, Any]:
+    raw = json.loads((FIXTURES / nombre).read_text(encoding="utf-8"))
     return serie(
-        IPC_ID,
+        sid,
         [(f, v) for f, v in raw["data"]],
         description=raw["field"]["description"],
         units=raw["field"]["units"],
         dataset=raw["dataset"]["title"],
+    )
+
+
+def ipc_real() -> dict[str, Any]:
+    """El IPC nacional tal como lo devolvió la API el 04-oct (117 meses)."""
+    return _grabada("ipc_148_3.json", IPC_ID)
+
+
+def exportaciones_reales() -> dict[str, Any]:
+    """Exportaciones totales (74.3) de 2023-01 a 2026-08, grabadas de la API el 05-oct.
+
+    Suma 2024: 79.703,2; suma 2025: 87.111,2 (+9,29 %). Diciembre contra
+    diciembre: 7.049,0 → 7.482,4 (+6,15 %).
+    """
+    return _grabada("expo_74_3.json", EXPO_ID)
+
+
+def desempleo() -> dict[str, Any]:
+    """La 45.2 desde 2025 (API, 05-oct): trimestral, «Porcentaje» y valores como fracción."""
+    return serie(
+        DESEMPLEO_ID,
+        [
+            ("2025-01-01", 0.079),
+            ("2025-04-01", 0.0757623890941418),
+            ("2025-07-01", 0.066),
+            ("2025-10-01", 0.075),
+            ("2026-01-01", 0.078),
+            ("2026-04-01", 0.079),
+        ],
+        description="Tasa de desempleo total. En porcentaje.",
+        units="Porcentaje",
+        frequency="R/P3M",
+        dataset="EPH. Tasas de actividad, empleo y desempleo",
     )
 
 
@@ -139,6 +189,26 @@ def _transform(window: list[tuple[str, float]], mode: str, per_year: int) -> lis
     return out
 
 
+def _period_start(fecha: str, months: int) -> str:
+    year, month = int(fecha[:4]), int(fecha[5:7])
+    return date(year, (month - 1) // months * months + 1, 1).isoformat()
+
+
+def _collapse(
+    window: list[tuple[str, float]], source_months: int, target_months: int, how: str
+) -> list[tuple[str, float]]:
+    groups: dict[str, list[float]] = {}
+    for fecha, value in window:
+        groups.setdefault(_period_start(fecha, target_months), []).append(value)
+    expected = target_months // source_months if source_months else None
+    return [
+        (period, _AGGREGATE[how](values))
+        for period, values in groups.items()
+        # Como la API: el período incompleto (el año en curso) queda afuera.
+        if expected is None or len(values) >= expected
+    ]
+
+
 class FakeSeriesApi:
     def __init__(self, *series: dict[str, Any]) -> None:
         self.series = {s["id"]: s for s in series}
@@ -157,21 +227,45 @@ class FakeSeriesApi:
         start = int(params.get("start", 0))
         start_date, end_date = params.get("start_date"), params.get("end_date")
         mode = params.get("representation_mode", "value")
+        collapse = params.get("collapse")
+        how = params.get("collapse_aggregation", "avg")
         ids = params["ids"].split(",")
         chosen = [self.series[i] for i in ids]
-        # Eje de tiempo común: la unión de las fechas, como la API.
-        dates = sorted({f for s in chosen for f, _ in s["data"]})
-        dates = [
-            f
-            for f in dates
-            if (not start_date or f >= start_date) and (not end_date or f <= end_date)
-        ]
+        windows = []
+        for s in chosen:
+            window = [
+                (f, v)
+                for f, v in s["data"]
+                if (not start_date or f >= start_date) and (not end_date or f <= end_date)
+            ]
+            if collapse:
+                source = _SOURCE_MONTHS[s["field"]["frequency"]]
+                target = _COLLAPSE_MONTHS[collapse]
+                if target < source:
+                    return httpx.Response(
+                        400,
+                        json={
+                            "errors": [
+                                {
+                                    "error": "Intervalo de collapse inválido para la(s) serie(s) "
+                                    f"seleccionadas: {collapse}. Pruebe con un intervalo mayor"
+                                }
+                            ]
+                        },
+                    )
+                window = _collapse(window, source, target, how)
+            windows.append(window)
+        # Eje de tiempo común: la unión de las fechas, como la API. `count`
+        # cuenta las filas ya agregadas.
+        dates = sorted({f for window in windows for f, _ in window})
         count = len(dates)
         columns = []
-        for s in chosen:
-            by_date = dict(s["data"])
-            window = [(f, by_date[f]) for f in dates if f in by_date]
-            per_year = _PERIODS_PER_YEAR[s["field"]["frequency"]]
+        for s, window in zip(chosen, windows, strict=True):
+            per_year = (
+                _COLLAPSE_PER_YEAR[collapse]
+                if collapse
+                else _PERIODS_PER_YEAR[s["field"]["frequency"]]
+            )
             columns.append(dict(_transform(window, mode, per_year)))
         rows = [
             [f, *[col.get(f) for col in columns]]
@@ -181,7 +275,9 @@ class FakeSeriesApi:
         if params.get("sort") == "desc":
             rows = rows[::-1]
         page = rows[start : start + limit]
-        axis: dict[str, Any] = {"frequency": _AXIS_FREQUENCY[chosen[0]["field"]["frequency"]]}
+        axis: dict[str, Any] = {
+            "frequency": collapse or _AXIS_FREQUENCY[chosen[0]["field"]["frequency"]]
+        }
         if page:
             axis.update(start_date=page[0][0], end_date=page[-1][0])
         meta: list[dict[str, Any]] = [axis]

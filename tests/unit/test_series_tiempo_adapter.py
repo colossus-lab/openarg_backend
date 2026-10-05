@@ -22,11 +22,15 @@ from __future__ import annotations
 import pytest
 
 from tests.unit.series_tiempo_fake import (
+    DESEMPLEO_ID,
+    EXPO_ID,
     IPC_ID,
     RESERVAS_ID,
     TIPO_CAMBIO_ID,
     FakeSeriesApi,
+    desempleo,
     diaria,
+    exportaciones_reales,
     ipc_real,
     reservas_mensuales,
 )
@@ -200,3 +204,47 @@ async def test_una_diaria_dice_que_es_diaria() -> None:
     assert result is not None
     assert result.metadata["frecuencia"] == "diaria"
     assert result.metadata["truncada"] is False
+
+
+DESEMPLEO_LABEL = "Tasa de desempleo total. En porcentaje."
+
+
+@pytest.mark.parametrize(
+    ("representation", "esperado", "unidades"),
+    [
+        # La API da 0,079 con unidades «Porcentaje»: el modelo decía 7,9 % y
+        # el respaldo decía 0,079.
+        (None, 7.9, "Porcentaje (en %)"),
+        # Diferencia en puntos porcentuales: 0,079 − 0,078.
+        ("change", 0.1, "(en puntos porcentuales)"),
+        # Variación de la tasa: ya entra por percent_*, no se escala dos veces.
+        ("percent_change", 1.28, "(en %)"),
+    ],
+)
+async def test_el_desempleo_llega_en_porcentaje_y_no_como_fraccion(
+    representation: str | None, esperado: float, unidades: str
+) -> None:
+    api = FakeSeriesApi(desempleo())
+    result = await api.adapter().fetch([DESEMPLEO_ID], representation=representation)
+
+    assert result is not None
+    assert result.records[-1]["fecha"] == "2026-04-01"
+    assert result.records[-1][DESEMPLEO_LABEL] == esperado
+    assert unidades in result.metadata["units"]
+    assert result.metadata["unidad"] == "porcentaje"
+
+
+async def test_collapse_year_suma_y_deja_afuera_el_anio_en_curso() -> None:
+    # Medido el 05-oct: exportaciones con collapse=year y sum dan 2023, 2024 y
+    # 2025 (79.703,2 y 87.111,2); 2026, incompleto, no aparece.
+    api = FakeSeriesApi(exportaciones_reales())
+    result = await api.adapter().fetch([EXPO_ID], collapse="year", collapse_aggregation="sum")
+
+    assert result is not None
+    label = "Exportaciones totales. En millones de dólares."
+    assert [r["fecha"] for r in result.records] == ["2023-01-01", "2024-01-01", "2025-01-01"]
+    assert [round(r[label], 1) for r in result.records][1:] == [79703.2, 87111.2]
+    assert result.metadata["frecuencia"] == "anual"
+    assert result.metadata["agregacion"] == "sum"
+    assert result.metadata["truncada"] is False
+    assert "unidad" not in result.metadata

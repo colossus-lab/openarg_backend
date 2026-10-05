@@ -88,6 +88,28 @@ SERIES_CATALOG: dict[str, dict] = {
         "keywords": ["ipc regional", "precios regionales", "inflacion regional"],
         "default_collapse": "month",
     },
+    # La diaria va ANTES que la mensual: `find_catalog_match` (pipeline viejo)
+    # se queda con la primera, y la mensual está parada en la fuente meses
+    # atrás (174.1 llega a 2026-04; la diaria, a 2026-08-31).
+    "reservas_diarias": {
+        "ids": ["92.2_RESERVAS_IRES_0_0_32_40"],
+        "description": (
+            "Reservas internacionales del BCRA, saldo diario en millones de dólares (desde "
+            "2003). Es la que llega más lejos: para el saldo a fin de cada mes, "
+            "frecuencia=month con agregacion=end_of_period."
+        ),
+        "expected_description": {
+            "92.2_RESERVAS_IRES_0_0_32_40": "Reservas internacionales del BCRA, en millones de dólares"
+        },
+        "keywords": [
+            "reservas",
+            "reservas internacionales",
+            "bcra reservas",
+            "reservas bcra",
+            "dolares bcra",
+            "reservas del banco central",
+        ],
+    },
     "reservas": {
         "ids": ["174.1_RRVAS_IDOS_0_0_36"],
         "description": (
@@ -105,22 +127,6 @@ SERIES_CATALOG: dict[str, dict] = {
             "reservas del banco central",
         ],
         "default_collapse": "month",
-    },
-    "reservas_diarias": {
-        "ids": ["92.2_RESERVAS_IRES_0_0_32_40"],
-        "description": (
-            "Reservas internacionales del BCRA, saldo diario en millones de dólares (desde 2003)"
-        ),
-        "expected_description": {
-            "92.2_RESERVAS_IRES_0_0_32_40": "Reservas internacionales del BCRA, en millones de dólares"
-        },
-        "keywords": [
-            "reservas",
-            "reservas internacionales",
-            "bcra reservas",
-            "reservas bcra",
-            "reservas del banco central",
-        ],
     },
     "base_monetaria": {
         "ids": ["331.1_SALDO_BASERIA__15"],
@@ -171,8 +177,8 @@ SERIES_CATALOG: dict[str, dict] = {
     "desempleo": {
         "ids": ["45.2_ECTDT_0_T_33"],
         "description": (
-            "Tasa de desempleo total (trimestral, desde 2003). La API la da como fracción: "
-            "0,079 es 7,9 %."
+            "Tasa de desempleo total (trimestral, desde 2003). series_tiempo la devuelve en %: "
+            "7.9 es 7,9 % (la API la da como fracción y se escala)."
         ),
         "expected_description": {"45.2_ECTDT_0_T_33": "Tasa de desempleo total. En porcentaje."},
         "keywords": [
@@ -408,6 +414,24 @@ _LOOKBACK_MONTHS = 13
 # valores (medido el 04-oct; en 2025 la de la API daba 16,90 % y el INDEC
 # publicó 19,5 %).
 YEAR_TO_DATE = "percent_change_since_beginning_of_year"
+
+# Series cuyas unidades dicen «Porcentaje» pero que la API da como fracción
+# (desempleo 0,079 = 7,9 %). Se escalan ×100 en modo valor y en `change`
+# (diferencia en puntos porcentuales). Lista cerrada y verificada contra la
+# API el 05-oct (descripción «… En porcentaje.», máximo histórico 0,204):
+# `is_percentage` no sirve para detectarlas, porque 174.1_T_INTERUS también
+# lo trae en True y ya viene ×100.
+FRACTION_PERCENT_IDS = frozenset(
+    {
+        "45.2_ECTDT_0_T_33",  # desempleo, total nacional
+        "45.2_ECTDTG_0_T_37",  # GBA
+        "45.2_ECTDTNO_0_T_42",  # NOA
+        "45.2_ECTDTNE_0_T_42",  # NEA
+        "45.2_ECTDTCU_0_T_38",  # Cuyo
+        "45.2_ECTDTRP_0_T_49",  # Pampeana
+        "45.2_ECTDTP_0_T_43",  # Patagonia
+    }
+)
 
 _FREQUENCY_NAMES = {
     "day": "diaria",
@@ -654,12 +678,20 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             # 33,54 %). Antes sólo se escalaba percent_change y la interanual
             # le llegaba al modelo como 0,3354 con unidades «Índice».
             is_percent = (representation or "").startswith("percent_change")
+            # Desempleo y compañía: «Porcentaje» como fracción (ver
+            # FRACTION_PERCENT_IDS). Con una representación percent_* ya
+            # entran por is_percent; acá no se escalan dos veces.
+            scaled_fractions = (
+                {sid for sid in series_ids if sid in FRACTION_PERCENT_IDS}
+                if representation in (None, "value", "change")
+                else set()
+            )
             records = []
             for row in data:
                 record: dict = {"fecha": row[0]}
                 for idx, sid in enumerate(series_ids):
                     val = row[idx + 1] if idx + 1 < len(row) else None
-                    if val is not None and is_percent:
+                    if val is not None and (is_percent or sid in scaled_fractions):
                         # Se multiplica por 100 para que el modelo, los
                         # gráficos y la UI reciban "33.54" y no "0.3354"; la
                         # escala va en metadata.unit / unidad / value_scale.
@@ -699,8 +731,17 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 )
             elif representation and representation_units:
                 units = representation_units
-            if is_percent:
-                units = f"{units} (en %)" if units else "%"
+            all_percent = is_percent or (
+                bool(scaled_fractions) and len(scaled_fractions) == len(set(series_ids))
+            )
+            if all_percent:
+                suffix = "en puntos porcentuales" if representation == "change" else "en %"
+                units = f"{units} ({suffix})" if units else "%"
+            for entry in per_series:
+                if entry["id"] in scaled_fractions:
+                    entry["unidades"] = (
+                        f"{entry['unidades'] or 'Porcentaje'} (en %; la API la da como fracción)"
+                    )
 
             metadata: dict[str, Any] = {
                 "total_records": len(records),
@@ -725,7 +766,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 metadata["representation"] = representation
             if collapse and collapse_aggregation:
                 metadata["agregacion"] = collapse_aggregation
-            if is_percent:
+            if all_percent:
                 # Contrato explícito: los valores ya están en puntos
                 # porcentuales (15.2 es 15,2 %).
                 metadata["unit"] = "percent"
