@@ -28,6 +28,7 @@ función. El camino contra Postgres de verdad está en
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -38,6 +39,7 @@ import pandas as pd
 import pytest
 
 from app.infrastructure.celery.tasks import series_tiempo_tasks as st
+from tests.unit.runbook_series import receta_volver_atras
 from tests.unit.series_tiempo_fake import DESEMPLEO_ID, TIPO_CAMBIO_ID, FakeSeriesApi, desempleo
 
 # ── la API, en memoria ─────────────────────────────────────────────────────
@@ -1044,6 +1046,36 @@ def test_con_los_mismos_permisos_no_se_toca_nada(grabadora):
 def test_la_previa_entra_en_un_identificador_de_postgres(clave):
     # Postgres trunca a 63 bytes: un nombre truncado no sería `<tabla>__previa`.
     assert len(f"cache_series_{clave}__previa".encode()) <= 63
+
+
+def _aplicar_receta(sentencias: list[str], tablas: dict[str, str]) -> dict[str, str]:
+    """Los RENAME y DROP de la receta sobre un esquema de mentira (nombre → contenido)."""
+    tablas = dict(tablas)
+    for sentencia in sentencias:
+        if m := re.fullmatch(r'ALTER TABLE raw\."([^"]+)" RENAME TO "([^"]+)"', sentencia):
+            origen, destino = m.groups()
+            assert origen in tablas, f"{sentencia}: no existe raw.{origen}"
+            assert destino not in tablas, f"{sentencia}: raw.{destino} ya existe"
+            tablas[destino] = tablas.pop(origen)
+        elif m := re.fullmatch(r'DROP TABLE (?:IF EXISTS )?raw\."([^"]+)"', sentencia):
+            tablas.pop(m.group(1), None)
+        else:
+            raise AssertionError(f"el test no sabe simular: {sentencia}")
+    return tablas
+
+
+def test_la_receta_del_runbook_deja_la_escritura_descartada_como_previa():
+    """`cleanup_invariants` registra cada hora toda tabla de `raw` sin fila en
+    el registro, salvo las `__previa`, y `list_cached_tables` lista toda fila
+    viva. La receta de antes dejaba `<tabla>__descartada`: en menos de una hora
+    la versión mala salía en /data/tables y en el NL2SQL. Ahora la descartada
+    pasa a ser la previa, que no se registra y la próxima escritura borra."""
+    tabla = "cache_series_desempleo"
+    antes = {tabla: "escritura descartada", f"{tabla}__previa": "versión anterior"}
+
+    despues = _aplicar_receta(receta_volver_atras("desempleo"), antes)
+
+    assert despues == {tabla: "versión anterior", f"{tabla}__previa": "escritura descartada"}
 
 
 # ── la tarea ───────────────────────────────────────────────────────────────

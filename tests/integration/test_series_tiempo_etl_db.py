@@ -28,6 +28,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.tasks import _db
 from app.infrastructure.celery.tasks import series_tiempo_tasks as st
+from tests.unit.runbook_series import receta_volver_atras
 
 
 def _engine_or_skip():
@@ -366,6 +367,53 @@ def _publico_puede_leer(engine, tabla: str) -> bool:
         )
 
 
+def _registradas_por_cleanup(engine, monkeypatch, serie: st.SerieETL) -> set[str]:
+    """Corre `cleanup_invariants` y devuelve las tablas `<tabla>*` que quedan en el registro.
+
+    Agrega una huérfana de control (`<tabla>__control`) que el pase de
+    huérfanas tiene que registrar: sin ella, que no registre nada más no
+    probaría nada. Borra lo que registró la corrida para no dejar filas
+    fantasma (también las de tablas de otros tests, como `raw.cached_datasets`
+    cuando la crea el fixture).
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    huerfana = f"{serie.tabla}__control"
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE raw."{huerfana}" AS SELECT 1 AS x'))
+    monkeypatch.setattr(ops_fixes, "get_sync_engine", lambda: engine)
+    monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
+    sql_huerfanas = text(
+        "SELECT resource_identity FROM public.raw_table_versions "
+        "WHERE resource_identity LIKE 'backfill_postauto::%'"
+    )
+    with engine.connect() as conn:
+        ya_estaban = {r[0] for r in conn.execute(sql_huerfanas)}
+    try:
+        ops_fixes.cleanup_invariants.run()
+        with engine.connect() as conn:
+            registradas = {
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT table_name FROM public.raw_table_versions WHERE table_name LIKE :p"
+                    ),
+                    {"p": f"{serie.tabla}%"},
+                )
+            }
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS raw."{huerfana}"'))
+            nuevas = {r[0] for r in conn.execute(sql_huerfanas)} - ya_estaban
+            if nuevas:
+                conn.execute(
+                    text("DELETE FROM public.raw_table_versions WHERE resource_identity = ANY(:r)"),
+                    {"r": sorted(nuevas)},
+                )
+    assert huerfana in registradas, "el pase de huérfanas sigue andando"
+    return registradas
+
+
 def test_la_tabla_vieja_queda_como_previa_y_volver_atras_es_un_rename(entorno, monkeypatch):
     """Antes el swap hacía DROP de la vieja y el único retorno era un dump JSON
     que con pandas 3 no se podía leer y que restauraba `fecha` como TEXT."""
@@ -389,14 +437,21 @@ def test_la_tabla_vieja_queda_como_previa_y_volver_atras_es_un_rename(entorno, m
     assert _publico_puede_leer(engine, serie.tabla), "la nueva hereda los permisos de la viva"
     assert _publico_puede_leer(engine, previa)
 
-    # La vuelta atrás: dos RENAME en una transacción.
+    # La vuelta atrás: la receta del runbook (§9, paso 2), tal cual, en una transacción.
     with engine.begin() as conn:
-        conn.execute(text(f'ALTER TABLE raw."{serie.tabla}" RENAME TO "{serie.tabla}__descartada"'))
-        conn.execute(text(f'ALTER TABLE raw."{previa}" RENAME TO "{serie.tabla}"'))
+        for sentencia in receta_volver_atras(serie.clave):
+            conn.execute(text(sentencia))
 
     assert _tabla(engine, serie.tabla) == (1000, date(2003, 1, 2) + timedelta(days=999))
     assert _columnas_y_tipos(engine, serie.tabla) == tipos_antes, "fecha sigue siendo timestamp"
     assert _publico_puede_leer(engine, serie.tabla)
+
+    # `cleanup_invariants` corre cada hora: lo que la receta deja en `raw` no
+    # puede entrar al registro, porque `list_cached_tables` lo serviría como
+    # tabla viva (/data/tables, modo datos, NL2SQL) con los datos descartados.
+    registradas = _registradas_por_cleanup(engine, monkeypatch, serie)
+    assert registradas == {serie.tabla, f"{serie.tabla}__control"}
+    assert _tabla(engine, previa)[0] == 6001, "la escritura descartada queda como previa"
 
 
 def test_la_previa_es_la_version_anterior_y_no_se_acumula(entorno, monkeypatch):
