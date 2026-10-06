@@ -1,21 +1,31 @@
 id: delitos_argentina_snic
-version: 0.2.0
+version: 0.3.0
 description: |
-  Sistema Nacional de Información Criminal (SNIC) — estadísticas de
-  delitos en formato departamental largo: cada fila es un cruce
-  (provincia, departamento, año, código de delito) con cantidad de hechos,
-  cantidad de víctimas (total, masculino, femenino, sin dato) y tasas
-  proyectadas por 100K habitantes.
+  Sistema Nacional de Información Criminal (SNIC): delitos por departamento
+  y año, 2000-2024.
+  INCOMPLETO: faltan Santiago del Estero, Tucumán y Tierra del Fuego (la
+  fuente se cortó en 500.000 filas). Sirve por provincia o departamento;
+  NO da un total nacional.
+
+  Formato departamental largo: cada fila es un cruce (provincia,
+  departamento, año, código de delito) con cantidad de hechos, cantidad
+  de víctimas (total, masculino, femenino, sin dato) y tasas proyectadas
+  por 100K habitantes. Códigos del INDEC con el cero adelante: provincia
+  '06' (Buenos Aires), partido '06854' (25 de Mayo).
+
+  "Homicidios dolosos" y "Homicidios dolosos en grado de tentativa" son
+  delitos distintos: filtrá `codigo_delito_snic_nombre` por el nombre
+  exacto, no por una parte.
 
   Source: 1 dataset multi-version `datos_gob_ar::snic_departamental_estadisticas_criminales*`
-  (~500K filas, capped por MAX_TABLE_ROWS por año fiscal). Publicado por
-  la Dirección Nacional de Estadística Criminal (Ministerio de Seguridad
-  de la Nación).
+  (todas sus tablas fuente están truncadas en 500.000 filas por
+  MAX_TABLE_ROWS). Publicado por la Dirección Nacional de Estadística
+  Criminal (Ministerio de Seguridad de la Nación).
 
   Es el panorama nacional de criminalidad — complementa `delitos_caba`
-  (que es solo CABA, granularidad geográfica fina). SNIC cubre las 24
-  provincias y los ~530 departamentos/partidos del país, en formato
-  agregado año-departamento-tipo de delito.
+  (que es solo CABA, granularidad geográfica fina). El SNIC publica las
+  24 jurisdicciones y sus ~530 departamentos/partidos, en formato
+  agregado año-departamento-tipo de delito; este mart trae 21.
 
   Casos de uso típicos:
     * "homicidios por provincia argentina"
@@ -48,13 +58,13 @@ sources:
 canonical_columns:
   - name: provincia_id
     type: text
-    description: Código de provincia
+    description: Código INDEC de provincia, dos cifras ('06' = Buenos Aires)
   - name: provincia_nombre
     type: text
     description: Nombre de la provincia
   - name: departamento_id
     type: text
-    description: Código del departamento/partido
+    description: Código INDEC del departamento/partido, cinco cifras ('06854')
   - name: departamento_nombre
     type: text
     description: Nombre del departamento/partido
@@ -106,6 +116,29 @@ sql: |
   -- un tercio. Ninguna clave repetida traía valores distintos (medido: 0 en
   -- conflicto), así que quedarse con una fila por clave no pierde nada.
   --
+  -- La clave se compara con los códigos NORMALIZADOS al formato del INDEC:
+  -- provincia de dos cifras, departamento de cinco. De los recursos que
+  -- matchea el patrón (cuatro en staging, dos en prod), `require_all_columns`
+  -- deja pasar dos —el CSV y el XLSX de la publicación de mayo de 2026; los
+  -- de agosto ya no traen `cod_delito`— y son el mismo archivo, pero el
+  -- XLSX se cargó con los códigos como `bigint` y perdieron el cero de
+  -- adelante: Buenos Aires es '6' y no '06', el partido 25 de Mayo es
+  -- '6854' y no '06854'. Comparando el texto crudo, el `DISTINCT ON` no
+  -- reconocía las dos copias y el mart servía dos veces cada partido de
+  -- Buenos Aires y cada comuna de CABA, en todos los años: homicidios
+  -- dolosos en PBA 2019 daban 1.754 contra 877, y en el país 3.058 contra
+  -- 2.085 (H004, revisión independiente del 05-oct).
+  -- `lpad` con `GREATEST(length(...))` rellena sin truncar: un código más
+  -- largo que lo esperado pasa tal cual, en vez de recortarse y chocar con
+  -- otro.
+  --
+  -- Entre las copias de una clave gana la de la tabla física de nombre
+  -- menor (`__src`, que agrega el macro). Hoy es el CSV (`4bf053c0`). Las
+  -- copias son idénticas, así que el criterio no cambia ningún número: lo
+  -- que importa es que sea fijo. Sin él Postgres puede devolver cualquiera
+  -- de las copias y el mart cambia de contenido entre reconstrucciones sin
+  -- que nada lo reporte.
+  --
   -- Acá `DISTINCT` es correcto y en `ddjj_patrimonio_declarado` no lo era.
   -- La diferencia es la clave: una declaración jurada puede listar dos
   -- bienes idénticos y ambos cuentan, así que allá hubo que deduplicar por
@@ -113,13 +146,22 @@ sql: |
   -- (departamento, año, delito) y una segunda fila con ese trío sólo puede
   -- ser una copia.
   --
-  -- El `ORDER BY` es lo que hace el build reproducible: sin él Postgres
-  -- puede devolver cualquiera de las copias y el mart cambia de contenido
-  -- entre reconstrucciones sin que nada lo reporte.
+  -- Santiago del Estero ('86') queda afuera. Todas las tablas fuente
+  -- están truncadas en 500.000 filas (`raw_table_versions.is_truncated`) y
+  -- el archivo viene ordenado por provincia y departamento, así que el
+  -- corte cae en la última provincia que entra: la publicación de mayo
+  -- llega hasta el departamento Mitre, a mitad de 2019, con 16 de los 27
+  -- departamentos de Santiago del Estero; Tucumán y Tierra del Fuego no
+  -- llegan. Las 21 jurisdicciones anteriores al corte están enteras. Un
+  -- total provincial con la mitad de los departamentos es un dato falso, y
+  -- es mejor que no esté. Cuando el SNIC se recolecte sin el tope, este
+  -- filtro sobra y hay que sacarlo.
   SELECT DISTINCT ON (anio, departamento_id, cod_delito)
-    NULLIF(TRIM(provincia_id::text), '')                    AS provincia_id,
+    lpad(NULLIF(TRIM(provincia_id::text), ''),
+         GREATEST(length(TRIM(provincia_id::text)), 2), '0') AS provincia_id,
     NULLIF(TRIM(provincia_nombre::text), '')                AS provincia_nombre,
-    NULLIF(TRIM(departamento_id::text), '')                 AS departamento_id,
+    lpad(NULLIF(TRIM(departamento_id::text), ''),
+         GREATEST(length(TRIM(departamento_id::text)), 5), '0') AS departamento_id,
     NULLIF(TRIM(departamento_nombre::text), '')             AS departamento_nombre,
     NULLIF(TRIM(anio::text), '')                            AS anio,
     NULLIF(TRIM(codigo_delito_snic_id::text), '')           AS codigo_delito_snic_id,
@@ -143,10 +185,12 @@ sql: |
                         'cantidad_victimas_masc', 'cantidad_victimas_fem',
                         'cantidad_victimas_sd', 'tasa_hechos', 'tasa_victimas',
                         'tasa_victimas_masc', 'tasa_victimas_fem'],
-      require_all_columns=True
+      require_all_columns=True,
+      source_marker='__src'
   ) }} sub
   WHERE NULLIF(TRIM(provincia_nombre::text), '') IS NOT NULL
-  ORDER BY anio, departamento_id, cod_delito, cantidad_hechos
+    AND TRIM(provincia_id::text) IS DISTINCT FROM '86'
+  ORDER BY anio, departamento_id, cod_delito, "__src"
 
 refresh:
   policy: on_upstream_change
@@ -159,8 +203,11 @@ sample_queries:
   - "evolución de la criminalidad en Argentina"
 
 expectations:
-  # La mitad de las 651.067 filas que quedan tras deduplicar. El piso
-  # anterior era 500.000, por debajo del millón inflado que servía el mart,
-  # así que no habría detectado nada. Si la dedup se rompe el conteo SUBE,
-  # no baja — de eso se ocupa `mart_build_history`, no este piso.
+  # Fijado como la mitad de 651.067, que resultó ser el conteo todavía
+  # duplicado (H004). Con los códigos normalizados y sin Santiago del Estero
+  # quedan 484.243 filas, y el piso sigue por debajo (dos tercios), así que
+  # no se toca. El piso anterior era 500.000, por debajo del millón inflado
+  # que servía el mart, así que no habría detectado nada. Si la dedup se
+  # rompe el conteo SUBE, no baja — de eso se ocupa `mart_build_history` y
+  # el test de invariante `tests/unit/test_mart_snic_partidos.py`.
   min_rows: 325533
