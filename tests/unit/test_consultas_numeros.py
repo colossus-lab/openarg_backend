@@ -135,17 +135,66 @@ class TestPerfilDeColumna:
     def test_hacen_falta_cinco_valores_de_evidencia(self) -> None:
         cuatro = perfil_columna("x", [*EVIDENCIA_AR[:4], "12.500"])
         assert cuatro.formato is None
-        assert cuatro.problema is not None and "sólo 4" in cuatro.problema
+        assert cuatro.problema is not None and "sólo 4 valores distintos" in cuatro.problema
         assert perfil_columna("x", [*EVIDENCIA_AR, "12.500"]).formato == "ar"
         assert perfil_columna("x", [*EVIDENCIA_EN, "12.500"]).formato == "en"
 
-    def test_hace_falta_el_noventa_por_ciento_de_un_formato(self) -> None:
+    def test_un_solo_valor_del_otro_formato_es_mezcla(self) -> None:
+        """Revisión del PR #148: con una mayoría del 90 %, 9 argentinos y 1
+        inglés decidían «argentino», y este test lo daba por bueno. La muestra
+        (pg_stats y las primeras 200 filas) no representa a la columna: ante
+        cualquier evidencia contraria se rechaza, como antes de la mayoría."""
         nueve_y_uno = [*EVIDENCIA_AR, *EVIDENCIA_AR[:4], "12.5", "12.500"]
-        assert perfil_columna("x", nueve_y_uno).formato == "ar"  # 9 de 10
-        ocho_y_uno = [*EVIDENCIA_AR, *EVIDENCIA_AR[:3], "12.5", "12.500"]
-        perfil = perfil_columna("x", ocho_y_uno)  # 8 de 9: 88 %
+        perfil = perfil_columna("x", nueve_y_uno)
         assert perfil.formato is None
         assert perfil.problema is not None and "mezcla" in perfil.problema
+
+    def test_subte_mayoria_argentina_en_la_muestra_inglesa_en_la_columna(self) -> None:
+        """fr1_km de caba__subte_trenes_despachados (staging `b0b65caa`, 500.000
+        filas). La muestra trae 209 argentinos, 8 ingleses y 27 ambiguos con
+        punto; la columna entera, 50.494 argentinos y 159.571 ingleses. Leída
+        como argentina (lo que hacía la mayoría del 90 %), «9.721» km eran
+        9.721 y el promedio daba 3.248 km por tren en vez de 280."""
+        muestra = (
+            ["11,77", "10,29", "4,29", "9,72"] * 52
+            + ["8,04"]
+            + ["11.77", "10.64", "10.29", "14.8", "0.0", "7.22", "9.5", "4.3"]
+            + ["4.294", "9.721", "8.044"] * 9
+            + ["1,234"] * 4
+            + ["10", "11"]
+        )
+        perfil = perfil_columna("fr1_km", muestra)
+        assert perfil.formato is None
+        assert perfil.problema is not None and "mezcla" in perfil.problema
+        assert leer_numero("9.721", perfil.formato) is None
+
+    def test_mezcla_sin_ambiguos_en_la_muestra_queda_sin_formato(self) -> None:
+        """Revisión del PR #148: sin ambiguos en la muestra, una mezcla quedaba
+        decidida por mayoría y los ambiguos de fuera de la muestra se leían con
+        ese formato sin aviso (72 columnas en staging). Sin formato quedan en
+        NULL y el cálculo los cuenta aparte."""
+        perfil = perfil_columna("CAMBIO", [*EVIDENCIA_EN, *EVIDENCIA_EN, "56,16"])
+        assert perfil.formato is None and perfil.problema is None
+        assert leer_numero("12.500", perfil.formato) is None
+
+    def test_un_valor_repetido_cuenta_una_sola_vez(self) -> None:
+        """Revisión del PR #148: la evidencia se contaba por apariciones. Un
+        «1,22» repetido cinco veces en la muestra decidía la columna, que es H009
+        por otro camino (los verificadores leen RETENCION_DIAS_U como inglesa)."""
+        base = ["365", "730", "1,039", "1,043", "1,058"]
+        perfil = perfil_columna("RETENCION_DIAS_U", [*base, *["1,22"] * 5])
+        assert perfil.formato is None
+        assert perfil.problema is not None and "sólo 1 valor distinto" in perfil.problema
+
+    def test_pg_stats_y_las_filas_no_cuentan_dos_veces_el_mismo_valor(self) -> None:
+        """La muestra junta most_common_vals, histogram_bounds y las primeras
+        200 filas: en una tabla chica cada valor llega dos veces. En
+        caba__casos_penales (staging `d1fd5984`, 6 filas) tres valores
+        argentinos sumaban seis apariciones y alcanzaban el mínimo."""
+        muestra = ["100,0", "12,4", "87,6"] * 2 + ["69.572"]
+        perfil = perfil_columna("col_69_572", muestra)
+        assert perfil.formato is None
+        assert perfil.problema is not None and "sólo 3 valores distintos" in perfil.problema
 
     def test_con_evidencia_clara_decide_aunque_la_muestra_no_tenga_ambiguos(self) -> None:
         """H041: presupuesto APN (credito_pagado, staging) traía 384 valores

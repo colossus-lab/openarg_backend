@@ -19,10 +19,10 @@ La regla de acá:
 - quedan dos formas ambiguas: "12.500" (¿doce mil quinientos o doce coma
   cinco?) y "1,250" (¿uno coma veinticinco o mil doscientos cincuenta?). Esas
   se resuelven POR COLUMNA, mirando una muestra: si la muestra trae al menos
-  ``MIN_EVIDENCIA`` valores que sólo pueden ser de un formato y son el
-  ``MAYORIA_PCT`` % o más de los que dicen formato, la columna es de ese
-  formato. Si no alcanza para decidir, se rechaza el cálculo con un mensaje
-  claro: un error de mil veces es peor que no contestar.
+  ``MIN_EVIDENCIA`` valores distintos que sólo pueden ser de un formato y
+  ninguno del otro, la columna es de ese formato. Si no alcanza para decidir,
+  se rechaza el cálculo con un mensaje claro: un error de mil veces es peor
+  que no contestar.
 
 Revisión independiente del 05-oct: el desempate "enteros cortos y «12.500»
 es argentino" leía mil veces más altos los minutos por día de la ENUT, que
@@ -64,12 +64,19 @@ FORMATO_AR = "ar"
 FORMATO_EN = "en"
 
 # Cuánta evidencia hace falta para decidir el formato de una columna: al menos
-# MIN_EVIDENCIA valores que sólo se leen de una forma, y que el MAYORIA_PCT %
-# de los que dicen formato digan el mismo. Con uno solo, el mismo dataset de
-# CABA (SADE) daba promedios de 7,567 y 8,820 en dos tablas, y la respuesta
-# podía cambiar con cada ANALYZE (H009).
+# MIN_EVIDENCIA valores DISTINTOS que sólo se leen de una forma, y ninguno que
+# sólo se lea de la otra. Con uno solo, el mismo dataset de CABA (SADE) daba
+# promedios de 7,567 y 8,820 en dos tablas, y la respuesta podía cambiar con
+# cada ANALYZE (H009).
+#
+# Revisión del PR #148:
+# - se cuentan valores distintos, no apariciones: la muestra junta pg_stats y
+#   las primeras filas, así que cada valor frecuente llega dos o tres veces, y
+#   un «1,22» repetido alcanzaba el mínimo;
+# - no hay mayoría: con el 90 % se decidían columnas con los dos formatos, y la
+#   muestra no representa a la columna (fr1_km del subte: 209 argentinos contra
+#   8 ingleses en la muestra, 50.494 contra 159.571 en la columna entera).
 MIN_EVIDENCIA = 5
-MAYORIA_PCT = 90
 
 # Lo que se limpia alrededor de cada valor, igual en Python y en SQL: espacio,
 # tab, salto de línea, retorno de carro y espacio duro (nbsp). `str.strip()`
@@ -130,18 +137,21 @@ class PerfilNumerico:
 def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
     """Decide el formato de una columna de texto a partir de una muestra.
 
-    - Con evidencia suficiente de un formato (``MIN_EVIDENCIA`` valores que
-      sólo se leen de una forma y el ``MAYORIA_PCT`` % de los que dicen
-      formato): ese formato, haya o no ambiguos en la muestra. Si no hay, los
-      de fuera de la muestra se leen igual (H041: antes quedaban en NULL).
-    - Sin evidencia suficiente y sin ambiguos en la muestra: no hace falta
-      decidir (``formato`` None). Los ambiguos que haya fuera de la muestra
-      quedan en NULL, no mal leídos, y el cálculo los cuenta aparte.
-    - Sin evidencia suficiente y con ambiguos: no se puede. Los enteros
-      cortos no son evidencia: "500" y "58.333" son también una columna
-      inglesa con tres decimales (H001: minutos por día de la ENUT).
+    - Con evidencia suficiente de un formato (``MIN_EVIDENCIA`` valores
+      distintos que sólo se leen de una forma) y ninguna del otro: ese
+      formato, haya o no ambiguos en la muestra. Si no hay, los de fuera de
+      la muestra se leen igual (H041: antes quedaban en NULL).
+    - Sin evidencia suficiente, o con evidencia de los dos formatos, y sin
+      ambiguos en la muestra: no hace falta decidir (``formato`` None). Los
+      ambiguos que haya fuera de la muestra quedan en NULL, no mal leídos, y
+      el cálculo los cuenta aparte.
+    - Sin evidencia suficiente, o con evidencia de los dos formatos, y con
+      ambiguos: no se puede. Los enteros cortos no son evidencia: "500" y
+      "58.333" son también una columna inglesa con tres decimales (H001:
+      minutos por día de la ENUT).
     """
     conteo = {"entero": 0, FORMATO_AR: 0, FORMATO_EN: 0, "ambiguo_punto": 0, "ambiguo_coma": 0}
+    distintos: dict[str, set[str]] = {FORMATO_AR: set(), FORMATO_EN: set()}
     total = 0
     ejemplos: list[str] = []
     for valor in valores:
@@ -150,6 +160,8 @@ def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
         if clase is None:
             continue
         conteo[clase] += 1
+        if clase in distintos:
+            distintos[clase].add(str(valor).strip(ESPACIOS))
         if clase.startswith("ambiguo") and len(ejemplos) < 3:
             ejemplos.append(str(valor).strip(ESPACIOS))
     numericos = sum(conteo.values())
@@ -158,19 +170,20 @@ def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
         return PerfilNumerico(columna, formato, problema, numericos=numericos, muestra=total)
 
     ar, en = conteo[FORMATO_AR], conteo[FORMATO_EN]
-    for formato, votos in ((FORMATO_AR, ar), (FORMATO_EN, en)):
-        if votos >= MIN_EVIDENCIA and 100 * votos >= MAYORIA_PCT * (ar + en):
-            return perfil(formato)
+    if not (ar and en):
+        for formato in (FORMATO_AR, FORMATO_EN):
+            if len(distintos[formato]) >= MIN_EVIDENCIA:
+                return perfil(formato)
     if not conteo["ambiguo_punto"] and not conteo["ambiguo_coma"]:
         return perfil(None)
     lista = ", ".join(f"«{e}»" for e in ejemplos)
     if ar and en:
         motivo = "mezcla números en formato argentino y en formato inglés"
     elif ar or en:
-        cuales = "valor que dice" if ar + en == 1 else "valores que dicen"
+        n = len(distintos[FORMATO_AR]) + len(distintos[FORMATO_EN])
+        cuales = "valor distinto que dice" if n == 1 else "valores distintos que dicen"
         motivo = (
-            f"trae sólo {ar + en} {cuales} en qué formato está, y hacen falta al menos "
-            f"{MIN_EVIDENCIA}"
+            f"trae sólo {n} {cuales} en qué formato está, y hacen falta al menos {MIN_EVIDENCIA}"
         )
     else:
         motivo = "no trae ningún valor que diga en qué formato está"
