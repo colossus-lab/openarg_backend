@@ -12,8 +12,9 @@ A3500 (1.523,09) al 02-oct.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncGenerator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -29,11 +30,13 @@ from app.application.answers.tools.bcra import VARIABLES, VariablesBCRA
 from app.application.answers.tools.conectores import Cotizaciones
 from app.application.pipeline.chart_builder import build_deterministic_charts
 from app.domain.exceptions.connector_errors import ConnectorError
+from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.llm.agent_llm import AgentTurn, AgentUsage, TextDelta, ToolCall
+from app.infrastructure.adapters.connectors import bcra_adapter as bcra_adapter_module
 from app.infrastructure.adapters.connectors.bcra_adapter import BCRAAdapter
 from app.infrastructure.resilience import retry as retry_module
 from app.infrastructure.resilience.circuit_breaker import CircuitState, get_circuit_breaker
-from tests.unit.bcra_fake_api import HOY, FakeBCRA
+from tests.unit.bcra_fake_api import HOY, SERIES, FakeBCRA
 
 _HOY_AR_REAL = bcra_tool.hoy_ar
 
@@ -195,8 +198,15 @@ async def test_una_variable_caida_no_tira_abajo_a_las_demas() -> None:
 
 
 async def test_si_no_responde_ninguna_es_error_de_la_fuente() -> None:
-    with pytest.raises(ConnectorError):
-        await _run(FakeBCRA(fail_ids={1}), variables=["reservas"])
+    """Antes subía un ConnectorError y el modelo leía el genérico del motor, "La
+    fuente no respondió. Probá con otra.", que lo mandaba a otra fuente sin
+    decir nada (revisión del 05-oct, H090). Ahora es un error de la
+    herramienta que nombra al BCRA."""
+    out = await _run(FakeBCRA(fail_ids={1}), variables=["reservas"])
+    assert out.is_error
+    assert "El BCRA no respondió" in out.content
+    assert "Probá con otra" not in out.content
+    assert out.results == []
 
 
 @pytest.mark.parametrize(
@@ -351,3 +361,179 @@ async def test_una_historia_larga_se_resume_por_anio() -> None:
     assert "resumen_mensual" not in payload
     assert [p["periodo"] for p in payload["resumen_anual"]] == [str(y) for y in range(2020, 2027)]
     assert len(out.content) < 12_000
+
+
+# ── revisión independiente del 05-oct: H088, H089 y H090 ───
+
+
+def _ultimo_hasta_hoy(id_variable: int) -> tuple[str, float]:
+    return [(f, v) for f, v in SERIES[id_variable] if f <= HOY.isoformat()][-1]
+
+
+@pytest.mark.parametrize("desde", ["2026-10-04", "2026-10-03"])
+async def test_un_domingo_la_banda_de_fin_de_mes_no_es_el_ultimo_dato(desde: str) -> None:
+    """H088: las bandas se publican por adelantado, sólo en días hábiles, hasta
+    el 30-oct. Un domingo, con `desde` = hoy (o el sábado), llegaban sólo
+    valores futuros y el techo del 30-oct salía como `ultimo_dato`."""
+    out = await _run(FakeBCRA(), variables=["banda_cambiaria_techo"], desde=desde)
+
+    fecha, valor = _ultimo_hasta_hoy(1188)
+    assert fecha == "2026-10-02"  # el viernes
+    payload = json.loads(out.content)["variables"][0]
+    assert payload["ultimo_dato"] == {"fecha": fecha, "valor": valor}
+    assert all(f["fecha"] <= HOY.isoformat() for f in payload["filas"])
+    assert payload["publicados_por_adelantado"][0]["fecha"] == "2026-10-05"
+    assert payload["publicados_por_adelantado"][-1]["fecha"] == "2026-10-30"
+    assert "02/10/2026" in payload["nota"]
+    # La evidencia (gráfico, aviso de atraso, verificación) termina hoy.
+    result = out.results[0]
+    assert result.records[-1]["fecha"] == fecha
+    assert result.metadata["ultima_observacion"] == fecha
+    assert result.metadata["fecha_fin_fuente"] == fecha
+    assert result.metadata["publicado_hasta"] == "2026-10-30"
+    assert "02/10/2026" in (out.summary or "")
+
+
+async def test_sin_dato_a_hoy_los_adelantados_van_aparte() -> None:
+    """H088: si el BCRA no contesta el segundo pedido no hay `ultimo_dato`.
+    Nunca uno de una fecha que todavía no llegó."""
+    ctx = _ctx(FakeBCRA())
+    original = ctx.deps.bcra.get_variable
+
+    async def sin_segundo_pedido(
+        id_variable: int, desde: Any = None, hasta: Any = None, **kw: Any
+    ) -> Any:
+        if desde is None:
+            raise ConnectorError(error_code=ErrorCode.CN_BCRA_UNAVAILABLE)
+        return await original(id_variable, desde, hasta, **kw)
+
+    ctx.deps.bcra.get_variable = sin_segundo_pedido
+    out = await VariablesBCRA().run(
+        {"variables": ["banda_cambiaria_techo"], "desde": "2026-10-04"}, ctx
+    )
+
+    payload = json.loads(out.content)["variables"][0]
+    assert payload["ultimo_dato"] is None
+    assert payload["filas"] == []
+    assert payload["publicados_por_adelantado"][0]["fecha"] == "2026-10-05"
+    assert "no son el valor de hoy" in payload["nota"]
+    assert out.results == []
+    assert "30/10/2026" not in (out.summary or "")
+
+
+def _serie_larga(
+    desde: date, hasta: date, base: float, *, habiles: bool = True
+) -> list[tuple[str, float]]:
+    out: list[tuple[str, float]] = []
+    d = desde
+    while d <= hasta:
+        if not habiles or d.weekday() < 5:
+            out.append((d.isoformat(), round(base + len(out) * 0.5, 2)))
+        d += timedelta(days=1)
+    return out
+
+
+_LARGAS = {
+    1: _serie_larga(date(2002, 1, 2), date(2026, 9, 30), 14000.0),
+    15: _serie_larga(date(2002, 1, 2), date(2026, 9, 30), 20000.0),
+    5: _serie_larga(date(2002, 1, 2), date(2026, 10, 2), 3.0),
+    # El CER se publica por adelantado y todos los días.
+    30: _serie_larga(date(2002, 2, 2), date(2026, 11, 3), 1.0, habiles=False),
+}
+
+
+async def test_con_varias_variables_el_resumen_anual_dice_desde_cuando() -> None:
+    """H089: con 3 variables y `desde` 2002 el resumen anual mostraba 2015-2026
+    y la nota decía "el resumen cubre todo el período leído": el modelo no
+    sabía que le faltaban 2002-2014 y podía errar mínimos, máximos o "desde
+    cuándo"."""
+    out = await _run(
+        FakeBCRA(series=_LARGAS),
+        variables=["reservas", "base_monetaria", "dolar_mayorista"],
+        desde="2002-01-01",
+    )
+
+    assert "cortado" not in out.content
+    for payload, result in zip(json.loads(out.content)["variables"], out.results, strict=True):
+        assert result.records[0]["fecha"][:4] == "2002"
+        anual = payload["resumen_anual"]
+        assert anual[-1]["periodo"] == "2026"
+        if anual[0]["periodo"] != "2002":
+            assert payload["resumen_desde"] == anual[0]["periodo"]
+            assert "cubre todo" not in payload["nota"]
+            assert "2002" in payload["nota"]
+            assert anual[0]["periodo"] in payload["nota"]
+
+
+async def test_una_variable_sola_resume_toda_la_historia() -> None:
+    out = await _run(FakeBCRA(series=_LARGAS), variables=["reservas"], desde="2002-01-01")
+    payload = json.loads(out.content)["variables"][0]
+    assert [p["periodo"] for p in payload["resumen_anual"]] == [str(y) for y in range(2002, 2027)]
+    assert "resumen_desde" not in payload
+    assert "cubre todo el período leído" in payload["nota"]
+
+
+async def test_el_aviso_del_resumen_no_lo_tapa_el_de_los_adelantados() -> None:
+    """La nota de los adelantados reemplazaba a cualquier otra."""
+    out = await _run(
+        FakeBCRA(series=_LARGAS),
+        variables=["reservas", "base_monetaria", "cer"],
+        desde="2002-01-01",
+    )
+    cer = {p["variable"]: p for p in json.loads(out.content)["variables"]}["cer"]
+    assert cer["publicados_por_adelantado"][-1]["fecha"] == "2026-11-03"
+    assert "adelantado" in cer["nota"]
+    assert cer["resumen_desde"] in cer["nota"]
+    assert "2002" in cer["nota"]
+
+
+async def test_una_variable_caida_le_dice_al_modelo_que_no_la_reemplace() -> None:
+    """H090: con "El BCRA no respondió." a secas, el modelo completaba con la
+    pizarra del Banco Nación o con una serie atrasada como si fueran el dato
+    oficial."""
+    out = await _run(FakeBCRA(fail_ids={5}), variables=["dolar_minorista", "dolar_mayorista"])
+    data = json.loads(out.content)
+    payloads = {p["variable"]: p for p in data["variables"]}
+    assert "El BCRA no respondió" in payloads["dolar_mayorista"]["error"]
+    assert "Decilo en la respuesta" in data["aviso"]
+    assert "oficial" in data["aviso"]
+
+
+def test_los_plazos_del_bcra_entran_en_el_tope_de_la_herramienta() -> None:
+    """H090: dos intentos de 8 s y la espera del reintento (hasta 1 s) entran
+    en el plazo de la herramienta, y ese plazo, en el corte del agente."""
+    pedido = bcra_adapter_module.AGENT_REQUEST_TIMEOUT_S
+    assert 2 * pedido + 1.0 < bcra_tool._PLAZO_S < agent_module.TOOL_TIMEOUT_S
+
+
+async def test_con_el_bcra_colgado_el_circuito_se_abre(monkeypatch: pytest.MonkeyPatch) -> None:
+    """H090: con la API colgada la herramienta se cortaba a los 25 s, en el
+    medio del segundo intento de 20 s; la cancelación no contaba como falla y
+    el circuito no se abría nunca: cada pregunta perdía 25 s y el modelo leía
+    "Probá con otra". A escala: 8 s → 0,05 s, 20 s → 0,3 s y 25 s → 1 s."""
+    monkeypatch.setattr(bcra_adapter_module, "AGENT_REQUEST_TIMEOUT_S", 0.05, raising=False)
+    monkeypatch.setattr(bcra_tool, "_PLAZO_S", 0.3, raising=False)
+    monkeypatch.setattr(agent_module, "TOOL_TIMEOUT_S", 1.0)
+    fake = FakeBCRA(data_delay=3600)
+    ctx = _ctx(fake)
+    engine = AgentEngine(MagicMock(), ctx.deps)
+    call = ToolCall(id="t1", name="variables_bcra", input={"variables": ["reservas"]})
+
+    for _ in range(5):
+        started = time.monotonic()
+        outcome = await engine._run_tool(VariablesBCRA(), call, ctx)
+        # Terminó la herramienta, no el corte del agente.
+        assert time.monotonic() - started < 0.9
+        assert outcome.is_error
+        assert "El BCRA no respondió" in outcome.content
+        assert "oficial" in outcome.content
+        assert "Probá con otra" not in outcome.content
+    assert get_circuit_breaker("bcra_api").state == CircuitState.OPEN
+
+    # Con el circuito abierto la pregunta siguiente no espera ni toca la API.
+    intentos = fake.data_attempts
+    started = time.monotonic()
+    outcome = await engine._run_tool(VariablesBCRA(), call, ctx)
+    assert time.monotonic() - started < 0.2
+    assert "El BCRA no respondió" in outcome.content
+    assert fake.data_attempts == intentos

@@ -40,6 +40,11 @@ class IBCRAConnector(ABC):
         *,
         limit: int | None = None,
         title: str | None = None,
+        plazo_s: float | None = None,
     ) -> DataResult:
-        """Observaciones de una variable monetaria v4, en orden cronológico."""
+        """Observaciones de una variable monetaria v4, en orden cronológico.
+
+        Con ``plazo_s``, si no termina en ese tiempo es un ConnectorError (y una
+        falla de la fuente), no una espera que corte el que llama.
+        """
         ...

@@ -321,3 +321,47 @@ async def test_desde_posterior_a_hasta_no_llega_a_la_api() -> None:
     with pytest.raises(ConnectorError):
         await _adapter(fake).get_variable(1, desde="2026-09-30", hasta="2026-09-01")
     assert not [r for r in fake.requests if r.url.path.endswith("/monetarias/1")]
+
+
+# ── el plazo del agente (revisión del 05-oct, H090) ────────
+
+
+async def test_con_plazo_cada_pedido_tiene_su_timeout_y_un_solo_reintento(monkeypatch) -> None:
+    """Con la API colgada: dos intentos cortos y una falla en el circuito, en
+    lugar de tres de 20 s que el agente cortaba a los 25 s sin contar nada."""
+    monkeypatch.setattr(bcra_module, "AGENT_REQUEST_TIMEOUT_S", 0.05, raising=False)
+    fake = FakeBCRA(data_delay=3600)
+    started = time.monotonic()
+    with pytest.raises(ConnectorError):
+        await asyncio.wait_for(_adapter(fake).get_variable(1, plazo_s=5.0), timeout=2)
+    assert time.monotonic() - started < 1
+    assert fake.data_attempts == 2  # un intento y un reintento
+    assert get_circuit_breaker("bcra_api").failure_count == 1
+
+
+async def test_con_plazo_una_consulta_que_no_termina_cuenta_como_falla(monkeypatch) -> None:
+    """Cada página llega antes del timeout por pedido, pero son muchas: el
+    plazo corta la consulta entera, es un ConnectorError y una falla del
+    circuito, no una cancelación muda."""
+    monkeypatch.setattr(bcra_module, "AGENT_REQUEST_TIMEOUT_S", 0.2, raising=False)
+    monkeypatch.setattr(bcra_module, "V4_PAGE_LIMIT", 100)
+    fake = FakeBCRA(data_delay=0.05)
+    started = time.monotonic()
+    with pytest.raises(ConnectorError):
+        await asyncio.wait_for(_adapter(fake).get_variable(1, "2020-01-01", plazo_s=0.3), timeout=2)
+    assert time.monotonic() - started < 0.6
+    assert get_circuit_breaker("bcra_api").failure_count == 1
+
+
+async def test_sin_plazo_el_pedido_sigue_como_antes(monkeypatch) -> None:
+    """El motor legacy y las tareas no pasan plazo: tres intentos con el
+    timeout del cliente."""
+    monkeypatch.setattr(bcra_module, "AGENT_REQUEST_TIMEOUT_S", 0.05, raising=False)
+    fake = FakeBCRA(fail_ids={1})
+    with pytest.raises(ConnectorError):
+        await _adapter(fake).get_variable(1)
+    assert fake.data_attempts == 3
+    fake = FakeBCRA(fail_ids={1})
+    with pytest.raises(ConnectorError):
+        await _adapter(fake).get_variable(1, plazo_s=5.0)
+    assert fake.data_attempts == 2
