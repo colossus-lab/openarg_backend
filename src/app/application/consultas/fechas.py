@@ -185,13 +185,22 @@ class ColumnaFecha:
     atributo: bool = False
 
 
+# Cómo las abrevian los portales: `fecha_nac` (personas buscadas), `fecha_vto`
+# (transportes autorizados), `Fecha Primer Vto.` (acceso a la información).
+_ABREVIATURAS_ATRIBUTO = {"nac": "nacimiento", "vto": "vencimiento", "venc": "vencimiento"}
+
+
+def _eventos(nombre: str) -> list[str]:
+    return [_ABREVIATURAS_ATRIBUTO.get(p, p) for p in _palabras(nombre)]
+
+
 def _es_de_atributo(nombre: str) -> bool:
-    return any(p in _PALABRAS_ATRIBUTO for p in _palabras(nombre))
+    return any(p in _PALABRAS_ATRIBUTO for p in _eventos(nombre))
 
 
 def _evento_de(nombre: str) -> str:
     """De qué es una fecha de atributo: ``defuncion``, ``nacimiento``…, o ""."""
-    return next((p for p in _palabras(nombre) if p in _PALABRAS_ATRIBUTO), "")
+    return next((p for p in _eventos(nombre) if p in _PALABRAS_ATRIBUTO), "")
 
 
 def _plural(evento: str) -> str:

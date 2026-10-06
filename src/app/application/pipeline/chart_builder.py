@@ -32,6 +32,34 @@ def is_date_column(name: str) -> bool:
     return es_nombre_de_fecha(name)
 
 
+def tabla_del_resultado(result: DataResult) -> str:
+    """La tabla servida y el título publicado: dicen de qué evento es una fecha.
+
+    El título genérico de NL2SQL ("Consulta SQL: <pregunta>") no cuenta: con él,
+    el eje dependía de las palabras que usara el usuario.
+    """
+    titulo = result.dataset_title or ""
+    if titulo.startswith(_GENERIC_TITLE_PREFIX):
+        titulo = ""
+    served = (result.metadata or {}).get("served_table")
+    return " ".join(str(t) for t in (served, titulo) if t)
+
+
+def es_eje_temporal(name: str, tabla: str = "") -> bool:
+    """Una fecha que ordena la serie (gráfico y resumen del contexto).
+
+    Una fecha de nacimiento, vencimiento o alta describe a alguien de la fila,
+    no cuándo pasó el dato: no ordena la serie, salvo que sea el evento que
+    registra la tabla (``fecha_nacimiento`` en caba__nacimientos), igual que en
+    ``consultas.fechas`` (H044). A diferencia del filtro por período, no se usa
+    ni como último recurso: en un registro crudo daba líneas de números de DNI
+    ordenados por vencimiento. Sin esto, un ranking de DDJJ se graficaba como
+    línea por ``fecha_nacimiento`` y el contexto le resumía el patrimonio "de
+    primero a último" por cumpleaños.
+    """
+    return is_date_column(name) and not es_fecha_de_atributo(name, tabla)
+
+
 def _sort_chart_rows(rows: list[dict[str, Any]], x_key: str) -> list[dict[str, Any]]:
     """Ordena el eje temporal por la fecha normalizada, no por el texto.
 
@@ -88,21 +116,12 @@ def build_deterministic_charts(
 
         keys = list(first.keys())
 
-        # Detect temporal key. Una fecha de nacimiento, vencimiento o alta describe
-        # a alguien de la fila, no cuándo pasó el dato: no ordena la serie, salvo
-        # que sea el evento que registra la tabla (H044). Sin esto, un ranking de
-        # DDJJ se graficaba como línea por `fecha_nacimiento`.
-        tabla = " ".join(
-            str(t) for t in ((result.metadata or {}).get("served_table"), result.dataset_title) if t
-        )
+        # Detect temporal key
+        tabla = tabla_del_resultado(result)
         time_key = None
         for k in keys:
             kl = k.lower()
-            if (is_date_column(k) and not es_fecha_de_atributo(k, tabla)) or kl in (
-                "año",
-                "year",
-                "mes",
-            ):
+            if es_eje_temporal(k, tabla) or kl in ("año", "year", "mes"):
                 time_key = k
                 break
 

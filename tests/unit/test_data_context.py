@@ -229,6 +229,25 @@ class TestSeriesSummary:
         records = [{"provincia": f"P{i}", "monto": i} for i in range(100)]
         assert "RESUMEN CALCULADO" not in _build_data_context([_make_result(records)])
 
+    def test_a_birth_date_does_not_make_a_ranking_a_series(self):
+        # Una búsqueda de DDJJ: el resumen decía que el patrimonio iba "de primero
+        # a último" ordenado por fecha de nacimiento, y con más de 50 filas la
+        # muestra se tomaba a intervalos de cumpleaños.
+        records = [
+            {"nombre": f"P{i}", "fecha_nacimiento": f"19{50 + i}-01-01", "patrimonio_cierre": i}
+            for i in range(60)
+        ]
+        ctx = _build_data_context([_make_result(records, title='Búsqueda DDJJ: "p"')])
+        assert "RESUMEN CALCULADO" not in ctx
+        assert "MUESTRA DE LA SERIE" not in ctx
+        assert "FILAS OMITIDAS" in ctx
+
+    def test_a_birth_date_is_the_series_of_a_births_table(self):
+        records = [{"fecha_nacimiento": f"2024-0{i}-01", "cantidad": i} for i in range(1, 5)]
+        meta = {"total_records": 4, "served_table": "raw.caba__nacimientos__a1b2c3d4__v1"}
+        ctx = _build_data_context([_make_result(records, metadata=meta)])
+        assert "RESUMEN CALCULADO" in ctx
+
     def test_non_numeric_and_internal_columns_are_skipped(self):
         records = [
             {"fecha": f"2024-0{i}", "valor": i, "nota": "x", "_source_url": 1} for i in range(1, 5)
