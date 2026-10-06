@@ -31,8 +31,9 @@ cita todo lo leído y sin citas, como antes del verificador: una falsa alarma
 y las citas salían ``verified`` sin mirar el período (revisión del 05-oct:
 H019, H082, H083, H100). En ``shadow`` lo que habría elegido queda en el log,
 y si todas las cifras quedaron respaldadas el aviso de atraso deja afuera lo
-que no aportó cifras y se llama igual que algo que sí (revisión de #146); con
-alguna sin respaldo, todo lo leído. Con ``off``, todo lo leído. Lo
+que no aportó cifras y se llama igual que algo que sí, y pone primero lo que
+las aportó (revisión de #146); con alguna sin respaldo, todo lo leído. Con
+``off``, todo lo leído. Lo
 transversal (caché, historial, aviso de atraso, analytics, auditoría) lo hace
 ``EngineRunner``.
 """
@@ -617,7 +618,9 @@ def _dated_outside_correct(
     consultada y no usada, arriba de una respuesta al día hecha con 92.1, que
     se llama igual (revisión de #146). Mirar sólo lo que aportó cifras dejaba
     afuera una serie vieja usada de verdad cuando su cifra coincidía por azar
-    con otra serie leída (``dated_evidence``). Si algo falla, todo lo leído.
+    con otra serie leída (``dated_evidence``). Lo que aportó cifras va
+    primero, para que lo leído antes y no usado no le gane el tope de avisos
+    ni la línea del catálogo. Si algo falla, todo lo leído.
     """
     if check is None or check.unsupported:
         return []

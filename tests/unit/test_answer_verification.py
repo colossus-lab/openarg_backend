@@ -442,6 +442,20 @@ def test_el_aviso_fuera_de_correct_deja_afuera_solo_lo_homonimo() -> None:
     assert v.dated_evidence([usada, leida], check) == [usada, leida]
 
 
+def test_el_aviso_fuera_de_correct_pone_primero_lo_que_aporto_cifras() -> None:
+    """Revisión de #146: el runner se queda con los dos primeros avisos de
+    atraso y con la primera tabla del catálogo, así que el orden importa. Lo
+    que aportó cifras va primero aunque se haya leído último; lo demás sigue,
+    en el orden en que se leyó."""
+    exportaciones = _dr("Exportaciones", [{"fecha": "2023-12-01", "v": 814.0}], url="u/x")
+    importaciones = _dr("Importaciones", [{"fecha": "2023-12-01", "v": 925.0}], url="u/m")
+    dolar = _dr("Tipo de cambio de referencia", [{"fecha": "2024-12-30", "v": 1031.56}])
+    evidence = [exportaciones, importaciones, dolar]
+    check = verify_figures("El dólar de referencia estaba en $1.031,56.", evidence)
+    assert v.figure_evidence(evidence, check) == [dolar]
+    assert v.dated_evidence(evidence, check) == [dolar, exportaciones, importaciones]
+
+
 def test_seen_numbers_lee_json_y_texto_argentino() -> None:
     seen = seen_numbers('{"a":49700.26,"b":"1.543,18","c":-0.22,"d":1e-05}')
     assert {49700.26, 1543.18, 0.22, 1e-05} <= set(seen)

@@ -282,7 +282,10 @@ class EngineRunner:
         # verificación), sobre lo citado. Así una fuente citada sólo porque su
         # título aparece en el texto, o leída y no usada que se llama igual
         # que la que sí, no pone "Dato atrasado" arriba de una respuesta hecha
-        # con datos frescos de otra.
+        # con datos frescos de otra. El orden importa: los avisos se cortan en
+        # dos y la línea del catálogo es la de la primera tabla, así que el
+        # motor pone primero lo que aportó cifras. Lo citado, cuando se cae a
+        # eso, va en el orden en que se leyó.
         dated = list(result.figure_evidence or result.cited_evidence or result.evidence)
 
         if result.evidence:

@@ -159,9 +159,10 @@ class EngineResult:
     # De las citadas, las que aportaron alguna cifra respaldada. El aviso de
     # atraso mira éstas: una citada sólo por el título no lo dispara. Vacío =
     # las citadas. Fuera de correct, con todas las cifras respaldadas, es todo
-    # lo leído menos lo que no aportó cifras y se llama igual que algo que sí
-    # (``answers.verification.dated_evidence``); vacía si alguna cifra quedó
-    # sin respaldo o no hubo verificación: ante la duda, el aviso mira todo.
+    # lo leído menos lo que no aportó cifras y se llama igual que algo que sí,
+    # con lo que aportó cifras primero (``answers.verification.dated_evidence``);
+    # vacía si alguna cifra quedó sin respaldo o no hubo verificación: ante la
+    # duda, el aviso mira todo.
     figure_evidence: list[Any] = field(default_factory=list, repr=False)
     # Los títulos de lo que se leyó y no se citó ("consultadas").
     consulted: list[str] = field(default_factory=list)

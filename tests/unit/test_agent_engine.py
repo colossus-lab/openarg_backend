@@ -1295,3 +1295,124 @@ async def test_en_sombra_una_serie_atrasada_usada_no_pierde_el_aviso_por_otra_al
     assert "mayo de 2026" in avisos
     if mode != "off":
         assert result.figure_evidence == [IPC_AL_DIA, SALARIOS_VIEJOS]
+
+
+# ── el aviso en sombra: primero lo que aportó cifras (revisión de #146) ──
+
+
+def _serie_vieja(sid: str, title: str, value: float) -> DataResult:
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url=f"https://datos.gob.ar/series/api/series/?ids={sid}",
+        dataset_title=title,
+        format="time_series",
+        records=[{"fecha": "2023-11-01", "v": value}, {"fecha": "2023-12-01", "v": value + 3.0}],
+        metadata={"units": "Millones de dólares"},
+    )
+
+
+EXPORTACIONES_VIEJAS = _serie_vieja(
+    "74.3_IEC_0_M_24", "Exportaciones de complejos oleaginosos", 811.0
+)
+IMPORTACIONES_VIEJAS = _serie_vieja("75.1_ICC_0_M_23", "Importaciones de bienes de capital", 922.0)
+
+
+# Sin "off": no verifica, así que no tiene con qué separar lo usado de lo
+# leído; el aviso mira todo lo leído en el orden en que se leyó, como antes
+# del verificador.
+@pytest.mark.parametrize("mode", [None, "shadow", "correct"])
+async def test_en_sombra_dos_series_leidas_y_no_usadas_no_le_ganan_el_tope_de_avisos(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """El aviso de atraso sale como mucho dos veces (`data_age._MAX_NOTICES`)
+    y recorre la evidencia en orden. Fuera de correct, con todas las cifras
+    respaldadas, iba en el orden de lectura: dos series viejas leídas antes y
+    no usadas se llevaban los dos avisos, y el dólar de 2024 que aportó una
+    cifra de la respuesta salía sin «Dato atrasado»."""
+    from app.application.answers.runner import EngineRunner
+
+    _runner_sin_io(monkeypatch)
+    _modo(monkeypatch, mode)
+    answer = (
+        "En septiembre de 2026 la inflación mensual fue de **1,7 %**. "
+        "El dólar de referencia estaba en **$1.031,56**."
+    )
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["74.3_IEC_0_M_24"]),
+                    _call("series_tiempo", 2, ids=["75.1_ICC_0_M_23"]),
+                    _call("series_tiempo", 3, ids=["148.3_INIVELNAL_DICI_M_26"]),
+                    _call("series_tiempo", 4, ids=["168.1_T_CAMBIOR_D_0_0_26"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(
+        llm, _deps_series(EXPORTACIONES_VIEJAS, IMPORTACIONES_VIEJAS, IPC_MENSUAL, DOLAR_VIEJO)
+    )
+    result = await EngineRunner(engine, MagicMock()).run(EngineRequest("inflación y dólar", "u"))
+    assert result.verification["sin_respaldo"] == []
+    assert result.answer.endswith(answer)
+    avisos = result.answer[: -len(answer)]
+    assert "Tipo de cambio de referencia" in avisos
+    assert "30 de diciembre de 2024" in avisos
+    assert result.figure_evidence[:2] == [IPC_MENSUAL, DOLAR_VIEJO]
+    if mode != "correct":
+        # Lo leído y no usado con otro título sigue contando, después.
+        assert result.figure_evidence[2:] == [EXPORTACIONES_VIEJAS, IMPORTACIONES_VIEJAS]
+
+
+def _tabla_catalogo(name: str, title: str, value: float) -> DataResult:
+    return DataResult(
+        source=f"sandbox:{name}",
+        portal_name="datos.gob.ar",
+        portal_url="",
+        dataset_title=title,
+        format="table",
+        records=[{"provincia": "Chaco", "valor": value}],
+        metadata={"served_table": name},
+    )
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "correct"])
+async def test_en_sombra_la_linea_de_atraso_del_catalogo_es_la_de_la_tabla_usada(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """La línea de atraso de las tablas del catálogo sale de la PRIMERA tabla
+    de la evidencia del aviso (`runner._served_catalog_table`). Fuera de
+    correct, con todas las cifras respaldadas, iba en el orden de lectura y
+    hablaba de una tabla leída antes y no usada. Sin "off", por lo mismo que
+    el test de arriba."""
+    from app.application.answers import runner as runner_module
+    from app.application.answers.runner import EngineRunner
+
+    pedidas: list[str | None] = []
+
+    async def _staleness(served: str | None) -> str | None:
+        pedidas.append(served)
+        return f"ATRASO<{served}>" if served else None
+
+    _runner_sin_io(monkeypatch)
+    monkeypatch.setattr(runner_module, "_staleness_line", _staleness)
+    _modo(monkeypatch, mode)
+    no_usada = _tabla_catalogo("cache_no_usada", "Matrícula universitaria por provincia", 4321.0)
+    usada = _tabla_catalogo("cache_usada", "Camas hospitalarias por provincia", 8765.0)
+    answer = "En Chaco hay **8.765** camas hospitalarias."
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[_call("series_tiempo", 1, ids=["x"]), _call("series_tiempo", 2, ids=["y"])]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(llm, _deps_series(no_usada, usada))
+    result = await EngineRunner(engine, MagicMock()).run(EngineRequest("camas en Chaco", "u"))
+    assert result.verification["sin_respaldo"] == []
+    assert pedidas == ["cache_usada"]
+    assert "ATRASO<cache_usada>" in result.warnings
+    assert "ATRASO<cache_no_usada>" not in result.warnings

@@ -43,8 +43,9 @@ Qué se hace con eso lo decide ``ANSWERS_VERIFY_MODE``:
   respuesta sale igual, también sus fuentes y sus citas: toda la evidencia
   citada y sin citas. Es para medir la precisión antes de actuar. Lo único
   que usa es lo respaldado: si todas las cifras lo están, el aviso de atraso
-  deja afuera lo que no aportó cifras y se llama igual que algo que sí
-  (``dated_evidence``); si no, mira todo lo leído.
+  deja afuera lo que no aportó cifras y se llama igual que algo que sí, y
+  pone primero lo que las aportó (``dated_evidence``); si no, mira todo lo
+  leído.
 - ``correct``: se citan sólo las fuentes usadas, con sus citas, y el agente
   hace UNA vuelta correctiva con la lista de cifras (``agent_engine``); si
   después sigue habiendo cifras sin respaldo, la respuesta lleva un aviso
@@ -1147,11 +1148,18 @@ def dated_evidence(evidence: Sequence[Any], verification: Verification) -> list[
     por coincidencia de valor, y una serie vieja que la respuesta sí usó queda
     afuera si su cifra (truncada) coincide con un valor o un salto de otra
     serie leída, o si la usa para una afirmación sin cifra propia.
+
+    Primero lo que aportó cifras y después lo demás, en el orden en que se
+    leyó: el runner se queda con los dos primeros avisos y con la primera
+    tabla del catálogo, y lo leído antes y no usado no puede desplazar a lo
+    que puso una cifra en la respuesta.
     """
     used = verification.used_results()
     keys = [_title_key(str(getattr(r, "dataset_title", "") or "")) for r in evidence]
     used_keys = {keys[i] for i in used if keys[i]}
-    return [r for i, r in enumerate(evidence) if i in used or keys[i] not in used_keys]
+    first = [r for i, r in enumerate(evidence) if i in used]
+    rest = [r for i, r in enumerate(evidence) if i not in used and keys[i] not in used_keys]
+    return first + rest
 
 
 # ── las citas estructuradas ────────────────────────────────
