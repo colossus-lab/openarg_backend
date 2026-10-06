@@ -48,19 +48,19 @@ def _looks_like_mixed_quote_snapshot(
     return len(set(x_values)) < len(x_values)
 
 
-def _ddjj_not_comparable(row: dict[str, Any], numeric_keys: list[str]) -> bool:
-    """H005: una DDJJ cuyas cifras no cierran no va a un gráfico.
+def _ddjj_comparable(row: dict[str, Any], numeric_keys: list[str]) -> dict[str, Any] | None:
+    """H005: lo que se puede graficar de una DDJJ, o ``None`` si nada.
 
     Sin la tarjeta, la barra seguía en ``chart_data``: el total de bienes que no
     cierra (31.251 M) quedaba 11,8 veces por encima del siguiente. Con
-    ``ingresos_inconsistentes`` sólo sus ingresos no son comparables: sale si el
-    eje es de ingresos.
+    ``ingresos_inconsistentes`` sólo sus ingresos no son comparables: se anulan
+    y la fila sigue con sus bienes (en un gráfico de ingresos solos, sale).
     """
     if row.get("inconsistente"):
-        return True
-    return bool(row.get("ingresos_inconsistentes")) and any(
-        "ingreso" in k.lower() for k in numeric_keys
-    )
+        return None
+    if row.get("ingresos_inconsistentes"):
+        return {**row, **{k: None for k in numeric_keys if "ingreso" in k.lower()}}
+    return row
 
 
 def build_deterministic_charts(
@@ -78,6 +78,11 @@ def build_deterministic_charts(
             continue
         if first.get("_type") == "resource_metadata":
             continue
+        is_ddjj = result.source.startswith("ddjj:")
+        if is_ddjj:
+            # La DDJJ que no cierra no va al gráfico, y tampoco decide sus
+            # series: su variación es null y la sacaba para todas.
+            first = next((r for r in result.records if not r.get("inconsistente")), first)
 
         keys = list(first.keys())
 
@@ -133,6 +138,8 @@ def build_deterministic_charts(
             and not k.startswith("_")
             and k.lower() not in _SKIP_NUMERIC
             and isinstance(first.get(k), int | float)
+            # ``isinstance(False, int)`` es True: una marca no es una serie.
+            and not isinstance(first.get(k), bool)
         ]
         if not numeric_keys:
             continue
@@ -153,9 +160,11 @@ def build_deterministic_charts(
             else:
                 numeric_keys = numeric_keys[:1]
 
-        clean = [row for row in result.records if any(row.get(k) is not None for k in numeric_keys)]
-        if result.source.startswith("ddjj:"):
-            clean = [row for row in clean if not _ddjj_not_comparable(row, numeric_keys)]
+        records = result.records
+        if is_ddjj:
+            comparable = (_ddjj_comparable(row, numeric_keys) for row in records)
+            records = [row for row in comparable if row is not None]
+        clean = [row for row in records if any(row.get(k) is not None for k in numeric_keys)]
         if len(clean) < 2:
             continue
 
