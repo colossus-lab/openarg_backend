@@ -784,6 +784,26 @@ async def test_tabla_de_un_ejercicio_pasado_dice_de_cuando_son_los_datos(
     assert "los datos son de 2019" in frescura["nota"]
 
 
+async def test_tabla_del_ejercicio_que_se_cerro_no_es_una_foto(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """Revisión del PR #144: el ejercicio anterior al de la lectura
+    (cache_presupuesto_pef_2025 releída en 2026) salía «vigente al» día de
+    lectura, aunque la documentación pública dice que la fecha de corte es
+    «sólo si es una foto del período en curso»."""
+    sandbox.get_column_types = AsyncMock(  # type: ignore[method-assign]
+        return_value={_T: [("ejercicio_presupuestario", "bigint"), ("credito_vigente", "text")]}
+    )
+    sandbox.rango = ("2025", "2025")
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    assert r.status_code == 200, r.text
+    frescura = r.json()["frescura"]
+    assert frescura["serie"] is False and frescura["ultimo_dato"] == "2025"
+    assert frescura["fecha_corte"] is None
+    assert "los vigentes al" not in frescura["nota"] and "foto" not in frescura["nota"]
+    assert "los datos son de 2025" in frescura["nota"]
+
+
 async def test_tabla_del_ejercicio_en_curso_es_una_foto_con_fecha_de_corte(
     client: AsyncClient, sandbox: FakeSandbox
 ) -> None:

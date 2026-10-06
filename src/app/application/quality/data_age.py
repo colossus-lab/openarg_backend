@@ -244,13 +244,13 @@ class TableFreshness:
       Una serie leída ayer puede terminar en 2023.
 
     Una tabla con un solo período es una foto, con ``fecha_corte`` el día en
-    que se leyó, sólo si ese período es el de la lectura o el anterior (el
-    crédito presupuestario del ejercicio en curso). Si es otro, la nota dice
-    de cuándo son los datos y no hay ``fecha_corte``: un ejercicio 2019
-    releído hoy no es "vigente" hoy (revisión independiente del 05-oct,
-    H022). Una tabla sin columna de fecha tampoco tiene ``fecha_corte``: la
-    fecha de lectura no dice de cuándo son sus datos, que suele decirlo el
-    título del dataset.
+    que se leyó, sólo si ese período es el de la lectura (el crédito
+    presupuestario del ejercicio en curso). Si es otro, aunque sea el anterior,
+    la nota dice de cuándo son los datos y no hay ``fecha_corte``: un ejercicio
+    2019, o el 2025 ya cerrado, releído hoy no es "vigente" hoy (revisión
+    independiente del 05-oct, H022). Una tabla sin columna de fecha tampoco
+    tiene ``fecha_corte``: la fecha de lectura no dice de cuándo son sus
+    datos, que suele decirlo el título del dataset.
 
     ``serie`` es None cuando la tabla tiene columna de fecha pero no se pudo
     calcular qué período cubre (fechas en un formato que no se reconoce, una
@@ -292,11 +292,13 @@ def _periodo(valor: str) -> tuple[str, date] | None:
 
 
 def _es_periodo_de_la_lectura(valor: str, leida: date) -> bool:
-    """¿El período es el del día de lectura, o el anterior según su granularidad?
+    """¿El período es el del día de lectura, según su granularidad?
 
-    El anterior también: el mes pasado, leído a principios de este, o el
-    ejercicio que se cerró el año pasado. Un período que no se reconoce no lo
-    es: sin saber de cuándo es, no se lo declara vigente.
+    El anterior no: el ejercicio que se cerró el año pasado no es el vigente,
+    y la nota de foto no nombra el período, así que «vigentes al <lectura>»
+    haría pasar el crédito de 2025 por el de hoy (revisión del PR #144). Un
+    período que no se reconoce tampoco: sin saber de cuándo es, no se lo
+    declara vigente.
     """
     periodo = _periodo(valor)
     if periodo is None:
@@ -308,7 +310,7 @@ def _es_periodo_de_la_lectura(valor: str, leida: date) -> bool:
         atraso = (leida.year * 12 + leida.month) - (inicio.year * 12 + inicio.month)
     else:
         atraso = leida.year - inicio.year
-    return atraso in (0, 1)
+    return atraso == 0
 
 
 def _de_periodo(valor: str) -> str:
@@ -351,9 +353,9 @@ def table_freshness(
         serie = desde != hasta
     ultimo = hasta if columna_fecha and con_rango else None
     aproximado = bool(aproximado and ultimo)
-    # Una foto sólo si el único período es el de la lectura (o el anterior):
-    # sin columna de fecha, o con un período pasado, la fecha de lectura no
-    # es la de los datos (H022).
+    # Una foto sólo si el único período es el de la lectura: sin columna de
+    # fecha, o con un período pasado, la fecha de lectura no es la de los
+    # datos (H022).
     foto = (
         serie is False
         and ultimo is not None

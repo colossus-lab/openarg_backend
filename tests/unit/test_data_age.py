@@ -280,30 +280,52 @@ def test_un_solo_periodo_pasado_dice_de_cuando_son_los_datos():
     assert f.actualizada is not None and f.actualizada.isoformat() == "2026-10-04"
 
 
+def test_el_ejercicio_que_se_cerro_no_se_declara_vigente():
+    """Revisión del PR #144: con la regla de «el actual o el anterior», el
+    ejercicio 2025 (cache_presupuesto_pef_2025 en staging, un solo ejercicio,
+    releída el 05-oct) salía como foto «vigente al 5 de octubre de 2026», sin
+    nombrar el ejercicio: un cliente podía citar el crédito de 2025 como el de hoy."""
+    f = table_freshness(
+        _leida(2026, 10, 5, 0), columna_fecha="ejercicio_presupuestario", desde="2025", hasta="2025"
+    )
+    assert f.serie is False and f.ultimo_dato == "2025"
+    assert f.fecha_corte is None
+    assert f.nota is not None
+    assert "los vigentes al" not in f.nota and "foto" not in f.nota
+    assert "los datos son de 2025" in f.nota
+
+
 @pytest.mark.parametrize(
     ("periodo", "leida", "foto"),
     [
-        # Ejercicio: el en curso o el anterior (el de 2025 se cierra en 2026).
+        # Ejercicio: sólo el en curso. El que se cerró ya no es el vigente,
+        # tampoco leído a principios del año siguiente.
         ("2026", (2026, 10, 5), True),
-        ("2025", (2026, 10, 5), True),
+        ("2026", (2026, 1, 1), True),
+        ("2026", (2026, 12, 31), True),
+        ("2025", (2026, 10, 5), False),
+        ("2025", (2026, 1, 3), False),
+        ("2025", (2026, 12, 31), False),
+        ("2026", (2027, 1, 3), False),
         ("2024", (2026, 10, 5), False),
         ("2001", (2026, 10, 5), False),
         # Un ejercicio futuro (un proyecto de presupuesto) tampoco es vigente.
         ("2027", (2026, 10, 5), False),
-        # Mes: el corriente o el anterior.
+        # Mes: sólo el corriente. Los datos de septiembre no son los vigentes
+        # al 5 de octubre: son de septiembre.
         ("2026-10", (2026, 10, 5), True),
-        ("2026-09", (2026, 10, 5), True),
-        ("2025-12", (2026, 1, 3), True),
+        ("2026-09", (2026, 10, 5), False),
+        ("2025-12", (2026, 1, 3), False),
         ("2026-07", (2026, 10, 5), False),
-        # Día: el de la lectura o el anterior.
+        # Día: sólo el de la lectura.
         ("2026-10-05", (2026, 10, 5), True),
-        ("2026-10-04", (2026, 10, 5), True),
+        ("2026-10-04", (2026, 10, 5), False),
         ("2026-09-30", (2026, 10, 5), False),
         # Un valor que no se reconoce: sin saber de cuándo es, no es vigente.
         ("2do semestre", (2026, 10, 5), False),
     ],
 )
-def test_un_solo_periodo_es_una_foto_solo_si_es_el_actual_o_el_anterior(
+def test_un_solo_periodo_es_una_foto_solo_si_es_el_de_la_lectura(
     periodo: str, leida: tuple[int, int, int], foto: bool
 ) -> None:
     f = table_freshness(_leida(*leida, 0), columna_fecha="periodo", desde=periodo, hasta=periodo)

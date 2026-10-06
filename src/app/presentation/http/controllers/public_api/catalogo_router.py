@@ -123,9 +123,10 @@ class Frescura(BaseModel):
     dias_desde_actualizacion: int | None = None
     # Último período con datos según la columna de fecha.
     ultimo_dato: str | None = None
-    # Sólo las fotos: un único período, el de la lectura o el anterior (el día
-    # al que corresponden los datos). Sin columna de fecha o con un período
-    # pasado no hay fecha de corte: la de lectura no es la de los datos.
+    # Sólo las fotos: un único período, el de la lectura (el día al que
+    # corresponden los datos). Sin columna de fecha o con un período pasado,
+    # aunque sea el anterior, no hay fecha de corte: la de lectura no es la de
+    # los datos.
     fecha_corte: str | None = None
     # None: tiene columna de fecha pero no se pudo calcular qué período cubre
     # (ni serie ni foto: no se sabe cuál es el último dato).
