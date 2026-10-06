@@ -229,8 +229,10 @@ async def describir_tabla(tabla: str, ctx: Context) -> str:
     `tabla` es el nombre que devuelve `buscar_datasets`. Usalo antes de
     `obtener_datos` o `agregar_datos` para saber qué columnas pedir y qué
     fechas existen. La frescura dice cuándo leyó OpenArg la tabla de su fuente,
-    cuál es el último dato y, si es una foto sin serie temporal, su fecha de
-    corte: no presentes como actual un dato viejo. No descuenta preguntas.
+    cuál es el último dato y, sólo si la tabla es una foto del período en curso,
+    su fecha de corte. La fecha de lectura no es la de los datos: una tabla de
+    un período pasado o sin columna de fecha no es vigente por haberse leído
+    hoy. No presentes como actual un dato viejo. No descuenta preguntas.
     """
     key, ip, caller = _caller(ctx)
     payload = await _call_backend(

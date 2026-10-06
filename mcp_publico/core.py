@@ -495,6 +495,14 @@ def _freshness_line(frescura: Any) -> str | None:
         # De una muestra de la tabla: puede haber datos posteriores.
         aprox = " (aproximado)" if frescura.get("aproximado") else ""
         parts.append(f"Último dato{aprox}: {frescura.get('ultimo_dato')}")
+    elif (
+        frescura.get("ultimo_dato")
+        and frescura.get("serie") is False
+        and not frescura.get("fecha_corte")
+    ):
+        # Un solo período que no es el de la lectura (un ejercicio 2019 releído
+        # hoy): no es una foto vigente, es de ese período (H022).
+        parts.append(f"Datos de {frescura.get('ultimo_dato')}")
     if frescura.get("fecha_corte"):
         parts.append(f"Fecha de corte: {frescura.get('fecha_corte')}")
     if frescura.get("actualizada"):
@@ -504,8 +512,8 @@ def _freshness_line(frescura: Any) -> str | None:
         return None
     lines = ["Frescura: " + " · ".join(parts)] if parts else []
     if nota:
-        # Que es una foto, o que hace meses que no se relee: cambia lo que se
-        # puede afirmar con la tabla.
+        # Que es una foto, de cuándo son los datos si no lo es, o que hace
+        # meses que no se relee: cambia lo que se puede afirmar con la tabla.
         lines.append(f"Nota: {nota}")
     return "\n".join(lines)
 

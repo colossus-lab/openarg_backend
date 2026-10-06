@@ -243,9 +243,14 @@ class TableFreshness:
     - ``ultimo_dato``: el último período con datos según la columna de fecha.
       Una serie leída ayer puede terminar en 2023.
 
-    Una tabla sin serie temporal (sin columna de fecha, o con un solo período,
-    como el crédito presupuestario de un ejercicio) es una foto: su
-    ``fecha_corte`` es el día en que se leyó.
+    Una tabla con un solo período es una foto, con ``fecha_corte`` el día en
+    que se leyó, sólo si ese período es el de la lectura o el anterior (el
+    crédito presupuestario del ejercicio en curso). Si es otro, la nota dice
+    de cuándo son los datos y no hay ``fecha_corte``: un ejercicio 2019
+    releído hoy no es "vigente" hoy (revisión independiente del 05-oct,
+    H022). Una tabla sin columna de fecha tampoco tiene ``fecha_corte``: la
+    fecha de lectura no dice de cuándo son sus datos, que suele decirlo el
+    título del dataset.
 
     ``serie`` es None cuando la tabla tiene columna de fecha pero no se pudo
     calcular qué período cubre (fechas en un formato que no se reconoce, una
@@ -267,6 +272,56 @@ class TableFreshness:
 
 def _fecha_es(day: date) -> str:
     return f"{day.day} de {_MONTHS_ES[day.month - 1]} de {day.year}"
+
+
+# Un período como lo da `describir_periodo`: AAAA, AAAA-MM o AAAA-MM-DD.
+_PERIODO_RE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$")
+
+
+def _periodo(valor: str) -> tuple[str, date] | None:
+    """La granularidad (``anio``, ``mes``, ``dia``) y el inicio de un período ISO."""
+    m = _PERIODO_RE.match(valor.strip())
+    if not m:
+        return None
+    anio, mes, dia = m.groups()
+    try:
+        inicio = date(int(anio), int(mes or 1), int(dia or 1))
+    except ValueError:
+        return None
+    return ("dia" if dia else "mes" if mes else "anio"), inicio
+
+
+def _es_periodo_de_la_lectura(valor: str, leida: date) -> bool:
+    """¿El período es el del día de lectura, o el anterior según su granularidad?
+
+    El anterior también: el mes pasado, leído a principios de este, o el
+    ejercicio que se cerró el año pasado. Un período que no se reconoce no lo
+    es: sin saber de cuándo es, no se lo declara vigente.
+    """
+    periodo = _periodo(valor)
+    if periodo is None:
+        return False
+    granularidad, inicio = periodo
+    if granularidad == "dia":
+        atraso = (leida - inicio).days
+    elif granularidad == "mes":
+        atraso = (leida.year * 12 + leida.month) - (inicio.year * 12 + inicio.month)
+    else:
+        atraso = leida.year - inicio.year
+    return atraso in (0, 1)
+
+
+def _de_periodo(valor: str) -> str:
+    """«de 2019», «de marzo de 2019», «del 3 de marzo de 2019»: como lo diría una persona."""
+    periodo = _periodo(valor)
+    if periodo is None:
+        return f"de {valor}"
+    granularidad, inicio = periodo
+    if granularidad == "dia":
+        return f"del {_fecha_es(inicio)}"
+    if granularidad == "mes":
+        return f"de {_MONTHS_ES[inicio.month - 1]} de {inicio.year}"
+    return f"de {inicio.year}"
 
 
 def table_freshness(
@@ -296,7 +351,17 @@ def table_freshness(
         serie = desde != hasta
     ultimo = hasta if columna_fecha and con_rango else None
     aproximado = bool(aproximado and ultimo)
-    corte = actualizada if serie is False else None
+    # Una foto sólo si el único período es el de la lectura (o el anterior):
+    # sin columna de fecha, o con un período pasado, la fecha de lectura no
+    # es la de los datos (H022).
+    foto = (
+        serie is False
+        and ultimo is not None
+        and actualizada is not None
+        and _es_periodo_de_la_lectura(ultimo, actualizada)
+    )
+    corte = actualizada if foto else None
+    leida = f"OpenArg la leyó de su fuente el {_fecha_es(actualizada)}" if actualizada else None
     partes: list[str] = []
     if serie is None:
         partes.append(
@@ -308,6 +373,21 @@ def table_freshness(
         partes.append(
             "Es una foto, sin serie temporal: los datos son los vigentes al "
             f"{_fecha_es(corte)}, cuando OpenArg la leyó de su fuente."
+        )
+    elif serie is False and ultimo is not None:
+        partes.append(
+            f"La tabla tiene un solo período: los datos son {_de_periodo(ultimo)}."
+            + (f" {leida}, pero eso no los hace vigentes a esa fecha." if leida else "")
+        )
+    elif serie is False:
+        partes.append(
+            "La tabla no tiene columna de fecha: "
+            + (
+                f"{leida}, pero eso no dice de cuándo son los datos; lo suele decir"
+                if leida
+                else "de cuándo son los datos lo suele decir"
+            )
+            + " el título del dataset. No la presentes como vigente."
         )
     if aproximado:
         partes.append(

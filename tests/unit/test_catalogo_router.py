@@ -68,6 +68,8 @@ class FakeSandbox:
         self.agg_rows: list[dict[str, Any]] = []
         # `pg_class.reltuples` que devuelven las estadísticas.
         self.estimated_rows: int | None = None
+        # Desde y hasta de la columna de fecha (`consulta_rango`).
+        self.rango: tuple[str, str] = ("2003-01-02", "2026-06-18")
 
     tables = [
         CachedTableInfo(table_name=_T, dataset_id="ds-1", row_count=8569, columns=[]),
@@ -118,9 +120,8 @@ class FakeSandbox:
                 error_kind=self.error_kind,
             )
         if "AS reconocidas" in sql:
-            rows = [
-                {"desde": "2003-01-02", "hasta": "2026-06-18", "reconocidas": 9, "con_valor": 9}
-            ]
+            desde, hasta = self.rango
+            rows = [{"desde": desde, "hasta": hasta, "reconocidas": 9, "con_valor": 9}]
         elif "GROUP BY 1" in sql:
             # Los valores que existen (`sugerencias`).
             rows = [{"valor": "Principales tasas", "filas": 12}, {"valor": "Otra cosa", "filas": 3}]
@@ -745,17 +746,58 @@ async def test_tabla_dice_cuando_se_leyo_y_el_ultimo_dato(client: AsyncClient) -
     assert frescura["serie"] is True and frescura["fecha_corte"] is None
 
 
-async def test_tabla_sin_serie_es_una_foto_con_fecha_de_corte(
+async def test_tabla_sin_columna_de_fecha_no_se_declara_vigente(
     client: AsyncClient, sandbox: FakeSandbox
 ) -> None:
+    """Revisión independiente del 05-oct (H022): antes salía como foto con
+    `fecha_corte` = día de lectura, «los datos son los vigentes al 5 de
+    septiembre de 2026», aunque la tabla fuera de 2001."""
     sandbox.get_column_types = AsyncMock(  # type: ignore[method-assign]
         return_value={_T: [("jurisdiccion_desc", "text"), ("credito_devengado", "text")]}
     )
     r = await client.get("/catalogo/tabla", params={"nombre": _T})
     frescura = r.json()["frescura"]
     assert frescura["serie"] is False and frescura["ultimo_dato"] is None
+    assert frescura["fecha_corte"] is None
+    assert "foto" not in frescura["nota"] and "los vigentes al" not in frescura["nota"]
+    assert "no tiene columna de fecha" in frescura["nota"]
+    assert frescura["actualizada"] == "2026-09-05"
+
+
+async def test_tabla_de_un_ejercicio_pasado_dice_de_cuando_son_los_datos(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """H022: cache_presupuesto_pef_2019 en staging, releída a diario, salía
+    «vigente al» día de lectura al lado de «Período: 2019 a 2019»."""
+    sandbox.get_column_types = AsyncMock(  # type: ignore[method-assign]
+        return_value={_T: [("ejercicio_presupuestario", "bigint"), ("credito_vigente", "text")]}
+    )
+    sandbox.rango = ("2019", "2019")
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["columna_fecha"] == "ejercicio_presupuestario"
+    frescura = body["frescura"]
+    assert frescura["serie"] is False and frescura["ultimo_dato"] == "2019"
+    assert frescura["fecha_corte"] is None
+    assert "los vigentes al" not in frescura["nota"] and "foto" not in frescura["nota"]
+    assert "los datos son de 2019" in frescura["nota"]
+
+
+async def test_tabla_del_ejercicio_en_curso_es_una_foto_con_fecha_de_corte(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """El crédito presupuestario del ejercicio en curso sí es una foto: los
+    datos son los vigentes al día en que se leyó."""
+    sandbox.get_column_types = AsyncMock(  # type: ignore[method-assign]
+        return_value={_T: [("ejercicio_presupuestario", "bigint"), ("credito_vigente", "text")]}
+    )
+    sandbox.rango = ("2026", "2026")
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    frescura = r.json()["frescura"]
+    assert frescura["serie"] is False and frescura["ultimo_dato"] == "2026"
     assert frescura["fecha_corte"] == "2026-09-05"
-    assert "foto" in frescura["nota"]
+    assert "foto" in frescura["nota"] and "vigentes al 5 de septiembre de 2026" in frescura["nota"]
 
 
 async def test_tabla_con_fecha_y_periodo_desconocido_no_es_una_foto(

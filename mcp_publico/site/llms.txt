@@ -32,7 +32,7 @@ OpenArg es abierto y gratuito, un proyecto de Colossus Lab que se sostiene con a
 Modo datos (el modelo del usuario razona con las filas):
 
 - `buscar_datasets(texto, portal?, limite?)`: datasets con título, portal, link oficial y tablas consultables.
-- `describir_tabla(tabla)`: columnas con tipo, filas, período cubierto, frescura (cuándo la leyó OpenArg de su fuente, último dato, fecha de corte si es una foto) y muestra.
+- `describir_tabla(tabla)`: columnas con tipo, filas, período cubierto, frescura (cuándo la leyó OpenArg de su fuente, último dato, fecha de corte sólo si es una foto del período en curso; la fecha de lectura no es la de los datos) y muestra.
 - `obtener_datos(tabla, columnas?, desde?, hasta?, filtros?, orden?, limite?, offset?, columna_fecha?)`: filas en CSV con la fuente, en orden estable por fecha (sin columna de fecha, sólo en tablas de hasta 50.000 filas). Sin SQL: columnas, período AAAA[-MM[-DD]] y filtros con operador (=, !=, mayor_que, menor_que, >=, <=, contiene, en). Si hay más filas, da el `offset` de la página siguiente (hasta 10.000). `orden="desc"` trae primero lo más reciente.
 - `agregar_datos(tabla, operacion, columna?, agrupar_por?, filtros?, desde?, hasta?, ordenar_por?, orden?, limite?, ponderar_por?)`: suma, promedio, conteo, mínimo o máximo calculado en la base, agrupado hasta por 3 columnas (ranking de mayor a menor por defecto). Dice sobre cuántas filas se calculó; sin coincidencias no da un cero sino los valores que existen.
 - `listar_fuentes()`: portales cubiertos y cantidad de datasets.

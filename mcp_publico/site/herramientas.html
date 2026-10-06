@@ -108,7 +108,7 @@
     </table>
     </div>
     <p><strong>Devuelve</strong> las columnas con su tipo, la cantidad de filas, el período cubierto (si tiene fechas), una muestra de 5 filas y la fuente oficial.</p>
-    <p><strong>Frescura:</strong> cuándo leyó OpenArg la tabla de su fuente por última vez, cuál es el último dato de la serie y, si la tabla es una foto sin serie temporal (un padrón, el crédito presupuestario de un ejercicio), su <strong>fecha de corte</strong>. Si el período sale de una muestra (tablas muy grandes), marca el último dato como aproximado; si la tabla tiene fechas pero no se pudo calcular qué período cubre, lo dice en vez de presentarla como vigente. Si hace más de 90 días que no se relee, lo avisa: el portal puede tener datos más nuevos.</p>
+    <p><strong>Frescura:</strong> cuándo leyó OpenArg la tabla de su fuente por última vez, cuál es el último dato de la serie y, si la tabla es una foto del período en curso (el crédito presupuestario del ejercicio actual), su <strong>fecha de corte</strong>. Si la tabla tiene un solo período y es pasado (un ejercicio 2019), dice de cuándo son los datos; si no tiene columna de fecha, no la presenta como vigente: la fecha de lectura no es la de los datos, que suele decirla el título del dataset. Si el período sale de una muestra (tablas muy grandes), marca el último dato como aproximado; si la tabla tiene fechas pero no se pudo calcular qué período cubre, lo dice en vez de presentarla como vigente. Si hace más de 90 días que no se relee, lo avisa: el portal puede tener datos más nuevos.</p>
 
     <h2 id="obtener_datos"><span class="tool-mode">Datos</span><code>obtener_datos</code></h2>
     <p>Trae filas de una tabla, en CSV. No se escribe SQL: se eligen columnas, período y filtros.</p>
