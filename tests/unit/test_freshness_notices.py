@@ -187,6 +187,184 @@ def test_una_evidencia_rara_no_rompe_nada() -> None:
     assert freshness_notices([object(), _serie("x", [])], HOY) == []
 
 
+# ── varias series en un mismo pedido (revisión del 05-oct, H020) ──────
+
+IPC_TITULO = "Índice de Precios al Consumidor Nacional (IPC)"
+
+
+def _varias(columnas: dict[str, dict[str, float]], series: list[dict[str, Any]]) -> DataResult:
+    """Como lo arma `series_tiempo_adapter` con varios ids: el título del
+    primer dataset, la última fila con algún valor, la fecha de fin de la más
+    atrasada y el «desactualizada» de cualquiera de las series."""
+    fechas = sorted({f for valores in columnas.values() for f in valores})
+    records = [
+        {"fecha": f, **{titulo: valores.get(f) for titulo, valores in columnas.items()}}
+        for f in fechas
+    ]
+    flags = [s["actualizada_en_fuente"] for s in series]
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url="https://datos.gob.ar/series/api/series/?ids=a,b",
+        dataset_title=IPC_TITULO,
+        format="time_series",
+        records=records,
+        metadata={
+            "ultima_observacion": fechas[-1],
+            "frecuencia": "mensual",
+            "fecha_fin_fuente": min(s["fecha_fin_fuente"] for s in series),
+            "actualizada_en_fuente": False
+            if any(f is False for f in flags)
+            else (True if all(f is True for f in flags) else None),
+            "truncada": False,
+            "series": series,
+        },
+    )
+
+
+def _meses(desde: int, hasta: int, base: float) -> dict[str, float]:
+    return {f"2026-{m:02d}-01": base + m for m in range(desde, hasta + 1)}
+
+
+def test_con_varias_series_el_aviso_nombra_la_atrasada_y_no_la_primera() -> None:
+    """La reproducción de la revisión: IPC hasta agosto y salario real hasta
+    mayo. El aviso decía «el último dato de "IPC" es de mayo de 2026»: el
+    título de la primera serie con la fecha de la más atrasada."""
+    result = _varias(
+        {"IPC Nivel general": _meses(1, 8, 1.5), "Índice de salarios real": _meses(1, 5, 100.0)},
+        [
+            {
+                "id": "148.3_INIVELNAL_DICI_M_26",
+                "titulo": "IPC Nivel general",
+                "fecha_fin_fuente": "2026-08-01",
+                "actualizada_en_fuente": None,
+                "frecuencia": "mensual",
+            },
+            {
+                "id": "149.1_SALARIO_REAL",
+                "titulo": "Índice de salarios real",
+                "fecha_fin_fuente": "2026-05-01",
+                "actualizada_en_fuente": None,
+                "frecuencia": "mensual",
+            },
+        ],
+    )
+    q = "¿Cómo vienen la inflación y el salario real?"
+    [aviso] = freshness_notices([result], HOY, q)
+    assert "«Índice de salarios real»" in aviso
+    assert "mayo de 2026" in aviso
+    assert "IPC" not in aviso
+
+
+def test_con_varias_series_la_desactualizada_de_una_no_se_le_atribuye_a_otra() -> None:
+    """IPC + tipo de cambio contra la API en vivo (verificación de H020): el
+    aviso decía que el IPC «la fuente no la actualizó» y la que la fuente marca
+    como desactualizada es la del tipo de cambio. Pedidas juntas, la diaria
+    llega agregada por mes (fechada el 1.º) y su fecha de fin es el 31-ago:
+    eso no es «se pidió un período pasado»."""
+    result = _varias(
+        {
+            "IPC Nivel general": _meses(3, 8, 1.5),
+            "Tipo de cambio de valuación": _meses(3, 8, 1300.0),
+        },
+        [
+            {
+                "id": "148.3_INIVELNAL_DICI_M_26",
+                "titulo": "IPC Nivel general",
+                "fecha_fin_fuente": "2026-08-01",
+                "actualizada_en_fuente": True,
+                "frecuencia": "mensual",
+            },
+            {
+                "id": "92.2_TIPO_CAMBIION_0_0_21_24",
+                "titulo": "Tipo de cambio de valuación",
+                "fecha_fin_fuente": "2026-08-31",
+                "actualizada_en_fuente": False,
+                "frecuencia": "diaria",
+            },
+        ],
+    )
+    [aviso] = freshness_notices([result], HOY)
+    assert "«Tipo de cambio de valuación»" in aviso
+    assert "la fuente no la actualizó" in aviso
+    assert "IPC" not in aviso
+
+
+def test_una_diaria_agregada_por_mes_no_es_un_periodo_pedido_a_proposito() -> None:
+    """La misma comparación con una sola serie: la diaria agregada por mes
+    llega hasta el 1-ago y la fuente, hasta el 31-ago. Se trajo hasta el
+    final; la fuente la marca desactualizada y eso se dice."""
+    result = _serie(
+        "Tipo de cambio de valuación",
+        ["2026-07-01", "2026-08-01"],
+        ultima_observacion="2026-08-01",
+        frecuencia="mensual",
+        fecha_fin_fuente="2026-08-31",
+        actualizada_en_fuente=False,
+    )
+    [aviso] = freshness_notices([result], HOY)
+    assert "agosto de 2026" in aviso and "la fuente no la actualizó" in aviso
+    # Un período pasado pedido a propósito sigue sin aviso.
+    pasado = _serie(
+        "Tipo de cambio de valuación",
+        ["2026-06-01", "2026-07-01"],
+        ultima_observacion="2026-07-01",
+        frecuencia="mensual",
+        fecha_fin_fuente="2026-08-31",
+        actualizada_en_fuente=False,
+    )
+    assert freshness_notices([pasado], HOY) == []
+
+
+def test_con_varias_series_al_dia_no_hay_aviso() -> None:
+    result = _varias(
+        {"IPC Nivel general": _meses(3, 8, 1.5), "EMAE": _meses(3, 7, 150.0)},
+        [
+            {
+                "id": "148.3_INIVELNAL_DICI_M_26",
+                "titulo": "IPC Nivel general",
+                "fecha_fin_fuente": "2026-08-01",
+                "actualizada_en_fuente": True,
+                "frecuencia": "mensual",
+            },
+            {
+                "id": "143.3_NO_PR_2004_A_21",
+                "titulo": "EMAE",
+                "fecha_fin_fuente": "2026-07-01",
+                "actualizada_en_fuente": True,
+                "frecuencia": "mensual",
+            },
+        ],
+    )
+    assert freshness_notices([result], HOY) == []
+
+
+async def test_con_varias_series_del_adaptador_el_aviso_nombra_la_serie_atrasada() -> None:
+    """De punta a punta, con la metadata que arma el adaptador contra la API
+    falsa: el IPC real (hasta agosto, al día) y una mensual que termina en mayo."""
+    from tests.unit.series_tiempo_fake import IPC_ID, FakeSeriesApi, ipc_real, serie
+
+    salario_id = "149.1_SOR_PRIVADO_0_M_23"
+    salario = serie(
+        salario_id,
+        [(f"2025-{m:02d}-01", 100.0 + m) for m in range(1, 13)]
+        + [(f"2026-{m:02d}-01", 120.0 + m) for m in range(1, 6)],
+        description="Índice de salarios. Sector privado registrado. Mensual.",
+        dataset="Índice de salarios",
+    )
+    api = FakeSeriesApi(ipc_real(), salario)
+    result = await api.adapter().fetch([IPC_ID, salario_id])
+    assert result is not None
+    # El agregado sigue como lo arma el adaptador: lo lee también el modelo.
+    assert result.metadata["fecha_fin_fuente"] == "2026-05-01"
+    assert result.dataset_title.startswith("Índice de Precios al Consumidor")
+
+    [aviso] = freshness_notices([result], HOY, "¿Cómo vienen la inflación y los salarios?")
+    assert "«Índice de salarios. Sector privado registrado. Mensual.»" in aviso
+    assert "mayo de 2026" in aviso
+    assert "Precios al Consumidor" not in aviso
+
+
 @pytest.mark.parametrize(
     ("last", "freq", "label"),
     [
