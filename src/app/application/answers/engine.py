@@ -151,13 +151,15 @@ class EngineResult:
     # Todos los `DataResult` que leyó el motor: contra eso se verifican las
     # cifras de la respuesta.
     evidence: list[Any] = field(default_factory=list, repr=False)
-    # Los que se citan: los que aportaron una cifra o se nombran en el texto
-    # (``answers.verification.select_evidence``). De acá salen las fuentes, los
-    # gráficos, `served_table` y el aviso de atraso. Vacío = toda la evidencia.
+    # Los que se citan: con ANSWERS_VERIFY_MODE=correct, los que aportaron una
+    # cifra o se nombran en el texto (``answers.verification.select_evidence``);
+    # si no, toda la evidencia. De acá salen las fuentes, los gráficos,
+    # `served_table` y el aviso de atraso. Vacío = toda la evidencia.
     cited_evidence: list[Any] = field(default_factory=list, repr=False)
     # De las citadas, las que aportaron alguna cifra respaldada. El aviso de
     # atraso mira éstas: una citada sólo por el título no lo dispara. Vacío =
-    # las citadas.
+    # las citadas. Fuera de correct va vacía si alguna cifra quedó sin
+    # respaldo o no hubo verificación: ante la duda, el aviso mira todo.
     figure_evidence: list[Any] = field(default_factory=list, repr=False)
     # Los títulos de lo que se leyó y no se citó ("consultadas").
     consulted: list[str] = field(default_factory=list)

@@ -497,7 +497,7 @@ def asks_for_named_period(question: str) -> bool:
     return bool(_YEAR_IN_QUESTION_RE.search(text)) and not _CURRENT_INTENT_RE.search(text)
 
 
-def _observation_for(result: Any, today: date, question: str = "") -> ObservationAge | None:
+def _observations_for(result: Any, today: date, question: str = "") -> list[ObservationAge]:
     """La última observación de un resultado, con el contrato de metadatos de los conectores.
 
     Lee ``ultima_observacion``, ``frecuencia``, ``fecha_fin_fuente`` y
@@ -506,38 +506,97 @@ def _observation_for(result: Any, today: date, question: str = "") -> Observatio
     dependen del filtro que eligió el modelo; su atraso lo dice
     ``staleness_warning``), y tampoco los fragmentos de sesiones, que tienen
     fecha pero no son una serie.
+
+    Con varias series en un pedido (``metadata["series"]``) va una por serie.
+    El agregado que arma el adaptador lleva el título del primer dataset, la
+    fecha de fin de la más atrasada y el «desactualizada» de cualquiera: el
+    aviso decía «el último dato del IPC es de mayo de 2026» cuando el IPC
+    llega a agosto y la que terminaba en mayo era el salario real (revisión
+    del 05-oct, H020). Cada serie se mide con su fecha de fin, su última fila
+    con valor y su «actualizada», y el aviso la nombra.
     """
     source = str(getattr(result, "source", "") or "")
     meta = getattr(result, "metadata", None) or {}
     has_contract = any(k in meta for k in _CONTRACT_KEYS)
     if source.startswith("sandbox:"):
-        return None
+        return []
     if not has_contract and getattr(result, "format", "") != "time_series":
-        return None
-    records = list(getattr(result, "records", None) or [])
-    dates = [d for d in (_as_date(r.get("fecha")) for r in records if isinstance(r, dict)) if d]
+        return []
+    records = [r for r in (getattr(result, "records", None) or []) if isinstance(r, dict)]
+    dates = [d for d in (_as_date(r.get("fecha")) for r in records) if d]
     last = _as_date(meta.get("ultima_observacion")) or (max(dates) if dates else None)
     if last is None:
-        return None
-    source_end = _as_date(meta.get("fecha_fin_fuente"))
+        return []
+    frequency = _normalize_frequency(meta.get("frecuencia")) or _infer_frequency(dates)
+    if frequency is None and (meta.get("realtime") or source in _LIVE_SOURCES_DAILY):
+        frequency = "diaria"
+    truncated = bool(meta.get("truncada"))
+    series = [s for s in (meta.get("series") or []) if isinstance(s, dict)]
+    if len(series) < 2:
+        age = _observation_age(
+            last,
+            meta.get("fecha_fin_fuente"),
+            frequency,
+            meta.get("actualizada_en_fuente"),
+            title=str(getattr(result, "dataset_title", "") or ""),
+            truncated=truncated,
+            question=question,
+            today=today,
+        )
+        return [age] if age is not None else []
+    out: list[ObservationAge] = []
+    for entry in series:
+        title = str(entry.get("titulo") or entry.get("id") or "")
+        # Las filas traen cada serie bajo su título (o su id, si no tiene).
+        keys = {k for k in (entry.get("titulo"), entry.get("id")) if k}
+        with_value = (r for r in records if any(r.get(k) is not None for k in keys))
+        age = _observation_age(
+            max(filter(None, (_as_date(r.get("fecha")) for r in with_value)), default=last),
+            entry.get("fecha_fin_fuente"),
+            # Las fechas de las filas van en la frecuencia de la respuesta; la
+            # de la serie, sólo si no se sabe otra.
+            frequency or _normalize_frequency(entry.get("frecuencia")),
+            entry.get("actualizada_en_fuente"),
+            title=title,
+            truncated=truncated,
+            question=question,
+            today=today,
+        )
+        if age is not None:
+            out.append(age)
+    return out
+
+
+def _observation_age(
+    last: date,
+    source_end_value: Any,
+    frequency: str | None,
+    updated: Any,
+    *,
+    title: str,
+    truncated: bool,
+    question: str,
+    today: date,
+) -> ObservationAge | None:
+    """El atraso de una serie, o None si lo que se trajo es un período pedido a propósito."""
+    source_end = _as_date(source_end_value)
     # Si la fuente llega más lejos que lo que se trajo y no fue un corte, la
-    # pregunta pidió un período pasado: no es un dato atrasado.
-    if source_end is not None and last < source_end and not meta.get("truncada"):
+    # pregunta pidió un período pasado: no es un dato atrasado. Se compara el
+    # fin del período de la última fila: una diaria pedida junto con una
+    # mensual llega agregada por mes, fechada el 1.º, y su fecha de fin en la
+    # fuente es un día de ese mismo mes.
+    if source_end is not None and _period_end(last, frequency or "") < source_end and not truncated:
         return None
     # Sin la fecha de fin de la fuente no se distingue "la serie termina acá"
     # de "se pidió hasta acá": si la pregunta nombra un período, no se avisa.
     if source_end is None and asks_for_named_period(question):
         return None
-    frequency = _normalize_frequency(meta.get("frecuencia")) or _infer_frequency(dates)
-    if frequency is None and (meta.get("realtime") or source in _LIVE_SOURCES_DAILY):
-        frequency = "diaria"
-    updated = meta.get("actualizada_en_fuente")
     return observation_staleness(
         source_end or last,
         frequency,
         today,
         updated_at_source=updated if isinstance(updated, bool) else None,
-        title=str(getattr(result, "dataset_title", "") or ""),
+        title=title,
     )
 
 
@@ -601,14 +660,15 @@ def freshness_notices(
     seen: set[str] = set()
     for result in evidence:
         try:
-            age = _observation_for(result, day, question)
+            ages = _observations_for(result, day, question)
         except Exception:
             logger.debug("freshness: could not date %r", result, exc_info=True)
             continue
-        if age is None or not age.stale or age.title in seen:
-            continue
-        seen.add(age.title)
-        out.append(_notice(age))
-        if len(out) >= _MAX_NOTICES:
-            break
+        for age in ages:
+            if not age.stale or age.title in seen:
+                continue
+            seen.add(age.title)
+            out.append(_notice(age))
+            if len(out) >= _MAX_NOTICES:
+                return out
     return out
