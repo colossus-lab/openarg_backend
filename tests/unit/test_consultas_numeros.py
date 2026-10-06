@@ -20,6 +20,7 @@ import pytest
 
 from app.application.consultas.numeros import (
     ESPACIOS,
+    RE_AMBIGUO,
     RE_AMBIGUO_COMA,
     RE_AMBIGUO_PUNTO,
     RE_AR,
@@ -321,12 +322,20 @@ class TestExpresionSQL:
         assert {chr(int(c)) for c in re.findall(r"chr\((\d+)\)", LIMPIO)} == set(ESPACIOS)
 
     def test_condicion_de_ambiguo(self) -> None:
-        """H041: el cálculo cuenta aparte las filas con un número ambiguo."""
+        """H041: el cálculo cuenta aparte las filas con un número ambiguo. Con
+        un solo regex (revisión del PR #148: dos `btrim` y dos regex por fila
+        eran la mitad del costo de la cuenta)."""
         x = LIMPIO.format("monto")
-        assert expresion_ambiguo("monto", "text") == (
-            f"({x} ~ '{RE_AMBIGUO_PUNTO}' OR {x} ~ '{RE_AMBIGUO_COMA}')"
-        )
+        assert expresion_ambiguo("monto", "text") == f"({x} ~ '{RE_AMBIGUO}')"
         assert expresion_ambiguo("monto", "numeric") is None
+
+    @pytest.mark.parametrize(
+        "valor",
+        ["12.500", "-59.796", "1,250", "+999,000", "0.500", "1234.567", "12.5", "1.234.567", "x"],
+    )
+    def test_el_regex_de_ambiguo_es_la_union_de_los_dos(self, valor: str) -> None:
+        dos = bool(re.match(RE_AMBIGUO_PUNTO, valor) or re.match(RE_AMBIGUO_COMA, valor))
+        assert bool(re.match(RE_AMBIGUO, valor)) == dos
 
     def test_formato_desconocido_deja_los_ambiguos_en_null(self) -> None:
         sql = expresion_numero("x", "text", None)

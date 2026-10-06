@@ -23,6 +23,7 @@ un error en ``ToolInputError``, el router en un 400 con su mensaje.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -31,7 +32,6 @@ from app.application.answers.aggregates import (
     COLUMNAS_DE_CONTROL,
     FILAS,
     FILAS_AMBIGUAS,
-    FILAS_AMBIGUAS_TOTAL,
     FILAS_CON_VALOR,
     FILAS_CON_VALOR_TOTAL,
     FILAS_TOTAL,
@@ -55,6 +55,8 @@ __all__ = [
     "agregar",
     "normalizar_operacion",
 ]
+
+logger = logging.getLogger(__name__)
 
 # Corre SQL armado por nuestro código con sus valores ligados; levanta la
 # excepción que el consumidor quiera mostrar si el sandbox lo rechaza.
@@ -164,6 +166,28 @@ def _por_que_sin_valor(cuales: str, filas: int, ambiguas: int, valorada: str | N
     )
 
 
+# Si no se pudieron contar los ambiguos (la consulta aparte falló, p. ej. por
+# timeout en una tabla grande), no se sabe cuál de las dos cosas pasa: se
+# dicen las dos.
+_SIN_CONTAR = "o tienen uno que se puede leer de dos formas (como «12.500»)"
+
+
+async def _contar_ambiguas(
+    sql: str, params: Mapping[str, Any], ejecutar: EjecutarSQL, maximo: int
+) -> int | None:
+    """Cuántas de las ``maximo`` filas sin valor tienen un número ambiguo.
+
+    None si la consulta falla: el cálculo ya está hecho y no se lo pierde por
+    un dato del aviso.
+    """
+    try:
+        rows = await ejecutar(sql, params)
+    except Exception:
+        logger.warning("consultas: no se pudieron contar los números ambiguos", exc_info=True)
+        return None
+    return min(int(rows[0].get(FILAS_AMBIGUAS) or 0), maximo) if rows else 0
+
+
 def _descripcion(req: AggregateRequest) -> str:
     what = req.operacion + (f" de {req.columna}" if req.columna else "")
     if req.ponderar_por:
@@ -230,15 +254,24 @@ async def agregar(sandbox: Any, pedido: PedidoAgregado, ejecutar: EjecutarSQL) -
         if controlado and FILAS_CON_VALOR in rows[0]
         else None
     )
-    ambiguas = (
-        _filas_del_calculo(rows, FILAS_AMBIGUAS, FILAS_AMBIGUAS_TOTAL)
-        if controlado and FILAS_AMBIGUAS in rows[0]
-        else 0
-    )
     # Con más grupos que `limite` y sin el total de todos los grupos (un
     # sandbox que no lo devuelve), la suma es sólo de los grupos mostrados:
     # no se la presenta como el total del cálculo.
     parcial = truncado and not (rows and rows[0].get(FILAS_TOTAL) is not None)
+    # Las filas con un número ambiguo se cuentan aparte y sólo si faltan filas
+    # con valor (ver `AggregateQuery.sql_ambiguas`). Con `parcial`, las filas
+    # con valor son de los grupos mostrados y la cuenta sería de todos.
+    ambiguas: int | None = 0
+    if (
+        query.sql_ambiguas is not None
+        and total
+        and con_valor is not None
+        and con_valor < total
+        and not parcial
+    ):
+        ambiguas = await _contar_ambiguas(
+            query.sql_ambiguas, query.params, ejecutar, total - con_valor
+        )
     notas = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
     aviso_fecha = aviso_formato_guardado(query.fecha) if (query.desde or query.hasta) else None
     if aviso_fecha:
@@ -288,6 +321,12 @@ async def agregar(sandbox: Any, pedido: PedidoAgregado, ejecutar: EjecutarSQL) -
                 f"Ninguna de las {total} filas que cumplen los filtros entró en el cálculo: "
                 f"{por_que}. No hay valor que informar."
             )
+        elif ambiguas is None:
+            resultado.aviso = (
+                f"Ninguna de las {total} filas que cumplen los filtros entró en el cálculo: "
+                f"no tienen un número reconocible en {valorada!r} {_SIN_CONTAR}. No hay valor "
+                "que informar."
+            )
         else:
             resultado.aviso = (
                 f"Ninguna de las {total} filas que cumplen los filtros tiene un número "
@@ -306,6 +345,11 @@ async def agregar(sandbox: Any, pedido: PedidoAgregado, ejecutar: EjecutarSQL) -
             por_que = _por_que_sin_valor("las otras", otras, ambiguas, valorada)
             resultado.avisos.append(
                 f"Se calculó sobre {con_valor} de {total} filas{donde}: {por_que}."
+            )
+        elif ambiguas is None:
+            resultado.avisos.append(
+                f"Se calculó sobre {con_valor} de {total} filas{donde}: las otras {otras} no "
+                f"tienen un número reconocible en {valorada!r} {_SIN_CONTAR}."
             )
         else:
             resultado.avisos.append(

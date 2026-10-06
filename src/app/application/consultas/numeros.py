@@ -49,6 +49,8 @@ RE_ENTERO = r"^[+-]?[0-9]+$"
 RE_AMBIGUO_PUNTO = r"^[+-]?[1-9][0-9]{0,2}\.[0-9]{3}$"
 # "1,250": decimal argentino o miles ingleses.
 RE_AMBIGUO_COMA = r"^[+-]?[1-9][0-9]{0,2},[0-9]{3}$"
+# Cualquiera de los dos, en un solo regex (para contarlos: ver `expresion_ambiguo`).
+RE_AMBIGUO = r"^[+-]?[1-9][0-9]{0,2}[.,][0-9]{3}$"
 # Sólo argentino: coma decimal (con o sin puntos de miles) o dos grupos de miles.
 RE_AR = r"^[+-]?(([0-9]{1,3}(\.[0-9]{3})+|[0-9]+),[0-9]+|[0-9]{1,3}(\.[0-9]{3}){2,})$"
 # Sólo inglés: punto decimal (con o sin comas de miles) o dos grupos de miles.
@@ -230,12 +232,13 @@ def expresion_ambiguo(columna: str, tipo: str) -> str | None:
 
     Con el formato sin decidir, esas filas quedan en NULL en
     ``expresion_numero``: el cálculo las cuenta aparte para no decir que "no
-    tienen un número" (H041). None si la columna ya es numérica.
+    tienen un número" (H041). None si la columna ya es numérica. Un solo
+    ``btrim`` y un solo regex por fila: con dos de cada uno la cuenta costaba
+    el doble (revisión del PR #148).
     """
     if es_tipo_numerico(tipo):
         return None
-    x = _texto(columna)
-    return f"({x} ~ '{RE_AMBIGUO_PUNTO}' OR {x} ~ '{RE_AMBIGUO_COMA}')"
+    return f"({_texto(columna)} ~ '{RE_AMBIGUO}')"
 
 
 def leer_numero(valor: object, formato: str | None = None) -> Decimal | None:

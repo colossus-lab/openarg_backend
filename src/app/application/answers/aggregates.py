@@ -13,9 +13,9 @@ operación, columnas y filtros, y este módulo arma la consulta:
 - la consulta cuenta cuántas filas entraron en el cálculo (``__filas``) y
   cuántas tenían un número (``__filas_con_valor``): sin eso, un filtro que no
   encontraba nada devolvía ``valor = 0`` o ``None``, indistinguible de un dato.
-  Si la columna es de texto y su formato no se decidió, cuenta también las
-  filas con un número ambiguo (``__filas_ambiguas``), que quedaron afuera
-  aunque tengan número.
+  Si la columna es de texto y su formato no se decidió, arma además una
+  consulta aparte que cuenta las filas con un número ambiguo
+  (``__filas_ambiguas``), que quedaron afuera aunque tengan número.
 
 Existe por el caso Pinamar: el pipeline viejo contó 7.944 filas de una
 encuesta y las presentó como 7.944 personas. Una encuesta se expande con su
@@ -54,7 +54,6 @@ __all__ = [
     "COLUMNAS_DE_CONTROL",
     "FILAS",
     "FILAS_AMBIGUAS",
-    "FILAS_AMBIGUAS_TOTAL",
     "FILAS_CON_VALOR",
     "FILAS_CON_VALOR_TOTAL",
     "FILAS_TOTAL",
@@ -83,19 +82,11 @@ FILAS_CON_VALOR = "__filas_con_valor"
 # suma de los grupos mostrados no es el total del cálculo.
 FILAS_TOTAL = "__filas_total"
 FILAS_CON_VALOR_TOTAL = "__filas_con_valor_total"
+COLUMNAS_DE_CONTROL = (FILAS, FILAS_CON_VALOR, FILAS_TOTAL, FILAS_CON_VALOR_TOTAL)
 # Filas que quedaron afuera por tener un número ambiguo ("12.500") en una
 # columna de texto cuyo formato no se decidió: no son filas "sin número" y el
-# aviso las cuenta aparte (H041).
+# aviso las cuenta aparte (H041). Las cuenta `AggregateQuery.sql_ambiguas`.
 FILAS_AMBIGUAS = "__filas_ambiguas"
-FILAS_AMBIGUAS_TOTAL = "__filas_ambiguas_total"
-COLUMNAS_DE_CONTROL = (
-    FILAS,
-    FILAS_CON_VALOR,
-    FILAS_TOTAL,
-    FILAS_CON_VALOR_TOTAL,
-    FILAS_AMBIGUAS,
-    FILAS_AMBIGUAS_TOTAL,
-)
 
 
 @dataclass(frozen=True)
@@ -137,6 +128,13 @@ class AggregateQuery:
     limite: int
     desde: str | None = None
     hasta: str | None = None
+    # Cuenta las filas con un número ambiguo que el cálculo no leyó (texto sin
+    # formato decidido), con los mismos filtros y sin agrupar; usa `params`.
+    # None si no hay columnas así. Es otra consulta, para correrla sólo si
+    # faltan filas con valor: en el SELECT principal eran dos regex más por
+    # fila en el caso común (texto con enteros, 0 ambiguos), y la suma de
+    # 5,35 M de filas pasaba de 9-11 s a 16-20 s (revisión del PR #148).
+    sql_ambiguas: str | None = None
 
 
 def numeric_columns(req: AggregateRequest) -> list[str]:
@@ -196,8 +194,8 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
     nombre; ``__filas`` y ``__filas_con_valor`` dicen sobre cuántas filas se
     calculó cada grupo, y con agrupación ``__filas_total`` y
     ``__filas_con_valor_total``, sobre cuántas en todos (también los que el
-    LIMIT deja afuera). ``__filas_ambiguas`` (y su ``_total``) cuenta las
-    filas con un número ambiguo que no se leyó por falta de formato.
+    LIMIT deja afuera). ``sql_ambiguas`` cuenta aparte las filas con un número
+    ambiguo que no se leyó por falta de formato.
     """
     types = {c: t for c, t in req.column_types if not is_internal_column(c)}
     if not types:
@@ -251,29 +249,27 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
     )
 
     measure, counted = _measure(req, types)
-    ambiguas = _ambiguas(req, types)
     select = [quote_ident(g) for g in groups] + [f"{measure} AS valor", f"count(*) AS {FILAS}"]
     columns = [*groups, "valor", FILAS]
     if counted is not None:
         select.append(f"count({counted}) AS {FILAS_CON_VALOR}")
         columns.append(FILAS_CON_VALOR)
-    if ambiguas is not None:
-        select.append(f"count(*) FILTER (WHERE {ambiguas}) AS {FILAS_AMBIGUAS}")
-        columns.append(FILAS_AMBIGUAS)
     if groups:
         select.append(f"sum(count(*)) OVER () AS {FILAS_TOTAL}")
         columns.append(FILAS_TOTAL)
         if counted is not None:
             select.append(f"sum(count({counted})) OVER () AS {FILAS_CON_VALOR_TOTAL}")
             columns.append(FILAS_CON_VALOR_TOTAL)
-        if ambiguas is not None:
-            select.append(
-                f"sum(count(*) FILTER (WHERE {ambiguas})) OVER () AS {FILAS_AMBIGUAS_TOTAL}"
-            )
-            columns.append(FILAS_AMBIGUAS_TOTAL)
     sql = f"SELECT {', '.join(select)} FROM {quote_qualified(req.table)}"
     if where:
         sql += " WHERE " + " AND ".join(where)
+    ambiguas = _ambiguas(req, types)
+    sql_ambiguas = (
+        f"SELECT count(*) AS {FILAS_AMBIGUAS} FROM {quote_qualified(req.table)} WHERE "
+        + " AND ".join([*where, f"({ambiguas})"])
+        if ambiguas is not None
+        else None
+    )
     if groups:
         sql += " GROUP BY " + ", ".join(quote_ident(g) for g in groups)
         if ordenar_por == "valor":
@@ -294,4 +290,5 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
         limite=int(req.limite),
         desde=desde,
         hasta=hasta,
+        sql_ambiguas=sql_ambiguas,
     )
