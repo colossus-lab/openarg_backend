@@ -323,8 +323,7 @@ class TestExpresionSQL:
 
     def test_condicion_de_ambiguo(self) -> None:
         """H041: el cálculo cuenta aparte las filas con un número ambiguo. Con
-        un solo regex (revisión del PR #148: dos `btrim` y dos regex por fila
-        eran la mitad del costo de la cuenta)."""
+        un solo `btrim` y un solo regex por fila (revisión del PR #148)."""
         x = LIMPIO.format("monto")
         assert expresion_ambiguo("monto", "text") == f"({x} ~ '{RE_AMBIGUO}')"
         assert expresion_ambiguo("monto", "numeric") is None

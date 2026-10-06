@@ -233,8 +233,8 @@ def expresion_ambiguo(columna: str, tipo: str) -> str | None:
     Con el formato sin decidir, esas filas quedan en NULL en
     ``expresion_numero``: el cálculo las cuenta aparte para no decir que "no
     tienen un número" (H041). None si la columna ya es numérica. Un solo
-    ``btrim`` y un solo regex por fila: con dos de cada uno la cuenta costaba
-    el doble (revisión del PR #148).
+    ``btrim`` y un solo regex por fila, no dos de cada uno (revisión del PR
+    #148: la cuenta recorre la tabla entera).
     """
     if es_tipo_numerico(tipo):
         return None
