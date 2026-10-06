@@ -690,7 +690,7 @@ async def test_el_desempleo_se_guarda_en_porcentaje_como_lo_da_el_conector():
     with httpx.Client(transport=httpx.MockTransport(api.handler)) as c:
         meta = st.consultar_metadatos(c, DESEMPLEO_ID)
         columna = st.nombre_columna(meta.descripcion, "desempleo")
-        df = st.armar_dataframe(st.descargar_serie(c, DESEMPLEO_ID), columna, serie_id=DESEMPLEO_ID)
+        df = st.armar_dataframe(st.descargar_serie(c, DESEMPLEO_ID), columna, meta=meta)
 
     assert columna == "Tasa de desempleo total. En porcentaje."
     assert df[columna].tolist() == [r[columna] for r in en_vivo.records]
@@ -699,7 +699,7 @@ async def test_el_desempleo_se_guarda_en_porcentaje_como_lo_da_el_conector():
 
 def test_una_serie_que_no_es_fraccion_no_se_escala():
     df = st.armar_dataframe(
-        [["2026-08-31", 1350.25], ["2026-09-01", 0.5]], "TC", serie_id=TIPO_CAMBIO_ID
+        [["2026-08-31", 1350.25], ["2026-09-01", 0.5]], "TC", meta=_meta(serie_id=TIPO_CAMBIO_ID)
     )
     assert df["TC"].tolist() == [1350.25, 0.5]
 
