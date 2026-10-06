@@ -321,12 +321,14 @@ class DeclaracionesJuradas:
             "ni lo atribuyas a nada: describí cifras con nombre y año. "
             "Una fila con `inconsistente: true` (total de bienes) o `ingresos_inconsistentes: "
             "true` es un registro del dataset con cifras que no cierran con la propia DDJJ, "
-            "probable error de carga no verificado (el motivo está en la fila): no es comparable "
-            "y el ranking y las estadísticas ya la excluyen (`excluidas_por_inconsistencia` dice "
-            "cuántas). No uses esa cifra, no le calcules variación, nunca la presentes como "
-            "enriquecimiento y no nombres a la persona excluida salvo que pregunten por ella; si "
-            "preguntan, decí que en el dataset esa cifra de su DDJJ no cierra con el resto de la "
-            "declaración, sin atribuírselo a la persona."
+            "probable error de carga no verificado (el motivo está en la fila), y esa cifra no es "
+            "comparable. `inconsistente` la saca de rankings y estadísticas; "
+            "`ingresos_inconsistentes`, sólo del ranking por ingresos: sus bienes cierran y sigue "
+            "en los demás rankings y en las estadísticas (`excluidas_por_inconsistencia` dice "
+            "cuántas se excluyeron). No uses esa cifra, no le calcules variación, nunca la "
+            "presentes como enriquecimiento y no nombres a la persona excluida salvo que pregunten "
+            "por ella; si preguntan, decí que en el dataset esa cifra de su DDJJ no cierra con el "
+            "resto de la declaración, sin atribuírselo a la persona."
         ),
         input_schema={
             "type": "object",

@@ -48,6 +48,21 @@ def _looks_like_mixed_quote_snapshot(
     return len(set(x_values)) < len(x_values)
 
 
+def _ddjj_not_comparable(row: dict[str, Any], numeric_keys: list[str]) -> bool:
+    """H005: una DDJJ cuyas cifras no cierran no va a un gráfico.
+
+    Sin la tarjeta, la barra seguía en ``chart_data``: el total de bienes que no
+    cierra (31.251 M) quedaba 11,8 veces por encima del siguiente. Con
+    ``ingresos_inconsistentes`` sólo sus ingresos no son comparables: sale si el
+    eje es de ingresos.
+    """
+    if row.get("inconsistente"):
+        return True
+    return bool(row.get("ingresos_inconsistentes")) and any(
+        "ingreso" in k.lower() for k in numeric_keys
+    )
+
+
 def build_deterministic_charts(
     results: list[DataResult], max_charts: int = 4
 ) -> list[dict[str, Any]]:
@@ -139,6 +154,8 @@ def build_deterministic_charts(
                 numeric_keys = numeric_keys[:1]
 
         clean = [row for row in result.records if any(row.get(k) is not None for k in numeric_keys)]
+        if result.source.startswith("ddjj:"):
+            clean = [row for row in clean if not _ddjj_not_comparable(row, numeric_keys)]
         if len(clean) < 2:
             continue
 

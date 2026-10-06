@@ -28,6 +28,17 @@ Y lo que pidió la revisión de #150/#151:
   después de los gastos multiplica por cien los bienes) quedan fuera del
   ranking por ingresos;
 - la descripción de la herramienta prohíbe calificar variaciones.
+
+Y lo que pidió la segunda revisión:
+
+- la cifra que no cierra tampoco sale en el gráfico (``chart_data``), que el
+  frontend dibuja aparte de las tarjetas;
+- el aviso de exclusión le llega al modelo aunque pida 50 filas: las filas
+  van al final del contenido y enteras, y las del ranking llevan la marca
+  sólo cuando vale true (con las dos marcas en false, el top 20 pasaba el
+  tope y el modelo leía el último patrimonio a medias);
+- en un ranking, las tarjetas conservan su puesto (el frontend las numera
+  por posición).
 """
 
 from __future__ import annotations
@@ -38,11 +49,17 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.application.answers.engine import EngineRequest
-from app.application.answers.tools.base import ToolContext
+from app.application.answers.tools.base import (
+    MAX_CONTENT_CHARS,
+    ToolContext,
+    result_for_model,
+    to_json,
+)
 from app.application.answers.tools.conectores import DeclaracionesJuradas
+from app.application.pipeline.chart_builder import build_deterministic_charts
 from app.application.pipeline.connectors.ddjj import execute_ddjj_step
 from app.application.pipeline.nodes.finalize import _extract_documents
-from app.domain.entities.connectors.data_result import PlanStep
+from app.domain.entities.connectors.data_result import DataResult, PlanStep
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 
 M = 1_000_000
@@ -188,7 +205,8 @@ def test_el_ranking_excluye_la_inconsistente_y_lo_dice(
     result = adapter.ranking(sort_by=sort_by, top=10, order=order)
     assert "LOPEZ CARLOS" not in _names(result.records)
     assert len(result.records) == 2
-    assert all(r["inconsistente"] is False for r in result.records)
+    # Las filas compactas del ranking llevan la marca sólo cuando vale true.
+    assert all("inconsistente" not in r for r in result.records)
     # Al modelo le llega cuántas; el nombre queda sólo para auditoría.
     assert result.metadata["excluidas_por_inconsistencia"] == 1
     assert result.metadata["excluidas_por_inconsistencia_nombres"] == ["LOPEZ CARLOS"]
@@ -528,3 +546,209 @@ def test_la_descripcion_de_la_herramienta_prohibe_calificar_variaciones() -> Non
         "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
         "ni lo atribuyas a nada: describí cifras con nombre y año."
     ) in description
+
+
+def test_la_descripcion_dice_que_los_ingresos_solo_excluyen_del_ranking_por_ingresos() -> None:
+    """Quien tiene sólo `ingresos_inconsistentes` sigue en los rankings por
+    patrimonio y bienes y en las estadísticas: la descripción no puede decir
+    que la excluyen."""
+    description = DeclaracionesJuradas.spec.description
+    assert "el ranking y las estadísticas ya la excluyen" not in description
+    assert "`ingresos_inconsistentes`, sólo del ranking por ingresos" in description
+    assert "sigue en los demás rankings y en las estadísticas" in description
+
+
+# ── el gráfico ─────────────────────────────────────────────
+
+
+def _bars(charts: list[dict]) -> list[str]:
+    return [row["nombre"] for chart in charts for row in chart["data"]]
+
+
+def test_real_el_grafico_de_una_busqueda_no_lleva_la_carga_erronea(real: DDJJAdapter) -> None:
+    """«juan» trae a Brugge con otros cinco: su barra de 31.251 M quedaba 11,8
+    veces por encima de la siguiente, en ``chart_data``, aunque ya no tuviera
+    tarjeta."""
+    result = real.search("juan", 10)
+    assert "BRUGGE JUAN FERNANDO" in _names(result.records)
+    charts = build_deterministic_charts([result])
+    assert [c["yKeys"] for c in charts] == [["patrimonio_cierre"]]
+    assert "BRUGGE JUAN FERNANDO" not in _bars(charts)
+    # El resto sigue en el gráfico.
+    assert len(_bars(charts)) == len(result.records) - 1
+
+
+async def test_herramienta_buscar_el_grafico_del_agente_no_lleva_la_carga_erronea(
+    real: DDJJAdapter,
+) -> None:
+    """El camino del agente: agent_engine arma ``chart_data`` con
+    ``build_deterministic_charts(evidence)``, y la evidencia es ``out.results``."""
+    out = await DeclaracionesJuradas().run({"accion": "buscar", "nombre": "fernando"}, _ctx(real))
+    charts = build_deterministic_charts(out.results)
+    assert charts
+    assert not any("BRUGGE" in nombre for nombre in _bars(charts))
+
+
+def _ddjj_result(records: list[dict]) -> DataResult:
+    return DataResult(
+        source="ddjj:oficina_anticorrupcion",
+        portal_name="DDJJ",
+        portal_url="",
+        dataset_title="Ranking",
+        format="json",
+        records=records,
+    )
+
+
+def test_los_ingresos_que_no_cierran_salen_solo_de_un_grafico_de_ingresos(
+    con_ingresos: DDJJAdapter,
+) -> None:
+    # Por patrimonio sus bienes cierran: sigue en el gráfico.
+    charts = build_deterministic_charts([con_ingresos.search("", limit=10)])
+    assert charts[0]["yKeys"] == ["patrimonio_cierre"]
+    assert "RUIZ MARTA" in _bars(charts)
+    # Con eje de ingresos, no.
+    filas = [
+        {"nombre": r["nombre"], "ingresos_trabajo_neto": r["ingresos_trabajo_neto"]}
+        | ({"ingresos_inconsistentes": True} if r["ingresos_inconsistentes"] else {})
+        for r in con_ingresos.search("", limit=10).records
+    ]
+    charts = build_deterministic_charts([_ddjj_result(filas)])
+    assert charts[0]["yKeys"] == ["ingresos_trabajo_neto"]
+    assert "RUIZ MARTA" not in _bars(charts)
+    assert len(_bars(charts)) == 3
+
+
+def test_la_marca_solo_filtra_el_grafico_de_las_ddjj() -> None:
+    """Una tabla cualquiera con una columna `inconsistente` no pierde filas."""
+    filas = [
+        {"nombre": "A", "total": 1, "inconsistente": True},
+        {"nombre": "B", "total": 2, "inconsistente": False},
+    ]
+    result = _ddjj_result(filas)
+    result.source = "sandbox:nl2sql"
+    assert _bars(build_deterministic_charts([result])) == ["A", "B"]
+
+
+# ── lo que lee el modelo de un ranking largo ───────────────
+
+
+def test_las_filas_del_ranking_llevan_la_marca_solo_si_vale_true(
+    con_ingresos: DDJJAdapter,
+) -> None:
+    filas = {r["nombre"]: r for r in con_ingresos.ranking(sort_by="patrimonio", top=10).records}
+    assert filas["RUIZ MARTA"]["ingresos_inconsistentes"] is True
+    assert filas["RUIZ MARTA"]["motivo_inconsistencia_ingresos"]
+    for nombre in ("PEREZ JUAN", "GOMEZ ANA", "DIAZ PEDRO"):
+        assert "inconsistente" not in filas[nombre]
+        assert "ingresos_inconsistentes" not in filas[nombre]
+    # En `buscar` (filas completas) van las dos, también en false.
+    [diaz] = con_ingresos.search("diaz").records
+    assert diaz["inconsistente"] is False
+    assert diaz["ingresos_inconsistentes"] is False
+
+
+@pytest.mark.parametrize("ordenar_por", ["patrimonio", "ingresos"])
+@pytest.mark.parametrize("cantidad", [20, 50])
+async def test_herramienta_ranking_largo_entra_entero_y_con_el_aviso(
+    real: DDJJAdapter, ordenar_por: str, cantidad: int
+) -> None:
+    """Con 20 filas el JSON pasaba el tope de 12.000 caracteres: el modelo
+    perdía la descripción y `excluidas_por_inconsistencia`, y leía el
+    patrimonio de la fila 20 cortado («59165042…» por 591.650.425,38)."""
+    out = await DeclaracionesJuradas().run(
+        {"accion": "ranking", "ordenar_por": ordenar_por, "cantidad": cantidad}, _ctx(real)
+    )
+    assert len(out.content) <= MAX_CONTENT_CHARS
+    payload = json.loads(out.content)  # JSON válido: no se cortó nada
+    [result] = out.results
+    # El aviso llega, y antes que las filas. Por ingresos, el top 50 excluye
+    # también a Brugge (35.º): cuántas, nunca quiénes.
+    excluidas = result.metadata["excluidas_por_inconsistencia_nombres"]
+    assert payload["excluidas_por_inconsistencia"] == len(excluidas) >= 1
+    assert not any(nombre in out.content for nombre in excluidas)
+    assert "probable error de carga" in payload["descripcion"]
+    assert out.content.index('"excluidas_por_inconsistencia"') < out.content.index('"filas"')
+    # Cada fila que ve el modelo está entera, con sus números tal cual.
+    filas = payload["filas"]
+    assert filas == result.records[: len(filas)]
+    assert payload["filas_totales"] == cantidad == len(result.records)
+    if cantidad == 20:
+        assert len(filas) == 20
+        assert "nota" not in payload
+    else:
+        # 50 filas no entran: se sacan filas enteras del final y se dice.
+        assert 0 < len(filas) < 50
+        assert payload["nota"] == f"Se muestran {len(filas)} de 50 filas."
+
+
+def _result(records: list[dict], **metadata: object) -> DataResult:
+    return DataResult(
+        source="x",
+        portal_name="Fuente",
+        portal_url="",
+        dataset_title="Tabla",
+        format="json",
+        records=records,
+        metadata=dict(metadata),
+    )
+
+
+def test_result_for_model_pone_las_filas_al_final_y_enteras() -> None:
+    filas = [{"id": i, "texto": "x" * 1_000} for i in range(30)]
+    payload = result_for_model(_result(filas, description="Aviso."), aviso_extra=1)
+    assert list(payload)[-1] == "filas"
+    content = to_json(payload)
+    assert len(content) <= MAX_CONTENT_CHARS
+    vuelta = json.loads(content)
+    assert vuelta["descripcion"] == "Aviso."
+    assert vuelta["aviso_extra"] == 1
+    assert vuelta["filas"] == filas[: len(vuelta["filas"])]
+    assert vuelta["nota"] == f"Se muestran {len(vuelta['filas'])} de 30 filas."
+
+
+def test_result_for_model_sin_cambios_cuando_entra() -> None:
+    filas = [{"id": i} for i in range(5)]
+    payload = result_for_model(_result(filas, description="d", units="pesos"))
+    assert payload == {
+        "titulo": "Tabla",
+        "fuente": "Fuente",
+        "filas_totales": 5,
+        "unidades": "pesos",
+        "descripcion": "d",
+        "filas": filas,
+    }
+
+
+def test_result_for_model_una_fila_que_sola_no_entra_igual_va() -> None:
+    """Sin ninguna fila el modelo no tendría nada que leer: va la primera y
+    `to_json` la corta, como antes, pero la descripción ya llegó."""
+    filas = [{"texto": "x" * 20_000}, {"texto": "y"}]
+    payload = result_for_model(_result(filas, description="Aviso."))
+    assert payload["filas"] == filas[:1]
+    assert payload["nota"] == "Se muestran 1 de 2 filas."
+    assert '"descripcion":"Aviso."' in to_json(payload)
+
+
+# ── las tarjetas de un ranking ─────────────────────────────
+
+
+def test_real_las_tarjetas_de_un_ranking_conservan_su_puesto(real: DDJJAdapter) -> None:
+    """OSUNA entra 48.ª por menos bienes (sus bienes cierran) pero no lleva
+    tarjeta por sus ingresos. El frontend numera las tarjetas por posición: si
+    se la salteaba, la tarjeta #48 mostraba a quien está 49.º. Las tarjetas se
+    cortan antes de ella."""
+    result = real.ranking(sort_by="bienes", top=50, order="asc")
+    nombres = _names(result.records)
+    assert nombres.index("OSUNA BLANCA INES") == 47
+    documents = _extract_documents([result]) or []
+    assert _names(documents) == nombres[:47]
+
+
+def test_en_una_busqueda_la_fila_sin_tarjeta_no_corta_las_demas(
+    con_ingresos: DDJJAdapter,
+) -> None:
+    """Una búsqueda no es un ranking: se saltea la fila y siguen las demás."""
+    con_ingresos._dataset.insert(0, CARGA_ERRONEA)
+    documents = _extract_documents([con_ingresos.search("", limit=10)]) or []
+    assert _names(documents) == ["PEREZ JUAN", "GOMEZ ANA", "DIAZ PEDRO"]
