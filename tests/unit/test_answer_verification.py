@@ -423,6 +423,39 @@ def test_un_titulo_generico_no_cita_una_serie_vieja() -> None:
     assert cited == [base, otra]  # nada nombrado ni con cifras: se citan todas
 
 
+def test_el_aviso_fuera_de_correct_deja_afuera_solo_lo_homonimo() -> None:
+    """Revisión de #146: fuera de correct, con todas las cifras respaldadas, el
+    aviso de atraso mira todo lo leído menos lo que no aportó cifras y se
+    llama igual que algo que sí (92.2 al lado de 92.1). Lo que no aportó
+    cifras y se llama distinto sigue contando, y un título vacío no es «el
+    mismo título»."""
+    reservas = "Reservas internacionales y pasivos del BCRA"
+    homonima = _dr(reservas, [{"fecha": "2026-08-31", "v": 39912.0}], url="u/92.2")
+    al_dia = _dr(reservas, [{"fecha": "2026-10-05", "v": 41234.0}], url="u/92.1")
+    dolar = _dr("Tipo de cambio de referencia", [{"fecha": "2024-12-30", "v": 1031.56}])
+    answer = "Las reservas eran de USD 41.234 millones."
+    check = verify_figures(answer, [homonima, al_dia, dolar])
+    assert v.figure_evidence([homonima, al_dia, dolar], check) == [al_dia]
+    assert v.dated_evidence([homonima, al_dia, dolar], check) == [al_dia, dolar]
+    usada, leida = _dr("", [{"v": 41234.0}], url="u/1"), _dr("", [{"v": 7.0}], url="u/2")
+    check = verify_figures(answer, [usada, leida])
+    assert v.dated_evidence([usada, leida], check) == [usada, leida]
+
+
+def test_el_aviso_fuera_de_correct_pone_primero_lo_que_aporto_cifras() -> None:
+    """Revisión de #146: el runner se queda con los dos primeros avisos de
+    atraso y con la primera tabla del catálogo, así que el orden importa. Lo
+    que aportó cifras va primero aunque se haya leído último; lo demás sigue,
+    en el orden en que se leyó."""
+    exportaciones = _dr("Exportaciones", [{"fecha": "2023-12-01", "v": 814.0}], url="u/x")
+    importaciones = _dr("Importaciones", [{"fecha": "2023-12-01", "v": 925.0}], url="u/m")
+    dolar = _dr("Tipo de cambio de referencia", [{"fecha": "2024-12-30", "v": 1031.56}])
+    evidence = [exportaciones, importaciones, dolar]
+    check = verify_figures("El dólar de referencia estaba en $1.031,56.", evidence)
+    assert v.figure_evidence(evidence, check) == [dolar]
+    assert v.dated_evidence(evidence, check) == [dolar, exportaciones, importaciones]
+
+
 def test_seen_numbers_lee_json_y_texto_argentino() -> None:
     seen = seen_numbers('{"a":49700.26,"b":"1.543,18","c":-0.22,"d":1e-05}')
     assert {49700.26, 1543.18, 0.22, 1e-05} <= set(seen)

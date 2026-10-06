@@ -30,10 +30,12 @@ cita todo lo leído y sin citas, como antes del verificador: una falsa alarma
 (una cifra truncada) le sacaba la fuente y el aviso de atraso a un dato viejo,
 y las citas salían ``verified`` sin mirar el período (revisión del 05-oct:
 H019, H082, H083, H100). En ``shadow`` lo que habría elegido queda en el log,
-y el aviso de atraso mira lo que aportó cifras sólo si todas quedaron
-respaldadas; con alguna sin respaldo, todo lo leído (revisión de #146). Con
-``off``, todo lo leído. Lo transversal (caché, historial, aviso de atraso,
-analytics, auditoría) lo hace ``EngineRunner``.
+y si todas las cifras quedaron respaldadas el aviso de atraso deja afuera lo
+que no aportó cifras y se llama igual que algo que sí, y pone primero lo que
+las aportó (revisión de #146); con alguna sin respaldo, todo lo leído. Con
+``off``, todo lo leído. Lo
+transversal (caché, historial, aviso de atraso, analytics, auditoría) lo hace
+``EngineRunner``.
 """
 
 from __future__ import annotations
@@ -75,6 +77,7 @@ from app.application.answers.verification import (
     claim_for,
     confidence_for,
     correction_note,
+    dated_evidence,
     figure_evidence,
     seen_numbers,
     select_evidence,
@@ -480,15 +483,7 @@ class AgentEngine:
             # Fuera de correct la selección queda sólo en el log: se cita todo
             # lo leído y sin citas estructuradas, como antes del verificador.
             cited, consulted, citations, figures = list(evidence), [], [], []
-            # El aviso de atraso: si todas las cifras quedaron respaldadas,
-            # mira sólo lo que las aportó; mirar todo lo leído ponía "Dato
-            # atrasado" por una serie consultada y no usada arriba de una
-            # respuesta al día (revisión de #146). Con alguna sin respaldo
-            # (una falsa alarma, como un truncado) o sin verificación (off),
-            # mira todo lo citado (`dated` vacío): ante la duda, el lado
-            # seguro (H082).
-            if check is None or check.unsupported:
-                dated = []
+            dated = _dated_outside_correct(evidence, check)
         if mode == VERIFY_CORRECT and check is not None and check.unsupported:
             # Después de la vuelta correctiva (o sin tiempo para hacerla):
             # nunca se borra una cifra; se avisa arriba cuáles no se pudieron
@@ -609,6 +604,31 @@ def _choose_sources(
         logger.warning("agent: source selection failed", exc_info=True)
         return list(evidence), [], [], []
     return cited, consulted, citations, figures
+
+
+def _dated_outside_correct(
+    evidence: list[DataResult], check: Verification | None
+) -> list[DataResult]:
+    """Sobre qué se calcula el aviso de atraso fuera de correct (vacío = todo lo citado).
+
+    Con alguna cifra sin respaldo (una falsa alarma, como un truncado) o sin
+    verificación (off), todo lo leído: ante la duda, el lado seguro (H082).
+    Con todas respaldadas, todo lo leído menos lo que no aportó cifras y se
+    llama igual que algo que sí: mirar todo ponía "Dato atrasado" por 92.2,
+    consultada y no usada, arriba de una respuesta al día hecha con 92.1, que
+    se llama igual (revisión de #146). Mirar sólo lo que aportó cifras dejaba
+    afuera una serie vieja usada de verdad cuando su cifra coincidía por azar
+    con otra serie leída (``dated_evidence``). Lo que aportó cifras va
+    primero, para que lo leído antes y no usado no le gane el tope de avisos
+    ni la línea del catálogo. Si algo falla, todo lo leído.
+    """
+    if check is None or check.unsupported:
+        return []
+    try:
+        return dated_evidence(evidence, check)
+    except Exception:
+        logger.warning("agent: dated evidence selection failed", exc_info=True)
+        return []
 
 
 def _verification_log(
