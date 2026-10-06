@@ -20,6 +20,7 @@ OpenArg's public API for **external integrators**. A single endpoint: `POST /api
 | **Plan** | Subscription tier (free / basic / pro) with different rate limits. |
 | **Global free cap** | Aggregated limit of requests/day across ALL free users (`PUBLIC_API_GLOBAL_DAILY_CAP`, default 300). It is the Bedrock spending ceiling of the public API. |
 | **IP cap** | Limit of requests/day per client IP (`PUBLIC_API_IP_DAILY_LIMIT`, default 30, across all plans). |
+| **Unbilled runs cap** | Limit per person and UTC day of model runs that are not charged — timeout, error, clarification, empty answer (`PUBLIC_API_USER_UNBILLED_DAILY_LIMIT`, default 20, across all plans). Reserved on entry before the IP and global caps; given back when the answer is charged, when the turn did not use the model, or when a later check rejects the request. Over the cap: 429 with `Retry-After` until 00:00 UTC. Without it, one free key rotating ~10 IPs drained the global free cap for everyone (H108, 2026-10-05). |
 | **UTC day** | Daily counters are keyed by the UTC date (`…:day:YYYY-MM-DD`) and reset at 00:00 UTC (21:00 in Argentina). |
 
 ## 3. User Stories

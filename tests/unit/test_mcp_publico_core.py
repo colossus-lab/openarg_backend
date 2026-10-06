@@ -103,6 +103,16 @@ class TestErrorMessages:
             429, "Too many requests from this IP. Try again tomorrow."
         )
 
+    def test_unbilled_runs_quota(self) -> None:
+        """H108: el tope diario de corridas no cobradas se renueva a las 00 UTC."""
+        msg = core.error_message(
+            429,
+            "Daily limit of unbilled runs reached: 20 per day "
+            "(timeouts, errors, clarifications). Try again tomorrow.",
+            retry_after="3600",
+        )
+        assert "21:00" in msg and "esperá un rato" not in msg
+
     def test_global_cap(self) -> None:
         assert "cupo público" in core.error_message(503, "Free tier daily capacity reached.")
 

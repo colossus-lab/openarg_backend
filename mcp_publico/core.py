@@ -286,6 +286,15 @@ def error_message(
                 "Se alcanzó el límite diario de consultas desde esta conexión. "
                 "Se renueva a las 21:00 (hora de Argentina)."
             )
+        if "unbilled" in detail_l:
+            # Tope diario por persona de corridas que no se cobran (H108).
+            return (
+                "Se alcanzó el límite diario de preguntas que no terminaron en una "
+                "respuesta (tiempos agotados, errores o pedidos de aclaración). Se "
+                "renueva a las 21:00 (hora de Argentina). Mientras tanto podés seguir "
+                "con el modo datos (buscar_datasets, describir_tabla, obtener_datos, "
+                "agregar_datos), que tiene su propio cupo."
+            )
         return "Demasiadas consultas: esperá un rato y volvé a intentar."
     if status == 503:
         # Dos 503 distintos: el tope global del día ("daily capacity") y el
