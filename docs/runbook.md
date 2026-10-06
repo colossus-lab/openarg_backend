@@ -256,13 +256,17 @@ la pisa. Después de una vuelta atrás, la previa es la escritura descartada.
    Correrlo otra vez deshace la vuelta atrás (y después hay que repetir el
    paso 3).
 
-   **Desempleo:** la primera escritura con el arreglo de H023 pasa la tabla de
-   fracción (máximo 0,204) a porcentaje (20,4) y deja como previa la de la
-   fracción. La serie es trimestral, así que esa previa puede durar meses.
-   Volver atrás con ella vuelve a servir la fracción bajo «Tasa de desempleo
-   total. En porcentaje.», que es H023. Antes del cambio, mirarla:
+   **Desempleo:** si la primera corrida con el arreglo de H023 encuentra la
+   tabla en fracción (máximo 0,204), la reescribe en porcentaje (20,4) aunque
+   esté al día en fechas y filas: sale con motivo `escala`. Pasa también si la
+   dejó así un ETL sin la escala, como el de ola-2 desplegado antes que este
+   arreglo. Esa escritura deja como previa la de la fracción, y como la serie
+   es trimestral, esa previa puede durar meses. Volver atrás con ella vuelve a
+   servir la fracción bajo «Tasa de desempleo total. En porcentaje.», que es
+   H023, hasta que la próxima corrida la escale de nuevo. Antes del cambio,
+   mirarla:
    `SELECT max("Tasa de desempleo total. En porcentaje.") FROM raw."cache_series_desempleo__previa";`.
-   Si da menos de 1, es la fracción: conviene corregir la escritura nueva en
+   Si no pasa de 1,5, es la fracción: conviene corregir la escritura nueva en
    vez de volver atrás.
 
 3. La metadata sigue describiendo la versión descartada. Alinear las filas:
@@ -291,5 +295,6 @@ la pisa. Después de una vuelta atrás, la previa es la escritura descartada.
 Mientras la ingesta esté frenada, la tabla restaurada no se actualiza. Antes de
 volver a agendarla, corregir lo que hizo mala la escritura descartada: la
 primera corrida va a comparar la tabla contra la API y reescribirla si está
-atrás.
+atrás o, en una tasa que se guarda en porcentaje como el desempleo, si quedó
+en fracción.
 

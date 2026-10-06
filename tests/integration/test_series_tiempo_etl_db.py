@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -29,6 +30,7 @@ from sqlalchemy import text
 from app.infrastructure.celery.tasks import _db
 from app.infrastructure.celery.tasks import series_tiempo_tasks as st
 from tests.unit.runbook_series import receta_volver_atras
+from tests.unit.series_tiempo_fake import DESEMPLEO_ID
 
 
 def _engine_or_skip():
@@ -273,6 +275,36 @@ def test_sin_novedades_no_reescribe_pero_late(entorno, monkeypatch):
         ).scalar()
     assert latidos == 2, "late la reparación y late la corrida al día"
     assert titulo == "Series de Tiempo — Serie de prueba"
+
+
+def test_el_desempleo_al_dia_en_fraccion_se_reescribe_en_porcentaje(entorno, monkeypatch):
+    """Orden de despliegue: el ETL de ola-2 (sin la escala) dejó el desempleo al
+    día y en fracción. Fecha, filas y columnas coinciden con la API; sin mirar
+    los valores, la tabla no se reescribía nunca (H023 con el latido sano)."""
+    engine, serie = entorno
+    desempleo = replace(serie, serie_id=DESEMPLEO_ID)
+    monkeypatch.setattr(
+        st.series_tiempo_adapter, "SERIES_CATALOG", {"prueba": {"ids": [DESEMPLEO_ID]}}
+    )
+    filas = [
+        [f"{2023 + i // 4}-{i % 4 * 3 + 1:02d}-01", round(0.06 + i / 1000, 3)] for i in range(12)
+    ]
+    _sembrar(engine, desempleo, filas)
+    _con_api(monkeypatch, _Api(filas))
+
+    resumen = st.ingest_series_tiempo.run(claves=[serie.clave])
+
+    assert resumen["escritas"] == 1, resumen
+    assert resumen["series"][serie.clave]["motivo"] == "escala"
+    with engine.connect() as conn:
+        viva, previa = (
+            conn.execute(text(f'SELECT max("Serie de prueba") FROM raw."{t}"')).scalar()
+            for t in (serie.tabla, f"{serie.tabla}__previa")
+        )
+    assert (viva, previa) == (7.1, 0.071), "la fracción queda como previa"
+
+    resumen = st.ingest_series_tiempo.run(claves=[serie.clave])
+    assert resumen["al_dia"] == 1 and resumen["escritas"] == 0, resumen
 
 
 def test_el_guardian_deja_la_tabla_como_estaba(entorno, monkeypatch):

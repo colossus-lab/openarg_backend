@@ -13,7 +13,8 @@ Por qué está escrito así (auditoría verificada del 04-oct-2026):
   06-may mientras la tarea corría todos los meses y terminaba en "success" en
   medio segundo. Ahora se compara el último dato de la API (`time_index_end`)
   contra `max(fecha)` de la tabla y se reescribe sólo si hay algo nuevo (o si
-  la tabla falta, cambió la serie o la cantidad de filas no coincide).
+  la tabla falta, cambió la serie, la cantidad de filas no coincide o una tasa
+  que se guarda en porcentaje quedó en fracción).
 - **Truncaba.** Un solo GET con `limit=1000` ascendente y sin leer `count`:
   tipo de cambio (8.643 observaciones) terminaba en 2005-09-27 y reservas
   (1.036) en 2023-04. Ahora se pagina con `start` hasta cubrir `count` (el tope
@@ -67,7 +68,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pandas as pd
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import text
+from sqlalchemy import column, func, select, table, text
 from sqlalchemy.engine import Engine
 
 from app.infrastructure.adapters.connectors import series_tiempo_adapter
@@ -259,6 +260,11 @@ class MetadatosAPI:
     unidades: str = ""
     titulo_dataset: str = ""
     fuente: str = ""
+    # El rango de TODA la serie (`min_value`/`max_value`, no cambia con la
+    # ventana). Con las unidades, es lo que mira el conector para decidir si
+    # la serie llega como fracción (ver `se_escala`).
+    minimo: float | None = None
+    maximo: float | None = None
 
 
 def _fecha(valor: Any) -> date | None:
@@ -284,6 +290,14 @@ def _booleano(valor: Any) -> bool | None:
         if bajo in {"false", "f", "0", "no"}:
             return False
     return None
+
+
+def _numero(valor: Any) -> float | None:
+    """La API manda `min_value` y `max_value` como texto."""
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
 
 
 def _get(client: httpx.Client, params: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +358,8 @@ def consultar_metadatos(client: httpx.Client, serie_id: str) -> MetadatosAPI:
         unidades=str(field.get("units") or "").strip(),
         titulo_dataset=str(dataset.get("title") or "").strip(),
         fuente=str(dataset.get("source") or "").strip(),
+        minimo=_numero(field.get("min_value")),
+        maximo=_numero(field.get("max_value")),
     )
 
 
@@ -412,6 +428,13 @@ class EstadoTabla:
     catalogo_estado: str | None = None
     catalogo_filas: int | None = None
     registro_filas: int | None = None
+    # max(abs(valor)) de la tabla guardada: dice si quedó en fracción.
+    valor_maximo: float | None = None
+
+
+_TIPOS_NUMERICOS = frozenset(
+    {"double precision", "real", "numeric", "bigint", "integer", "smallint"}
+)
 
 
 def _serie_id_de_url(url: str | None) -> str | None:
@@ -436,8 +459,8 @@ def _entero(valor: Any) -> int | None:
 
 
 def estado_tabla(engine: Engine, serie: SerieETL) -> EstadoTabla:
-    """Lo que hay hoy: la tabla (filas, última fecha, columnas), el dataset, el catálogo
-    (`raw.cached_datasets`) y el registro."""
+    """Lo que hay hoy: la tabla (filas, última fecha, columnas, valor máximo), el dataset,
+    el catálogo (`raw.cached_datasets`) y el registro."""
     with engine.connect() as conn:
         existe = bool(
             conn.execute(
@@ -447,23 +470,29 @@ def estado_tabla(engine: Engine, serie: SerieETL) -> EstadoTabla:
         filas = 0
         max_fecha: date | None = None
         columnas: tuple[str, ...] = ()
+        valor_maximo: float | None = None
         if existe:
             fila = conn.execute(
                 text(f'SELECT count(*) AS n, max(fecha) AS fin FROM raw."{serie.tabla}"')  # noqa: S608
             ).one()
             filas = int(fila.n)
             max_fecha = _fecha(fila.fin)
-            columnas = tuple(
-                str(r[0])
-                for r in conn.execute(
-                    text(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = 'raw' AND table_name = :tn "
-                        "ORDER BY ordinal_position"
-                    ),
-                    {"tn": serie.tabla},
+            tipos = conn.execute(
+                text(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'raw' AND table_name = :tn "
+                    "ORDER BY ordinal_position"
+                ),
+                {"tn": serie.tabla},
+            ).all()
+            columnas = tuple(str(r[0]) for r in tipos)
+            if len(tipos) == 2 and tipos[1][1] in _TIPOS_NUMERICOS:
+                # Con select() y no con text(): el nombre de la columna sale de la
+                # API y puede traer comillas o dos puntos.
+                t = table(serie.tabla, column(columnas[1]), schema="raw")
+                valor_maximo = _numero(
+                    conn.execute(select(func.max(func.abs(t.c[columnas[1]])))).scalar()
                 )
-            )
         ds = conn.execute(
             text(
                 "SELECT CAST(id AS text) AS id, title, description, url, columns, "
@@ -502,6 +531,7 @@ def estado_tabla(engine: Engine, serie: SerieETL) -> EstadoTabla:
         catalogo_estado=str(catalogo.status) if catalogo and catalogo.status else None,
         catalogo_filas=_entero(catalogo.row_count) if catalogo else None,
         registro_filas=_entero(registro.row_count) if registro else None,
+        valor_maximo=valor_maximo,
     )
 
 
@@ -515,6 +545,36 @@ def nombre_columna(descripcion: str, respaldo: str) -> str:
     if len(crudo) <= _MAX_BYTES_IDENTIFICADOR:
         return nombre
     return crudo[:_MAX_BYTES_IDENTIFICADOR].decode("utf-8", errors="ignore").rstrip()
+
+
+def se_escala(meta: MetadatosAPI, valores: list[float] | None = None) -> bool:
+    """Si la serie llega como fracción con unidades «Porcentaje» y se guarda ×100.
+
+    Decide la misma función que el conector en vivo
+    (`series_tiempo_adapter._is_fraction_percent`), con las unidades y el rango
+    de la metadata: por familia (desempleo, actividad, pobreza…) y con control
+    de magnitud. Así la tabla y el conector dan la misma cifra, y si la API
+    pasara a publicar el porcentaje ninguno de los dos lo multiplica. Sin
+    `valores`, decide con la metadata sola (antes de bajar la serie).
+    """
+    campo = {"units": meta.unidades, "min_value": meta.minimo, "max_value": meta.maximo}
+    return series_tiempo_adapter._is_fraction_percent(meta.serie_id, campo, valores or [])
+
+
+def _guardada_en_fraccion(meta: MetadatosAPI, estado: EstadoTabla) -> bool:
+    """Si la tabla guardada tiene la fracción de la API en vez del porcentaje.
+
+    En fracción no pasa de 1,5 (la cota del conector). Con el rango de la API
+    se pide además que no esté cerca del ×100: una tasa que nunca pasó del
+    1,5 % queda escalada por debajo de 1,5 y se reescribiría en cada corrida,
+    pisando la previa con la escritura del día anterior.
+    """
+    mayor = estado.valor_maximo
+    if mayor is None or mayor > series_tiempo_adapter._FRACTION_MAX:
+        return False
+    if meta.minimo is None or meta.maximo is None:
+        return True
+    return mayor < max(abs(meta.minimo), abs(meta.maximo)) * 10
 
 
 def motivo_para_escribir(
@@ -539,6 +599,12 @@ def motivo_para_escribir(
         return "cantidad_distinta"
     if tuple(columnas) != estado.columnas:
         return "columnas_distintas"
+    if se_escala(meta) and _guardada_en_fraccion(meta, estado):
+        # Al día en fecha, filas y columnas, pero en fracción: la escribió un
+        # ETL sin la escala (el de ola-2, si se despliega antes que éste) o
+        # una vuelta atrás a una previa vieja. Sin mirar los valores no se
+        # reescribía nunca: H023 con el latido sano.
+        return "escala"
     return None
 
 
@@ -644,18 +710,18 @@ def clasificar_frescura(meta: MetadatosAPI, estado: EstadoTabla, hoy: date) -> l
 
 
 def armar_dataframe(
-    filas: list[list[Any]], columna_valor: str, *, serie_id: str = ""
+    filas: list[list[Any]], columna_valor: str, *, meta: MetadatosAPI
 ) -> pd.DataFrame:
     df = pd.DataFrame([f[:2] for f in filas], columns=["fecha", columna_valor])
     df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
     if df["fecha"].isna().any():
         raise _SerieFallida("datos", "la API devolvió fechas que no se pueden leer")
     df[columna_valor] = pd.to_numeric(df[columna_valor], errors="coerce")
-    if serie_id in series_tiempo_adapter.FRACTION_PERCENT_IDS:
+    if se_escala(meta, [float(v) for v in df[columna_valor].dropna()]):
         # Desempleo y compañía: la API dice «Porcentaje» y manda la fracción
         # (0,079 = 7,9 %). La tabla guardaba 0,079 bajo la columna "… En
-        # porcentaje." y el conector en vivo da 7,9: misma regla y mismo
-        # redondeo que el conector, para que los dos caminos den lo mismo.
+        # porcentaje." y el conector en vivo da 7,9: misma regla (`se_escala`)
+        # y mismo redondeo que el conector, para que los dos caminos den lo mismo.
         df[columna_valor] = df[columna_valor].map(lambda v: v if pd.isna(v) else round(v * 100, 2))
     return df
 
@@ -1073,9 +1139,7 @@ def _procesar_con_metadatos(
         res.estado = "reconciliada"
         return res
 
-    df = armar_dataframe(
-        descargar_serie(client, serie.serie_id), columna_valor, serie_id=serie.serie_id
-    )
+    df = armar_dataframe(descargar_serie(client, serie.serie_id), columna_valor, meta=meta)
     fin_nuevo = _fecha(df["fecha"].max())
     res.filas, res.motivo = len(df), motivo
     misma_serie = estado.serie_id_previa in (None, serie.serie_id)

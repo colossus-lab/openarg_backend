@@ -40,7 +40,15 @@ import pytest
 
 from app.infrastructure.celery.tasks import series_tiempo_tasks as st
 from tests.unit.runbook_series import receta_volver_atras
-from tests.unit.series_tiempo_fake import DESEMPLEO_ID, TIPO_CAMBIO_ID, FakeSeriesApi, desempleo
+from tests.unit.series_tiempo_fake import (
+    ACTIVIDAD_ID,
+    DESEMPLEO_ID,
+    TIPO_CAMBIO_ID,
+    FakeSeriesApi,
+    desempleo,
+    tasa,
+)
+from tests.unit.series_tiempo_fake import serie as serie_api
 
 # ── la API, en memoria ─────────────────────────────────────────────────────
 
@@ -247,6 +255,18 @@ def test_la_metadata_trae_fin_frecuencia_e_is_updated():
     assert api.pedidos[0]["limit"] == "1" and api.pedidos[0]["metadata"] == "full"
 
 
+def test_la_metadata_trae_las_unidades_y_el_rango_de_toda_la_serie():
+    # Lo que mira el conector para decidir si la serie llega como fracción. La
+    # API manda `min_value` y `max_value` como texto.
+    with httpx.Client(transport=httpx.MockTransport(FakeSeriesApi(desempleo()).handler)) as c:
+        meta = st.consultar_metadatos(c, DESEMPLEO_ID)
+    assert (meta.unidades, meta.minimo, meta.maximo) == ("Porcentaje", 0.066, 0.079)
+
+    with _ApiFalsa(_filas_diarias(10)).cliente() as c:
+        sin_rango = st.consultar_metadatos(c, _SERIE.serie_id)
+    assert (sin_rango.minimo, sin_rango.maximo) == (None, None)
+
+
 def test_pagina_con_start_hasta_cubrir_count():
     # 12.345 > 2 páginas de 5.000. Antes: un GET con limit=1000, sin start.
     api = _ApiFalsa(_filas_diarias(12_345))
@@ -320,6 +340,62 @@ def test_otros_motivos_para_reescribir(estado_kw, esperado):
 def test_forzar_reescribe_aunque_este_al_dia():
     estado = _estado(filas=8643, max_fecha=date(2026, 8, 31))
     assert st.motivo_para_escribir(_meta(), estado, list(_COLUMNAS), forzar=True) == "forzada"
+
+
+_COLUMNAS_DESEMPLEO = ("fecha", "Tasa de desempleo total. En porcentaje.")
+
+
+def _desempleo_al_dia(
+    valor_maximo: float, *, minimo: float | None, maximo: float | None
+) -> tuple[st.MetadatosAPI, st.EstadoTabla]:
+    """La tabla de desempleo igual a la API en fecha, filas, columnas y serie."""
+    meta = _meta(
+        serie_id=DESEMPLEO_ID,
+        total=94,
+        fin=date(2026, 4, 1),
+        frecuencia="trimestral",
+        descripcion=_COLUMNAS_DESEMPLEO[1],
+        unidades="Porcentaje",
+        minimo=minimo,
+        maximo=maximo,
+    )
+    estado = _estado(
+        filas=94,
+        max_fecha=date(2026, 4, 1),
+        columnas=_COLUMNAS_DESEMPLEO,
+        serie_id_previa=DESEMPLEO_ID,
+        valor_maximo=valor_maximo,
+    )
+    return meta, estado
+
+
+@pytest.mark.parametrize(("minimo", "maximo"), [(0.049, 0.204), (None, None)])
+def test_el_desempleo_al_dia_pero_en_fraccion_se_reescribe_por_la_escala(minimo, maximo):
+    """Orden de despliegue: si el ETL de ola-2 (sin la escala) escribió el
+    desempleo al día, la tabla coincide con la API en fecha, filas y columnas y
+    no se reescribía nunca: 0,204 bajo «En porcentaje» (H023) con el latido
+    sano. Lo mismo después de volver atrás a una previa en fracción."""
+    meta, estado = _desempleo_al_dia(0.204, minimo=minimo, maximo=maximo)
+    assert st.motivo_para_escribir(meta, estado, list(_COLUMNAS_DESEMPLEO)) == "escala"
+
+    meta, estado = _desempleo_al_dia(20.4, minimo=minimo, maximo=maximo)
+    assert st.motivo_para_escribir(meta, estado, list(_COLUMNAS_DESEMPLEO)) is None
+
+
+def test_una_tabla_ya_escalada_con_valores_chicos_no_se_reescribe_todos_los_dias():
+    # Una tasa que nunca pasó del 1,2 % queda escalada en ≤ 1,5. Mirando sólo
+    # el 1,5 se reescribiría en cada corrida, y la previa sería siempre la de
+    # ayer en vez de la versión anterior. El rango de la API lo distingue.
+    meta, estado = _desempleo_al_dia(1.2, minimo=0.004, maximo=0.012)
+    assert st.motivo_para_escribir(meta, estado, list(_COLUMNAS_DESEMPLEO)) is None
+    meta, estado = _desempleo_al_dia(0.012, minimo=0.004, maximo=0.012)
+    assert st.motivo_para_escribir(meta, estado, list(_COLUMNAS_DESEMPLEO)) == "escala"
+
+
+def test_una_serie_que_no_se_escala_no_se_reescribe_por_valores_chicos():
+    # Tipo de cambio de 0,75 al día: no es una fracción, no hay escala que corregir.
+    estado = _estado(filas=8643, max_fecha=date(2026, 8, 31), valor_maximo=0.75)
+    assert st.motivo_para_escribir(_meta(), estado, list(_COLUMNAS)) is None
 
 
 # ── el guardián ────────────────────────────────────────────────────────────
@@ -614,7 +690,7 @@ async def test_el_desempleo_se_guarda_en_porcentaje_como_lo_da_el_conector():
     with httpx.Client(transport=httpx.MockTransport(api.handler)) as c:
         meta = st.consultar_metadatos(c, DESEMPLEO_ID)
         columna = st.nombre_columna(meta.descripcion, "desempleo")
-        df = st.armar_dataframe(st.descargar_serie(c, DESEMPLEO_ID), columna, serie_id=DESEMPLEO_ID)
+        df = st.armar_dataframe(st.descargar_serie(c, DESEMPLEO_ID), columna, meta=meta)
 
     assert columna == "Tasa de desempleo total. En porcentaje."
     assert df[columna].tolist() == [r[columna] for r in en_vivo.records]
@@ -623,7 +699,7 @@ async def test_el_desempleo_se_guarda_en_porcentaje_como_lo_da_el_conector():
 
 def test_una_serie_que_no_es_fraccion_no_se_escala():
     df = st.armar_dataframe(
-        [["2026-08-31", 1350.25], ["2026-09-01", 0.5]], "TC", serie_id=TIPO_CAMBIO_ID
+        [["2026-08-31", 1350.25], ["2026-09-01", 0.5]], "TC", meta=_meta(serie_id=TIPO_CAMBIO_ID)
     )
     assert df["TC"].tolist() == [1350.25, 0.5]
 
@@ -645,6 +721,64 @@ def test_la_tarea_escribe_el_desempleo_en_porcentaje(monkeypatch):
     assert res.estado == "escrita", res
     (df,) = base.dataframes
     assert df.iloc[:, 1].tolist() == [7.5, 7.8, 7.9]
+
+
+async def _etl_y_conector(
+    monkeypatch, api: FakeSeriesApi, serie: st.SerieETL
+) -> tuple[list[Any], list[Any]]:
+    """La columna de valores que escribe el ETL y la que da el conector en vivo."""
+    en_vivo = await api.adapter().fetch([serie.serie_id])
+    assert en_vivo is not None
+    estado = _estado(
+        existe=False,
+        filas=0,
+        max_fecha=None,
+        columnas=(),
+        serie_id_previa=serie.serie_id,
+        dueno_registro=serie.identidad,
+    )
+    base = _Base(monkeypatch, estado)
+    with httpx.Client(transport=httpx.MockTransport(api.handler)) as c:
+        res = st.procesar_serie(MagicMock(), c, serie)
+    assert res.estado == "escrita", res
+    (df,) = base.dataframes
+    columna = df.columns[1]
+    return df[columna].tolist(), [r[columna] for r in en_vivo.records]
+
+
+async def test_con_el_desempleo_ya_en_porcentaje_el_etl_da_lo_mismo_que_el_conector(monkeypatch):
+    """Si la API pasara a publicar el desempleo en % (7,9 y no 0,079), el
+    conector no lo escala: los valores y el rango de la serie pasan de 1,5. El
+    ETL lo multiplicaba igual por estar en FRACTION_PERCENT_IDS y guardaba 790
+    bajo «En porcentaje», sin que WS0 ni el guardián lo vieran."""
+    fraccion = desempleo()
+    api = FakeSeriesApi(
+        serie_api(
+            DESEMPLEO_ID,
+            [(f, round(v * 100, 2)) for f, v in fraccion["data"]],
+            description=fraccion["field"]["description"],
+            units="Porcentaje",
+            frequency="R/P3M",
+        )
+    )
+    (desempleo_etl,), _ = st.series_del_catalogo(claves=["desempleo"])
+
+    etl, conector = await _etl_y_conector(monkeypatch, api, desempleo_etl)
+
+    assert etl == conector
+    assert etl[-1] == 7.9
+
+
+async def test_una_tasa_de_familia_sale_en_porcentaje_como_en_el_conector(monkeypatch):
+    # La regla es por familia (EPH, pobreza), no por la lista del desempleo:
+    # una tasa de actividad que se sume a SERIES_TABLAS no puede quedar en
+    # fracción en la tabla y en % en el conector.
+    actividad = st.SerieETL(clave="actividad", clave_catalogo="actividad", serie_id=ACTIVIDAD_ID)
+
+    etl, conector = await _etl_y_conector(monkeypatch, FakeSeriesApi(tasa(ACTIVIDAD_ID)), actividad)
+
+    assert etl == conector
+    assert etl[-1] == 48.9
 
 
 # ── una corrida cortada después del reemplazo (H024) ──────────────────────
