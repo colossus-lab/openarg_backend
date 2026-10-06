@@ -30,7 +30,8 @@ Lo que encontró la revisión independiente del 05-oct sobre esto:
   tiene, se rechaza; el orden usa el mes como segunda clave (H010);
 - las fechas con barras se leían siempre d/m: en una columna m/d «3/4/2025»
   quedaba en abril y «5/31/2021» en NULL (H003). Ahora la lectura se decide
-  por columna con la muestra (``lectura_dia_mes``).
+  por columna con la muestra (``lectura_dia_mes``);
+- una fecha de nacimiento le ganaba a la fecha del dato (H044).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Literal
 
@@ -100,6 +101,11 @@ _CALIFICADORES_MES = frozenset(
     {"n", "nro", "num", "numero", "id", "cod", "codigo", "nombre", "desc", "descripcion"}
 )
 _NOMBRE_DEL_MES = frozenset({"nombre", "desc", "descripcion"})
+# Fechas que describen a alguien o algo de la fila, no cuándo pasó el dato:
+# se usan sólo si la tabla no tiene otra candidata, y con aviso (H044).
+_PALABRAS_ATRIBUTO = frozenset(
+    {"nacimiento", "defuncion", "fallecimiento", "vencimiento", "alta", "baja"}
+)
 
 _DATE_TYPE = re.compile(r"^(date|timestamp)", re.IGNORECASE)
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -169,6 +175,13 @@ class ColumnaFecha:
     # La columna de mes de una tabla con año y mes separados (H002, H010).
     mes: str | None = None
     tipo_mes: str = "text"
+    # Una fecha de nacimiento, vencimiento, alta o baja que se eligió porque la
+    # tabla no tenía otra (H044): se avisa (`aviso_lectura_fecha`).
+    atributo: bool = False
+
+
+def _es_de_atributo(nombre: str) -> bool:
+    return any(p in _PALABRAS_ATRIBUTO for p in _palabras(nombre))
 
 
 def _es_columna_de_mes(nombre: str, anio: str) -> bool:
@@ -211,7 +224,9 @@ def resolver_columna_fecha(
     ``ejercicio_presupuestario``), con la de mes si la tabla la tiene. Las
     fechas de carga o auditoría nunca. Una marca de tiempo (``timestamp``,
     ``event_ts`` de tipo timestamp) sólo si no hay ninguna otra: en una tabla
-    de sensores es la fecha del dato.
+    de sensores es la fecha del dato. Las de nacimiento, vencimiento, alta o
+    baja (``consultante_fecha_nacimiento``), al final: describen a alguien de
+    la fila, no cuándo pasó el dato.
 
     ``elegida`` es la que pidió el usuario (``columna_fecha``): tiene que
     existir, y se usa aunque el nombre no parezca de fecha.
@@ -229,16 +244,17 @@ def resolver_columna_fecha(
         )
     # `fecha_timestamp` entra: la marca no la hace metadato si dice "fecha".
     candidatas = [(n, t) for n, t in pares if not es_metadato(n) or es_nombre_de_fecha(n)]
-    for nombre, tipo in candidatas:
+    del_dato = [(n, t) for n, t in candidatas if not _es_de_atributo(n)]
+    for nombre, tipo in del_dato:
         if plegar(nombre) in _NOMBRES_FECHA:
             return ColumnaFecha(nombre, tipo)
-    for nombre, tipo in candidatas:
+    for nombre, tipo in del_dato:
         if _DATE_TYPE.match(tipo or ""):
             return ColumnaFecha(nombre, tipo)
-    for nombre, tipo in candidatas:
+    for nombre, tipo in del_dato:
         if any(p in _PALABRAS_FECHA for p in _palabras(nombre)):
             return ColumnaFecha(nombre, tipo)
-    for nombre, tipo in candidatas:
+    for nombre, tipo in del_dato:
         if es_nombre_de_anio(nombre):
             return _columna_de_anio(nombre, tipo, pares)
     for nombre, tipo in pares:
@@ -246,6 +262,13 @@ def resolver_columna_fecha(
             _DATE_TYPE.match(tipo or "") or plegar(nombre) == "timestamp"
         ):
             return ColumnaFecha(nombre, tipo)
+    atributos = [(n, t) for n, t in candidatas if _es_de_atributo(n)]
+    for nombre, tipo in atributos:
+        if _DATE_TYPE.match(tipo or "") or any(p in _PALABRAS_FECHA for p in _palabras(nombre)):
+            return ColumnaFecha(nombre, tipo, atributo=True)
+    for nombre, tipo in atributos:
+        if es_nombre_de_anio(nombre):
+            return replace(_columna_de_anio(nombre, tipo, pares), atributo=True)
     return None
 
 
@@ -515,8 +538,9 @@ def aviso_lectura_fecha(columna: ColumnaFecha | None) -> str | None:
     """Lo que hay que saber de cómo se leyó la columna de fecha, o None.
 
     Junta los casos en que la lectura pierde o supone algo: la forma dominante
-    de una tabla grande (``aviso_formato_guardado``) y una columna que mezcla
-    fechas d/m y m/d (H003).
+    de una tabla grande (``aviso_formato_guardado``), una columna que mezcla
+    fechas d/m y m/d (H003) y una fecha de nacimiento, vencimiento, alta o
+    baja que se usa porque la tabla no tiene otra (H044).
     """
     if columna is None:
         return None
@@ -527,6 +551,14 @@ def aviso_lectura_fecha(columna: ColumnaFecha | None) -> str | None:
             "es seguro, pero en las que no se distinguen (las dos partes hasta 12) el mes y el "
             "día pueden estar invertidos. Por eso sólo filtro años enteros con `desde`/`hasta` "
             "y el orden dentro de cada año puede no ser exacto."
+        )
+    if columna.atributo:
+        de = next((p for p in _palabras(columna.nombre) if p in _PALABRAS_ATRIBUTO), "")
+        avisos.append(
+            f"Uso «{columna.nombre}» como fecha de la tabla porque no tiene otra, pero es una "
+            f"fecha de {'defunción' if de == 'defuncion' else de}, no la del dato: `desde`/`hasta` "
+            "y el orden van por ella. Si la tabla tiene otra columna con el período, pasala en "
+            "`columna_fecha`."
         )
     texto = " ".join(a for a in avisos if a)
     return texto or None

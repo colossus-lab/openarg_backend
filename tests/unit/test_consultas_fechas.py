@@ -237,7 +237,7 @@ class TestPeriodo:
             validar_fecha(valor, "desde")
 
 
-# ── revisión independiente del 05-oct (H002, H003, H010) ───────────────────
+# ── revisión independiente del 05-oct (H002, H003, H010, H044) ─────────────
 
 
 class TestAnioYMesSeparados:
@@ -450,3 +450,43 @@ class TestDiaMesOMesDia:
     def test_tabla_grande_mixta_sin_forma_dominante_no_usa_la_guarda(self) -> None:
         muestra = ["15/1/2020", "1/31/2020"] * 50
         assert formato_uniforme(muestra, filas=8_000_000) == formato_uniforme(self.MIXTA)
+
+
+class TestFechasDeAtributo:
+    """H044: cualquier nombre con "fecha" ganaba. En 85 tablas de prod la fecha
+    elegida era una de nacimiento, y `desde`/`hasta` filtraban por el año de
+    nacimiento (consultas a los centros de acceso a la justicia:
+    `consultante_fecha_nacimiento` con `consulta_fecha_carga` al lado)."""
+
+    def test_una_fecha_de_nacimiento_no_le_gana_a_otra_candidata(self) -> None:
+        col = resolver_columna_fecha(
+            [("consultante_fecha_nacimiento", "text"), ("consulta_fecha", "text")]
+        )
+        assert col is not None and col.nombre == "consulta_fecha"
+        col = resolver_columna_fecha(
+            [("fecha_nacimiento", "text"), ("fecha_incio_mandato", "text")]
+        )
+        assert col is not None and col.nombre == "fecha_incio_mandato"
+        col = resolver_columna_fecha([("fecha_nacimiento", "date"), ("anio", "bigint")])
+        assert col is not None and col.nombre == "anio"
+        col = resolver_columna_fecha([("fecha_vencimiento", "date"), ("fecha_emision", "text")])
+        assert col is not None and col.nombre == "fecha_emision"
+
+    def test_si_es_la_unica_se_usa_y_se_avisa(self) -> None:
+        from app.application.consultas.fechas import aviso_lectura_fecha
+
+        col = resolver_columna_fecha(
+            [("consultante_fecha_nacimiento", "text"), ("consulta_fecha_carga", "text")]
+        )
+        assert col is not None and col.nombre == "consultante_fecha_nacimiento"
+        aviso = aviso_lectura_fecha(col) or ""
+        assert "«consultante_fecha_nacimiento»" in aviso and "columna_fecha" in aviso
+
+    def test_la_elegida_por_el_usuario_no_lleva_aviso(self) -> None:
+        from app.application.consultas.fechas import aviso_lectura_fecha
+
+        col = resolver_columna_fecha(
+            [("fecha_nacimiento", "text"), ("fecha", "text")], "fecha_nacimiento"
+        )
+        assert col is not None and col.nombre == "fecha_nacimiento"
+        assert aviso_lectura_fecha(col) is None
