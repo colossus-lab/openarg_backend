@@ -39,6 +39,86 @@ def _summarize_assets(bienes: list[dict]) -> dict[str, float]:
     return summary
 
 
+# H005 (independent review, 2026-10-05): the declared closing total
+# (``bienesCierre``) is checked against the declaration itself. The public part
+# rarely itemizes everything (the whole dataset carries only 3 company stakes),
+# so in 28 of the 192 DDJJ with itemized assets the total is more than twice the
+# item sum, and several of those are real fortunes whose total was already
+# declared at the start of the period. The base is therefore the larger of the
+# item sum and ``bienesInicio``: a total with history is backed. Against that
+# base the highest ratio in the dataset is 4.4, while the one bad load (a
+# closing total of $31,275.5 M against $66.2 M itemized and $56.8 M at start)
+# is 472; one order of magnitude leaves room on both sides. Downwards, a total
+# under a tenth of its own items doesn't add up either (the lowest ratio in the
+# dataset is 0.52, where one amount shows up twice in the detail, as a property
+# and as a credit).
+_MAX_TOTAL_VS_DETAIL = 10.0
+
+_NOT_COMPARABLE = (
+    "El total no coincide con la propia declaración: esta DDJJ queda fuera de "
+    "rankings, promedios y variación patrimonial."
+)
+
+
+def _millones(value: float) -> str:
+    """``31275522665.75`` → ``"$31.275,5 millones"`` (es-AR)."""
+    text = f"{value / 1_000_000:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"${text} millones"
+
+
+def _veces(ratio: float) -> str:
+    """Truncated, never rounded up: 472.5 → ``"472"``."""
+    return f"{int(ratio):,}".replace(",", ".")
+
+
+def _inconsistency(r: dict) -> str | None:
+    """Why the closing total doesn't add up with its own declaration, or ``None``."""
+    bienes = r.get("bienes") or []
+    detalle = sum(float(b.get("importe") or 0) for b in bienes)
+    if detalle <= 0:
+        return None  # nothing itemized: nothing to check against
+    cierre = float(r.get("bienesCierre") or 0)
+    inicio = float(r.get("bienesInicio") or 0)
+    if cierre > _MAX_TOTAL_VS_DETAIL * max(detalle, inicio):
+        motivo = (
+            f"El total de bienes al cierre ({_millones(cierre)}) es {_veces(cierre / detalle)} "
+            f"veces la suma de los {len(bienes)} bienes del detalle ({_millones(detalle)})"
+        )
+        if inicio > 0:
+            motivo += f" y {_veces(cierre / inicio)} veces el total al inicio ({_millones(inicio)})"
+    elif cierre * _MAX_TOTAL_VS_DETAIL < detalle:
+        if cierre > 0:
+            motivo = (
+                f"La suma de los {len(bienes)} bienes del detalle ({_millones(detalle)}) es "
+                f"{_veces(detalle / cierre)} veces el total de bienes al cierre "
+                f"({_millones(cierre)})"
+            )
+        else:
+            motivo = (
+                f"El total de bienes al cierre es cero pero los {len(bienes)} bienes del "
+                f"detalle suman {_millones(detalle)}"
+            )
+    else:
+        return None
+    return f"{motivo}. {_NOT_COMPARABLE}"
+
+
+def _split_inconsistent(records: list[dict]) -> tuple[list[dict], list[str]]:
+    """Records usable for rankings/aggregates, and names of the excluded ones."""
+    usable: list[dict] = []
+    excluded: list[str] = []
+    for r in records:
+        if _inconsistency(r) is None:
+            usable.append(r)
+        else:
+            excluded.append(r.get("nombre", ""))
+    return usable, excluded
+
+
+def _declaraciones(n: int) -> str:
+    return f"{n} declaración" if n == 1 else f"{n} declaraciones"
+
+
 class DDJJAdapter:
     """In-memory DDJJ dataset loaded once at startup (singleton)."""
 
@@ -119,8 +199,10 @@ class DDJJAdapter:
             "bienes": "bienesCierre",
         }
         sort_key = key_map.get(sort_by, "patrimonioCierre")
+        # H005: a DDJJ whose total doesn't add up never enters a ranking.
+        usable, excluded = _split_inconsistent(self._dataset)
         sorted_ds = sorted(
-            self._dataset,
+            usable,
             key=lambda r: r.get(sort_key, 0),
             reverse=(order == "desc"),
         )
@@ -130,11 +212,19 @@ class DDJJAdapter:
         # strips ``bienes_detalle``, ``bienes`` and ``resumen_bienes`` so
         # the analyst fits all N records in its output budget. See
         # FIX-007 in ``specs/FIX_BACKLOG.md``.
-        return self._to_data_result(
+        result = self._to_data_result(
             f"Ranking: {top} diputados con {label} {sort_by}",
             top_records,
             compact=True,
         )
+        if excluded:
+            verbo = "excluyó" if len(excluded) == 1 else "excluyeron"
+            result.metadata["excluidas_por_inconsistencia"] = excluded
+            result.metadata["description"] += (
+                f". Se {verbo} {_declaraciones(len(excluded))} cuyo total de bienes no "
+                "coincide con su propio detalle (excluidas_por_inconsistencia)."
+            )
+        return result
 
     def get_by_name(self, name: str) -> DataResult:
         self._ensure_loaded()
@@ -143,7 +233,10 @@ class DDJJAdapter:
 
     def stats(self) -> DataResult:
         self._ensure_loaded()
-        if not self._dataset:
+        # H005: averages, median, max and min leave out the DDJJ whose total
+        # doesn't add up (a single bad load moved the average from 351 M to 509 M).
+        usable, excluded = _split_inconsistent(self._dataset)
+        if not usable:
             return DataResult(
                 source="ddjj:oficina_anticorrupcion",
                 portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
@@ -156,11 +249,12 @@ class DDJJAdapter:
 
         # Single pass: collect min, max, sum, and sorted list simultaneously
         total = len(self._dataset)
+        n = len(usable)
         suma = 0.0
         max_val, min_val = float("-inf"), float("inf")
-        max_r = min_r = self._dataset[0]
+        max_r = min_r = usable[0]
         patrimonios: list[float] = []
-        for r in self._dataset:
+        for r in usable:
             p = r.get("patrimonioCierre", 0)
             patrimonios.append(p)
             suma += p
@@ -173,13 +267,21 @@ class DDJJAdapter:
         stats_record = {
             "total": total,
             "anio": self._dataset[0].get("anioDeclaracion", ""),
-            "patrimonio_promedio": suma / total if total else 0,
-            "patrimonio_mediano": patrimonios[total // 2] if total else 0,
+            "patrimonio_promedio": suma / n if n else 0,
+            "patrimonio_mediano": patrimonios[n // 2] if n else 0,
             "patrimonio_maximo_nombre": max_r.get("nombre", ""),
             "patrimonio_maximo_monto": max_r.get("patrimonioCierre", 0),
             "patrimonio_minimo_nombre": min_r.get("nombre", ""),
             "patrimonio_minimo_monto": min_r.get("patrimonioCierre", 0),
         }
+        description = f"Estadísticas agregadas de {total} declaraciones juradas patrimoniales"
+        if excluded:
+            stats_record["excluidas_por_inconsistencia"] = excluded
+            description += (
+                f". Promedio, mediana, máximo y mínimo calculados sin "
+                f"{_declaraciones(len(excluded))} cuyo total de bienes no coincide con su "
+                "propio detalle (excluidas_por_inconsistencia)."
+            )
         return DataResult(
             source="ddjj:oficina_anticorrupcion",
             portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
@@ -190,7 +292,7 @@ class DDJJAdapter:
             metadata={
                 "total_records": 1,
                 "fetched_at": datetime.now(UTC).isoformat(),
-                "description": f"Estadísticas agregadas de {total} declaraciones juradas patrimoniales",
+                "description": description,
             },
         )
 
@@ -213,6 +315,7 @@ class DDJJAdapter:
         formatted = []
         for r in records:
             bienes = r.get("bienes", [])
+            motivo = _inconsistency(r)
             row: dict[str, Any] = {
                 "cuit": r.get("cuit", ""),
                 "nombre": r.get("nombre", ""),
@@ -232,7 +335,14 @@ class DDJJAdapter:
                 "ingresos_trabajo_neto": r.get("ingresosTrabajoNeto", 0),
                 "gastos_personales": r.get("gastosPersonales", 0),
                 "cantidad_bienes": len(bienes),
+                "inconsistente": motivo is not None,
             }
+            if motivo is not None:
+                # H005: the declared totals stay visible (it's what the DDJJ
+                # says), but the variation of a total that doesn't add up is not
+                # a variation.
+                row["motivo_inconsistencia"] = motivo
+                row["variacion_patrimonial"] = None
             if not compact:
                 row["bienes_detalle"] = bienes
                 row["resumen_bienes"] = _summarize_assets(bienes)
