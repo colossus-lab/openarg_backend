@@ -35,16 +35,19 @@ Con eso se deciden tres cosas: qué fuentes se citan (las que aportaron una
 cifra o se nombran en el texto; las demás sólo se consultaron), qué citas
 estructuradas lleva la respuesta y qué cifras no tienen respaldo.
 
-Qué se hace con las cifras sin respaldo lo decide ``ANSWERS_VERIFY_MODE``:
+Qué se hace con eso lo decide ``ANSWERS_VERIFY_MODE``:
 
-- ``off``: nada.
-- ``shadow`` (por defecto): se registran en el log (``answers.verify``) y la
-  respuesta sale igual. Es para medir la precisión antes de actuar.
-- ``correct``: el agente hace UNA vuelta correctiva con la lista de cifras
-  (``agent_engine``); si después sigue habiendo cifras sin respaldo, la
-  respuesta lleva un aviso arriba que las nombra. Nunca se borra una cifra
-  del texto: con la precisión medida, borrar se llevaría cifras correctas y
-  rompería la oración.
+- ``off``: nada; ni se verifica. Es el interruptor: la respuesta sale como
+  antes del verificador (toda la evidencia citada, sin citas).
+- ``shadow`` (por defecto): se registra en el log (``answers.verify``) y la
+  respuesta sale igual, también sus fuentes y sus citas: toda la evidencia
+  citada y sin citas. Es para medir la precisión antes de actuar.
+- ``correct``: se citan sólo las fuentes usadas, con sus citas, y el agente
+  hace UNA vuelta correctiva con la lista de cifras (``agent_engine``); si
+  después sigue habiendo cifras sin respaldo, la respuesta lleva un aviso
+  arriba que las nombra. Nunca se borra una cifra del texto: con la
+  precisión medida, borrar se llevaría cifras correctas y rompería la
+  oración.
 
 Esto no es un control de verdad: una cifra vieja o de una serie truncada
 está en la evidencia y pasa. Para eso están el aviso de atraso y la

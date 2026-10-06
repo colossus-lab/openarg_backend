@@ -19,12 +19,19 @@ Cada turno:
    cifras sin respaldo el modelo hace UNA vuelta más con esa lista (el texto
    que ya salió se borra con ``clear_answer``); si después siguen, la
    respuesta lleva un aviso arriba que las nombra. Con ``shadow`` (el modo
-   por defecto) sólo se registran en el log ``answers.verify``.
+   por defecto) sólo se registran en el log ``answers.verify``. Con ``off``
+   no se verifica.
 
-Las fuentes, los gráficos, el mapa y `served_table` salen sólo de las
-evidencias que la respuesta usó: las que aportaron una cifra o se nombran en
-el texto. Lo demás quedó "consultado" y no se cita. Lo transversal (caché,
-historial, aviso de atraso, analytics, auditoría) lo hace ``EngineRunner``.
+Sólo con ``correct`` el verificador decide además qué se cita: las fuentes,
+los gráficos, el mapa, `served_table`, las citas estructuradas y la evidencia
+del aviso de atraso salen de las evidencias que la respuesta usó (las que
+aportaron una cifra o se nombran en el texto). Con ``shadow`` y ``off`` se
+cita todo lo leído y sin citas, como antes del verificador: una falsa alarma
+(una cifra truncada) le sacaba la fuente y el aviso de atraso a un dato viejo,
+y las citas salían ``verified`` sin mirar el período (revisión del 05-oct:
+H019, H082, H083, H100). En ``shadow`` lo que habría elegido queda en el log.
+Lo transversal (caché, historial, aviso de atraso, analytics, auditoría) lo
+hace ``EngineRunner``.
 """
 
 from __future__ import annotations
@@ -404,10 +411,11 @@ class AgentEngine:
                 }
             )
 
-        # La verificación de la respuesta final, fuera del event loop.
+        # La verificación de la respuesta final, fuera del event loop. Con
+        # `off` no se verifica: es el interruptor.
         final_check: Verification | None = None
         verify_ms: float | None = None
-        if evidence and final.stop_reason != "refusal":
+        if mode != VERIFY_OFF and evidence and final.stop_reason != "refusal":
             text = _answer_of(final)[0]
             if checked is not None and checked[0] == text:
                 _, final_check, verify_ms = checked
@@ -457,7 +465,7 @@ class AgentEngine:
         if isinstance(check, _Unchecked):
             check = (
                 _safe_verify(answer, evidence, evidence_seen, context_seen)
-                if evidence and turn.stop_reason != "refusal"
+                if mode != VERIFY_OFF and evidence and turn.stop_reason != "refusal"
                 else None
             )
         # Las mismas evidencias para fuentes, gráficos, `served_table` y lo que
@@ -465,6 +473,11 @@ class AgentEngine:
         # que aportaron cifras (`figures`), si hay.
         cited, consulted, citations, figures = _choose_sources(answer, evidence, check)
         summary = _verification_log(mode, answer, check, first_check, cited, consulted, verify_ms)
+        if mode != VERIFY_CORRECT:
+            # Fuera de correct la selección queda sólo en el log: se cita todo
+            # lo leído, sin citas estructuradas, y el aviso de atraso mira todo
+            # lo citado (`figures` vacío), como antes del verificador.
+            cited, consulted, citations, figures = list(evidence), [], [], []
         if mode == VERIFY_CORRECT and check is not None and check.unsupported:
             # Después de la vuelta correctiva (o sin tiempo para hacerla):
             # nunca se borra una cifra; se avisa arriba cuáles no se pudieron

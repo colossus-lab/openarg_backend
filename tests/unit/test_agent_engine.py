@@ -597,10 +597,14 @@ def _reservas_llm(*answers: str) -> ScriptedLLM:
     )
 
 
-async def test_se_citan_solo_las_fuentes_que_aportaron_cifras() -> None:
+async def test_se_citan_solo_las_fuentes_que_aportaron_cifras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Reproducción del 04-oct, reservas corrida 1: citaba las tres series
     leídas y sólo una aportó las cifras. Gráficos y `served_table` salen de
-    la misma lista."""
+    la misma lista. Sólo en correct: en shadow y off se cita todo lo leído
+    (revisión del 05-oct, más abajo)."""
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
     llm = _reservas_llm(
         "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
     )
@@ -710,10 +714,14 @@ async def test_en_modo_off_no_se_registra_ni_se_corrige(
 # ── lo que encontró la revisión del PR (05-oct) ────────────
 
 
-async def test_una_descripcion_mal_formada_no_se_lleva_la_respuesta() -> None:
+async def test_una_descripcion_mal_formada_no_se_lleva_la_respuesta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """«secciones 1.1,1.2» en la descripción de una serie: la verificación
     tiraba ValueError, `_safe_verify` la atrapaba, pero `select_evidence` la
-    repetía sin red y el usuario se quedaba sin respuesta."""
+    repetía sin red y el usuario se quedaba sin respuesta. En correct, que es
+    donde la selección se aplica."""
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
     rara = DataResult(
         source=RESERVAS_MENSUAL.source,
         portal_name=RESERVAS_MENSUAL.portal_name,
@@ -780,9 +788,13 @@ async def test_la_verificacion_corre_fuera_del_event_loop_y_una_sola_vez(
     assert isinstance(result.verification["ms"], int)
 
 
-async def test_lo_citado_por_titulo_no_es_lo_que_aporto_cifras() -> None:
+async def test_lo_citado_por_titulo_no_es_lo_que_aporto_cifras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Una serie que sólo se nombra se cita, pero el aviso de atraso
-    (`figure_evidence`) y `served_table` salen de la que aportó las cifras."""
+    (`figure_evidence`) y `served_table` salen de la que aportó las cifras.
+    En correct, que es donde la selección se aplica."""
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
     nombrada = _serie(
         "116.4_TCRZE_2015_D_36_4",
         "Índice de tipo de cambio real multilateral",
@@ -825,3 +837,187 @@ async def test_una_busqueda_que_falla_deja_la_sesion_usable() -> None:
     with pytest.raises(TimeoutError):
         await BuscarDatos().run({"texto": "x"}, ToolContext(deps, EngineRequest("q", "u")))
     deps.vector_search.reset.assert_awaited_once()
+
+
+# ── el verificador sólo actúa en correct (revisión independiente del 05-oct) ──
+
+
+def _modo(monkeypatch: pytest.MonkeyPatch, mode: str | None) -> None:
+    if mode is None:
+        monkeypatch.delenv("ANSWERS_VERIFY_MODE", raising=False)
+    else:
+        monkeypatch.setenv("ANSWERS_VERIFY_MODE", mode)
+
+
+IPC_MENSUAL = _serie(
+    "148.3_INIVELNAL_DICI_M_26",
+    "IPC nacional, variación mensual",
+    [("2026-07-01", 1.9), ("2026-08-01", 2.1), ("2026-09-01", 1.7)],
+    "Porcentaje",
+)
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+async def test_fuera_de_correct_no_se_publican_citas_del_verificador(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """H019: las citas se arman por coincidencia de valor, sin mirar el
+    período, y salían en el JSON de /ask con `verified: true` también en
+    shadow: «la inflación de septiembre fue 2,1 %» salía verificada con el 2,1
+    de agosto. Fuera de correct, `citations=[]`, como antes del verificador."""
+    _modo(monkeypatch, mode)
+    llm = ScriptedLLM(
+        [
+            _turn(calls=[_call("series_tiempo", 1, ids=["148.3_INIVELNAL_DICI_M_26"])]),
+            _turn("La inflación de septiembre de 2026 fue de **2,1 %**."),
+        ]
+    )
+    result = (await _run(AgentEngine(llm, _deps_series(IPC_MENSUAL))))[-1].result
+    assert result.citations == []
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+async def test_fuera_de_correct_se_cita_toda_la_evidencia_como_antes(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """H082/H100: la selección de fuentes por uso corría en todos los modos y
+    decidía fuentes, gráficos, `served_table` y sobre qué se calcula el aviso
+    de atraso. Fuera de correct se cita todo lo leído, como antes de #134, y
+    el aviso se calcula sobre todo lo citado (`figure_evidence` vacío)."""
+    _modo(monkeypatch, mode)
+    llm = _reservas_llm(
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
+    )
+    result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
+        -1
+    ].result
+    assert [s["url"] for s in result.sources] == [
+        RESERVAS_DIARIA.portal_url,
+        RESERVAS_MENSUAL.portal_url,
+    ]
+    assert result.cited_evidence == [RESERVAS_DIARIA, RESERVAS_MENSUAL]
+    assert result.figure_evidence == []
+    assert result.consulted == []
+    assert result.row_count == len(RESERVAS_DIARIA.records)
+
+
+async def test_en_sombra_la_seleccion_de_fuentes_queda_solo_en_el_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Lo que habría hecho correct se registra en `answers.verify` para medirlo."""
+    monkeypatch.delenv("ANSWERS_VERIFY_MODE", raising=False)
+    llm = _reservas_llm(
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
+    )
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
+            -1
+        ].result
+    assert len(result.sources) == 2
+    assert result.verification["fuentes_citadas"] == 1
+    assert result.verification["consultadas"] == 1
+    [line] = [r.getMessage() for r in caplog.records if "answers.verify" in r.getMessage()]
+    assert '"consultadas": 1' in line
+
+
+async def test_off_es_el_motor_de_antes_del_verificador(monkeypatch: pytest.MonkeyPatch) -> None:
+    """H083: con off se seguía verificando y filtrando fuentes, citas,
+    gráficos, mapa, `served_table` y la evidencia del aviso de atraso; lo único
+    que cambiaba era la línea del log. Off es el interruptor: no se verifica y
+    el resultado es el de antes de #134 (todo lo leído, sin citas)."""
+    from app.application.pipeline.chart_builder import build_deterministic_charts
+    from app.application.pipeline.nodes.analyst import _build_map_data
+    from app.application.pipeline.nodes.finalize import _extract_documents
+
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "off")
+    original = agent_module.verify_figures
+    verified: list[str] = []
+
+    def _spy(answer: str, *a: Any, **kw: Any) -> Any:
+        verified.append(answer)
+        return original(answer, *a, **kw)
+
+    monkeypatch.setattr(agent_module, "verify_figures", _spy)
+    answer = "Las reservas fueron de **USD 51.191 millones** en agosto de 2026."
+    llm = _reservas_llm(answer)
+    result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
+        -1
+    ].result
+
+    evidence = [RESERVAS_DIARIA, RESERVAS_MENSUAL]
+    assert verified == []
+    assert result.answer == answer
+    assert len(llm.calls) == 2
+    # El `_result` de antes de #134 (16b2abf): todo sale de la evidencia leída.
+    assert result.sources == [
+        {"name": r.dataset_title, "url": r.portal_url, "portal": r.portal_name, "accessed_at": ""}
+        for r in evidence
+    ]
+    assert result.chart_data == (build_deterministic_charts(evidence) or None)
+    assert result.map_data == _build_map_data(evidence)
+    assert result.documents == _extract_documents(evidence)
+    assert result.served_table == RESERVAS_DIARIA.source
+    assert result.row_count == len(RESERVAS_DIARIA.records)
+    assert result.citations == []
+    assert result.cited_evidence == evidence and result.figure_evidence == []
+    assert result.verification is None
+
+
+DOLAR_VIEJO = DataResult(
+    source="series_tiempo",
+    portal_name="API de Series de Tiempo",
+    portal_url="https://datos.gob.ar/series/api/series/?ids=168.1_T_CAMBIOR_D_0_0_26",
+    dataset_title="Tipo de cambio de referencia Comunicación A3500 (serie discontinuada)",
+    format="time_series",
+    records=[{"fecha": "2024-12-27", "Dólar": 1029.0}, {"fecha": "2024-12-30", "Dólar": 1031.56}],
+    metadata={"units": "Pesos argentinos por dólar"},
+)
+
+
+async def test_una_cifra_truncada_no_le_saca_la_fuente_ni_el_aviso_de_atraso(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H082, de punta a punta con el runner: «$1.031» por 1.031,56 (truncado,
+    no redondeado) queda sin respaldo, y en shadow la serie vieja dejaba de
+    citarse y perdía el «Dato atrasado»: un dato de 2024 sin fuente y sin
+    fecha. En shadow se cita todo y el aviso mira todo lo citado."""
+    from app.application.answers import runner as runner_module
+    from app.application.answers.runner import EngineRunner
+
+    async def _nada(*a: Any, **kw: Any) -> None:
+        return None
+
+    async def _sin_cache(*a: Any, **kw: Any) -> tuple[None, None]:
+        return None, None
+
+    monkeypatch.setattr(runner_module, "record_terminal_analytics", _nada)
+    monkeypatch.setattr(runner_module, "check_cache", _sin_cache)
+    monkeypatch.setattr(runner_module, "write_cache", _nada)
+    monkeypatch.setattr(runner_module, "audit_query", lambda **kw: None)
+    monkeypatch.delenv("ANSWERS_VERIFY_MODE", raising=False)
+
+    answer = (
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026. "
+        "El dólar de referencia estaba en **$1.031**."
+    )
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["92.1_RID_0_0_32"]),
+                    _call("series_tiempo", 2, ids=["168.1_T_CAMBIOR_D_0_0_26"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(llm, _deps_series(RESERVAS_MENSUAL, DOLAR_VIEJO))
+    result = await EngineRunner(engine, MagicMock()).run(EngineRequest("reservas y dólar", "u"))
+    assert result.verification["sin_respaldo"] == ["1.031"]
+    assert [s["url"] for s in result.sources] == [
+        RESERVAS_MENSUAL.portal_url,
+        DOLAR_VIEJO.portal_url,
+    ]
+    assert result.answer.startswith("**Dato atrasado:**")
+    assert "30 de diciembre de 2024" in result.answer
+    assert result.answer.endswith(answer)
