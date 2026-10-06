@@ -131,6 +131,11 @@ def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
     cualquiera, y el aviso de tipo de cambio + IPC decía «su último dato es
     del 2026-08-01» (el IPC, que está al día) por el tipo de cambio, que
     llega al 31-08.
+
+    Con varias series va también la escala de cada una: desempleo (en %) y
+    salarios (índice) en una misma llamada llevaban una sola unidad,
+    «Porcentaje». Y si la API promedió una serie más fina para alinearla con
+    las otras (diaria con mensual), se avisa.
     """
     out: dict[str, Any] = {}
     if meta.get("ultima_observacion"):
@@ -142,6 +147,7 @@ def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
         out["por_serie"] = [
             {
                 "serie": _short(s.get("titulo") or s.get("id")),
+                "unidades": s.get("unidades"),
                 "la_fuente_llega_hasta": s.get("fecha_fin_fuente"),
                 "actualizada_en_fuente": s.get("actualizada_en_fuente"),
             }
@@ -152,8 +158,35 @@ def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
             out["la_fuente_llega_hasta"] = meta["fecha_fin_fuente"]
         if meta.get("actualizada_en_fuente") is not None:
             out["actualizada_en_fuente"] = meta["actualizada_en_fuente"]
+    scaled = [s for s in series if s.get("escalada_a_porcentaje")]
     if meta.get("unidad") == "porcentaje":
         out["escala"] = "Los valores ya están en %: 33.54 es 33,54 %."
+    elif 0 < len(scaled) < len(series):
+        en_pct = " y ".join(f"«{_short(s.get('titulo') or s.get('id'))}»" for s in scaled)
+        resto = "; ".join(
+            f"«{_short(s.get('titulo') or s.get('id'))}» va en sus unidades "
+            f"({s.get('unidades') or 'sin unidades'})"
+            for s in series
+            if not s.get("escalada_a_porcentaje")
+        )
+        out["escala"] = (
+            f"Las series no vienen en la misma escala: {en_pct} "
+            f"{'están' if len(scaled) > 1 else 'está'} en % (7.9 es 7,9 %); {resto}. "
+            "Leé cada columna con sus `unidades` de `por_serie`."
+        )
+    averaged = [s for s in series if s.get("promediada_por_api")]
+    if averaged:
+        nombres = " y ".join(
+            f"«{_short(s.get('titulo') or s.get('id'))}» ({s.get('frecuencia') or 'más fina'})"
+            for s in averaged
+        )
+        out["aviso_agregacion"] = (
+            "Se pidieron juntas series de distinta frecuencia y la API las llevó a frecuencia "
+            f"{meta.get('frecuencia') or 'más gruesa'} PROMEDIANDO {nombres}: cada valor es el "
+            "promedio del período, no su último dato (en un saldo, como las reservas, no es el "
+            "saldo a fin de período). Si eso importa, pedila sola, o con `frecuencia` y "
+            "`agregacion=end_of_period` (saldos) o `agregacion=sum` (flujos)."
+        )
     stale = [s for s in series if s.get("actualizada_en_fuente") is False]
     if len(series) > 1 and stale:
         detalle = " y ".join(
@@ -321,8 +354,11 @@ class BuscarSeries:
             "(INDEC, BCRA, Ministerio de Economía…). Es la fuente preferida para indicadores "
             "macro: inflación (IPC), PBI, EMAE, desempleo, salarios, reservas, base monetaria, "
             "tipo de cambio oficial, exportaciones, canastas. Devuelve id, título, unidades, "
-            "frecuencia y hasta cuándo llega cada serie (`hasta`); después pedí los datos con "
-            "series_tiempo. Elegí la serie que mide exactamente lo pedido y, entre dos que miden "
+            "frecuencia y hasta cuándo llega cada serie según el catálogo de la API "
+            "(`hasta_segun_catalogo`): ese metadato puede estar atrasado, así que sirve para "
+            "descartar series paradas hace años, no para decir cuál es el último dato (eso lo "
+            "dice series_tiempo). Después pedí los datos con series_tiempo. Elegí la serie que "
+            "mide exactamente lo pedido y, entre dos que miden "
             "lo mismo, la que llega más lejos: el EMAE no es el PBI, y la línea de pobreza "
             "(valor de la canasta) no es la tasa de pobreza."
         ),
@@ -358,10 +394,12 @@ class BuscarSeries:
                 "dataset": s.get("dataset_title"),
                 "fuente": s.get("source"),
             }
-            # Hasta cuándo llega cada serie en la fuente: entre dos que miden
-            # lo mismo, la que está al día.
+            # Hasta cuándo llega cada serie según el catálogo: entre dos que
+            # miden lo mismo, la que está al día. No es el último dato: la
+            # pobreza 64.2 dice 2026-01-01 y ya publicó 2026-07-01, y con
+            # «hasta» el modelo lo tomaba como el fin de la serie.
             if s.get("time_index_end"):
-                item["hasta"] = s["time_index_end"]
+                item["hasta_segun_catalogo"] = s["time_index_end"]
             series.append(item)
         if not curated and not series:
             return ToolOutcome(

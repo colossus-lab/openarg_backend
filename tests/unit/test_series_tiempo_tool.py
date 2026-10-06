@@ -12,6 +12,12 @@
 - un error de la API que no es el de frecuencia inválida no se reintenta
   sin la agregación pedida;
 - con varias series, el aviso de atraso nombra cada serie con su fecha;
+- las tasas de la EPH llegan en %, y con escalas mixtas el modelo ve la de
+  cada columna;
+- `la_fuente_llega_hasta` no es anterior al último dato aunque la metadata
+  de la API esté atrasada, y `buscar_series` no presenta ese metadato como
+  el fin de la serie;
+- series de distinta frecuencia pedidas juntas avisan que la API promedió;
 - `buscar_series` compara sin acentos y por palabra completa, y el catálogo
   ya no rotula el EMAE de comercio como "actividad industrial".
 """
@@ -32,18 +38,25 @@ from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
 from tests.unit.series_tiempo_fake import (
+    ACTIVIDAD_ID,
     DESEMPLEO_ID,
     EXPO_ID,
     IPC_ID,
+    POBREZA_ID,
+    RESERVAS_DIARIAS_ID,
     RESERVAS_ID,
+    SALARIOS_ID,
     TIPO_CAMBIO_ID,
     FakeSeriesApi,
     desempleo,
     diaria,
     exportaciones_reales,
     ipc_real,
+    reservas_diarias,
     reservas_mensuales,
+    salarios,
     serie,
+    tasa,
 )
 
 
@@ -387,6 +400,96 @@ async def test_con_varias_series_el_aviso_nombra_la_desactualizada_con_su_fecha(
     assert "la_fuente_llega_hasta" not in payload
 
 
+# ── escalas: las tasas de la EPH en %, y la de cada columna (H085/H060) ──
+
+
+async def test_la_tasa_de_actividad_llega_en_porcentaje_con_la_escala_dicha() -> None:
+    # La API da 0,489 «Porcentaje»; el modelo podía decir «0,49 %».
+    payload, _ = await _run(
+        FakeSeriesApi(tasa(ACTIVIDAD_ID)), {"ids": [ACTIVIDAD_ID], "ultimos": 1}
+    )
+    assert 48.9 in payload["filas"][-1].values()
+    assert "33,54 %" in payload["escala"]
+
+
+async def test_con_escalas_mixtas_el_modelo_ve_la_escala_de_cada_columna() -> None:
+    payload, _ = await _run(
+        FakeSeriesApi(desempleo(), salarios()),
+        {"ids": [DESEMPLEO_ID, SALARIOS_ID], "desde": "2025-10-01"},
+    )
+    por_serie = {s["serie"]: s for s in payload["por_serie"]}
+    assert "en %" in por_serie["Tasa de desempleo total. En porcentaje."]["unidades"]
+    assert por_serie["Índice de Salarios"]["unidades"] == "Índice"
+    escala = payload["escala"]
+    assert "no vienen en la misma escala" in escala
+    assert "«Tasa de desempleo total. En porcentaje.» está en %" in escala
+    assert "«Índice de Salarios» va en sus unidades (Índice)" in escala
+
+
+async def test_con_todas_las_series_en_porcentaje_no_hay_escala_mixta() -> None:
+    payload, _ = await _run(
+        FakeSeriesApi(desempleo(), tasa(ACTIVIDAD_ID)),
+        {"ids": [DESEMPLEO_ID, ACTIVIDAD_ID], "desde": "2026-01-01"},
+    )
+    assert {7.9, 48.9} <= set(payload["filas"][-1].values())
+    assert payload["escala"] == "Los valores ya están en %: 33.54 es 33,54 %."
+
+
+async def test_la_variacion_de_dos_tasas_en_porcentaje_no_habla_de_escalas_mixtas() -> None:
+    # El resultado de la variación no lleva `unidad` (sólo algunas columnas
+    # son porcentajes), pero las dos series están en la misma escala.
+    payload, _ = await _run(
+        FakeSeriesApi(desempleo(), tasa(ACTIVIDAD_ID)),
+        {
+            "ids": [DESEMPLEO_ID, ACTIVIDAD_ID],
+            "variacion": {"desde": "2025-04", "hasta": "2026-04"},
+        },
+    )
+    assert {f["serie"]: f["valor_hasta"] for f in payload["filas"]} == {
+        "Tasa de desempleo total. En porcentaje.": 7.9,
+        "Tasa de actividad total. En porcentaje.": 48.9,
+    }
+    assert "escala" not in payload
+
+
+# ── fin de la fuente: la última observación, no un metadato viejo (H065) ──
+
+
+async def test_la_fuente_llega_hasta_el_ultimo_dato_aunque_la_metadata_este_atrasada() -> None:
+    # Pobreza 64.2: la metadata dice 2026-01-01 y la API ya trae 2026-07-01.
+    # Con «la fuente llega hasta 2026-01-01» el modelo descartó el 1S-2026.
+    payload, _ = await _run(FakeSeriesApi(tasa(POBREZA_ID)), {"ids": [POBREZA_ID], "ultimos": 2})
+    assert payload["ultima_observacion"] == "2026-07-01"
+    assert payload["la_fuente_llega_hasta"] == "2026-07-01"
+    assert payload["filas"][-1]["periodo"] == "2026-S1"
+    assert 32.3 in payload["filas"][-1].values()
+
+
+# ── frecuencias distintas en un pedido: la API promedia (H086) ──
+
+
+async def test_series_de_distinta_frecuencia_avisan_que_la_api_promedio() -> None:
+    # Reservas diaria + mensual: la diaria llega promediada al mes (49.700
+    # en agosto) y el modelo la podía dar como el saldo (48.259 al 31-08).
+    payload, _ = await _run(
+        FakeSeriesApi(reservas_diarias(), reservas_mensuales()),
+        {"ids": [RESERVAS_DIARIAS_ID, RESERVAS_ID], "desde": "2026-06-01"},
+    )
+    aviso = payload["aviso_agregacion"]
+    assert "«Reservas internacionales del BCRA, en millones de dólares» (diaria)" in aviso
+    assert "Saldos" not in aviso
+    assert "PROMEDIANDO" in aviso
+    assert "agregacion=end_of_period" in aviso
+
+
+async def test_una_serie_sola_no_avisa_promedio() -> None:
+    payload, _ = await _run(
+        FakeSeriesApi(reservas_diarias()), {"ids": [RESERVAS_DIARIAS_ID], "ultimos": 1}
+    )
+    assert payload["filas"][-1]["fecha"] == "2026-08-31"
+    assert "aviso_agregacion" not in payload
+
+
 # ── _tail_for_model con resultados de otros conectores ─────
 
 
@@ -455,7 +558,12 @@ async def test_buscar_series_marca_la_discontinuada_y_dice_hasta_cuando_llega() 
     )
     gasto = next(v for v in payload["verificadas"] if "451.3_GPNGPN_0_0_3_30" in v["ids"])
     assert gasto["discontinuada"] is True
-    assert payload["series"][0]["hasta"] == "2023-01-01"
+    # Es el metadato del catálogo de la API, que puede estar atrasado (la
+    # pobreza 64.2 dice 2026-01-01 y ya publicó 2026-07-01): se lo nombra
+    # así y no como el fin de la serie.
+    assert payload["series"][0]["hasta_segun_catalogo"] == "2023-01-01"
+    assert "hasta" not in payload["series"][0]
+    assert "puede estar atrasado" in BuscarSeries.spec.description
 
 
 async def test_buscar_series_reservas_ofrece_primero_la_diaria() -> None:

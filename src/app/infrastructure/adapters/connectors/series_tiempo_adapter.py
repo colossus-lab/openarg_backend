@@ -417,10 +417,12 @@ YEAR_TO_DATE = "percent_change_since_beginning_of_year"
 
 # Series cuyas unidades dicen «Porcentaje» pero que la API da como fracción
 # (desempleo 0,079 = 7,9 %). Se escalan ×100 en modo valor y en `change`
-# (diferencia en puntos porcentuales). Lista cerrada y verificada contra la
-# API el 05-oct (descripción «… En porcentaje.», máximo histórico 0,204):
-# `is_percentage` no sirve para detectarlas, porque 174.1_T_INTERUS también
-# lo trae en True y ya viene ×100.
+# (diferencia en puntos porcentuales). La detección es por regla
+# (`_is_fraction_percent`); esta lista, verificada contra la API el 05-oct
+# (descripción «… En porcentaje.», máximo histórico 0,204), sólo asegura el
+# desempleo cuando la metadata no trae el rango de la serie. `is_percentage`
+# no sirve para detectarlas: 174.1_T_INTERUS_0_0_43 también lo trae en True y
+# ya viene ×100.
 FRACTION_PERCENT_IDS = frozenset(
     {
         "45.2_ECTDT_0_T_33",  # desempleo, total nacional
@@ -432,6 +434,10 @@ FRACTION_PERCENT_IDS = frozenset(
         "45.2_ECTDTP_0_T_43",  # Patagonia
     }
 )
+
+# Una tasa dada como fracción no pasa de 1,5 (150 %); un porcentaje ya
+# multiplicado por 100 pasa, al menos alguna vez en su historia.
+_FRACTION_MAX = 1.5
 
 _FREQUENCY_NAMES = {
     "day": "diaria",
@@ -449,6 +455,8 @@ _ISO_FREQUENCY_NAMES = {
     "R/P6M": "semestral",
     "R/P1Y": "anual",
 }
+# De la más fina a la más gruesa.
+_FREQUENCY_ORDER = {name: i for i, name in enumerate(_FREQUENCY_NAMES.values())}
 
 _DATE_RE = re.compile(r"(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?")
 
@@ -486,6 +494,47 @@ def _as_bool(value: Any) -> bool | None:
     if isinstance(value, str) and value.strip().lower() in ("true", "false"):
         return value.strip().lower() == "true"
     return None
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_fraction_percent(sid: str, field: Mapping[str, Any], values: list[float]) -> bool:
+    """¿Unidades «Porcentaje» con los valores como fracción (0,489 = 48,9 %)?
+
+    Por regla y no por lista: con la lista sólo se escalaba el desempleo, y
+    actividad, empleo, subocupación y pobreza llegaban como 0,489 «Porcentaje».
+
+    - Las unidades empiezan con «Porcentaje» («de hogares», «de población»),
+      salvo las que aclaran «(0-100)», como la BADLAR.
+    - Control de magnitud: el rango de TODA la serie (``min_value`` y
+      ``max_value`` de la metadata, que no cambian con la ventana, la
+      representación ni el collapse; medido el 06-oct) y los valores traídos
+      caben en ±1,5. La tasa de plazo fijo en dólares 174.1_T_INTERUS_0_0_43
+      dice «Porcentaje», vale 1,04 en 2026-04 y ya viene en %: en 2001 llegó a
+      13,75. Sin el rango no se escala.
+
+    Los ids de FRACTION_PERCENT_IDS no necesitan las unidades ni el rango,
+    pero tampoco se escalan si sus valores ya están en %.
+    """
+    if any(abs(v) > _FRACTION_MAX for v in values):
+        return False
+    low, high = _as_float(field.get("min_value")), _as_float(field.get("max_value"))
+    if low is not None and high is not None and max(abs(low), abs(high)) > _FRACTION_MAX:
+        return False
+    if sid in FRACTION_PERCENT_IDS:
+        return True
+    units = _strip_accents(str(field.get("units") or "")).strip().lower()
+    return (
+        low is not None
+        and high is not None
+        and units.startswith("porcentaje")
+        and "0-100" not in units
+    )
 
 
 def _year_to_date(rows: list[list[Any]]) -> list[list[Any]]:
@@ -629,11 +678,23 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             if not data:
                 return None
 
+            # La última fila con dato de cada serie. La metadata de la API
+            # puede estar atrasada: la pobreza 64.2_POBLACION_NUA_0_0_34_74
+            # dice time_index_end 2026-01-01 y ya trae la fila 2026-07-01; con
+            # «la fuente llega hasta 2026-01-01» el modelo descartó ese dato.
+            last_by_id: dict[str, str] = {}
+            for idx, sid in enumerate(series_ids):
+                for row in reversed(data):
+                    if idx + 1 < len(row) and row[idx + 1] is not None:
+                        last_by_id[sid] = str(row[0])[:10]
+                        break
+
             # Labels a partir de la metadata: meta[0] es el eje de tiempo
             # (con la frecuencia de la respuesta), meta[1..N] las series.
             meta_list = raw.get("meta", [])
             axis = meta_list[0] if meta_list else {}
             id_to_label: dict[str, str] = {}
+            fields: dict[str, Mapping[str, Any]] = {}
             field_descriptions: list[str] = []
             field_units = ""
             representation_units = ""
@@ -647,6 +708,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 label = field.get("description") or field.get("title") or sid
                 if sid:
                     id_to_label[sid] = label
+                    fields[sid] = field
                 if field.get("description"):
                     field_descriptions.append(field["description"])
                 if not field_units and field.get("units"):
@@ -658,11 +720,17 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 if not organism and ds.get("source"):
                     organism = ds["source"]
                 if sid:
+                    # El fin de la serie en la fuente nunca es anterior a un
+                    # dato que la API ya devolvió.
+                    source_end = field.get("time_index_end")
+                    observed = last_by_id.get(sid)
+                    if observed and (not source_end or observed > str(source_end)[:10]):
+                        source_end = observed
                     per_series.append(
                         {
                             "id": sid,
                             "titulo": label,
-                            "fecha_fin_fuente": field.get("time_index_end"),
+                            "fecha_fin_fuente": source_end,
                             "actualizada_en_fuente": _as_bool(field.get("is_updated")),
                             "dias_sin_datos": _as_int(field.get("days_without_data")),
                             "unidades": field.get("units"),
@@ -678,14 +746,19 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             # 33,54 %). Antes sólo se escalaba percent_change y la interanual
             # le llegaba al modelo como 0,3354 con unidades «Índice».
             is_percent = (representation or "").startswith("percent_change")
-            # Desempleo y compañía: «Porcentaje» como fracción (ver
-            # FRACTION_PERCENT_IDS). Con una representación percent_* ya
+            # Desempleo, actividad, pobreza…: «Porcentaje» como fracción (ver
+            # _is_fraction_percent). Con una representación percent_* ya
             # entran por is_percent; acá no se escalan dos veces.
-            scaled_fractions = (
-                {sid for sid in series_ids if sid in FRACTION_PERCENT_IDS}
-                if representation in (None, "value", "change")
-                else set()
-            )
+            scaled_fractions: set[str] = set()
+            if representation in (None, "value", "change"):
+                for idx, sid in enumerate(series_ids):
+                    column = [
+                        float(row[idx + 1])
+                        for row in data
+                        if idx + 1 < len(row) and isinstance(row[idx + 1], int | float)
+                    ]
+                    if _is_fraction_percent(sid, fields.get(sid, {}), column):
+                        scaled_fractions.add(sid)
             records = []
             for row in data:
                 record: dict = {"fecha": row[0]}
@@ -742,6 +815,21 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     entry["unidades"] = (
                         f"{entry['unidades'] or 'Porcentaje'} (en %; la API la da como fracción)"
                     )
+                    # Con escalas mixtas, lo que ve el modelo dice cuál es cuál.
+                    entry["escalada_a_porcentaje"] = True
+
+            # Sin `collapse`, series de distinta frecuencia van al eje de la
+            # más gruesa y la API PROMEDIA las más finas sin decirlo: reservas
+            # diaria + mensual daban 49.700,26 en 2026-08 (el promedio de
+            # agosto) y el saldo al 31 era 48.259. Se marca cuáles.
+            averaged = False
+            axis_rank = _FREQUENCY_ORDER.get(_FREQUENCY_NAMES.get(str(axis.get("frequency")), ""))
+            if not collapse and axis_rank is not None:
+                for entry in per_series:
+                    native_rank = _FREQUENCY_ORDER.get(entry["frecuencia"] or "")
+                    if native_rank is not None and native_rank < axis_rank:
+                        entry["promediada_por_api"] = True
+                        averaged = True
 
             metadata: dict[str, Any] = {
                 "total_records": len(records),
@@ -766,6 +854,8 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 metadata["representation"] = representation
             if collapse and collapse_aggregation:
                 metadata["agregacion"] = collapse_aggregation
+            if averaged:
+                metadata["agregada_por_api"] = "promedio"
             if all_percent:
                 # Contrato explícito: los valores ya están en puntos
                 # porcentuales (15.2 es 15,2 %).
