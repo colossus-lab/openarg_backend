@@ -261,6 +261,21 @@ def test_los_pedidos_invalidos_vuelven_con_un_mensaje_para_el_modelo(
         build_aggregate_query(_req(**kw))
 
 
+@pytest.mark.parametrize("columna", ["ingreso", "no_existe", "pondera"])
+def test_un_conteo_con_columna_se_rechaza_en_vez_de_rotular_un_count_de_filas(
+    columna: str,
+) -> None:
+    """Revisión independiente del 05-oct (H109): el conteo es count(*) (o la
+    suma del ponderador), pero con `columna` se aceptaba cualquier texto y el
+    resultado salía rotulado «conteo de <columna>»: el total de filas bajo un
+    rótulo que dice otra cosa. También con ponderador."""
+    with pytest.raises(CatalogRequestError, match="conteo") as exc:
+        build_aggregate_query(_req(columna=columna))
+    assert "`columna`" in str(exc.value) and "filtros" in str(exc.value)
+    with pytest.raises(CatalogRequestError, match="conteo"):
+        build_aggregate_query(_req(columna=columna, ponderar_por="pondera"))
+
+
 def test_las_columnas_internas_no_se_pueden_usar() -> None:
     """`_source_dataset_id` es del colector, no un dato."""
     with pytest.raises(CatalogRequestError):

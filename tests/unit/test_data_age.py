@@ -7,8 +7,10 @@ into a promise.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
+
+import pytest
 
 from app.application.quality.data_age import (
     STALE_AFTER_DAYS,
@@ -235,9 +237,120 @@ def test_un_solo_periodo_es_una_foto_con_su_fecha_de_corte():
     assert f.nota is not None and "foto" in f.nota and "hace" not in f.nota
 
 
-def test_sin_columna_de_fecha_no_hay_ultimo_dato():
+def test_sin_columna_de_fecha_no_hay_ultimo_dato_ni_fecha_de_corte():
+    """Revisión independiente del 05-oct (H022): antes una tabla sin columna de
+    fecha salía con `fecha_corte` = día de lectura, "vigente al" ese día. La
+    fecha de lectura no dice de cuándo son los datos."""
     f = table_freshness(_leida(2026, 10, 4, 1), columna_fecha=None, desde=None, hasta=None)
-    assert f.ultimo_dato is None and f.fecha_corte is not None and not f.serie
+    assert f.ultimo_dato is None and f.fecha_corte is None and not f.serie
+    assert f.nota is not None
+    assert "los vigentes al" not in f.nota and "foto" not in f.nota
+    assert "no tiene columna de fecha" in f.nota and "4 de octubre de 2026" in f.nota
+    # La fecha de lectura se informa igual: es cierta.
+    assert f.actualizada is not None and f.actualizada.isoformat() == "2026-10-04"
+
+
+def test_una_tabla_de_2001_sin_fecha_no_se_declara_vigente_hoy():
+    """H022: 3.331 tablas de prod sin columna de fecha (390 con un año ≤2023
+    en el título), releídas a diario, salían "vigentes al 5 de octubre de
+    2026". El año está en el título; la tabla no lo tiene en ninguna columna."""
+    f = table_freshness(_leida(2026, 10, 5, 0), columna_fecha=None, desde=None, hasta=None)
+    assert f.fecha_corte is None and f.serie is False
+    assert f.nota is not None and "vigentes al" not in f.nota
+    assert "título del dataset" in f.nota
+
+
+def test_sin_columna_de_fecha_y_sin_fecha_de_lectura_tampoco_afirma_nada():
+    f = table_freshness(None, columna_fecha=None, desde=None, hasta=None)
+    assert f.fecha_corte is None and f.actualizada is None
+    assert f.nota is not None and "los vigentes al" not in f.nota
+
+
+def test_un_solo_periodo_pasado_dice_de_cuando_son_los_datos():
+    """H022, la reproducción de la revisión: ejercicio 2019 releído el 04-oct-2026
+    salía «Es una foto… los datos son los vigentes al 4 de octubre de 2026»."""
+    f = table_freshness(
+        _leida(2026, 10, 4, 1), columna_fecha="ejercicio", desde="2019", hasta="2019"
+    )
+    assert f.serie is False and f.ultimo_dato == "2019"
+    assert f.fecha_corte is None
+    assert f.nota is not None
+    assert "los vigentes al" not in f.nota and "foto" not in f.nota
+    assert "los datos son de 2019" in f.nota
+    assert f.actualizada is not None and f.actualizada.isoformat() == "2026-10-04"
+
+
+def test_el_ejercicio_que_se_cerro_no_se_declara_vigente():
+    """Revisión del PR #144: con la regla de «el actual o el anterior», el
+    ejercicio 2025 (cache_presupuesto_pef_2025 en staging, un solo ejercicio,
+    releída el 05-oct) salía como foto «vigente al 5 de octubre de 2026», sin
+    nombrar el ejercicio: un cliente podía citar el crédito de 2025 como el de hoy."""
+    f = table_freshness(
+        _leida(2026, 10, 5, 0), columna_fecha="ejercicio_presupuestario", desde="2025", hasta="2025"
+    )
+    assert f.serie is False and f.ultimo_dato == "2025"
+    assert f.fecha_corte is None
+    assert f.nota is not None
+    assert "los vigentes al" not in f.nota and "foto" not in f.nota
+    assert "los datos son de 2025" in f.nota
+
+
+@pytest.mark.parametrize(
+    ("periodo", "leida", "foto"),
+    [
+        # Ejercicio: sólo el en curso. El que se cerró ya no es el vigente,
+        # tampoco leído a principios del año siguiente.
+        ("2026", (2026, 10, 5), True),
+        ("2026", (2026, 1, 1), True),
+        ("2026", (2026, 12, 31), True),
+        ("2025", (2026, 10, 5), False),
+        ("2025", (2026, 1, 3), False),
+        ("2025", (2026, 12, 31), False),
+        ("2026", (2027, 1, 3), False),
+        ("2024", (2026, 10, 5), False),
+        ("2001", (2026, 10, 5), False),
+        # Un ejercicio futuro (un proyecto de presupuesto) tampoco es vigente.
+        ("2027", (2026, 10, 5), False),
+        # Mes: sólo el corriente. Los datos de septiembre no son los vigentes
+        # al 5 de octubre: son de septiembre.
+        ("2026-10", (2026, 10, 5), True),
+        ("2026-09", (2026, 10, 5), False),
+        ("2025-12", (2026, 1, 3), False),
+        ("2026-07", (2026, 10, 5), False),
+        # Día: sólo el de la lectura.
+        ("2026-10-05", (2026, 10, 5), True),
+        ("2026-10-04", (2026, 10, 5), False),
+        ("2026-09-30", (2026, 10, 5), False),
+        # Un valor que no se reconoce: sin saber de cuándo es, no es vigente.
+        ("2do semestre", (2026, 10, 5), False),
+    ],
+)
+def test_un_solo_periodo_es_una_foto_solo_si_es_el_de_la_lectura(
+    periodo: str, leida: tuple[int, int, int], foto: bool
+) -> None:
+    f = table_freshness(_leida(*leida, 0), columna_fecha="periodo", desde=periodo, hasta=periodo)
+    assert f.serie is False and f.ultimo_dato == periodo
+    if foto:
+        assert f.fecha_corte is not None and f.fecha_corte == date(*leida)
+        assert f.nota is not None and "vigentes al" in f.nota
+    else:
+        assert f.fecha_corte is None
+        assert f.nota is not None and "los vigentes al" not in f.nota and "foto" not in f.nota
+
+
+@pytest.mark.parametrize(
+    ("periodo", "texto"),
+    [("2026-03", "de marzo de 2026"), ("2026-09-30", "del 30 de septiembre de 2026")],
+)
+def test_el_periodo_pasado_se_dice_como_una_persona(periodo: str, texto: str) -> None:
+    f = table_freshness(_leida(2026, 10, 5, 0), columna_fecha="fecha", desde=periodo, hasta=periodo)
+    assert f.nota is not None and f"los datos son {texto}." in f.nota
+
+
+def test_un_solo_periodo_sin_fecha_de_lectura_dice_igual_de_cuando_es():
+    f = table_freshness(None, columna_fecha="ejercicio", desde="2019", hasta="2019")
+    assert f.fecha_corte is None and f.ultimo_dato == "2019"
+    assert f.nota is not None and "los datos son de 2019" in f.nota
 
 
 def test_sin_fecha_de_lectura_no_inventa_una():

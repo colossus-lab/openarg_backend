@@ -347,6 +347,31 @@ class TestModoDatosCore:
         )
         assert "Fecha de corte: 2026-10-05" in foto and "Último dato" not in foto
 
+    def test_table_of_a_past_period_says_when_the_data_is_from(self) -> None:
+        """Revisión independiente del 05-oct (H022): un ejercicio 2019 releído
+        hoy salía con «Fecha de corte: <día de lectura>» al lado de «Período:
+        2019 a 2019». Ahora el backend no manda fecha_corte y la línea dice de
+        cuándo son los datos."""
+        out = core.format_table(
+            {
+                "tabla": "t",
+                "columnas": [],
+                "columna_fecha": "ejercicio",
+                "desde": "2019",
+                "hasta": "2019",
+                "frescura": {
+                    "actualizada": "2026-10-04",
+                    "ultimo_dato": "2019",
+                    "fecha_corte": None,
+                    "serie": False,
+                    "nota": "La tabla tiene un solo período: los datos son de 2019.",
+                },
+            }
+        )
+        assert "Fecha de corte" not in out
+        assert "Frescura: Datos de 2019 · Leída de la fuente por OpenArg: 2026-10-04" in out
+        assert "Nota: La tabla tiene un solo período" in out
+
     def test_table_without_freshness_keeps_the_old_shape(self) -> None:
         assert "Frescura" not in core.format_table({"tabla": "t", "columnas": []})
 
