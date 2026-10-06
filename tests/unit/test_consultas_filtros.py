@@ -225,7 +225,8 @@ class TestComparaciones:
 
     def test_usa_el_formato_de_la_columna(self) -> None:
         sql, _ = _sql(Filter("credito_devengado", ">=", "10"), formatos={"credito_devengado": "ar"})
-        assert "replace(btrim(\"credito_devengado\"::text), '.', '')::numeric" in sql
+        x = 'btrim("credito_devengado"::text, chr(32) || chr(9) || chr(10) || chr(13) || chr(160))'
+        assert f"replace({x}, '.', '')::numeric" in sql
 
     def test_una_fecha_se_filtra_con_desde_hasta(self) -> None:
         with pytest.raises(CatalogRequestError, match="desde"):

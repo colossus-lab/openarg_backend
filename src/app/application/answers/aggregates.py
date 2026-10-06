@@ -13,6 +13,9 @@ operación, columnas y filtros, y este módulo arma la consulta:
 - la consulta cuenta cuántas filas entraron en el cálculo (``__filas``) y
   cuántas tenían un número (``__filas_con_valor``): sin eso, un filtro que no
   encontraba nada devolvía ``valor = 0`` o ``None``, indistinguible de un dato.
+  Si la columna es de texto y su formato no se decidió, arma además una
+  consulta aparte que cuenta las filas con un número ambiguo
+  (``__filas_ambiguas``), que quedaron afuera aunque tengan número.
 
 Existe por el caso Pinamar: el pipeline viejo contó 7.944 filas de una
 encuesta y las presentó como 7.944 personas. Una encuesta se expande con su
@@ -38,7 +41,7 @@ from app.application.consultas.fechas import (
     validar_fecha,
 )
 from app.application.consultas.filtros import OPERADORES, Filter, sql_filtro, validar_filtros
-from app.application.consultas.numeros import expresion_numero
+from app.application.consultas.numeros import expresion_ambiguo, expresion_numero
 from app.application.consultas.sql import Params
 from app.application.public_catalog import (
     CatalogRequestError,
@@ -50,6 +53,7 @@ from app.domain.value_objects.table_reference import quote_qualified
 __all__ = [
     "COLUMNAS_DE_CONTROL",
     "FILAS",
+    "FILAS_AMBIGUAS",
     "FILAS_CON_VALOR",
     "FILAS_CON_VALOR_TOTAL",
     "FILAS_TOTAL",
@@ -79,6 +83,10 @@ FILAS_CON_VALOR = "__filas_con_valor"
 FILAS_TOTAL = "__filas_total"
 FILAS_CON_VALOR_TOTAL = "__filas_con_valor_total"
 COLUMNAS_DE_CONTROL = (FILAS, FILAS_CON_VALOR, FILAS_TOTAL, FILAS_CON_VALOR_TOTAL)
+# Filas que quedaron afuera por tener un número ambiguo ("12.500") en una
+# columna de texto cuyo formato no se decidió: no son filas "sin número" y el
+# aviso las cuenta aparte (H041). Las cuenta `AggregateQuery.sql_ambiguas`.
+FILAS_AMBIGUAS = "__filas_ambiguas"
 
 
 @dataclass(frozen=True)
@@ -120,6 +128,13 @@ class AggregateQuery:
     limite: int
     desde: str | None = None
     hasta: str | None = None
+    # Cuenta las filas con un número ambiguo que el cálculo no leyó (texto sin
+    # formato decidido), con los mismos filtros y sin agrupar; usa `params`.
+    # None si no hay columnas así. Es otra consulta, para correrla sólo si
+    # faltan filas con valor: en el SELECT principal eran dos regex más por
+    # fila en el caso común (texto con enteros, 0 ambiguos), y la suma de
+    # 5,35 M de filas pasaba de 9-11 s a 16-20 s (revisión del PR #148).
+    sql_ambiguas: str | None = None
 
 
 def numeric_columns(req: AggregateRequest) -> list[str]:
@@ -157,6 +172,21 @@ def _measure(req: AggregateRequest, types: dict[str, str]) -> tuple[str, str | N
     return f"{'min' if op == 'minimo' else 'max'}({value})", counted
 
 
+def _ambiguas(req: AggregateRequest, types: dict[str, str]) -> str | None:
+    """Condición de las filas con un número ambiguo que el cálculo no leyó.
+
+    Sólo las columnas de texto leídas como número cuyo formato quedó sin
+    decidir: con formato, los ambiguos se leen.
+    """
+    formatos = req.formatos or {}
+    condiciones = [
+        cond
+        for col in numeric_columns(req)
+        if formatos.get(col) is None and (cond := expresion_ambiguo(col, types[col])) is not None
+    ]
+    return " OR ".join(condiciones) if condiciones else None
+
+
 def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
     """Arma el SELECT del agregado.
 
@@ -164,7 +194,8 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
     nombre; ``__filas`` y ``__filas_con_valor`` dicen sobre cuántas filas se
     calculó cada grupo, y con agrupación ``__filas_total`` y
     ``__filas_con_valor_total``, sobre cuántas en todos (también los que el
-    LIMIT deja afuera).
+    LIMIT deja afuera). ``sql_ambiguas`` cuenta aparte las filas con un número
+    ambiguo que no se leyó por falta de formato.
     """
     types = {c: t for c, t in req.column_types if not is_internal_column(c)}
     if not types:
@@ -232,6 +263,13 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
     sql = f"SELECT {', '.join(select)} FROM {quote_qualified(req.table)}"
     if where:
         sql += " WHERE " + " AND ".join(where)
+    ambiguas = _ambiguas(req, types)
+    sql_ambiguas = (
+        f"SELECT count(*) AS {FILAS_AMBIGUAS} FROM {quote_qualified(req.table)} WHERE "
+        + " AND ".join([*where, f"({ambiguas})"])
+        if ambiguas is not None
+        else None
+    )
     if groups:
         sql += " GROUP BY " + ", ".join(quote_ident(g) for g in groups)
         if ordenar_por == "valor":
@@ -252,4 +290,5 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
         limite=int(req.limite),
         desde=desde,
         hasta=hasta,
+        sql_ambiguas=sql_ambiguas,
     )

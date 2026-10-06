@@ -155,10 +155,14 @@ async def test_calcular_no_suma_una_columna_de_numeros_ambiguos() -> None:
 
 
 async def test_calcular_suma_una_columna_argentina_y_dice_sobre_cuantas_filas() -> None:
+    # Hacen falta cinco valores que sólo puedan ser argentinos (H009: con uno
+    # solo, «1.218.600», se decidía la columna entera). Valores reales de la
+    # Pauta CABA.
+    muestra = ["27.830", "1.218.600", "1.344.663", "1.446.434", "1.456.840", "1.271.613"]
     sandbox = Sandbox(
         TYPES,
         [
-            ("AS v FROM", [{"v": "27.830"}, {"v": "1.218.600"}]),
+            ("AS v FROM", [{"v": v} for v in muestra]),
             ("AS valor", [{"valor": 242635557, "__filas": 1312, "__filas_con_valor": 1300}]),
         ],
     )
@@ -166,7 +170,9 @@ async def test_calcular_suma_una_columna_argentina_y_dice_sobre_cuantas_filas() 
         {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
     )
     sql = sandbox.sql_with("AS valor")
-    assert "replace(btrim(\"IMPORTE\"::text), '.', '')::numeric" in sql
+    x = 'btrim("IMPORTE"::text, chr(32) || chr(9) || chr(10) || chr(13) || chr(160))'
+    assert f"replace({x}, '.', '')::numeric" in sql
+    assert "__filas_ambiguas" not in sql  # formato decidido: no quedan ambiguos sin leer
     [result] = out.results
     assert result.records == [{"valor": 242635557}]  # sin las columnas de control
     assert result.metadata["filas_usadas"] == 1312
@@ -189,6 +195,109 @@ async def test_calcular_sin_numeros_reconocibles_no_da_valor() -> None:
     )
     assert out.results == []
     assert "número reconocible" in json.loads(out.content)["aviso"]
+
+
+async def test_calcular_separa_los_ambiguos_de_las_filas_sin_numero() -> None:
+    """H041: con el formato sin decidir, un «12.500» queda afuera del cálculo,
+    pero es un número. El aviso decía que esas filas "no tienen un número
+    reconocible". Se cuentan en una consulta aparte (revisión del PR #148: en
+    el SELECT principal costaban dos regex por fila en todos los cálculos)."""
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}, {"v": "1.234,5"}, {"v": "s/d"}]),
+            ("AS valor", [{"valor": 1000, "__filas": 100, "__filas_con_valor": 90}]),
+            ("AS __filas_ambiguas", [{"__filas_ambiguas": 6}]),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    assert "__filas_ambiguas" not in sandbox.sql_with("AS valor")
+    cuenta = sandbox.sql_with("AS __filas_ambiguas")
+    assert "GROUP BY" not in cuenta and "FILTER" not in cuenta
+    [result] = out.results
+    assert result.records == [{"valor": 1000}]  # sin las columnas de control
+    [aviso] = [n for n in json.loads(out.content)["notas"] if "90 de 100" in n]
+    assert "6 tienen un número que se puede leer de dos formas" in aviso
+    assert "4 no tienen un número reconocible en 'IMPORTE'" in aviso
+
+
+async def test_calcular_presupuesto_apn_las_filas_afuera_eran_todas_ambiguas() -> None:
+    """Los números de credito_pagado (presupuesto APN `5f0f`, staging) con el
+    formato sin decidir: las 24 filas afuera son «6,555» y parecidos."""
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}]),
+            ("AS valor", [{"valor": 38434.9, "__filas": 25063, "__filas_con_valor": 25039}]),
+            ("AS __filas_ambiguas", [{"__filas_ambiguas": 24}]),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    [aviso] = [n for n in json.loads(out.content)["notas"] if "25039 de 25063" in n]
+    assert "las otras 24 tienen un número que se puede leer de dos formas" in aviso
+    assert "no tienen un número reconocible" not in aviso
+
+
+async def test_calcular_sin_valor_por_ambiguos_no_dice_que_no_hay_numeros() -> None:
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}]),
+            ("AS valor", [{"valor": None, "__filas": 5, "__filas_con_valor": 0}]),
+            ("AS __filas_ambiguas", [{"__filas_ambiguas": 5}]),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    assert out.results == []
+    aviso = json.loads(out.content)["aviso"]
+    assert "5 tienen un número que se puede leer de dos formas" in aviso
+    assert "no tienen un número reconocible" not in aviso
+
+
+async def test_calcular_con_todas_las_filas_con_valor_no_cuenta_ambiguos() -> None:
+    """El caso común (texto con enteros, todas las filas leídas) no paga la
+    segunda consulta."""
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}, {"v": "17"}]),
+            ("AS valor", [{"valor": 517, "__filas": 2, "__filas_con_valor": 2}]),
+            ("AS __filas_ambiguas", [{"__filas_ambiguas": 0}]),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    assert [r.records for r in out.results] == [[{"valor": 517}]]
+    assert not any("__filas_ambiguas" in sql for sql, _ in sandbox.calls)
+
+
+async def test_calcular_si_no_se_pueden_contar_los_ambiguos_da_el_resultado_igual() -> None:
+    """Si la cuenta aparte pasa el timeout (tabla grande), el cálculo ya está
+    hecho: se informa, y el aviso no afirma que las filas afuera no tengan
+    número, porque no se sabe."""
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}]),
+            ("AS valor", [{"valor": 1000, "__filas": 100, "__filas_con_valor": 90}]),
+            ("AS __filas_ambiguas", "canceling statement due to statement timeout"),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    [result] = out.results
+    assert result.records == [{"valor": 1000}]
+    [aviso] = [n for n in json.loads(out.content)["notas"] if "90 de 100" in n]
+    assert "las otras 10 no tienen un número reconocible en 'IMPORTE' o tienen" in aviso
+    assert "se puede leer de dos formas" in aviso
 
 
 async def test_calcular_avisa_si_hay_mas_grupos_que_el_limite() -> None:

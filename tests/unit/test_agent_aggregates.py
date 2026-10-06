@@ -14,6 +14,7 @@ import pytest
 
 from app.application.answers.aggregates import (
     FILAS,
+    FILAS_AMBIGUAS,
     FILAS_CON_VALOR,
     FILAS_CON_VALOR_TOTAL,
     FILAS_TOTAL,
@@ -22,10 +23,14 @@ from app.application.answers.aggregates import (
     build_aggregate_query,
     numeric_columns,
 )
+from app.application.consultas.numeros import RE_AMBIGUO
 from app.application.public_catalog import CatalogRequestError
+from app.domain.value_objects.table_reference import quote_qualified
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
 
 ESTUDIO = "raw.datos_gob_ar__estudio_nacional_sobre_el_perfil_de__08ca74a9__v1"
+# Una columna de texto limpia en el SQL (ver `consultas.numeros.ESPACIOS`).
+LIMPIO = 'btrim("{}"::text, chr(32) || chr(9) || chr(10) || chr(13) || chr(160))'
 TYPES = [
     ("pondera", "text"),
     ("dificultad_total", "text"),
@@ -46,10 +51,13 @@ def test_un_conteo_ponderado_suma_los_pesos_y_no_cuenta_filas() -> None:
     q = build_aggregate_query(
         _req(ponderar_por="pondera", filtros=[Filter("dificultad_total", "=", "1")])
     )
-    assert 'sum((CASE WHEN btrim("pondera"::text) ~' in q.sql
+    assert f"sum((CASE WHEN {LIMPIO.format('pondera')} ~" in q.sql
     assert "count(*) AS valor" not in q.sql
     assert q.params == {"p0": "1"}
+    # `pondera` es texto sin formato decidido: las filas con un número
+    # ambiguo se cuentan en otra consulta (H041), no en esta.
     assert q.columns == ["valor", FILAS, FILAS_CON_VALOR]
+    assert q.sql_ambiguas is not None
 
 
 def test_sin_ponderador_es_un_conteo_de_filas() -> None:
@@ -120,12 +128,57 @@ class TestFormatoDeLosNumeros:
         q = build_aggregate_query(
             _req(operacion="suma", columna="pondera", formatos={"pondera": "ar"})
         )
-        assert "replace(btrim(\"pondera\"::text), '.', '')::numeric" in q.sql
+        assert f"replace({LIMPIO.format('pondera')}, '.', '')::numeric" in q.sql
         assert r"^\s*-?[0-9]+(\.[0-9]+)?\s*$" not in q.sql
 
     def test_formato_desconocido_no_lee_los_ambiguos(self) -> None:
         q = build_aggregate_query(_req(operacion="suma", columna="pondera"))
         assert "THEN NULL" in q.sql
+
+    def test_el_select_principal_no_cuenta_ambiguos(self) -> None:
+        """Revisión del PR #148: el `count(*) FILTER` de los ambiguos iba en el
+        SELECT de toda columna de texto sin formato decidido, que es el caso
+        común (texto con enteros, 0 ambiguos). En staging, la suma de pax_pagos
+        (5,35 M de filas) pasaba de 9-11 s a 16-20 s, con un timeout de 10 s."""
+        q = build_aggregate_query(_req(operacion="suma", columna="pondera", formatos={}))
+        assert "FILTER" not in q.sql and FILAS_AMBIGUAS not in q.sql
+        agrupado = build_aggregate_query(
+            _req(operacion="suma", columna="pondera", agrupar_por=["edad_agrupada"])
+        )
+        assert "FILTER" not in agrupado.sql and FILAS_AMBIGUAS not in agrupado.sql
+
+    def test_los_ambiguos_se_cuentan_aparte_con_los_mismos_filtros(self) -> None:
+        """H041: sin eso, el aviso decía que «12.500» "no tiene un número". La
+        cuenta va en otra consulta, que `agregar` corre sólo si faltan filas
+        con valor, con los mismos filtros y sin agrupar."""
+        q = build_aggregate_query(
+            _req(
+                operacion="suma",
+                columna="pondera",
+                agrupar_por=["edad_agrupada"],
+                filtros=[Filter("dificultad_total", "=", "1")],
+                desde="2020",
+            )
+        )
+        assert q.sql_ambiguas is not None
+        tabla = quote_qualified(ESTUDIO)
+        ambiguo = f"(({LIMPIO.format('pondera')} ~ '{RE_AMBIGUO}'))"
+        where = q.sql.split(" WHERE ", 1)[1].split(" GROUP BY ", 1)[0]
+        assert q.sql_ambiguas == (
+            f"SELECT count(*) AS {FILAS_AMBIGUAS} FROM {tabla} WHERE {where} AND {ambiguo}"
+        )
+        assert _validate_sql(q.sql_ambiguas, built=True) is None
+        sin_filtros = build_aggregate_query(_req(operacion="suma", columna="pondera"))
+        assert sin_filtros.sql_ambiguas == (
+            f"SELECT count(*) AS {FILAS_AMBIGUAS} FROM {tabla} WHERE {ambiguo}"
+        )
+
+    def test_con_formato_decidido_o_columna_numerica_no_hay_ambiguos(self) -> None:
+        decidido = _req(operacion="suma", columna="pondera", formatos={"pondera": "ar"})
+        assert build_aggregate_query(decidido).sql_ambiguas is None
+        numerica = _req(operacion="suma", columna="ingreso")
+        assert build_aggregate_query(numerica).sql_ambiguas is None
+        assert build_aggregate_query(_req()).sql_ambiguas is None  # conteo de filas
 
     def test_columnas_que_se_leen_como_numero(self) -> None:
         assert numeric_columns(_req(operacion="suma", columna="pondera")) == ["pondera"]

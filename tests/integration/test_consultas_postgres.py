@@ -14,13 +14,20 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, text
 
 from app.application.consultas.fechas import expresion_fecha, fecha_iso
-from app.application.consultas.numeros import expresion_numero, leer_numero
+from app.application.consultas.numeros import (
+    clase_valor,
+    expresion_ambiguo,
+    expresion_numero,
+    leer_numero,
+)
 from app.application.public_catalog import DataRequest, build_data_query
 
 # A nivel de módulo: dishka resuelve las anotaciones de los providers (con
@@ -48,7 +55,28 @@ FECHAS = [
     "31/02/2020",
     "",
 ]
-NUMEROS = ["1234", "12.500", "-59.796", "1,250", "1.234.567", "1.234,56", "1,234.5", "0.125", "s/d"]
+NUMEROS = [
+    "1234",
+    "12.500",
+    "-59.796",
+    "1,250",
+    "1.234.567",
+    "1.234,56",
+    "1,234.5",
+    "0.125",
+    "s/d",
+    # Los cinco del pedido original que faltaban.
+    "12,5",
+    "1,234.56",
+    "12.5",
+    # H042: Python sacaba con strip() nbsp, tab, CR y LF; btrim(x), sólo espacios.
+    "\xa012.500\xa0",
+    "12.500\t",
+    "0,82\r\r\n",
+    " 1.234,56 ",
+    "\t-12,5\n",
+    "12\u2007",
+]
 
 
 def _engine():
@@ -101,9 +129,40 @@ def test_la_expresion_de_numeros_coincide_con_python(formato: str | None) -> Non
     assert {v: n for v, n in rows} == {v: leer_numero(v, formato) for v in NUMEROS}
 
 
-@pytest.fixture
-def tabla():
-    """Una tabla `cache_*` de prueba: el validador del sandbox sólo deja leer esas."""
+def test_la_condicion_de_ambiguo_coincide_con_python() -> None:
+    engine = _engine()
+    values, params = _values(NUMEROS)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT v, {expresion_ambiguo('v', 'text')} AS amb FROM (VALUES {values}) AS t(v)"
+            ),
+            params,
+        ).fetchall()
+    assert {v: a for v, a in rows} == {
+        v: (clase_valor(v) or "").startswith("ambiguo") for v in NUMEROS
+    }
+
+
+FILAS_DE_PRUEBA = (
+    "('Educación y Cultura', 'Banco do Brasil', '1.500.000,50', '1/10/2017'),"
+    "('Educación y Cultura', 'Banco Nación', '900.000', '15/1/2018'),"
+    "('Salud', 'Call Center', '2.000.000', '1/9/2017'),"
+    "('Defensa', 'Otro', '12.500', 'sin fecha')"
+)
+# Para los cálculos sobre `monto`: con «1.500.000,50» y «2.000.000» son cinco
+# valores distintos que sólo se leen en formato argentino, el mínimo para
+# decidir el formato (H009). Con las cuatro filas de arriba la columna se
+# rechaza, y los tests de `agregar` fallaban (revisión del PR #148).
+FILAS_TURISMO = (
+    "('Turismo', 'Otro', '1.250.000', '1/3/2016'),"
+    "('Turismo', 'Otro', '350.000,25', '1/4/2016'),"
+    "('Turismo', 'Otro', '75,5', '1/5/2016')"
+)
+
+
+@contextmanager
+def _tabla_de_prueba(filas: str) -> Iterator[str]:
     engine = _engine()
     name = f"cache_test_consultas_{uuid.uuid4().hex[:8]}"
     with engine.begin() as conn:
@@ -112,18 +171,26 @@ def tabla():
                 f'CREATE TABLE public."{name}" (funcion_desc text, entidad text, monto text, fecha text)'
             )
         )
-        conn.execute(
-            text(
-                f'INSERT INTO public."{name}" VALUES '
-                "('Educación y Cultura', 'Banco do Brasil', '1.500.000,50', '1/10/2017'),"
-                "('Educación y Cultura', 'Banco Nación', '900.000', '15/1/2018'),"
-                "('Salud', 'Call Center', '2.000.000', '1/9/2017'),"
-                "('Defensa', 'Otro', '12.500', 'sin fecha')"
-            )
-        )
-    yield name
-    with engine.begin() as conn:
-        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+        conn.execute(text(f'INSERT INTO public."{name}" VALUES {filas}'))
+    try:
+        yield name
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+@pytest.fixture
+def tabla():
+    """Una tabla `cache_*` de prueba: el validador del sandbox sólo deja leer esas."""
+    with _tabla_de_prueba(FILAS_DE_PRUEBA) as name:
+        yield name
+
+
+@pytest.fixture
+def tabla_montos():
+    """La misma, con las tres filas de `FILAS_TURISMO`: `monto` es argentina."""
+    with _tabla_de_prueba(f"{FILAS_DE_PRUEBA},{FILAS_TURISMO}") as name:
+        yield name
 
 
 def _run(name: str, **kw):
@@ -306,10 +373,10 @@ async def _agregar(tabla: str, **kw):  # type: ignore[no-untyped-def]
     )
 
 
-async def test_agregar_suma_un_monto_argentino_filtrado(tabla: str) -> None:
+async def test_agregar_suma_un_monto_argentino_filtrado(tabla_montos: str) -> None:
     """Educación y Cultura: 1.500.000,50 + 900.000, con la igualdad sin acentos."""
     res = await _agregar(
-        tabla,
+        tabla_montos,
         operacion="suma",
         columna="monto",
         filtros={"funcion_desc": "educacion y cultura"},
@@ -318,13 +385,55 @@ async def test_agregar_suma_un_monto_argentino_filtrado(tabla: str) -> None:
     assert res.filas_usadas == 2 and res.filas_con_valor == 2 and not res.truncado
 
 
-async def test_agregar_ranking_dice_el_total_de_todos_los_grupos(tabla: str) -> None:
+async def test_agregar_ranking_dice_el_total_de_todos_los_grupos(tabla_montos: str) -> None:
     res = await _agregar(
-        tabla, operacion="suma", columna="monto", agrupar_por=["funcion_desc"], limite=2
+        tabla_montos, operacion="suma", columna="monto", agrupar_por=["funcion_desc"], limite=2
     )
     assert [g["funcion_desc"] for g in res.grupos] == ["Educación y Cultura", "Salud"]
-    assert res.truncado and res.filas_usadas == 4
+    assert res.truncado and res.filas_usadas == 7  # las 4 filas de `tabla` y las 3 de Turismo
     assert any("Hay más de 2 grupos" in a for a in res.avisos)
+
+
+async def test_agregar_rechaza_la_columna_sin_evidencia_suficiente(tabla: str) -> None:
+    """Con las cuatro filas de `tabla`, «900.000» y «12.500» no se pueden leer y
+    sólo dos valores dicen el formato: no se calcula (H009)."""
+    from app.application.public_catalog import CatalogRequestError
+
+    with pytest.raises(CatalogRequestError, match="sólo 2 valores distintos"):
+        await _agregar(tabla, operacion="suma", columna="monto")
+
+
+def test_la_cuenta_de_ambiguos_corre_con_los_filtros_del_calculo(tabla: str) -> None:
+    """H041: las filas con un número ambiguo se cuentan en otra consulta
+    (revisión del PR #148), con los parámetros ligados del cálculo. En `tabla`
+    son «900.000» y «12.500»; con el filtro queda «900.000»."""
+    from app.application.answers.aggregates import (
+        FILAS_AMBIGUAS,
+        AggregateRequest,
+        build_aggregate_query,
+    )
+    from app.application.consultas.filtros import Filter
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    tipos = [(c, "text") for c in ("funcion_desc", "entidad", "monto", "fecha")]
+    for filtros, esperado in (
+        ([], 2),
+        ([Filter("funcion_desc", "=", "educacion y cultura")], 1),
+    ):
+        q = build_aggregate_query(
+            AggregateRequest(
+                table=tabla,
+                column_types=tipos,
+                operacion="suma",
+                columna="monto",
+                filtros=filtros,
+                formatos={},
+            )
+        )
+        assert q.sql_ambiguas is not None
+        result = PgSandboxAdapter()._execute_sync(q.sql_ambiguas, 10, q.params)
+        assert result.error is None, (result.error, q.sql_ambiguas)
+        assert [int(r[FILAS_AMBIGUAS]) for r in result.rows] == [esperado]
 
 
 async def test_agregar_sin_coincidencias_explica_en_vez_de_dar_cero(tabla: str) -> None:
@@ -334,7 +443,7 @@ async def test_agregar_sin_coincidencias_explica_en_vez_de_dar_cero(tabla: str) 
     assert "Educación y Cultura" in [s["valor"] for s in res.sugerencias["funcion_desc"]]
 
 
-async def test_agregar_por_http_devuelve_el_valor_como_numero(tabla: str) -> None:
+async def test_agregar_por_http_devuelve_el_valor_como_numero(tabla_montos: str) -> None:
     """Revisión del PR #139: la suma sale de Postgres como Decimal y el router la
     pasaba cruda a `list[dict[str, Any]]`, que Pydantic serializa como texto
     ("valor": "2400000.50"). Los tests del router usan floats y la prueba en
@@ -356,7 +465,9 @@ async def test_agregar_por_http_devuelve_el_valor_como_numero(tabla: str) -> Non
         # El catálogo (`cached_datasets`) no conoce la tabla de prueba: el
         # resto (consulta, estadísticas) es el adaptador real.
         async def find_tables(self, *, dataset_ids=None, table_names=None):  # type: ignore[no-untyped-def,override]
-            return [CachedTableInfo(table_name=tabla, dataset_id="ds", row_count=4, columns=[])]
+            return [
+                CachedTableInfo(table_name=tabla_montos, dataset_id="ds", row_count=7, columns=[])
+            ]
 
         async def get_column_types(self, table_names):  # type: ignore[no-untyped-def,override]
             cols = [(c, "text") for c in ("funcion_desc", "entidad", "monto", "fecha")]
@@ -408,7 +519,7 @@ async def test_agregar_por_http_devuelve_el_valor_como_numero(tabla: str) -> Non
             "/catalogo/agregar",
             headers={"Authorization": f"Bearer {raw}"},
             json={
-                "tabla": tabla,
+                "tabla": tabla_montos,
                 "operacion": "suma",
                 "columna": "monto",
                 "agrupar_por": ["funcion_desc"],
