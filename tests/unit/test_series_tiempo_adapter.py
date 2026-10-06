@@ -21,18 +21,20 @@ Lo que se prueba:
   (gasto en % del PIB, tasa de Japón); con escalas mixtas cada serie dice
   la suya, y con una representación, la de la representación;
 - la fecha de fin de la fuente nunca queda antes del último dato traído
-  (la metadata de la API puede estar atrasada), y si sale de ahí va marcada
-  como inferida;
+  (la metadata de la API puede estar atrasada), y si sale de ahí y ese dato
+  llega al `hasta` va marcada como inferida;
 - series de distinta frecuencia pedidas juntas marcan cuál promedió la API.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
 
+from app.infrastructure.adapters.connectors.series_tiempo_adapter import _reaches_end
 from tests.unit.series_tiempo_fake import (
     ACTIVIDAD_ID,
     DESEMPLEO_ID,
@@ -539,9 +541,18 @@ async def test_el_fin_que_sale_del_ultimo_dato_va_marcado_como_inferido() -> Non
     assert sin_fin.metadata["fecha_fin_fuente_inferida"] is True
     assert sin_fin.metadata["series"][0]["fecha_fin_fuente_inferida"] is True
 
-    # La metadata atrasada (64.2) también se reemplaza por el último dato.
+    # La metadata atrasada (64.2) también se reemplaza por el último dato,
+    # pero sin `hasta` ese dato es el fin de la serie, no el de una ventana.
     pobreza = await FakeSeriesApi(tasa(POBREZA_ID)).adapter().fetch([POBREZA_ID])
     assert pobreza is not None
+    assert pobreza.metadata["fecha_fin_fuente"] == "2026-07-01"
+    assert pobreza.metadata["fecha_fin_fuente_inferida"] is False
+    # Con un `hasta` al que llega ese último semestre, la ventana pudo cortarla.
+    pobreza = (
+        await FakeSeriesApi(tasa(POBREZA_ID)).adapter().fetch([POBREZA_ID], end_date="2026-12-31")
+    )
+    assert pobreza is not None
+    assert pobreza.metadata["fecha_fin_fuente"] == "2026-07-01"
     assert pobreza.metadata["fecha_fin_fuente_inferida"] is True
 
     # Con time_index_end, manda la fuente.
@@ -551,6 +562,67 @@ async def test_el_fin_que_sale_del_ultimo_dato_va_marcado_como_inferido() -> Non
     assert con_fin.metadata["fecha_fin_fuente"] == "2026-08-01"
     assert con_fin.metadata["fecha_fin_fuente_inferida"] is False
     assert con_fin.metadata["series"][0]["fecha_fin_fuente_inferida"] is False
+
+
+@pytest.mark.parametrize(
+    ("datos", "frecuencia", "pedido", "fin", "inferida"),
+    [
+        # Mensual parada en 2024-12, sin time_index_end: sin `hasta`, o con
+        # uno al que no llega, es el fin de la serie.
+        ("mensual", "R/P1M", {}, "2024-12-01", False),
+        ("mensual", "R/P1M", {"end_date": "2025-12-31"}, "2024-12-01", False),
+        ("mensual", "R/P1M", {"end_date": "2025-01-01"}, "2024-12-01", False),
+        # Con un `hasta` dentro de diciembre, la ventana pudo cortarla.
+        ("mensual", "R/P1M", {"end_date": "2024-12-31"}, "2024-12-01", True),
+        ("mensual", "R/P1M", {"end_date": "2024-12-15"}, "2024-12-01", True),
+        # Diaria de días hábiles: un `hasta` en domingo deja el viernes
+        # como último dato, y eso no es que la serie haya terminado.
+        ("habiles", "R/P1D", {"end_date": "2019-12-29"}, "2019-12-27", True),
+        ("habiles", "R/P1D", {}, "2019-12-31", False),
+        ("habiles", "R/P1D", {"end_date": "2020-01-31"}, "2019-12-31", False),
+    ],
+)
+async def test_el_fin_es_inferido_solo_si_el_ultimo_dato_llega_al_hasta(
+    datos: str, frecuencia: str, pedido: dict[str, str], fin: str, inferida: bool
+) -> None:
+    """Revisión de ola 3, tercera vuelta: la marca de inferido apagaba el
+    «Dato atrasado» de una serie parada de verdad, aunque no hubiera `hasta`.
+    Sólo va marcada si el período del último dato llega al `hasta`."""
+    if datos == "mensual":
+        filas = [(f"{a}-{m:02d}-01", float(m)) for a in (2023, 2024) for m in range(1, 13)]
+    else:
+        filas = [
+            (dia.isoformat(), float(i))
+            for i, dia in enumerate(date(2019, 12, 1) + timedelta(days=d) for d in range(31))
+            if dia.weekday() < 5
+        ]
+    s = serie(IPC_ID, filas, description=IPC_LABEL, frequency=frecuencia)
+    s["field"].pop("time_index_end")
+    result = await FakeSeriesApi(s).adapter().fetch([IPC_ID], **pedido)
+    assert result is not None
+    assert result.metadata["fecha_fin_fuente"] == fin
+    assert result.metadata["fecha_fin_fuente_inferida"] is inferida
+    assert result.metadata["series"][0]["fecha_fin_fuente_inferida"] is inferida
+
+
+@pytest.mark.parametrize(
+    ("ultimo", "hasta", "frecuencia", "llega"),
+    [
+        # Las frecuencias que la API falsa no simula.
+        ("2026-09-28", "2026-10-04", "semanal", True),
+        ("2026-09-21", "2026-10-04", "semanal", False),
+        ("2019-10-01", "2019-12-31", "trimestral", True),
+        ("2019-07-01", "2019-12-31", "trimestral", False),
+        ("2019-01-01", "2019-12-31", "anual", True),
+        ("2018-01-01", "2019-12-31", "anual", False),
+        # Sin frecuencia conocida no se sabe: como antes, inferida.
+        ("2019-06-01", "2019-12-31", None, True),
+    ],
+)
+def test_si_el_ultimo_dato_llega_al_hasta_segun_la_frecuencia(
+    ultimo: str, hasta: str, frecuencia: str | None, llega: bool
+) -> None:
+    assert _reaches_end(ultimo, hasta, frecuencia) is llega
 
 
 # ── frecuencias distintas en un pedido: la API promedia (H086) ──

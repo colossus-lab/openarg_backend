@@ -402,6 +402,56 @@ async def test_sin_time_index_end_un_periodo_pasado_no_es_un_dato_atrasado() -> 
 
 
 @pytest.mark.parametrize(
+    ("time_index_end", "actualizada", "pedido", "pregunta"),
+    [
+        # La metadata atrasada (H065, como la 64.2), sin `hasta`.
+        ("2024-06-01", True, {}, "¿Cuál fue la inflación de 2026?"),
+        # Con un `hasta` al que la serie no llega.
+        (
+            "2024-06-01",
+            True,
+            {"start_date": "2024-01-01", "end_date": "2025-12-31"},
+            "¿Cómo cerró la inflación de 2025 comparada con 2024?",
+        ),
+        (None, True, {}, "¿Cuál fue la inflación de 2026?"),
+        (None, False, {}, "¿Cuál fue la inflación de 2026?"),
+    ],
+)
+async def test_una_serie_parada_sin_time_index_end_vigente_sigue_avisando(
+    time_index_end: str | None, actualizada: bool, pedido: dict[str, str], pregunta: str
+) -> None:
+    """Revisión de ola 3, tercera vuelta: el fin que sale del último dato es
+    el de la ventana sólo si ese dato llega al `hasta`. Sin `hasta`, o si la
+    serie termina antes, es el fin real de la serie: una mensual parada en
+    diciembre de 2024 tiene que seguir dando «Dato atrasado» aunque la
+    pregunta nombre un año (la marca de inferido la apagaba)."""
+    from tests.unit.series_tiempo_fake import IPC_ID, FakeSeriesApi, serie
+
+    ipc = serie(
+        IPC_ID,
+        [
+            (f"{a}-{m:02d}-01", 100.0 + 12 * (a - 2017) + m)
+            for a in range(2017, 2025)
+            for m in range(1, 13)
+        ],
+        description="IPC Nivel general",
+        is_updated=actualizada,
+        time_index_end=time_index_end,
+    )
+    if time_index_end is None:
+        ipc["field"].pop("time_index_end")
+    result = await FakeSeriesApi(ipc).adapter().fetch([IPC_ID], **pedido)
+    assert result is not None
+    assert result.metadata["fecha_fin_fuente"] == "2024-12-01"
+
+    avisos = freshness_notices([result], HOY, pregunta)
+    assert len(avisos) == 1, avisos
+    assert "diciembre de 2024" in avisos[0]
+    assert ("no la actualizó" in avisos[0]) is not actualizada
+    assert result.metadata["fecha_fin_fuente_inferida"] is False
+
+
+@pytest.mark.parametrize(
     ("last", "freq", "label"),
     [
         (date(2026, 9, 30), "diaria", "30 de septiembre de 2026"),

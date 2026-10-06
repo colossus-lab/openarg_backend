@@ -674,11 +674,10 @@ def _observation_age(
         return None
     # Sin la fecha de fin de la fuente no se distingue "la serie termina acá"
     # de "se pidió hasta acá": si la pregunta nombra un período, no se avisa.
-    # Tampoco si el conector la infirió del último dato traído
-    # (`fecha_fin_fuente_inferida`: la metadata no traía time_index_end, o
-    # era anterior): con un período pasado es el fin de lo pedido, y «¿cuál
-    # fue la inflación de 2019?» salía con «Dato atrasado… es de diciembre de
-    # 2019».
+    # Tampoco si el conector la infirió del último dato traído y ese dato
+    # llega al `hasta` del pedido (`fecha_fin_fuente_inferida`): con un
+    # período pasado es el fin de lo pedido, y «¿cuál fue la inflación de
+    # 2019?» salía con «Dato atrasado… es de diciembre de 2019».
     if (source_end is None or source_end_inferred) and asks_for_named_period(question):
         return None
     return observation_staleness(
