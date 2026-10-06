@@ -3,7 +3,8 @@
 Dos cosas que el SQL no puede decidir solo:
 
 - el formato de los números guardados como texto (``numeros``): se mira una
-  muestra de la columna (``pg_stats`` más las primeras 200 filas no nulas);
+  muestra de la columna (``pg_stats`` más las primeras 200 filas no nulas) y,
+  en las tablas chicas, se confirma en la columna entera;
 - si conviene plegar mayúsculas y acentos fila por fila (``filtros``): en una
   tabla de 6 M de filas ``lower(translate(...))`` tarda 8,7 s y en 8,4 M pasa
   el timeout del sandbox (medido en staging el 04-oct). En las grandes se usa
@@ -33,7 +34,14 @@ from app.application.consultas.filtros import (
     columnas_numericas,
     es_columna_de_texto,
 )
-from app.application.consultas.numeros import PerfilNumerico, perfil_columna
+from app.application.consultas.numeros import (
+    ESPACIOS,
+    PerfilNumerico,
+    confirmar_formato,
+    expresion_ambiguo,
+    expresion_otro_formato,
+    perfil_columna,
+)
 from app.application.consultas.sql import CatalogRequestError, quote_ident
 from app.application.consultas.texto import plegar
 from app.domain.ports.sandbox.sql_sandbox import SandboxResult, TableValueStats
@@ -42,8 +50,12 @@ from app.domain.value_objects.table_reference import quote_qualified
 logger = logging.getLogger(__name__)
 
 # Desde cuántas filas no se pliega cada fila (ver el docstring del módulo).
+# Hasta ahí también se confirma en la columna entera el formato de números
+# que decidió la muestra (`numeros.confirmar_formato`).
 TOLERANTE_MAX_FILAS = 1_000_000
 MUESTRA_NUMEROS = 200
+# La cuenta de la confirmación: si no termina, vale lo que decidió la muestra.
+TIMEOUT_CONFIRMAR_S = 5
 # Con menos fechas reconocidas que esto, `describir_tabla` lo avisa: las demás
 # quedan fuera de cualquier período (revisión independiente del 05-oct, H003:
 # en la Pauta publicitaria de CABA se reconocían 936 de 3.655 y sólo se
@@ -126,13 +138,72 @@ def resolver_canonicos(
     return resueltos
 
 
+async def _contar_otro_formato(sandbox: Any, tabla: str, columna: str, formato: str) -> int | None:
+    """Cuántos valores de la columna entera sólo se leen en el otro formato.
+
+    None si la cuenta falla o pasa ``TIMEOUT_CONFIRMAR_S``.
+    """
+    try:
+        result = await ejecutar(
+            sandbox,
+            f"SELECT count(*) AS del_otro FROM {quote_qualified(tabla)} "
+            f"WHERE {expresion_otro_formato(columna, formato)}",
+            {},
+            timeout_seconds=TIMEOUT_CONFIRMAR_S,
+        )
+    except Exception:
+        logger.warning(
+            "consultas: no se pudo confirmar el formato de %s; vale el de la muestra",
+            columna,
+            exc_info=True,
+        )
+        return None
+    if result.error or not result.rows or result.rows[0].get("del_otro") is None:
+        logger.warning(
+            "consultas: no se pudo confirmar el formato de %s; vale el de la muestra: %s",
+            columna,
+            result.error,
+        )
+        return None
+    return int(result.rows[0]["del_otro"])
+
+
+async def _buscar_ambiguos(sandbox: Any, tabla: str, columna: str) -> tuple[str, ...] | None:
+    """Hasta tres números ambiguos de la columna entera; None si la búsqueda falla.
+
+    Sólo corre si la columna mezcla los dos formatos y la muestra no trajo
+    ambiguos (`numeros.confirmar_formato`): ahí hace falta saber si hay alguno.
+    """
+    try:
+        result = await ejecutar(
+            sandbox,
+            f"SELECT {quote_ident(columna)}::text AS ambiguo FROM {quote_qualified(tabla)} "
+            f"WHERE {expresion_ambiguo(columna, 'text')} LIMIT 3",
+            {},
+            timeout_seconds=TIMEOUT_CONFIRMAR_S,
+        )
+    except Exception:
+        logger.warning("consultas: no se pudieron buscar ambiguos en %s", columna, exc_info=True)
+        return None
+    if result.error:
+        logger.warning("consultas: no se pudieron buscar ambiguos en %s: %s", columna, result.error)
+        return None
+    valores = (str(row.get("ambiguo")).strip(ESPACIOS) for row in result.rows)
+    return tuple(dict.fromkeys(valores))
+
+
 async def perfiles_numericos(
     sandbox: Any,
     tabla: str,
     columnas: Mapping[str, str],
     stats: TableValueStats | None,
+    filas: int | None = None,
 ) -> dict[str, PerfilNumerico]:
-    """El formato de cada columna de texto que se va a leer como número."""
+    """El formato de cada columna de texto que se va a leer como número.
+
+    ``filas``: las de la tabla (``filas_estimadas``). Si es chica, o no se
+    sabe, lo que decidió la muestra se confirma en la columna entera.
+    """
     perfiles: dict[str, PerfilNumerico] = {}
     for columna, tipo in columnas.items():
         if not es_columna_de_texto(tipo):
@@ -151,7 +222,14 @@ async def perfiles_numericos(
         )
         if not result.error:
             valores.extend(row.get("v") for row in result.rows)
-        perfiles[columna] = perfil_columna(columna, valores)
+        perfil = perfil_columna(columna, valores)
+        if perfil.formato is not None and es_tolerante(filas):
+            del_otro = await _contar_otro_formato(sandbox, tabla, columna, perfil.formato)
+            ambiguos: tuple[str, ...] | None = None
+            if del_otro and not perfil.ambiguos:
+                ambiguos = await _buscar_ambiguos(sandbox, tabla, columna)
+            perfil = confirmar_formato(perfil, del_otro, ambiguos)
+        perfiles[columna] = perfil
     return perfiles
 
 
@@ -294,11 +372,13 @@ async def preparar(
     if not de_texto and not numeros and not columna_fecha:
         return Preparado(filtros=filtros, filas_estimadas=row_count or None)
     stats = await estadisticas(sandbox, tabla, [*de_texto, *numeros, *columna_fecha])
-    perfiles = await perfiles_numericos(sandbox, tabla, {c: tipos[c] for c in numeros}, stats)
+    filas = filas_estimadas(stats, row_count)
+    perfiles = await perfiles_numericos(
+        sandbox, tabla, {c: tipos[c] for c in numeros}, stats, filas
+    )
     for perfil in perfiles.values():
         if perfil.problema:
             raise CatalogRequestError(perfil.problema)
-    filas = filas_estimadas(stats, row_count)
     return Preparado(
         filtros=resolver_canonicos(filtros, tipos, stats),
         tolerante=es_tolerante(filas),

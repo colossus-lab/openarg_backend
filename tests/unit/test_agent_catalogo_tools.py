@@ -174,12 +174,15 @@ async def test_calcular_suma_una_columna_argentina_y_dice_sobre_cuantas_filas() 
         TYPES,
         [
             ("AS v FROM", [{"v": v} for v in muestra]),
+            # En la tabla chica, la columna entera no tiene valores ingleses.
+            ("AS del_otro", [{"del_otro": 0}]),
             ("AS valor", [{"valor": 242635557, "__filas": 1312, "__filas_con_valor": 1300}]),
         ],
     )
     out = await Calcular().run(
         {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
     )
+    assert "IMPORTE" in sandbox.sql_with("AS del_otro")
     sql = sandbox.sql_with("AS valor")
     x = 'btrim("IMPORTE"::text, chr(32) || chr(9) || chr(10) || chr(13) || chr(160))'
     assert f"replace({x}, '.', '')::numeric" in sql
