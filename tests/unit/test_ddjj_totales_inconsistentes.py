@@ -16,6 +16,18 @@ Lo que se prueba:
 - un detalle incompleto con historia (el total ya venía declarado al inicio)
   no se marca: la parte pública casi nunca lista todo;
 - con el dataset real del repo, sólo esa DDJJ queda afuera.
+
+Y lo que pidió la revisión de #150/#151:
+
+- la fila inconsistente no genera tarjeta en el frontend (la tarjeta
+  destacaba el patrimonio y mostraba la variación ``null`` como «+$ 0»);
+- al modelo le llega cuántas filas se excluyeron, nunca el nombre, y sólo
+  si la fila habría entrado en el recorte pedido;
+- el motivo se lo atribuye al registro del dataset, no a la persona;
+- los ingresos que no cierran con la propia declaración (lo que queda
+  después de los gastos multiplica por cien los bienes) quedan fuera del
+  ranking por ingresos;
+- la descripción de la herramienta prohíbe calificar variaciones.
 """
 
 from __future__ import annotations
@@ -29,6 +41,7 @@ from app.application.answers.engine import EngineRequest
 from app.application.answers.tools.base import ToolContext
 from app.application.answers.tools.conectores import DeclaracionesJuradas
 from app.application.pipeline.connectors.ddjj import execute_ddjj_step
+from app.application.pipeline.nodes.finalize import _extract_documents
 from app.domain.entities.connectors.data_result import PlanStep
 from app.infrastructure.adapters.connectors.ddjj_adapter import DDJJAdapter
 
@@ -43,6 +56,7 @@ def _ddjj(
     detalle: list[float],
     deudas: float = 0,
     ingresos: float = 10 * M,
+    gastos: float = 1 * M,
 ) -> dict:
     return {
         "cuit": f"20-{len(nombre):08d}-0",
@@ -55,7 +69,7 @@ def _ddjj(
         "deudasCierre": deudas,
         "patrimonioCierre": cierre - deudas,
         "ingresosTrabajoNeto": ingresos,
-        "gastosPersonales": 1 * M,
+        "gastosPersonales": gastos,
         "bienes": [{"tipo": "INMUEBLES EN EL PAIS", "importe": v} for v in detalle],
     }
 
@@ -175,8 +189,26 @@ def test_el_ranking_excluye_la_inconsistente_y_lo_dice(
     assert "LOPEZ CARLOS" not in _names(result.records)
     assert len(result.records) == 2
     assert all(r["inconsistente"] is False for r in result.records)
-    assert result.metadata["excluidas_por_inconsistencia"] == ["LOPEZ CARLOS"]
+    # Al modelo le llega cuántas; el nombre queda sólo para auditoría.
+    assert result.metadata["excluidas_por_inconsistencia"] == 1
+    assert result.metadata["excluidas_por_inconsistencia_nombres"] == ["LOPEZ CARLOS"]
+    assert "LOPEZ" not in result.metadata["description"]
     assert "Se excluyó 1 declaración" in result.metadata["description"]
+
+
+def test_el_ranking_avisa_solo_si_la_excluida_entraba_en_el_recorte(
+    adapter: DDJJAdapter,
+) -> None:
+    """Los de menor patrimonio no tienen por qué enterarse de la carga errónea."""
+    asc = adapter.ranking(sort_by="patrimonio", top=1, order="asc")
+    assert _names(asc.records) == ["PEREZ JUAN"]
+    assert "excluidas_por_inconsistencia" not in asc.metadata
+    assert "excluidas_por_inconsistencia_nombres" not in asc.metadata
+    assert "excluy" not in asc.metadata["description"]
+
+    desc = adapter.ranking(sort_by="patrimonio", top=1, order="desc")
+    assert _names(desc.records) == ["GOMEZ ANA"]
+    assert desc.metadata["excluidas_por_inconsistencia"] == 1
 
 
 def test_el_ranking_sin_inconsistentes_no_agrega_aviso() -> None:
@@ -189,12 +221,139 @@ def test_el_ranking_sin_inconsistentes_no_agrega_aviso() -> None:
 
 
 def test_las_estadisticas_se_calculan_sin_la_inconsistente(adapter: DDJJAdapter) -> None:
-    [stats] = adapter.stats().records
+    result = adapter.stats()
+    [stats] = result.records
     assert stats["total"] == 3
     assert stats["patrimonio_maximo_nombre"] == "GOMEZ ANA"
     assert stats["patrimonio_promedio"] == pytest.approx((60 * M + 6_700 * M) / 2)
-    assert stats["excluidas_por_inconsistencia"] == ["LOPEZ CARLOS"]
-    assert "sin 1 declaración" in adapter.stats().metadata["description"]
+    # La fila de estadísticas la lee el modelo: lleva la cantidad, no el nombre.
+    assert stats["excluidas_por_inconsistencia"] == 1
+    assert "LOPEZ" not in json.dumps(stats)
+    assert result.metadata["excluidas_por_inconsistencia_nombres"] == ["LOPEZ CARLOS"]
+    assert "sin 1 declaración" in result.metadata["description"]
+
+
+def test_el_motivo_se_lo_atribuye_al_dataset_no_a_la_persona(adapter: DDJJAdapter) -> None:
+    """No se verificó si el error viene de la Oficina Anticorrupción o de la conversión."""
+    [row] = adapter.search("lopez").records
+    motivo = row["motivo_inconsistencia"]
+    assert motivo.startswith("En el registro del dataset")
+    assert "probable error de carga" in motivo
+    assert "no coincide con la propia declaración" not in motivo
+
+
+# ── los ingresos contra la propia declaración ──────────────
+
+# Lo que queda de los ingresos después de los gastos multiplica por 135 lo
+# mayor entre bienes al inicio, al cierre y deudas al inicio: no está en
+# ningún lado de la declaración.
+INGRESO_ERRONEO = _ddjj(
+    "RUIZ MARTA",
+    inicio=31 * M,
+    cierre=37 * M,
+    detalle=[37 * M],
+    ingresos=5_000 * M,
+    gastos=0,
+)
+# Gana 44 M, gasta 42 M y tiene 3,3 M en bienes: 13 veces sus bienes, pero lo
+# gastó. Es legítimo y no se marca.
+GASTA_LO_QUE_GANA = _ddjj(
+    "DIAZ PEDRO",
+    inicio=1.6 * M,
+    cierre=3.3 * M,
+    detalle=[3.3 * M],
+    ingresos=44 * M,
+    gastos=42.4 * M,
+)
+
+
+@pytest.fixture
+def con_ingresos() -> DDJJAdapter:
+    a = DDJJAdapter()
+    a._loaded = True
+    a._dataset = [COHERENTE, CON_HISTORIA, INGRESO_ERRONEO, GASTA_LO_QUE_GANA]
+    return a
+
+
+def test_ingresos_que_no_cierran_con_la_declaracion_se_marcan(
+    con_ingresos: DDJJAdapter,
+) -> None:
+    [row] = con_ingresos.search("ruiz").records
+    assert row["ingresos_inconsistentes"] is True
+    motivo = row["motivo_inconsistencia_ingresos"]
+    assert motivo.startswith("En el registro del dataset")
+    assert "$5.000,0 millones" in motivo
+    assert "135 veces" in motivo
+    assert "probable error de carga" in motivo
+    # El patrimonio cierra: la fila sigue siendo comparable por patrimonio.
+    assert row["inconsistente"] is False
+    assert row["variacion_patrimonial"] == 6 * M
+
+
+def test_gastar_lo_que_se_gana_no_es_inconsistente(con_ingresos: DDJJAdapter) -> None:
+    [row] = con_ingresos.search("diaz").records
+    assert row["ingresos_inconsistentes"] is False
+    assert "motivo_inconsistencia_ingresos" not in row
+
+
+@pytest.mark.parametrize(
+    ("ingresos", "inconsistente"),
+    [(599 * M, False), (601 * M, False), (602 * M, True)],
+)
+def test_la_tolerancia_de_ingresos_es_un_orden_de_magnitud(
+    ingresos: float, inconsistente: bool
+) -> None:
+    """La base es lo mayor entre bienes al inicio (50 M) y al cierre (60 M); gastos 1 M."""
+    a = DDJJAdapter()
+    a._loaded = True
+    a._dataset = [
+        _ddjj("X", inicio=50 * M, cierre=60 * M, detalle=[40 * M, 20 * M], ingresos=ingresos)
+    ]
+    [row] = a.search("x").records
+    assert row["ingresos_inconsistentes"] is inconsistente
+
+
+def test_las_deudas_al_inicio_tambien_respaldan_los_ingresos() -> None:
+    """Lo que se ahorró pudo ir a cancelar deudas: no es un error."""
+    fila = _ddjj("PAGA DEUDAS", inicio=5 * M, cierre=5 * M, detalle=[5 * M], ingresos=100 * M)
+    fila["deudasInicio"] = 95 * M
+    a = DDJJAdapter()
+    a._loaded = True
+    a._dataset = [fila]
+    [row] = a.search("paga").records
+    assert row["ingresos_inconsistentes"] is False
+
+
+def test_el_ranking_por_ingresos_excluye_los_ingresos_que_no_cierran(
+    con_ingresos: DDJJAdapter,
+) -> None:
+    por_ingresos = con_ingresos.ranking(sort_by="ingresos", top=10)
+    assert "RUIZ MARTA" not in _names(por_ingresos.records)
+    assert por_ingresos.metadata["excluidas_por_inconsistencia"] == 1
+    assert por_ingresos.metadata["excluidas_por_inconsistencia_nombres"] == ["RUIZ MARTA"]
+
+    # Su patrimonio cierra: sigue en el ranking por patrimonio y en las
+    # estadísticas, sin aviso.
+    por_patrimonio = con_ingresos.ranking(sort_by="patrimonio", top=10)
+    assert "RUIZ MARTA" in _names(por_patrimonio.records)
+    assert "excluidas_por_inconsistencia" not in por_patrimonio.metadata
+    [stats] = con_ingresos.stats().records
+    assert "excluidas_por_inconsistencia" not in stats
+
+
+# ── la tarjeta del frontend ────────────────────────────────
+
+
+def test_solo_las_filas_que_cierran_generan_tarjeta(con_ingresos: DDJJAdapter) -> None:
+    """La tarjeta destaca el patrimonio, los ingresos y la variación sin lugar
+    para el motivo, y el frontend tipa la variación como número: un ``null``
+    se veía como «+$ 0» en verde."""
+    con_ingresos._dataset.append(CARGA_ERRONEA)
+    result = con_ingresos.search("", limit=10)
+    assert len(result.records) == 5
+    documents = _extract_documents([result]) or []
+    assert sorted(_names(documents)) == ["DIAZ PEDRO", "GOMEZ ANA", "PEREZ JUAN"]
+    assert all(isinstance(d["variacion_patrimonial"], float | int) for d in documents)
 
 
 # ── el dataset real del repo ───────────────────────────────
@@ -212,7 +371,9 @@ def test_real_la_carga_erronea_se_marca(real: DDJJAdapter) -> None:
 def test_real_solo_esa_ddjj_queda_afuera(real: DDJJAdapter) -> None:
     """La tolerancia no tapa los 27 detalles incompletos con patrimonio real."""
     result = real.ranking(top=50)
-    assert result.metadata["excluidas_por_inconsistencia"] == ["BRUGGE JUAN FERNANDO"]
+    assert result.metadata["excluidas_por_inconsistencia"] == 1
+    assert result.metadata["excluidas_por_inconsistencia_nombres"] == ["BRUGGE JUAN FERNANDO"]
+    assert sum(r["inconsistente"] for r in real.search("", limit=500).records) == 1
     names = _names(result.records)
     assert names[0] == "KIRCHNER MAXIMO CARLOS"
     for alto_con_detalle_incompleto in (
@@ -230,7 +391,54 @@ def test_real_las_estadisticas_no_las_infla_la_carga_erronea(real: DDJJAdapter) 
     assert stats["patrimonio_maximo_nombre"] == "KIRCHNER MAXIMO CARLOS"
     # Con la carga errónea el promedio daba 509 M.
     assert stats["patrimonio_promedio"] == pytest.approx(350_864_232, rel=1e-6)
-    assert stats["excluidas_por_inconsistencia"] == ["BRUGGE JUAN FERNANDO"]
+    assert stats["excluidas_por_inconsistencia"] == 1
+    assert "BRUGGE" not in json.dumps(stats)
+
+
+def test_real_los_rankings_que_no_la_incluian_no_la_nombran(real: DDJJAdapter) -> None:
+    """Brugge quedaba en el puesto 195 por menor patrimonio y en el 35 por ingresos."""
+    asc = real.ranking(sort_by="patrimonio", top=3, order="asc")
+    assert "excluidas_por_inconsistencia" not in asc.metadata
+    assert "BRUGGE" not in json.dumps(asc.metadata) + json.dumps(asc.records)
+
+    por_ingresos = real.ranking(sort_by="ingresos", top=20)
+    assert "BRUGGE" not in json.dumps(por_ingresos.metadata) + json.dumps(por_ingresos.records)
+
+
+def test_real_los_ingresos_de_osuna_no_cierran_y_son_los_unicos(real: DDJJAdapter) -> None:
+    """5.016 M de ingresos sin gastos, con 36,9 M de bienes: 136 veces. El
+    siguiente cociente legítimo del dataset es 5,1."""
+    filas = real.search("", limit=500).records
+    assert [f["nombre"] for f in filas if f["ingresos_inconsistentes"]] == ["OSUNA BLANCA INES"]
+    [osuna] = real.search("osuna blanca").records
+    assert osuna["inconsistente"] is False
+    assert "136 veces" in osuna["motivo_inconsistencia_ingresos"]
+    assert "$5.016,3 millones" in osuna["motivo_inconsistencia_ingresos"]
+    # Quien gasta lo que gana (13,5 veces sus bienes, en bruto) no se marca.
+    [arrua] = real.search("arrua pedro").records
+    assert arrua["ingresos_inconsistentes"] is False
+
+
+def test_real_el_ranking_por_ingresos_ya_no_lo_encabeza_osuna(real: DDJJAdapter) -> None:
+    result = real.ranking(sort_by="ingresos", top=3)
+    assert _names(result.records) == [
+        "POLINI JUAN CARLOS",
+        "RANDAZZO ANIBAL FLORENCIO",
+        "RITONDO CRISTIAN ADRIAN",
+    ]
+    assert result.metadata["excluidas_por_inconsistencia"] == 1
+    assert result.metadata["excluidas_por_inconsistencia_nombres"] == ["OSUNA BLANCA INES"]
+    # Por patrimonio sigue entrando: sus bienes cierran.
+    assert "OSUNA BLANCA INES" in _names(real.ranking(top=195).records)
+
+
+def test_real_la_busqueda_de_brugge_no_genera_tarjeta(real: DDJJAdapter) -> None:
+    assert _extract_documents([real.search("brugge")]) is None
+    assert _extract_documents([real.search("osuna blanca")]) is None
+    # Una DDJJ que cierra sigue teniendo su tarjeta.
+    [doc] = _extract_documents([real.search("kirchner maximo")]) or []
+    assert doc["doc_type"] == "ddjj"
+    assert isinstance(doc["variacion_patrimonial"], float | int)
 
 
 def test_real_el_pipeline_viejo_tampoco_lo_pone_primero(real: DDJJAdapter) -> None:
@@ -258,8 +466,30 @@ async def test_herramienta_ranking_avisa_que_excluyo(real: DDJJAdapter) -> None:
     out = await DeclaracionesJuradas().run({"accion": "ranking"}, _ctx(real))
     payload = json.loads(out.content)
     assert "BRUGGE JUAN FERNANDO" not in _names(payload["filas"])
-    assert payload["excluidas_por_inconsistencia"] == ["BRUGGE JUAN FERNANDO"]
-    assert "no coincide con su propio detalle" in payload["descripcion"]
+    # Cuántas, no quién: el nombre no le llega al modelo en ningún campo.
+    assert payload["excluidas_por_inconsistencia"] == 1
+    assert "BRUGGE" not in out.content
+    assert "no cierran con la propia DDJJ" in payload["descripcion"]
+    assert "probable error de carga" in payload["descripcion"]
+
+
+async def test_herramienta_estadisticas_no_le_pasa_el_nombre(real: DDJJAdapter) -> None:
+    out = await DeclaracionesJuradas().run({"accion": "estadisticas"}, _ctx(real))
+    [fila] = json.loads(out.content)["filas"]
+    assert fila["excluidas_por_inconsistencia"] == 1
+    assert "BRUGGE" not in out.content
+
+
+async def test_herramienta_ranking_ascendente_sin_aviso(real: DDJJAdapter) -> None:
+    """«Los 3 con menor patrimonio» no tiene nada que ver con la carga errónea."""
+    out = await DeclaracionesJuradas().run(
+        {"accion": "ranking", "ordenar_por": "patrimonio", "orden": "asc", "cantidad": 3},
+        _ctx(real),
+    )
+    payload = json.loads(out.content)
+    assert "excluidas_por_inconsistencia" not in payload
+    assert "BRUGGE" not in out.content
+    assert "excluy" not in payload.get("descripcion", "")
 
 
 async def test_herramienta_buscar_devuelve_la_marca(real: DDJJAdapter) -> None:
@@ -270,7 +500,31 @@ async def test_herramienta_buscar_devuelve_la_marca(real: DDJJAdapter) -> None:
     assert fila["motivo_inconsistencia"]
 
 
+async def test_herramienta_buscar_brugge_no_genera_tarjeta(real: DDJJAdapter) -> None:
+    """El camino del agente: agent_engine arma las tarjetas con
+    ``_extract_documents(evidence)``, y la evidencia es ``out.results``."""
+    out = await DeclaracionesJuradas().run({"accion": "buscar", "nombre": "brugge"}, _ctx(real))
+    assert out.results
+    assert _extract_documents(out.results) is None
+
+
 def test_la_descripcion_de_la_herramienta_explica_la_marca() -> None:
     description = DeclaracionesJuradas.spec.description
     assert "`inconsistente: true`" in description
+    assert "`ingresos_inconsistentes: true`" in description
     assert "enriquecimiento" in description
+    # El problema es del registro, no de la persona.
+    assert "probable error de carga" in description
+    assert "sin atribuírselo a la persona" in description
+    assert "no nombres a la persona excluida salvo que pregunten por ella" in description
+    assert "el total declarado no coincide con el detalle de sus bienes" not in description
+
+
+def test_la_descripcion_de_la_herramienta_prohibe_calificar_variaciones() -> None:
+    """main y staging no tienen en el prompt la regla de neutralidad de la ola 2:
+    la regla de la fuente va en la descripción de su herramienta."""
+    description = DeclaracionesJuradas.spec.description
+    assert (
+        "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
+        "ni lo atribuyas a nada: describí cifras con nombre y año."
+    ) in description

@@ -84,6 +84,12 @@ def _extract_documents(results: list) -> list[dict[str, Any]] | None:
     for r in results:
         if r.source.startswith("ddjj:"):
             for rec in r.records:
+                # H005: una DDJJ cuyas cifras no cierran no lleva tarjeta. La
+                # tarjeta destaca patrimonio, ingresos y variación sin lugar
+                # para el motivo, y el frontend tipa la variación como número
+                # (un null se veía como «+$ 0»). El texto ya lo explica.
+                if rec.get("inconsistente") or rec.get("ingresos_inconsistentes"):
+                    continue
                 if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
                     documents.append({**rec, "doc_type": "ddjj"})
     return documents if documents else None
