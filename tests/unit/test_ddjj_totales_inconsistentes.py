@@ -656,13 +656,15 @@ def eje_fecha_nacimiento(monkeypatch: pytest.MonkeyPatch) -> None:
     ``fecha_nacimiento`` cuenta como fecha y el gráfico de las DDJJ pasa a ser
     de línea con todas sus columnas numéricas. Ese arreglo va aparte: acá se
     prueba que, aun con ese eje, el gráfico no lleve las marcas ni la carga
-    errónea, y no pierda series."""
+    errónea, y no pierda series. Desde que el gráfico deja de usar una fecha
+    de atributo como eje (#157), el eje también se fuerza ahí."""
     original = chart_builder.is_date_column
     monkeypatch.setattr(
         chart_builder,
         "is_date_column",
         lambda name: name == "fecha_nacimiento" or original(name),
     )
+    monkeypatch.setattr(chart_builder, "es_fecha_de_atributo", lambda *_: False, raising=False)
 
 
 @pytest.mark.usefixtures("eje_fecha_nacimiento")
