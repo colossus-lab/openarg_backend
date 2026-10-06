@@ -508,6 +508,10 @@ class TestFechasDeAtributo:
         assert es_fecha_de_atributo("fecha_venc")
         assert not es_fecha_de_atributo("fecha_nac", "raw.caba__nacimientos__a1b2c3d4__v1")
         assert not es_fecha_de_atributo("fecha_nacional")
+        # En la deuda pública el vencimiento es el perfil de pagos: era el eje en prod.
+        mendoza = "raw.mendoza__deuda_publica_2018__cab67076__v1"
+        assert not es_fecha_de_atributo("Fecha vto./\nMaturity Date", mendoza)
+        assert es_fecha_de_atributo("Fecha vto./\nMaturity Date", "raw.otra_tabla__v1")
 
     def test_si_es_la_unica_se_usa_y_se_avisa(self) -> None:
         from app.application.consultas.fechas import aviso_lectura_fecha
