@@ -737,16 +737,24 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     organism = ds["source"]
                 if sid:
                     # El fin de la serie en la fuente nunca es anterior a un
-                    # dato que la API ya devolvió.
+                    # dato que la API ya devolvió. Si sale de ahí y no de la
+                    # metadata, se marca: con `hasta`, el último dato traído
+                    # puede ser el fin de lo pedido y no el de la serie (el
+                    # IPC sin time_index_end pedido para 2019 «terminaba» en
+                    # diciembre de 2019, y el aviso de atraso lo daba por
+                    # atrasado).
                     source_end = field.get("time_index_end")
                     observed = last_by_id.get(sid)
+                    inferred = False
                     if observed and (not source_end or observed > str(source_end)[:10]):
                         source_end = observed
+                        inferred = True
                     per_series.append(
                         {
                             "id": sid,
                             "titulo": label,
                             "fecha_fin_fuente": source_end,
+                            "fecha_fin_fuente_inferida": inferred,
                             "actualizada_en_fuente": _as_bool(field.get("is_updated")),
                             "dias_sin_datos": _as_int(field.get("days_without_data")),
                             "unidades": field.get("units"),
@@ -802,6 +810,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 str(records[-1]["fecha"])[:10],
             )
             source_ends = [s["fecha_fin_fuente"] for s in per_series if s["fecha_fin_fuente"]]
+            oldest_end = min(source_ends) if source_ends else None
             updated_flags = [s["actualizada_en_fuente"] for s in per_series]
             if any(flag is False for flag in updated_flags):
                 updated: bool | None = False
@@ -871,7 +880,12 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 # fuente es la de la más atrasada.
                 "ultima_observacion": last_observation,
                 "frecuencia": frequency,
-                "fecha_fin_fuente": min(source_ends) if source_ends else None,
+                "fecha_fin_fuente": oldest_end,
+                "fecha_fin_fuente_inferida": any(
+                    s["fecha_fin_fuente_inferida"]
+                    for s in per_series
+                    if oldest_end and s["fecha_fin_fuente"] == oldest_end
+                ),
                 "actualizada_en_fuente": updated,
                 "total_fuente": total,
                 "truncada": truncated,

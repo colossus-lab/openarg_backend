@@ -21,7 +21,8 @@ Lo que se prueba:
   (gasto en % del PIB, tasa de Japón); con escalas mixtas cada serie dice
   la suya, y con una representación, la de la representación;
 - la fecha de fin de la fuente nunca queda antes del último dato traído
-  (la metadata de la API puede estar atrasada);
+  (la metadata de la API puede estar atrasada), y si sale de ahí va marcada
+  como inferida;
 - series de distinta frecuencia pedidas juntas marcan cuál promedió la API.
 """
 
@@ -523,6 +524,33 @@ async def test_un_rango_pasado_no_achica_la_fecha_de_fin_de_la_fuente() -> None:
     assert result is not None
     assert result.metadata["ultima_observacion"] == "2020-12-01"
     assert result.metadata["fecha_fin_fuente"] == "2026-04-01"
+
+
+async def test_el_fin_que_sale_del_ultimo_dato_va_marcado_como_inferido() -> None:
+    """Sin time_index_end, el fin de un pedido de 2019 es diciembre de 2019:
+    el de la ventana, no necesariamente el de la serie. Va marcado para que
+    el aviso de atraso no lo tome como el fin de la fuente."""
+    ipc = ipc_real()
+    ipc["field"].pop("time_index_end")
+    api = FakeSeriesApi(ipc)
+    sin_fin = await api.adapter().fetch([IPC_ID], start_date="2019-01-01", end_date="2019-12-31")
+    assert sin_fin is not None
+    assert sin_fin.metadata["fecha_fin_fuente"] == "2019-12-01"
+    assert sin_fin.metadata["fecha_fin_fuente_inferida"] is True
+    assert sin_fin.metadata["series"][0]["fecha_fin_fuente_inferida"] is True
+
+    # La metadata atrasada (64.2) también se reemplaza por el último dato.
+    pobreza = await FakeSeriesApi(tasa(POBREZA_ID)).adapter().fetch([POBREZA_ID])
+    assert pobreza is not None
+    assert pobreza.metadata["fecha_fin_fuente_inferida"] is True
+
+    # Con time_index_end, manda la fuente.
+    api = FakeSeriesApi(ipc_real())
+    con_fin = await api.adapter().fetch([IPC_ID], start_date="2019-01-01", end_date="2019-12-31")
+    assert con_fin is not None
+    assert con_fin.metadata["fecha_fin_fuente"] == "2026-08-01"
+    assert con_fin.metadata["fecha_fin_fuente_inferida"] is False
+    assert con_fin.metadata["series"][0]["fecha_fin_fuente_inferida"] is False
 
 
 # ── frecuencias distintas en un pedido: la API promedia (H086) ──

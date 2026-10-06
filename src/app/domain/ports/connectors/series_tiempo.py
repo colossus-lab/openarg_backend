@@ -30,7 +30,7 @@ class ISeriesTiempoConnector(ABC):
         default, which is wrong for flows such as exports (a yearly total is a
         sum). The result's metadata carries the freshness contract
         (``ultima_observacion``, ``frecuencia``, ``fecha_fin_fuente``,
-        ``actualizada_en_fuente``, ``total_fuente``, ``truncada``, ``unidad``,
-        ``oficial``).
+        ``fecha_fin_fuente_inferida``, ``actualizada_en_fuente``,
+        ``total_fuente``, ``truncada``, ``unidad``, ``oficial``).
         """
         ...

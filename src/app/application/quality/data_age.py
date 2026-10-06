@@ -621,6 +621,7 @@ def _observations_for(result: Any, today: date, question: str = "") -> list[Obse
             frequency,
             meta.get("actualizada_en_fuente"),
             title=str(getattr(result, "dataset_title", "") or ""),
+            source_end_inferred=meta.get("fecha_fin_fuente_inferida") is True,
             truncated=truncated,
             question=question,
             today=today,
@@ -640,6 +641,7 @@ def _observations_for(result: Any, today: date, question: str = "") -> list[Obse
             frequency or _normalize_frequency(entry.get("frecuencia")),
             entry.get("actualizada_en_fuente"),
             title=title,
+            source_end_inferred=entry.get("fecha_fin_fuente_inferida") is True,
             truncated=truncated,
             question=question,
             today=today,
@@ -656,6 +658,7 @@ def _observation_age(
     updated: Any,
     *,
     title: str,
+    source_end_inferred: bool,
     truncated: bool,
     question: str,
     today: date,
@@ -671,7 +674,12 @@ def _observation_age(
         return None
     # Sin la fecha de fin de la fuente no se distingue "la serie termina acá"
     # de "se pidió hasta acá": si la pregunta nombra un período, no se avisa.
-    if source_end is None and asks_for_named_period(question):
+    # Tampoco si el conector la infirió del último dato traído
+    # (`fecha_fin_fuente_inferida`: la metadata no traía time_index_end, o
+    # era anterior): con un período pasado es el fin de lo pedido, y «¿cuál
+    # fue la inflación de 2019?» salía con «Dato atrasado… es de diciembre de
+    # 2019».
+    if (source_end is None or source_end_inferred) and asks_for_named_period(question):
         return None
     return observation_staleness(
         source_end or last,

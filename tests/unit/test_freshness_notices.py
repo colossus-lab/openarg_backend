@@ -365,6 +365,42 @@ async def test_con_varias_series_del_adaptador_el_aviso_nombra_la_serie_atrasada
     assert "Precios al Consumidor" not in aviso
 
 
+async def test_sin_time_index_end_un_periodo_pasado_no_es_un_dato_atrasado() -> None:
+    """Revisión de ola 3 (#152 × #146): sin time_index_end, el adaptador pone
+    como fin de la fuente el último dato de la ventana pedida, y «¿cuál fue
+    la inflación de 2019?» salía con «Dato atrasado… es de diciembre de
+    2019». Ese fin va marcado como inferido y cuenta como si faltara."""
+    from tests.unit.series_tiempo_fake import IPC_ID, FakeSeriesApi, ipc_real, serie
+
+    ipc = ipc_real()
+    ipc["field"].pop("time_index_end")
+    api = FakeSeriesApi(ipc)
+    result = await api.adapter().fetch([IPC_ID], start_date="2019-01-01", end_date="2019-12-31")
+    assert result is not None
+    assert result.metadata["fecha_fin_fuente"] == "2019-12-01"
+    assert freshness_notices([result], HOY, "¿Cuál fue la inflación de 2019?") == []
+    # Si pide el valor actual, el último dato traído es de 2019 y sí se avisa.
+    assert freshness_notices([result], HOY, "¿Cuál es la inflación actual?")
+
+    # Con varias series se mide cada una con la suya.
+    salario_id = "149.1_SOR_PRIVADO_0_M_23"
+    salario = serie(
+        salario_id,
+        [(f"{a}-{m:02d}-01", 100.0 + m) for a in (2018, 2019, 2020) for m in range(1, 13)],
+        description="Índice de salarios. Sector privado registrado. Mensual.",
+    )
+    salario["field"].pop("time_index_end")
+    ipc = ipc_real()
+    ipc["field"].pop("time_index_end")
+    api = FakeSeriesApi(ipc, salario)
+    varias = await api.adapter().fetch(
+        [IPC_ID, salario_id], start_date="2019-01-01", end_date="2019-12-31"
+    )
+    assert varias is not None
+    q = "¿Qué relación hubo entre inflación y salarios en 2019?"
+    assert freshness_notices([varias], HOY, q) == []
+
+
 @pytest.mark.parametrize(
     ("last", "freq", "label"),
     [

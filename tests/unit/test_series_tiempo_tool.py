@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -36,6 +37,7 @@ import pytest
 from app.application.answers.engine import EngineRequest
 from app.application.answers.tools.base import ToolContext, ToolInputError
 from app.application.answers.tools.conectores import BuscarSeries, SeriesTiempo, _tail_for_model
+from app.application.quality.data_age import freshness_notices
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
@@ -330,6 +332,24 @@ async def test_la_variacion_de_un_mes_completo_no_avisa_nada() -> None:
         {"ids": [IPC_ID], "variacion": {"desde": "2026-02", "hasta": "2026-08"}},
     )
     assert "nota" not in payload
+
+
+async def test_la_variacion_de_un_anio_pasado_sin_time_index_end_no_es_un_dato_atrasado() -> None:
+    """Revisión de ola 3 (#152 × #146): sin time_index_end, el fin de la fuente
+    sale del último dato traído (diciembre de 2019) y la variación lo copia;
+    sin la marca de inferido, el aviso de atraso lo tomaba como el fin de la
+    serie."""
+    ipc = ipc_real()
+    ipc["field"].pop("time_index_end")
+    payload, outcome = await _run(
+        FakeSeriesApi(ipc),
+        {"ids": [IPC_ID], "variacion": {"desde": "2018-12", "hasta": "2019-12"}},
+    )
+    assert payload["filas"][0]["hasta"] == "2019-12-01"
+    computed = outcome.results[0]
+    q = "¿Cuánto aumentaron los precios en 2019?"
+    assert freshness_notices([computed], date(2026, 10, 6), q) == []
+    assert computed.metadata["fecha_fin_fuente_inferida"] is True
 
 
 async def test_la_variacion_anual_con_el_anio_en_curso_explica_por_que_no_hay_dato() -> None:
