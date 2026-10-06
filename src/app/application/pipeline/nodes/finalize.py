@@ -89,6 +89,11 @@ def _extract_documents(results: list) -> list[dict[str, Any]] | None:
                 # para el motivo, y el frontend tipa la variación como número
                 # (un null se veía como «+$ 0»). El texto ya lo explica.
                 if rec.get("inconsistente") or rec.get("ingresos_inconsistentes"):
+                    # En un ranking el frontend numera las tarjetas por
+                    # posición: saltearla corría el puesto de todas las que
+                    # siguen. Ahí se cortan.
+                    if (r.metadata or {}).get("ranking"):
+                        break
                     continue
                 if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
                     documents.append({**rec, "doc_type": "ddjj"})

@@ -271,6 +271,8 @@ class DDJJAdapter:
             top_records,
             compact=True,
         )
+        # Row order is the rank: _extract_documents must not skip a card.
+        result.metadata["ranking"] = True
         if excluded:
             verbo = "excluyó" if len(excluded) == 1 else "excluyeron"
             habria = "habría" if len(excluded) == 1 else "habrían"
@@ -399,9 +401,13 @@ class DDJJAdapter:
                 "ingresos_trabajo_neto": r.get("ingresosTrabajoNeto", 0),
                 "gastos_personales": r.get("gastosPersonales", 0),
                 "cantidad_bienes": len(bienes),
-                "inconsistente": motivo is not None,
-                "ingresos_inconsistentes": motivo_ingresos is not None,
             }
+            # Compact ranking rows only carry the flags when true: two
+            # ``false`` per row pushed a top 20 past the tool's content cap.
+            if not compact or motivo is not None:
+                row["inconsistente"] = motivo is not None
+            if not compact or motivo_ingresos is not None:
+                row["ingresos_inconsistentes"] = motivo_ingresos is not None
             if motivo is not None:
                 # H005: the declared totals stay visible (it's what the DDJJ
                 # says), but the variation of a total that doesn't add up is not
