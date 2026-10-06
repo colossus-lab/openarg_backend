@@ -408,6 +408,19 @@ def _enrich_table(engine, table_name: str) -> bool:
         return False
 
 
+def _aws_credentials_available() -> bool:
+    """Hay credenciales de AWS por cualquier vía de boto3: variables, perfil o rol de la instancia.
+
+    Mirar sólo `AWS_ACCESS_KEY_ID` dejaba el enriquecimiento apagado en silencio
+    cuando los servidores usan el rol de la instancia y no tienen clave en el `.env`.
+    """
+    try:
+        return boto3.Session().get_credentials() is not None
+    except Exception:
+        logger.debug("No se pudieron resolver credenciales de AWS", exc_info=True)
+        return False
+
+
 @celery_app.task(
     name="openarg.enrich_single_table",
     bind=True,
@@ -417,7 +430,7 @@ def _enrich_table(engine, table_name: str) -> bool:
 )
 def enrich_single_table(self, table_name: str):
     """Enrich a single cached table with semantic metadata."""
-    if not os.getenv("AWS_ACCESS_KEY_ID"):
+    if not _aws_credentials_available():
         logger.warning("AWS credentials not set, skipping catalog enrichment")
         return {"error": "no_aws_credentials"}
 
@@ -440,7 +453,7 @@ def enrich_single_table(self, table_name: str):
 )
 def enrich_all_tables(self, batch_size: int = 50):
     """Enrich all cached tables that don't have a catalog entry yet."""
-    if not os.getenv("AWS_ACCESS_KEY_ID"):
+    if not _aws_credentials_available():
         logger.warning("AWS credentials not set, skipping catalog enrichment")
         return {"error": "no_aws_credentials"}
 
