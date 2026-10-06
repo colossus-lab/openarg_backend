@@ -493,6 +493,35 @@ def _months_back(iso: str, months: int) -> str:
     return date(total // 12, total % 12 + 1, 1).isoformat()
 
 
+_PERIOD_MONTHS = {"mensual": 1, "trimestral": 3, "semestral": 6, "anual": 12}
+# Días que puede haber entre el último dato y `hasta` sin que la serie haya
+# terminado antes: en una diaria, un fin de semana largo (el mismo margen que
+# `_infer_frequency` en data_age); en una semanal, lo que falta para la
+# semana siguiente.
+_END_SLACK_DAYS = {"diaria": 4, "semanal": 6}
+
+
+def _reaches_end(last: str, end: str, frequency: str | None) -> bool:
+    """¿El período del último dato llega a `end`? Si llega, la ventana pudo cortar la serie.
+
+    La API devuelve las filas fechadas hasta `end_date`, y cada período va
+    fechado por su primer día: si el siguiente empieza antes de `end`, la API
+    lo habría traído, así que la serie termina en `last`. Sin frecuencia
+    conocida no se sabe y se supone que sí.
+    """
+    months = _PERIOD_MONTHS.get(frequency or "")
+    try:
+        if months:
+            # El primer día del período siguiente.
+            return _months_back(last, -months) > end
+        slack = _END_SLACK_DAYS.get(frequency or "")
+        if slack is None:
+            return True
+        return (date.fromisoformat(end) - date.fromisoformat(last)).days <= slack
+    except ValueError:
+        return True
+
+
 def _as_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -641,6 +670,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
         try:
             page = min(max(limit, _PAGE_MIN), _PAGE_MAX)
             start_iso = iso_date(start_date)
+            end_iso = iso_date(end_date)
             query_start = start_date
             trim_before: str | None = None
             if representation and start_iso:
@@ -737,16 +767,31 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     organism = ds["source"]
                 if sid:
                     # El fin de la serie en la fuente nunca es anterior a un
-                    # dato que la API ya devolvió.
+                    # dato que la API ya devolvió. Si sale de ahí y no de la
+                    # metadata, y el período de ese dato llega al `hasta`, se
+                    # marca: puede ser el fin de lo pedido y no el de la serie
+                    # (el IPC sin time_index_end pedido para 2019 «terminaba»
+                    # en diciembre de 2019, y el aviso de atraso lo daba por
+                    # atrasado). Sin `hasta`, o si la serie termina antes, es
+                    # el fin real: marcado, apagaba el «Dato atrasado» de una
+                    # serie parada de verdad (revisión de ola 3).
                     source_end = field.get("time_index_end")
                     observed = last_by_id.get(sid)
+                    inferred = False
                     if observed and (not source_end or observed > str(source_end)[:10]):
                         source_end = observed
+                        inferred = end_iso is not None and _reaches_end(
+                            observed,
+                            end_iso,
+                            _FREQUENCY_NAMES.get(str(axis.get("frequency", "")))
+                            or _ISO_FREQUENCY_NAMES.get(field.get("frequency", "")),
+                        )
                     per_series.append(
                         {
                             "id": sid,
                             "titulo": label,
                             "fecha_fin_fuente": source_end,
+                            "fecha_fin_fuente_inferida": inferred,
                             "actualizada_en_fuente": _as_bool(field.get("is_updated")),
                             "dias_sin_datos": _as_int(field.get("days_without_data")),
                             "unidades": field.get("units"),
@@ -802,6 +847,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 str(records[-1]["fecha"])[:10],
             )
             source_ends = [s["fecha_fin_fuente"] for s in per_series if s["fecha_fin_fuente"]]
+            oldest_end = min(source_ends) if source_ends else None
             updated_flags = [s["actualizada_en_fuente"] for s in per_series]
             if any(flag is False for flag in updated_flags):
                 updated: bool | None = False
@@ -871,7 +917,12 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 # fuente es la de la más atrasada.
                 "ultima_observacion": last_observation,
                 "frecuencia": frequency,
-                "fecha_fin_fuente": min(source_ends) if source_ends else None,
+                "fecha_fin_fuente": oldest_end,
+                "fecha_fin_fuente_inferida": any(
+                    s["fecha_fin_fuente_inferida"]
+                    for s in per_series
+                    if oldest_end and s["fecha_fin_fuente"] == oldest_end
+                ),
                 "actualizada_en_fuente": updated,
                 "total_fuente": total,
                 "truncada": truncated,

@@ -866,6 +866,29 @@ def test_orden_desc_sobre_anio_y_mes_de_texto(tabla_mensual_texto: str) -> None:
     assert result.rows == [{"anio": "2024", "mes": "12"}]
 
 
+async def test_el_periodo_de_anio_y_mes_llega_al_ultimo_mes(
+    tabla_mensual: str, tabla_mensual_texto: str
+) -> None:
+    """Revisión de ola 3 (#144 × #154): el período de describir_tabla iba por el
+    año solo, y una tabla de un año con meses hasta marzo era «2026 a 2026»:
+    una foto vigente al día de lectura. La fila «Total» cuenta por su año."""
+    from app.application.consultas.fechas import resolver_columna_fecha
+    from app.application.consultas.preparar import describir_periodo
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    sandbox = PgSandboxAdapter()
+    for tabla, tipos, esperado in [
+        (tabla_mensual, _TIPOS_MENSUAL, ("2024-01", "2025-09")),
+        (tabla_mensual_texto, _TIPOS_MENSUAL_TEXTO, ("2022-01", "2024-12")),
+    ]:
+        fecha = resolver_columna_fecha(tipos, tabla=tabla)
+        assert fecha is not None and fecha.mes == "mes"
+        periodo = await describir_periodo(sandbox, tabla, fecha)
+        assert (periodo.desde, periodo.hasta) == esperado, periodo
+        # Todas las filas tienen año: ningún aviso de valores sin fecha.
+        assert periodo.aviso is None, periodo
+
+
 @pytest.fixture
 def tabla_mensual_mes_dia():
     """Como biodiésel y bioetanol 26bc8483 (staging): «M/1/AAAA», ningún día mayor que 12."""

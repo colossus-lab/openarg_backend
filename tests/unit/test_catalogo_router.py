@@ -70,6 +70,8 @@ class FakeSandbox:
         self.estimated_rows: int | None = None
         # Desde y hasta de la columna de fecha (`consulta_rango`).
         self.rango: tuple[str, str] = ("2003-01-02", "2026-06-18")
+        # Los de una tabla con año y mes, si la consulta del rango lee el mes.
+        self.rango_con_mes: tuple[str, str] | None = None
 
     tables = [
         CachedTableInfo(table_name=_T, dataset_id="ds-1", row_count=8569, columns=[]),
@@ -121,6 +123,8 @@ class FakeSandbox:
             )
         if "AS reconocidas" in sql:
             desde, hasta = self.rango
+            if self.rango_con_mes and '"mes"' in sql:
+                desde, hasta = self.rango_con_mes
             rows = [{"desde": desde, "hasta": hasta, "reconocidas": 9, "con_valor": 9}]
         elif "GROUP BY 1" in sql:
             # Los valores que existen (`sugerencias`).
@@ -818,6 +822,30 @@ async def test_tabla_del_ejercicio_en_curso_es_una_foto_con_fecha_de_corte(
     assert frescura["serie"] is False and frescura["ultimo_dato"] == "2026"
     assert frescura["fecha_corte"] == "2026-09-05"
     assert "foto" in frescura["nota"] and "vigentes al 5 de septiembre de 2026" in frescura["nota"]
+
+
+async def test_tabla_de_anio_y_mes_del_anio_en_curso_no_es_una_foto(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """Revisión de ola 3 (#144 × #154): una tabla con `anio` y `mes` que sólo
+    tiene 2026, con meses hasta marzo, salía «Es una foto… vigentes al 5 de
+    septiembre de 2026»: el rango iba por el año solo (2026 a 2026)."""
+    sandbox.get_column_types = AsyncMock(  # type: ignore[method-assign]
+        return_value={_T: [("anio", "bigint"), ("mes", "bigint"), ("valor", "text")]}
+    )
+    sandbox.rango = ("2026", "2026")
+    sandbox.rango_con_mes = ("2026-01", "2026-03")
+    r = await client.get("/catalogo/tabla", params={"nombre": _T})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    frescura = body["frescura"]
+    assert frescura["fecha_corte"] is None
+    assert not frescura["nota"] or (
+        "foto" not in frescura["nota"] and "los vigentes al" not in frescura["nota"]
+    )
+    assert frescura["serie"] is True and frescura["ultimo_dato"] == "2026-03"
+    assert body["columna_fecha"] == "anio"
+    assert (body["desde"], body["hasta"]) == ("2026-01", "2026-03")
 
 
 async def test_tabla_con_fecha_y_periodo_desconocido_no_es_una_foto(

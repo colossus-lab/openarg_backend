@@ -709,6 +709,7 @@ class SeriesTiempo:
                 "ultima_observacion": max(r["hasta"] for r in rows),
                 "frecuencia": meta.get("frecuencia"),
                 "fecha_fin_fuente": meta.get("fecha_fin_fuente"),
+                "fecha_fin_fuente_inferida": meta.get("fecha_fin_fuente_inferida", False),
                 "actualizada_en_fuente": meta.get("actualizada_en_fuente"),
                 "total_fuente": None,
                 "truncada": False,

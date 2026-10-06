@@ -365,6 +365,92 @@ async def test_con_varias_series_del_adaptador_el_aviso_nombra_la_serie_atrasada
     assert "Precios al Consumidor" not in aviso
 
 
+async def test_sin_time_index_end_un_periodo_pasado_no_es_un_dato_atrasado() -> None:
+    """Revisión de ola 3 (#152 × #146): sin time_index_end, el adaptador pone
+    como fin de la fuente el último dato de la ventana pedida, y «¿cuál fue
+    la inflación de 2019?» salía con «Dato atrasado… es de diciembre de
+    2019». Ese fin va marcado como inferido y cuenta como si faltara."""
+    from tests.unit.series_tiempo_fake import IPC_ID, FakeSeriesApi, ipc_real, serie
+
+    ipc = ipc_real()
+    ipc["field"].pop("time_index_end")
+    api = FakeSeriesApi(ipc)
+    result = await api.adapter().fetch([IPC_ID], start_date="2019-01-01", end_date="2019-12-31")
+    assert result is not None
+    assert result.metadata["fecha_fin_fuente"] == "2019-12-01"
+    assert freshness_notices([result], HOY, "¿Cuál fue la inflación de 2019?") == []
+    # Si pide el valor actual, el último dato traído es de 2019 y sí se avisa.
+    assert freshness_notices([result], HOY, "¿Cuál es la inflación actual?")
+
+    # Con varias series se mide cada una con la suya.
+    salario_id = "149.1_SOR_PRIVADO_0_M_23"
+    salario = serie(
+        salario_id,
+        [(f"{a}-{m:02d}-01", 100.0 + m) for a in (2018, 2019, 2020) for m in range(1, 13)],
+        description="Índice de salarios. Sector privado registrado. Mensual.",
+    )
+    salario["field"].pop("time_index_end")
+    ipc = ipc_real()
+    ipc["field"].pop("time_index_end")
+    api = FakeSeriesApi(ipc, salario)
+    varias = await api.adapter().fetch(
+        [IPC_ID, salario_id], start_date="2019-01-01", end_date="2019-12-31"
+    )
+    assert varias is not None
+    q = "¿Qué relación hubo entre inflación y salarios en 2019?"
+    assert freshness_notices([varias], HOY, q) == []
+
+
+@pytest.mark.parametrize(
+    ("time_index_end", "actualizada", "pedido", "pregunta"),
+    [
+        # La metadata atrasada (H065, como la 64.2), sin `hasta`.
+        ("2024-06-01", True, {}, "¿Cuál fue la inflación de 2026?"),
+        # Con un `hasta` al que la serie no llega.
+        (
+            "2024-06-01",
+            True,
+            {"start_date": "2024-01-01", "end_date": "2025-12-31"},
+            "¿Cómo cerró la inflación de 2025 comparada con 2024?",
+        ),
+        (None, True, {}, "¿Cuál fue la inflación de 2026?"),
+        (None, False, {}, "¿Cuál fue la inflación de 2026?"),
+    ],
+)
+async def test_una_serie_parada_sin_time_index_end_vigente_sigue_avisando(
+    time_index_end: str | None, actualizada: bool, pedido: dict[str, str], pregunta: str
+) -> None:
+    """Revisión de ola 3, tercera vuelta: el fin que sale del último dato es
+    el de la ventana sólo si ese dato llega al `hasta`. Sin `hasta`, o si la
+    serie termina antes, es el fin real de la serie: una mensual parada en
+    diciembre de 2024 tiene que seguir dando «Dato atrasado» aunque la
+    pregunta nombre un año (la marca de inferido la apagaba)."""
+    from tests.unit.series_tiempo_fake import IPC_ID, FakeSeriesApi, serie
+
+    ipc = serie(
+        IPC_ID,
+        [
+            (f"{a}-{m:02d}-01", 100.0 + 12 * (a - 2017) + m)
+            for a in range(2017, 2025)
+            for m in range(1, 13)
+        ],
+        description="IPC Nivel general",
+        is_updated=actualizada,
+        time_index_end=time_index_end,
+    )
+    if time_index_end is None:
+        ipc["field"].pop("time_index_end")
+    result = await FakeSeriesApi(ipc).adapter().fetch([IPC_ID], **pedido)
+    assert result is not None
+    assert result.metadata["fecha_fin_fuente"] == "2024-12-01"
+
+    avisos = freshness_notices([result], HOY, pregunta)
+    assert len(avisos) == 1, avisos
+    assert "diciembre de 2024" in avisos[0]
+    assert ("no la actualizó" in avisos[0]) is not actualizada
+    assert result.metadata["fecha_fin_fuente_inferida"] is False
+
+
 @pytest.mark.parametrize(
     ("last", "freq", "label"),
     [
