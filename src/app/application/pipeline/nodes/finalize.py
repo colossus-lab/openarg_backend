@@ -84,6 +84,17 @@ def _extract_documents(results: list) -> list[dict[str, Any]] | None:
     for r in results:
         if r.source.startswith("ddjj:"):
             for rec in r.records:
+                # H005: una DDJJ cuyas cifras no cierran no lleva tarjeta. La
+                # tarjeta destaca patrimonio, ingresos y variación sin lugar
+                # para el motivo, y el frontend tipa la variación como número
+                # (un null se veía como «+$ 0»). El texto ya lo explica.
+                if rec.get("inconsistente") or rec.get("ingresos_inconsistentes"):
+                    # En un ranking el frontend numera las tarjetas por
+                    # posición: saltearla corría el puesto de todas las que
+                    # siguen. Ahí se cortan.
+                    if (r.metadata or {}).get("ranking"):
+                        break
+                    continue
                 if rec.get("nombre") and rec.get("patrimonio_cierre") is not None:
                     documents.append({**rec, "doc_type": "ddjj"})
     return documents if documents else None
