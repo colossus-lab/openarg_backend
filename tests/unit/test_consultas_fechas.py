@@ -318,6 +318,25 @@ class TestAnioYMesSeparados:
         assert condiciones_periodo(col, "2019-01", "2019-12", Params())
         assert condiciones_periodo(col, "2019-01-01", "2019-12-31", Params())
 
+    def test_el_rango_de_la_tabla_va_por_el_anio_y_el_mes(self) -> None:
+        """Revisión de ola 3 (#144 × #154): con el año solo, una tabla de 2026 con
+        meses hasta marzo daba de 2026 a 2026, y describir_tabla la declaraba una
+        foto vigente al día de lectura. El mes irreconocible cuenta por el año."""
+        from app.application.consultas.fechas import consulta_rango, expresion_mes
+
+        col = resolver_columna_fecha([("anio", "bigint"), ("mes", "bigint")])
+        assert col is not None
+        sql = consulta_rango('"raw"."t"', col)
+        rango = sql.split(" AS f,")[0]
+        assert expresion_mes("mes") in rango
+        assert rango.count("COALESCE(") == 1
+        assert expresion_fecha("anio", "bigint", "iso") in rango
+        # La clave del rango es AAAA-MM, sin día.
+        assert "'-01'" not in rango and "'-31'" not in rango
+        # Sin columna de mes, como siempre.
+        solo = consulta_rango('"raw"."t"', ColumnaFecha("anio", "bigint", "anio"))
+        assert "COALESCE(" not in solo and '"mes"' not in solo
+
     def test_una_columna_de_anio_con_meses_adentro_no_se_rechaza(self) -> None:
         """`ano_mes` con "2016-05" (mercado inmobiliario de CABA): el valor ya trae el mes."""
         col = ColumnaFecha("ano_mes", "text", "anio", formato="iso_mes")

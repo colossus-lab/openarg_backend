@@ -833,22 +833,23 @@ def mes_de(valor: object) -> str | None:
 
 
 def _clave_anio_mes(columna: ColumnaFecha, mes: str, modo: Modo) -> str:
-    """La clave de inicio o de fin de cada fila con el año de una columna y el mes de otra.
+    """La clave de cada fila con el año de una columna y el mes de otra.
 
-    Una fila cuyo "año" ya trae el mes o el día ("2016-05" en `ano_mes`) se
-    lee como siempre; una con el mes irreconocible ("Total") da NULL y queda
-    fuera del período.
+    ``modo`` como en ``expresion_fecha``: ``AAAA-MM`` con ``"iso"``, de inicio
+    o de fin del mes con ``"inicio"``/``"fin"``. Una fila cuyo "año" ya trae
+    el mes o el día ("2016-05" en `ano_mes`) se lee como siempre; una con el
+    mes irreconocible ("Total") da NULL y queda fuera del período.
     """
     x = f"btrim({quote_ident(columna.nombre)}::text)"
-    sufijo = "-01" if modo == "inicio" else "-31"
+    sufijo = _sufijo(modo, "mes")
     if columna.formato == "anio":
         # Todos años en la muestra: se lee como en `expresion_fecha`, sin
         # volver a mirar cada valor (el costo, en `expresion_mes`).
-        return f"(left(NULLIF({x}, ''), 4) || '-' || {expresion_mes(mes)} || '{sufijo}')"
+        return f"(left(NULLIF({x}, ''), 4) || '-' || {expresion_mes(mes)}{sufijo})"
     otra = expresion_fecha(columna.nombre, columna.tipo, modo, columna.formato)
     return (
         f"(CASE WHEN {x} ~ '{RE_ANIO}' THEN left({x}, 4) || '-' || "
-        f"{expresion_mes(mes)} || '{sufijo}' ELSE {otra} END)"
+        f"{expresion_mes(mes)}{sufijo} ELSE {otra} END)"
     )
 
 
@@ -983,8 +984,16 @@ def consulta_rango(tabla_citada: str, columna: ColumnaFecha) -> str:
 
     ``reconocidas = 0`` con ``con_valor > 0`` es "la columna tiene fechas en un
     formato que no entiendo": se avisa en vez de informar un período vacío.
+
+    En una tabla con año y mes, el rango va por las dos (``2026-03``): con el
+    año solo, una tabla de 2026 con meses hasta marzo daba de 2026 a 2026 y
+    describir_tabla la presentaba como una foto vigente al día en que se leyó
+    (revisión de ola 3, #144 × #154). Una fila con el mes irreconocible
+    ("Total") cuenta por su año, como antes.
     """
     iso = expresion_fecha(columna.nombre, columna.tipo, "iso", columna.formato)
+    if columna.clase == "anio" and columna.mes is not None:
+        iso = f"COALESCE({_clave_anio_mes(columna, columna.mes, 'iso')}, {iso})"
     ident = quote_ident(columna.nombre)
     # OFFSET 0 impide que Postgres aplane la subconsulta: así la expresión se
     # calcula una vez por fila y no tres (min, max y count).
