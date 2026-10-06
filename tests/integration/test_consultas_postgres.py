@@ -20,7 +20,12 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app.application.consultas.fechas import expresion_fecha, fecha_iso
-from app.application.consultas.numeros import expresion_numero, leer_numero
+from app.application.consultas.numeros import (
+    clase_valor,
+    expresion_ambiguo,
+    expresion_numero,
+    leer_numero,
+)
 from app.application.public_catalog import DataRequest, build_data_query
 
 # A nivel de módulo: dishka resuelve las anotaciones de los providers (con
@@ -48,7 +53,28 @@ FECHAS = [
     "31/02/2020",
     "",
 ]
-NUMEROS = ["1234", "12.500", "-59.796", "1,250", "1.234.567", "1.234,56", "1,234.5", "0.125", "s/d"]
+NUMEROS = [
+    "1234",
+    "12.500",
+    "-59.796",
+    "1,250",
+    "1.234.567",
+    "1.234,56",
+    "1,234.5",
+    "0.125",
+    "s/d",
+    # Los cinco del pedido original que faltaban.
+    "12,5",
+    "1,234.56",
+    "12.5",
+    # H042: Python sacaba con strip() nbsp, tab, CR y LF; btrim(x), sólo espacios.
+    "\xa012.500\xa0",
+    "12.500\t",
+    "0,82\r\r\n",
+    " 1.234,56 ",
+    "\t-12,5\n",
+    "12\u2007",
+]
 
 
 def _engine():
@@ -99,6 +125,21 @@ def test_la_expresion_de_numeros_coincide_con_python(formato: str | None) -> Non
             params,
         ).fetchall()
     assert {v: n for v, n in rows} == {v: leer_numero(v, formato) for v in NUMEROS}
+
+
+def test_la_condicion_de_ambiguo_coincide_con_python() -> None:
+    engine = _engine()
+    values, params = _values(NUMEROS)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT v, {expresion_ambiguo('v', 'text')} AS amb FROM (VALUES {values}) AS t(v)"
+            ),
+            params,
+        ).fetchall()
+    assert {v: a for v, a in rows} == {
+        v: (clase_valor(v) or "").startswith("ambiguo") for v in NUMEROS
+    }
 
 
 @pytest.fixture

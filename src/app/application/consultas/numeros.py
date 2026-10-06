@@ -18,10 +18,16 @@ La regla de acá:
   "0.125", ingleses);
 - quedan dos formas ambiguas: "12.500" (¿doce mil quinientos o doce coma
   cinco?) y "1,250" (¿uno coma veinticinco o mil doscientos cincuenta?). Esas
-  se resuelven POR COLUMNA, mirando una muestra: si la muestra trae valores
-  que sólo pueden ser argentinos (o sólo ingleses), la columna es de ese
+  se resuelven POR COLUMNA, mirando una muestra: si la muestra trae al menos
+  ``MIN_EVIDENCIA`` valores que sólo pueden ser de un formato y son el
+  ``MAYORIA_PCT`` % o más de los que dicen formato, la columna es de ese
   formato. Si no alcanza para decidir, se rechaza el cálculo con un mensaje
   claro: un error de mil veces es peor que no contestar.
+
+Revisión independiente del 05-oct: el desempate "enteros cortos y «12.500»
+es argentino" leía mil veces más altos los minutos por día de la ENUT, que
+son decimales ingleses de tres cifras (H001), y un solo valor de la muestra
+decidía la columna entera (H009). Ninguno de los dos queda.
 """
 
 from __future__ import annotations
@@ -57,9 +63,30 @@ _EN = re.compile(RE_EN)
 FORMATO_AR = "ar"
 FORMATO_EN = "en"
 
+# Cuánta evidencia hace falta para decidir el formato de una columna: al menos
+# MIN_EVIDENCIA valores que sólo se leen de una forma, y que el MAYORIA_PCT %
+# de los que dicen formato digan el mismo. Con uno solo, el mismo dataset de
+# CABA (SADE) daba promedios de 7,567 y 8,820 en dos tablas, y la respuesta
+# podía cambiar con cada ANALYZE (H009).
+MIN_EVIDENCIA = 5
+MAYORIA_PCT = 90
+
+# Lo que se limpia alrededor de cada valor, igual en Python y en SQL: espacio,
+# tab, salto de línea, retorno de carro y espacio duro (nbsp). `str.strip()`
+# sacaba esos y más; `btrim(x)` de Postgres, sólo el espacio. El perfil
+# contaba como número un «0,82\r\r\n» que el SQL dejaba en NULL (H042: 98
+# columnas en staging, entre ellas las mediciones de radiaciones de CABA).
+ESPACIOS = " \t\n\r\u00a0"
+_ESPACIOS_SQL = " || ".join(f"chr({ord(c)})" for c in ESPACIOS)
+
 
 def es_tipo_numerico(tipo: str) -> bool:
     return bool(NUMERIC_TYPES.match(tipo or ""))
+
+
+def _texto(columna: str) -> str:
+    """La columna como texto, sin ``ESPACIOS`` alrededor (en SQL)."""
+    return f"btrim({quote_ident(columna)}::text, {_ESPACIOS_SQL})"
 
 
 def clase_valor(valor: object) -> str | None:
@@ -68,7 +95,7 @@ def clase_valor(valor: object) -> str | None:
         return None
     if isinstance(valor, int | float | Decimal):
         return "entero" if float(valor).is_integer() else "en"
-    texto = str(valor).strip()
+    texto = str(valor).strip(ESPACIOS)
     if not texto:
         return None
     # El orden importa: los ambiguos antes que los patrones generales, que
@@ -91,7 +118,8 @@ class PerfilNumerico:
     """Lo que dice la muestra de una columna de texto sobre su formato."""
 
     columna: str
-    # "ar", "en" o None (la muestra no tiene valores ambiguos, o no se pudo decidir).
+    # "ar", "en" o None (sin evidencia suficiente: con ambiguos en la muestra,
+    # `problema` dice por qué no se calcula).
     formato: str | None
     # Si no se puede calcular: por qué, en castellano, para el modelo.
     problema: str | None = None
@@ -102,17 +130,18 @@ class PerfilNumerico:
 def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
     """Decide el formato de una columna de texto a partir de una muestra.
 
-    - Sin valores ambiguos en la muestra: no hace falta decidir (``formato``
-      None). Los ambiguos que haya fuera de la muestra quedan en NULL, no
-      mal leídos, y ``filas_con_valor`` lo deja ver.
-    - Con ambiguos y evidencia de un solo formato: ese formato.
-    - Con ambiguos y enteros cortos ("500", "999") y nada más: "12.500" es
-      argentino (el separador aparece sólo desde mil) y "1,250" es inglés,
-      por la misma razón.
-    - Si no: no se puede.
+    - Con evidencia suficiente de un formato (``MIN_EVIDENCIA`` valores que
+      sólo se leen de una forma y el ``MAYORIA_PCT`` % de los que dicen
+      formato): ese formato, haya o no ambiguos en la muestra. Si no hay, los
+      de fuera de la muestra se leen igual (H041: antes quedaban en NULL).
+    - Sin evidencia suficiente y sin ambiguos en la muestra: no hace falta
+      decidir (``formato`` None). Los ambiguos que haya fuera de la muestra
+      quedan en NULL, no mal leídos, y el cálculo los cuenta aparte.
+    - Sin evidencia suficiente y con ambiguos: no se puede. Los enteros
+      cortos no son evidencia: "500" y "58.333" son también una columna
+      inglesa con tres decimales (H001: minutos por día de la ENUT).
     """
     conteo = {"entero": 0, FORMATO_AR: 0, FORMATO_EN: 0, "ambiguo_punto": 0, "ambiguo_coma": 0}
-    enteros_largos = 0
     total = 0
     ejemplos: list[str] = []
     for valor in valores:
@@ -121,30 +150,28 @@ def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
         if clase is None:
             continue
         conteo[clase] += 1
-        if clase == "entero" and len(str(valor).strip().lstrip("+-")) > 3:
-            enteros_largos += 1
         if clase.startswith("ambiguo") and len(ejemplos) < 3:
-            ejemplos.append(str(valor).strip())
+            ejemplos.append(str(valor).strip(ESPACIOS))
     numericos = sum(conteo.values())
 
     def perfil(formato: str | None, problema: str | None = None) -> PerfilNumerico:
         return PerfilNumerico(columna, formato, problema, numericos=numericos, muestra=total)
 
+    ar, en = conteo[FORMATO_AR], conteo[FORMATO_EN]
+    for formato, votos in ((FORMATO_AR, ar), (FORMATO_EN, en)):
+        if votos >= MIN_EVIDENCIA and 100 * votos >= MAYORIA_PCT * (ar + en):
+            return perfil(formato)
     if not conteo["ambiguo_punto"] and not conteo["ambiguo_coma"]:
         return perfil(None)
-    ar, en = conteo[FORMATO_AR], conteo[FORMATO_EN]
-    if ar and not en:
-        return perfil(FORMATO_AR)
-    if en and not ar:
-        return perfil(FORMATO_EN)
-    if not ar and not en and conteo["entero"] and not enteros_largos:
-        if not conteo["ambiguo_coma"]:
-            return perfil(FORMATO_AR)
-        if not conteo["ambiguo_punto"]:
-            return perfil(FORMATO_EN)
     lista = ", ".join(f"«{e}»" for e in ejemplos)
     if ar and en:
         motivo = "mezcla números en formato argentino y en formato inglés"
+    elif ar or en:
+        cuales = "valor que dice" if ar + en == 1 else "valores que dicen"
+        motivo = (
+            f"trae sólo {ar + en} {cuales} en qué formato está, y hacen falta al menos "
+            f"{MIN_EVIDENCIA}"
+        )
     else:
         motivo = "no trae ningún valor que diga en qué formato está"
     return perfil(
@@ -165,7 +192,7 @@ def expresion_numero(columna: str, tipo: str, formato: str | None) -> str:
     ident = quote_ident(columna)
     if es_tipo_numerico(tipo):
         return ident
-    x = f"btrim({ident}::text)"
+    x = _texto(columna)
     ar = f"replace(replace({x}, '.', ''), ',', '.')::numeric"
     en = f"replace({x}, ',', '')::numeric"
     if formato == FORMATO_AR:
@@ -185,12 +212,25 @@ def expresion_numero(columna: str, tipo: str, formato: str | None) -> str:
     )
 
 
+def expresion_ambiguo(columna: str, tipo: str) -> str | None:
+    """Condición SQL: el valor es un número ambiguo ("12.500", "1,250").
+
+    Con el formato sin decidir, esas filas quedan en NULL en
+    ``expresion_numero``: el cálculo las cuenta aparte para no decir que "no
+    tienen un número" (H041). None si la columna ya es numérica.
+    """
+    if es_tipo_numerico(tipo):
+        return None
+    x = _texto(columna)
+    return f"({x} ~ '{RE_AMBIGUO_PUNTO}' OR {x} ~ '{RE_AMBIGUO_COMA}')"
+
+
 def leer_numero(valor: object, formato: str | None = None) -> Decimal | None:
     """Lo mismo que ``expresion_numero``, en Python (para valores de filtros y tests)."""
     clase = clase_valor(valor)
     if clase is None:
         return None
-    texto = str(valor).strip()
+    texto = str(valor).strip(ESPACIOS)
     try:
         if clase == "entero" or (clase == "en" and not isinstance(valor, str)):
             return Decimal(texto)

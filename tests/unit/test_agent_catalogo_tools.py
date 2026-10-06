@@ -155,10 +155,14 @@ async def test_calcular_no_suma_una_columna_de_numeros_ambiguos() -> None:
 
 
 async def test_calcular_suma_una_columna_argentina_y_dice_sobre_cuantas_filas() -> None:
+    # Hacen falta cinco valores que sólo puedan ser argentinos (H009: con uno
+    # solo, «1.218.600», se decidía la columna entera). Valores reales de la
+    # Pauta CABA.
+    muestra = ["27.830", "1.218.600", "1.344.663", "1.446.434", "1.456.840", "1.271.613"]
     sandbox = Sandbox(
         TYPES,
         [
-            ("AS v FROM", [{"v": "27.830"}, {"v": "1.218.600"}]),
+            ("AS v FROM", [{"v": v} for v in muestra]),
             ("AS valor", [{"valor": 242635557, "__filas": 1312, "__filas_con_valor": 1300}]),
         ],
     )
@@ -166,7 +170,9 @@ async def test_calcular_suma_una_columna_argentina_y_dice_sobre_cuantas_filas() 
         {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
     )
     sql = sandbox.sql_with("AS valor")
-    assert "replace(btrim(\"IMPORTE\"::text), '.', '')::numeric" in sql
+    x = 'btrim("IMPORTE"::text, chr(32) || chr(9) || chr(10) || chr(13) || chr(160))'
+    assert f"replace({x}, '.', '')::numeric" in sql
+    assert "__filas_ambiguas" not in sql  # formato decidido: no quedan ambiguos sin leer
     [result] = out.results
     assert result.records == [{"valor": 242635557}]  # sin las columnas de control
     assert result.metadata["filas_usadas"] == 1312
@@ -189,6 +195,86 @@ async def test_calcular_sin_numeros_reconocibles_no_da_valor() -> None:
     )
     assert out.results == []
     assert "número reconocible" in json.loads(out.content)["aviso"]
+
+
+async def test_calcular_separa_los_ambiguos_de_las_filas_sin_numero() -> None:
+    """H041: con el formato sin decidir, un «12.500» queda afuera del cálculo,
+    pero es un número. El aviso decía que esas filas "no tienen un número
+    reconocible"."""
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}, {"v": "1.234,5"}, {"v": "s/d"}]),
+            (
+                "AS valor",
+                [
+                    {
+                        "valor": 1000,
+                        "__filas": 100,
+                        "__filas_con_valor": 90,
+                        "__filas_ambiguas": 6,
+                    }
+                ],
+            ),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    assert "AS __filas_ambiguas" in sandbox.sql_with("AS valor")
+    [result] = out.results
+    assert result.records == [{"valor": 1000}]  # sin las columnas de control
+    [aviso] = [n for n in json.loads(out.content)["notas"] if "90 de 100" in n]
+    assert "6 tienen un número que se puede leer de dos formas" in aviso
+    assert "4 no tienen un número reconocible en 'IMPORTE'" in aviso
+
+
+async def test_calcular_presupuesto_apn_las_filas_afuera_eran_todas_ambiguas() -> None:
+    """Los números de credito_pagado (presupuesto APN `5f0f`, staging) con el
+    formato sin decidir: las 24 filas afuera son «6,555» y parecidos."""
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}]),
+            (
+                "AS valor",
+                [
+                    {
+                        "valor": 38434.9,
+                        "__filas": 25063,
+                        "__filas_con_valor": 25039,
+                        "__filas_ambiguas": 24,
+                    }
+                ],
+            ),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    [aviso] = [n for n in json.loads(out.content)["notas"] if "25039 de 25063" in n]
+    assert "las otras 24 tienen un número que se puede leer de dos formas" in aviso
+    assert "no tienen un número reconocible" not in aviso
+
+
+async def test_calcular_sin_valor_por_ambiguos_no_dice_que_no_hay_numeros() -> None:
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS v FROM", [{"v": "500"}]),
+            (
+                "AS valor",
+                [{"valor": None, "__filas": 5, "__filas_con_valor": 0, "__filas_ambiguas": 5}],
+            ),
+        ],
+    )
+    out = await Calcular().run(
+        {"tabla": T, "operacion": "suma", "columna": "IMPORTE"}, _ctx(sandbox)
+    )
+    assert out.results == []
+    aviso = json.loads(out.content)["aviso"]
+    assert "5 tienen un número que se puede leer de dos formas" in aviso
+    assert "no tienen un número reconocible" not in aviso
 
 
 async def test_calcular_avisa_si_hay_mas_grupos_que_el_limite() -> None:
