@@ -65,6 +65,13 @@ def _serie_uva() -> list[tuple[str, float]]:
     return _serie_adelantada(2000.0, 1.0, date(2026, 10, 15))
 
 
+def _serie_banda(inicio: float, paso: float) -> list[tuple[str, float]]:
+    # Las bandas (1187/1188) también se publican por adelantado, pero sólo en
+    # días hábiles: el 04-oct (domingo) llegaban hasta el 30-oct.
+    dias = _habiles(date(2025, 4, 14), date(2026, 10, 30))
+    return [(d.isoformat(), round(inicio + i * paso, 2)) for i, d in enumerate(dias)]
+
+
 SERIES: dict[int, list[tuple[str, float]]] = {
     1: _serie_reservas(),
     4: _serie_diaria(date(2026, 10, 2), 1543.18),
@@ -74,6 +81,8 @@ SERIES: dict[int, list[tuple[str, float]]] = {
     30: _serie_adelantada(700.0, 0.25, date(2026, 11, 3)),
     31: _serie_uva(),
     40: _serie_adelantada(30.0, 0.01, date(2026, 11, 3)),
+    1187: _serie_banda(1000.0, -0.25),
+    1188: _serie_banda(1400.0, 0.5),
 }
 
 CATALOGO: list[dict[str, Any]] = [
@@ -191,12 +200,20 @@ class FakeBCRA:
         fail_ids: set[int] | None = None,
         catalog_down: bool = False,
         catalog_delay: float = 0.0,
+        data_delay: float = 0.0,
+        series: dict[int, list[tuple[str, float]]] | None = None,
     ) -> None:
         self.requests: list[httpx.Request] = []
         self.fail_ids = fail_ids or set()
         self.catalog_down = catalog_down
         # Segundos que tarda el catálogo en responder (uno colgado: 30).
         self.catalog_delay = catalog_delay
+        # Lo mismo para los datos de cada variable (la API colgada: 3600).
+        self.data_delay = data_delay
+        # Pedidos de datos que empezaron, aunque se hayan cortado por timeout.
+        self.data_attempts = 0
+        # Series que reemplazan a las de SERIES (una historia más larga).
+        self.series = {**SERIES, **(series or {})}
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.ahandle)
@@ -204,6 +221,10 @@ class FakeBCRA:
     async def ahandle(self, request: httpx.Request) -> httpx.Response:
         if self.catalog_delay and request.url.path == "/estadisticas/v4.0/monetarias":
             await asyncio.sleep(self.catalog_delay)
+        if request.url.path.startswith("/estadisticas/v4.0/monetarias/"):
+            self.data_attempts += 1
+            if self.data_delay:
+                await asyncio.sleep(self.data_delay)
         return self.handle(request)
 
     def catalog_requests(self) -> int:
@@ -244,7 +265,7 @@ class FakeBCRA:
     def _variable(self, id_variable: int, q: dict[str, str]) -> httpx.Response:
         if id_variable in self.fail_ids:
             return httpx.Response(500, json={"status": 500})
-        if id_variable not in SERIES:
+        if id_variable not in self.series:
             return _bad("IdVariable invalida.")
         try:
             desde, hasta = _iso(q.get("desde")), _iso(q.get("hasta"))
@@ -256,7 +277,7 @@ class FakeBCRA:
             return _bad("Fecha desde no debe ser mayor a la fecha hasta.")
         rows = [
             {"fecha": f, "valor": v}
-            for f, v in reversed(SERIES[id_variable])
+            for f, v in reversed(self.series[id_variable])
             if (not desde or f >= desde.isoformat()) and (not hasta or f <= hasta.isoformat())
         ]
         limit = int(q.get("limit", 1000))

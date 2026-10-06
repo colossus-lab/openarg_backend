@@ -35,6 +35,7 @@ from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.connectors.bcra import IBCRAConnector
+from app.infrastructure.resilience.circuit_breaker import get_circuit_breaker
 from app.infrastructure.resilience.retry import with_retry
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,14 @@ CATALOG_TTL_S = 6 * 3600
 CATALOG_WAIT_S = 3.0
 # Después de un fallo del catálogo no se lo vuelve a pedir por este tiempo.
 CATALOG_RETRY_S = 300.0
+# Con plazo (el agente, que corta la herramienta a los 25 s): cada pedido de
+# datos espera esto y se reintenta una sola vez. Con 20 s por pedido y dos
+# reintentos el corte llegaba en el medio del segundo intento, la cancelación
+# no contaba como falla y con el BCRA colgado el circuito no se abría nunca
+# (revisión del 05-oct, H090).
+AGENT_REQUEST_TIMEOUT_S = 8.0
+# El circuito de los datos: lo comparten los pedidos con plazo y sin plazo.
+DATA_CIRCUIT = "bcra_api"
 
 # Argentina no tiene horario de verano desde 2009.
 _AR = timezone(timedelta(hours=-3), "ART")
@@ -123,31 +132,57 @@ class BCRAAdapter(IBCRAConnector):
             )
         return self._client
 
-    async def _send(self, url: str, params: dict[str, str] | None) -> httpx.Response:
-        resp = await self._get_client().get(url, params=params or None)
+    async def _send(
+        self, url: str, params: dict[str, str] | None, timeout: float | None = None
+    ) -> httpx.Response:
+        client = self._get_client()
+        if timeout is None:
+            resp = await client.get(url, params=params or None)
+        else:
+            # El timeout de httpx es por operación (conectar, cada lectura), no
+            # por el pedido entero: una respuesta a cuentagotas lo esquiva.
+            # asyncio.timeout corta el pedido entero con un TimeoutError, que
+            # with_retry reintenta y, en el último intento, cuenta como falla.
+            async with asyncio.timeout(timeout):
+                resp = await client.get(url, params=params or None, timeout=timeout)
         if resp.status_code == 429 or resp.status_code >= 500:
             resp.raise_for_status()  # with_retry reintenta y lo cuenta como falla
         return resp
 
-    @with_retry(max_retries=2, service_name="bcra_api")
+    @with_retry(max_retries=2, service_name=DATA_CIRCUIT)
     async def _send_data(self, url: str, params: dict[str, str] | None) -> httpx.Response:
         return await self._send(url, params)
+
+    @with_retry(max_retries=1, service_name=DATA_CIRCUIT)
+    async def _send_data_plazo(self, url: str, params: dict[str, str] | None) -> httpx.Response:
+        return await self._send(url, params, timeout=AGENT_REQUEST_TIMEOUT_S)
 
     @with_retry(max_retries=1, service_name="bcra_api_catalogo")
     async def _send_catalog(self, url: str, params: dict[str, str] | None) -> httpx.Response:
         return await self._send(url, params)
 
     async def _get_json(
-        self, url: str, params: dict[str, str] | None = None, *, catalog: bool = False
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        catalog: bool = False,
+        plazo: bool = False,
     ) -> Any:
         """GET con reintentos ante 5xx/429 y cortes de red.
 
         Un 4xx (fecha futura, ``limit`` fuera de rango) es un pedido mal
         armado, no una API caída: se levanta acá, fuera de ``with_retry``, para
         que no se reintente ni abra el circuito. El catálogo tiene su propio
-        circuito: si se cae, los datos siguen andando.
+        circuito: si se cae, los datos siguen andando. Con ``plazo``, cada
+        pedido de datos tiene ``AGENT_REQUEST_TIMEOUT_S`` y un solo reintento.
         """
-        send = self._send_catalog if catalog else self._send_data
+        if catalog:
+            send = self._send_catalog
+        elif plazo:
+            send = self._send_data_plazo
+        else:
+            send = self._send_data
         resp = await send(url, params)
         resp.raise_for_status()
         return resp.json()
@@ -402,10 +437,10 @@ class BCRAAdapter(IBCRAConnector):
             return None
         return next((v for v in catalog if v.get("idVariable") == id_variable), None)
 
-    async def _newest_date(self, url: str) -> str | None:
+    async def _newest_date(self, url: str, *, plazo: bool = False) -> str | None:
         """La última fecha que publicó el BCRA para una variable (sin catálogo)."""
         try:
-            data = await self._get_json(url, {"limit": "10"})
+            data = await self._get_json(url, {"limit": "10"}, plazo=plazo)
         except Exception:
             return None
         page = _v4_detail(data)
@@ -420,13 +455,48 @@ class BCRAAdapter(IBCRAConnector):
         *,
         limit: int | None = None,
         title: str | None = None,
+        plazo_s: float | None = None,
     ) -> DataResult:
         """Observaciones de una variable v4, de la más vieja a la más nueva.
 
         - Con ``desde``: todo el rango (paginado), hasta ``V4_MAX_ROWS``.
         - Sin ``desde``: las ``limit`` más recientes (por defecto 60) hasta
           ``hasta`` o hasta hoy.
+        - Con ``plazo_s`` (el agente): cada pedido espera
+          ``AGENT_REQUEST_TIMEOUT_S`` y se reintenta una vez, y si la consulta
+          entera no termina en ``plazo_s`` es un ConnectorError que cuenta como
+          falla del circuito. Sin él, el corte lo hacía el agente desde afuera
+          y el circuito no se enteraba.
         """
+        if plazo_s is None:
+            return await self._get_variable(id_variable, desde, hasta, limit, title, plazo=False)
+        try:
+            async with asyncio.timeout(plazo_s):
+                return await self._get_variable(id_variable, desde, hasta, limit, title, plazo=True)
+        except TimeoutError:
+            # _get_variable convierte en ConnectorError todo lo que levanta: un
+            # TimeoutError acá es el plazo vencido.
+            get_circuit_breaker(DATA_CIRCUIT).record_failure()
+            logger.warning("BCRA: la variable %s no respondió en %.0f s", id_variable, plazo_s)
+            raise ConnectorError(
+                error_code=ErrorCode.CN_BCRA_UNAVAILABLE,
+                details={
+                    "action": "get_variable",
+                    "id_variable": id_variable,
+                    "reason": f"no respondió en {plazo_s:.0f} s",
+                },
+            ) from None
+
+    async def _get_variable(
+        self,
+        id_variable: int,
+        desde: str | None,
+        hasta: str | None,
+        limit: int | None,
+        title: str | None,
+        *,
+        plazo: bool,
+    ) -> DataResult:
         try:
             start = _iso_date(desde, "desde")
             end = _iso_date(hasta, "hasta")
@@ -452,6 +522,7 @@ class BCRAAdapter(IBCRAConnector):
                 data = await self._get_json(
                     url,
                     {**base, "limit": str(max(10, page_limit)), "offset": str(offset)},
+                    plazo=plazo,
                 )
                 if total is None:
                     total = _resultset_count(data)
@@ -479,7 +550,7 @@ class BCRAAdapter(IBCRAConnector):
                 # Con `hasta`, lo traído no dice hasta dónde llega la serie. Sin
                 # la ficha del catálogo, una consulta de un período pasado
                 # parecería un dato atrasado: se pregunta la última fecha.
-                catalog_end = await self._newest_date(url)
+                catalog_end = await self._newest_date(url, plazo=plazo)
             # Sin `hasta`, la primera fila de la primera página es la última que
             # publicó el BCRA: puede ser más nueva que el catálogo cacheado.
             source_end = max((d for d in (newest_fetched, catalog_end) if d), default=None)

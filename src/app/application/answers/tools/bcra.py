@@ -16,6 +16,7 @@ mayorista de referencia de la Comunicación A 3500 (variable 5).
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -32,8 +33,9 @@ from app.application.answers.tools.base import (
 )
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
-from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.llm.agent_llm import AgentTool
+
+logger = logging.getLogger(__name__)
 
 # Argentina no tiene horario de verano desde 2009. El servidor corre en UTC:
 # a las 22 h del domingo su "hoy" ya es el lunes.
@@ -47,6 +49,19 @@ _VENTANA_RECIENTE = 60
 # Valores publicados por adelantado que se le muestran al modelo (la UVA llega
 # hasta el día 15 del mes siguiente: unas 40 filas).
 _MAX_ADELANTADOS = 45
+# Lo que la herramienta espera al BCRA, con reintentos. El motor la corta a
+# los 25 s (agent_engine.TOOL_TIMEOUT_S) y ese corte el circuito no lo ve: el
+# adaptador corta antes y lo cuenta como falla (revisión del 05-oct, H090).
+_PLAZO_S = 20.0
+# Lo que lee el modelo si el BCRA no contesta. El genérico del motor ("Probá
+# con otra") lo mandaba a la pizarra del Banco Nación o a una serie atrasada,
+# presentadas como el dato oficial (H090).
+_SIN_RESPUESTA = (
+    "El BCRA no respondió (su API está caída o no contestó a tiempo). Decilo en la "
+    "respuesta. No presentes otra fuente como el dato oficial del BCRA: cotizaciones es "
+    "la pizarra del Banco Nación, no el dólar oficial, y series_tiempo puede estar "
+    "atrasada; si usás alguna, decí cuál es y de qué fecha es el dato."
+)
 
 
 @dataclass(frozen=True)
@@ -215,17 +230,26 @@ def _agrupar(records: list[dict[str, Any]], width: int) -> list[dict[str, Any]]:
     return out
 
 
-def _resumen(records: list[dict[str, Any]], max_periodos: int) -> tuple[str, list[dict]]:
-    """La historia entera en pocas líneas, calculada acá y no por el modelo.
+def _resumen(
+    records: list[dict[str, Any]], max_periodos: int
+) -> tuple[str, list[dict], str | None]:
+    """La historia en pocas líneas, calculada acá y no por el modelo.
 
     Con `desde` llegan cientos de observaciones diarias y el modelo ve sólo
     las últimas: para contar la evolución de un año pedía la misma serie tres
     veces con otros rangos (medido en staging el 04-oct).
+
+    El anual se queda con los últimos ``max_periodos`` años, para que varias
+    variables entren en el tope de texto. Si recorta, el tercer valor es el
+    primer año leído, para decirlo; None si el resumen cubre todo (H089).
     """
     mensual = _agrupar(records, 7)
     if len(mensual) <= max_periodos:
-        return "resumen_mensual", mensual
-    return "resumen_anual", _agrupar(records, 4)[-max_periodos:]
+        return "resumen_mensual", mensual, None
+    anual = _agrupar(records, 4)
+    if len(anual) <= max_periodos:
+        return "resumen_anual", anual, None
+    return "resumen_anual", anual[-max_periodos:], anual[0]["periodo"]
 
 
 def _separar_adelantados(
@@ -261,6 +285,15 @@ def _sin_adelantados(
         meta["fecha_fin_fuente"] = ultima
 
 
+def _recortar_adelantados(
+    adelantados: list[dict[str, Any]], max_adelantados: int
+) -> list[dict[str, Any]]:
+    """Los más cercanos y el último publicado."""
+    if len(adelantados) > max_adelantados:
+        return adelantados[: max_adelantados - 1] + adelantados[-1:]
+    return adelantados
+
+
 def _payload(
     key: str,
     var: Variable,
@@ -269,6 +302,7 @@ def _payload(
     max_periodos: int,
     adelantados: list[dict[str, Any]],
     max_adelantados: int,
+    aviso: str | None = None,
 ) -> dict:
     """Una variable como la ve el modelo: el último dato con su fecha, arriba."""
     records = result.records or []
@@ -284,27 +318,71 @@ def _payload(
         "filas_totales": len(records),
         "filas": records[-shown:],
     }
+    notas = [aviso] if aviso else []
+    leido_desde: str | None = None
     if len(records) > shown:
-        nombre, resumen = _resumen(records, max_periodos)
+        nombre, resumen, leido_desde = _resumen(records, max_periodos)
         payload[nombre] = resumen
     if adelantados:
         # El de hoy es el último que no es futuro; los que siguen ya los
         # publicó el BCRA y sirven si preguntan por una fecha que viene.
-        if len(adelantados) > max_adelantados:
-            # Los más cercanos y el último publicado.
-            adelantados = adelantados[: max_adelantados - 1] + adelantados[-1:]
+        adelantados = _recortar_adelantados(adelantados, max_adelantados)
         payload["publicados_por_adelantado"] = adelantados
-        payload["nota"] = (
+        notas.append(
             f"El BCRA ya publicó valores hasta el {_fecha_ar(adelantados[-1].get('fecha'))} "
             "(se conocen por adelantado, van en `publicados_por_adelantado`); el de hoy es "
             "`ultimo_dato`."
         )
     elif len(records) > shown:
-        payload["nota"] = (
-            f"Se muestran las últimas {shown} de {len(records)} observaciones; el resumen "
-            "cubre todo el período leído."
+        cubre = "; el resumen cubre todo el período leído." if leido_desde is None else "."
+        notas.append(f"Se muestran las últimas {shown} de {len(records)} observaciones{cubre}")
+    if leido_desde is not None:
+        anual = payload["resumen_anual"]
+        payload["resumen_desde"] = anual[0]["periodo"]
+        notas.append(
+            f"El resumen anual va de {anual[0]['periodo']} a {anual[-1]['periodo']}: los años "
+            f"anteriores (se leyó desde {leido_desde}) no se muestran; para verlos, pedí esta "
+            "variable sola o con `hasta`."
         )
+    if notas:
+        payload["nota"] = " ".join(notas)
     return payload
+
+
+def _sin_dato_a_hoy(
+    key: str, var: Variable, adelantados: list[dict[str, Any]], max_adelantados: int
+) -> dict:
+    """Sólo llegaron valores de fechas que no pasaron: no hay `ultimo_dato`."""
+    return {
+        "variable": key,
+        "titulo": var.titulo,
+        "fuente": _FUENTE,
+        "unidades": var.unidades,
+        "ultimo_dato": None,
+        "filas": [],
+        "publicados_por_adelantado": _recortar_adelantados(adelantados, max_adelantados),
+        "nota": (
+            "El período pedido no tiene datos hasta hoy: lo que llegó son valores ya "
+            "publicados para fechas que todavía no pasaron (van en "
+            "`publicados_por_adelantado`) y no son el valor de hoy. Para el último dato, "
+            "pedí la variable sin `desde`."
+        ),
+    }
+
+
+async def _hasta_hoy(
+    bcra: Any, var: Variable, today: date, limit: int, plazo_s: float
+) -> DataResult | None:
+    """Las últimas observaciones hasta hoy; None si el BCRA no contestó a tiempo."""
+    if plazo_s < 1.0:
+        return None
+    try:
+        result: DataResult = await bcra.get_variable(
+            var.id, None, today.isoformat(), limit=limit, title=var.titulo, plazo_s=plazo_s
+        )
+    except ConnectorError:
+        return None
+    return result
 
 
 class VariablesBCRA:
@@ -335,8 +413,10 @@ class VariablesBCRA:
             "días), base_monetaria, circulacion_monetaria, uva, cer, icl (índice de contratos "
             "de alquiler), banda_cambiaria_piso, banda_cambiaria_techo. Devuelve por variable "
             "el último dato con su fecha, las últimas observaciones y un resumen por mes (o por "
-            "año) con cierre, mínimo y máximo; con `desde` el resumen cubre todo el período. "
-            "Para inflación usá las series del INDEC (series_tiempo)."
+            "año) con cierre, mínimo y máximo; con `desde` el resumen cubre todo el período "
+            "(con varias variables y muchos años, el anual muestra los últimos y "
+            "`resumen_desde` dice desde cuál). Para inflación usá las series del INDEC "
+            "(series_tiempo)."
         ),
         input_schema={
             "type": "object",
@@ -376,14 +456,18 @@ class VariablesBCRA:
         max_adelantados = max(10, _MAX_ADELANTADOS // len(keys))
 
         bcra = ctx.deps.bcra
+        loop = asyncio.get_running_loop()
+        vence = loop.time() + _PLAZO_S
+        limit = max(ultimos, _VENTANA_RECIENTE)
         fetched = await asyncio.gather(
             *(
                 bcra.get_variable(
                     VARIABLES[k].id,
                     desde,
                     hasta,
-                    limit=max(ultimos, _VENTANA_RECIENTE),
+                    limit=limit,
                     title=VARIABLES[k].titulo,
+                    plazo_s=_PLAZO_S,
                 )
                 for k in keys
             ),
@@ -406,29 +490,47 @@ class VariablesBCRA:
             if not got.records:
                 payloads.append({"variable": key, "filas": [], "nota": "Sin datos en ese período."})
                 continue
+            al_dia, adelantados = _separar_adelantados(got.records, today)
+            aviso: str | None = None
+            if adelantados and not al_dia:
+                # Un fin de semana o feriado, con `desde` = hoy, de las bandas
+                # (publicadas por adelantado, sólo días hábiles) llegaban sólo
+                # fechas futuras, y el techo de fin de mes salía como el de hoy
+                # (revisión del 05-oct, H088). El de hoy es el último hasta hoy.
+                previo = await _hasta_hoy(bcra, var, today, limit, vence - loop.time())
+                al_dia = _separar_adelantados(previo.records, today)[0] if previo else []
+                if previo is None or not al_dia:
+                    payloads.append(_sin_dato_a_hoy(key, var, adelantados, max_adelantados))
+                    continue
+                got = previo
+                aviso = (
+                    "El período pedido no tiene datos hasta hoy (fin de semana o feriado): "
+                    f"`ultimo_dato` es el último publicado, del {_fecha_ar(al_dia[-1]['fecha'])}, "
+                    "y las `filas` son anteriores a lo pedido."
+                )
             meta = got.metadata
             meta["units"] = meta.get("units") or var.unidades
             meta["frecuencia"] = meta.get("frecuencia") or "diaria"
             meta["oficial"] = True
             if var.porcentaje:
                 meta["unidad"] = "porcentaje"
-            al_dia, adelantados = _separar_adelantados(got.records, today)
-            if al_dia and adelantados:
+            if adelantados:
                 _sin_adelantados(got, al_dia, adelantados)
-            else:
-                adelantados = []
             payloads.append(
-                _payload(key, var, got, shown, max_periodos, adelantados, max_adelantados)
+                _payload(key, var, got, shown, max_periodos, adelantados, max_adelantados, aviso)
             )
             results.append(got)
 
         if failures == len(keys):
-            raise ConnectorError(
-                error_code=ErrorCode.CN_BCRA_UNAVAILABLE,
-                details={"action": "variables_bcra", "variables": keys},
-            )
+            # No sube como ConnectorError: el motor le diría al modelo "Probá
+            # con otra" y nada más (H090).
+            logger.info("variables_bcra: el BCRA no respondió (%s)", ", ".join(keys))
+            return ToolOutcome(_SIN_RESPUESTA, is_error=True)
+        # El aviso va primero: el tope de texto corta por el final.
+        respuesta: dict[str, Any] = {"aviso": _SIN_RESPUESTA} if failures else {}
+        respuesta["variables"] = payloads
         return ToolOutcome(
-            to_json({"variables": payloads}),
+            to_json(respuesta),
             results=results,
             summary=_summary(results, today),
         )
