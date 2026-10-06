@@ -41,7 +41,9 @@ Qué se hace con eso lo decide ``ANSWERS_VERIFY_MODE``:
   antes del verificador (toda la evidencia citada, sin citas).
 - ``shadow`` (por defecto): se registra en el log (``answers.verify``) y la
   respuesta sale igual, también sus fuentes y sus citas: toda la evidencia
-  citada y sin citas. Es para medir la precisión antes de actuar.
+  citada y sin citas. Es para medir la precisión antes de actuar. Lo único
+  que usa es lo respaldado: si todas las cifras lo están, el aviso de atraso
+  mira sólo las evidencias que las aportaron; si no, todo lo leído.
 - ``correct``: se citan sólo las fuentes usadas, con sus citas, y el agente
   hace UNA vuelta correctiva con la lista de cifras (``agent_engine``); si
   después sigue habiendo cifras sin respaldo, la respuesta lleva un aviso

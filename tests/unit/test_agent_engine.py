@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
+from datetime import date, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -882,8 +883,11 @@ async def test_fuera_de_correct_se_cita_toda_la_evidencia_como_antes(
 ) -> None:
     """H082/H100: la selección de fuentes por uso corría en todos los modos y
     decidía fuentes, gráficos, `served_table` y sobre qué se calcula el aviso
-    de atraso. Fuera de correct se cita todo lo leído, como antes de #134, y
-    el aviso se calcula sobre todo lo citado (`figure_evidence` vacío)."""
+    de atraso. Fuera de correct se cita todo lo leído, como antes de #134.
+
+    El aviso: en shadow, con todas las cifras respaldadas, mira lo que aportó
+    cifras (revisión de #146, test de abajo); con off no hay verificación y
+    mira todo lo citado (`figure_evidence` vacío)."""
     _modo(monkeypatch, mode)
     llm = _reservas_llm(
         "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
@@ -896,8 +900,9 @@ async def test_fuera_de_correct_se_cita_toda_la_evidencia_como_antes(
         RESERVAS_MENSUAL.portal_url,
     ]
     assert result.cited_evidence == [RESERVAS_DIARIA, RESERVAS_MENSUAL]
-    assert result.figure_evidence == []
+    assert result.figure_evidence == ([] if mode == "off" else [RESERVAS_MENSUAL])
     assert result.consulted == []
+    assert result.served_table == RESERVAS_DIARIA.source
     assert result.row_count == len(RESERVAS_DIARIA.records)
 
 
@@ -1021,3 +1026,107 @@ async def test_una_cifra_truncada_no_le_saca_la_fuente_ni_el_aviso_de_atraso(
     assert result.answer.startswith("**Dato atrasado:**")
     assert "30 de diciembre de 2024" in result.answer
     assert result.answer.endswith(answer)
+
+
+def _reservas_92_2_hoy() -> DataResult:
+    """92.2 con la metadata que devuelve hoy la API pública: diaria, termina
+    el 31-ago-2026 y la fuente dice que no se actualiza."""
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url="https://datos.gob.ar/series/api/series/?ids=92.2_RESERVAS_IRES_0_0_32_40",
+        dataset_title="Reservas internacionales y pasivos del BCRA",
+        format="time_series",
+        records=[
+            {"fecha": "2026-08-28", "Reservas": 39876.0},
+            {"fecha": "2026-08-31", "Reservas": 39912.0},
+        ],
+        metadata={
+            "units": "Millones de dólares",
+            "ultima_observacion": "2026-08-31",
+            "frecuencia": "diaria",
+            "fecha_fin_fuente": "2026-08-31",
+            "actualizada_en_fuente": False,
+        },
+    )
+
+
+def _reservas_92_1_al_dia() -> DataResult:
+    """92.1, mismo título que 92.2, con el último dato de ayer."""
+    ayer = date.today() - timedelta(days=1)
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url="https://datos.gob.ar/series/api/series/?ids=92.1_RID_0_0_32",
+        dataset_title="Reservas internacionales y pasivos del BCRA",
+        format="time_series",
+        records=[
+            {"fecha": (ayer - timedelta(days=1)).isoformat(), "Reservas": 41100.0},
+            {"fecha": ayer.isoformat(), "Reservas": 41234.0},
+        ],
+        metadata={
+            "units": "Millones de dólares",
+            "ultima_observacion": ayer.isoformat(),
+            "frecuencia": "diaria",
+            "fecha_fin_fuente": ayer.isoformat(),
+            "actualizada_en_fuente": True,
+        },
+    )
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+async def test_en_sombra_una_serie_atrasada_leida_y_no_usada_no_pone_el_aviso(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """Revisión de #146: en shadow el aviso miraba siempre toda la evidencia
+    leída, así que una serie consultada y no usada ponía «Dato atrasado»
+    arriba de una respuesta correcta y al día, con todas sus cifras
+    respaldadas. 92.1 y 92.2 se llaman igual en la API: el aviso parecía
+    hablar de la cifra de la respuesta. Con todas las cifras respaldadas, el
+    aviso mira lo que aportó cifras; las fuentes siguen siendo todo lo leído.
+
+    Con off no se verifica y el aviso mira todo lo leído: es el interruptor, y
+    sin verificación no hay con qué distinguir lo usado de lo consultado."""
+    from app.application.answers import runner as runner_module
+    from app.application.answers.runner import EngineRunner
+
+    async def _nada(*a: Any, **kw: Any) -> None:
+        return None
+
+    async def _sin_cache(*a: Any, **kw: Any) -> tuple[None, None]:
+        return None, None
+
+    monkeypatch.setattr(runner_module, "record_terminal_analytics", _nada)
+    monkeypatch.setattr(runner_module, "check_cache", _sin_cache)
+    monkeypatch.setattr(runner_module, "write_cache", _nada)
+    monkeypatch.setattr(runner_module, "audit_query", lambda **kw: None)
+    _modo(monkeypatch, mode)
+
+    vieja, al_dia = _reservas_92_2_hoy(), _reservas_92_1_al_dia()
+    answer = (
+        "Las reservas internacionales eran de **USD 41.234 millones** según el último dato diario."
+    )
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["92.2_RESERVAS_IRES_0_0_32_40"]),
+                    _call("series_tiempo", 2, ids=["92.1_RID_0_0_32"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(llm, _deps_series(vieja, al_dia))
+    result = await EngineRunner(engine, MagicMock()).run(
+        EngineRequest("¿Cuánto hay de reservas hoy?", "u")
+    )
+    assert [s["url"] for s in result.sources] == [vieja.portal_url, al_dia.portal_url]
+    if mode == "off":
+        assert result.verification is None
+        assert result.answer.startswith("**Dato atrasado:**")
+        assert "31 de agosto de 2026" in result.answer
+        return
+    assert result.verification["sin_respaldo"] == []
+    assert result.answer == answer
+    assert result.figure_evidence == [al_dia]

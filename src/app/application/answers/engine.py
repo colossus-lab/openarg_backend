@@ -158,7 +158,8 @@ class EngineResult:
     cited_evidence: list[Any] = field(default_factory=list, repr=False)
     # De las citadas, las que aportaron alguna cifra respaldada. El aviso de
     # atraso mira éstas: una citada sólo por el título no lo dispara. Vacío =
-    # las citadas.
+    # las citadas. Fuera de correct va vacía si alguna cifra quedó sin
+    # respaldo o no hubo verificación: ante la duda, el aviso mira todo.
     figure_evidence: list[Any] = field(default_factory=list, repr=False)
     # Los títulos de lo que se leyó y no se citó ("consultadas").
     consulted: list[str] = field(default_factory=list)
