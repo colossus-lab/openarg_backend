@@ -316,7 +316,19 @@ class DeclaracionesJuradas:
         description=(
             "Declaraciones juradas patrimoniales de diputados nacionales (Oficina "
             "Anticorrupción). `buscar` por nombre, `ranking` por patrimonio, ingresos o bienes, "
-            "`estadisticas` para totales generales (incluye cuántos tienen patrimonio negativo)."
+            "`estadisticas` para totales generales (incluye cuántos tienen patrimonio negativo). "
+            "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
+            "ni lo atribuyas a nada: describí cifras con nombre y año. "
+            "Una fila con `inconsistente: true` (total de bienes) o `ingresos_inconsistentes: "
+            "true` es un registro del dataset con cifras que no cierran con la propia DDJJ, "
+            "probable error de carga no verificado (el motivo está en la fila), y esa cifra no es "
+            "comparable. `inconsistente` la saca de rankings y estadísticas; "
+            "`ingresos_inconsistentes`, sólo del ranking por ingresos: sus bienes cierran y sigue "
+            "en los demás rankings y en las estadísticas (`excluidas_por_inconsistencia` dice "
+            "cuántas se excluyeron). No uses esa cifra, no le calcules variación, nunca la "
+            "presentes como enriquecimiento y no nombres a la persona excluida salvo que pregunten "
+            "por ella; si preguntan, decí que en el dataset esa cifra de su DDJJ no cierra con el "
+            "resto de la declaración, sin atribuírselo a la persona."
         ),
         input_schema={
             "type": "object",
@@ -350,7 +362,10 @@ class DeclaracionesJuradas:
             raise ToolInputError("`accion` es buscar, ranking o estadisticas.")
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "Sin resultados."}))
-        return ToolOutcome(to_json(result_for_model(result)), results=[result])
+        extra: dict[str, Any] = {}
+        if excluidas := (result.metadata or {}).get("excluidas_por_inconsistencia"):
+            extra["excluidas_por_inconsistencia"] = excluidas
+        return ToolOutcome(to_json(result_for_model(result, **extra)), results=[result])
 
 
 # ── sesiones del Congreso ──────────────────────────────────
