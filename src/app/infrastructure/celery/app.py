@@ -69,6 +69,34 @@ _HEAVY_COLLECT_QUEUE = os.getenv("OPENARG_HEAVY_COLLECT_QUEUE", "collector-heavy
 _HEAVY_RETRY_QUEUE = os.getenv("OPENARG_HEAVY_RETRY_QUEUE", "collector-heavy-retry")
 
 
+def quitar_entradas_desactivadas(agenda: dict) -> list[str]:
+    """Saca de la agenda las entradas de `OPENARG_BEAT_DESACTIVADAS` y devuelve cuáles.
+
+    La variable es una lista separada por comas de nombres de ENTRADAS (las
+    claves de `beat_schedule`, p. ej. ``ingest-series-tiempo``), no de tareas.
+    Sirve para desplegar código nuevo sin que el beat dispare solo lo que
+    todavía no se quiere correr, y correrlo a mano cuando se decida. El beat
+    borra de su archivo de agenda las entradas que ya no están, así que no
+    queda nada pendiente de antes. Un nombre que no existe se loguea como
+    error: un error de tipeo dejaría corriendo, y en silencio, justo la tarea
+    que se quería frenar.
+    """
+    pedidas = dict.fromkeys(
+        n.strip() for n in os.getenv("OPENARG_BEAT_DESACTIVADAS", "").split(",") if n.strip()
+    )
+    sacadas = [n for n in pedidas if agenda.pop(n, None) is not None]
+    desconocidas = [n for n in pedidas if n not in sacadas]
+    if sacadas:
+        logger.warning("beat: OPENARG_BEAT_DESACTIVADAS saca de la agenda %s", sacadas)
+    if desconocidas:
+        logger.error(
+            "beat: OPENARG_BEAT_DESACTIVADAS nombra entradas que no existen: %s "
+            "(van las claves de beat_schedule, no los nombres de las tareas)",
+            desconocidas,
+        )
+    return sacadas
+
+
 def create_celery() -> Celery:
     broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
@@ -927,6 +955,9 @@ def create_celery() -> Celery:
             },
         }
     )
+
+    # Lo que el operador frenó para este despliegue (docs/configuration.md).
+    quitar_entradas_desactivadas(app.conf.beat_schedule)
 
     return app
 
