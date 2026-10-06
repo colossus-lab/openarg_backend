@@ -23,6 +23,14 @@ class IVectorSearch(ABC):
         """
         return None
 
+    async def known_portals(self) -> list[str]:
+        """Los portales que existen en el catálogo, para validar un filtro.
+
+        No es abstracto: un adapter que no lo sepa devuelve vacío y el filtro
+        no se valida.
+        """
+        return []
+
     async def search_datasets_ann(
         self,
         query_embedding: list[float],

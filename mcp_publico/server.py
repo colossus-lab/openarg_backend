@@ -53,13 +53,19 @@ server = MCPServer(
         "económicas y más) en dos modos.\n"
         "MODO DATOS (preferilo cuando puedas razonar vos con los datos): "
         "`buscar_datasets` encuentra datasets y sus tablas; `describir_tabla` "
-        "muestra columnas, período y una muestra; `obtener_datos` trae filas "
-        "filtradas por período, columnas y valores. No descuenta preguntas "
+        "muestra columnas, período, de cuándo son los datos y una muestra; "
+        "`obtener_datos` trae filas filtradas por período, columnas y valores; "
+        "`agregar_datos` calcula en la base totales, promedios, conteos, mínimos, "
+        "máximos y rankings agrupados: usalo SIEMPRE que necesites una de esas "
+        "cuentas, en vez de traer filas y sumarlas vos. No descuenta preguntas "
         "(tiene su propio cupo, más amplio).\n"
         "MODO RESPUESTAS: `consultar_datos_publicos` recibe una pregunta en "
         "lenguaje natural y OpenArg arma la respuesta con fuentes y advertencias. "
-        "Cada llamada descuenta 1 de las preguntas del mes del usuario (10 gratis): usala "
-        "cuando la pregunta necesite cruzar tablas o cuando el modo datos no alcance.\n"
+        "Cada respuesta descuenta 1 de las preguntas del mes del usuario; no descuentan "
+        "los errores, los cortes por tiempo ni repetir la misma pregunta dentro de los "
+        "5 minutos. Usala cuando la pregunta necesite cruzar tablas o cuando el modo "
+        "datos no alcance.\n"
+        f"{core.LIMITES}\n"
         "Citá siempre la fuente (título y link) de los datos que uses. "
         "`listar_fuentes` muestra qué portales cubre."
     ),
@@ -120,11 +126,18 @@ async def _call_backend(
 
     if resp.status_code != 200:
         try:
-            detail = str(resp.json().get("detail", ""))
-        except ValueError:
+            detail = core.error_detail(resp.json().get("detail", ""))
+        except (ValueError, AttributeError):
             detail = ""
         logger.info("backend %s %s -> %s", method, path, resp.status_code)
-        raise ToolError(core.error_message(resp.status_code, detail, data_mode=data_mode))
+        raise ToolError(
+            core.error_message(
+                resp.status_code,
+                detail,
+                data_mode=data_mode,
+                retry_after=resp.headers.get("retry-after"),
+            )
+        )
     return resp.json()
 
 
@@ -152,9 +165,10 @@ async def consultar_datos_publicos(pregunta: str, ctx: Context) -> str:
     "Presupuesto ejecutado por el Ministerio de Salud en 2024".
     La respuesta incluye los datasets usados (con link al portal oficial),
     advertencias sobre la calidad o cobertura del dato, y cuántas preguntas
-    le quedan este mes al usuario. Descuenta 1 de sus preguntas del mes (10
-    gratis): si podés responder con `buscar_datasets` + `obtener_datos`,
-    preferí esas.
+    le quedan este mes al usuario. Cada respuesta descuenta 1 de sus preguntas
+    del mes (10 gratis); un error, un corte por tiempo o la misma pregunta
+    repetida dentro de los 5 minutos no descuentan. Si podés responder con
+    `buscar_datasets` + `obtener_datos` o `agregar_datos`, preferí esas.
     """
     try:
         question = core.validate_question(pregunta)
@@ -210,11 +224,15 @@ async def buscar_datasets(
 
 @_tool("Describir una tabla de OpenArg", _IDEMPOTENT)
 async def describir_tabla(tabla: str, ctx: Context) -> str:
-    """Muestra las columnas (con su tipo), cantidad de filas, período cubierto y una muestra de una tabla.
+    """Muestra las columnas (con su tipo), cantidad de filas, período cubierto, frescura y una muestra de una tabla.
 
     `tabla` es el nombre que devuelve `buscar_datasets`. Usalo antes de
-    `obtener_datos` para saber qué columnas pedir y qué fechas existen.
-    No descuenta preguntas.
+    `obtener_datos` o `agregar_datos` para saber qué columnas pedir y qué
+    fechas existen. La frescura dice cuándo leyó OpenArg la tabla de su fuente,
+    cuál es el último dato y, sólo si la tabla es una foto del período en curso,
+    su fecha de corte. La fecha de lectura no es la de los datos: una tabla de
+    un período pasado o sin columna de fecha no es vigente por haberse leído
+    hoy. No presentes como actual un dato viejo. No descuenta preguntas.
     """
     key, ip, caller = _caller(ctx)
     payload = await _call_backend(
@@ -236,29 +254,48 @@ async def obtener_datos(
     columnas: list[str] | None = None,
     desde: str | None = None,
     hasta: str | None = None,
-    filtros: dict[str, str] | None = None,
-    orden: str = "asc",
+    filtros: dict[str, str | int | float] | list[dict[str, Any]] | None = None,
+    orden: str | None = None,
     limite: int = 100,
+    columna_fecha: str | None = None,
+    offset: int = 0,
 ) -> str:
     """Trae filas de una tabla, en CSV, con la fuente oficial.
 
+    Para un total, promedio, conteo, mínimo, máximo o ranking NO traigas filas para
+    sumarlas: usá `agregar_datos`.
     - `columnas`: las que quieras (por defecto, todas); nombres exactos de `describir_tabla`.
-    - `desde` / `hasta`: período, como AAAA, AAAA-MM o AAAA-MM-DD, sobre la columna de fecha.
-    - `filtros`: igualdad exacta por columna, p. ej. {"provincia": "Córdoba"} (hasta 5).
-    - `orden`: "asc" o "desc" por fecha. `limite`: 1 a 500 filas.
+    - `desde` / `hasta`: período, como AAAA, AAAA-MM o AAAA-MM-DD, sobre la columna de
+      fecha (o de año).
+    - `filtros`: hasta 5. Igualdad: {"provincia": "Córdoba"}. Con operador, una lista:
+      [{"columna": "monto", "operador": "mayor_que", "valor": "1000000"},
+      {"columna": "provincia", "operador": "en", "valores": ["Salta", "Jujuy"]}].
+      Operadores: =, !=, mayor_que, menor_que, >=, <=, contiene y en. La igualdad y
+      `contiene` no distinguen mayúsculas ni acentos (en tablas de más de un millón de
+      filas, sí: ahí la respuesta dice en `filtros_aplicados` qué se buscó tal cual).
+    - `orden`: "asc" (por defecto: primero lo más viejo) o "desc" (primero lo más
+      reciente), por fecha. Para el último dato de una serie, pedí "desc".
+    - `limite`: 1 a 500 filas. Si hay más, la respuesta lo dice y da el `offset` de la
+      página siguiente (hasta 10.000).
+    - `columna_fecha`: opcional, otra columna de fecha para `desde`/`hasta` y el orden.
+    Si ninguna fila cumple los filtros, la respuesta dice qué valores existen.
     No descuenta preguntas.
     """
     key, ip, caller = _caller(ctx)
     body: dict[str, Any] = {
         "tabla": tabla.strip(),
-        "orden": orden,
-        "limite": max(1, min(int(limite), 500)),
+        "limite": max(1, min(int(limite), core.LIMITE_FILAS_POR_PEDIDO)),
     }
     for field, value in (
         ("columnas", columnas),
         ("desde", desde),
         ("hasta", hasta),
         ("filtros", filtros),
+        # Sólo si lo eligió: sin `orden`, el backend sabe que trajo lo más viejo
+        # por defecto y sugiere "desc".
+        ("orden", orden),
+        ("columna_fecha", columna_fecha),
+        ("offset", max(0, int(offset or 0))),
     ):
         if value:
             body[field] = value
@@ -266,6 +303,68 @@ async def obtener_datos(
         "POST", "/api/v1/catalogo/datos", key, ip, caller, json=body, data_mode=True
     )
     return core.format_rows(payload)
+
+
+@_tool("Calcular totales y rankings sobre una tabla de OpenArg", _IDEMPOTENT)
+async def agregar_datos(
+    tabla: str,
+    operacion: str,
+    ctx: Context,
+    columna: str | None = None,
+    agrupar_por: list[str] | None = None,
+    filtros: dict[str, str | int | float] | list[dict[str, Any]] | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+    ordenar_por: str | None = None,
+    orden: str = "desc",
+    limite: int = 50,
+    ponderar_por: str | None = None,
+    columna_fecha: str | None = None,
+) -> str:
+    """Calcula en la base una suma, promedio, conteo, mínimo o máximo, opcionalmente agrupado.
+
+    Usala SIEMPRE que necesites un total, un promedio, un conteo, un mínimo/máximo o un
+    ranking, en vez de traer filas con `obtener_datos` y hacer la cuenta vos: es exacta,
+    no tiene el tope de 500 filas y gasta muchos menos tokens.
+    - `operacion`: "suma", "promedio", "conteo", "minimo" o "maximo".
+    - `columna`: la que se suma/promedia/etc. (nombres exactos de `describir_tabla`); no
+      va con "conteo", que cuenta filas (si la mandás, da error). Las columnas de texto
+      con números se leen según su formato (1.234,5 o 1,234.5); si el formato es
+      ambiguo, no calcula y lo dice.
+    - `agrupar_por`: hasta 3 columnas, p. ej. ["jurisdiccion_desc"] para un ranking.
+    - `filtros`, `desde`, `hasta`, `columna_fecha`: como en `obtener_datos` (hasta 6 filtros).
+    - `ordenar_por`: "valor" (por defecto, para rankings) o una columna de `agrupar_por`
+      (p. ej. el año, para una serie). `orden`: "desc" (por defecto) o "asc".
+    - `limite`: grupos a devolver, 1 a 200.
+    - `ponderar_por`: la columna de ponderación de una encuesta (con "conteo" da la
+      población estimada, no la cantidad de filas de la muestra).
+    La respuesta dice sobre cuántas filas se calculó (`filas_usadas`, de todos los
+    grupos) y si hay más grupos que `limite`. Si ninguna fila cumple los filtros no hay
+    valor: dice qué valores existen. No descuenta preguntas.
+    """
+    key, ip, caller = _caller(ctx)
+    body: dict[str, Any] = {
+        "tabla": tabla.strip(),
+        "operacion": (operacion or "").strip(),
+        "orden": orden,
+        "limite": max(1, min(int(limite), core.LIMITE_GRUPOS_AGREGAR)),
+    }
+    for field, value in (
+        ("columna", columna),
+        ("agrupar_por", agrupar_por),
+        ("filtros", filtros),
+        ("desde", desde),
+        ("hasta", hasta),
+        ("ordenar_por", ordenar_por),
+        ("ponderar_por", ponderar_por),
+        ("columna_fecha", columna_fecha),
+    ):
+        if value:
+            body[field] = value
+    payload = await _call_backend(
+        "POST", "/api/v1/catalogo/agregar", key, ip, caller, json=body, data_mode=True
+    )
+    return core.format_aggregate(payload)
 
 
 @server.custom_route("/health", methods=["GET"])

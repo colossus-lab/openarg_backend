@@ -92,3 +92,43 @@ class TestRedisCacheAdapter:
         mock_redis.pipeline = lambda: pipe
 
         assert await cache.increment_with_ttl("fresh", 60) == 1
+
+    async def test_decrement_is_one_atomic_script(self, cache, mock_redis):
+        """The refund of a quota reservation is a single EVAL: GET + DECR in
+        one step, so it never creates the key nor goes below 0. The real
+        semantics are checked against Redis in
+        tests/integration/test_redis_quota_reservation.py."""
+        mock_redis.eval.return_value = 4
+        assert await cache.decrement("rl:user:u:month:2026-10") == 4
+        script, numkeys, key = mock_redis.eval.await_args.args
+        assert (numkeys, key) == (1, "rl:user:u:month:2026-10")
+        assert "DECR" in script and "GET" in script
+
+    async def test_set_if_absent_is_one_set_nx_ex(self, cache, mock_redis):
+        """The dedupe lock and the charged-counter seed: key and TTL land in
+        one command, and only if the key did not exist."""
+        mock_redis.set.return_value = True
+        assert await cache.set_if_absent("ask:dedupe:fp:lock", "tok", 45) is True
+        mock_redis.set.assert_awaited_once_with("ask:dedupe:fp:lock", "tok", ex=45, nx=True)
+        mock_redis.set.return_value = None  # redis-py: NX not met
+        assert await cache.set_if_absent("ask:dedupe:fp:lock", "tok2", 45) is False
+
+    async def test_delete_if_equals_is_one_atomic_script(self, cache, mock_redis):
+        """Compare-and-delete in Lua: a lock is released only while it still
+        holds the caller's token (real semantics in the integration test)."""
+        mock_redis.eval.return_value = 1
+        assert await cache.delete_if_equals("ask:dedupe:fp:lock", "tok") is True
+        script, numkeys, key, token = mock_redis.eval.await_args.args
+        assert (numkeys, key, token) == (1, "ask:dedupe:fp:lock", "tok")
+        assert "GET" in script and "DEL" in script
+        mock_redis.eval.return_value = 0
+        assert await cache.delete_if_equals("ask:dedupe:fp:lock", "other") is False
+
+    async def test_ttl_is_the_seconds_left_or_none(self, cache, mock_redis):
+        """Para el `Retry-After` real del límite por minuto (QW10)."""
+        mock_redis.ttl.return_value = 17
+        assert await cache.ttl("rl:user:x:catalog:min") == 17
+        mock_redis.ttl.return_value = -2  # no existe
+        assert await cache.ttl("nada") is None
+        mock_redis.ttl.return_value = -1  # no vence
+        assert await cache.ttl("eterna") is None

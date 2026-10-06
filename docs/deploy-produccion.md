@@ -72,6 +72,31 @@ docker compose up -d --no-deps $SVC
 Evitar las 3:30 ART (limpieza nocturna de catálogo) y las 6:00 UTC (barridos
 y refresh de marts).
 
+### Desplegar sin que algunas tareas corran solas
+
+Si el código nuevo cambia lo que hace una tarea agendada y se la quiere correr
+a mano la primera vez (p. ej. la ingesta de series, que reescribe tablas de
+`raw`), sacarla de la agenda antes del `up -d` con `OPENARG_BEAT_DESACTIVADAS`
+en el `.env` de `/opt/docker/openarg` (lo leen el beat y los workers):
+
+```bash
+OPENARG_BEAT_DESACTIVADAS=ingest-series-tiempo,check-series-freshness,snapshot-bcra
+```
+
+Van los nombres de las **entradas** de `beat_schedule`, no los de las tareas.
+Verificar que el beat las sacó (y que no hay un nombre mal escrito, que sale
+como `ERROR` y deja la tarea corriendo):
+
+```bash
+docker logs openarg_beat 2>&1 | grep OPENARG_BEAT_DESACTIVADAS
+docker exec openarg_beat python -c "
+from app.infrastructure.celery.app import celery_app as a
+print(sorted(k for k in a.conf.beat_schedule if 'series' in k or 'bcra' in k))"
+```
+
+Para volver a agendarlas, sacar la línea del `.env` y recrear `beat` y los
+workers (`docker compose up -d --no-deps beat worker-ingest …`).
+
 ## 5. Verificar
 
 **El gate**, que existe por el deploy a medias del 2026-09-02 —API y frontend

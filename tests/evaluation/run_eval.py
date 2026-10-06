@@ -14,9 +14,23 @@ sola pasada no distingue una mejora de la suerte. El reporte da la tasa de
 acierto por caso y cuántos casos son inestables.
 
 **Todo queda en el reporte**: la respuesta completa de cada corrida, las
-fuentes, la latencia, los tokens reales de todas las llamadas al modelo y su
-costo en USD. Con ``--judge`` además se agregan dos jueces con Sonnet 4.6
-(relevancia y alucinación), que cuestan aparte y se reportan aparte.
+fuentes, las advertencias, la evidencia fuente por fuente, la latencia, los
+tokens reales de todas las llamadas al modelo y su costo en USD. Con
+``--judge`` además se agregan los jueces con Sonnet 4.6 (relevancia,
+alucinación y, en los casos cebo, neutralidad), que cuestan aparte.
+
+**Cifras calculadas, no fijas** (octubre de 2026). Los casos macro declaran
+de dónde sale su cifra (``expected_values_from``, ver ``oracles.py``): IPC
+mensual e interanual, acumulada, exportaciones, reservas y dólar del BCRA.
+La batería las calcula al arrancar, desde la API de Series de Tiempo y la
+v4 del BCRA, y las congela en el reporte (``expectativas``): ``--rescore``
+usa lo congelado. Un oráculo que falla deja el caso "no evaluable", fuera
+de la tasa y contado aparte, nunca aprobado.
+
+**Los jueces votan.** Con ``--judge``, el de alucinación hace fallar el caso
+por encima de ``--umbral-alucinacion`` y el de neutralidad (sólo casos con
+``juez_neutralidad``) por debajo de ``--umbral-neutralidad``. El de
+relevancia sigue siendo diagnóstico.
 
 **Motor.** La batería no arma el pipeline: le pide la respuesta a un motor
 (``engines.py``). Hoy hay uno, ``legacy``, que es el grafo actual. El agente
@@ -57,8 +71,11 @@ import logging
 import statistics
 import sys
 from collections import Counter
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+
+from tests.evaluation.quality_checks import JudgeThresholds
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +139,26 @@ _LIST_FIELDS = (
 
 def validate_dataset(entries: list[dict]) -> list[str]:
     """Return a list of structural problems with the dataset."""
+    from tests.evaluation.oracles import spec_problems
     from tests.evaluation.quality_checks import SOURCE_KINDS
 
     errors: list[str] = []
+    for i, entry in enumerate(entries):
+        eid = entry.get("id", i)
+        for name in ("expected_values_from", "forbidden_values_from"):
+            if name in entry and not isinstance(entry[name], list):
+                errors.append(f"{eid}: {name} tiene que ser una lista")
+                continue
+            for spec in entry.get(name) or []:
+                errors.extend(f"{eid}: {name}: {p}" for p in spec_problems(spec))
+        if entry.get("expected_period_from") is not None:
+            errors.extend(
+                f"{eid}: expected_period_from: {p}"
+                for p in spec_problems(entry["expected_period_from"])
+            )
+        for flag in ("juez_neutralidad", "rotular_no_oficial"):
+            if flag in entry and not isinstance(entry[flag], bool):
+                errors.append(f"{eid}: {flag} tiene que ser true o false")
     seen: set[str] = set()
     for i, entry in enumerate(entries):
         missing = REQUIRED_FIELDS - set(entry)
@@ -214,12 +248,22 @@ def _source_names(sources: list[dict] | None) -> list[str]:
 
 
 async def _judge_run(judge: Any, entry: dict, out: Any) -> dict[str, Any]:
-    """Los dos jueces, con su gasto medido aparte del del motor."""
+    """Los jueces, con su gasto medido aparte del del motor."""
     from tests.evaluation.engines import metering
-    from tests.evaluation.evaluator import judge_answer_relevance, judge_hallucination
+    from tests.evaluation.evaluator import (
+        judge_answer_relevance,
+        judge_hallucination,
+        judge_neutrality,
+    )
 
     if out.error or len(out.answer) < MIN_USEFUL_ANSWER_CHARS:
-        return {"relevance": None, "hallucination": None, "reasons": {}, "usage": None}
+        return {
+            "relevance": None,
+            "hallucination": None,
+            "neutrality": None,
+            "reasons": {},
+            "usage": None,
+        }
     with metering() as meter:
         relevance = await judge_answer_relevance(judge, entry["question"], out.answer)
         # Sin datos a la vista (saludos, preguntas educativas) no hay contra
@@ -229,15 +273,48 @@ async def _judge_run(judge: Any, entry: dict, out: Any) -> dict[str, Any]:
             if out.evidence
             else None
         )
+        neutrality = (
+            await judge_neutrality(judge, entry["question"], out.answer)
+            if entry.get("juez_neutralidad")
+            else None
+        )
     return {
         "relevance": relevance.score,
         "hallucination": hallucination.score if hallucination else None,
+        "neutrality": neutrality.score if neutrality else None,
         "reasons": {
             "relevance": relevance.reason,
             "hallucination": hallucination.reason if hallucination else "",
+            "neutrality": neutrality.reason if neutrality else "",
         },
         "usage": meter.to_dict(),
     }
+
+
+def score_run(
+    entry: dict,
+    run: dict,
+    resolved: dict[str, Any] | None,
+    thresholds: JudgeThresholds | None,
+) -> dict[str, Any]:
+    """El veredicto de una corrida guardada: chequeos, oráculos y jueces.
+
+    Es lo mismo al correr y al re-puntuar: una función pura sobre lo que
+    quedó en el reporte. ``evidence_items`` ausente (reportes de antes de
+    octubre de 2026) deja sin correr ``fuente_sin_cifra``.
+    """
+    from tests.evaluation.quality_checks import add_judge_checks, assess
+
+    quality = assess(
+        entry,
+        run["answer"],
+        run["sources"],
+        run["error"],
+        resolved=resolved,
+        evidence_items=run.get("evidence_items"),
+    )
+    add_judge_checks(quality, run.get("judge"), entry, thresholds)
+    return quality.to_dict()
 
 
 async def evaluate_run(
@@ -247,34 +324,38 @@ async def evaluate_run(
     run: int,
     use_cache: bool = False,
     judge: Any = None,
+    resolved: dict[str, Any] | None = None,
+    thresholds: JudgeThresholds | None = None,
 ) -> dict:
     """Una corrida de un caso: la respuesta completa y todo lo que se midió.
 
     El motor recibe ``user_id`` de batería y nunca un ``conversation_id``: la
     batería no escribe en el historial de nadie (ver ``engines.py``).
     """
-    from tests.evaluation.quality_checks import assess
-
     # Sin bypass la batería sólo sirve una vez: la segunda corrida mide el
     # caché que dejó la primera, y sus respuestas se les servirían a usuarios
     # reales.
     out = await engine.run(
         entry["question"], case_id=entry["id"], mode=mode, bypass_cache=not use_cache
     )
-    quality = assess(entry, out.answer, out.sources, out.error)
     record: dict[str, Any] = {
         "run": run,
         "error": out.error,
         "latency_ms": out.latency_ms,
         "answer": out.answer,
         "sources": out.sources,
+        "warnings": out.warnings,
+        "evidence_items": out.evidence_items,
+        # Lo que vio el juez de alucinación: sin esto, una persona no puede
+        # calificar la corrida a mano (ver calibracion_juez.py).
+        "evidence": out.evidence,
         "usage": out.usage,
         "tokens_reported": out.tokens_reported,
-        "quality": quality.to_dict(),
         "diagnostics": out.diagnostics,
     }
     if judge is not None:
         record["judge"] = await _judge_run(judge, entry, out)
+    record["quality"] = score_run(entry, record, resolved, thresholds)
     return record
 
 
@@ -299,10 +380,11 @@ def aggregate_entry(entry: dict, runs: list[dict]) -> dict:
     first = runs[0]
     names = [_source_names(r["sources"]) for r in runs]
     errors = [r["error"] for r in runs if r["error"]]
-    passes = sum(1 for r in runs if r["quality"]["passed"])
+    evaluable = [r for r in runs if r["quality"].get("evaluable", True)]
+    passes = sum(1 for r in evaluable if r["quality"]["passed"])
 
     expected_intent = entry.get("expected_intent")
-    mapped = INTENT_MAP.get(expected_intent)
+    mapped = INTENT_MAP.get(expected_intent or "")
     expected_connector = entry.get("expected_connector")
 
     failures = Counter(f for r in runs for f in r["quality"]["failures"])
@@ -363,7 +445,10 @@ def aggregate_entry(entry: dict, runs: list[dict]) -> dict:
         # ── lo nuevo ──
         "n_runs": len(runs),
         "passes": passes,
-        "pass_rate": round(passes / len(runs), 3),
+        # Sobre las corridas evaluables: un oráculo caído no es un aprobado
+        # ni un desaprobado. Sin ninguna evaluable, None.
+        "pass_rate": round(passes / len(evaluable), 3) if evaluable else None,
+        "runs_not_evaluable": len(runs) - len(evaluable),
         "failures": dict(failures.most_common()),
         "cost_usd": _mean(
             [r["usage"]["cost_usd"] for r in runs if r["usage"].get("cost_usd") is not None]
@@ -374,6 +459,9 @@ def aggregate_entry(entry: dict, runs: list[dict]) -> dict:
         ),
         "judge_hallucination": _mean(
             [j["hallucination"] for j in judges if j.get("hallucination") is not None]
+        ),
+        "judge_neutrality": _mean(
+            [j["neutrality"] for j in judges if j.get("neutrality") is not None]
         ),
         "runs": runs,
     }
@@ -392,12 +480,18 @@ def _quality_summary(results: list[dict]) -> dict[str, Any]:
     Todas se calculan sobre corridas, no sobre casos, y cada una dice sobre
     cuántas: una tasa sobre 4 corridas no pesa lo mismo que una sobre 159.
     """
-    runs = [(r, run) for r in results for run in r.get("runs") or []]
-    if not runs:
+    all_runs = [(r, run) for r in results for run in r.get("runs") or []]
+    if not all_runs:
         return {}
+    runs = [(r, run) for r, run in all_runs if run["quality"].get("evaluable", True)]
 
     def checks(run: dict, prefix: str) -> list[dict]:
         return [c for c in run["quality"]["checks"] if c["name"].startswith(prefix)]
+
+    def rate_of(prefix: str) -> dict[str, Any]:
+        return _rate_over(
+            [all(c["ok"] for c in checks(run, prefix)) for _, run in runs if checks(run, prefix)]
+        )
 
     numeric = [
         all(c["ok"] for c in checks(run, "valor:")) for _, run in runs if checks(run, "valor:")
@@ -419,13 +513,20 @@ def _quality_summary(results: list[dict]) -> dict[str, Any]:
     for r, run in runs:
         by_cat.setdefault(r["category"], []).append(run["quality"]["passed"])
 
+    rates = [r.get("pass_rate") for r in results]
     return {
         "pass_rate": _rate_over([run["quality"]["passed"] for _, run in runs]),
-        "cases_always_pass": sum(1 for r in results if r["pass_rate"] == 1.0),
-        "cases_never_pass": sum(1 for r in results if r["pass_rate"] == 0.0),
+        # Oráculos que no respondieron: fuera de la tasa, nunca aprobados.
+        "runs_not_evaluable": len(all_runs) - len(runs),
+        "cases_always_pass": sum(1 for p in rates if p == 1.0),
+        "cases_never_pass": sum(1 for p in rates if p == 0.0),
         # Un caso que a veces pasa y a veces no: lo que una sola corrida no ve.
-        "cases_flaky": sum(1 for r in results if 0.0 < r["pass_rate"] < 1.0),
+        "cases_flaky": sum(1 for p in rates if p is not None and 0.0 < p < 1.0),
         "numeric_accuracy": _rate_over(numeric),
+        "date_accuracy": rate_of("fecha_del_dato"),
+        "sourcing_accuracy": rate_of("fuente_sin_cifra"),
+        "hallucination_judge_pass": rate_of("juez_alucinacion"),
+        "neutrality_judge_pass": rate_of("juez_neutralidad"),
         "deflection_accuracy": _rate_over(deflect),
         "source_accuracy": _rate_over(sources),
         "runs_with_leaked_errors": leaks,
@@ -469,11 +570,14 @@ def _judge_summary(results: list[dict]) -> dict[str, Any]:
         return {}
     rel = [j["relevance"] for j in judged if j["relevance"] is not None]
     hal = [j["hallucination"] for j in judged if j["hallucination"] is not None]
+    neu = [j["neutrality"] for j in judged if j.get("neutrality") is not None]
     return {
         "relevance_avg": _mean(rel),
         "relevance_scored_over": len(rel),
         "hallucination_avg": _mean(hal),
         "hallucination_scored_over": len(hal),
+        "neutrality_avg": _mean(neu),
+        "neutrality_scored_over": len(neu),
         # Corridas con respuesta que el juez no pudo puntuar: si crece, el
         # promedio deja de representar a la batería.
         "judge_failures": sum(
@@ -581,7 +685,11 @@ def compare_to_baseline(current: dict, baseline: dict) -> tuple[list[str], list[
             )
         if r["keyword_score"] < b["keyword_score"] - 0.001:
             blandas.append(f"{r['id']}: keywords {b['keyword_score']} → {r['keyword_score']}")
-        if "pass_rate" in r and "pass_rate" in b and r["pass_rate"] < b["pass_rate"] - 0.001:
+        if (
+            r.get("pass_rate") is not None
+            and b.get("pass_rate") is not None
+            and r["pass_rate"] < b["pass_rate"] - 0.001
+        ):
             blandas.append(f"{r['id']}: veredicto {b['pass_rate']} → {r['pass_rate']}")
         if b["connector_scored"] and b["connector_match"] and not r["connector_match"]:
             duras.append(
@@ -600,7 +708,22 @@ def compare_to_baseline(current: dict, baseline: dict) -> tuple[list[str], list[
     return duras, blandas
 
 
-def rescore(report: dict, entries: list[dict]) -> dict:
+def _thresholds_from(report: dict, override: JudgeThresholds | None) -> JudgeThresholds:
+    if override is not None:
+        return override
+    saved = report.get("umbrales_jueces") or {}
+    return (
+        JudgeThresholds(**{k: float(v) for k, v in saved.items()}) if saved else JudgeThresholds()
+    )
+
+
+def rescore(
+    report: dict,
+    entries: list[dict],
+    *,
+    thresholds: JudgeThresholds | None = None,
+    expectativas: dict[str, Any] | None = None,
+) -> dict:
     """Recalcula los veredictos de un reporte con las expectativas actuales.
 
     Los chequeos son funciones puras sobre la respuesta guardada, así que
@@ -608,8 +731,17 @@ def rescore(report: dict, entries: list[dict]) -> dict:
     se vuelven a aplicar sobre las mismas respuestas. Lo que viene del motor
     o del juez (latencia, costo, puntajes) queda como estaba. Los casos que no
     están en el reporte se ignoran.
+
+    Las cifras de los oráculos salen de lo congelado en el reporte
+    (``expectativas``), no de la fuente de hoy: el IPC del mes siguiente no
+    puede desaprobar una respuesta que era correcta el día de la corrida. Un
+    caso nuevo, o un reporte de antes de los oráculos, usa ``expectativas``
+    (resuelto aparte, con la fecha de la corrida si se conoce).
     """
-    from tests.evaluation.quality_checks import assess
+    frozen = report.get("expectativas") or {}
+    extra = expectativas or {}
+    casos = {**(extra.get("casos") or {}), **(frozen.get("casos") or {})}
+    th = _thresholds_from(report, thresholds)
 
     by_id = {e["id"]: e for e in entries}
     results = []
@@ -617,12 +749,37 @@ def rescore(report: dict, entries: list[dict]) -> dict:
         entry = by_id.get(old["id"])
         if entry is None:
             continue
-        runs = [
-            {**run, "quality": assess(entry, run["answer"], run["sources"], run["error"]).to_dict()}
-            for run in old["runs"]
-        ]
+        resolved = casos.get(entry["id"])
+        runs = [{**run, "quality": score_run(entry, run, resolved, th)} for run in old["runs"]]
         results.append(aggregate_entry(entry, runs))
-    return summarise(results, report.get("mode", "normal"), report.get("engine", "legacy"))
+    out = summarise(results, report.get("mode", "normal"), report.get("engine", "legacy"))
+    out["expectativas"] = {
+        "hoy": frozen.get("hoy") or extra.get("hoy"),
+        "resuelto_en": frozen.get("resuelto_en") or extra.get("resuelto_en"),
+        "casos": {e: casos[e] for e in casos if e in {r["id"] for r in results}},
+    }
+    out["umbrales_jueces"] = vars(th)
+    for key in ("fecha", "commit"):
+        if key in report:
+            out[key] = report[key]
+    return out
+
+
+def _cases_needing_oracles(report: dict, entries: list[dict]) -> list[dict]:
+    """Los casos con oráculos que el reporte no tiene congelados."""
+    frozen = (report.get("expectativas") or {}).get("casos") or {}
+    in_report = {r["id"] for r in report.get("results", [])}
+    return [
+        e
+        for e in entries
+        if e["id"] in in_report
+        and e["id"] not in frozen
+        and (
+            e.get("expected_values_from")
+            or e.get("forbidden_values_from")
+            or e.get("expected_period_from")
+        )
+    ]
 
 
 # ── la corrida entera ──────────────────────────────────────
@@ -636,6 +793,15 @@ def _make_judge() -> Any:
     return BedrockLLMAdapter(region=settings.bedrock.REGION, model=JUDGE_MODEL)
 
 
+def resolve_expectations(entries: list[dict], hoy: date | None = None) -> dict[str, Any]:
+    """Las cifras de los oráculos, calculadas ahora y con sello de tiempo."""
+    from tests.evaluation.oracles import resolve_dataset
+
+    resolved = resolve_dataset(entries, hoy=hoy)
+    resolved["resuelto_en"] = datetime.now().isoformat(timespec="seconds")
+    return resolved
+
+
 async def run_evaluation(
     entries: list[dict],
     mode: str,
@@ -644,9 +810,22 @@ async def run_evaluation(
     n_runs: int = 1,
     engine_name: str = "legacy",
     judge: bool = False,
+    thresholds: JudgeThresholds | None = None,
+    expectativas: dict[str, Any] | None = None,
 ) -> dict:
-    """Arma el motor y corre cada caso ``n_runs`` veces."""
+    """Arma el motor y corre cada caso ``n_runs`` veces.
+
+    Las cifras de los oráculos se resuelven una vez, antes de la primera
+    corrida, y todas las corridas se puntúan contra lo mismo.
+    """
     from tests.evaluation.engines import ENGINES
+
+    th = thresholds or JudgeThresholds()
+    expectativas = expectativas if expectativas is not None else resolve_expectations(entries)
+    casos = expectativas.get("casos") or {}
+    for cid, res in casos.items():
+        for err in res.get("errores") or []:
+            print(f"  oráculo sin resolver en {cid}: {err}", file=sys.stderr)
 
     engine = ENGINES[engine_name]()
     await engine.start()
@@ -659,10 +838,16 @@ async def run_evaluation(
     async def one(entry: dict, run: int) -> dict:
         nonlocal done
         async with sem:
-            rec = await evaluate_run(engine, entry, mode, run, use_cache, judge_llm)
+            rec = await evaluate_run(
+                engine, entry, mode, run, use_cache, judge_llm, casos.get(entry["id"]), th
+            )
         done += 1
         q = rec["quality"]
-        flag = "ERR " if rec["error"] else ("ok  " if q["passed"] else "MAL ")
+        flag = (
+            "ERR "
+            if rec["error"]
+            else ("N/E " if not q.get("evaluable", True) else ("ok  " if q["passed"] else "MAL "))
+        )
         cost = rec["usage"].get("cost_usd")
         print(
             f"  [{done:>3}/{total}] {flag}{entry['id']:<22} #{run} "
@@ -686,7 +871,11 @@ async def run_evaluation(
     for (e, _), rec in zip(jobs, records, strict=True):
         by_id.setdefault(e["id"], []).append(rec)
     results = [aggregate_entry(e, sorted(by_id[e["id"]], key=lambda r: r["run"])) for e in entries]
-    return summarise(results, mode, engine_name)
+    report = summarise(results, mode, engine_name)
+    report["fecha"] = datetime.now().isoformat(timespec="seconds")
+    report["expectativas"] = expectativas
+    report["umbrales_jueces"] = vars(th)
+    return report
 
 
 def _fmt_rate(r: dict[str, Any] | None) -> str:
@@ -710,7 +899,16 @@ def _print_report(rep: dict) -> None:
             f"                {q['cases_always_pass']} casos siempre, "
             f"{q['cases_never_pass']} nunca, {q['cases_flaky']} a veces"
         )
+        if q.get("runs_not_evaluable"):
+            print(
+                f"                {q['runs_not_evaluable']} corridas no evaluables "
+                "(oráculo sin resolver): fuera de la tasa"
+            )
         print(f"  números:      {_fmt_rate(q['numeric_accuracy'])}")
+        print(f"  fecha dato:   {_fmt_rate(q.get('date_accuracy'))}")
+        print(f"  fuente usada: {_fmt_rate(q.get('sourcing_accuracy'))}")
+        print(f"  j.alucinac.:  {_fmt_rate(q.get('hallucination_judge_pass'))}")
+        print(f"  j.neutral.:   {_fmt_rate(q.get('neutrality_judge_pass'))}")
         print(f"  deflexión:    {_fmt_rate(q['deflection_accuracy'])}")
         print(f"  fuente:       {_fmt_rate(q['source_accuracy'])}")
         print(
@@ -745,12 +943,20 @@ def _print_report(rep: dict) -> None:
     print(f"{'=' * 72}")
     for cat, rate in (q.get("by_category") or {}).items():
         print(f"  {cat:<20} {_fmt_rate(rate)}")
-    malos = [r for r in rep["results"] if r.get("pass_rate", 1.0) < 1.0]
+    if "neutralidad" in (q.get("by_category") or {}) and not (
+        (q.get("neutrality_judge_pass") or {}).get("scored_over")
+    ):
+        print(
+            "  aviso: sin el juez de neutralidad (--judge), la tasa de neutralidad sólo mide "
+            "patrones, que no ven paráfrasis"
+        )
+    malos = [r for r in rep["results"] if (r.get("pass_rate") if "pass_rate" in r else 1.0) != 1.0]
     if malos:
         print(f"\n  {len(malos)} casos que no aprueban siempre:")
         for r in malos:
             top = "; ".join(f"{k} ×{v}" for k, v in list(r["failures"].items())[:3])
-            print(f"    {r['id']:<22} {r['passes']}/{r['n_runs']}  {top[:110]}")
+            ne = f" ({r['runs_not_evaluable']} N/E)" if r.get("runs_not_evaluable") else ""
+            print(f"    {r['id']:<22} {r['passes']}/{r['n_runs']}{ne}  {top[:110]}")
 
 
 def main() -> None:
@@ -766,6 +972,27 @@ def main() -> None:
     p.add_argument("--concurrency", type=int, default=3)
     p.add_argument(
         "--judge", action="store_true", help=f"agrega los jueces con {JUDGE_MODEL} (cuesta aparte)"
+    )
+    p.add_argument(
+        "--umbral-alucinacion",
+        type=float,
+        default=None,
+        help="el juez de alucinación desaprueba por encima de esto "
+        f"(default {JudgeThresholds.alucinacion_max})",
+    )
+    p.add_argument(
+        "--umbral-neutralidad",
+        type=float,
+        default=None,
+        help="el juez de neutralidad desaprueba por debajo de esto "
+        f"(default {JudgeThresholds.neutralidad_min})",
+    )
+    p.add_argument(
+        "--hoy",
+        type=date.fromisoformat,
+        default=None,
+        help="fecha (AAAA-MM-DD) para resolver los oráculos de un reporte que no los tiene "
+        "congelados; por default, la fecha del reporte o la de hoy",
     )
     p.add_argument("--output", type=Path, help="write the report here")
     p.add_argument("--compare", type=Path, help="baseline report to check against")
@@ -785,6 +1012,12 @@ def main() -> None:
     args = p.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
+    # Una consola de Windows (cp1252) no puede imprimir "≤" ni "−" de las
+    # etiquetas: que reemplace el carácter en vez de cortar la corrida.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
 
     cats = args.categories.split(",") if args.categories else None
     entries = load_golden_dataset(args.dataset, cats)
@@ -804,8 +1037,35 @@ def main() -> None:
         )
         sys.exit(0)
 
+    thresholds: JudgeThresholds | None = None
+    if args.umbral_alucinacion is not None or args.umbral_neutralidad is not None:
+        base = JudgeThresholds()
+        thresholds = JudgeThresholds(
+            alucinacion_max=(
+                args.umbral_alucinacion
+                if args.umbral_alucinacion is not None
+                else base.alucinacion_max
+            ),
+            neutralidad_min=(
+                args.umbral_neutralidad
+                if args.umbral_neutralidad is not None
+                else base.neutralidad_min
+            ),
+        )
+
     if args.rescore:
-        report = rescore(json.loads(args.rescore.read_text(encoding="utf-8")), entries)
+        old = json.loads(args.rescore.read_text(encoding="utf-8"))
+        missing = _cases_needing_oracles(old, entries)
+        extra = None
+        if missing:
+            hoy = args.hoy or (date.fromisoformat(old["fecha"][:10]) if old.get("fecha") else None)
+            print(
+                f"  {len(missing)} casos sin cifras congeladas: se resuelven con la fuente "
+                f"al {hoy or 'día de hoy'}",
+                file=sys.stderr,
+            )
+            extra = resolve_expectations(missing, hoy=hoy)
+        report = rescore(old, entries, thresholds=thresholds, expectativas=extra)
     else:
         report = asyncio.run(
             run_evaluation(
@@ -816,6 +1076,8 @@ def main() -> None:
                 n_runs=max(1, args.n_runs),
                 engine_name=args.engine,
                 judge=args.judge,
+                thresholds=thresholds,
+                expectativas=resolve_expectations(entries, hoy=args.hoy),
             )
         )
     _print_report(report)

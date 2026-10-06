@@ -148,9 +148,27 @@ class EngineResult:
     # No había datos para responder. No se cachea: una deflexión cacheada se
     # le vuelve a servir a cada reformulación, aunque el dato aparezca.
     no_data: bool = False
-    # Los `DataResult` que respaldan la respuesta, para verificar las cifras
-    # citadas contra lo que de verdad se leyó.
+    # Todos los `DataResult` que leyó el motor: contra eso se verifican las
+    # cifras de la respuesta.
     evidence: list[Any] = field(default_factory=list, repr=False)
+    # Los que se citan: con ANSWERS_VERIFY_MODE=correct, los que aportaron una
+    # cifra o se nombran en el texto (``answers.verification.select_evidence``);
+    # si no, toda la evidencia. De acá salen las fuentes, los gráficos,
+    # `served_table` y el aviso de atraso. Vacío = toda la evidencia.
+    cited_evidence: list[Any] = field(default_factory=list, repr=False)
+    # De las citadas, las que aportaron alguna cifra respaldada. El aviso de
+    # atraso mira éstas: una citada sólo por el título no lo dispara. Vacío =
+    # las citadas. Fuera de correct, con todas las cifras respaldadas, es todo
+    # lo leído menos lo que no aportó cifras y se llama igual que algo que sí,
+    # con lo que aportó cifras primero (``answers.verification.dated_evidence``);
+    # vacía si alguna cifra quedó sin respaldo o no hubo verificación: ante la
+    # duda, el aviso mira todo.
+    figure_evidence: list[Any] = field(default_factory=list, repr=False)
+    # Los títulos de lo que se leyó y no se citó ("consultadas").
+    consulted: list[str] = field(default_factory=list)
+    # El resumen de la verificación de cifras (cuántas, cuáles sin respaldo,
+    # si hubo vuelta correctiva). Para el log, nunca para el cliente.
+    verification: dict[str, Any] | None = None
     # Con qué modelo y a qué costo, sumando todas las vueltas del turno.
     # None = no se sabe (el grafo actual no lo mide entero).
     model: str = ""

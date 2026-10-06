@@ -8,6 +8,24 @@ import redis.asyncio as aioredis
 from app.domain.ports.cache.cache_port import ICacheService
 from app.infrastructure.serialization import safe_dumps
 
+# DECR with a floor and without creating the key, in one atomic step. A plain
+# DECR on a key that expired between the reservation and the refund would
+# create it at -1 with no TTL, and that counter would never expire.
+_DECREMENT_FLOOR_ZERO = """
+local v = tonumber(redis.call('GET', KEYS[1]))
+if v == nil then return 0 end
+if v <= 0 then return v end
+return redis.call('DECR', KEYS[1])
+"""
+
+# Compare-and-delete: release a lock only while it still holds our token.
+_DELETE_IF_EQUALS = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
 
 class RedisCacheAdapter(ICacheService):
     def __init__(self, redis_url: str = "redis://localhost:6379/2") -> None:
@@ -44,3 +62,20 @@ class RedisCacheAdapter(ICacheService):
         pipe.expire(key, ttl_seconds, nx=True)
         results = await pipe.execute()
         return int(results[0])
+
+    async def decrement(self, key: str) -> int:
+        # EVAL runs atomically on the Redis side: no other command can land
+        # between the GET and the DECR. DECR keeps the key's TTL.
+        return int(await self._redis.eval(_DECREMENT_FLOOR_ZERO, 1, key))
+
+    async def set_if_absent(self, key: str, value: str, ttl_seconds: int) -> bool:
+        # SET NX EX is a single atomic command: the key and its TTL land together.
+        return bool(await self._redis.set(key, value, ex=ttl_seconds, nx=True))
+
+    async def delete_if_equals(self, key: str, value: str) -> bool:
+        return bool(await self._redis.eval(_DELETE_IF_EQUALS, 1, key, value))
+
+    async def ttl(self, key: str) -> int | None:
+        # Redis: -2 if the key does not exist, -1 if it has no expiry.
+        seconds = int(await self._redis.ttl(key))
+        return seconds if seconds >= 0 else None

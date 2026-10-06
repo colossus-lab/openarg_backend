@@ -177,7 +177,10 @@ Mi clave está en la variable OPENARG_API_KEY: usala desde ahí, sin escribirla 
         <tr><td>Usaste las 200 consultas del modo datos de este mes</td><td>Se renuevan el 1° del mes que viene.</td></tr>
         <tr><td>Columnas que no existen en la tabla…</td><td>El asistente pidió un nombre de columna mal: que use <code>describir_tabla</code> primero.</td></tr>
         <tr><td>El cupo público de hoy está agotado</td><td>Se alcanzó el límite total del día para todos los usuarios. Se renueva a las 21:00.</td></tr>
-        <tr><td>La consulta tardó demasiado</td><td>Acotá la pregunta: un indicador, un período, una jurisdicción.</td></tr>
+        <tr><td>El servicio de cupos de OpenArg no responde</td><td>Es una falla nuestra, no tu cupo. Probá de nuevo en unos minutos; esa consulta no descontó ninguna pregunta.</td></tr>
+        <tr><td>La consulta tardó demasiado</td><td>Acotá la pregunta: un indicador, un período, una jurisdicción; la pregunta cortada no se descontó. En el modo datos, acotá con <code>desde</code>/<code>hasta</code> o <code>filtros</code>, o pedí el total con <code>agregar_datos</code>.</td></tr>
+        <tr><td>Demasiadas consultas seguidas: esperá N segundos</td><td>Se pasó el límite por minuto (30 en el modo datos; en el modo respuestas, 2 preguntas nuevas o 10 repeticiones de la misma). Esperá esos segundos y reintentá una vez.</td></tr>
+        <tr><td>La tabla tiene un problema de calidad sin resolver</td><td>Está oculta hasta que se corrija: que el asistente busque otra fuente con <code>buscar_datasets</code>.</td></tr>
       </tbody>
     </table>
     </div>

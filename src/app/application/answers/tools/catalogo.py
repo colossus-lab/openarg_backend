@@ -17,17 +17,21 @@ Pinamar) y las unidades que declara el mart.
 
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from app.application.answers.aggregates import (
     FILTER_OPERATORS,
     OPERATIONS,
-    AggregateRequest,
-    Filter,
-    build_aggregate_query,
+)
+from app.application.answers.aggregates import (
+    MAX_FILTERS as MAX_AGG_FILTERS,
 )
 from app.application.answers.tools.base import (
     MAX_ROWS_FOR_MODEL,
@@ -41,20 +45,28 @@ from app.application.answers.tools.base import (
     str_arg,
     to_json,
 )
+from app.application.catalog.collapse import collapse_hits
+from app.application.catalog.national_prior import national_prior
+from app.application.consultas.agregar import PedidoAgregado, agregar
+from app.application.consultas.fechas import aviso_lectura_fecha
+from app.application.consultas.filtros import notas_de_filtros
+from app.application.consultas.preparar import Preparado, describir_periodo, ejecutar, preparar
+from app.application.consultas.sugerencias import diagnosticar_vacio
 from app.application.public_catalog import (
     CatalogRequestError,
     DataRequest,
     build_data_query,
-    build_date_range_query,
     build_sample_query,
-    date_column,
     is_internal_column,
+    resolve_date_column,
     resolve_table,
 )
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.agent_llm import AgentTool
 from app.domain.ports.sandbox.sql_sandbox import MartInfo
 from app.domain.value_objects.table_reference import bare_name
+
+logger = logging.getLogger(__name__)
 
 # Mismo umbral que el modo datos y `/data/search`.
 _MIN_SIMILARITY = 0.40
@@ -129,18 +141,41 @@ def _mart_title(mart: MartInfo) -> str:
     return first[:160] or mart.mart_id
 
 
-async def _run_sql(sandbox: Any, sql: str) -> list[dict[str, Any]]:
-    result = await sandbox.execute_readonly(sql)
-    if result.error:
-        raise ToolInputError(
-            f"La consulta no se pudo ejecutar ({result.error[:160]}). "
-            "Probá con otros filtros, menos columnas o otra tabla."
+def _sandbox_error(result: Any) -> str:
+    kind = getattr(result, "error_kind", None)
+    if kind == "timeout":
+        return (
+            "La consulta tardó demasiado: la tabla es muy grande para ese pedido. Acotá con "
+            "desde/hasta o con filtros más específicos."
         )
+    if kind == "blocked":
+        return str(result.error)
+    return (
+        f"La consulta no se pudo ejecutar ({str(result.error)[:160]}). "
+        "Probá con otros filtros, menos columnas o otra tabla."
+    )
+
+
+async def _run_sql(
+    sandbox: Any, sql: str, params: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """Corre SQL armado por nuestro código (valores ligados en ``params``)."""
+    result = await ejecutar(sandbox, sql, params or {})
+    if result.error:
+        raise ToolInputError(_sandbox_error(result))
     return plain_rows(result.rows)
 
 
+def _printable(params: Mapping[str, Any]) -> dict[str, Any]:
+    return {k: (str(v) if isinstance(v, Decimal) else v) for k, v in params.items()}
+
+
 def _data_result(
-    table: ResolvedTable, rows: list[dict[str, Any]], sql: str, title: str
+    table: ResolvedTable,
+    rows: list[dict[str, Any]],
+    sql: str,
+    title: str,
+    params: Mapping[str, Any] | None = None,
 ) -> DataResult:
     return DataResult(
         source=f"sandbox:{table.name}",
@@ -153,6 +188,7 @@ def _data_result(
             "served_table": table.name,
             "total_records": len(rows),
             "generated_sql": sql,
+            **({"sql_params": _printable(params)} if params else {}),
             "fetched_at": datetime.now(UTC).isoformat(),
             **({"description": table.mart.description} if table.mart else {}),
         },
@@ -215,12 +251,16 @@ class BuscarDatos:
         texto = str_arg(args, "texto", required=True)
         portal = str_arg(args, "portal", max_len=80)
         deps = ctx.deps
+        t0 = time.perf_counter()
         vector = await deps.embedding.embed(texto)
+        t_embed = time.perf_counter()
         async with ctx.db_lock:
             try:
+                # Varios datasets por resultado: muchos son el mismo archivo
+                # (gemelos, espejos, CSV y JSON) y `collapse_hits` los junta.
                 hits = await deps.vector_search.search_datasets_ann(
                     query_embedding=vector,
-                    limit=_MAX_DATASETS * 2,
+                    limit=_MAX_DATASETS * 4,
                     portal_filter=portal,
                     min_similarity=_MIN_SIMILARITY,
                 )
@@ -230,33 +270,30 @@ class BuscarDatos:
                 # siguientes del turno fallaban (staging, 01-oct).
                 await deps.vector_search.reset()
                 raise
-        tables: dict[str, list[dict[str, Any]]] = {}
-        for t in await deps.sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits]):
-            # Una tabla con 0 filas es una versión vieja o una descarga fallida.
-            if t.dataset_id and t.row_count != 0:
-                tables.setdefault(str(t.dataset_id), []).append(_table_summary(t))
-
-        # El catálogo tiene datasets repetidos (la migración de datos.gob.ar
-        # regeneró IDs): mismo título y URL = el mismo dataset.
-        merged: dict[tuple[str, str], dict[str, Any]] = {}
-        for h in hits:
-            key = (h.title.strip().lower(), (h.download_url or "").strip())
-            found = tables.get(str(h.dataset_id), [])
-            if key in merged:
-                known = {t["tabla"] for t in merged[key]["tablas"]}
-                merged[key]["tablas"].extend(t for t in found if t["tabla"] not in known)
-                continue
-            merged[key] = {
-                "titulo": h.title,
-                "portal": h.portal,
-                "descripcion": (h.description or "")[:_DESCRIPTION_CHARS],
-                "tablas": list(found),
+        t_search = time.perf_counter()
+        found_tables = await deps.sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits])
+        profiles = await deps.sandbox.table_profiles([t.table_name for t in found_tables])
+        # Una entrada por archivo, con la copia de más filas reales y
+        # encabezado sano; prioridad chica a lo nacional si no nombra lugar.
+        datasets = [
+            {
+                "titulo": c.hit.title,
+                "portal": c.hit.portal,
+                "descripcion": (c.hit.description or "")[:_DESCRIPTION_CHARS],
+                **({"archivo": c.archivo} if c.archivo else {}),
+                "tablas": [_table_summary(t) for t in c.tables[:_MAX_TABLES_PER_DATASET]],
             }
-        datasets = [d for d in merged.values() if d["tablas"]][:_MAX_DATASETS]
-        for d in datasets:
-            d["tablas"] = sorted(d["tablas"], key=lambda t: -(t["filas"] or 0))[
-                :_MAX_TABLES_PER_DATASET
-            ]
+            for c in collapse_hits(hits, found_tables, profiles, prior=national_prior(texto))
+            if c.tables
+        ][:_MAX_DATASETS]
+        logger.info(
+            "buscar_datos: embed_ms=%.0f busqueda_ms=%.0f tablas_ms=%.0f hits=%d datasets=%d",
+            (t_embed - t0) * 1000,
+            (t_search - t_embed) * 1000,
+            (time.perf_counter() - t_search) * 1000,
+            len(hits),
+            len(datasets),
+        )
 
         marts = await deps.sandbox.find_marts(vector, limit=_MAX_MARTS) if not portal else []
         curated = [
@@ -270,8 +307,19 @@ class BuscarDatos:
             if m.score >= _MIN_SIMILARITY
         ]
         if not datasets and not curated:
+            nota = "Nada parecido en el catálogo."
+            if portal and not hits:
+                # Un portal inexistente ("INDEC") vacía el filtro y parecía
+                # que el dato no estaba.
+                async with ctx.db_lock:
+                    portals = await deps.vector_search.known_portals()
+                if portals and portal not in portals:
+                    nota = (
+                        f"No existe el portal {portal!r}. Portales válidos: "
+                        f"{', '.join(portals)}. Probá sin portal."
+                    )
             return ToolOutcome(
-                to_json({"resultados": [], "nota": "Nada parecido en el catálogo."}),
+                to_json({"resultados": [], "nota": nota}),
                 summary="No encontró nada parecido en el catálogo",
             )
         found = count(len(datasets), "dataset", "datasets")
@@ -321,13 +369,12 @@ class DescribirTabla:
         types = (await sandbox.get_column_types([table.name])).get(table.name, [])
         columns = [(c, t) for c, t in types if not is_internal_column(c)]
         names = [c for c, _ in columns]
-        fecha = date_column(names)
-        desde = hasta = None
-        if fecha:
-            rows = await _run_sql(sandbox, build_date_range_query(table.name, fecha))
-            if rows:
-                desde, hasta = rows[0].get("desde"), rows[0].get("hasta")
-        sample = await _run_sql(sandbox, build_sample_query(table.name, names))
+        fecha = resolve_date_column(columns, tabla=table.name)
+        periodo = await describir_periodo(sandbox, table.name, fecha)
+        # La muestra orienta: si falla (tabla bloqueada, timeout), se describe
+        # igual sin ella en vez de tirar la herramienta entera.
+        sample_result = await ejecutar(sandbox, build_sample_query(table.name, names), {})
+        sample = [] if sample_result.error else plain_rows(sample_result.rows)
 
         described: dict[str, str] = {}
         if table.mart and table.mart.columns:
@@ -350,13 +397,17 @@ class DescribirTabla:
                 }
                 for c, t in columns
             ],
-            "columna_fecha": fecha,
-            "desde": desde,
-            "hasta": hasta,
+            "columna_fecha": fecha.nombre if fecha else None,
+            "desde": periodo.desde,
+            "hasta": periodo.hasta,
             "muestra": sample,
             "ponderador": weights[0] if weights else None,
             "columnas_geograficas": geo,
         }
+        if periodo.aviso:
+            payload["aviso_fecha"] = periodo.aviso
+        if sample_result.error:
+            payload["aviso_muestra"] = "No pude leer filas de muestra de esta tabla."
         if table.mart:
             payload["descripcion"] = table.mart.description[:1200]
         if weights:
@@ -385,6 +436,38 @@ class DescribirTabla:
 # ── obtener_datos ──────────────────────────────────────────
 
 
+def _filters_schema(max_items: int) -> dict[str, Any]:
+    """La misma gramática de filtros para obtener_datos y calcular."""
+    return {
+        "type": "array",
+        "maxItems": max_items,
+        "description": (
+            "Filtros {columna, operador, valor}. Operadores: = y != (texto o número), >, >=, "
+            "<, <= (números), contiene (parte del texto) y en (lista, en `valores`). = y "
+            "contiene no distinguen mayúsculas ni acentos, salvo en tablas de más de un millón "
+            "de filas (ahí `filtros_aplicados` dice qué se buscó tal cual)."
+        ),
+        "items": {
+            "type": "object",
+            "properties": {
+                "columna": {"type": "string"},
+                "operador": {"type": "string", "enum": list(FILTER_OPERATORS)},
+                "valor": {"type": "string"},
+                "valores": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 50,
+                    "description": "Sólo para el operador en.",
+                },
+            },
+            "required": ["columna", "operador"],
+        },
+    }
+
+
+_FILTERS_SCHEMA = _filters_schema(5)
+
+
 class ObtenerDatos:
     status = "Leyendo datos..."
 
@@ -395,8 +478,10 @@ class ObtenerDatos:
         name="obtener_datos",
         description=(
             "Lee filas de una tabla: columnas elegidas, período (desde/hasta sobre la columna de "
-            "fecha), filtros de igualdad y orden por fecha. Para series y listados cortos. Si hay "
-            "que sumar, contar o promediar muchas filas, usá calcular."
+            "fecha o de año), filtros y orden por fecha. Para series y listados cortos. Si hay "
+            "que sumar, contar o promediar muchas filas, usá calcular. Los filtros de igualdad y "
+            "`contiene` no distinguen mayúsculas ni acentos; si ninguna fila cumple, la "
+            "respuesta trae `aviso` y `sugerencias` con los valores que sí existen."
         ),
         input_schema={
             "type": "object",
@@ -405,11 +490,14 @@ class ObtenerDatos:
                 "columnas": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
                 "desde": {"type": "string", "description": "AAAA, AAAA-MM o AAAA-MM-DD"},
                 "hasta": {"type": "string", "description": "AAAA, AAAA-MM o AAAA-MM-DD"},
-                "filtros": {
-                    "type": "object",
-                    "description": "{columna: valor exacto}. Hasta 5.",
-                    "additionalProperties": {"type": "string"},
+                "columna_fecha": {
+                    "type": "string",
+                    "description": (
+                        "Opcional: la columna de fecha para desde/hasta y el orden, si no es la "
+                        "que informa describir_tabla (p. ej. fecha_fin en vez de fecha_inicio)."
+                    ),
                 },
+                "filtros": _FILTERS_SCHEMA,
                 "orden": {"type": "string", "enum": ["asc", "desc"]},
                 "limite": {"type": "integer", "minimum": 1, "maximum": 200},
             },
@@ -422,45 +510,83 @@ class ObtenerDatos:
         table = await resolve(sandbox, str_arg(args, "tabla", required=True, max_len=200) or "")
         types = (await sandbox.get_column_types([table.name])).get(table.name, [])
         columnas = args.get("columnas")
-        filtros = args.get("filtros")
         if columnas is not None and not isinstance(columnas, list):
             raise ToolInputError("`columnas` es una lista de nombres.")
-        if filtros is not None and not isinstance(filtros, dict):
-            raise ToolInputError("`filtros` es un objeto {columna: valor}.")
         try:
-            sql, cols = build_data_query(
-                DataRequest(
-                    table=table.name,
-                    available_columns=[c for c, _ in types],
-                    columns=[str(c) for c in columnas] if columnas else None,
-                    desde=str_arg(args, "desde", max_len=10),
-                    hasta=str_arg(args, "hasta", max_len=10),
-                    filtros={str(k): str(v) for k, v in (filtros or {}).items()} or None,
-                    orden=str_arg(args, "orden", max_len=4) or "asc",
-                    limite=int_arg(args, "limite", 100, 1, 200),
-                )
+            req = DataRequest(
+                table=table.name,
+                available_columns=[c for c, _ in types],
+                column_types=types,
+                columns=[str(c) for c in columnas] if columnas else None,
+                desde=str_arg(args, "desde", max_len=10),
+                hasta=str_arg(args, "hasta", max_len=10),
+                filtros=args.get("filtros") or None,
+                orden=str_arg(args, "orden", max_len=4) or "asc",
+                limite=int_arg(args, "limite", 100, 1, 200),
+                columna_fecha=str_arg(args, "columna_fecha", max_len=200),
             )
+            # Primero sólo valida (puro, sin tocar la base); después se leen
+            # estadísticas y formatos (filtros y fecha), y se arma de nuevo.
+            query = build_data_query(req)
+            prep = Preparado(filtros=query.filtros, filas_estimadas=table.row_count or None)
+            if query.filtros or query.fecha:
+                prep = await preparar(
+                    sandbox,
+                    table.name,
+                    query.tipos,
+                    query.filtros,
+                    row_count=table.row_count,
+                    fecha=query.fecha,
+                )
+                query = build_data_query(
+                    replace(
+                        req,
+                        filtros=prep.filtros,
+                        tolerante=prep.tolerante,
+                        formatos=prep.formatos,
+                        formato_fecha=prep.formato_fecha,
+                    )
+                )
         except CatalogRequestError as exc:
             raise ToolInputError(str(exc)) from None
-        rows = await _run_sql(sandbox, sql)
-        result = _data_result(table, rows, sql, table.title)
-        return ToolOutcome(
-            to_json(
-                {
-                    "tabla": table.name,
-                    "titulo": table.title,
-                    "columnas": cols,
-                    "cantidad": len(rows),
-                    "filas": rows[:MAX_ROWS_FOR_MODEL],
-                    **(
-                        {"nota": f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(rows)} filas."}
-                        if len(rows) > MAX_ROWS_FOR_MODEL
-                        else {}
-                    ),
-                }
-            ),
-            results=[result] if rows else [],
-        )
+        rows = await _run_sql(sandbox, query.sql, query.params)
+        payload: dict[str, Any] = {
+            "tabla": table.name,
+            "titulo": table.title,
+            "columnas": query.columns,
+            "cantidad": len(rows),
+            "filas": rows[:MAX_ROWS_FOR_MODEL],
+        }
+        if len(rows) > MAX_ROWS_FOR_MODEL:
+            payload["nota"] = f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(rows)} filas."
+        notas = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
+        aviso_fecha = aviso_lectura_fecha(query.fecha)
+        if aviso_fecha:
+            notas.append(aviso_fecha)
+        if notas:
+            payload["filtros_aplicados"] = notas
+        if not rows and (query.filtros or query.desde or query.hasta):
+            try:
+                diag = await diagnosticar_vacio(
+                    sandbox,
+                    tabla=table.name,
+                    tipos=query.tipos,
+                    filtros=query.filtros,
+                    fecha=query.fecha,
+                    desde=query.desde,
+                    hasta=query.hasta,
+                    tolerante=prep.tolerante,
+                    formatos=prep.formatos,
+                    stats=prep.stats,
+                    filas_estimadas=prep.filas_estimadas,
+                )
+            except CatalogRequestError as exc:
+                raise ToolInputError(str(exc)) from None
+            payload["aviso"] = diag.aviso
+            if diag.sugerencias:
+                payload["sugerencias"] = diag.sugerencias
+        result = _data_result(table, rows, query.sql, table.title, query.params)
+        return ToolOutcome(to_json(payload), results=[result] if rows else [])
 
 
 # ── calcular ───────────────────────────────────────────────
@@ -488,8 +614,11 @@ class Calcular:
             "agrupando y filtrando. La consulta la arma OpenArg: no se escribe SQL. Para "
             "encuestas, pasá la columna de ponderación en `ponderar_por`: con operacion=conteo "
             "devuelve la población estimada (suma de pesos), no la cantidad de filas de la "
-            "muestra. Las columnas de texto se convierten a número sólo si el valor es un número "
-            "limpio (1234.5)."
+            "muestra. Las columnas de texto se convierten a número según su formato (argentino "
+            "1.234,5 o inglés 1,234.5, decidido con una muestra de la columna); si el formato es "
+            "ambiguo, no calcula y lo dice. Cada resultado trae `filas_usadas` (sobre cuántas "
+            "filas se calculó). Si ninguna fila cumple los filtros no hay valor: viene `aviso` "
+            "con los valores que sí existen."
         ),
         input_schema={
             "type": "object",
@@ -505,21 +634,20 @@ class Calcular:
                     "description": "Columna de ponderación (encuestas).",
                 },
                 "agrupar_por": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
-                "filtros": {
-                    "type": "array",
-                    "maxItems": 6,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "columna": {"type": "string"},
-                            "operador": {"type": "string", "enum": list(FILTER_OPERATORS)},
-                            "valor": {"type": "string"},
-                        },
-                        "required": ["columna", "operador", "valor"],
-                    },
-                },
+                "filtros": _filters_schema(MAX_AGG_FILTERS),
                 "desde": {"type": "string"},
                 "hasta": {"type": "string"},
+                "columna_fecha": {
+                    "type": "string",
+                    "description": "Opcional: la columna de fecha para desde/hasta.",
+                },
+                "ordenar_por": {
+                    "type": "string",
+                    "description": (
+                        "'valor' (por defecto) o una columna de agrupar_por (p. ej. el año, "
+                        "para una serie)."
+                    ),
+                },
                 "orden": {"type": "string", "enum": ["asc", "desc"]},
                 "limite": {"type": "integer", "minimum": 1, "maximum": 200},
             },
@@ -535,43 +663,90 @@ class Calcular:
         groups = args.get("agrupar_por") or []
         if not isinstance(raw_filters, list) or not isinstance(groups, list):
             raise ToolInputError("`filtros` y `agrupar_por` son listas.")
+
+        async def run_sql(sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+            return await _run_sql(sandbox, sql, params)
+
         try:
-            filters = [
-                Filter(str(f["columna"]), str(f["operador"]), str(f["valor"]))
-                for f in raw_filters
-                if isinstance(f, dict)
-            ]
-            req = AggregateRequest(
-                table=table.name,
-                column_types=types,
-                operacion=str_arg(args, "operacion", required=True, max_len=20) or "",
-                columna=str_arg(args, "columna", max_len=200),
-                ponderar_por=str_arg(args, "ponderar_por", max_len=200),
-                agrupar_por=[str(g) for g in groups],
-                filtros=filters,
-                desde=str_arg(args, "desde", max_len=10),
-                hasta=str_arg(args, "hasta", max_len=10),
-                orden=str_arg(args, "orden", max_len=4) or "desc",
-                limite=int_arg(args, "limite", 50, 1, 200),
+            res = await agregar(
+                sandbox,
+                PedidoAgregado(
+                    tabla=table.name,
+                    tipos=types,
+                    operacion=str_arg(args, "operacion", required=True, max_len=20) or "",
+                    columna=str_arg(args, "columna", max_len=200),
+                    ponderar_por=str_arg(args, "ponderar_por", max_len=200),
+                    agrupar_por=[str(g) for g in groups],
+                    filtros=raw_filters,
+                    desde=str_arg(args, "desde", max_len=10),
+                    hasta=str_arg(args, "hasta", max_len=10),
+                    orden=str_arg(args, "orden", max_len=4) or "desc",
+                    limite=int_arg(args, "limite", 50, 1, 200),
+                    columna_fecha=str_arg(args, "columna_fecha", max_len=200),
+                    ordenar_por=str_arg(args, "ordenar_por", max_len=200),
+                    filas_tabla=table.row_count,
+                ),
+                run_sql,
             )
-            sql, cols = build_aggregate_query(req)
-        except (CatalogRequestError, KeyError) as exc:
+        except CatalogRequestError as exc:
             raise ToolInputError(str(exc)) from None
-        rows = await _run_sql(sandbox, sql)
-        what = req.operacion + (f" de {req.columna}" if req.columna else "")
-        if req.ponderar_por:
-            what += f" ponderado por {req.ponderar_por}"
+        req, query, what = res.req, res.query, res.calculo
         title = f"{table.title} — {what}"
+        base: dict[str, Any] = {
+            "tabla": table.name,
+            "calculo": what,
+            "agrupado_por": req.agrupar_por,
+        }
+        total, parcial = res.filas_usadas, res.parcial
+        clave_filas = "filas_usadas_en_grupos_mostrados" if parcial else "filas_usadas"
+
+        if res.vacio:
+            payload = {**base, "filas_usadas": 0, "resultado": None, "aviso": res.aviso}
+            if res.sugerencias:
+                payload["sugerencias"] = res.sugerencias
+            if res.notas:
+                payload["notas"] = res.notas
+            return ToolOutcome(
+                to_json(payload),
+                summary=f"Ninguna fila cumplió los filtros en {quoted(table.title, 80)}",
+            )
+
+        if res.sin_numeros:
+            payload = {**base, clave_filas: total, "resultado": None, "aviso": res.aviso}
+            return ToolOutcome(
+                to_json(payload),
+                summary=f"{res.columna_valorada} no tiene números en {quoted(table.title, 80)}",
+            )
+
+        clean = plain_rows(res.grupos)
+        controlado = total is not None
+        for_model = [
+            {**c, "filas_usadas": n} if controlado else c
+            for c, n in zip(clean, res.filas_por_grupo, strict=True)
+        ]
+        avisos = list(res.avisos)
+        if len(for_model) > MAX_ROWS_FOR_MODEL:
+            avisos.append(f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(for_model)} grupos.")
+        notas = [*avisos, *res.notas]
+
+        result = _data_result(table, clean, query.sql, title, query.params)
+        if total is not None:
+            result.metadata[clave_filas] = total
+        if res.filas_con_valor is not None and not parcial:
+            result.metadata["filas_con_valor"] = res.filas_con_valor
+        # Contrato de metadatos (lo lee la verificación de cifras).
+        result.metadata["truncada"] = res.truncado
+        payload = {
+            **base,
+            "columnas": [*req.agrupar_por, "valor", *(["filas_usadas"] if controlado else [])],
+            "filas": for_model[:MAX_ROWS_FOR_MODEL],
+        }
+        if total is not None:
+            payload[clave_filas] = total
+        if notas:
+            payload["notas"] = notas
         return ToolOutcome(
-            to_json(
-                {
-                    "tabla": table.name,
-                    "calculo": what,
-                    "agrupado_por": req.agrupar_por,
-                    "columnas": cols,
-                    "filas": rows[:MAX_ROWS_FOR_MODEL],
-                }
-            ),
-            results=[_data_result(table, rows, sql, title)] if rows else [],
+            to_json(payload),
+            results=[result],
             summary=f"Calculó {what} en {quoted(table.title, 80)}",
         )

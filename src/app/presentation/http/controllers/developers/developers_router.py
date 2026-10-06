@@ -186,8 +186,10 @@ async def get_usage(
         balance = {"preguntas": 0, "datos": 0}
 
     async def used(tipo: CreditType) -> int:
-        # El mismo contador que aplica el cupo (Redis). Cuenta intentos, así
-        # que puede pasar el límite: se muestra como mucho el límite.
+        # El mismo contador que aplica el cupo (Redis). Las preguntas cuentan
+        # las cobradas más las que están corriendo (la reserva se devuelve si
+        # no se cobran); los datos cuentan pedidos. Con créditos puede pasar
+        # el límite: se muestra como mucho el límite.
         try:
             value = await cache.get(monthly_counter_key(user.id, tipo))
             return int(value or 0)

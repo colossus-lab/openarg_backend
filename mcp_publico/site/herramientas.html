@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Herramientas · OpenArg MCP</title>
-  <meta name="description" content="Referencia de las cinco herramientas del MCP de OpenArg: buscar_datasets, describir_tabla, obtener_datos, consultar_datos_publicos y listar_fuentes.">
+  <meta name="description" content="Referencia de las seis herramientas del MCP de OpenArg: buscar_datasets, describir_tabla, obtener_datos, agregar_datos, consultar_datos_publicos y listar_fuentes.">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
   <link rel="canonical" href="https://mcp.openarg.org/herramientas.html">
@@ -14,7 +14,7 @@
   <meta property="og:locale" content="es_AR">
   <meta property="og:url" content="https://mcp.openarg.org/herramientas.html">
   <meta property="og:title" content="Las herramientas del MCP de OpenArg">
-  <meta property="og:description" content="Cinco herramientas de solo lectura, en dos modos: datos crudos con su fuente, o respuestas verificadas.">
+  <meta property="og:description" content="Seis herramientas de solo lectura, en dos modos: datos crudos y totales con su fuente, o respuestas verificadas.">
   <meta property="og:image" content="https://mcp.openarg.org/og-image.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -41,7 +41,7 @@
 <main class="wrap">
   <section class="page-hero">
     <p class="eyebrow"><span class="num">02 / 03</span> Referencia</p>
-    <h1 class="display">Cinco herramientas, <span class="alt">dos modos.</span></h1>
+    <h1 class="display">Seis herramientas, <span class="alt">dos modos.</span></h1>
     <p class="lead">
       El servidor <code>https://mcp.openarg.org/mcp</code> usa el transporte
       Streamable HTTP. Todas las herramientas son de solo lectura.
@@ -50,6 +50,7 @@
       <li><a href="#buscar_datasets">buscar_datasets</a></li>
       <li><a href="#describir_tabla">describir_tabla</a></li>
       <li><a href="#obtener_datos">obtener_datos</a></li>
+      <li><a href="#agregar_datos">agregar_datos</a></li>
       <li><a href="#consultar_datos_publicos">consultar_datos_publicos</a></li>
       <li><a href="#listar_fuentes">listar_fuentes</a></li>
       <li><a href="#sin-mcp">Sin MCP</a></li>
@@ -60,12 +61,13 @@
     <article class="card">
       <div class="card-num">01</div>
       <h3>Modo datos</h3>
-      <p class="muted">Tu asistente busca, mira y trae las filas, y razona él. No descuenta preguntas.</p>
+      <p class="muted">Tu asistente busca, mira, trae las filas o pide los totales, y razona él. No descuenta preguntas.</p>
       <div class="card-quota"><strong>200</strong><span class="meta">pedidos por mes</span></div>
       <ul>
         <li><code>buscar_datasets</code></li>
         <li><code>describir_tabla</code></li>
         <li><code>obtener_datos</code></li>
+        <li><code>agregar_datos</code></li>
         <li><code>listar_fuentes</code></li>
       </ul>
     </article>
@@ -106,6 +108,7 @@
     </table>
     </div>
     <p><strong>Devuelve</strong> las columnas con su tipo, la cantidad de filas, el período cubierto (si tiene fechas), una muestra de 5 filas y la fuente oficial.</p>
+    <p><strong>Frescura:</strong> cuándo leyó OpenArg la tabla de su fuente por última vez, cuál es el último dato de la serie y, si la tabla es una foto del período en curso (el crédito presupuestario del ejercicio actual), su <strong>fecha de corte</strong>. Si la tabla tiene un solo período y es pasado (un ejercicio 2019), dice de cuándo son los datos; si no tiene columna de fecha, no la presenta como vigente: la fecha de lectura no es la de los datos, que suele decirla el título del dataset. Si el período sale de una muestra (tablas muy grandes), marca el último dato como aproximado; si la tabla tiene fechas pero no se pudo calcular qué período cubre, lo dice en vez de presentarla como vigente. Si hace más de 90 días que no se relee, lo avisa: el portal puede tener datos más nuevos.</p>
 
     <h2 id="obtener_datos"><span class="tool-mode">Datos</span><code>obtener_datos</code></h2>
     <p>Trae filas de una tabla, en CSV. No se escribe SQL: se eligen columnas, período y filtros.</p>
@@ -116,13 +119,37 @@
         <tr><td><code>tabla</code></td><td>texto</td><td>La tabla, como la devuelve <code>buscar_datasets</code>.</td></tr>
         <tr><td><code>columnas</code></td><td>lista, opcional</td><td>Nombres exactos de <code>describir_tabla</code>. Por defecto, todas (hasta 30).</td></tr>
         <tr><td><code>desde</code> / <code>hasta</code></td><td>texto, opcional</td><td>Período: <code>AAAA</code>, <code>AAAA-MM</code> o <code>AAAA-MM-DD</code>.</td></tr>
-        <tr><td><code>filtros</code></td><td>objeto, opcional</td><td>Igualdad exacta por columna, hasta 5: <code>{"provincia": "Córdoba"}</code>.</td></tr>
-        <tr><td><code>orden</code></td><td>texto, opcional</td><td><code>asc</code> o <code>desc</code>, por fecha.</td></tr>
+        <tr><td><code>filtros</code></td><td>objeto o lista, opcional</td><td>Hasta 5. Igualdad: <code>{"provincia": "Córdoba"}</code>. Con operador: <code>[{"columna": "monto", "operador": "mayor_que", "valor": "1000000"}]</code>. Operadores: <code>=</code>, <code>!=</code>, <code>mayor_que</code>, <code>menor_que</code>, <code>&gt;=</code>, <code>&lt;=</code>, <code>contiene</code> y <code>en</code> (con <code>valores</code>). La igualdad no distingue mayúsculas ni acentos.</td></tr>
+        <tr><td><code>orden</code></td><td>texto, opcional</td><td><code>asc</code> (por defecto: primero lo más viejo) o <code>desc</code> (primero lo más reciente), por fecha.</td></tr>
         <tr><td><code>limite</code></td><td>número, opcional</td><td>De 1 a 500 filas. Por defecto 100.</td></tr>
+        <tr><td><code>offset</code></td><td>número, opcional</td><td>Filas a saltear, para la página siguiente (hasta 10.000).</td></tr>
+        <tr><td><code>columna_fecha</code></td><td>texto, opcional</td><td>Otra columna de fecha para el período y el orden.</td></tr>
       </tbody>
     </table>
     </div>
-    <p><strong>Devuelve</strong> las filas en CSV, la fuente oficial con su link y un aviso si hay más filas que las pedidas.</p>
+    <p><strong>Devuelve</strong> las filas en CSV y la fuente oficial con su link. Si hay más filas que las pedidas lo dice y da el <code>offset</code> de la página siguiente. Con columna de fecha, las filas salen en un orden estable: por fecha y, entre filas de la misma fecha, en el orden del archivo. Sin columna de fecha, el orden del archivo se garantiza sólo en tablas de hasta 50.000 filas; en las más grandes (o si no se sabe cuántas filas tienen) las filas salen en el orden en que se leen, que puede cambiar entre pedidos, y la respuesta lo avisa: para recorrerlas acotá con filtros. La paginación llega hasta <code>offset</code> 10.000. Si ninguna fila cumple los filtros, dice qué valores existen.</p>
+    <p class="muted">Para un total, un promedio o un ranking no traigas filas para sumarlas: usá <code>agregar_datos</code>.</p>
+
+    <h2 id="agregar_datos"><span class="tool-mode">Datos</span><code>agregar_datos</code></h2>
+    <p>Calcula en la base una suma, un promedio, un conteo, un mínimo o un máximo, opcionalmente agrupado: un total, un ranking o una serie, sin traer las filas ni el tope de 500.</p>
+    <div class="table-scroll">
+    <table>
+      <thead><tr><th>Parámetro</th><th>Tipo</th><th>Descripción</th></tr></thead>
+      <tbody>
+        <tr><td><code>tabla</code></td><td>texto</td><td>La tabla, como la devuelve <code>buscar_datasets</code>.</td></tr>
+        <tr><td><code>operacion</code></td><td>texto</td><td><code>suma</code>, <code>promedio</code>, <code>conteo</code>, <code>minimo</code> o <code>maximo</code>.</td></tr>
+        <tr><td><code>columna</code></td><td>texto, opcional</td><td>La columna que se suma, promedia, etc. No va con <code>conteo</code>, que cuenta filas: si viene, el pedido se rechaza con un 400. Las columnas de texto con números se leen según su formato (<code>1.234,5</code> o <code>1,234.5</code>); si el formato es ambiguo, no calcula y lo dice.</td></tr>
+        <tr><td><code>agrupar_por</code></td><td>lista, opcional</td><td>Hasta 3 columnas: <code>["jurisdiccion_desc"]</code> da un ranking por jurisdicción.</td></tr>
+        <tr><td><code>filtros</code>, <code>desde</code>, <code>hasta</code>, <code>columna_fecha</code></td><td>opcionales</td><td>Como en <code>obtener_datos</code> (hasta 6 filtros).</td></tr>
+        <tr><td><code>ordenar_por</code></td><td>texto, opcional</td><td><code>valor</code> (por defecto) o una columna de <code>agrupar_por</code>, por ejemplo el año para una serie.</td></tr>
+        <tr><td><code>orden</code></td><td>texto, opcional</td><td><code>desc</code> (por defecto: de mayor a menor) o <code>asc</code>.</td></tr>
+        <tr><td><code>limite</code></td><td>número, opcional</td><td>Grupos a devolver, de 1 a 200. Por defecto 50.</td></tr>
+        <tr><td><code>ponderar_por</code></td><td>texto, opcional</td><td>La columna de ponderación de una encuesta: con <code>conteo</code> da la población estimada, no la cantidad de filas de la muestra.</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p><strong>Devuelve</strong> el resultado en CSV (un valor por grupo, con cuántas filas entraron en cada uno), sobre cuántas filas de la tabla se calculó en total, si hay más grupos que el <code>limite</code> y la fuente oficial. Si ninguna fila cumple los filtros no devuelve un cero: dice qué valores existen.</p>
+    <p><strong>Cupo:</strong> cuenta como un pedido del modo datos, igual que <code>obtener_datos</code>.</p>
 
     <h2 id="consultar_datos_publicos"><span class="tool-mode sol">Respuestas</span><code>consultar_datos_publicos</code></h2>
     <p>Responde una pregunta sobre datos públicos oficiales de Argentina, con fuentes.</p>
@@ -139,9 +166,9 @@
       <li>la respuesta,</li>
       <li><strong>Fuentes</strong>: los datasets consultados, con el nombre, el portal y el link al portal oficial,</li>
       <li><strong>Advertencias</strong>: dato provisorio, serie incompleta, números que no se pudieron verificar contra la tabla,</li>
-      <li>las consultas que te quedan hoy.</li>
+      <li>las preguntas que te quedan este mes.</li>
     </ul>
-    <p><strong>Cupo:</strong> descuenta 1 de las 10 preguntas del mes, aunque la pregunta termine sin datos.</p>
+    <p><strong>Cupo:</strong> cada respuesta descuenta 1 de las 10 preguntas del mes, aunque la respuesta sea que no encontró el dato. No descuentan los errores, las consultas que se cortan por tiempo, los saludos ni la misma pregunta repetida dentro de los 5 minutos (en ese caso te devuelve la misma respuesta sin volver a calcularla).</p>
     <p class="muted">Tarda entre unos segundos y un minuto, según cuántas tablas tenga que cruzar.</p>
 
     <h2 id="listar_fuentes"><span class="tool-mode">Datos</span><code>listar_fuentes</code></h2>
@@ -153,6 +180,16 @@
       Los errores vuelven como error de herramienta (<code>isError: true</code>) con un
       mensaje en castellano que el asistente le puede mostrar al usuario.
       La tabla está en <a class="inline-link" href="empezar.html">Empezar</a>.
+    </p>
+    <p>
+      Si se pasa el límite por minuto, el mensaje dice cuántos segundos faltan
+      (en la API HTTP, el header <code>Retry-After</code>). En el modo datos, cada
+      rechazo de una consulta tiene su mensaje: la consulta tardó demasiado, el
+      validador de seguridad la rechazó, la tabla está oculta por un problema de
+      calidad o pidió una columna que ya no existe. En la API HTTP el header
+      <code>X-OpenArg-Error</code> lo dice en una palabra (<code>timeout</code>,
+      <code>validador</code>, <code>tabla_bloqueada</code>, <code>columna_inexistente</code>,
+      <code>tabla_inexistente</code>, <code>ejecucion</code>).
     </p>
 
     <h2 id="sin-mcp">Sin MCP</h2>
@@ -174,7 +211,15 @@ curl -G https://api.openarg.org/api/v1/catalogo/tabla \
 
 curl https://api.openarg.org/api/v1/catalogo/datos \
   -H "Authorization: Bearer oarg_sk_TU_CLAVE" -H "Content-Type: application/json" \
-  -d '{"tabla": "TABLA", "desde": "2026-01", "limite": 100}'</code></pre></div>
+  -d '{"tabla": "TABLA", "desde": "2026-01", "limite": 100}'
+
+curl https://api.openarg.org/api/v1/catalogo/agregar \
+  -H "Authorization: Bearer oarg_sk_TU_CLAVE" -H "Content-Type: application/json" \
+  -d '{"tabla": "TABLA", "operacion": "suma", "columna": "monto", "agrupar_por": ["provincia"]}'</code></pre></div>
+    <p class="muted">
+      En el JSON, <code>valor</code> y las columnas numéricas son números (no texto), con la
+      precisión de un número de punto flotante.
+    </p>
   </div>
 
   <nav class="next" aria-label="Siguiente">

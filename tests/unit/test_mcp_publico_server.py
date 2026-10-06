@@ -48,11 +48,40 @@ class FakeBackend:
 
     catalog_status = 200
     catalog_detail = ""
+    catalog_headers: dict[str, str] = {}
 
     def catalog(self, request: httpx.Request) -> httpx.Response:
         if self.catalog_status != 200:
-            return httpx.Response(self.catalog_status, json={"detail": self.catalog_detail})
+            return httpx.Response(
+                self.catalog_status,
+                json={"detail": self.catalog_detail},
+                headers=self.catalog_headers,
+            )
         path = request.url.path
+        if path.endswith("/agregar"):
+            return httpx.Response(
+                200,
+                json={
+                    "tabla": "raw.cache_presupuesto_credito_2026",
+                    "calculo": "suma de credito_devengado",
+                    "agrupado_por": ["jurisdiccion_desc"],
+                    "columnas": ["jurisdiccion_desc", "valor", "filas_usadas"],
+                    "filas": [
+                        {
+                            "jurisdiccion_desc": "Ministerio de Capital Humano",
+                            "valor": 60622921.86,
+                            "filas_usadas": 412,
+                        }
+                    ],
+                    "cantidad": 1,
+                    "filas_usadas": 4905,
+                    "filas_con_valor": 4905,
+                    "truncado": True,
+                    "fuente": "Crédito presupuestario 2026",
+                    "url": "https://presupuestoabierto.gob.ar/x",
+                    "notas": ["Hay más de 1 grupos: se muestran los primeros 1."],
+                },
+            )
         if path.endswith("/buscar"):
             return httpx.Response(
                 200,
@@ -86,6 +115,11 @@ class FakeBackend:
                     "desde": "2003-01-02",
                     "hasta": "2026-06-18",
                     "muestra": [{"indice_tiempo": "2003-01-02", "call": 6.02}],
+                    "frescura": {
+                        "actualizada": "2026-10-04",
+                        "ultimo_dato": "2026-06-18",
+                        "serie": True,
+                    },
                 },
             )
         return httpx.Response(
@@ -153,6 +187,7 @@ async def test_tools_are_listed_without_a_key(backend: FakeBackend) -> None:
         "buscar_datasets",
         "describir_tabla",
         "obtener_datos",
+        "agregar_datos",
     }
     for tool in result.tools:
         assert "\n    " not in (tool.description or ""), f"{tool.name}: descripción con sangría"
@@ -211,6 +246,35 @@ async def test_quota_exhausted_is_a_spanish_tool_error(backend: FakeBackend) -> 
     assert result.is_error
     assert "10 preguntas de este mes" in _text(result)
     assert "modo datos" in _text(result)
+
+
+async def test_quota_service_down_is_not_shown_as_quota_exhausted(backend: FakeBackend) -> None:
+    """Un 503 por Redis caído decía "el cupo público de hoy está agotado"."""
+    backend.status = 503
+    backend.body = {
+        "detail": "Public API temporarily unavailable: the quota service is not "
+        "responding. Try again in a few minutes."
+    }
+    result = await _call(
+        "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
+    )
+    assert result.is_error
+    assert "no responde" in _text(result)
+    assert "agotado" not in _text(result)
+
+    backend.body = {"detail": "Free tier daily capacity reached. Try again tomorrow."}
+    result = await _call(
+        "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
+    )
+    assert "cupo público de OpenArg para hoy está agotado" in _text(result)
+
+
+async def test_an_answer_that_was_not_charged_says_so(backend: FakeBackend) -> None:
+    backend.body = {**backend.body, "usage": {"requests_remaining_month": 9, "charged": False}}
+    result = await _call(
+        "consultar_datos_publicos", {"pregunta": "x"}, {"Authorization": f"Bearer {KEY}"}
+    )
+    assert "te quedan este mes: 9 (esta no se descontó)" in _text(result)
 
 
 async def test_listar_fuentes(backend: FakeBackend) -> None:
@@ -309,6 +373,7 @@ class TestModoDatos:
         assert "2003-01-02 a 2026-06-18" in text
         assert "- call (double precision)" in text
         assert "```csv" in text
+        assert "Último dato: 2026-06-18" in text and "OpenArg: 2026-10-04" in text
 
     async def test_obtener_datos_sends_structured_request_and_returns_csv(
         self, backend: FakeBackend
@@ -338,6 +403,23 @@ class TestModoDatos:
         assert "Hay más filas" in text
         assert "https://infra.datos.gob.ar/x.csv" in text
 
+    async def test_obtener_datos_forwards_operator_filters_and_date_column(
+        self, backend: FakeBackend
+    ) -> None:
+        """Auditoría 3.3: los filtros del modo datos eran sólo de igualdad."""
+        filtros = [
+            {"columna": "call", "operador": "mayor_que", "valor": "30"},
+            {"columna": "serie", "operador": "en", "valores": ["a", "b"]},
+        ]
+        await _call(
+            "obtener_datos",
+            {"tabla": "raw.tasas", "filtros": filtros, "columna_fecha": "indice_tiempo"},
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        body = json.loads(backend.requests[0].content)
+        assert body["filtros"] == filtros
+        assert body["columna_fecha"] == "indice_tiempo"
+
     async def test_backend_validation_message_reaches_the_model(self, backend: FakeBackend) -> None:
         backend.catalog_status = 400
         backend.catalog_detail = "Columnas que no existen en la tabla: password."
@@ -355,3 +437,95 @@ class TestModoDatos:
         result = await _call("buscar_datasets", {"texto": "x"}, {})
         assert result.is_error and "openarg.org/desarrolladores" in _text(result)
         assert backend.requests == []
+
+
+class TestAgregarDatosYLimites:
+    async def test_agregar_datos_sends_the_aggregate_and_formats_it(
+        self, backend: FakeBackend
+    ) -> None:
+        """Auditoría 3.1: el modo datos no agregaba; el cliente sumaba 493 filas a mano."""
+        result = await _call(
+            "agregar_datos",
+            {
+                "tabla": "raw.cache_presupuesto_credito_2026",
+                "operacion": "suma",
+                "columna": "credito_devengado",
+                "agrupar_por": ["jurisdiccion_desc"],
+                "filtros": {"ejercicio_presupuestario": 2026},
+                "limite": 999,
+            },
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        assert not result.is_error, _text(result)
+        req = backend.requests[0]
+        assert req.method == "POST" and req.url.path == "/api/v1/catalogo/agregar"
+        assert json.loads(req.content) == {
+            "tabla": "raw.cache_presupuesto_credito_2026",
+            "operacion": "suma",
+            "columna": "credito_devengado",
+            "agrupar_por": ["jurisdiccion_desc"],
+            "filtros": {"ejercicio_presupuestario": 2026},
+            "orden": "desc",
+            "limite": 200,  # acotado
+        }
+        text = _text(result)
+        assert "sobre 4.905 filas" in text
+        assert "Ministerio de Capital Humano,60622921.86,412" in text
+        assert "presupuestoabierto.gob.ar/x" in text
+
+    async def test_agregar_datos_description_says_to_always_use_it_for_totals(
+        self, backend: FakeBackend
+    ) -> None:
+        result = await _call("__list__", {}, {})
+        tool = next(t for t in result.tools if t.name == "agregar_datos")
+        assert "SIEMPRE" in (tool.description or "")
+        assert "obtener_datos" in (tool.description or "")
+        obtener = next(t for t in result.tools if t.name == "obtener_datos")
+        assert "agregar_datos" in (obtener.description or "")
+
+    async def test_the_instructions_carry_the_limits(self) -> None:
+        """QW10: los límites en el único lugar que leen todos los clientes."""
+        from mcp_publico import core
+
+        assert core.LIMITES in (mcp_server.server.instructions or "")
+        assert "agregar_datos" in (mcp_server.server.instructions or "")
+
+    async def test_minute_limit_says_how_long_to_wait(self, backend: FakeBackend) -> None:
+        backend.catalog_status = 429
+        backend.catalog_detail = "Rate limit exceeded: 30 catalog requests per minute"
+        backend.catalog_headers = {"Retry-After": "17"}
+        result = await _call(
+            "describir_tabla", {"tabla": "raw.tasas"}, {"Authorization": f"Bearer {KEY}"}
+        )
+        assert result.is_error
+        assert "esperá 17 segundos" in _text(result)
+
+    async def test_a_422_tells_the_model_which_parameter_to_fix(self, backend: FakeBackend) -> None:
+        """Revisión del PR #139: el 422 de FastAPI llegaba como «formato no válido»."""
+        backend.catalog_status = 422
+        backend.catalog_detail = [  # type: ignore[assignment]
+            {
+                "type": "too_long",
+                "loc": ["body", "agrupar_por"],
+                "msg": "List should have at most 3 items after validation, not 4",
+            }
+        ]
+        result = await _call(
+            "agregar_datos",
+            {"tabla": "t", "operacion": "suma", "agrupar_por": ["a", "b", "c", "d"]},
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        assert result.is_error
+        assert "`agrupar_por`: List should have at most 3 items" in _text(result)
+
+    async def test_obtener_datos_sends_offset_and_leaves_the_order_to_the_backend(
+        self, backend: FakeBackend
+    ) -> None:
+        """Sin `orden`, el backend sabe que trajo lo más viejo por defecto y sugiere "desc"."""
+        await _call(
+            "obtener_datos",
+            {"tabla": "raw.tasas", "offset": 100},
+            {"Authorization": f"Bearer {KEY}"},
+        )
+        body = json.loads(backend.requests[0].content)
+        assert body == {"tabla": "raw.tasas", "limite": 100, "offset": 100}

@@ -43,4 +43,4 @@ pytest tests/unit/test_mcp_publico_server.py    # necesita requirements.txt inst
 |---|---|---|
 | `BACKEND_URL` | `http://backend:8080` | Dónde está la API |
 | `MCP_ALLOWED_HOSTS` | `mcp.openarg.org,mcp.staging.openarg.org,localhost:*,127.0.0.1:*,mcp:8000` | Host aceptados (protección contra DNS rebinding) |
-| `MCP_BACKEND_TIMEOUT_SECONDS` | `75` | Tiene que ser mayor que `PUBLIC_API_TIMEOUT_SECONDS` del backend |
+| `MCP_BACKEND_TIMEOUT_SECONDS` | `75` | Tiene que ser mayor que `PUBLIC_API_TIMEOUT_SECONDS` del backend + 10 s (lo que puede esperar una pregunta repetida a la que está en curso) |

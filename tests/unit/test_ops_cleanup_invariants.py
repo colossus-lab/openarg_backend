@@ -298,6 +298,27 @@ def test_counts_canonical_and_fallback_separately():
     assert summary["registered_orphan_tables"] == 18  # canonical + fallback
 
 
+def test_fallback_registration_skips_the_series_rollback_copies():
+    """The series ETL keeps the replaced table as `raw.<table>__previa` so a bad
+    write can be undone with a RENAME. Registering it under
+    `backfill_postauto::` would make `list_cached_tables` serve it as a live
+    table next to the real one, with the previous write's data."""
+    from app.infrastructure.celery.tasks.ops_fixes import cleanup_invariants
+
+    engine, conn = _build_engine_with_results(_baseline(0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "app.infrastructure.celery.tasks.ops_fixes.get_sync_engine",
+            lambda: engine,
+        )
+        cleanup_invariants.run()
+
+    fallback_sql = str(conn.execute.call_args_list[5].args[0])
+    assert "backfill_postauto" in fallback_sql
+    assert "__previa" in fallback_sql
+
+
 def test_emits_11_sql_statements_when_no_orphans():
     """Sanity: 8 rowcount + 1 empty-orphan SELECT + 1 double_cd_ready
     + 1 dataset row_count = 11 total. Adding new paths is fine —
