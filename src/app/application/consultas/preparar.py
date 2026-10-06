@@ -22,6 +22,7 @@ from app.application.consultas.fechas import (
     ColumnaFecha,
     aviso_lectura_fecha,
     consulta_rango,
+    es_tipo_fecha,
     fecha_iso,
     formato_uniforme,
     lectura_de,
@@ -290,7 +291,10 @@ async def preparar(
         for c in dict.fromkeys([*numericas, *columnas_numericas(filtros)])
         if es_columna_de_texto(tipos.get(c, ""))
     ]
-    columna_fecha = [fecha.nombre] if fecha is not None and es_columna_de_texto(fecha.tipo) else []
+    # También una numérica: `periodo` o `indice_tiempo` bigint con años
+    # aceptaba un pedido de junio y devolvía enero o el año entero (H002,
+    # tercera revisión del PR #154). `pg_stats` da sus valores como texto.
+    columna_fecha = [fecha.nombre] if fecha is not None and not es_tipo_fecha(fecha.tipo) else []
     if not de_texto and not numeros and not columna_fecha:
         return Preparado(filtros=filtros, filas_estimadas=row_count or None)
     stats = await estadisticas(sandbox, tabla, [*de_texto, *numeros, *columna_fecha])

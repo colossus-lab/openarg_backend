@@ -8,6 +8,7 @@ sí) y el filtro era lexicográfico sobre el texto (0 filas sin aviso con
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from app.application.consultas.fechas import (
     ColumnaFecha,
     aviso_formato_guardado,
+    claves_orden,
     condiciones_periodo,
     es_nombre_de_fecha,
     expresion_fecha,
@@ -27,6 +29,7 @@ from app.application.consultas.fechas import (
     validar_fecha,
 )
 from app.application.consultas.sql import CatalogRequestError, Params
+from app.application.public_catalog import DataQuery, DataRequest, build_data_query
 
 
 class TestQueColumnaEsLaFecha:
@@ -791,3 +794,135 @@ class TestCostoDelMes:
         col = ColumnaFecha("anio", "text", "anio", formato="case_anio", mes="mes")
         cond = condiciones_periodo(col, "2023-06", "2023-06", Params())
         assert len(cond) == 2 and all(RE_ANIO in c for c in cond)
+
+
+# ── tercera revisión del PR #154 ────────────────────────────
+
+
+class _SandboxConMuestra:
+    """Da la misma muestra de `pg_stats` para cualquier columna y anota cuáles se pidieron."""
+
+    def __init__(self, muestra: list[str]) -> None:
+        self.muestra = muestra
+        self.pedidas: list[list[str]] = []
+
+    async def get_value_stats(self, tabla: str, columnas: list[str]) -> object:
+        from app.domain.ports.sandbox.sql_sandbox import ColumnValueStats, TableValueStats
+
+        self.pedidas.append(list(columnas))
+        return TableValueStats(
+            estimated_rows=500_000,
+            columns={c: ColumnValueStats(c, most_common_vals=self.muestra) for c in columnas},
+        )
+
+    async def execute_readonly(self, *args: object, **kw: object) -> object:
+        raise AssertionError("para la fecha alcanza con pg_stats")
+
+
+class TestAniosEnUnaColumnaNumerica:
+    """H002 en columnas de años numéricas: `preparar` le pedía `pg_stats` sólo a
+    una fecha de texto. Un `periodo` bigint o double con años (AUSA 9bb3efc9 y
+    6c6c20a1 en staging) quedaba sin formato y un pedido de junio devolvía
+    enero o el año entero, sin aviso. Son 248 de las 337 columnas a las que el
+    arreglo para las de texto les cambiaba `_de_anios` (indice_tiempo bigint
+    x144, periodo bigint x62, PERIODO bigint x15, periodo double x8…)."""
+
+    TABLA = "raw.caba__flujo_vehicular_por_unidades_de_peaje_ausa__9bb3efc9__v3"
+
+    async def _armar(
+        self, nombre: str, tipo: str, muestra: list[str], desde: str, hasta: str
+    ) -> tuple[_SandboxConMuestra, DataQuery]:
+        """El camino de obtener_datos: valida, prepara y arma con el formato."""
+        from app.application.consultas.preparar import preparar
+
+        tipos = [(nombre, tipo), ("cantidad", "bigint")]
+        req = DataRequest(
+            table=self.TABLA,
+            available_columns=[c for c, _ in tipos],
+            column_types=tipos,
+            desde=desde,
+            hasta=hasta,
+        )
+        q = build_data_query(req)
+        sandbox = _SandboxConMuestra(muestra)
+        prep = await preparar(sandbox, self.TABLA, q.tipos, q.filtros, fecha=q.fecha)
+        return sandbox, build_data_query(replace(req, formato_fecha=prep.formato_fecha))
+
+    @pytest.mark.parametrize("muestra", [["2019", "2020", "2021"], ["2019"]])
+    @pytest.mark.parametrize("tipo", ["bigint", "double precision"])
+    @pytest.mark.parametrize("nombre", ["periodo", "indice_tiempo", "PERIODO"])
+    async def test_un_pedido_mensual_se_rechaza(
+        self, nombre: str, tipo: str, muestra: list[str]
+    ) -> None:
+        with pytest.raises(CatalogRequestError, match="años enteros"):
+            await self._armar(nombre, tipo, muestra, "2019-06", "2019-06")
+        # El año entero, sí; y la muestra se pidió para la columna de fecha.
+        sandbox, q = await self._armar(nombre, tipo, muestra, "2019", "2019")
+        assert sandbox.pedidas == [[nombre]]
+        assert q.fecha is not None and q.fecha.formato in ("anio", "case_anio")
+
+    async def test_un_periodo_numerico_con_meses_filtra_el_mes(self) -> None:
+        """Con «201906» (complejo teatral 19fa77ad, double) el mes es del valor."""
+        _, q = await self._armar(
+            "periodo", "double precision", ["201905", "201906", "201907"], "2019-06", "2019-06"
+        )
+        assert q.fecha is not None and q.fecha.formato == "aaaamm"
+        assert q.params == {"p0": "2019-06-01", "p1": "2019-06-31"}
+
+    async def test_una_columna_de_tipo_fecha_no_pide_muestra(self) -> None:
+        sandbox, _ = await self._armar("fecha", "date", ["2019-06-01"], "2019-06", "2019-06")
+        assert sandbox.pedidas == []
+
+
+class TestOrdenConAnioYMesNumericos:
+    """En una tabla con año (y mes) numéricos, el ORDER BY de obtener_datos
+    pasaba cada fila por el CASE de expresiones regulares sobre `anio::text`
+    (y por el del mes). En raw.datos_gob_ar__estadistica_de_mediaciones_
+    prejudic__b221bf4b__v1 (914.247 filas, `anio` y `mes` bigint, staging)
+    orden=desc daba timeout dos de cada tres veces; con comparaciones enteras,
+    de 0,5 a 1,4 s y las mismas primeras filas."""
+
+    ANIO = '(CASE WHEN "anio" BETWEEN 1800 AND 2099 THEN "anio" END)'
+    MES = '(CASE WHEN "mes" BETWEEN 1 AND 12 THEN "mes" END)'
+
+    @pytest.mark.parametrize("formato", [None, "anio", "anio*", "case_anio"])
+    def test_un_anio_numerico_se_ordena_comparando_enteros(self, formato: str | None) -> None:
+        assert orden_fecha(ColumnaFecha("anio", "bigint", "anio", formato=formato)) == self.ANIO
+        # Con decimales posibles, «2019.5» no es un año (como en RE_ANIO).
+        periodo = ColumnaFecha("periodo", "double precision", formato=formato or "anio")
+        assert orden_fecha(periodo) == (
+            '(CASE WHEN "periodo" BETWEEN 1800 AND 2099 AND "periodo" = trunc("periodo") '
+            'THEN "periodo" END)'
+        )
+
+    def test_un_mes_numerico_tambien(self) -> None:
+        col = ColumnaFecha("anio", "bigint", "anio", formato="anio", mes="mes", tipo_mes="bigint")
+        assert claves_orden(col) == [self.ANIO, self.MES]
+
+    def test_obtener_datos_ordena_sin_expresiones_regulares(self) -> None:
+        from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
+
+        tipos = [("anio", "bigint"), ("mes", "bigint"), ("cantidad", "bigint")]
+        q = build_data_query(
+            DataRequest(
+                table="raw.datos_gob_ar__estadistica_de_mediaciones_prejudic__b221bf4b__v1",
+                available_columns=[c for c, _ in tipos],
+                column_types=tipos,
+                orden="desc",
+            )
+        )
+        orden = q.sql.split(" ORDER BY ", 1)[1]
+        assert orden == f"{self.ANIO} DESC NULLS LAST, {self.MES} DESC NULLS LAST, ctid LIMIT 100"
+        assert _validate_sql(q.sql, built=True) is None
+
+    def test_lo_de_texto_y_lo_que_no_es_un_anio_no_cambia(self) -> None:
+        from app.application.consultas.fechas import expresion_mes
+
+        # De texto: el valor crudo si la muestra es toda de años; el mes, con
+        # `expresion_mes` (puede venir «Junio» o « 7 »).
+        texto = ColumnaFecha("anio", "text", "anio", formato="anio", mes="mes")
+        assert claves_orden(texto) == ['"anio"', expresion_mes("mes")]
+        # Un número que no es un año («201906») no se corta en 2099.
+        assert "BETWEEN" not in orden_fecha(ColumnaFecha("periodo", "bigint", formato="aaaamm"))
+        # Una numérica sin muestra que no se llama como un año: no se supone nada.
+        assert "BETWEEN" not in orden_fecha(ColumnaFecha("periodo", "bigint"))
