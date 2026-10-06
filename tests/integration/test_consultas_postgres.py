@@ -928,3 +928,145 @@ async def test_un_mes_sobre_un_periodo_de_anios_se_rechaza(tabla_periodo_anual: 
         tabla_periodo_anual, tipos, operacion="conteo", desde="2019", hasta="2019"
     )
     assert res.grupos == [{"valor": 3}]
+
+
+# ── tercera revisión del PR #154 ────────────────────────────────────────────
+
+ANIOS_NUMERICOS = ["-5", "0", "99", "1799", "1800", "1999", "2024", "2099", "2100", "201906"]
+MESES_NUMERICOS = ["-1", "0", "1", "6", "9", "12", "13", "99"]
+
+
+@pytest.mark.parametrize(
+    ("tipo", "decimales"),
+    [("bigint", []), ("numeric", ["2019.5", "6.5", "2019.0"]), ("double precision", ["2019.5"])],
+)
+def test_el_orden_numerico_coincide_con_las_expresiones_de_texto(
+    tipo: str, decimales: list[str]
+) -> None:
+    """El año y el mes numéricos se ordenan comparando números, no con las
+    expresiones regulares sobre `::text`: tienen que dar NULL en los mismos
+    valores (los años de `RE_ANIO`, los meses de `expresion_mes`) y el mismo orden."""
+    from app.application.consultas.fechas import ColumnaFecha, claves_orden, expresion_mes
+
+    anio, mes = claves_orden(ColumnaFecha("a", tipo, "anio", mes="m", tipo_mes=tipo))
+    solo_anios = expresion_fecha("a", tipo, "inicio", "anio*")
+
+    def valores(numeros: list[str]) -> str:
+        return ", ".join(f"(CAST({n} AS {tipo}))" for n in numeros)
+
+    engine = _engine()
+    with engine.connect() as conn:
+        anios = conn.execute(
+            text(
+                f"SELECT {anio} AS barato, {solo_anios} AS caro "
+                f"FROM (VALUES {valores(ANIOS_NUMERICOS + decimales)}) AS t(a)"
+            )
+        ).fetchall()
+        meses = conn.execute(
+            text(
+                f"SELECT {mes} AS barato, {expresion_mes('m')} AS caro "
+                f"FROM (VALUES {valores(MESES_NUMERICOS + decimales)}) AS t(m)"
+            )
+        ).fetchall()
+    assert [None if b is None else f"{int(b)}-01-01" for b, _ in anios] == [c for _, c in anios]
+    assert [None if b is None else f"{int(b):02d}" for b, _ in meses] == [c for _, c in meses]
+    # 1800, 1999, 2024 y 2099 (y «2019.0» en numeric); «2019.5» y «6.5» no.
+    assert sum(b is not None for b, _ in anios) == (5 if "2019.0" in decimales else 4)
+
+
+@pytest.fixture(params=["bigint", "double precision"])
+def tabla_periodo_numerico(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
+    """Como el peaje de AUSA 9bb3efc9 (bigint) y 6c6c20a1 (double) en staging."""
+    engine = _engine()
+    tipo = request.param
+    name = f"cache_test_periodo_num_{uuid.uuid4().hex[:8]}"
+    filas = [f"({a}, {a})" for a in range(2013, 2022) for _ in range(3)]
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE public."{name}" (periodo {tipo}, pasos bigint)'))
+        conn.execute(text(f'INSERT INTO public."{name}" VALUES ' + ", ".join(filas)))
+        conn.execute(text(f'ANALYZE public."{name}"'))
+    yield name, tipo
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+async def test_un_mes_sobre_un_periodo_numerico_de_anios_se_rechaza(
+    tabla_periodo_numerico: tuple[str, str],
+) -> None:
+    """`preparar` le pedía `pg_stats` sólo a una fecha de texto: con `periodo`
+    bigint o double de años, junio devolvía el año entero (o enero)."""
+    from dataclasses import replace
+
+    from app.application.consultas.preparar import preparar
+    from app.application.consultas.sql import CatalogRequestError
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    name, tipo = tabla_periodo_numerico
+    tipos = [("periodo", tipo), ("pasos", "bigint")]
+    # calcular/agregar_datos.
+    with pytest.raises(CatalogRequestError, match="años enteros"):
+        await _agregar_en(name, tipos, operacion="conteo", desde="2019-06", hasta="2019-06")
+    res = await _agregar_en(name, tipos, operacion="conteo", desde="2019", hasta="2019")
+    assert res.query.fecha is not None and res.query.fecha.formato == "anio"
+    assert res.grupos == [{"valor": 3}]
+    # obtener_datos, por el mismo camino que `catalogo_router`.
+    req = DataRequest(
+        table=name,
+        available_columns=[c for c, _ in tipos],
+        column_types=tipos,
+        desde="2019-06",
+        hasta="2019-06",
+    )
+    q = build_data_query(req)
+    prep = await preparar(PgSandboxAdapter(), name, q.tipos, q.filtros, fecha=q.fecha)
+    with pytest.raises(CatalogRequestError, match="años enteros"):
+        build_data_query(replace(req, formato_fecha=prep.formato_fecha))
+
+
+@pytest.fixture
+def tabla_anio_mes_numericos():
+    """Como estadistica_de_mediaciones_prejudic b221bf4b (staging): `anio` y `mes` bigint."""
+    engine = _engine()
+    name = f"cache_test_anio_mes_num_{uuid.uuid4().hex[:8]}"
+    filas = [(a, m) for a in (2014, 2015) for m in range(1, 13)] + [(2016, m) for m in (1, 2, 3)]
+    # Un mes que no es un mes (99, un total) y un año que no es un año (0).
+    filas += [(2016, 99), (0, 5)]
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE public."{name}" (anio bigint, mes bigint, casos bigint)'))
+        conn.execute(
+            text(
+                f'INSERT INTO public."{name}" VALUES '
+                + ", ".join(f"({a}, {m}, 1)" for a, m in filas)
+            )
+        )
+        conn.execute(text(f'ANALYZE public."{name}"'))
+    yield name
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+def test_el_orden_con_anio_y_mes_numericos(tabla_anio_mes_numericos: str) -> None:
+    """Comparando enteros, el último dato sigue siendo el último mes, y lo que no
+    es un año o un mes queda al final de su grupo, como con las expresiones regulares."""
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    tipos = [("anio", "bigint"), ("mes", "bigint"), ("casos", "bigint")]
+    filas: dict[str, list[tuple[int, int]]] = {}
+    for orden in ("asc", "desc"):
+        q = build_data_query(
+            DataRequest(
+                table=tabla_anio_mes_numericos,
+                available_columns=[c for c, _ in tipos],
+                column_types=tipos,
+                columns=["anio", "mes"],
+                orden=orden,
+                formato_fecha="anio",
+            )
+        )
+        assert "BETWEEN" in q.sql and " ~" not in q.sql
+        result = PgSandboxAdapter()._execute_sync(q.sql, 10, q.params)
+        assert result.error is None, (result.error, q.sql)
+        filas[orden] = [(r["anio"], r["mes"]) for r in result.rows]
+    assert filas["desc"][:4] == [(2016, 3), (2016, 2), (2016, 1), (2016, 99)]
+    assert filas["desc"][4] == (2015, 12) and filas["desc"][-1] == (0, 5)
+    assert filas["asc"][0] == (2014, 1) and filas["asc"][-2:] == [(2016, 99), (0, 5)]

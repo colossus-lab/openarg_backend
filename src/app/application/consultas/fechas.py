@@ -112,6 +112,11 @@ _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _SEPARADORES = re.compile(r"[^0-9a-zñ]+")
 
 
+def es_tipo_fecha(tipo: str) -> bool:
+    """date o timestamp: el texto del valor ya es ISO, no hace falta mirar la muestra."""
+    return bool(_DATE_TYPE.match(tipo or ""))
+
+
 def _palabras(nombre: str) -> list[str]:
     return [p for p in _SEPARADORES.split(plegar(_CAMEL.sub("_", nombre))) if p]
 
@@ -890,12 +895,13 @@ def _anios_enteros(desde: str | None, hasta: str | None) -> bool:
 def _de_anios(columna: ColumnaFecha) -> bool:
     """Una columna con años (2019), no meses ni días, hasta donde se sabe.
 
-    Una de texto sin muestra todavía (la primera validación, que no toca la
+    Una columna sin muestra todavía (la primera validación, que no toca la
     base) no se decide: ``consultas.preparar.con_formato`` le pone ``anio`` o
     ``CASE_ANIO`` si la muestra tiene años, o nada si sus valores traen el mes
-    (`ano_mes` con "2016-05"). Vale para cualquier nombre: un `periodo` o un
-    `indice_tiempo` con años es tan anual como un `anio` (revisión del PR
-    #154). Una numérica sin muestra es de años sólo si se llama como tal.
+    (`ano_mes` con "2016-05"). Vale para cualquier nombre y tipo: un `periodo`
+    o un `indice_tiempo` con años, de texto o bigint, es tan anual como un
+    `anio` (revisiones del PR #154). Una numérica sin muestra es de años sólo
+    si se llama como tal.
     """
     if (columna.formato or "").rstrip(GUARDADO) in ("anio", CASE_ANIO):
         return True
@@ -960,9 +966,17 @@ def orden_fecha(columna: ColumnaFecha) -> str:
 
     Si la columna es de tipo fecha, o todos sus valores son ISO o años, el
     texto crudo ya ordena bien y es lo más barato (sin función por fila).
+
+    Un año numérico se ordena comparando números, con NULL donde ``RE_ANIO``
+    no reconoce un año (fuera de 1800-2099 o con decimales): el CASE de
+    expresiones regulares sobre ``anio::text`` daba timeout en tablas de 900
+    mil filas (tercera revisión del PR #154).
     """
+    ident = quote_ident(columna.nombre)
+    if es_tipo_numerico(columna.tipo) and _de_anios(columna):
+        return _entre(ident, columna.tipo, 1800, 2099)
     if _DATE_TYPE.match(columna.tipo or "") or columna.formato in ("iso_dia", "iso_mes", "anio"):
-        return quote_ident(columna.nombre)
+        return ident
     return expresion_fecha(columna.nombre, columna.tipo, "inicio", columna.formato)
 
 
@@ -970,12 +984,27 @@ def claves_orden(columna: ColumnaFecha) -> list[str]:
     """Las claves del ORDER BY por fecha: la fecha y, en una tabla con año y mes, el mes.
 
     Con el año solo, dentro de cada año desempataba la posición física y
-    ``orden=desc`` traía enero como el último dato (H010).
+    ``orden=desc`` traía enero como el último dato (H010). Un mes numérico,
+    como el año, se compara como número (NULL donde ``expresion_mes`` no ve
+    un mes: fuera de 1 a 12 o con decimales).
     """
     claves = [orden_fecha(columna)]
     if columna.clase == "anio" and columna.mes is not None:
-        claves.append(expresion_mes(columna.mes))
+        claves.append(
+            _entre(quote_ident(columna.mes), columna.tipo_mes, 1, 12)
+            if es_tipo_numerico(columna.tipo_mes)
+            else expresion_mes(columna.mes)
+        )
     return claves
+
+
+_TIPOS_ENTEROS = frozenset({"smallint", "integer", "bigint"})
+
+
+def _entre(ident: str, tipo: str, desde: int, hasta: int) -> str:
+    """El valor numérico si es un entero entre ``desde`` y ``hasta``; si no, NULL."""
+    entero = "" if (tipo or "").lower() in _TIPOS_ENTEROS else f" AND {ident} = trunc({ident})"
+    return f"(CASE WHEN {ident} BETWEEN {desde} AND {hasta}{entero} THEN {ident} END)"
 
 
 def consulta_rango(tabla_citada: str, columna: ColumnaFecha) -> str:
