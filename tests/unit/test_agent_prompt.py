@@ -49,6 +49,21 @@ def test_superlativos_comparaciones_y_rangos_solo_si_los_calcula_una_herramienta
     assert "Si la persona los pide, calculalos con una herramienta" in prompt
 
 
+def test_el_superlativo_se_calcula_sobre_una_sola_serie() -> None:
+    """Revisión de #146: el ejemplo «calcular con operacion=minimo o maximo»
+    sin acotar. En mart.pobreza_indec_aglomerados pobreza e indigencia
+    comparten la columna `valor` y ninguna otra las separa: el mínimo de
+    «Personas» es 4,8, la indigencia del 2.º semestre de 2017, y el
+    verificador lo da por respaldado porque sale de una herramienta."""
+    prompt = system_prompt(date(2026, 10, 6))
+    assert "operacion=minimo o maximo" not in prompt
+    assert "sobre una sola serie (un mismo indicador, en una misma unidad)" in prompt
+    assert (
+        "Si en la tabla varios indicadores comparten la columna de valores y ninguna otra "
+        "columna los distingue, no lo calcules: mostrá los valores."
+    ) in prompt
+
+
 def test_la_regla_del_bcra_va_solo_si_esta_la_herramienta() -> None:
     sin = system_prompt(date(2026, 10, 4), tool_names={"buscar_series", "series_tiempo"})
     con = system_prompt(date(2026, 10, 4), tool_names={"buscar_series", BCRA_TOOL})
