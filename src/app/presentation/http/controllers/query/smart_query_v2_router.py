@@ -750,13 +750,50 @@ async def _check_ws_rate_limit(cache: ICacheService, identifier: str) -> bool:
 
 
 def _validate_api_key_value(provided: str) -> bool:
-    """Validate an API key value against BACKEND_API_KEY."""
-    import secrets as _secrets
+    """Validate an API key value against BACKEND_API_KEY.
 
+    Compares bytes, not str: ``compare_digest`` raises TypeError on a str
+    with non-ASCII characters, and a header or query param can carry any.
+    """
     expected = os.getenv("BACKEND_API_KEY", "")
     if not expected:
         return True
-    return _secrets.compare_digest(provided, expected) if provided else False
+    if not provided:
+        return False
+    return _secrets_mod.compare_digest(provided.encode(), expected.encode())
+
+
+# La clave por query string queda deprecada: uvicorn imprime la ruta con su
+# query en la línea `"WebSocket /ruta?query" [accepted]` (logger
+# `uvicorn.error`), así que la clave de servicio quedaba en texto plano en los
+# logs de prod. Se avisa una vez por proceso para que el log no se llene.
+_ws_query_key_warned = False
+
+
+def _ws_handshake_authorized(ws: WebSocket) -> bool:
+    """¿El handshake trae la clave de servicio?
+
+    Va en el header ``X-API-Key``, igual que el POST ``/smart``. El query param
+    ``api_key`` se acepta mientras quede desplegado el frontend que lo manda
+    (el backend se despliega primero); un PR posterior lo saca. Si el
+    handshake no trae una clave válida, todavía puede llegar en el primer
+    mensaje (``api_key`` del cuerpo).
+    """
+    global _ws_query_key_warned  # noqa: PLW0603
+
+    if _validate_api_key_value(ws.headers.get("x-api-key", "")):
+        return True
+    query_key = ws.query_params.get("api_key", "")
+    if not query_key:
+        return False
+    if not _ws_query_key_warned:
+        _ws_query_key_warned = True
+        logger.warning(
+            "WS /ws/smart recibió la clave de servicio por query string "
+            "(?api_key=): está deprecado y la deja en los logs de acceso. "
+            "Mandala en el header X-API-Key. Se avisa una vez por proceso."
+        )
+    return _validate_api_key_value(query_key)
 
 
 # ── WebSocket endpoint ─────────────────────────────────────
@@ -765,14 +802,7 @@ def _validate_api_key_value(provided: str) -> bool:
 @router.websocket("/ws/smart")
 async def ws_smart_query_v2(ws: WebSocket) -> None:
     """Stream the LangGraph pipeline via WebSocket."""
-    # Try query-param auth first (backward compat)
-    import secrets as _secrets
-
-    expected = os.getenv("BACKEND_API_KEY", "")
-    provided = ws.query_params.get("api_key", "")
-    has_query_param_auth = not expected or (
-        _secrets.compare_digest(provided, expected) if provided else False
-    )
+    has_handshake_auth = _ws_handshake_authorized(ws)
 
     await ws.accept()
 
@@ -795,7 +825,7 @@ async def ws_smart_query_v2(ws: WebSocket) -> None:
                 raw = json.loads(raw_text)
 
                 # Validate API key
-                if not has_query_param_auth:
+                if not has_handshake_auth:
                     msg_api_key = raw.get("api_key", "")
                     if not _validate_api_key_value(msg_api_key):
                         await _safe_send_json(
