@@ -27,9 +27,17 @@ Por qué está escrito así (auditoría verificada del 04-oct-2026):
   WS0 (`_finalize_cached_dataset`): un rechazo dejaba la tabla reescrita y la
   serie fuera del catálogo. Ahora WS0 decide primero (mira columnas y cantidad
   de filas, no el contenido), la carga va a una tabla `__nueva` y el reemplazo
-  es un DROP + RENAME en la misma transacción. Un guardián se niega a
-  reemplazar por menos filas o por una fecha máxima anterior (salvo
-  `permitir_menos_filas`).
+  son dos RENAME en la misma transacción: la vieja pasa a `<tabla>__previa`
+  (volver atrás es otro RENAME) y la nueva ocupa su lugar. Un guardián se
+  niega a reemplazar por menos filas o por una fecha máxima anterior (salvo
+  `permitir_menos_filas`), y por otra serie salvo que el cambio esté en
+  `CAMBIOS_DE_SERIE_APROBADOS`.
+- **Decía "al día" con el catálogo roto.** El reemplazo se confirma solo y lo
+  que viene después (dataset, catálogo, registro) va en transacciones
+  propias. Si la corrida se cortaba en el medio, la siguiente veía la tabla
+  igual a la API, latía sana y no reparaba nada. Ahora "al día" también mira
+  `raw.cached_datasets`, `raw_table_versions` y `datasets`, y si no coinciden
+  rehace esos pasos sin bajar ni reescribir la tabla (`reconciliada`).
 - **Tenía un catálogo propio.** Los ids salen del `SERIES_CATALOG` del
   adaptador (el mismo que usa el agente); acá sólo queda qué clave del
   catálogo alimenta qué tabla. Los títulos salen de la metadata de la API, que
@@ -102,6 +110,21 @@ SERIES_TABLAS: dict[str, str] = {
     "actividad_industrial": "actividad_industrial",
 }
 
+# Los cambios de id que una persona aprobó, como (tabla, id viejo, id nuevo).
+# El id de cada tabla sale del `SERIES_CATALOG` del adaptador, que comparten el
+# agente y otros PRs: sin esta lista, cualquier edición del catálogo
+# reemplazaba la tabla raw sin comparar filas ni fechas. Un cambio que no está
+# acá se rechaza y avisa; para aprobarlo se agrega la tupla en un PR.
+CAMBIOS_DE_SERIE_APROBADOS: frozenset[tuple[str, str, str]] = frozenset(
+    {
+        # "Actividad industrial" era EMAE Comercio (265 meses desde 2004) desde
+        # 2026-02; el catálogo la corrigió al IPI manufacturero del INDEC (127
+        # meses desde 2016). Se pierde 2004-2015 de una serie que no era la
+        # que decía ser, y cambia el nombre de la columna.
+        ("actividad_industrial", "11.3_AGCS_2004_M_41", "453.1_SERIE_ORIGNAL_0_0_14_46"),
+    }
+)
+
 _FRECUENCIAS = {
     # field.frequency (ISO 8601) y meta[0].frequency de la API
     "R/P1D": "diaria",
@@ -162,6 +185,11 @@ class SerieETL:
     @property
     def url(self) -> str:
         return f"{API_URL}?ids={self.serie_id}"
+
+
+def cambio_de_serie_aprobado(serie: SerieETL, serie_id_previa: str | None) -> bool:
+    """Si pasar la tabla de `serie_id_previa` al id actual está en la lista aprobada."""
+    return (serie.clave, serie_id_previa or "", serie.serie_id) in CAMBIOS_DE_SERIE_APROBADOS
 
 
 def series_del_catalogo(
@@ -378,6 +406,12 @@ class EstadoTabla:
     columnas_dataset: tuple[str, ...] = ()
     serie_id_previa: str | None = None
     dueno_registro: str | None = None
+    # Lo que acompaña a la tabla, para ver si una corrida cortada lo dejó atrás.
+    dataset_filas: int | None = None
+    dataset_cacheado: bool | None = None
+    catalogo_estado: str | None = None
+    catalogo_filas: int | None = None
+    registro_filas: int | None = None
 
 
 def _serie_id_de_url(url: str | None) -> str | None:
@@ -397,8 +431,13 @@ def _columnas_de_json(valor: Any) -> tuple[str, ...]:
     return tuple(str(c) for c in lista)
 
 
+def _entero(valor: Any) -> int | None:
+    return None if valor is None else int(valor)
+
+
 def estado_tabla(engine: Engine, serie: SerieETL) -> EstadoTabla:
-    """Lo que hay hoy: la tabla (filas, última fecha, columnas), el dataset y el registro."""
+    """Lo que hay hoy: la tabla (filas, última fecha, columnas), el dataset, el catálogo
+    (`raw.cached_datasets`) y el registro."""
     with engine.connect() as conn:
         existe = bool(
             conn.execute(
@@ -427,18 +466,23 @@ def estado_tabla(engine: Engine, serie: SerieETL) -> EstadoTabla:
             )
         ds = conn.execute(
             text(
-                "SELECT CAST(id AS text) AS id, title, description, url, columns "
+                "SELECT CAST(id AS text) AS id, title, description, url, columns, "
+                "row_count, is_cached "
                 "FROM datasets WHERE source_id = :sid AND portal = :portal"
             ),
             {"sid": serie.source_id, "portal": PORTAL},
         ).first()
-        dueno = conn.execute(
+        registro = conn.execute(
             text(
-                "SELECT resource_identity FROM public.raw_table_versions "
+                "SELECT resource_identity, row_count FROM public.raw_table_versions "
                 "WHERE schema_name = 'raw' AND table_name = :tn LIMIT 1"
             ),
             {"tn": serie.tabla},
-        ).scalar()
+        ).first()
+        catalogo = conn.execute(
+            text("SELECT status, row_count FROM raw.cached_datasets WHERE table_name = :tn"),
+            {"tn": serie.tabla},
+        ).first()
         conn.rollback()
     return EstadoTabla(
         existe=existe,
@@ -450,7 +494,14 @@ def estado_tabla(engine: Engine, serie: SerieETL) -> EstadoTabla:
         descripcion=ds.description if ds else None,
         columnas_dataset=_columnas_de_json(ds.columns) if ds else (),
         serie_id_previa=_serie_id_de_url(ds.url) if ds else None,
-        dueno_registro=str(dueno) if dueno else None,
+        dueno_registro=str(registro.resource_identity)
+        if registro and registro.resource_identity
+        else None,
+        dataset_filas=_entero(ds.row_count) if ds else None,
+        dataset_cacheado=bool(ds.is_cached) if ds and ds.is_cached is not None else None,
+        catalogo_estado=str(catalogo.status) if catalogo and catalogo.status else None,
+        catalogo_filas=_entero(catalogo.row_count) if catalogo else None,
+        registro_filas=_entero(registro.row_count) if registro else None,
     )
 
 
@@ -497,17 +548,69 @@ def motivo_para_rechazar(
     fin_nuevo: date | None,
     estado: EstadoTabla,
     misma_serie: bool,
+    cambio_aprobado: bool = False,
     permitir_menos_filas: bool = False,
+    serie_id: str = "",
 ) -> str | None:
-    """El guardián: lo que no se reemplaza sin que una persona lo pida."""
+    """El guardián: lo que no se reemplaza sin que una persona lo pida.
+
+    Otra serie en la misma tabla sólo con el cambio aprobado
+    (`CAMBIOS_DE_SERIE_APROBADOS`); con él, comparar filas y fechas contra la
+    serie anterior no dice nada. `permitir_menos_filas` no lo reemplaza: achicar
+    la misma serie no es cambiarla.
+    """
     if filas_nuevas <= 0:
         return "sin_filas"
-    if not estado.existe or not misma_serie or permitir_menos_filas:
+    if not estado.existe:
+        return None
+    if not misma_serie:
+        if cambio_aprobado:
+            return None
+        return (
+            f"cambio de serie sin aprobar ({estado.serie_id_previa} → {serie_id or 'otro id'}): "
+            "agregarlo a CAMBIOS_DE_SERIE_APROBADOS si es intencional"
+        )
+    if permitir_menos_filas:
         return None
     if estado.max_fecha and (fin_nuevo is None or fin_nuevo < estado.max_fecha):
         return f"la fecha máxima retrocede ({estado.max_fecha} → {fin_nuevo})"
     if filas_nuevas < estado.filas:
         return f"menos filas que las que hay ({estado.filas} → {filas_nuevas})"
+    return None
+
+
+def motivo_para_reconciliar(
+    serie: SerieETL, meta: MetadatosAPI, estado: EstadoTabla, columnas: list[str]
+) -> str | None:
+    """Con la tabla al día, qué de lo que la acompaña quedó atrás, o `None`.
+
+    El reemplazo se confirma solo; el dataset, el catálogo y el registro van
+    después, cada uno en su transacción. Un corte en el medio (límite de
+    tiempo, redespacho por deploy, la conexión) dejaba la tabla nueva con el
+    resto viejo, y la corrida siguiente, que miraba sólo la tabla, decía "al
+    día" y latía sana para siempre.
+    """
+    if estado.dataset_id is None:
+        return "no hay fila en datasets"
+    if (
+        estado.titulo != _titulo(serie, meta)
+        or estado.descripcion != _descripcion(serie, meta)
+        or estado.columnas_dataset != tuple(columnas)
+        or estado.dataset_filas != estado.filas
+        or estado.dataset_cacheado is not True
+    ):
+        return "datasets no describe la tabla (título, descripción, columnas, filas o is_cached)"
+    if estado.catalogo_estado != "ready" or estado.catalogo_filas != estado.filas:
+        return (
+            f"raw.cached_datasets en {estado.catalogo_estado or 'ninguna fila'} con "
+            f"{estado.catalogo_filas} filas; la tabla tiene {estado.filas}"
+        )
+    if estado.dueno_registro is None:
+        return "la tabla no está en raw_table_versions"
+    if estado.registro_filas != estado.filas:
+        return (
+            f"raw_table_versions con {estado.registro_filas} filas; la tabla tiene {estado.filas}"
+        )
     return None
 
 
@@ -540,12 +643,20 @@ def clasificar_frescura(meta: MetadatosAPI, estado: EstadoTabla, hoy: date) -> l
 # ── escritura ────────────────────────────────────────────────────────────────
 
 
-def armar_dataframe(filas: list[list[Any]], columna_valor: str) -> pd.DataFrame:
+def armar_dataframe(
+    filas: list[list[Any]], columna_valor: str, *, serie_id: str = ""
+) -> pd.DataFrame:
     df = pd.DataFrame([f[:2] for f in filas], columns=["fecha", columna_valor])
     df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
     if df["fecha"].isna().any():
         raise _SerieFallida("datos", "la API devolvió fechas que no se pueden leer")
     df[columna_valor] = pd.to_numeric(df[columna_valor], errors="coerce")
+    if serie_id in series_tiempo_adapter.FRACTION_PERCENT_IDS:
+        # Desempleo y compañía: la API dice «Porcentaje» y manda la fracción
+        # (0,079 = 7,9 %). La tabla guardaba 0,079 bajo la columna "… En
+        # porcentaje." y el conector en vivo da 7,9: misma regla y mismo
+        # redondeo que el conector, para que los dos caminos den lo mismo.
+        df[columna_valor] = df[columna_valor].map(lambda v: v if pd.isna(v) else round(v * 100, 2))
     return df
 
 
@@ -655,19 +766,90 @@ def veredicto_ws0(
     return resultado.error_message or resultado.result_kind
 
 
+_SQL_PERMISOS = text(
+    """
+    SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(r.rolname) END AS rol,
+           a.privilege_type AS privilegio, a.is_grantable AS con_grant
+    FROM pg_class c
+    CROSS JOIN LATERAL aclexplode(c.relacl) AS a
+    LEFT JOIN pg_roles r ON r.oid = a.grantee
+    WHERE c.oid = to_regclass(:q)
+      AND a.grantee <> c.relowner
+      AND (a.grantee = 0 OR r.oid IS NOT NULL)
+    """
+)
+
+_SQL_DEPENDIENTES = text(
+    """
+    SELECT DISTINCT v.oid::regclass::text
+    FROM pg_depend d
+    JOIN pg_rewrite w ON w.oid = d.objid
+    JOIN pg_class v ON v.oid = w.ev_class
+    WHERE d.classid = 'pg_rewrite'::regclass
+      AND d.refclassid = 'pg_class'::regclass
+      AND d.refobjid = to_regclass(:q)
+      AND v.oid <> d.refobjid
+    """
+)
+
+
+def _igualar_permisos(conn: Any, *, desde: str, hacia: str) -> None:
+    """`raw.<hacia>` queda con los permisos de `raw.<desde>` (los del dueño no cuentan).
+
+    La tabla nueva nace con los privilegios por defecto del esquema, que no
+    tienen por qué ser los de la viva: le faltaría un GRANT hecho a mano, o
+    tendría uno que a la viva le sacaron. En staging y prod hoy son iguales
+    (`openarg_sandbox_ro=r`), así que normalmente no se ejecuta nada.
+    """
+
+    def permisos(tabla: str) -> set[tuple[str, str, bool]]:
+        filas = conn.execute(_SQL_PERMISOS, {"q": f'raw."{tabla}"'}).all()
+        return {(str(f.rol), str(f.privilegio), bool(f.con_grant)) for f in filas}
+
+    viejos, nuevos = permisos(desde), permisos(hacia)
+    a_limpiar = sorted({rol for rol, _, _ in nuevos - viejos})
+    for rol in a_limpiar:
+        conn.execute(text(f'REVOKE ALL ON raw."{hacia}" FROM {rol}'))
+    for rol, privilegio, con_grant in sorted(viejos):
+        if (rol, privilegio, con_grant) in nuevos and rol not in a_limpiar:
+            continue
+        opcion = " WITH GRANT OPTION" if con_grant else ""
+        conn.execute(text(f'GRANT {privilegio} ON raw."{hacia}" TO {rol}{opcion}'))
+
+
 def escribir_atomico(engine: Engine, tabla: str, df: pd.DataFrame) -> None:
     """Carga en `raw.<tabla>__nueva` y la pone en lugar de la vieja, en una transacción.
 
+    La vieja no se borra: pasa a `raw.<tabla>__previa` (borrando la previa
+    anterior en la misma transacción), con sus tipos, sus filas y sus
+    permisos, así que volver atrás es un RENAME (ver docs/runbook.md). Antes
+    era un DROP y el único retorno era un dump JSON que no se podía
+    restaurar. La nueva toma los permisos de la viva antes del cambio.
+
     Si algo falla, el rollback deja la tabla de antes intacta y no queda una
-    `__nueva` huérfana. El lock exclusivo sobre la tabla viva dura sólo el
-    DROP + RENAME del final; `lock_timeout` evita quedarse esperando detrás de
-    una consulta larga mientras se encolan las demás.
+    `__nueva` huérfana. Una vista sobre la tabla frena el reemplazo: con el
+    RENAME se iría con la vieja a `__previa` y serviría datos viejos sin
+    avisar (con el DROP de antes, fallaba). El lock exclusivo sobre la tabla
+    viva dura sólo los RENAME del final; `lock_timeout` evita quedarse
+    esperando detrás de una consulta larga mientras se encolan las demás.
     """
     nueva = f"{tabla}__nueva"
+    previa = f"{tabla}__previa"
     with engine.begin() as conn:
         conn.execute(text("SET LOCAL lock_timeout = '15s'"))
         df.to_sql(nueva, conn, schema="raw", if_exists="replace", index=False)
-        conn.execute(text(f'DROP TABLE IF EXISTS raw."{tabla}"'))
+        existe = conn.execute(
+            text("SELECT to_regclass(:q) IS NOT NULL"), {"q": f'raw."{tabla}"'}
+        ).scalar()
+        if existe:
+            vistas = list(conn.execute(_SQL_DEPENDIENTES, {"q": f'raw."{tabla}"'}).scalars().all())
+            if vistas:
+                raise _SerieFallida(
+                    "reemplazo", f"dependen de raw.{tabla}: {', '.join(map(str, vistas))}"
+                )
+            _igualar_permisos(conn, desde=tabla, hacia=nueva)
+            conn.execute(text(f'DROP TABLE IF EXISTS raw."{previa}"'))
+            conn.execute(text(f'ALTER TABLE raw."{tabla}" RENAME TO "{previa}"'))
         conn.execute(text(f'ALTER TABLE raw."{nueva}" RENAME TO "{tabla}"'))
 
 
@@ -704,12 +886,72 @@ def _actualizar_dataset(
         )
 
 
+def _completar_metadatos(
+    engine: Engine,
+    *,
+    serie: SerieETL,
+    meta: MetadatosAPI,
+    dataset_id: str,
+    columnas: list[str],
+    filas: int,
+    reembeber: bool,
+) -> None:
+    """Lo que acompaña a la tabla: dataset, catálogo (`ready`), registro y embedding.
+
+    Lo usan la escritura, después del reemplazo, y la reconciliación, que lo
+    repite sin tocar la tabla cuando una corrida anterior se cortó en el medio.
+    Son upserts idempotentes. Una excepción acá deja la tabla nueva con la
+    metadata vieja: sale como motivo `metadatos`, que alerta (como `error` no
+    alertaba), y la corrida siguiente lo repara.
+    """
+    try:
+        _actualizar_dataset(
+            engine, dataset_id=dataset_id, serie=serie, meta=meta, columnas=columnas, filas=filas
+        )
+        final = _finalize_cached_dataset(
+            engine,
+            dataset_id=dataset_id,
+            portal=PORTAL,
+            source_id=serie.source_id,
+            table_name=serie.tabla,
+            row_count=filas,
+            columns=columnas,
+            declared_format="json",
+            download_url=serie.url,
+        )
+        if not final.get("ok"):
+            raise _SerieFallida("finalizacion", str(final.get("error") or final.get("status")))
+        if not register_via_b_table(
+            engine,
+            resource_identity=serie.identidad,
+            table_name=serie.tabla,
+            schema_name="raw",
+            row_count=filas,
+        ):
+            raise _SerieFallida("registro", f"no se pudo registrar {serie.identidad}")
+    except (SoftTimeLimitExceeded, _SerieFallida):
+        raise
+    except Exception as exc:
+        logger.exception("Series %s: falló la metadata de la tabla", serie.clave)
+        raise _SerieFallida("metadatos", str(exc)[:300]) from exc
+
+    if reembeber:
+        # Re-embeber sólo si cambia lo que se embebe: con el beat diario, hacerlo
+        # en cada escritura sumaría churn al índice sin cambiar nada buscable.
+        try:
+            from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
+
+            index_dataset_embedding.delay(dataset_id)
+        except Exception:
+            logger.warning("Series %s: no se pudo encolar el embedding", serie.clave, exc_info=True)
+
+
 # ── una serie ────────────────────────────────────────────────────────────────
 
 
 @dataclass
 class ResultadoSerie:
-    estado: str  # escrita | al_dia | rechazada | fallida | simulada
+    estado: str  # escrita | reconciliada | al_dia | rechazada | fallida | simulada
     motivo: str = ""
     detalle: str = ""
     filas: int | None = None
@@ -797,15 +1039,43 @@ def _procesar_con_metadatos(
     columnas = ["fecha", columna_valor]
     motivo = motivo_para_escribir(meta, estado, columnas, forzar=forzar)
     if motivo is None:
-        if not dry_run:
-            # Mirado contra la API y al día: eso también es "llegó".
-            from app.application.quality.heartbeat import record_ingest
-
-            record_ingest(engine, serie.identidad)
         res.filas = estado.filas
+        pendiente = motivo_para_reconciliar(serie, meta, estado, columnas)
+        if pendiente is None:
+            if not dry_run:
+                # Mirado contra la API y al día, con todo lo que la acompaña en
+                # orden: eso también es "llegó".
+                from app.application.quality.heartbeat import record_ingest
+
+                record_ingest(engine, serie.identidad)
+            return res
+        res.motivo, res.detalle = "reconciliar", pendiente
+        if dry_run:
+            res.estado = "simulada"
+            res.detalle = f"repararía sin reescribir la tabla: {pendiente}"
+            return res
+        # La tabla está bien y lo de alrededor no: una corrida anterior se
+        # cortó después del reemplazo. Se rehacen esos pasos (el registro es
+        # el que late) y se re-embebe, porque no se sabe si la corrida cortada
+        # llegó a encolar el embedding.
+        dataset_id = estado.dataset_id or _asegurar_dataset(
+            engine, serie, meta, columnas, estado.filas
+        )
+        _completar_metadatos(
+            engine,
+            serie=serie,
+            meta=meta,
+            dataset_id=dataset_id,
+            columnas=columnas,
+            filas=estado.filas,
+            reembeber=True,
+        )
+        res.estado = "reconciliada"
         return res
 
-    df = armar_dataframe(descargar_serie(client, serie.serie_id), columna_valor)
+    df = armar_dataframe(
+        descargar_serie(client, serie.serie_id), columna_valor, serie_id=serie.serie_id
+    )
     fin_nuevo = _fecha(df["fecha"].max())
     res.filas, res.motivo = len(df), motivo
     misma_serie = estado.serie_id_previa in (None, serie.serie_id)
@@ -814,7 +1084,9 @@ def _procesar_con_metadatos(
         fin_nuevo=fin_nuevo,
         estado=estado,
         misma_serie=misma_serie,
+        cambio_aprobado=not misma_serie and cambio_de_serie_aprobado(serie, estado.serie_id_previa),
         permitir_menos_filas=permitir_menos_filas,
+        serie_id=serie.serie_id,
     )
     if rechazo:
         res.estado, res.detalle = "rechazada", rechazo
@@ -833,46 +1105,21 @@ def _procesar_con_metadatos(
         return res
 
     escribir_atomico(engine, serie.tabla, df)
-    _actualizar_dataset(
-        engine, dataset_id=dataset_id, serie=serie, meta=meta, columnas=columnas, filas=len(df)
-    )
-    final = _finalize_cached_dataset(
-        engine,
-        dataset_id=dataset_id,
-        portal=PORTAL,
-        source_id=serie.source_id,
-        table_name=serie.tabla,
-        row_count=len(df),
-        columns=columnas,
-        declared_format="json",
-        download_url=serie.url,
-    )
-    if not final.get("ok"):
-        raise _SerieFallida("finalizacion", str(final.get("error") or final.get("status")))
-    if not register_via_b_table(
-        engine,
-        resource_identity=serie.identidad,
-        table_name=serie.tabla,
-        schema_name="raw",
-        row_count=len(df),
-    ):
-        raise _SerieFallida("registro", f"no se pudo registrar {serie.identidad}")
-
     cambio_lo_buscable = (
         estado.dataset_id is None
         or estado.titulo != _titulo(serie, meta)
         or estado.descripcion != _descripcion(serie, meta)
         or estado.columnas_dataset != tuple(columnas)
     )
-    if cambio_lo_buscable:
-        # Re-embeber sólo si cambia lo que se embebe: con el beat diario, hacerlo
-        # en cada escritura sumaría churn al índice sin cambiar nada buscable.
-        try:
-            from app.infrastructure.celery.tasks.scraper_tasks import index_dataset_embedding
-
-            index_dataset_embedding.delay(dataset_id)
-        except Exception:
-            logger.warning("Series %s: no se pudo encolar el embedding", serie.clave, exc_info=True)
+    _completar_metadatos(
+        engine,
+        serie=serie,
+        meta=meta,
+        dataset_id=dataset_id,
+        columnas=columnas,
+        filas=len(df),
+        reembeber=cambio_lo_buscable,
+    )
 
     res.estado = "escrita"
     res.fin_tabla = fin_nuevo.isoformat() if fin_nuevo else None
@@ -902,8 +1149,15 @@ def _alertas_de_ingesta(
                     detail=f"{res.motivo or 'rechazo'} — {res.detalle}"[:300],
                 )
             )
-        elif res.estado == "fallida" and res.motivo in {"registro", "finalizacion", "dataset"}:
-            # Las de red se reintentan solas mañana; éstas no.
+        elif res.estado == "fallida" and res.motivo in {
+            "registro",
+            "finalizacion",
+            "dataset",
+            "metadatos",
+            "reemplazo",
+        }:
+            # Las de red se reintentan solas mañana; éstas no (o dejaron la
+            # tabla nueva con la metadata vieja hasta la próxima corrida).
             alertas.append(
                 Alert(
                     kind="series_ingest_failed",
@@ -937,7 +1191,8 @@ def ingest_series_tiempo(
 
     - `forzar`: reescribe aunque la tabla esté al día (pasa igual por el guardián).
     - `permitir_menos_filas`: deja reemplazar por menos filas o por una fecha
-      máxima anterior. Sólo a mano, sabiendo por qué.
+      máxima anterior. Sólo a mano, sabiendo por qué. Ninguno de los dos
+      habilita otra serie en la tabla: eso es `CAMBIOS_DE_SERIE_APROBADOS`.
     - `claves`: limita a esas tablas (p. ej. ``["tipo_cambio"]``).
     - `dry_run`: consulta la API y la base y dice qué haría, sin escribir nada
       (ni findings, ni latidos, ni alertas).
@@ -1013,6 +1268,7 @@ def ingest_series_tiempo(
 def _resumen(resultados: Mapping[str, ResultadoSerie]) -> dict[str, Any]:
     cuenta = {
         "escritas": 0,
+        "reconciliadas": 0,
         "al_dia": 0,
         "rechazadas": 0,
         "fallidas": 0,
@@ -1020,6 +1276,7 @@ def _resumen(resultados: Mapping[str, ResultadoSerie]) -> dict[str, Any]:
     }
     nombres = {
         "escrita": "escritas",
+        "reconciliada": "reconciliadas",
         "al_dia": "al_dia",
         "rechazada": "rechazadas",
         "fallida": "fallidas",
@@ -1030,6 +1287,7 @@ def _resumen(resultados: Mapping[str, ResultadoSerie]) -> dict[str, Any]:
     return {
         **cuenta,
         "resueltas": cuenta["escritas"]
+        + cuenta["reconciliadas"]
         + cuenta["al_dia"]
         + cuenta["rechazadas"]
         + cuenta["simuladas"],

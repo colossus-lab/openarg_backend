@@ -28,6 +28,7 @@ from sqlalchemy import text
 
 from app.infrastructure.celery.tasks import _db
 from app.infrastructure.celery.tasks import series_tiempo_tasks as st
+from tests.unit.runbook_series import receta_volver_atras
 
 
 def _engine_or_skip():
@@ -107,9 +108,11 @@ def entorno(monkeypatch):
         conn.execute(text(f'DROP VIEW IF EXISTS raw."{serie.tabla}_vista"'))
         conn.execute(text(f'DROP TABLE IF EXISTS raw."{serie.tabla}"'))
         conn.execute(text(f'DROP TABLE IF EXISTS raw."{serie.tabla}__nueva"'))
+        conn.execute(text(f'DROP TABLE IF EXISTS raw."{serie.tabla}__previa"'))
+        conn.execute(text(f'DROP TABLE IF EXISTS raw."{serie.tabla}__descartada"'))
         conn.execute(
-            text("DELETE FROM public.raw_table_versions WHERE table_name = :t"),
-            {"t": serie.tabla},
+            text("DELETE FROM public.raw_table_versions WHERE table_name LIKE :t"),
+            {"t": f"{serie.tabla}%"},
         )
         conn.execute(
             text("DELETE FROM public.ingest_heartbeat WHERE resource_identity = :r"),
@@ -244,6 +247,9 @@ def test_una_serie_ready_y_cortada_se_refresca_entera_y_queda_registrada(entorno
 
 
 def test_sin_novedades_no_reescribe_pero_late(entorno, monkeypatch):
+    # `_sembrar` deja el dataset con el título de antes ('Series de Tiempo —
+    # vieja'). Desde H024 la primera corrida lo repara sin recrear la tabla;
+    # la segunda ya la ve al día.
     engine, serie = entorno
     filas = _filas(1500, date(2003, 1, 2))
     _sembrar(engine, serie, filas)
@@ -251,15 +257,22 @@ def test_sin_novedades_no_reescribe_pero_late(entorno, monkeypatch):
     antes = _oid(engine, serie.tabla)
 
     resumen = st.ingest_series_tiempo.run(claves=[serie.clave])
+    assert resumen["reconciliadas"] == 1 and resumen["escritas"] == 0, resumen
 
+    resumen = st.ingest_series_tiempo.run(claves=[serie.clave])
     assert resumen["al_dia"] == 1 and resumen["escritas"] == 0, resumen
+
     assert _oid(engine, serie.tabla) == antes, "la tabla no se recreó"
     with engine.connect() as conn:
         latidos = conn.execute(
             text("SELECT times_seen FROM public.ingest_heartbeat WHERE resource_identity = :r"),
             {"r": serie.identidad},
         ).scalar()
-    assert latidos == 1
+        titulo = conn.execute(
+            text("SELECT title FROM datasets WHERE source_id = :s"), {"s": serie.source_id}
+        ).scalar()
+    assert latidos == 2, "late la reparación y late la corrida al día"
+    assert titulo == "Series de Tiempo — Serie de prueba"
 
 
 def test_el_guardian_deja_la_tabla_como_estaba(entorno, monkeypatch):
@@ -320,3 +333,247 @@ def test_la_alarma_ve_la_tabla_atrasada_en_la_base(entorno, monkeypatch):
 
     assert [f["serie"] for f in informe["series_cache_stale"]] == [serie.clave]
     assert informe["series_source_stale"] == []
+
+
+# ── la vuelta atrás es un RENAME (H025/H057) ──────────────────────────────
+
+
+def _columnas_y_tipos(engine, tabla: str) -> list[tuple[str, str]]:
+    with engine.connect() as conn:
+        return [
+            (str(r[0]), str(r[1]))
+            for r in conn.execute(
+                text(
+                    "SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a "
+                    "WHERE a.attrelid = to_regclass(:q) AND a.attnum > 0 AND NOT a.attisdropped "
+                    "ORDER BY a.attnum"
+                ),
+                {"q": f'raw."{tabla}"'},
+            )
+        ]
+
+
+def _publico_puede_leer(engine, tabla: str) -> bool:
+    with engine.connect() as conn:
+        return bool(
+            conn.execute(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a "
+                    "WHERE c.oid = to_regclass(:q) AND a.grantee = 0 "
+                    "AND a.privilege_type = 'SELECT')"
+                ),
+                {"q": f'raw."{tabla}"'},
+            ).scalar()
+        )
+
+
+def _registradas_por_cleanup(engine, monkeypatch, serie: st.SerieETL) -> set[str]:
+    """Corre `cleanup_invariants` y devuelve las tablas `<tabla>*` que quedan en el registro.
+
+    Agrega una huérfana de control (`<tabla>__control`) que el pase de
+    huérfanas tiene que registrar: sin ella, que no registre nada más no
+    probaría nada. Borra lo que registró la corrida para no dejar filas
+    fantasma (también las de tablas de otros tests, como `raw.cached_datasets`
+    cuando la crea el fixture).
+    """
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    huerfana = f"{serie.tabla}__control"
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE raw."{huerfana}" AS SELECT 1 AS x'))
+    monkeypatch.setattr(ops_fixes, "get_sync_engine", lambda: engine)
+    monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
+    sql_huerfanas = text(
+        "SELECT resource_identity FROM public.raw_table_versions "
+        "WHERE resource_identity LIKE 'backfill_postauto::%'"
+    )
+    with engine.connect() as conn:
+        ya_estaban = {r[0] for r in conn.execute(sql_huerfanas)}
+    try:
+        ops_fixes.cleanup_invariants.run()
+        with engine.connect() as conn:
+            registradas = {
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT table_name FROM public.raw_table_versions WHERE table_name LIKE :p"
+                    ),
+                    {"p": f"{serie.tabla}%"},
+                )
+            }
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS raw."{huerfana}"'))
+            nuevas = {r[0] for r in conn.execute(sql_huerfanas)} - ya_estaban
+            if nuevas:
+                conn.execute(
+                    text("DELETE FROM public.raw_table_versions WHERE resource_identity = ANY(:r)"),
+                    {"r": sorted(nuevas)},
+                )
+    assert huerfana in registradas, "el pase de huérfanas sigue andando"
+    return registradas
+
+
+def test_la_tabla_vieja_queda_como_previa_y_volver_atras_es_un_rename(entorno, monkeypatch):
+    """Antes el swap hacía DROP de la vieja y el único retorno era un dump JSON
+    que con pandas 3 no se podía leer y que restauraba `fecha` como TEXT."""
+    engine, serie = entorno
+    _sembrar(engine, serie, _filas(1000, date(2003, 1, 2)))
+    with engine.begin() as conn:
+        # Un permiso que los privilegios por defecto no dan: tiene que pasar
+        # a la tabla nueva y quedarse en la previa.
+        conn.execute(text(f'GRANT SELECT ON raw."{serie.tabla}" TO PUBLIC'))
+    tipos_antes = _columnas_y_tipos(engine, serie.tabla)
+    _con_api(monkeypatch, _Api(_filas(6001, date(2003, 1, 2))))
+
+    resumen = st.ingest_series_tiempo.run(claves=[serie.clave])
+
+    assert resumen["escritas"] == 1, resumen
+    previa = f"{serie.tabla}__previa"
+    assert _tabla(engine, serie.tabla)[0] == 6001
+    assert _tabla(engine, previa) == (1000, date(2003, 1, 2) + timedelta(days=999))
+    assert _columnas_y_tipos(engine, previa) == tipos_antes
+    assert ("fecha", "timestamp without time zone") in tipos_antes
+    assert _publico_puede_leer(engine, serie.tabla), "la nueva hereda los permisos de la viva"
+    assert _publico_puede_leer(engine, previa)
+
+    # La vuelta atrás: la receta del runbook (§9, paso 2), tal cual, en una transacción.
+    with engine.begin() as conn:
+        for sentencia in receta_volver_atras(serie.clave):
+            conn.execute(text(sentencia))
+
+    assert _tabla(engine, serie.tabla) == (1000, date(2003, 1, 2) + timedelta(days=999))
+    assert _columnas_y_tipos(engine, serie.tabla) == tipos_antes, "fecha sigue siendo timestamp"
+    assert _publico_puede_leer(engine, serie.tabla)
+
+    # `cleanup_invariants` corre cada hora: lo que la receta deja en `raw` no
+    # puede entrar al registro, porque `list_cached_tables` lo serviría como
+    # tabla viva (/data/tables, modo datos, NL2SQL) con los datos descartados.
+    registradas = _registradas_por_cleanup(engine, monkeypatch, serie)
+    assert registradas == {serie.tabla, f"{serie.tabla}__control"}
+    assert _tabla(engine, previa)[0] == 6001, "la escritura descartada queda como previa"
+
+
+def test_la_previa_es_la_version_anterior_y_no_se_acumula(entorno, monkeypatch):
+    engine, serie = entorno
+    _sembrar(engine, serie, _filas(1000, date(2003, 1, 2)))
+    api = _Api(_filas(6001, date(2003, 1, 2)))
+    _con_api(monkeypatch, api)
+    st.ingest_series_tiempo.run(claves=[serie.clave])
+    api.filas = _filas(6002, date(2003, 1, 2))  # la API publicó un día más
+
+    resumen = st.ingest_series_tiempo.run(claves=[serie.clave])
+
+    assert resumen["escritas"] == 1, resumen
+    assert _tabla(engine, serie.tabla)[0] == 6002
+    assert _tabla(engine, f"{serie.tabla}__previa")[0] == 6001
+    with engine.connect() as conn:
+        copias = conn.execute(
+            text(
+                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'raw' AND c.relname LIKE :p"
+            ),
+            {"p": serie.tabla.replace("_", "\\_") + "\\_\\_%"},
+        ).scalar()
+    assert copias == 1, "una sola previa: la de la escritura anterior"
+
+
+def test_cleanup_invariants_no_registra_la_previa(entorno, monkeypatch):
+    """Registrarla la listaría como tabla viva (list_cached_tables) al lado de
+    la de verdad, con los datos de la escritura anterior."""
+    from app.infrastructure.celery.tasks import ops_fixes
+
+    engine, serie = entorno
+    _sembrar(engine, serie, _filas(1000, date(2003, 1, 2)))
+    _con_api(monkeypatch, _Api(_filas(6001, date(2003, 1, 2))))
+    st.ingest_series_tiempo.run(claves=[serie.clave])
+    huerfana = f"{serie.tabla}__control"
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE raw."{huerfana}" AS SELECT 1 AS x'))
+    monkeypatch.setattr(ops_fixes, "get_sync_engine", lambda: engine)
+    monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
+    sql_huerfanas = text(
+        "SELECT resource_identity FROM public.raw_table_versions "
+        "WHERE resource_identity LIKE 'backfill_postauto::%'"
+    )
+    with engine.connect() as conn:
+        ya_estaban = {r[0] for r in conn.execute(sql_huerfanas)}
+
+    try:
+        ops_fixes.cleanup_invariants.run()
+        with engine.connect() as conn:
+            registradas = {
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT table_name FROM public.raw_table_versions WHERE table_name LIKE :p"
+                    ),
+                    {"p": f"{serie.tabla}%"},
+                )
+            }
+    finally:
+        # El barrido registra toda tabla de `raw` sin fila (también las de
+        # otros tests, como `raw.cached_datasets` cuando la crea el fixture):
+        # se borra lo que registró acá para no dejar filas fantasma.
+        with engine.begin() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS raw."{huerfana}"'))
+            nuevas = {r[0] for r in conn.execute(sql_huerfanas)} - ya_estaban
+            if nuevas:
+                conn.execute(
+                    text("DELETE FROM public.raw_table_versions WHERE resource_identity = ANY(:r)"),
+                    {"r": sorted(nuevas)},
+                )
+
+    assert huerfana in registradas, "el pase de huérfanas sigue andando"
+    assert f"{serie.tabla}__previa" not in registradas
+    assert serie.tabla in registradas
+
+
+# ── una corrida cortada después del reemplazo (H024) ──────────────────────
+
+
+def test_una_corrida_cortada_despues_del_reemplazo_se_repara(entorno, monkeypatch):
+    engine, serie = entorno
+    _sembrar(engine, serie, _filas(1000, date(2003, 1, 2)))
+    api = _Api(_filas(6001, date(2003, 1, 2)))
+    real = st._finalize_cached_dataset
+    llamadas = {"n": 0}
+
+    def _finalize_que_se_corta_una_vez(*a, **k):
+        llamadas["n"] += 1
+        if llamadas["n"] == 1:
+            raise RuntimeError("server closed the connection unexpectedly")
+        return real(*a, **k)
+
+    monkeypatch.setattr(st, "_finalize_cached_dataset", _finalize_que_se_corta_una_vez)
+
+    # La serie sola, no la tarea: con su única serie fallida la tarea se
+    # declara caída y reintenta (lo prueba otro test).
+    with httpx.Client(transport=httpx.MockTransport(api)) as client:
+        primera = st.procesar_serie(engine, client, serie)
+    assert (primera.estado, primera.motivo) == ("fallida", "metadatos"), primera
+    assert _tabla(engine, serie.tabla)[0] == 6001, "el reemplazo ya se había confirmado"
+
+    _con_api(monkeypatch, api)
+    segunda = st.ingest_series_tiempo.run(claves=[serie.clave])
+    assert segunda["reconciliadas"] == 1, segunda
+
+    with engine.connect() as conn:
+        cd = conn.execute(
+            text("SELECT status, row_count FROM raw.cached_datasets WHERE table_name = :t"),
+            {"t": serie.tabla},
+        ).one()
+        rtv = conn.execute(
+            text("SELECT row_count FROM public.raw_table_versions WHERE table_name = :t"),
+            {"t": serie.tabla},
+        ).scalar()
+        ds = conn.execute(
+            text("SELECT row_count, is_cached FROM datasets WHERE source_id = :s"),
+            {"s": serie.source_id},
+        ).one()
+    assert tuple(cd) == ("ready", 6001)
+    assert rtv == 6001
+    assert tuple(ds) == (6001, True)
+
+    tercera = st.ingest_series_tiempo.run(claves=[serie.clave])
+    assert tercera["al_dia"] == 1, tercera

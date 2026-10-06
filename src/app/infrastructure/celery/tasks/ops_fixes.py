@@ -1083,6 +1083,11 @@ def cleanup_invariants(self) -> dict[str, int]:
                 WHERE t.table_schema = 'raw'
                   AND t.table_type = 'BASE TABLE'  -- never a view: DROP TABLE fails on one
                   AND rtv.table_name IS NULL
+                  -- `<table>__previa` is the copy the series ETL keeps so a bad
+                  -- write can be undone with a RENAME. Registered here it would
+                  -- be listed as a live table (`list_cached_tables`) next to the
+                  -- real one, serving the previous write's data.
+                  AND t.table_name !~ '__previa$'
                 ON CONFLICT (resource_identity, version) DO NOTHING
                 """
             )

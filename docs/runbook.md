@@ -223,3 +223,73 @@ mcp-series-tiempo:
 - Para cache-heavy: Redis Cluster o Redis Sentinel para HA
 - Evaluar `maxmemory-policy allkeys-lru` si la memoria es limitada
 
+---
+
+## 9. Series de tiempo: volver atrás una tabla `raw.cache_series_*`
+
+El ETL de series (`ingest_series_tiempo`) no borra la tabla que reemplaza: la
+deja como `raw.<tabla>__previa`, con sus filas, sus tipos y sus permisos. Hay
+una sola previa por tabla, la de la escritura anterior; la siguiente escritura
+la pisa. Después de una vuelta atrás, la previa es la escritura descartada.
+`cleanup_invariants` no la registra, así que no aparece en el catálogo ni en
+`/data/tables`.
+
+1. Frenar la ingesta para que no vuelva a escribir la tabla restaurada:
+   `OPENARG_BEAT_DESACTIVADAS=ingest-series-tiempo,check-series-freshness` en
+   el `.env` y recrear `beat` y los workers (ver `docs/deploy-produccion.md`).
+2. Intercambiar la tabla viva con la previa, en una transacción. La escritura
+   descartada queda como la nueva `__previa`: `cleanup_invariants` no la
+   registra y la próxima escritura la borra. No dejarla con otro nombre: el
+   pase de huérfanas de `cleanup_invariants` (cada hora, a los :15) registra
+   toda tabla de `raw` sin fila en el registro, salvo las `__previa`, y
+   `/data/tables`, el modo datos del MCP y el NL2SQL la servirían como tabla
+   viva, con los datos que se acaban de descartar.
+
+   ```sql
+   BEGIN;
+   ALTER TABLE raw."cache_series_<clave>" RENAME TO "cache_series_<clave>__tmp";
+   ALTER TABLE raw."cache_series_<clave>__previa" RENAME TO "cache_series_<clave>";
+   ALTER TABLE raw."cache_series_<clave>__tmp" RENAME TO "cache_series_<clave>__previa";
+   COMMIT;
+   ```
+
+   Correrlo otra vez deshace la vuelta atrás (y después hay que repetir el
+   paso 3).
+
+   **Desempleo:** la primera escritura con el arreglo de H023 pasa la tabla de
+   fracción (máximo 0,204) a porcentaje (20,4) y deja como previa la de la
+   fracción. La serie es trimestral, así que esa previa puede durar meses.
+   Volver atrás con ella vuelve a servir la fracción bajo «Tasa de desempleo
+   total. En porcentaje.», que es H023. Antes del cambio, mirarla:
+   `SELECT max("Tasa de desempleo total. En porcentaje.") FROM raw."cache_series_desempleo__previa";`.
+   Si da menos de 1, es la fracción: conviene corregir la escritura nueva en
+   vez de volver atrás.
+
+3. La metadata sigue describiendo la versión descartada. Alinear las filas:
+
+   ```sql
+   BEGIN;
+   WITH n AS (SELECT count(*) AS filas FROM raw."cache_series_<clave>")
+   UPDATE raw.cached_datasets SET row_count = n.filas FROM n
+    WHERE table_name = 'cache_series_<clave>';
+   WITH n AS (SELECT count(*) AS filas FROM raw."cache_series_<clave>")
+   UPDATE public.raw_table_versions SET row_count = n.filas FROM n
+    WHERE schema_name = 'raw' AND table_name = 'cache_series_<clave>';
+   WITH n AS (SELECT count(*) AS filas FROM raw."cache_series_<clave>")
+   UPDATE datasets SET row_count = n.filas FROM n
+    WHERE portal = 'series_tiempo' AND source_id = 'series-tiempo-<clave>';
+   COMMIT;
+   ```
+
+   Si la escritura descartada cambió de serie (otro id), `datasets.url`,
+   `title`, `description` y `columns` también quedaron con la serie nueva:
+   volverlos a los de la vieja a mano. Y mientras el catálogo del adaptador y
+   `CAMBIOS_DE_SERIE_APROBADOS` (en `series_tiempo_tasks.py`) digan la serie
+   nueva, la próxima corrida la vuelve a escribir: sacar la aprobación en un
+   PR antes de volver a agendar la ingesta.
+
+Mientras la ingesta esté frenada, la tabla restaurada no se actualiza. Antes de
+volver a agendarla, corregir lo que hizo mala la escritura descartada: la
+primera corrida va a comparar la tabla contra la API y reescribirla si está
+atrás.
+
