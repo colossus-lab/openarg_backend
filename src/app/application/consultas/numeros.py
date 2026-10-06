@@ -142,8 +142,10 @@ class PerfilNumerico:
 
 def _problema(columna: str, ambiguos: Iterable[str], motivo: str) -> str:
     lista = ", ".join(f"«{e}»" for e in ambiguos)
+    # Sin ejemplos cuando no se los pudo buscar (`confirmar_formato`).
+    tiene = f"tiene números como {lista}" if lista else "puede tener números"
     return (
-        f"La columna {columna!r} tiene números como {lista} que se pueden leer de dos formas "
+        f"La columna {columna!r} {tiene} que se pueden leer de dos formas "
         "(por ejemplo «12.500»: doce mil quinientos en formato argentino, doce coma cinco en "
         f"formato inglés) y {motivo}. No calculo sobre esa columna: el error posible es de mil "
         "veces. Mostrá los valores con obtener_datos o usá otra columna."
@@ -159,8 +161,10 @@ def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
       la muestra se leen igual (H041: antes quedaban en NULL).
     - Sin evidencia suficiente, o con evidencia de los dos formatos, y sin
       ambiguos en la muestra: no hace falta decidir (``formato`` None). Los
-      ambiguos que haya fuera de la muestra quedan en NULL, no mal leídos, y
-      el cálculo los cuenta aparte.
+      ambiguos que haya fuera de la muestra quedan en NULL, no mal leídos. Si
+      son de la columna del cálculo, el cálculo los cuenta aparte; si son de
+      un filtro de orden (``>``, ``<``…), quedan afuera sin aviso (H041
+      parcial: contarlos es otra consulta que recorre la tabla).
     - Sin evidencia suficiente, o con evidencia de los dos formatos, y con
       ambiguos: no se puede. Los enteros cortos no son evidencia: "500" y
       "58.333" son también una columna inglesa con tres decimales (H001:
@@ -233,19 +237,35 @@ def expresion_otro_formato(columna: str, formato: str) -> str:
     return f"({x} ~ '{RE_AR}' AND {x} !~ '{RE_AMBIGUO_COMA}')"
 
 
-def confirmar_formato(perfil: PerfilNumerico, del_otro: int | None) -> PerfilNumerico:
+def confirmar_formato(
+    perfil: PerfilNumerico, del_otro: int | None, ambiguos: tuple[str, ...] | None = None
+) -> PerfilNumerico:
     """El perfil, visto cuántos valores del otro formato hay en la columna entera.
 
     ``del_otro`` es la cuenta de ``expresion_otro_formato`` sobre toda la
-    columna, o None si no se pudo hacer (timeout, error). Si la muestra no
-    decidió, o la columna no tiene ninguno, el perfil queda como estaba. Si
-    tiene alguno es mezcla, igual que en la muestra: rechazo si la muestra
-    trae ambiguos, sin formato si no. Si no se pudo contar, sin formato: los
-    ambiguos quedan en NULL y el cálculo los cuenta aparte.
+    columna, o None si no se pudo hacer (timeout, error). ``ambiguos``: hasta
+    tres números ambiguos de la columna entera, que hace falta buscar sólo si
+    hay alguno del otro formato y la muestra no trajo ambiguos; None si no se
+    buscaron o la búsqueda falló.
+
+    - Si la muestra no decidió, o la columna no tiene ninguno del otro
+      formato, el perfil queda como estaba.
+    - Si no se pudo contar, también: vale lo que decidió la muestra, como
+      desde ``TOLERANTE_MAX_FILAS``.
+    - Si tiene alguno es mezcla, igual que en la muestra: rechazo si hay
+      ambiguos (en la muestra o en la columna entera) o no se los pudo
+      buscar; sin formato si no hay ninguno.
+
+    Tercera revisión del PR #148: dejar el formato en None no es neutral si
+    hay ambiguos. El cálculo cuenta aparte los de su columna, pero un filtro
+    ``>`` (en ``agregar`` o ``obtener_datos``) los deja afuera sin aviso. Con
+    la cuenta en timeout, el conteo de partidas con crédito presupuestado
+    mayor a 5 del presupuesto de la APN daba 16.496 en vez de 17.326.
     """
-    if perfil.formato is None or del_otro == 0:
+    if perfil.formato is None or not del_otro:
         return perfil
-    if del_otro is None or not perfil.ambiguos:
+    ejemplos = perfil.ambiguos or ambiguos
+    if ejemplos == ():
         return replace(perfil, formato=None)
     nombre = {FORMATO_AR: "argentino", FORMATO_EN: "inglés"}
     otro = FORMATO_EN if perfil.formato == FORMATO_AR else FORMATO_AR
@@ -256,9 +276,7 @@ def confirmar_formato(perfil: PerfilNumerico, del_otro: int | None) -> PerfilNum
         "la columna entera mezcla los dos formatos: la muestra parecía en formato "
         f"{nombre[perfil.formato]}, pero la tabla tiene {cuantos} en formato {nombre[otro]}"
     )
-    return replace(
-        perfil, formato=None, problema=_problema(perfil.columna, perfil.ambiguos, motivo)
-    )
+    return replace(perfil, formato=None, problema=_problema(perfil.columna, ejemplos or (), motivo))
 
 
 def expresion_numero(columna: str, tipo: str, formato: str | None) -> str:

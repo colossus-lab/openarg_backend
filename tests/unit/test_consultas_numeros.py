@@ -14,11 +14,13 @@ se usaba y Python limpiaba espacios que el SQL dejaba.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
+from app.application.consultas.agregar import PedidoAgregado, ResultadoAgregado, agregar
 from app.application.consultas.numeros import (
     ESPACIOS,
     RE_AMBIGUO,
@@ -37,6 +39,7 @@ from app.application.consultas.numeros import (
 from app.application.consultas.preparar import TOLERANTE_MAX_FILAS, preparar
 from app.application.consultas.sql import CatalogRequestError
 from app.domain.ports.sandbox.sql_sandbox import ColumnValueStats, SandboxResult, TableValueStats
+from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
 
 # Cómo queda una columna de texto limpia en el SQL: los mismos caracteres que
 # saca Python (`ESPACIOS`), no sólo el espacio de `btrim(x)`.
@@ -405,8 +408,10 @@ CONSULTAS_MEDICAS_FILAS = """
 
 class _Tabla:
     """Un sandbox con una sola columna de texto: devuelve la muestra (pg_stats y
-    las primeras filas) y cuenta en la columna entera con las condiciones del
-    SQL que recibe (sus ``~ '…'`` y ``!~ '…'``), como lo haría Postgres."""
+    las primeras filas) y busca o cuenta en la columna entera con las
+    condiciones del SQL que recibe (sus ``~ '…'`` y ``!~ '…'``), como lo haría
+    Postgres. ``error`` hace fallar la cuenta; ``error_busqueda``, la búsqueda
+    de ambiguos."""
 
     def __init__(
         self,
@@ -416,11 +421,13 @@ class _Tabla:
         *,
         estimadas: int | None = None,
         error: str | None = None,
+        error_busqueda: str | None = None,
     ) -> None:
         self.pg_stats, self.filas = pg_stats, filas
         self.columna = [*filas, *resto]
         self.estimadas = len(self.columna) if estimadas is None else estimadas
         self.error = error
+        self.error_busqueda = error_busqueda
         self.consultas: list[tuple[str, int]] = []
 
     async def get_value_stats(self, tabla: str, columnas: list[str]) -> TableValueStats:
@@ -434,25 +441,55 @@ class _Tabla:
     ) -> SandboxResult:
         self.consultas.append((sql, timeout_seconds))
         cuenta = re.search(r"count\(\*\) AS (\w+)", sql)
-        if cuenta is None:
-            return SandboxResult(["v"], [{"v": v} for v in self.filas], len(self.filas), False)
-        if self.error:
-            return SandboxResult([], [], 0, False, error=self.error, error_kind="timeout")
         condiciones = re.findall(r"(!?~) '([^']*)'", sql)
+        if cuenta is None and not condiciones:
+            return SandboxResult(["v"], [{"v": v} for v in self.filas], len(self.filas), False)
+        error = self.error if cuenta else self.error_busqueda
+        if error:
+            return SandboxResult([], [], 0, False, error=error, error_kind="timeout")
         assert condiciones, sql
-        n = sum(
-            all(
+        coinciden = [
+            v
+            for v in self.columna
+            if all(
                 (re.search(patron, v.strip(ESPACIOS)) is not None) == (op == "~")
                 for op, patron in condiciones
             )
-            for v in self.columna
-        )
-        return SandboxResult([cuenta.group(1)], [{cuenta.group(1): n}], 1, False)
+        ]
+        if cuenta is None:
+            alias = re.search(r"AS (\w+) FROM", sql)
+            limite = re.search(r"LIMIT (\d+)$", sql)
+            assert alias and limite, sql
+            filas = [{alias.group(1): v} for v in coinciden[: int(limite.group(1))]]
+            return SandboxResult([alias.group(1)], filas, len(filas), False)
+        return SandboxResult([cuenta.group(1)], [{cuenta.group(1): len(coinciden)}], 1, False)
 
 
 async def _formato(tabla: _Tabla, columna: str = "consultas_medicas") -> str | None:
     prep = await preparar(tabla, "raw.t", {columna: "text"}, [], numericas=[columna])
     return prep.formatos[columna]
+
+
+async def _conteo_con_filtro(tabla: _Tabla, columna: str) -> tuple[ResultadoAgregado, str]:
+    """``agregar``: cuántas filas tienen más de 5 en ``columna``, y el SQL del cálculo."""
+    consultas: list[str] = []
+
+    async def ejecutar(sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        consultas.append(sql)
+        return [{"valor": 1}]
+
+    res = await agregar(
+        tabla,
+        PedidoAgregado(
+            tabla="raw.t",
+            tipos=[(columna, "text")],
+            operacion="conteo",
+            filtros=[{"columna": columna, "operador": ">", "valor": "5"}],
+        ),
+        ejecutar,
+    )
+    [sql] = consultas
+    return res, sql
 
 
 class TestColumnaEnteraEnTablasChicas:
@@ -475,21 +512,70 @@ class TestColumnaEnteraEnTablasChicas:
         [(_, timeout)] = [(sql, t) for sql, t in tabla.consultas if "count(*)" in sql]
         assert timeout < 10  # más corto que el del cálculo, que viene después
 
-    async def test_mezcla_fuera_de_la_muestra_sin_ambiguos_queda_sin_formato(self) -> None:
-        """Como en la muestra: sin ambiguos no hace falta rechazar. Quedan en
-        NULL los de fuera de la muestra y el cálculo los cuenta aparte."""
-        tabla = _Tabla([], [*EVIDENCIA_EN, "500"], ["1.234,5", "12.500"])
+    async def test_mezcla_sin_ningun_ambiguo_en_la_columna_queda_sin_formato(self) -> None:
+        """Sin ambiguos en la columna entera no hace falta rechazar: cada valor
+        se lee solo y ninguno queda en NULL por falta de formato."""
+        tabla = _Tabla([], [*EVIDENCIA_EN, "500"], ["1.234,5", "12"])
         assert await _formato(tabla, "monto") is None
+        [cuenta, busqueda] = [(s, t) for s, t in tabla.consultas if "~" in s]
+        assert "AS del_otro" in cuenta[0] and "AS ambiguo" in busqueda[0]
+        assert busqueda[1] < 10
+        # Las dos pasan el validador del sandbox real.
+        assert _validate_sql(cuenta[0], built=True) is None
+        assert _validate_sql(busqueda[0], built=True) is None
 
-    async def test_si_la_cuenta_no_termina_no_se_decide(self) -> None:
+    async def test_mezcla_con_ambiguos_fuera_de_la_muestra_se_rechaza(self) -> None:
+        """Tercera revisión del PR #148: sin ambiguos en la muestra la mezcla
+        quedaba sin formato, y un filtro `>` sobre la columna dejaba afuera sin
+        aviso el «12.500» de fuera de la muestra (en la columna del cálculo
+        se contaba aparte; en la de un filtro, no). Se buscan en la columna
+        entera, como el otro formato."""
+        tabla = _Tabla([], [*EVIDENCIA_EN, "500"], ["1.234,5", "12.500"])
+        with pytest.raises(CatalogRequestError, match="columna entera") as exc:
+            await _conteo_con_filtro(tabla, "monto")
+        assert "«12.500»" in str(exc.value)
+
+    async def test_si_no_se_pueden_buscar_los_ambiguos_se_rechaza(self) -> None:
+        tabla = _Tabla(
+            [],
+            [*EVIDENCIA_EN, "500"],
+            ["1.234,5"],
+            error_busqueda="canceling statement due to statement timeout",
+        )
+        with pytest.raises(CatalogRequestError, match="columna entera") as exc:
+            await _formato(tabla, "monto")
+        # Sin ejemplos: no se afirma que los tenga.
+        assert "'monto' puede tener números que se pueden leer" in str(exc.value)
+
+    async def test_si_la_cuenta_no_termina_vale_lo_que_dice_la_muestra(self) -> None:
+        """Como desde ``TOLERANTE_MAX_FILAS``. Antes quedaba sin formato, y eso
+        no era neutral: ver el test siguiente."""
         tabla = _Tabla(
             CONSULTAS_MEDICAS_PG_STATS,
             CONSULTAS_MEDICAS_FILAS,
             [],
             error="canceling statement due to statement timeout",
         )
-        assert await _formato(tabla) is None
-        assert leer_numero("120.813", None) is None
+        assert await _formato(tabla) == "en"
+
+    async def test_si_la_cuenta_no_termina_un_filtro_no_deja_afuera_los_ambiguos(self) -> None:
+        """Tercera revisión del PR #148: con la cuenta en timeout el formato
+        quedaba en None, aunque la muestra trajera ambiguos, y un conteo con
+        filtro `>` sobre esa columna los dejaba afuera sin aviso (el aviso de
+        ambiguos sólo mira la columna del cálculo). En staging,
+        credito_presupuestado del presupuesto de la APN (`ec0942ae`): 16.496
+        partidas en vez de 17.326, según estuviera fría o caliente la caché."""
+        tabla = _Tabla(
+            CONSULTAS_MEDICAS_PG_STATS,
+            CONSULTAS_MEDICAS_FILAS,
+            [],
+            error="canceling statement due to statement timeout",
+        )
+        res, sql = await _conteo_con_filtro(tabla, "consultas_medicas")
+        assert res.req.formatos == {"consultas_medicas": "en"}
+        lectura = expresion_numero("consultas_medicas", "text", "en")
+        assert re.search(re.escape(lectura) + r" > :p\d+", sql), sql
+        assert "THEN NULL" not in sql
 
     async def test_en_la_muestra_argentina_se_buscan_ingleses(self) -> None:
         tabla = _Tabla([], [*EVIDENCIA_AR, "12.500"], ["1,234,567"])

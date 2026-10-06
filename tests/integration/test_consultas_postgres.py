@@ -449,6 +449,28 @@ async def test_agregar_rechaza_una_mezcla_que_la_muestra_no_ve() -> None:
             await _agregar(mezclada, operacion="suma", columna="monto")
 
 
+async def test_agregar_busca_los_ambiguos_de_una_mezcla_que_la_muestra_no_ve() -> None:
+    """Tercera revisión del PR #148: la muestra (las primeras 200 filas) es
+    inglesa y no trae ambiguos; al final hay un argentino y un «12.500». Sin
+    formato, el filtro `monto > 5` dejaba afuera el «12.500» sin aviso. Sin el
+    «12.500» no hay nada que leer de dos formas: queda sin formato y cuenta
+    todas las filas que pasan el filtro."""
+    from app.application.public_catalog import CatalogRequestError
+
+    def filas(valores: list[str]) -> str:
+        return ",".join(f"('x', 'x', '{v}', 'x')" for v in valores)
+
+    muestra = ["1,234.5", "7.25", "1,000,000", "3.5", "12,345.67"] * 40
+    filtro = [{"columna": "monto", "operador": ">", "valor": "5"}]
+    with _tabla_de_prueba(filas([*muestra, "1.234,5"]), autovacuum=False) as limpia:
+        res = await _agregar(limpia, operacion="conteo", filtros=filtro)
+        assert res.req.formatos == {"monto": None}
+        assert res.grupos == [{"valor": 161}]  # 4 de cada 5 de la muestra, y «1.234,5»
+    with _tabla_de_prueba(filas([*muestra, "1.234,5", "12.500"]), autovacuum=False) as mezclada:
+        with pytest.raises(CatalogRequestError, match="«12.500»"):
+            await _agregar(mezclada, operacion="conteo", filtros=filtro)
+
+
 def test_la_cuenta_de_ambiguos_corre_con_los_filtros_del_calculo(tabla: str) -> None:
     """H041: las filas con un número ambiguo se cuentan en otra consulta
     (revisión del PR #148), con los parámetros ligados del cálculo. En `tabla`

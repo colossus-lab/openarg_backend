@@ -31,8 +31,10 @@ from app.application.consultas.filtros import (
     es_columna_de_texto,
 )
 from app.application.consultas.numeros import (
+    ESPACIOS,
     PerfilNumerico,
     confirmar_formato,
+    expresion_ambiguo,
     expresion_otro_formato,
     perfil_columna,
 )
@@ -48,7 +50,7 @@ logger = logging.getLogger(__name__)
 # que decidió la muestra (`numeros.confirmar_formato`).
 TOLERANTE_MAX_FILAS = 1_000_000
 MUESTRA_NUMEROS = 200
-# La cuenta de la confirmación: si no termina, el formato queda sin decidir.
+# La cuenta de la confirmación: si no termina, vale lo que decidió la muestra.
 TIMEOUT_CONFIRMAR_S = 5
 
 
@@ -141,12 +143,44 @@ async def _contar_otro_formato(sandbox: Any, tabla: str, columna: str, formato: 
             timeout_seconds=TIMEOUT_CONFIRMAR_S,
         )
     except Exception:
-        logger.warning("consultas: no se pudo confirmar el formato de %s", columna, exc_info=True)
+        logger.warning(
+            "consultas: no se pudo confirmar el formato de %s; vale el de la muestra",
+            columna,
+            exc_info=True,
+        )
         return None
     if result.error or not result.rows or result.rows[0].get("del_otro") is None:
-        logger.info("consultas: no se pudo confirmar el formato de %s: %s", columna, result.error)
+        logger.warning(
+            "consultas: no se pudo confirmar el formato de %s; vale el de la muestra: %s",
+            columna,
+            result.error,
+        )
         return None
     return int(result.rows[0]["del_otro"])
+
+
+async def _buscar_ambiguos(sandbox: Any, tabla: str, columna: str) -> tuple[str, ...] | None:
+    """Hasta tres números ambiguos de la columna entera; None si la búsqueda falla.
+
+    Sólo corre si la columna mezcla los dos formatos y la muestra no trajo
+    ambiguos (`numeros.confirmar_formato`): ahí hace falta saber si hay alguno.
+    """
+    try:
+        result = await ejecutar(
+            sandbox,
+            f"SELECT {quote_ident(columna)}::text AS ambiguo FROM {quote_qualified(tabla)} "
+            f"WHERE {expresion_ambiguo(columna, 'text')} LIMIT 3",
+            {},
+            timeout_seconds=TIMEOUT_CONFIRMAR_S,
+        )
+    except Exception:
+        logger.warning("consultas: no se pudieron buscar ambiguos en %s", columna, exc_info=True)
+        return None
+    if result.error:
+        logger.warning("consultas: no se pudieron buscar ambiguos en %s: %s", columna, result.error)
+        return None
+    valores = (str(row.get("ambiguo")).strip(ESPACIOS) for row in result.rows)
+    return tuple(dict.fromkeys(valores))
 
 
 async def perfiles_numericos(
@@ -182,7 +216,10 @@ async def perfiles_numericos(
         perfil = perfil_columna(columna, valores)
         if perfil.formato is not None and es_tolerante(filas):
             del_otro = await _contar_otro_formato(sandbox, tabla, columna, perfil.formato)
-            perfil = confirmar_formato(perfil, del_otro)
+            ambiguos: tuple[str, ...] | None = None
+            if del_otro and not perfil.ambiguos:
+                ambiguos = await _buscar_ambiguos(sandbox, tabla, columna)
+            perfil = confirmar_formato(perfil, del_otro, ambiguos)
         perfiles[columna] = perfil
     return perfiles
 
