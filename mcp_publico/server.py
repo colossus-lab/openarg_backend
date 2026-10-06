@@ -328,8 +328,9 @@ async def agregar_datos(
     no tiene el tope de 500 filas y gasta muchos menos tokens.
     - `operacion`: "suma", "promedio", "conteo", "minimo" o "maximo".
     - `columna`: la que se suma/promedia/etc. (nombres exactos de `describir_tabla`); no
-      va con "conteo". Las columnas de texto con números se leen según su formato
-      (1.234,5 o 1,234.5); si el formato es ambiguo, no calcula y lo dice.
+      va con "conteo", que cuenta filas (si la mandás, da error). Las columnas de texto
+      con números se leen según su formato (1.234,5 o 1,234.5); si el formato es
+      ambiguo, no calcula y lo dice.
     - `agrupar_por`: hasta 3 columnas, p. ej. ["jurisdiccion_desc"] para un ranking.
     - `filtros`, `desde`, `hasta`, `columna_fecha`: como en `obtener_datos` (hasta 6 filtros).
     - `ordenar_por`: "valor" (por defecto, para rankings) o una columna de `agrupar_por`

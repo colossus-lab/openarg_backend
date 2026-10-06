@@ -147,6 +147,17 @@ async def test_calcular_agrupado_sin_filas_tampoco() -> None:
     assert json.loads(out.content)["resultado"] is None
 
 
+async def test_calcular_conteo_con_columna_vuelve_al_modelo_sin_rotular_mal() -> None:
+    """H109 (revisión del 05-oct): antes salía «conteo de credito_devengado»
+    con el total de filas. Ahora el modelo recibe el porqué y reintenta."""
+    sandbox = Sandbox(TYPES, [("AS valor", [{"valor": 10, "__filas": 10}])])
+    with pytest.raises(ToolInputError, match="conteo"):
+        await Calcular().run(
+            {"tabla": T, "operacion": "conteo", "columna": "credito_devengado"}, _ctx(sandbox)
+        )
+    assert sandbox.calls == []  # no llegó a consultar
+
+
 async def test_calcular_no_suma_una_columna_de_numeros_ambiguos() -> None:
     sandbox = Sandbox(TYPES, [("AS v FROM", [{"v": "27.830"}, {"v": "7.000"}, {"v": "15.000"}])])
     with pytest.raises(ToolInputError, match="mil veces"):

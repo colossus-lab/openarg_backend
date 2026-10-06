@@ -182,6 +182,15 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
         raise CatalogRequestError(f"`operacion` es una de: {', '.join(OPERATIONS)}.")
     if req.operacion != "conteo":
         known(req.columna, "La columna")
+    elif req.columna:
+        # El conteo es count(*) (o la suma del ponderador): con `columna` salía
+        # rotulado "conteo de <columna>", también con una que no existe
+        # (revisión independiente del 05-oct, H109). No se repite el texto.
+        raise CatalogRequestError(
+            "Con operacion=conteo no va `columna`: el conteo cuenta filas (o suma "
+            "`ponderar_por`), no los valores de una columna. Sacá `columna`; para contar "
+            "sólo las filas que cumplen una condición usá `filtros`."
+        )
     if req.ponderar_por:
         known(req.ponderar_por, "La columna de ponderación")
     if len(req.agrupar_por) > MAX_GROUP_BY:

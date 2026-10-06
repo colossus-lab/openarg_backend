@@ -138,7 +138,7 @@
       <tbody>
         <tr><td><code>tabla</code></td><td>texto</td><td>La tabla, como la devuelve <code>buscar_datasets</code>.</td></tr>
         <tr><td><code>operacion</code></td><td>texto</td><td><code>suma</code>, <code>promedio</code>, <code>conteo</code>, <code>minimo</code> o <code>maximo</code>.</td></tr>
-        <tr><td><code>columna</code></td><td>texto, opcional</td><td>La columna que se suma, promedia, etc. No va con <code>conteo</code>. Las columnas de texto con números se leen según su formato (<code>1.234,5</code> o <code>1,234.5</code>); si el formato es ambiguo, no calcula y lo dice.</td></tr>
+        <tr><td><code>columna</code></td><td>texto, opcional</td><td>La columna que se suma, promedia, etc. No va con <code>conteo</code>, que cuenta filas: si viene, el pedido se rechaza con un 400. Las columnas de texto con números se leen según su formato (<code>1.234,5</code> o <code>1,234.5</code>); si el formato es ambiguo, no calcula y lo dice.</td></tr>
         <tr><td><code>agrupar_por</code></td><td>lista, opcional</td><td>Hasta 3 columnas: <code>["jurisdiccion_desc"]</code> da un ranking por jurisdicción.</td></tr>
         <tr><td><code>filtros</code>, <code>desde</code>, <code>hasta</code>, <code>columna_fecha</code></td><td>opcionales</td><td>Como en <code>obtener_datos</code> (hasta 6 filtros).</td></tr>
         <tr><td><code>ordenar_por</code></td><td>texto, opcional</td><td><code>valor</code> (por defecto) o una columna de <code>agrupar_por</code>, por ejemplo el año para una serie.</td></tr>
