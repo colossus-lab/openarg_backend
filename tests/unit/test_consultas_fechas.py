@@ -178,10 +178,17 @@ class TestCaminoRapido:
         assert formato_uniforme(["2019-05-28"]) is None  # muestra muy chica
 
     def test_tabla_grande_con_una_forma_dominante_usa_la_guarda(self) -> None:
-        """Molinetes del subte: 200 valores d/m/aaaa y un "8/20/2025" (m/d)."""
-        muestra = ["1/4/2025"] * 200 + ["8/20/2025"]
+        """Molinetes del subte: d/m/aaaa y un "8/20/2025" (m/d).
+
+        La muestra real (staging, 05-oct, 8,4 M de filas) tiene 114 valores que
+        sólo pueden ser d/m y uno que sólo puede ser m/d. La de antes (200
+        «1/4/2025» y el «8/20/2025») no tenía ninguno que sólo pudiera ser d/m:
+        por la regla de la revisión independiente (H003) esa columna es m/d.
+        """
+        muestra = ["17/7/2025", "18/8/2025", "25/7/2025", "13/6/2025", "5/6/2025"] * 40
+        muestra.append("8/20/2025")
         assert formato_uniforme(muestra, filas=8_427_643) == "dmy*"
-        assert formato_uniforme(muestra, filas=5_000) is None
+        assert formato_uniforme(["1/4/2025"] * 200 + ["8/20/2025"], filas=8_427_643) == "mdy"
 
     def test_la_expresion_directa_no_tiene_el_case(self) -> None:
         sql = expresion_fecha("fecha_de_inicio", "text", "fin", "iso_dia")
@@ -228,3 +235,218 @@ class TestPeriodo:
     def test_desde_y_hasta_tienen_forma_iso(self, valor: str) -> None:
         with pytest.raises(CatalogRequestError, match="fecha"):
             validar_fecha(valor, "desde")
+
+
+# ── revisión independiente del 05-oct (H002, H003, H010) ───────────────────
+
+
+class TestAnioYMesSeparados:
+    """H002 y H010: en una tabla con `anio` y `mes`, la fecha era el año solo.
+
+    Un pedido de junio de 2019 se solapaba con todo 2019 y devolvía los doce
+    meses (staging, capturas_maritimas 2db47cbb: 384.639,77 en vez de
+    33.071,94, sin aviso), y `orden=desc` traía enero como "lo último".
+    """
+
+    def test_la_columna_de_anio_recuerda_la_de_mes(self) -> None:
+        col = resolver_columna_fecha([("anio", "bigint"), ("mes", "bigint"), ("captura", "text")])
+        assert col is not None
+        assert (col.nombre, col.clase, col.mes, col.tipo_mes) == ("anio", "anio", "mes", "bigint")
+
+    @pytest.mark.parametrize(
+        ("anio", "mes"),
+        [
+            ("reclamo_ano", "reclamo_mes_nro"),
+            ("impacto_presupuestario_anio", "impacto_presupuestario_mes"),
+            ("año", "n° mes"),
+            ("Año", "MES"),
+            ("year", "month"),
+            ("anio", "nombre_mes"),
+        ],
+    )
+    def test_reconoce_la_columna_de_mes(self, anio: str, mes: str) -> None:
+        col = resolver_columna_fecha([(anio, "bigint"), (mes, "text"), ("valor", "text")])
+        assert col is not None and col.nombre == anio and col.mes == mes
+
+    def test_no_toma_cualquier_columna_que_diga_mes(self) -> None:
+        """EPH: `pp04b3_mes` es el mes en que empezó un trabajo, no el del dato."""
+        col = resolver_columna_fecha(
+            [
+                ("anio", "bigint"),
+                ("pp04b3_mes", "text"),
+                ("mes_transferencia", "text"),
+                ("meses_de_atraso", "bigint"),
+                ("mes_carga", "text"),
+            ]
+        )
+        assert col is not None and col.mes is None
+
+    def test_prefiere_el_numero_del_mes_al_nombre(self) -> None:
+        col = resolver_columna_fecha(
+            [
+                ("reclamo_ano", "bigint"),
+                ("reclamo_mes_nombre", "text"),
+                ("reclamo_mes_nro", "bigint"),
+            ]
+        )
+        assert col is not None and col.mes == "reclamo_mes_nro"
+
+    def test_un_pedido_mensual_usa_el_anio_y_el_mes(self) -> None:
+        col = resolver_columna_fecha([("anio", "bigint"), ("mes", "bigint")])
+        assert col is not None
+        params = Params()
+        cond = condiciones_periodo(col, "2019-06", "2019-06", params)
+        assert params.values == {"p0": "2019-06-01", "p1": "2019-06-31"}
+        assert len(cond) == 2 and all('btrim("mes"::text)' in c for c in cond)
+
+    @pytest.mark.parametrize(
+        ("desde", "hasta"),
+        [("2019", "2019"), ("2019-01", "2019-12"), ("2019-01-01", "2020-12-31")],
+    )
+    def test_un_pedido_de_anios_enteros_sigue_usando_el_anio(self, desde: str, hasta: str) -> None:
+        col = resolver_columna_fecha([("anio", "bigint"), ("mes", "bigint")])
+        assert col is not None
+        cond = condiciones_periodo(col, desde, hasta, Params())
+        assert not any('"mes"' in c for c in cond)
+
+    def test_sin_columna_de_mes_un_pedido_mensual_se_rechaza(self) -> None:
+        col = resolver_columna_fecha([("anio", "bigint"), ("valor", "text")])
+        assert col is not None
+        with pytest.raises(CatalogRequestError, match="años enteros"):
+            condiciones_periodo(col, "2019-06", "2019-06", Params())
+        # El año entero escrito con meses o con días se acepta.
+        assert condiciones_periodo(col, "2019-01", "2019-12", Params())
+        assert condiciones_periodo(col, "2019-01-01", "2019-12-31", Params())
+
+    def test_una_columna_de_anio_con_meses_adentro_no_se_rechaza(self) -> None:
+        """`ano_mes` con "2016-05" (mercado inmobiliario de CABA): el valor ya trae el mes."""
+        col = ColumnaFecha("ano_mes", "text", "anio", formato="iso_mes")
+        assert condiciones_periodo(col, "2016-06", "2016-06", Params())
+
+    def test_una_columna_de_anio_de_texto_se_decide_con_la_muestra(self) -> None:
+        from app.application.consultas.preparar import con_formato
+        from app.domain.ports.sandbox.sql_sandbox import ColumnValueStats, TableValueStats
+
+        def stats(valores: list[str]) -> TableValueStats:
+            return TableValueStats(
+                estimated_rows=500,
+                columns={"anio": ColumnValueStats("anio", most_common_vals=valores)},
+            )
+
+        col = ColumnaFecha("anio", "text", "anio")
+        # Sin la muestra (la primera validación, que no toca la base) no se decide.
+        assert condiciones_periodo(col, "2019-06", "2019-06", Params())
+        # Años, aunque haya una fila «Total» o no haya estadísticas: se rechaza.
+        for anual in (con_formato(col, stats(["2019", "2020", "Total"])), con_formato(col, None)):
+            with pytest.raises(CatalogRequestError, match="años enteros"):
+                condiciones_periodo(anual, "2019-06", "2019-06", Params())
+        # Meses adentro: se filtra por el valor.
+        mensual = con_formato(col, stats(["2016-05", "2016-06", "2016-07"]))
+        assert condiciones_periodo(mensual, "2016-06", "2016-06", Params())
+
+    @pytest.mark.parametrize(
+        ("valor", "mes"),
+        [
+            (6, "06"),
+            ("6", "06"),
+            ("06", "06"),
+            ("6.0", "06"),
+            (6.0, "06"),
+            ("Junio", "06"),
+            ("SEPTIEMBRE", "09"),
+            ("Setiembre", "09"),
+            ("dic.", "12"),
+            ("Diciembre*", "12"),
+            ("ene-17", "01"),
+            ("10/2020", "10"),
+            ("2024-07-01 00:00:00", "07"),
+        ],
+    )
+    def test_el_mes_se_lee_en_sus_formas(self, valor: object, mes: str) -> None:
+        from app.application.consultas.fechas import mes_de
+
+        assert mes_de(valor) == mes
+
+    @pytest.mark.parametrize("valor", ["Total", "13", "0", "99", "", None, "Marcas", "Mayor"])
+    def test_lo_que_no_es_un_mes_es_none(self, valor: object) -> None:
+        from app.application.consultas.fechas import mes_de
+
+        assert mes_de(valor) is None
+
+
+class TestDiaMesOMesDia:
+    """H003: RE_DMY sólo entendía d/m. En una columna m/d (Pauta publicitaria de
+    CABA, c7fd6b9c: 2.719 de 3.655 filas con el segundo campo > 12 y ninguna con
+    el primero) «3/4/2025» quedaba en abril y «5/31/2021» en NULL: mayo de 2021
+    daba 53 filas de otros meses en vez de 292, sin aviso."""
+
+    # Valores de la muestra de pg_stats de esa columna en staging.
+    PAUTA = [
+        "3/30/2021",
+        "8/31/2021",
+        "6/15/2021",
+        "5/18/2021",
+        "12/27/2021",
+        "4/20/2021",
+        "10/6/2021",
+        "11/4/2021",
+        "1/19/2021",
+    ]
+    # mart.pauta_oficial: une fuentes d/m («15/01/2020») y m/d («10/31/2022»).
+    MIXTA = ["15/01/2020", "01/06/2014", "10/31/2022", "12/21/2021", "2018-10-01", "jun-18"]
+    MDY = "(0?[1-9]|1[0-2])[/-](0?[1-9]|[12][0-9]|3[01])[/-]"
+    DMY = "(0?[1-9]|[12][0-9]|3[01])[/-](0?[1-9]|1[0-2])[/-]"
+
+    def test_una_columna_mes_dia_se_lee_mes_dia(self) -> None:
+        formato = formato_uniforme(self.PAUTA)
+        assert formato == "mdy"
+        sql = expresion_fecha("FECHA", "text", "inicio", formato)
+        assert "CASE" not in sql  # camino rápido, como d/m
+        # El mes es el primer campo y el día el segundo.
+        assert sql.index("'/', 1)") < sql.index("'/', 2)")
+
+    def test_la_lectura_mes_dia_en_python(self) -> None:
+        assert fecha_iso("3/4/2025", lectura="mdy") == "2025-03-04"
+        assert fecha_iso("5/31/2021", lectura="mdy") == "2021-05-31"
+        assert fecha_iso("31/5/2021", lectura="mdy") is None
+        assert fecha_iso("3/4/2025") == "2025-04-03"  # por defecto, d/m como siempre
+
+    def test_la_lectura_se_decide_por_columna(self) -> None:
+        from app.application.consultas.fechas import lectura_dia_mes
+
+        assert lectura_dia_mes(self.PAUTA) == "mdy"
+        assert lectura_dia_mes(["15/1/2018", "1/10/2017", "3/4/2025"]) == "dmy"
+        assert lectura_dia_mes(["3/4/2025", "5/6/2025"]) == "dmy"  # nada lo decide
+        assert lectura_dia_mes(self.MIXTA) == "mixta"
+        assert lectura_dia_mes(["2024-03-05", "Junio de 2026"]) == "dmy"
+
+    def test_formas_mezcladas_con_mes_dia_leen_mes_dia(self) -> None:
+        formato = formato_uniforme([*self.PAUTA, "2021-05-31", "Mayo de 2021"])
+        assert formato is not None  # antes: None, el CASE que sólo entiende d/m
+        col = ColumnaFecha("FECHA", "text", formato=formato)
+        cond = condiciones_periodo(col, "2021-05", None, Params())
+        # «5/31/2021» entra en el CASE como mes/día: «5» es el mes.
+        assert self.MDY in cond[0] and self.DMY not in cond[0]
+
+    def test_evidencia_mixta_sólo_filtra_años_enteros(self) -> None:
+        col = ColumnaFecha("periodo", "text", formato=formato_uniforme(self.MIXTA))
+        with pytest.raises(CatalogRequestError, match="mezcla"):
+            condiciones_periodo(col, "2021-05", "2021-05", Params())
+        # El año de cada fila sí es seguro: lee las dos formas (antes «10/31/2022»
+        # quedaba en NULL y salía de 2022).
+        cond = condiciones_periodo(col, "2022", "2022", Params())
+        assert self.MDY in cond[0] and self.DMY in cond[0]
+        assert fecha_iso("10/31/2022", lectura="mixta") == "2022-10-31"
+        assert fecha_iso("01/06/2014", lectura="mixta") == "2014-06-01"
+
+    def test_evidencia_mixta_avisa(self) -> None:
+        from app.application.consultas.fechas import aviso_lectura_fecha
+
+        col = ColumnaFecha("periodo", "text", formato=formato_uniforme(self.MIXTA))
+        aviso = aviso_lectura_fecha(col) or ""
+        assert "«periodo»" in aviso and "mezcla" in aviso
+        assert aviso_lectura_fecha(ColumnaFecha("FECHA", "text", formato="mdy")) is None
+
+    def test_tabla_grande_mixta_sin_forma_dominante_no_usa_la_guarda(self) -> None:
+        muestra = ["15/1/2020", "1/31/2020"] * 50
+        assert formato_uniforme(muestra, filas=8_000_000) == formato_uniforme(self.MIXTA)

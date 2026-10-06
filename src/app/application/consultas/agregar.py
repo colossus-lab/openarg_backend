@@ -39,7 +39,7 @@ from app.application.answers.aggregates import (
     build_aggregate_query,
     numeric_columns,
 )
-from app.application.consultas.fechas import aviso_formato_guardado
+from app.application.consultas.fechas import aviso_lectura_fecha
 from app.application.consultas.filtros import leer_filtros, notas_de_filtros, validar_filtros
 from app.application.consultas.preparar import preparar
 from app.application.consultas.sugerencias import diagnosticar_vacio
@@ -213,7 +213,7 @@ async def agregar(sandbox: Any, pedido: PedidoAgregado, ejecutar: EjecutarSQL) -
     # no se la presenta como el total del cálculo.
     parcial = truncado and not (rows and rows[0].get(FILAS_TOTAL) is not None)
     notas = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
-    aviso_fecha = aviso_formato_guardado(query.fecha) if (query.desde or query.hasta) else None
+    aviso_fecha = aviso_lectura_fecha(query.fecha) if (query.desde or query.hasta) else None
     if aviso_fecha:
         notas.append(aviso_fecha)
     valorada = req.ponderar_por if req.operacion == "conteo" else req.columna

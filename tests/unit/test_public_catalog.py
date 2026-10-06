@@ -261,6 +261,53 @@ class TestFechasQueAntesNoSeReconocian:
         assert q.fecha is not None and q.fecha.nombre == "fecha_fin"
 
 
+class TestTablasConAnioYMes:
+    """Revisión independiente del 05-oct, H002 y H010 (staging, sólo lectura).
+
+    teus_movilizados 7abdb8a6 tiene `anio` y `mes`: con `orden=desc` el ORDER BY
+    era `anio DESC, ctid` y "lo último" salía enero de 2025 (el último real es
+    septiembre); con desde=hasta=2025-06 entraba el año entero (701.748 TEUs
+    en vez de 81.208).
+    """
+
+    TIPOS = [("anio", "bigint"), ("mes", "bigint"), ("puerto", "text"), ("teus", "bigint")]
+
+    def _req(self, **kw: object) -> DataRequest:
+        return DataRequest(
+            table="raw.datos_gob_ar__teus_movilizados__7abdb8a6__v1",
+            available_columns=[c for c, _ in self.TIPOS],
+            column_types=self.TIPOS,
+            **kw,  # type: ignore[arg-type]
+        )
+
+    def test_desc_ordena_por_anio_y_despues_por_mes(self) -> None:
+        q = build_data_query(self._req(orden="desc", limite=3))
+        orden = q.sql.split(" ORDER BY ", 1)[1]
+        anio, mes, resto = orden.split(" DESC NULLS LAST, ")
+        assert '"anio"' in anio and '"mes"' not in anio
+        assert '"mes"' in mes
+        assert resto == "ctid LIMIT 3"
+        assert _validate_sql(q.sql, built=True) is None
+
+    def test_un_pedido_mensual_filtra_el_mes(self) -> None:
+        q = build_data_query(self._req(desde="2025-06", hasta="2025-06"))
+        where = q.sql.split(" WHERE ", 1)[1].split(" ORDER BY ", 1)[0]
+        assert '"mes"' in where
+        assert q.params == {"p0": "2025-06-01", "p1": "2025-06-31"}
+        assert _validate_sql(q.sql, built=True) is None
+
+    def test_sin_mes_un_pedido_mensual_se_rechaza(self) -> None:
+        with pytest.raises(CatalogRequestError, match="años enteros"):
+            build_data_query(
+                DataRequest(
+                    table=_T,
+                    available_columns=["anio", "valor"],
+                    column_types=[("anio", "bigint"), ("valor", "text")],
+                    desde="2025-06",
+                )
+            )
+
+
 class TestTheSandboxValidatorAcceptsWhatWeBuild:
     """Las consultas pasan igual por el validador del sandbox (segunda barrera).
 

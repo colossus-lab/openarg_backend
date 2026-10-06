@@ -36,7 +36,7 @@ from app.application.api_key_service import check_catalog_rate_limit
 from app.application.catalog.collapse import collapse_hits
 from app.application.catalog.national_prior import national_prior
 from app.application.consultas.agregar import PedidoAgregado, agregar
-from app.application.consultas.fechas import aviso_formato_guardado
+from app.application.consultas.fechas import aviso_lectura_fecha
 from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import (
     Preparado,
@@ -645,7 +645,7 @@ async def obtener_datos(
                 raise HTTPException(status_code=400, detail=str(exc)) from None
             aviso, sugerencias = diag.aviso, diag.sugerencias or None
         notas = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
-        aviso_fecha = aviso_formato_guardado(query.fecha)
+        aviso_fecha = aviso_lectura_fecha(query.fecha)
         if aviso_fecha:
             notas.append(aviso_fecha)
         notas.extend(_notas_de_orden(query.orden, body, truncado, filas_tabla))

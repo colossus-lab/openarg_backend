@@ -105,6 +105,58 @@ def test_los_blancos_se_pliegan_igual_que_en_python() -> None:
     assert {v: p for v, p in rows} == {v: plegar(v) for v in textos}
 
 
+# Revisión independiente del 05-oct: fechas m/d (H003) y el mes de una columna
+# aparte (H002). Verificado también contra el Postgres de staging (sólo
+# lectura) el 06-oct.
+FECHAS_CON_BARRAS = [
+    *FECHAS,
+    "5/31/2021",
+    "3/4/2025",
+    "12/31/2021 10:00",
+    "31/5/2021",
+    "10/31/2022",
+    "01/06/2014",
+    "15/01/2020",
+]
+
+
+@pytest.mark.parametrize("formato", [None, "case_mdy", "case_mixta"])
+@pytest.mark.parametrize("modo", ["iso", "inicio", "fin"])
+def test_las_lecturas_dia_mes_coinciden_con_python(modo: str, formato: str | None) -> None:
+    from app.application.consultas.fechas import lectura_de
+
+    engine = _engine()
+    values, params = _values(FECHAS_CON_BARRAS)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT v, {expresion_fecha('v', 'text', modo, formato)} AS iso "
+                f"FROM (VALUES {values}) AS t(v)"
+            ),
+            params,
+        ).fetchall()
+    lectura = lectura_de(formato)
+    assert {v: iso for v, iso in rows} == {
+        v: fecha_iso(v, modo, lectura) for v in FECHAS_CON_BARRAS
+    }
+
+
+MESES = ["6", "06", "6.0", "12", "13", "0", "99", "Junio", "ENERO", "Diciembre*", "ene-17"]
+MESES += ["Setiembre", "sept.", "Marcas", "Total", "10/2020", "2024-07-01 00:00:00", "", " 7 "]
+
+
+def test_la_expresion_del_mes_coincide_con_python() -> None:
+    from app.application.consultas.fechas import expresion_mes, mes_de
+
+    engine = _engine()
+    values, params = _values(MESES)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(f"SELECT v, {expresion_mes('v')} AS m FROM (VALUES {values}) AS t(v)"), params
+        ).fetchall()
+    assert {v: m for v, m in rows} == {v: mes_de(v) for v in MESES}
+
+
 @pytest.mark.parametrize("formato", [None, "ar", "en"])
 def test_la_expresion_de_numeros_coincide_con_python(formato: str | None) -> None:
     engine = _engine()
@@ -479,3 +531,98 @@ async def test_un_valor_con_dos_espacios_se_encuentra_copiado_tal_cual() -> None
     finally:
         with engine.begin() as conn:
             conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+@pytest.fixture
+def tabla_mensual():
+    """Como teus_movilizados (staging): `anio` y `mes` separados, un dato por mes."""
+    engine = _engine()
+    name = f"cache_test_anio_mes_{uuid.uuid4().hex[:8]}"
+    with engine.begin() as conn:
+        conn.execute(
+            text(f'CREATE TABLE public."{name}" (anio bigint, mes text, puerto text, teus text)')
+        )
+        filas = [f"(2024, '{m}', 'Dock Sud', '{m * 10}')" for m in range(1, 13)]
+        filas += [f"(2025, '{m}', 'Dock Sud', '{m * 100}')" for m in range(1, 10)]
+        # Un mes escrito con el nombre y una fila de total, que no es de ningún mes.
+        filas += ["(2025, 'Junio', 'La Plata', '7')", "(2025, 'Total', 'Dock Sud', '4500')"]
+        conn.execute(text(f'INSERT INTO public."{name}" VALUES ' + ", ".join(filas)))
+    yield name
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+_TIPOS_MENSUAL = [("anio", "bigint"), ("mes", "text"), ("puerto", "text"), ("teus", "text")]
+
+
+async def test_un_mes_sobre_anio_y_mes_suma_solo_ese_mes(tabla_mensual: str) -> None:
+    """H002: antes entraba el año entero (4500 + 7 + la suma de los nueve meses)."""
+    res = await _agregar_en(
+        tabla_mensual,
+        _TIPOS_MENSUAL,
+        operacion="suma",
+        columna="teus",
+        desde="2025-06",
+        hasta="2025-06",
+    )
+    assert res.grupos == [{"valor": Decimal("607")}]  # 600 de Dock Sud y 7 de La Plata
+    assert res.filas_usadas == 2
+
+
+async def test_el_anio_entero_sigue_entrando_entero(tabla_mensual: str) -> None:
+    res = await _agregar_en(
+        tabla_mensual, _TIPOS_MENSUAL, operacion="conteo", desde="2025-01", hasta="2025-12"
+    )
+    assert res.grupos == [{"valor": 11}]  # nueve meses, «Junio» y la fila de total
+
+
+def test_orden_desc_trae_el_ultimo_mes(tabla_mensual: str) -> None:
+    """H010: con `ORDER BY anio DESC, ctid` salía enero de 2025."""
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    q = build_data_query(
+        DataRequest(
+            table=tabla_mensual,
+            available_columns=[c for c, _ in _TIPOS_MENSUAL],
+            column_types=_TIPOS_MENSUAL,
+            columns=["anio", "mes"],
+            orden="desc",
+            limite=1,
+        )
+    )
+    result = PgSandboxAdapter()._execute_sync(q.sql, 10, q.params)
+    assert result.error is None, (result.error, q.sql)
+    assert result.rows == [{"anio": 2025, "mes": "9"}]
+
+
+@pytest.fixture
+def tabla_mes_dia():
+    """Como la Pauta publicitaria de CABA (staging, c7fd6b9c): fechas m/d/aaaa."""
+    engine = _engine()
+    name = f"cache_test_mes_dia_{uuid.uuid4().hex[:8]}"
+    fechas = [f"5/{d}/2021" for d in range(1, 32)]  # mayo entero
+    fechas += [f"{m}/15/2021" for m in (3, 4, 6, 8)] + ["3/4/2021", "8/5/2021", "12/30/2021"]
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE public."{name}" (fecha_pauta text, monto text)'))
+        conn.execute(
+            text(
+                f'INSERT INTO public."{name}" VALUES ' + ", ".join(f"('{f}', '1')" for f in fechas)
+            )
+        )
+        # La lectura d/m o m/d sale de la muestra de pg_stats.
+        conn.execute(text(f'ANALYZE public."{name}"'))
+    yield name
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+async def test_un_mes_sobre_fechas_mes_dia(tabla_mes_dia: str) -> None:
+    """H003: leídas d/m, mayo de 2021 daba 2 filas: «5/5/2021» y «8/5/2021» (de agosto)."""
+    res = await _agregar_en(
+        tabla_mes_dia,
+        [("fecha_pauta", "text"), ("monto", "text")],
+        operacion="conteo",
+        desde="2021-05",
+        hasta="2021-05",
+    )
+    assert res.grupos == [{"valor": 31}]

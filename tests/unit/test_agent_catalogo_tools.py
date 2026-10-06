@@ -305,6 +305,32 @@ async def test_describir_tabla_no_se_cae_si_falla_el_periodo() -> None:
     assert payload["muestra"] == [{"TITULO": "x"}]
 
 
+async def test_describir_tabla_avisa_si_reconoce_menos_del_95_por_ciento() -> None:
+    """Revisión independiente del 05-oct, H003: en la Pauta publicitaria de CABA
+    (m/d) se reconocían 936 de 3.655 fechas y sólo se avisaba con cero."""
+    sandbox = Sandbox(
+        [("FECHA", "text"), ("MONTO", "text")],
+        [
+            (
+                "AS reconocidas",
+                [
+                    {
+                        "desde": "2021-01-04",
+                        "hasta": "2021-12-11",
+                        "reconocidas": 936,
+                        "con_valor": 3655,
+                    }
+                ],
+            ),
+            ("LIMIT 5", [{"FECHA": "5/31/2021"}]),
+        ],
+    )
+    out = await DescribirTabla().run({"tabla": T}, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["desde"] == "2021-01-04"  # el período se informa igual
+    assert "936 de 3655" in payload["aviso_fecha"] and "«FECHA»" in payload["aviso_fecha"]
+
+
 # ── revisión del PR #133 ────────────────────────────────────
 
 

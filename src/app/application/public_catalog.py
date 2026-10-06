@@ -23,9 +23,9 @@ from typing import Any
 
 from app.application.consultas.fechas import (
     ColumnaFecha,
+    claves_orden,
     condiciones_periodo,
     consulta_rango,
-    orden_fecha,
     resolver_columna_fecha,
     sin_columna_fecha,
     validar_fecha,
@@ -267,8 +267,11 @@ def build_data_query(req: DataRequest) -> DataQuery:
     if fecha is not None:
         # Las fechas que no se reconocen van al final en los dos sentidos:
         # antes, con el orden del texto crudo, "1/9/2025" quedaba como el
-        # último dato de una serie que llega a 2026.
-        sql += f" ORDER BY {orden_fecha(fecha)} {orden.upper()} NULLS LAST"
+        # último dato de una serie que llega a 2026. En una tabla con año y
+        # mes separados, el mes es la segunda clave: con el año solo,
+        # `orden=desc` traía enero como el último dato (H010).
+        sentido = f"{orden.upper()} NULLS LAST"
+        sql += " ORDER BY " + ", ".join(f"{clave} {sentido}" for clave in claves_orden(fecha))
         if desempate:
             sql += f", {desempate}"
         criterio = "fecha"
