@@ -60,9 +60,15 @@ EMPLEO_ID = "42.3_EPH_PUNTUATAL_0_M_24"
 SUBOCUPACION_ID = "46.2_ECTST_0_T_36"
 HOGARES_POBRES_ID = "63.2_HOGARES_PONUA_0_0_41_84"
 POBREZA_ID = "64.2_POBLACION_NUA_0_0_34_74"
+DESOCUPACION_AGLOMERADO_ID = "343.1_CHUBUT_RALEW__21"
 PLAZO_FIJO_USD_ID = "174.1_T_INTERUS_0_0_43"
 SALARIOS_ID = "149.1_TL_INDIIOS_OCTU_0_21"
 RESERVAS_DIARIAS_ID = "92.2_RESERVAS_IRES_0_0_32_40"
+GASTO_PIB_TOTAL_ID = "451.2_GPC_PIBPIB_0_0_7_85"
+GASTO_PIB_EDUCACION_ID = "451.2_GPC_EDUCACPIB_0_0_24_72"
+GASTO_PIB_UNIVERSIDAD_ID = "451.2_GPC_EDUCACPIB_0_0_31_23"
+GASTO_PIB_CIENCIA_ID = "451.2_GPC_CIENCIPIB_0_0_23_49"
+TASA_JAPON_ID = "131.1_OIRJT_0_0_34"
 
 _AXIS_FREQUENCY = {
     "R/P1D": "day",
@@ -274,6 +280,15 @@ _TASAS: dict[str, dict[str, Any]] = {
             ("2026-07-01", 0.3229999999999999),
         ],
     },
+    # Desocupación por aglomerado 1974-2003: la serie entera, discontinuada.
+    DESOCUPACION_AGLOMERADO_ID: {
+        "description": "Chubut Rawson - Trelew",
+        "units": "Porcentaje de población",
+        "frequency": "R/P6M",
+        "dataset": "Tasa de Desocupación por aglomerado 1974-2003",
+        "value_range": (0.166, 0.173),
+        "data": [("2002-07-01", 0.173), ("2003-01-01", 0.166)],
+    },
 }
 
 
@@ -316,6 +331,103 @@ def plazo_fijo_usd() -> dict[str, Any]:
         dataset="Series históricas de estadísticas monetarias",
         source="Banco Central de la República Argentina (BCRA)",
         value_range=(0.2320475981526836, 13.75208473618025),
+    )
+
+
+# Gasto Público Consolidado (451.x, API, 06-oct): «Porcentaje del PIB», YA en
+# %, de 2019 a 2023. El total es 41,87 % del PIB en 2023 y la ciencia y
+# técnica 0,27 %: todo el rango de esta (0,18 a 0,32) cabe en ±1,5, pero no
+# es una fracción.
+_GASTO_PIB: dict[str, dict[str, Any]] = {
+    GASTO_PIB_TOTAL_ID: {
+        "description": "Gasto público consolidado en porcentaje del PIB",
+        "value_range": (25.92035600792439, 47.35332155887762),
+        "values": [
+            43.463394679430536,
+            47.35332155887762,
+            42.80888347010397,
+            42.25644868970256,
+            41.86654045227007,
+        ],
+    },
+    GASTO_PIB_EDUCACION_ID: {
+        "description": "Gasto público consolidado en Educación básica en porcentaje del PIB",
+        "value_range": (1.334115662126785, 4.148832742362272),
+        "values": [
+            3.434737477473392,
+            3.667549273366692,
+            3.260382154733194,
+            3.2523612326731075,
+            3.4592789759436595,
+        ],
+    },
+    GASTO_PIB_UNIVERSIDAD_ID: {
+        "description": (
+            "Gasto público consolidado en Educación superior y universitaria en porcentaje del PIB"
+        ),
+        "value_range": (0.3458402383115652, 1.2958420233838006),
+        "values": [
+            1.0807226125281253,
+            1.1778968432375083,
+            1.0578644409730298,
+            1.0492658592301691,
+            1.1274565845376978,
+        ],
+    },
+    GASTO_PIB_CIENCIA_ID: {
+        "description": "Gasto público consolidado en Ciencia y técnica en porcentaje del PIB",
+        "value_range": (0.1825126369920748, 0.3201046710985293),
+        "values": [
+            0.1996238189347094,
+            0.2044682970676959,
+            0.2203159894286404,
+            0.2460896516367026,
+            0.2673829881871986,
+        ],
+    },
+}
+
+
+def gasto_pib(sid: str) -> dict[str, Any]:
+    """Una serie de Gasto Público Consolidado en % del PIB, anual de 2019 a 2023."""
+    spec = _GASTO_PIB[sid]
+    return serie(
+        sid,
+        [(f"{2019 + i}-01-01", v) for i, v in enumerate(spec["values"])],
+        description=spec["description"],
+        units="Porcentaje del PIB",
+        frequency="R/P1Y",
+        is_updated=False,
+        dataset="Gasto Público Consolidado",
+        source="Secretaría de Política Económica, Ministerio de Economía",
+        value_range=spec["value_range"],
+    )
+
+
+def tasa_japon() -> dict[str, Any]:
+    """131.1_OIRJT (API, 06-oct): la tasa overnight de Japón, «Porcentaje» y YA en %.
+
+    0,75 es 0,75 %: en toda su historia fue de −0,1 a 0,75.
+    """
+    return serie(
+        TASA_JAPON_ID,
+        [
+            ("2025-09-01", 0.5),
+            ("2025-10-01", 0.5),
+            ("2025-11-01", 0.5),
+            ("2025-12-01", 0.75),
+            ("2026-01-01", 0.75),
+            ("2026-02-01", 0.75),
+            ("2026-03-01", 0.75),
+            ("2026-04-01", 0.75),
+            ("2026-05-01", 0.75),
+        ],
+        description="Overnight Interest Rate - Japón - Tasa",
+        units="Porcentaje",
+        is_updated=False,
+        dataset="Principales Tasas de Interés de Referencia",
+        source="Bancos Centrales",
+        value_range=(-0.1, 0.75),
     )
 
 

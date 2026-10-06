@@ -13,7 +13,9 @@
   sin la agregación pedida;
 - con varias series, el aviso de atraso nombra cada serie con su fecha;
 - las tasas de la EPH llegan en %, y con escalas mixtas el modelo ve la de
-  cada columna;
+  cada columna; las que ya vienen en % (gasto en % del PIB, tasa de Japón)
+  no se tocan, y con una representación cada columna lleva las unidades de
+  la representación, no «Índice»;
 - `la_fuente_llega_hasta` no es anterior al último dato aunque la metadata
   de la API esté atrasada, y `buscar_series` no presenta ese metadato como
   el fin de la serie;
@@ -41,22 +43,29 @@ from tests.unit.series_tiempo_fake import (
     ACTIVIDAD_ID,
     DESEMPLEO_ID,
     EXPO_ID,
+    GASTO_PIB_CIENCIA_ID,
+    GASTO_PIB_EDUCACION_ID,
+    GASTO_PIB_TOTAL_ID,
+    GASTO_PIB_UNIVERSIDAD_ID,
     IPC_ID,
     POBREZA_ID,
     RESERVAS_DIARIAS_ID,
     RESERVAS_ID,
     SALARIOS_ID,
+    TASA_JAPON_ID,
     TIPO_CAMBIO_ID,
     FakeSeriesApi,
     desempleo,
     diaria,
     exportaciones_reales,
+    gasto_pib,
     ipc_real,
     reservas_diarias,
     reservas_mensuales,
     salarios,
     serie,
     tasa,
+    tasa_japon,
 )
 
 
@@ -424,6 +433,48 @@ async def test_con_escalas_mixtas_el_modelo_ve_la_escala_de_cada_columna() -> No
     assert "no vienen en la misma escala" in escala
     assert "«Tasa de desempleo total. En porcentaje.» está en %" in escala
     assert "«Índice de Salarios» va en sus unidades (Índice)" in escala
+
+
+async def test_el_gasto_en_porcentaje_del_pib_llega_como_lo_publica_la_api() -> None:
+    # `buscar_series` lleva a estas series («gasto público en ciencia y
+    # técnica»). La misma fila traía 3,46 (educación básica), 112,75
+    # (universitaria) y 26,74 (ciencia) con una `escala` que decía que las dos
+    # últimas estaban en %. Las cuatro vienen ya en % del PIB.
+    ids = [
+        GASTO_PIB_TOTAL_ID,
+        GASTO_PIB_EDUCACION_ID,
+        GASTO_PIB_UNIVERSIDAD_ID,
+        GASTO_PIB_CIENCIA_ID,
+    ]
+    payload, _ = await _run(
+        FakeSeriesApi(*(gasto_pib(sid) for sid in ids)), {"ids": ids, "ultimos": 1}
+    )
+    assert [v for k, v in payload["filas"][-1].items() if k not in ("fecha", "periodo")] == [
+        41.86654045227007,
+        3.4592789759436595,
+        1.1274565845376978,
+        0.2673829881871986,
+    ]
+    assert "escala" not in payload
+
+
+async def test_la_tasa_de_japon_no_se_multiplica_por_cien() -> None:
+    # 0,75 es 0,75 %; salía 75,0 con «Los valores ya están en %».
+    payload, _ = await _run(FakeSeriesApi(tasa_japon()), {"ids": [TASA_JAPON_ID], "ultimos": 1})
+    assert 0.75 in payload["filas"][-1].values()
+    assert "escala" not in payload
+
+
+async def test_con_una_representacion_por_serie_no_dice_indice() -> None:
+    # IPC + salarios en percent_change: `por_serie` decía «Índice» en cada
+    # serie y las filas traían variaciones en %.
+    payload, _ = await _run(
+        FakeSeriesApi(ipc_real(), salarios()),
+        {"ids": [IPC_ID, SALARIOS_ID], "desde": "2026-01-01", "representacion": "percent_change"},
+    )
+    assert payload["escala"] == "Los valores ya están en %: 33.54 es 33,54 %."
+    unidades = [s["unidades"] for s in payload["por_serie"]]
+    assert unidades == ["Variación porcentual período anterior (en %)"] * 2
 
 
 async def test_con_todas_las_series_en_porcentaje_no_hay_escala_mixta() -> None:

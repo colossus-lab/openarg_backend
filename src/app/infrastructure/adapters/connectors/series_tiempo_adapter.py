@@ -414,10 +414,11 @@ _LOOKBACK_MONTHS = 13
 # valores (medido el 04-oct; en 2025 la de la API daba 16,90 % y el INDEC
 # publicó 19,5 %).
 YEAR_TO_DATE = "percent_change_since_beginning_of_year"
+_YEAR_TO_DATE_UNITS = "Variación porcentual acumulada en el año (contra el cierre del año anterior)"
 
 # Series cuyas unidades dicen «Porcentaje» pero que la API da como fracción
 # (desempleo 0,079 = 7,9 %). Se escalan ×100 en modo valor y en `change`
-# (diferencia en puntos porcentuales). La detección es por regla
+# (diferencia en puntos porcentuales). La detección es por familia de series
 # (`_is_fraction_percent`); esta lista, verificada contra la API el 05-oct
 # (descripción «… En porcentaje.», máximo histórico 0,204), sólo asegura el
 # desempleo cuando la metadata no trae el rango de la serie. `is_percentage`
@@ -438,6 +439,17 @@ FRACTION_PERCENT_IDS = frozenset(
 # Una tasa dada como fracción no pasa de 1,5 (150 %); un porcentaje ya
 # multiplicado por 100 pasa, al menos alguna vez en su historia.
 _FRACTION_MAX = 1.5
+
+# Familias de series que la API da como fracción con unidades «Porcentaje…»,
+# verificadas una por una contra la metadata de la API el 06-oct: la EPH 42.x
+# a 48.x (actividad, empleo, desempleo, subocupación), la pobreza y la
+# indigencia 60.x a 64.x («Porcentaje de hogares» y «de población») y las
+# tasas por aglomerado de 1974-2003, 341.1 a 344.1. Afuera no se escala
+# aunque todo el rango quepa en ±1,5: la ciencia y técnica en % del PIB
+# 451.2_GPC_CIENCIPIB_0_0_23_49 va de 0,18 a 0,32 y ya está en % (0,27 % del
+# PIB en 2023), y la tasa overnight de Japón 131.1_OIRJT_0_0_34, de −0,1 a
+# 0,75, también. Escaladas, salían 26,74 y 75,0 rotuladas como %.
+_FRACTION_FAMILIES = re.compile(r"(?:4[2-8]|6[0-4])\.\d+_|34[1-4]\.1_")
 
 _FREQUENCY_NAMES = {
     "day": "diaria",
@@ -506,9 +518,12 @@ def _as_float(value: Any) -> float | None:
 def _is_fraction_percent(sid: str, field: Mapping[str, Any], values: list[float]) -> bool:
     """¿Unidades «Porcentaje» con los valores como fracción (0,489 = 48,9 %)?
 
-    Por regla y no por lista: con la lista sólo se escalaba el desempleo, y
+    Por familia y no por lista: con la lista sólo se escalaba el desempleo, y
     actividad, empleo, subocupación y pobreza llegaban como 0,489 «Porcentaje».
 
+    - El id es de una familia verificada como fracción (``_FRACTION_FAMILIES``).
+      Las unidades y el rango solos no alcanzan: el gasto en % del PIB y la
+      tasa de Japón dicen «Porcentaje…», caben en ±1,5 y ya están en %.
     - Las unidades empiezan con «Porcentaje» («de hogares», «de población»),
       salvo las que aclaran «(0-100)», como la BADLAR.
     - Control de magnitud: el rango de TODA la serie (``min_value`` y
@@ -532,6 +547,7 @@ def _is_fraction_percent(sid: str, field: Mapping[str, Any], values: list[float]
     return (
         low is not None
         and high is not None
+        and _FRACTION_FAMILIES.match(sid) is not None
         and units.startswith("porcentaje")
         and "0-100" not in units
     )
@@ -799,21 +815,35 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
 
             units = field_units
             if local_ytd:
-                units = (
-                    "Variación porcentual acumulada en el año (contra el cierre del año anterior)"
-                )
+                units = _YEAR_TO_DATE_UNITS
             elif representation and representation_units:
                 units = representation_units
             all_percent = is_percent or (
                 bool(scaled_fractions) and len(scaled_fractions) == len(set(series_ids))
             )
+            suffix = "en puntos porcentuales" if representation == "change" else "en %"
             if all_percent:
-                suffix = "en puntos porcentuales" if representation == "change" else "en %"
                 units = f"{units} ({suffix})" if units else "%"
             for entry in per_series:
+                if representation:
+                    # Cada serie, en las unidades de lo que se pidió: IPC +
+                    # salarios en percent_change decían «Índice» en
+                    # `por_serie` con los valores en %.
+                    rep_units = (
+                        _YEAR_TO_DATE_UNITS
+                        if local_ytd
+                        else fields.get(entry["id"], {}).get("representation_mode_units")
+                    )
+                    if rep_units:
+                        entry["unidades"] = rep_units
+                    if is_percent:
+                        entry["unidades"] = (
+                            f"{entry['unidades']} (en %)" if entry["unidades"] else "%"
+                        )
                 if entry["id"] in scaled_fractions:
                     entry["unidades"] = (
-                        f"{entry['unidades'] or 'Porcentaje'} (en %; la API la da como fracción)"
+                        f"{entry['unidades'] or 'Porcentaje'} "
+                        f"({suffix}; la API la da como fracción)"
                     )
                     # Con escalas mixtas, lo que ve el modelo dice cuál es cuál.
                     entry["escalada_a_porcentaje"] = True
