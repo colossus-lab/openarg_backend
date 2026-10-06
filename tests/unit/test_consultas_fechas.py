@@ -494,6 +494,21 @@ class TestFechasDeAtributo:
         col = resolver_columna_fecha([("fecha_vencimiento", "date"), ("fecha_emision", "text")])
         assert col is not None and col.nombre == "fecha_emision"
 
+    def test_las_abreviaturas_de_los_portales_tambien_son_de_atributo(self) -> None:
+        # raw.caba__personas_buscadas (`fecha_nac` antes que `fecha_extravio`),
+        # transportes autorizados (`fecha_vto`) y acceso a la información
+        # (`Fecha Primer Vto.`).
+        col = resolver_columna_fecha([("fecha_nac", "text"), ("fecha_extravio", "text")])
+        assert col is not None and col.nombre == "fecha_extravio"
+        col = resolver_columna_fecha([("Fecha Primer Vto.", "text"), ("Fecha Ingreso", "text")])
+        assert col is not None and col.nombre == "Fecha Ingreso"
+        from app.application.consultas.fechas import es_fecha_de_atributo
+
+        assert es_fecha_de_atributo("fecha_vto")
+        assert es_fecha_de_atributo("fecha_venc")
+        assert not es_fecha_de_atributo("fecha_nac", "raw.caba__nacimientos__a1b2c3d4__v1")
+        assert not es_fecha_de_atributo("fecha_nacional")
+
     def test_si_es_la_unica_se_usa_y_se_avisa(self) -> None:
         from app.application.consultas.fechas import aviso_lectura_fecha
 

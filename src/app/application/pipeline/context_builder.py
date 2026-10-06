@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any
 
-from app.application.pipeline.chart_builder import is_date_column
+from app.application.pipeline.chart_builder import es_eje_temporal, tabla_del_resultado
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ _MAX_RECORDS_TO_SEND = 50
 
 
 def _sample_records(
-    records: list[dict[str, Any]], columns: tuple[str, ...]
+    records: list[dict[str, Any]], columns: tuple[str, ...], tabla: str = ""
 ) -> tuple[list[dict[str, Any]], bool]:
     """Elige qué filas ve el modelo cuando hay más de `_MAX_RECORDS_TO_SEND`.
 
@@ -36,7 +36,7 @@ def _sample_records(
     total = len(records)
     if total <= _MAX_RECORDS_TO_SEND:
         return records, False
-    if any(is_date_column(c) for c in columns):
+    if any(es_eje_temporal(c, tabla) for c in columns):
         last = total - 1
         steps = _MAX_RECORDS_TO_SEND - 1
         indices = sorted({round(i * last / steps) for i in range(_MAX_RECORDS_TO_SEND)})
@@ -68,7 +68,9 @@ def _fmt_number(value: float) -> str:
     return f"{round(value, 2):g}"
 
 
-def _series_summary(records: list[dict[str, Any]], columns: tuple[str, ...]) -> str | None:
+def _series_summary(
+    records: list[dict[str, Any]], columns: tuple[str, ...], tabla: str = ""
+) -> str | None:
     """Primero, último, mínimo y máximo de cada columna, sobre TODAS las filas.
 
     El texto de la respuesta lo escribe el modelo mirando una muestra (ver
@@ -78,7 +80,7 @@ def _series_summary(records: list[dict[str, Any]], columns: tuple[str, ...]) -> 
     fue 64%, un pico de tres días que no cayó en la muestra). Estos números
     salen del código, no de lo que el modelo estima mirando puntos sueltos.
     """
-    date_col = next((c for c in columns if is_date_column(c)), None)
+    date_col = next((c for c in columns if es_eje_temporal(c, tabla)), None)
     if date_col is None:
         return None
     dated = [r for r in records if r.get(date_col) not in (None, "")]
@@ -431,7 +433,8 @@ def build_data_context(results: list[DataResult]) -> str:
             display_columns_text = _display_columns_text(columns)
             total_rows = len(valid_records)
 
-            records_to_send, sampled_series = _sample_records(valid_records, columns)
+            tabla = tabla_del_resultado(result)
+            records_to_send, sampled_series = _sample_records(valid_records, columns, tabla)
 
             # Pre-compute key mapping once, reuse for all records
             if records_to_send:
@@ -461,7 +464,7 @@ def build_data_context(results: list[DataResult]) -> str:
             lines.append(f"Columnas: {display_columns_text}")
             if len(records_to_send) < total_rows:
                 lines.append(_omitted_rows_note(len(records_to_send), total_rows, sampled_series))
-            summary = _series_summary(valid_records, columns)
+            summary = _series_summary(valid_records, columns, tabla)
             if summary:
                 lines.append(summary)
             if description:
