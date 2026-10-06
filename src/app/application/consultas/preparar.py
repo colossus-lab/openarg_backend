@@ -18,10 +18,14 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.application.consultas.fechas import (
+    CASE_ANIO,
     ColumnaFecha,
+    aviso_lectura_fecha,
     consulta_rango,
     fecha_iso,
     formato_uniforme,
+    lectura_de,
+    rama_fecha,
 )
 from app.application.consultas.filtros import (
     OPERADORES_DE_TEXTO,
@@ -40,6 +44,11 @@ logger = logging.getLogger(__name__)
 # Desde cuántas filas no se pliega cada fila (ver el docstring del módulo).
 TOLERANTE_MAX_FILAS = 1_000_000
 MUESTRA_NUMEROS = 200
+# Con menos fechas reconocidas que esto, `describir_tabla` lo avisa: las demás
+# quedan fuera de cualquier período (revisión independiente del 05-oct, H003:
+# en la Pauta publicitaria de CABA se reconocían 936 de 3.655 y sólo se
+# avisaba con cero).
+MIN_RECONOCIDAS = 0.95
 
 
 async def ejecutar(
@@ -197,9 +206,18 @@ async def describir_periodo(sandbox: Any, tabla: str, fecha: ColumnaFecha | None
             )
         )
     desde, hasta = fila.get("desde"), fila.get("hasta")
+    avisos = [aviso_lectura_fecha(fecha)]
+    reconocidas, con_valor = int(fila.get("reconocidas") or 0), int(fila.get("con_valor") or 0)
+    if con_valor and reconocidas < MIN_RECONOCIDAS * con_valor:
+        avisos.append(
+            f"Reconocí como fecha {reconocidas} de {con_valor} valores de «{fecha.nombre}» "
+            f"({100 * reconocidas / con_valor:.0f} %): los demás quedan fuera de "
+            "`desde`/`hasta` y al final del orden."
+        )
     return Periodo(
         desde=None if desde is None else str(desde),
         hasta=None if hasta is None else str(hasta),
+        aviso=" ".join(a for a in avisos if a) or None,
     )
 
 
@@ -209,15 +227,28 @@ def _muestra_de(columna: str, stats: TableValueStats | None) -> list[str]:
 
 
 def con_formato(fecha: ColumnaFecha, stats: TableValueStats | None) -> ColumnaFecha:
-    """La columna de fecha con la forma única de sus valores, si la muestra la tiene."""
-    formato = formato_uniforme(
-        _muestra_de(fecha.nombre, stats), filas=stats.estimated_rows if stats else None
-    )
+    """La columna de fecha con la forma única de sus valores, si la muestra la tiene.
+
+    En una columna de año sin forma única (un «Total» entre los años, una
+    muestra de un solo valor o ninguna) se marca ``CASE_ANIO`` si la muestra
+    no tiene nada más fino que un año: así un pedido de un mes sobre esa
+    columna se rechaza en vez de devolver el año entero (H002). Lo mismo con
+    otro nombre (`periodo`, `indice_tiempo`) si la muestra tiene algún año y
+    nada más fino; sin muestra, ahí no se supone nada (revisión del PR #154).
+    """
+    muestra = _muestra_de(fecha.nombre, stats)
+    formato = formato_uniforme(muestra, filas=stats.estimated_rows if stats else None)
+    if formato is None:
+        ramas = [rama_fecha(v) for v in muestra]
+        if all(r in (None, "anio") for r in ramas) and (fecha.clase == "anio" or "anio" in ramas):
+            formato = CASE_ANIO
     return replace(fecha, formato=formato) if formato else fecha
 
 
 def _rango_de_muestra(fecha: ColumnaFecha, stats: TableValueStats | None) -> tuple[str, str] | None:
-    fechas = sorted(f for f in (fecha_iso(v) for v in _muestra_de(fecha.nombre, stats)) if f)
+    lectura = lectura_de(fecha.formato)
+    muestra = _muestra_de(fecha.nombre, stats)
+    fechas = sorted(f for f in (fecha_iso(v, lectura=lectura) for v in muestra) if f)
     return (fechas[0], fechas[-1]) if fechas else None
 
 

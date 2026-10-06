@@ -414,6 +414,65 @@ async def test_describir_tabla_no_se_cae_si_falla_el_periodo() -> None:
     assert payload["muestra"] == [{"TITULO": "x"}]
 
 
+async def test_describir_tabla_avisa_si_reconoce_menos_del_95_por_ciento() -> None:
+    """Revisión independiente del 05-oct, H003: en la Pauta publicitaria de CABA
+    (m/d) se reconocían 936 de 3.655 fechas y sólo se avisaba con cero."""
+    sandbox = Sandbox(
+        [("FECHA", "text"), ("MONTO", "text")],
+        [
+            (
+                "AS reconocidas",
+                [
+                    {
+                        "desde": "2021-01-04",
+                        "hasta": "2021-12-11",
+                        "reconocidas": 936,
+                        "con_valor": 3655,
+                    }
+                ],
+            ),
+            ("LIMIT 5", [{"FECHA": "5/31/2021"}]),
+        ],
+    )
+    out = await DescribirTabla().run({"tabla": T}, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["desde"] == "2021-01-04"  # el período se informa igual
+    assert "936 de 3655" in payload["aviso_fecha"] and "«FECHA»" in payload["aviso_fecha"]
+
+
+class _SandboxDe(Sandbox):
+    """El mismo doble, con otra tabla."""
+
+    def __init__(self, tabla: str, *args: Any, **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        self.tabla = tabla
+
+    async def find_tables(self, **kw: Any) -> list[CachedTableInfo]:
+        return [CachedTableInfo(self.tabla, "ds-2", self.row_count, [])]
+
+    async def get_column_types(self, names: list[str]) -> dict[str, list[tuple[str, str]]]:
+        return {self.tabla: self.types}
+
+
+async def test_describir_tabla_de_nacimientos_no_avisa_que_su_fecha_no_es_la_del_dato() -> None:
+    """Revisión del PR #154 (H044): en caba__nacimientos `hijo_fecha_nacimiento`
+    es la fecha del dato, pero el aviso decía que no."""
+    tabla = "raw.caba__nacimientos__1c5b3921__v2"
+    sandbox = _SandboxDe(
+        tabla,
+        [("hijo_fecha_nacimiento", "text"), ("hijo_genero", "text")],
+        [
+            (
+                "AS reconocidas",
+                [{"desde": "2015-01-01", "hasta": "2024-12-31", "reconocidas": 9, "con_valor": 9}],
+            ),
+        ],
+    )
+    payload = json.loads((await DescribirTabla().run({"tabla": tabla}, _ctx(sandbox))).content)
+    assert payload["columna_fecha"] == "hijo_fecha_nacimiento"
+    assert "aviso_fecha" not in payload
+
+
 # ── revisión del PR #133 ────────────────────────────────────
 
 

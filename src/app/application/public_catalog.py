@@ -23,9 +23,9 @@ from typing import Any
 
 from app.application.consultas.fechas import (
     ColumnaFecha,
+    claves_orden,
     condiciones_periodo,
     consulta_rango,
-    orden_fecha,
     resolver_columna_fecha,
     sin_columna_fecha,
     validar_fecha,
@@ -122,11 +122,17 @@ def resolve_table(requested: str, tables: Iterable[CachedTableInfo]) -> CachedTa
 
 
 def resolve_date_column(
-    columns: Iterable[tuple[str, str]] | Iterable[str], chosen: str | None = None
+    columns: Iterable[tuple[str, str]] | Iterable[str],
+    chosen: str | None = None,
+    tabla: str | None = None,
 ) -> ColumnaFecha | None:
-    """La columna de fecha (con su tipo), sin las internas del colector."""
+    """La columna de fecha (con su tipo), sin las internas del colector.
+
+    ``tabla``: el nombre de la tabla, para reconocer la fecha del evento que
+    registra (``resolver_columna_fecha``).
+    """
     pares = [(c, "text") if isinstance(c, str) else (str(c[0]), str(c[1])) for c in columns]
-    return resolver_columna_fecha([p for p in pares if not is_internal_column(p[0])], chosen)
+    return resolver_columna_fecha([p for p in pares if not is_internal_column(p[0])], chosen, tabla)
 
 
 def date_column(columns: Iterable[tuple[str, str]] | Iterable[str]) -> str | None:
@@ -234,7 +240,7 @@ def build_data_query(req: DataRequest) -> DataQuery:
 
     desde = validar_fecha(req.desde, "desde")
     hasta = validar_fecha(req.hasta, "hasta")
-    fecha = resolver_columna_fecha(list(tipos.items()), req.columna_fecha)
+    fecha = resolver_columna_fecha(list(tipos.items()), req.columna_fecha, req.table)
     if fecha is not None and req.formato_fecha:
         fecha = replace(fecha, formato=req.formato_fecha)
     if (desde or hasta) and fecha is None:
@@ -267,8 +273,11 @@ def build_data_query(req: DataRequest) -> DataQuery:
     if fecha is not None:
         # Las fechas que no se reconocen van al final en los dos sentidos:
         # antes, con el orden del texto crudo, "1/9/2025" quedaba como el
-        # último dato de una serie que llega a 2026.
-        sql += f" ORDER BY {orden_fecha(fecha)} {orden.upper()} NULLS LAST"
+        # último dato de una serie que llega a 2026. En una tabla con año y
+        # mes separados, el mes es la segunda clave: con el año solo,
+        # `orden=desc` traía enero como el último dato (H010).
+        sentido = f"{orden.upper()} NULLS LAST"
+        sql += " ORDER BY " + ", ".join(f"{clave} {sentido}" for clave in claves_orden(fecha))
         if desempate:
             sql += f", {desempate}"
         criterio = "fecha"

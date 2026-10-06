@@ -22,7 +22,7 @@ from app.application.consultas.filtros import (
 )
 from app.application.consultas.preparar import resolver_canonicos
 from app.application.consultas.sql import CatalogRequestError, Params
-from app.application.consultas.texto import plegar
+from app.application.consultas.texto import plegar, plegar_sql
 from app.domain.ports.sandbox.sql_sandbox import ColumnValueStats, TableValueStats
 from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import _validate_sql
 
@@ -89,7 +89,8 @@ class TestLectura:
 class TestIgualdadTolerante:
     def test_no_distingue_mayusculas_ni_acentos(self) -> None:
         sql, params = _sql(Filter("funcion_desc", "=", "  educacion  y CULTURA "))
-        assert sql.startswith('lower(translate(btrim("funcion_desc"::text), ')
+        # Los blancos de la columna se colapsan como los de lo pedido (H011).
+        assert sql.startswith('lower(translate(btrim(regexp_replace("funcion_desc"::text, ')
         assert params == {"p0": "educacion y cultura"}
         # Mismo plegado de los dos lados.
         assert plegar("Educación y Cultura") == params["p0"]
@@ -126,6 +127,40 @@ class TestIgualdadTolerante:
         exacto = Filter("funcion_desc", "=", "Salud", canonicos=("Salud",))
         assert describir_filtro(exacto, tolerante=True) is None
         assert describir_filtro(exacto, tolerante=False) is None
+
+
+class TestBlancosIgualEnPythonYEnSQL:
+    """H011 (revisión independiente del 05-oct): `plegar` colapsaba los espacios
+    repetidos y los NBSP del valor pedido, pero `plegar_sql` sólo hacía `btrim`
+    de la columna. Un valor real con dos espacios («Hosp. Zonal Gral. de Ag.
+    Prof. Dr. R. Carrillo», 13 filas en staging) no se encontraba ni copiándolo
+    exacto, y el diagnóstico de cero filas sugería el mismo valor: el reintento
+    fallaba otra vez."""
+
+    BLANCOS = [chr(c) for c in range(0x110000) if chr(c).isspace()]
+
+    def test_el_sql_colapsa_los_mismos_blancos_que_python(self) -> None:
+        sql = plegar_sql('"x"::text')
+        assert 'btrim(regexp_replace("x"::text, ' in sql and "'g')" in sql
+        # Cada blanco que `str.split()` colapsa está en la clase de la expresión.
+        faltan = [hex(ord(c)) for c in self.BLANCOS if f"\\u{ord(c):04x}" not in sql]
+        assert faltan == []
+
+    def test_un_valor_con_espacios_dobles_o_nbsp_se_pliega_igual(self) -> None:
+        pedido = "Hosp. Zonal Gral. de Ag.\u00a0 Prof. Dr. R. Carrillo"
+        sql, params = _sql(Filter("funcion_desc", "=", pedido))
+        assert params == {"p0": "hosp. zonal gral. de ag. prof. dr. r. carrillo"}
+        assert "regexp_replace(" in sql
+
+    def test_contiene_tambien_colapsa(self) -> None:
+        sql, params = _sql(Filter("funcion_desc", "contiene", "Ag.  Prof"))
+        assert params == {"p0": "%ag. prof%"}
+        assert sql.startswith('lower(translate(btrim(regexp_replace("funcion_desc"::text, ')
+
+    def test_el_validador_del_sandbox_acepta_la_expresion(self) -> None:
+        sql, _ = _sql(Filter("funcion_desc", "=", "Hosp.  Carrillo"))
+        built = f'SELECT "funcion_desc" FROM "raw"."cache_presupuesto_credito_2026" WHERE {sql}'
+        assert _validate_sql(built, built=True) is None
 
 
 def _stats(columna: str, mcv: list[str], filas: int = 1_426_810) -> TableValueStats:

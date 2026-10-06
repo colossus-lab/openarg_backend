@@ -210,6 +210,36 @@ def test_periodo_sobre_una_columna_de_anio() -> None:
     assert q.params == {"p0": "2020-01-01", "p1": "2021-12-31"}
 
 
+def test_un_pedido_mensual_sobre_anio_y_mes_suma_solo_ese_mes() -> None:
+    """Revisión independiente del 05-oct, H002: capturas_maritimas 2db47cbb,
+    junio de 2019, daba 384.639,77 (el año entero, 2.213 filas) en vez de
+    33.071,94 (184 filas), sin aviso. La consulta ahora filtra con el mes."""
+    tipos = [("anio", "bigint"), ("mes", "bigint"), ("captura", "double precision")]
+    q = build_aggregate_query(
+        _req(
+            column_types=tipos,
+            operacion="suma",
+            columna="captura",
+            desde="2019-06",
+            hasta="2019-06",
+        )
+    )
+    assert q.fecha is not None and q.fecha.mes == "mes"
+    where = q.sql.split(" WHERE ", 1)[1]
+    assert '"mes"' in where
+    assert q.params == {"p0": "2019-06-01", "p1": "2019-06-31"}
+    assert _validate_sql(q.sql, built=True) is None
+
+
+def test_un_pedido_mensual_sobre_una_tabla_anual_se_rechaza() -> None:
+    """Sin columna de mes no hay forma de saber qué filas son de junio."""
+    with pytest.raises(CatalogRequestError, match="años enteros"):
+        build_aggregate_query(_req(desde="2020-06", hasta="2020-06"))
+    # El año entero escrito con meses sí.
+    q = build_aggregate_query(_req(desde="2020-01", hasta="2020-12"))
+    assert q.params == {"p0": "2020-01-01", "p1": "2020-12-31"}
+
+
 @pytest.mark.parametrize(
     ("kw", "mensaje"),
     [

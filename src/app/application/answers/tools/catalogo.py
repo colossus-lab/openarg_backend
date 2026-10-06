@@ -48,7 +48,7 @@ from app.application.answers.tools.base import (
 from app.application.catalog.collapse import collapse_hits
 from app.application.catalog.national_prior import national_prior
 from app.application.consultas.agregar import PedidoAgregado, agregar
-from app.application.consultas.fechas import aviso_formato_guardado
+from app.application.consultas.fechas import aviso_lectura_fecha
 from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import Preparado, describir_periodo, ejecutar, preparar
 from app.application.consultas.sugerencias import diagnosticar_vacio
@@ -369,7 +369,7 @@ class DescribirTabla:
         types = (await sandbox.get_column_types([table.name])).get(table.name, [])
         columns = [(c, t) for c, t in types if not is_internal_column(c)]
         names = [c for c, _ in columns]
-        fecha = resolve_date_column(columns)
+        fecha = resolve_date_column(columns, tabla=table.name)
         periodo = await describir_periodo(sandbox, table.name, fecha)
         # La muestra orienta: si falla (tabla bloqueada, timeout), se describe
         # igual sin ella en vez de tirar la herramienta entera.
@@ -560,7 +560,7 @@ class ObtenerDatos:
         if len(rows) > MAX_ROWS_FOR_MODEL:
             payload["nota"] = f"Se muestran {MAX_ROWS_FOR_MODEL} de {len(rows)} filas."
         notas = notas_de_filtros(query.filtros, query.tipos, tolerante=prep.tolerante)
-        aviso_fecha = aviso_formato_guardado(query.fecha)
+        aviso_fecha = aviso_lectura_fecha(query.fecha)
         if aviso_fecha:
             notas.append(aviso_fecha)
         if notas:

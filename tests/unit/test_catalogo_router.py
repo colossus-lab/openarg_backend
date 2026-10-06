@@ -815,6 +815,26 @@ async def test_tabla_bloqueada_sin_fecha_lo_dice(client: AsyncClient, sandbox: F
     assert "problema de calidad" in r.json()["aviso"] and r.json()["frescura"] is None
 
 
+async def test_tabla_de_defunciones_no_avisa_que_su_fecha_no_es_la_del_dato(
+    client: AsyncClient, sandbox: FakeSandbox
+) -> None:
+    """Revisión del PR #154 (H044): en caba__defunciones `FECHA_DEFUNCION` es la
+    fecha del dato, pero describir_tabla decía «es una fecha de defunción, no la
+    del dato»."""
+    tabla = "raw.caba__defunciones__91003a9e__v1"
+    sandbox.tables = [  # type: ignore[misc]
+        CachedTableInfo(table_name=tabla, dataset_id="ds-def", row_count=3000, columns=[])
+    ]
+    sandbox.get_column_types = AsyncMock(  # type: ignore[method-assign]
+        return_value={tabla: [("FECHA_DEFUNCION", "text"), ("GENERO", "text")]}
+    )
+    r = await client.get("/catalogo/tabla", params={"nombre": tabla})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["columna_fecha"] == "FECHA_DEFUNCION"
+    assert not body.get("aviso_fecha")
+
+
 # ── /agregar (3.1 / RC7) ───────────────────────────────────────────────────
 
 _PRESUPUESTO_TIPOS = [
