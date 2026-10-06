@@ -402,9 +402,10 @@ def test_la_tabla_vieja_queda_como_previa_y_volver_atras_es_un_rename(entorno, m
 def test_la_previa_es_la_version_anterior_y_no_se_acumula(entorno, monkeypatch):
     engine, serie = entorno
     _sembrar(engine, serie, _filas(1000, date(2003, 1, 2)))
-    _con_api(monkeypatch, _Api(_filas(6001, date(2003, 1, 2))))
+    api = _Api(_filas(6001, date(2003, 1, 2)))
+    _con_api(monkeypatch, api)
     st.ingest_series_tiempo.run(claves=[serie.clave])
-    _con_api(monkeypatch, _Api(_filas(6002, date(2003, 1, 2))))
+    api.filas = _filas(6002, date(2003, 1, 2))  # la API publicó un día más
 
     resumen = st.ingest_series_tiempo.run(claves=[serie.clave])
 
