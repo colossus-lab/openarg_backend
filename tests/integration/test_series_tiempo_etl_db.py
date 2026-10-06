@@ -436,6 +436,12 @@ def test_cleanup_invariants_no_registra_la_previa(entorno, monkeypatch):
         conn.execute(text(f'CREATE TABLE raw."{huerfana}" AS SELECT 1 AS x'))
     monkeypatch.setattr(ops_fixes, "get_sync_engine", lambda: engine)
     monkeypatch.setattr(ops_fixes, "_require_registry", lambda *a, **k: None)
+    sql_huerfanas = text(
+        "SELECT resource_identity FROM public.raw_table_versions "
+        "WHERE resource_identity LIKE 'backfill_postauto::%'"
+    )
+    with engine.connect() as conn:
+        ya_estaban = {r[0] for r in conn.execute(sql_huerfanas)}
 
     try:
         ops_fixes.cleanup_invariants.run()
@@ -450,8 +456,17 @@ def test_cleanup_invariants_no_registra_la_previa(entorno, monkeypatch):
                 )
             }
     finally:
+        # El barrido registra toda tabla de `raw` sin fila (también las de
+        # otros tests, como `raw.cached_datasets` cuando la crea el fixture):
+        # se borra lo que registró acá para no dejar filas fantasma.
         with engine.begin() as conn:
             conn.execute(text(f'DROP TABLE IF EXISTS raw."{huerfana}"'))
+            nuevas = {r[0] for r in conn.execute(sql_huerfanas)} - ya_estaban
+            if nuevas:
+                conn.execute(
+                    text("DELETE FROM public.raw_table_versions WHERE resource_identity = ANY(:r)"),
+                    {"r": sorted(nuevas)},
+                )
 
     assert huerfana in registradas, "el pase de huérfanas sigue andando"
     assert f"{serie.tabla}__previa" not in registradas
