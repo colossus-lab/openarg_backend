@@ -223,3 +223,54 @@ mcp-series-tiempo:
 - Para cache-heavy: Redis Cluster o Redis Sentinel para HA
 - Evaluar `maxmemory-policy allkeys-lru` si la memoria es limitada
 
+---
+
+## 9. Series de tiempo: volver atrás una tabla `raw.cache_series_*`
+
+El ETL de series (`ingest_series_tiempo`) no borra la tabla que reemplaza: la
+deja como `raw.<tabla>__previa`, con sus filas, sus tipos y sus permisos. Hay
+una sola previa por tabla, la de la escritura anterior; la siguiente escritura
+la pisa. `cleanup_invariants` no la registra, así que no aparece en el
+catálogo ni en `/data/tables`.
+
+1. Frenar la ingesta para que no vuelva a escribir la tabla restaurada:
+   `OPENARG_BEAT_DESACTIVADAS=ingest-series-tiempo,check-series-freshness` en
+   el `.env` y recrear `beat` y los workers (ver `docs/deploy-produccion.md`).
+2. Cambiar las tablas, en una transacción:
+
+   ```sql
+   BEGIN;
+   ALTER TABLE raw."cache_series_<clave>" RENAME TO "cache_series_<clave>__descartada";
+   ALTER TABLE raw."cache_series_<clave>__previa" RENAME TO "cache_series_<clave>";
+   COMMIT;
+   ```
+
+3. La metadata sigue describiendo la versión descartada. Alinear las filas:
+
+   ```sql
+   BEGIN;
+   WITH n AS (SELECT count(*) AS filas FROM raw."cache_series_<clave>")
+   UPDATE raw.cached_datasets SET row_count = n.filas FROM n
+    WHERE table_name = 'cache_series_<clave>';
+   WITH n AS (SELECT count(*) AS filas FROM raw."cache_series_<clave>")
+   UPDATE public.raw_table_versions SET row_count = n.filas FROM n
+    WHERE schema_name = 'raw' AND table_name = 'cache_series_<clave>';
+   WITH n AS (SELECT count(*) AS filas FROM raw."cache_series_<clave>")
+   UPDATE datasets SET row_count = n.filas FROM n
+    WHERE portal = 'series_tiempo' AND source_id = 'series-tiempo-<clave>';
+   COMMIT;
+   ```
+
+   Si la escritura descartada cambió de serie (otro id), `datasets.url`,
+   `title`, `description` y `columns` también quedaron con la serie nueva:
+   volverlos a los de la vieja a mano. Y mientras el catálogo del adaptador y
+   `CAMBIOS_DE_SERIE_APROBADOS` (en `series_tiempo_tasks.py`) digan la serie
+   nueva, la próxima corrida la vuelve a escribir: sacar la aprobación en un
+   PR antes de volver a agendar la ingesta.
+4. `DROP TABLE raw."cache_series_<clave>__descartada"` cuando ya no haga falta.
+
+Mientras la ingesta esté frenada, la tabla restaurada no se actualiza. Antes de
+volver a agendarla, corregir lo que hizo mala la escritura descartada: la
+primera corrida va a comparar la tabla contra la API y reescribirla si está
+atrás.
+
