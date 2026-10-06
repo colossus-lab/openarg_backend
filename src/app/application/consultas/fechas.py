@@ -207,10 +207,20 @@ def _plural(evento: str) -> str:
     return evento + ("es" if evento.endswith("n") else "s")
 
 
+# Tablas que registran el evento sin nombrarlo en plural: en la deuda pública
+# el vencimiento es el perfil de pagos (mendoza__deuda_publica_2018).
+_TABLAS_DEL_EVENTO = {"vencimiento": frozenset({"deuda"})}
+
+
 def _de_la_tabla(nombre: str, tabla: str | None) -> bool:
     """La fecha es del evento que registra la tabla (`fecha_defuncion` en caba__defunciones)."""
     evento = _evento_de(nombre)
-    return bool(evento and tabla) and _plural(evento) in _palabras(tabla or "")
+    if not (evento and tabla):
+        return False
+    palabras = _palabras(tabla)
+    return _plural(evento) in palabras or bool(
+        _TABLAS_DEL_EVENTO.get(evento, frozenset()) & set(palabras)
+    )
 
 
 def es_fecha_de_atributo(nombre: str, tabla: str | None = None) -> bool:

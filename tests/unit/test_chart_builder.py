@@ -265,6 +265,19 @@ class TestFechasNoIso:
 
         assert not es_eje_temporal("Fecha Primer Vto.")
 
+    def test_en_la_deuda_publica_el_vencimiento_es_el_perfil_de_pagos(self):
+        # mendoza__deuda_publica_2018: en prod era el eje (tenía "date").
+        vto = "Fecha vto./\nMaturity Date"
+        records = [
+            {"Acreedor": "A", vto: "2030-06-15", "Saldo/Outstanding": 9.0},
+            {"Acreedor": "B", vto: "2024-03-01", "Saldo/Outstanding": 3.0},
+        ]
+        result = _make_result(records, format="json", title="Deuda Pública 2018")
+        result.metadata["served_table"] = "raw.mendoza__deuda_publica_2018__cab67076__v1"
+        charts = _build_deterministic_charts([result])
+        assert charts[0]["type"] == "line_chart"
+        assert charts[0]["xKey"] == vto
+
     def test_en_nl2sql_el_eje_no_depende_de_como_se_pregunta(self):
         records = [
             {"fecha_fallecimiento": "2021-02-01", "casos": 5},
