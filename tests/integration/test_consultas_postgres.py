@@ -86,6 +86,25 @@ def test_la_expresion_de_fechas_coincide_con_python(modo: str) -> None:
     assert {v: iso for v, iso in rows} == {v: fecha_iso(v, modo) for v in FECHAS}
 
 
+def test_los_blancos_se_pliegan_igual_que_en_python() -> None:
+    """H011 (revisión independiente del 05-oct): `plegar_sql` sólo hacía `btrim`.
+
+    Verificado también contra el Postgres de staging (sólo lectura) el 06-oct.
+    """
+    from app.application.consultas.texto import plegar, plegar_sql
+
+    blancos = [chr(c) for c in range(0x110000) if chr(c).isspace()]
+    textos = ["Hosp. Zonal Gral. de Ag.  Prof. Dr. R. Carrillo", "  EDUCACIÓN y   Cultura "]
+    textos += [f"a{c}b{c}{c}c" for c in blancos]
+    engine = _engine()
+    values, params = _values(textos)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(f"SELECT v, {plegar_sql('v')} AS p FROM (VALUES {values}) AS t(v)"), params
+        ).fetchall()
+    assert {v: p for v, p in rows} == {v: plegar(v) for v in textos}
+
+
 @pytest.mark.parametrize("formato", [None, "ar", "en"])
 def test_la_expresion_de_numeros_coincide_con_python(formato: str | None) -> None:
     engine = _engine()
@@ -421,3 +440,42 @@ async def test_agregar_por_http_devuelve_el_valor_como_numero(tabla: str) -> Non
     assert educacion["filas_usadas"] == 2
     # Una suma entera sale entera.
     assert filas["Salud"]["valor"] == 2000000 and isinstance(filas["Salud"]["valor"], int)
+
+
+# ── revisión independiente del 05-oct, de punta a punta ─────────────────────
+
+
+async def _agregar_en(tabla: str, tipos: list[tuple[str, str]], **kw):  # type: ignore[no-untyped-def]
+    from app.application.consultas.agregar import PedidoAgregado, agregar
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    sandbox = PgSandboxAdapter()
+
+    async def run(sql, params):  # type: ignore[no-untyped-def]
+        result = await sandbox.execute_readonly(sql, params=params)
+        assert result.error is None, (result.error, sql)
+        return result.rows
+
+    return await agregar(sandbox, PedidoAgregado(tabla=tabla, tipos=tipos, **kw), run)
+
+
+async def test_un_valor_con_dos_espacios_se_encuentra_copiado_tal_cual() -> None:
+    """H011: el filtro plegaba lo pedido («ag. prof») pero no la columna («ag.  prof»)."""
+    engine = _engine()
+    name = f"cache_test_blancos_{uuid.uuid4().hex[:8]}"
+    nbsp = chr(0xA0)
+    valores = ["Hosp. Zonal Gral. de Ag.  Prof. Dr. R. Carrillo", f"Hosp. Zonal{nbsp}Gral.", "Otro"]
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE public."{name}" (establecimiento text)'))
+        for v in valores:
+            conn.execute(text(f'INSERT INTO public."{name}" VALUES (:v)'), {"v": v})
+    try:
+        tipos = [("establecimiento", "text")]
+        for pedido in valores[:2]:
+            res = await _agregar_en(
+                name, tipos, operacion="conteo", filtros={"establecimiento": pedido}
+            )
+            assert res.grupos == [{"valor": 1}], pedido
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))

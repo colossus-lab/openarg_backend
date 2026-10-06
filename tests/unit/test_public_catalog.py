@@ -87,7 +87,7 @@ class TestBuildDataQuery:
         )
         assert "O'Higgins" not in q.sql and "o'higgins" not in q.sql
         assert q.params == {"p0": "o'higgins"}
-        assert 'lower(translate(btrim("provincia"::text)' in q.sql
+        assert 'lower(translate(btrim(regexp_replace("provincia"::text, ' in q.sql
 
     def test_exact_equality_when_the_table_is_too_big_to_fold(self) -> None:
         q = build_data_query(
