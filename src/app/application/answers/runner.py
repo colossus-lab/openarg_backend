@@ -277,11 +277,12 @@ class EngineRunner:
         result.answer = _scrub(result.answer)
         result.sources = [_with_portal(s) for s in result.sources]
         warnings = list(result.warnings)
-        # El atraso se mide sobre lo que aportó cifras; si el motor no lo sabe
-        # (nada aportó, alguna cifra quedó sin respaldo o no hubo
-        # verificación), sobre lo citado. Así una fuente leída y no usada, o
-        # citada sólo porque su título aparece en el texto, no pone "Dato
-        # atrasado" arriba de una respuesta hecha con datos frescos de otra.
+        # El atraso se mide sobre lo que el motor dice (`figure_evidence`); si
+        # no dice nada (nada aportó, alguna cifra quedó sin respaldo o no hubo
+        # verificación), sobre lo citado. Así una fuente citada sólo porque su
+        # título aparece en el texto, o leída y no usada que se llama igual
+        # que la que sí, no pone "Dato atrasado" arriba de una respuesta hecha
+        # con datos frescos de otra.
         dated = list(result.figure_evidence or result.cited_evidence or result.evidence)
 
         if result.evidence:

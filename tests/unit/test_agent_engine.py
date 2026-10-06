@@ -885,9 +885,10 @@ async def test_fuera_de_correct_se_cita_toda_la_evidencia_como_antes(
     decidía fuentes, gráficos, `served_table` y sobre qué se calcula el aviso
     de atraso. Fuera de correct se cita todo lo leído, como antes de #134.
 
-    El aviso: en shadow, con todas las cifras respaldadas, mira lo que aportó
-    cifras (revisión de #146, test de abajo); con off no hay verificación y
-    mira todo lo citado (`figure_evidence` vacío)."""
+    El aviso: en shadow, con todas las cifras respaldadas, deja afuera lo que
+    no aportó cifras y se llama igual que algo que sí, acá 92.2 (revisión de
+    #146, tests de abajo); con off no hay verificación y mira todo lo citado
+    (`figure_evidence` vacío)."""
     _modo(monkeypatch, mode)
     llm = _reservas_llm(
         "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
@@ -1083,7 +1084,8 @@ async def test_en_sombra_una_serie_atrasada_leida_y_no_usada_no_pone_el_aviso(
     arriba de una respuesta correcta y al día, con todas sus cifras
     respaldadas. 92.1 y 92.2 se llaman igual en la API: el aviso parecía
     hablar de la cifra de la respuesta. Con todas las cifras respaldadas, el
-    aviso mira lo que aportó cifras; las fuentes siguen siendo todo lo leído.
+    aviso deja afuera lo que no aportó cifras y se llama igual que algo que
+    sí; las fuentes siguen siendo todo lo leído.
 
     Con off no se verifica y el aviso mira todo lo leído: es el interruptor, y
     sin verificación no hay con qué distinguir lo usado de lo consultado."""
@@ -1130,3 +1132,166 @@ async def test_en_sombra_una_serie_atrasada_leida_y_no_usada_no_pone_el_aviso(
     assert result.verification["sin_respaldo"] == []
     assert result.answer == answer
     assert result.figure_evidence == [al_dia]
+
+
+# ── el aviso en sombra sólo deja afuera lo homónimo (revisión de #146) ──
+
+
+def _runner_sin_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    """El runner de verdad, sin caché, analytics ni auditoría."""
+    from app.application.answers import runner as runner_module
+
+    async def _nada(*a: Any, **kw: Any) -> None:
+        return None
+
+    async def _sin_cache(*a: Any, **kw: Any) -> tuple[None, None]:
+        return None, None
+
+    monkeypatch.setattr(runner_module, "record_terminal_analytics", _nada)
+    monkeypatch.setattr(runner_module, "check_cache", _sin_cache)
+    monkeypatch.setattr(runner_module, "write_cache", _nada)
+    monkeypatch.setattr(runner_module, "audit_query", lambda **kw: None)
+
+
+# Las reservas mensuales de H082 con el salto julio→agosto en 1.031,30 (en
+# RESERVAS_MENSUAL es 1.038,38): coincide con el «$1.031» truncado del dólar.
+RESERVAS_MENSUAL_SALTO_1031 = _serie(
+    "92.1_RID_0_0_32",
+    "Reservas internacionales y pasivos del BCRA",
+    [("2026-06-01", 47467.31), ("2026-07-01", 48668.96), ("2026-08-01", 49700.26)],
+    "Millones de dólares",
+)
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+async def test_en_sombra_un_truncado_que_coincide_con_otra_serie_no_pierde_el_aviso(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """El caso de H082 («$1.031» por 1.031,56, de diciembre de 2024) con el
+    salto julio→agosto de las reservas en 1.031,30: el verificador da el
+    truncado por derivado de las reservas, todas las cifras quedan
+    respaldadas, y el aviso miraba sólo lo que aportó cifras. El dato de 2024
+    salía sin «Dato atrasado». El dólar no se llama como las reservas: cuenta."""
+    from app.application.answers.runner import EngineRunner
+
+    _runner_sin_io(monkeypatch)
+    _modo(monkeypatch, mode)
+    answer = (
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026. "
+        "El dólar de referencia estaba en **$1.031**."
+    )
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["92.1_RID_0_0_32"]),
+                    _call("series_tiempo", 2, ids=["168.1_T_CAMBIOR_D_0_0_26"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(llm, _deps_series(RESERVAS_MENSUAL_SALTO_1031, DOLAR_VIEJO))
+    result = await EngineRunner(engine, MagicMock()).run(EngineRequest("reservas y dólar", "u"))
+    if mode != "off":
+        # La coincidencia: ninguna cifra queda sin respaldo.
+        assert result.verification["sin_respaldo"] == []
+    assert result.answer.endswith(answer)
+    avisos = result.answer[: -len(answer)]
+    assert avisos.startswith("**Dato atrasado:**")
+    assert "Tipo de cambio de referencia" in avisos
+    assert "30 de diciembre de 2024" in avisos
+    if mode != "off":
+        assert result.figure_evidence == [RESERVAS_MENSUAL_SALTO_1031, DOLAR_VIEJO]
+
+
+IPC_AL_DIA = DataResult(
+    source="series_tiempo",
+    portal_name="API de Series de Tiempo",
+    portal_url="https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26",
+    dataset_title="IPC nacional, variación mensual",
+    format="time_series",
+    records=[
+        {"fecha": "2026-06-01", "IPC": 2.4},
+        {"fecha": "2026-07-01", "IPC": 1.9},
+        {"fecha": "2026-08-01", "IPC": 2.1},
+        {"fecha": "2026-09-01", "IPC": 1.7},
+    ],
+    metadata={
+        "units": "Porcentaje",
+        "ultima_observacion": "2026-09-01",
+        "frecuencia": "mensual",
+        "fecha_fin_fuente": "2026-09-01",
+        "actualizada_en_fuente": True,
+    },
+)
+
+SALARIOS_VIEJOS = DataResult(
+    source="series_tiempo",
+    portal_name="API de Series de Tiempo",
+    portal_url="https://datos.gob.ar/series/api/series/?ids=149.1_SOR_PRIADO_OCTU_0_25",
+    dataset_title="Índice de salarios. Sector privado registrado. Mensual.",
+    format="time_series",
+    records=[
+        {"fecha": "2026-03-01", "Salarios": 3.1},
+        {"fecha": "2026-04-01", "Salarios": 2.6},
+        {"fecha": "2026-05-01", "Salarios": 2.47},
+    ],
+    metadata={
+        "units": "Porcentaje",
+        "ultima_observacion": "2026-05-01",
+        "frecuencia": "mensual",
+        "fecha_fin_fuente": "2026-05-01",
+        "actualizada_en_fuente": False,
+    },
+)
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+@pytest.mark.parametrize(
+    "salarios",
+    [
+        # «2,4 %» por 2,47 (truncado, como H082) coincide tal cual con junio
+        # del IPC: queda "directa" del IPC y nada la ata a los salarios.
+        "Los salarios registrados subieron **2,4 %** en el último mes.",
+        # La serie vieja se usa para una afirmación sin cifra propia.
+        "Los salarios registrados vienen creciendo por encima de la inflación.",
+    ],
+    ids=["truncado_que_coincide_con_el_ipc", "sin_cifra_propia"],
+)
+async def test_en_sombra_una_serie_atrasada_usada_no_pierde_el_aviso_por_otra_al_dia(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None, salarios: str
+) -> None:
+    """IPC al día y salarios que la fuente da por desactualizados (terminan en
+    mayo). La respuesta usa los salarios, pero la única cifra respaldada es
+    del IPC, y el aviso miraba sólo el IPC: salía sin «Dato atrasado». Los
+    salarios no se llaman como el IPC: cuentan."""
+    from app.application.answers.runner import EngineRunner
+
+    _runner_sin_io(monkeypatch)
+    _modo(monkeypatch, mode)
+    answer = f"En septiembre de 2026 la inflación mensual fue de **1,7 %**. {salarios}"
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["148.3_INIVELNAL_DICI_M_26"]),
+                    _call("series_tiempo", 2, ids=["149.1_SOR_PRIADO_OCTU_0_25"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(llm, _deps_series(IPC_AL_DIA, SALARIOS_VIEJOS))
+    result = await EngineRunner(engine, MagicMock()).run(
+        EngineRequest("¿Los salarios le ganan a la inflación?", "u")
+    )
+    if mode != "off":
+        assert result.verification["sin_respaldo"] == []
+    assert result.answer.endswith(answer)
+    avisos = result.answer[: -len(answer)]
+    assert avisos.startswith("**Dato atrasado:**")
+    assert "Índice de salarios" in avisos
+    assert "mayo de 2026" in avisos
+    if mode != "off":
+        assert result.figure_evidence == [IPC_AL_DIA, SALARIOS_VIEJOS]

@@ -43,7 +43,8 @@ Qué se hace con eso lo decide ``ANSWERS_VERIFY_MODE``:
   respuesta sale igual, también sus fuentes y sus citas: toda la evidencia
   citada y sin citas. Es para medir la precisión antes de actuar. Lo único
   que usa es lo respaldado: si todas las cifras lo están, el aviso de atraso
-  mira sólo las evidencias que las aportaron; si no, todo lo leído.
+  deja afuera lo que no aportó cifras y se llama igual que algo que sí
+  (``dated_evidence``); si no, mira todo lo leído.
 - ``correct``: se citan sólo las fuentes usadas, con sus citas, y el agente
   hace UNA vuelta correctiva con la lista de cifras (``agent_engine``); si
   después sigue habiendo cifras sin respaldo, la respuesta lleva un aviso
@@ -1132,6 +1133,25 @@ def figure_evidence(evidence: Sequence[Any], verification: Verification | None) 
         return []
     used = verification.used_results()
     return [r for i, r in enumerate(evidence) if i in used]
+
+
+def dated_evidence(evidence: Sequence[Any], verification: Verification) -> list[Any]:
+    """Sobre qué evidencias se calcula el aviso de atraso fuera de ``correct``.
+
+    Todo lo leído, menos lo que no aportó cifras y se llama igual que una
+    evidencia que sí aportó: 92.1 y 92.2 son las dos «Reservas internacionales
+    y pasivos del BCRA», y con 92.1 al día y 92.2 consultada y vieja el aviso
+    parecía hablar de la cifra de la respuesta (revisión de #146).
+
+    No alcanza con lo que aportó cifras (``figure_evidence``): el respaldo es
+    por coincidencia de valor, y una serie vieja que la respuesta sí usó queda
+    afuera si su cifra (truncada) coincide con un valor o un salto de otra
+    serie leída, o si la usa para una afirmación sin cifra propia.
+    """
+    used = verification.used_results()
+    keys = [_title_key(str(getattr(r, "dataset_title", "") or "")) for r in evidence]
+    used_keys = {keys[i] for i in used if keys[i]}
+    return [r for i, r in enumerate(evidence) if i in used or keys[i] not in used_keys]
 
 
 # ── las citas estructuradas ────────────────────────────────
