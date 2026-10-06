@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -33,7 +34,9 @@ from app.application.consultas.numeros import (
     numero_de_filtro,
     perfil_columna,
 )
+from app.application.consultas.preparar import TOLERANTE_MAX_FILAS, preparar
 from app.application.consultas.sql import CatalogRequestError
+from app.domain.ports.sandbox.sql_sandbox import ColumnValueStats, SandboxResult, TableValueStats
 
 # Cómo queda una columna de texto limpia en el SQL: los mismos caracteres que
 # saca Python (`ESPACIOS`), no sólo el espacio de `btrim(x)`.
@@ -361,3 +364,147 @@ class TestNumeroDeFiltro:
     def test_texto_no_es_un_numero(self) -> None:
         with pytest.raises(CatalogRequestError, match="necesita un número"):
             numero_de_filtro("mucho", "c", ">")
+
+
+# ── Tablas chicas: el formato de la muestra se confirma en la columna entera ──
+
+# consultas_medicas de buenos_aires_prov__rendimiento_de_establecimiento
+# (staging `a7ce7a82`, 2.371 filas), tal como la lee `perfiles_numericos`:
+# pg_stats y las primeras 200 filas no nulas. Trae 40 enteros, 275 ambiguos
+# con punto y 25 valores distintos que sólo pueden ser ingleses («1.07»,
+# «24.87»). La columna entera tiene 8 que sólo pueden ser argentinos
+# («1.005.915»), ninguno en la muestra.
+CONSULTAS_MEDICAS_PG_STATS = """
+0 1.036 10.417 1.12 1.146 12.431 12.484 13.868 14.282 151 15.185 15.285 15.681 17.093 18.298
+1.834 19.246 2.178 2.349 265 266 27.284 2.979 3.017 3.439 3.604 3.989 4.412 44.696 4.754 5.105
+530 6.034 7.607 7.626 768 8.128 9.642 994 1.001 10.229 10.593 10.849 11.073 1.134 11.626 119
+121.636 12.374 12.576 12.838 13.093 133.797 13.627 13.921 14.132 144.429 14.731 15.177 15.515
+15.992 163.478 170.346 17.476 17.995 18.318 188.361 19.373 197.821 20.182 20.587 20.963 21.527
+22.207 22.692 232.762 23.786 244 24.938 25.597 26.202 26.805 27.41 2.805 28.614 294 299.379
+3.048 31.201 324 33.171 33.59 34.32 3.528 36.409 372.438 38.199 39.287 40.003 40.83 41.743
+42.866 4.39 44.915 45.909 46.829 48.07 49.525 5.068 51.524 5.281 54.115 55.387 56.908 57.956
+5.882 6.015 6.161 6.296 64.395 65.93 67.532 6.91 7.05 7.239 73.695 7.518 76.26 7.784 796 8.103
+82.627 84 85.527 87.095 8.985 9.208 951 97.574 9.998
+""".split()
+CONSULTAS_MEDICAS_FILAS = """
+120.813 7.339 411 1.349 119 38.128 7.156 5.202 19.536 39.891 8.673 38.572 3.396 7.583 238 1.993
+3.811 3.528 2.83 165.452 4.441 8.266 0 0 5.682 0 7.7 8.045 16.018 8.168 7.567 30.565 0 5.719
+7.589 7.765 0 2.178 11.133 4.217 16.192 7.596 1.789 33.76 7.692 6.779 5.405 7.029 0 13.572 13
+7.676 6.561 6.015 8.261 0 0 7.566 5.235 6.517 10.399 9.718 6.2 9.998 9.367 22.798 6.224 1.31
+6.034 11.084 13.577 7.097 7.997 90.116 5.491 14.223 24.87 8.421 3.752 1.07 284 8.344 2.465 1.724
+3.624 92.665 2.293 1.322 4.239 3.017 9.208 1.177 8.555 4.64 660 1.315 97.155 5.068 44.221 1.203
+685 5.105 3.372 6.623 36.377 1.396 1.45 2.158 867 1.252 682 70 87.95 1.336 22.256 6.072 2.796
+12.837 7.775 12.159 5.852 5.628 6.019 2.438 5.698 98.173 25.449 4.861 768 425 8.393 110.586
+14.465 13.094 14.349 13.819 13.998 12.706 6.275 21.281 85.052 18.338 3.655 968 2.404 17.641
+101.008 12.357 3.953 10.959 8.07 3.361 2.177 2.637 57.253 8.98 1.55 2.593 2.002 19.246 2.145
+14.053 45.665 93.419 13.799 12.564 14.077 16.777 14.155 14.052 7.557 7.768 10.794 197.821 10.954
+11.177 406 3.604 12.423 10.618 6.635 5.844 3.78 8.802 9.658 11.134 10.833 6.056 48.973 26.538
+27.025 290 58 62 5.544 3.252 443 7.113 12.642 8.779
+""".split()
+
+
+class _Tabla:
+    """Un sandbox con una sola columna de texto: devuelve la muestra (pg_stats y
+    las primeras filas) y cuenta en la columna entera con las condiciones del
+    SQL que recibe (sus ``~ '…'`` y ``!~ '…'``), como lo haría Postgres."""
+
+    def __init__(
+        self,
+        pg_stats: list[str],
+        filas: list[str],
+        resto: list[str],
+        *,
+        estimadas: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        self.pg_stats, self.filas = pg_stats, filas
+        self.columna = [*filas, *resto]
+        self.estimadas = len(self.columna) if estimadas is None else estimadas
+        self.error = error
+        self.consultas: list[tuple[str, int]] = []
+
+    async def get_value_stats(self, tabla: str, columnas: list[str]) -> TableValueStats:
+        return TableValueStats(
+            self.estimadas,
+            {c: ColumnValueStats(c, histogram_bounds=self.pg_stats) for c in columnas},
+        )
+
+    async def execute_readonly(
+        self, sql: str, timeout_seconds: int = 10, *, params: Any = None
+    ) -> SandboxResult:
+        self.consultas.append((sql, timeout_seconds))
+        cuenta = re.search(r"count\(\*\) AS (\w+)", sql)
+        if cuenta is None:
+            return SandboxResult(["v"], [{"v": v} for v in self.filas], len(self.filas), False)
+        if self.error:
+            return SandboxResult([], [], 0, False, error=self.error, error_kind="timeout")
+        condiciones = re.findall(r"(!?~) '([^']*)'", sql)
+        assert condiciones, sql
+        n = sum(
+            all(
+                (re.search(patron, v.strip(ESPACIOS)) is not None) == (op == "~")
+                for op, patron in condiciones
+            )
+            for v in self.columna
+        )
+        return SandboxResult([cuenta.group(1)], [{cuenta.group(1): n}], 1, False)
+
+
+async def _formato(tabla: _Tabla, columna: str = "consultas_medicas") -> str | None:
+    prep = await preparar(tabla, "raw.t", {columna: "text"}, [], numericas=[columna])
+    return prep.formatos[columna]
+
+
+class TestColumnaEnteraEnTablasChicas:
+    """Segunda revisión del PR #148: la regla «sin mezcla» sólo miraba la
+    muestra. En consultas_medicas la muestra dice «inglés» y la columna entera
+    es argentina: «120.813» consultas (Adolfo Alsina, 2024) salían 120,813."""
+
+    async def test_consultas_medicas_un_argentino_fuera_de_la_muestra_es_mezcla(self) -> None:
+        muestra = [*CONSULTAS_MEDICAS_PG_STATS, *CONSULTAS_MEDICAS_FILAS]
+        assert perfil_columna("consultas_medicas", muestra).formato == "en"  # la muestra sola
+        tabla = _Tabla(CONSULTAS_MEDICAS_PG_STATS, CONSULTAS_MEDICAS_FILAS, ["1.005.915"])
+        with pytest.raises(CatalogRequestError, match="mil veces") as exc:
+            await _formato(tabla)
+        assert "columna entera" in str(exc.value) and "argentino" in str(exc.value)
+        assert not any("AS valor" in sql for sql, _ in tabla.consultas)
+
+    async def test_sin_valores_del_otro_formato_vale_lo_que_dice_la_muestra(self) -> None:
+        tabla = _Tabla(CONSULTAS_MEDICAS_PG_STATS, CONSULTAS_MEDICAS_FILAS, ["1.234", "5"])
+        assert await _formato(tabla) == "en"
+        [(_, timeout)] = [(sql, t) for sql, t in tabla.consultas if "count(*)" in sql]
+        assert timeout < 10  # más corto que el del cálculo, que viene después
+
+    async def test_mezcla_fuera_de_la_muestra_sin_ambiguos_queda_sin_formato(self) -> None:
+        """Como en la muestra: sin ambiguos no hace falta rechazar. Quedan en
+        NULL los de fuera de la muestra y el cálculo los cuenta aparte."""
+        tabla = _Tabla([], [*EVIDENCIA_EN, "500"], ["1.234,5", "12.500"])
+        assert await _formato(tabla, "monto") is None
+
+    async def test_si_la_cuenta_no_termina_no_se_decide(self) -> None:
+        tabla = _Tabla(
+            CONSULTAS_MEDICAS_PG_STATS,
+            CONSULTAS_MEDICAS_FILAS,
+            [],
+            error="canceling statement due to statement timeout",
+        )
+        assert await _formato(tabla) is None
+        assert leer_numero("120.813", None) is None
+
+    async def test_en_la_muestra_argentina_se_buscan_ingleses(self) -> None:
+        tabla = _Tabla([], [*EVIDENCIA_AR, "12.500"], ["1,234,567"])
+        with pytest.raises(CatalogRequestError, match="columna entera"):
+            await _formato(tabla, "IMPORTE")
+
+    async def test_en_una_tabla_grande_no_se_recorre_la_columna(self) -> None:
+        """Desde ``TOLERANTE_MAX_FILAS`` la cuenta no se hace (recorrer la
+        columna es lo que en esas tablas pasa el timeout): decide la muestra
+        sola, como antes de este arreglo."""
+        tabla = _Tabla(
+            CONSULTAS_MEDICAS_PG_STATS,
+            CONSULTAS_MEDICAS_FILAS,
+            ["1.005.915"],
+            estimadas=TOLERANTE_MAX_FILAS,
+        )
+        await _formato(tabla)
+        assert not any("count(*)" in sql for sql, _ in tabla.consultas)

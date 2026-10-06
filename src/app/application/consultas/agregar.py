@@ -148,10 +148,12 @@ def _filas_del_calculo(rows: list[dict[str, Any]], por_grupo: str, de_todos: str
 
 # Por qué un número ambiguo quedó afuera del cálculo. Antes esas filas se
 # contaban entre las que "no tienen un número reconocible", y sí lo tienen
-# (H041).
+# (H041). El formato queda sin decidir si la muestra no alcanza, si la
+# columna entera mezcla los dos o si no se la pudo recorrer
+# (`numeros.confirmar_formato`).
 _AMBIGUAS = (
     "tienen un número que se puede leer de dos formas (como «12.500»: doce mil quinientos "
-    "o doce coma cinco) y la muestra de la columna no alcanza para decidir el formato"
+    "o doce coma cinco) y no se pudo decidir en qué formato está la columna"
 )
 
 

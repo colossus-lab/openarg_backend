@@ -22,7 +22,9 @@ La regla de acá:
   ``MIN_EVIDENCIA`` valores distintos que sólo pueden ser de un formato y
   ninguno del otro, la columna es de ese formato. Si no alcanza para decidir,
   se rechaza el cálculo con un mensaje claro: un error de mil veces es peor
-  que no contestar.
+  que no contestar;
+- en tablas chicas, lo que decidió la muestra se confirma en la columna
+  entera (``confirmar_formato``): un solo valor del otro formato es mezcla.
 
 Revisión independiente del 05-oct: el desempate "enteros cortos y «12.500»
 es argentino" leía mil veces más altos los minutos por día de la ENUT, que
@@ -34,7 +36,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 
 from app.application.consultas.sql import CatalogRequestError, quote_ident
@@ -134,6 +136,18 @@ class PerfilNumerico:
     problema: str | None = None
     numericos: int = 0
     muestra: int = 0
+    # Hasta tres números ambiguos de la muestra (vacío si no trajo ninguno).
+    ambiguos: tuple[str, ...] = ()
+
+
+def _problema(columna: str, ambiguos: Iterable[str], motivo: str) -> str:
+    lista = ", ".join(f"«{e}»" for e in ambiguos)
+    return (
+        f"La columna {columna!r} tiene números como {lista} que se pueden leer de dos formas "
+        "(por ejemplo «12.500»: doce mil quinientos en formato argentino, doce coma cinco en "
+        f"formato inglés) y {motivo}. No calculo sobre esa columna: el error posible es de mil "
+        "veces. Mostrá los valores con obtener_datos o usá otra columna."
+    )
 
 
 def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
@@ -169,7 +183,14 @@ def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
     numericos = sum(conteo.values())
 
     def perfil(formato: str | None, problema: str | None = None) -> PerfilNumerico:
-        return PerfilNumerico(columna, formato, problema, numericos=numericos, muestra=total)
+        return PerfilNumerico(
+            columna,
+            formato,
+            problema,
+            numericos=numericos,
+            muestra=total,
+            ambiguos=tuple(ejemplos),
+        )
 
     ar, en = conteo[FORMATO_AR], conteo[FORMATO_EN]
     if not (ar and en):
@@ -178,7 +199,6 @@ def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
                 return perfil(formato)
     if not conteo["ambiguo_punto"] and not conteo["ambiguo_coma"]:
         return perfil(None)
-    lista = ", ".join(f"«{e}»" for e in ejemplos)
     if ar and en:
         motivo = "mezcla números en formato argentino y en formato inglés"
     elif ar or en:
@@ -189,12 +209,55 @@ def perfil_columna(columna: str, valores: Iterable[object]) -> PerfilNumerico:
         )
     else:
         motivo = "no trae ningún valor que diga en qué formato está"
-    return perfil(
-        None,
-        f"La columna {columna!r} tiene números como {lista} que se pueden leer de dos formas "
-        "(por ejemplo «12.500»: doce mil quinientos en formato argentino, doce coma cinco en "
-        f"formato inglés) y la muestra {motivo}. No calculo sobre esa columna: el error "
-        "posible es de mil veces. Mostrá los valores con obtener_datos o usá otra columna.",
+    return perfil(None, _problema(columna, ejemplos, f"la muestra {motivo}"))
+
+
+# Revisión del PR #148 (segunda ronda): la regla «sin mezcla» de
+# `perfil_columna` sólo ve la muestra. En consultas_medicas (rendimiento de
+# establecimientos de PBA, staging `a7ce7a82`, 2.371 filas) la muestra trae 25
+# valores que sólo pueden ser ingleses («1.07», «24.87») y ninguno argentino;
+# la columna entera tiene 8 argentinos («1.005.915») y 1.842 ambiguos con
+# punto, que se leían como decimales ingleses: 120.813 consultas eran 120,813.
+# Igual en paginas_vistas de la web del GCBA y en Pasos de los peajes de AUSA.
+
+
+def expresion_otro_formato(columna: str, formato: str) -> str:
+    """Condición SQL: el valor sólo se puede leer en el formato contrario a ``formato``.
+
+    Los ambiguos no cuentan: ``RE_EN`` también acepta "12.500" y ``RE_AR``,
+    "1,250" (``clase_valor`` los prueba antes por eso).
+    """
+    x = _texto(columna)
+    if formato == FORMATO_AR:
+        return f"({x} ~ '{RE_EN}' AND {x} !~ '{RE_AMBIGUO_PUNTO}')"
+    return f"({x} ~ '{RE_AR}' AND {x} !~ '{RE_AMBIGUO_COMA}')"
+
+
+def confirmar_formato(perfil: PerfilNumerico, del_otro: int | None) -> PerfilNumerico:
+    """El perfil, visto cuántos valores del otro formato hay en la columna entera.
+
+    ``del_otro`` es la cuenta de ``expresion_otro_formato`` sobre toda la
+    columna, o None si no se pudo hacer (timeout, error). Si la muestra no
+    decidió, o la columna no tiene ninguno, el perfil queda como estaba. Si
+    tiene alguno es mezcla, igual que en la muestra: rechazo si la muestra
+    trae ambiguos, sin formato si no. Si no se pudo contar, sin formato: los
+    ambiguos quedan en NULL y el cálculo los cuenta aparte.
+    """
+    if perfil.formato is None or del_otro == 0:
+        return perfil
+    if del_otro is None or not perfil.ambiguos:
+        return replace(perfil, formato=None)
+    nombre = {FORMATO_AR: "argentino", FORMATO_EN: "inglés"}
+    otro = FORMATO_EN if perfil.formato == FORMATO_AR else FORMATO_AR
+    cuantos = (
+        "un valor que sólo se lee" if del_otro == 1 else f"{del_otro} valores que sólo se leen"
+    )
+    motivo = (
+        "la columna entera mezcla los dos formatos: la muestra parecía en formato "
+        f"{nombre[perfil.formato]}, pero la tabla tiene {cuantos} en formato {nombre[otro]}"
+    )
+    return replace(
+        perfil, formato=None, problema=_problema(perfil.columna, perfil.ambiguos, motivo)
     )
 
 

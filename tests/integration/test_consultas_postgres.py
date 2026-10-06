@@ -26,6 +26,7 @@ from app.application.consultas.numeros import (
     clase_valor,
     expresion_ambiguo,
     expresion_numero,
+    expresion_otro_formato,
     leer_numero,
 )
 from app.application.public_catalog import DataRequest, build_data_query
@@ -144,6 +145,23 @@ def test_la_condicion_de_ambiguo_coincide_con_python() -> None:
     }
 
 
+@pytest.mark.parametrize(("formato", "otro"), [("ar", "en"), ("en", "ar")])
+def test_la_condicion_del_otro_formato_coincide_con_python(formato: str, otro: str) -> None:
+    """Lo que cuenta la confirmación en la columna entera: los valores que
+    `clase_valor` lee sólo en el otro formato, sin los ambiguos."""
+    engine = _engine()
+    values, params = _values(NUMEROS)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT v, {expresion_otro_formato('v', formato)} AS otro "
+                f"FROM (VALUES {values}) AS t(v)"
+            ),
+            params,
+        ).fetchall()
+    assert {v: o for v, o in rows} == {v: clase_valor(v) == otro for v in NUMEROS}
+
+
 FILAS_DE_PRUEBA = (
     "('Educación y Cultura', 'Banco do Brasil', '1.500.000,50', '1/10/2017'),"
     "('Educación y Cultura', 'Banco Nación', '900.000', '15/1/2018'),"
@@ -162,13 +180,17 @@ FILAS_TURISMO = (
 
 
 @contextmanager
-def _tabla_de_prueba(filas: str) -> Iterator[str]:
+def _tabla_de_prueba(filas: str, *, autovacuum: bool = True) -> Iterator[str]:
     engine = _engine()
     name = f"cache_test_consultas_{uuid.uuid4().hex[:8]}"
+    # Sin autovacuum no hay ANALYZE a mitad del test: la muestra de
+    # `perfiles_numericos` son sólo las primeras filas, sin `pg_stats`.
+    opciones = "" if autovacuum else " WITH (autovacuum_enabled = false)"
     with engine.begin() as conn:
         conn.execute(
             text(
                 f'CREATE TABLE public."{name}" (funcion_desc text, entidad text, monto text, fecha text)'
+                + opciones
             )
         )
         conn.execute(text(f'INSERT INTO public."{name}" VALUES {filas}'))
@@ -401,6 +423,30 @@ async def test_agregar_rechaza_la_columna_sin_evidencia_suficiente(tabla: str) -
 
     with pytest.raises(CatalogRequestError, match="sólo 2 valores distintos"):
         await _agregar(tabla, operacion="suma", columna="monto")
+
+
+async def test_agregar_rechaza_una_mezcla_que_la_muestra_no_ve() -> None:
+    """Segunda revisión del PR #148: consultas_medicas (staging `a7ce7a82`). Las
+    primeras 200 filas, que son la muestra, dicen «inglés»; «1.005.915», al
+    final de la tabla, sólo puede ser argentino. Sin la cuenta en la columna
+    entera, «120.813» consultas se sumaban como 120,813."""
+    from app.application.public_catalog import CatalogRequestError
+    from tests.unit.test_consultas_numeros import (
+        CONSULTAS_MEDICAS_FILAS,
+        CONSULTAS_MEDICAS_PG_STATS,
+    )
+
+    def filas(valores: list[str]) -> str:
+        return ",".join(f"('x', 'x', '{v}', 'x')" for v in valores)
+
+    valores = [*CONSULTAS_MEDICAS_FILAS, *CONSULTAS_MEDICAS_PG_STATS]
+    with _tabla_de_prueba(filas(valores), autovacuum=False) as limpia:
+        res = await _agregar(limpia, operacion="suma", columna="monto")
+        # La cuenta pasó por el sandbox real y no encontró argentinos.
+        assert res.req.formatos == {"monto": "en"}
+    with _tabla_de_prueba(filas([*valores, "1.005.915"]), autovacuum=False) as mezclada:
+        with pytest.raises(CatalogRequestError, match="columna entera"):
+            await _agregar(mezclada, operacion="suma", columna="monto")
 
 
 def test_la_cuenta_de_ambiguos_corre_con_los_filtros_del_calculo(tabla: str) -> None:
