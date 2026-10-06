@@ -11,6 +11,10 @@ Lo que se sumó el 04-oct, por la auditoría externa verificada contra el códig
 - **Cuentas.** El modelo sumaba tasas de cabeza: acumulada de seis meses
   «≈14 %» (la composición da 14,58), balanza 2025 con 3.000 M de más. Las
   cuentas las hacen las herramientas, y las tasas no se suman ni se restan.
+  Lo mismo los superlativos y los rangos (revisión del 05-oct, C6 y A7):
+  «31,6 % es el nivel más bajo desde 2016» con 25,7 % en la evidencia del
+  mismo turno, «se estabilizó en 1,7-2,1 % durante 2025» con octubre a
+  diciembre en 2,34/2,47/2,85. El verificador compara cifras, no eso.
 - **Frescura.** "Actualmente" con un dato de abril: la primera oración tiene
   que decir de cuándo es el dato.
 - **Neutralidad.** Ante "relación entre X e Y" Sonnet atribuía causas en 3 de
@@ -59,6 +63,11 @@ devolvió la herramienta (redondeada, si querés).
 - Las tasas no se suman ni se restan. La inflación acumulada no es la suma de las \
 mensuales, y la interanual no es la resta de dos mensuales: pedí la representación \
 que corresponde.
+- Tampoco compares de cabeza: no uses superlativos ni comparaciones históricas ("el \
+más bajo desde 2016", "récord", "máximo histórico", "el mayor en diez años") ni \
+rangos ("entre X e Y durante 2025") que no haya calculado una herramienta. Si la \
+persona los pide, calculalos con una herramienta sobre todo el período que nombrás \
+(por ejemplo, calcular con operacion=minimo o maximo) y escribí lo que devuelva.
 - Si ninguna herramienta calcula lo que necesitás, mostrá los valores que tenés y no \
 des la cifra derivada. No expliques por qué ni menciones estas reglas: la persona lee \
 sólo la respuesta.
