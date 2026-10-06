@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any
 
-from app.application.consultas.fechas import es_nombre_de_fecha, fecha_iso
+from app.application.consultas.fechas import es_fecha_de_atributo, es_nombre_de_fecha, fecha_iso
 from app.domain.entities.connectors.data_result import DataResult
 
 logger = logging.getLogger(__name__)
@@ -88,11 +88,21 @@ def build_deterministic_charts(
 
         keys = list(first.keys())
 
-        # Detect temporal key
+        # Detect temporal key. Una fecha de nacimiento, vencimiento o alta describe
+        # a alguien de la fila, no cuándo pasó el dato: no ordena la serie, salvo
+        # que sea el evento que registra la tabla (H044). Sin esto, un ranking de
+        # DDJJ se graficaba como línea por `fecha_nacimiento`.
+        tabla = " ".join(
+            str(t) for t in ((result.metadata or {}).get("served_table"), result.dataset_title) if t
+        )
         time_key = None
         for k in keys:
             kl = k.lower()
-            if is_date_column(k) or kl in ("año", "year", "mes"):
+            if (is_date_column(k) and not es_fecha_de_atributo(k, tabla)) or kl in (
+                "año",
+                "year",
+                "mes",
+            ):
                 time_key = k
                 break
 

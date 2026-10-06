@@ -187,6 +187,39 @@ class TestFechasNoIso:
         assert not is_date_column("updated_ts")
         assert not is_date_column("candidate")
 
+    def test_fecha_de_nacimiento_no_es_el_eje_de_un_ranking_de_personas(self):
+        # Las DDJJ traen `fecha_nacimiento` antes de las cifras: con la regla de
+        # fechas de las olas el ranking se graficaba como línea por cumpleaños.
+        records = [
+            {"nombre": "A", "fecha_nacimiento": "1970-05-01", "patrimonio_cierre": 10.0},
+            {"nombre": "B", "fecha_nacimiento": "1965-02-11", "patrimonio_cierre": 7.5},
+        ]
+        result = _make_result(records, format="json", title='Búsqueda DDJJ: "juan"')
+        charts = _build_deterministic_charts([result])
+        assert charts[0]["type"] == "bar_chart"
+        assert charts[0]["xKey"] == "nombre"
+        assert charts[0]["yKeys"] == ["patrimonio_cierre"]
+
+    def test_fecha_de_nacimiento_es_el_eje_de_una_tabla_de_nacimientos(self):
+        records = [
+            {"fecha_nacimiento": "2024-02-01", "cantidad": 12},
+            {"fecha_nacimiento": "2024-01-01", "cantidad": 10},
+        ]
+        result = _make_result(records, format="json", title="caba__nacimientos__a1b2c3d4__v1")
+        charts = _build_deterministic_charts([result])
+        assert charts[0]["type"] == "line_chart"
+        assert charts[0]["xKey"] == "fecha_nacimiento"
+        assert [r["cantidad"] for r in charts[0]["data"]] == [10, 12]
+
+    def test_la_fecha_del_dato_gana_a_una_de_vencimiento_anterior(self):
+        records = [
+            {"fecha_vencimiento": "2030-01-01", "fecha": "2024-02-01", "monto": 2},
+            {"fecha_vencimiento": "2029-01-01", "fecha": "2024-01-01", "monto": 1},
+        ]
+        charts = _build_deterministic_charts([_make_result(records, format="json")])
+        assert charts[0]["xKey"] == "fecha"
+        assert [r["monto"] for r in charts[0]["data"]] == [1, 2]
+
 
 class TestAdoptLlmTitles:
     def test_generic_sql_title_takes_the_models_title(self):

@@ -204,6 +204,12 @@ def _de_la_tabla(nombre: str, tabla: str | None) -> bool:
     return bool(evento and tabla) and _plural(evento) in _palabras(tabla or "")
 
 
+def es_fecha_de_atributo(nombre: str, tabla: str | None = None) -> bool:
+    """Una fecha que describe a alguien de la fila (nacimiento, vencimiento, alta…),
+    no cuándo pasó el dato, salvo que sea el evento que registra la tabla (H044)."""
+    return _es_de_atributo(nombre) and not _de_la_tabla(nombre, tabla)
+
+
 def _es_columna_de_mes(nombre: str, anio: str) -> bool:
     palabras = _palabras(nombre)
     if (
