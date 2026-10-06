@@ -39,6 +39,13 @@ Y lo que pidió la segunda revisión:
   tope y el modelo leía el último patrimonio a medias);
 - en un ranking, las tarjetas conservan su puesto (el frontend las numera
   por posición).
+
+Y lo que pidió la tercera, para un gráfico de varias series (el de línea que
+sale cuando ``fecha_nacimiento`` cuenta como fecha):
+
+- las marcas booleanas no son series;
+- la fila que no cierra no decide qué series hay;
+- con ``ingresos_inconsistentes`` se anulan sus ingresos, no la fila.
 """
 
 from __future__ import annotations
@@ -56,6 +63,7 @@ from app.application.answers.tools.base import (
     to_json,
 )
 from app.application.answers.tools.conectores import DeclaracionesJuradas
+from app.application.pipeline import chart_builder
 from app.application.pipeline.chart_builder import build_deterministic_charts
 from app.application.pipeline.connectors.ddjj import execute_ddjj_step
 from app.application.pipeline.nodes.finalize import _extract_documents
@@ -628,6 +636,64 @@ def test_la_marca_solo_filtra_el_grafico_de_las_ddjj() -> None:
     result = _ddjj_result(filas)
     result.source = "sandbox:nl2sql"
     assert _bars(build_deterministic_charts([result])) == ["A", "B"]
+
+
+def test_una_columna_booleana_no_es_una_serie_del_grafico() -> None:
+    """``isinstance(False, int)`` es True: una marca entraba como serie de 0 y 1."""
+    filas = [
+        {"fecha": "2024-01-01", "valor": 10.0, "estimado": False},
+        {"fecha": "2024-02-01", "valor": 12.0, "estimado": True},
+    ]
+    result = _ddjj_result(filas)
+    result.source = "sandbox:nl2sql"
+    [chart] = build_deterministic_charts([result])
+    assert chart["yKeys"] == ["valor"]
+
+
+@pytest.fixture
+def eje_fecha_nacimiento(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Con la regla de fechas de #133 (en las olas de integración)
+    ``fecha_nacimiento`` cuenta como fecha y el gráfico de las DDJJ pasa a ser
+    de línea con todas sus columnas numéricas. Ese arreglo va aparte: acá se
+    prueba que, aun con ese eje, el gráfico no lleve las marcas ni la carga
+    errónea, y no pierda series."""
+    original = chart_builder.is_date_column
+    monkeypatch.setattr(
+        chart_builder,
+        "is_date_column",
+        lambda name: name == "fecha_nacimiento" or original(name),
+    )
+
+
+@pytest.mark.usefixtures("eje_fecha_nacimiento")
+def test_real_un_grafico_de_varias_series_no_toma_las_marcas_ni_pierde_series(
+    real: DDJJAdapter,
+) -> None:
+    result = real.search("juan", 10)
+    brugge = result.records[0]
+    assert brugge["nombre"] == "BRUGGE JUAN FERNANDO"
+    [chart] = build_deterministic_charts([result])
+    assert chart["xKey"] == "fecha_nacimiento"
+    assert "inconsistente" not in chart["yKeys"]
+    assert "ingresos_inconsistentes" not in chart["yKeys"]
+    # La variación null de Brugge, primera fila, sacaba la serie para todos.
+    assert "variacion_patrimonial" in chart["yKeys"]
+    assert len(chart["data"]) == len(result.records) - 1
+    assert all(row["bienes_cierre"] < brugge["bienes_cierre"] for row in chart["data"])
+
+
+@pytest.mark.usefixtures("eje_fecha_nacimiento")
+def test_real_en_un_grafico_de_varias_series_osuna_pierde_solo_sus_ingresos(
+    real: DDJJAdapter,
+) -> None:
+    """Sus bienes cierran: sale el valor de ingresos, no la fila."""
+    result = real.ranking(sort_by="bienes", top=50, order="asc")
+    [osuna] = [r for r in result.records if r["nombre"] == "OSUNA BLANCA INES"]
+    [chart] = build_deterministic_charts([result])
+    assert "ingresos_trabajo_neto" in chart["yKeys"]
+    assert len(chart["data"]) == 50
+    sin_ingresos = [row for row in chart["data"] if row["ingresos_trabajo_neto"] is None]
+    assert [row["bienes_cierre"] for row in sin_ingresos] == [osuna["bienes_cierre"]]
 
 
 # ── lo que lee el modelo de un ranking largo ───────────────
