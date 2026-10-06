@@ -54,9 +54,29 @@ def _summarize_assets(bienes: list[dict]) -> dict[str, float]:
 # and as a credit).
 _MAX_TOTAL_VS_DETAIL = 10.0
 
+# Same idea for the declared income (``ingresosTrabajoNeto``): what is left
+# after personal expenses has to show up somewhere in the declaration, so it is
+# checked against the larger of the opening assets, the closing assets and the
+# opening debts (savings may have gone to pay them off). Gross income alone is
+# not enough: a deputy who spends what he earns and owns little is at 13.5×
+# (44.1 M earned, 42.4 M spent, 3.3 M in assets) and is legitimate. Net of
+# expenses, the highest ratio in the dataset is 5.1, while the one bad load
+# (5,016.3 M of income with no expenses against 36.9 M in assets; the median
+# declared income is 45.7 M) is 136. One order of magnitude again. With no
+# assets or debts declared there is nothing to check against.
+_MAX_SAVINGS_VS_ASSETS = 10.0
+
+# H005 review: nobody checked whether a figure comes like this from the Oficina
+# Anticorrupción or broke while converting the dataset, so the reason talks
+# about the record, never about the person.
 _NOT_COMPARABLE = (
-    "El total no coincide con la propia declaración: esta DDJJ queda fuera de "
-    "rankings, promedios y variación patrimonial."
+    "Es un probable error de carga o de conversión, no verificado contra la Oficina "
+    "Anticorrupción: esta DDJJ no es comparable y queda fuera de rankings, promedios y "
+    "variación patrimonial."
+)
+_INCOME_NOT_COMPARABLE = (
+    "Es un probable error de carga o de conversión, no verificado contra la Oficina "
+    "Anticorrupción: esos ingresos no son comparables y quedan fuera del ranking por ingresos."
 )
 
 
@@ -81,26 +101,57 @@ def _inconsistency(r: dict) -> str | None:
     inicio = float(r.get("bienesInicio") or 0)
     if cierre > _MAX_TOTAL_VS_DETAIL * max(detalle, inicio):
         motivo = (
-            f"El total de bienes al cierre ({_millones(cierre)}) es {_veces(cierre / detalle)} "
-            f"veces la suma de los {len(bienes)} bienes del detalle ({_millones(detalle)})"
+            f"En el registro del dataset, el total de bienes al cierre ({_millones(cierre)}) es "
+            f"{_veces(cierre / detalle)} veces la suma de los {len(bienes)} bienes del detalle "
+            f"({_millones(detalle)})"
         )
         if inicio > 0:
             motivo += f" y {_veces(cierre / inicio)} veces el total al inicio ({_millones(inicio)})"
     elif cierre * _MAX_TOTAL_VS_DETAIL < detalle:
         if cierre > 0:
             motivo = (
-                f"La suma de los {len(bienes)} bienes del detalle ({_millones(detalle)}) es "
-                f"{_veces(detalle / cierre)} veces el total de bienes al cierre "
-                f"({_millones(cierre)})"
+                f"En el registro del dataset, la suma de los {len(bienes)} bienes del detalle "
+                f"({_millones(detalle)}) es {_veces(detalle / cierre)} veces el total de bienes "
+                f"al cierre ({_millones(cierre)})"
             )
         else:
             motivo = (
-                f"El total de bienes al cierre es cero pero los {len(bienes)} bienes del "
-                f"detalle suman {_millones(detalle)}"
+                f"En el registro del dataset, el total de bienes al cierre es cero pero los "
+                f"{len(bienes)} bienes del detalle suman {_millones(detalle)}"
             )
     else:
         return None
     return f"{motivo}. {_NOT_COMPARABLE}"
+
+
+def _income_inconsistency(r: dict) -> str | None:
+    """Why the declared income doesn't add up with its own declaration, or ``None``."""
+    ingresos = float(r.get("ingresosTrabajoNeto") or 0)
+    gastos = float(r.get("gastosPersonales") or 0)
+    base = max(
+        float(r.get("bienesInicio") or 0),
+        float(r.get("bienesCierre") or 0),
+        float(r.get("deudasInicio") or 0),
+    )
+    if base <= 0 or ingresos - gastos <= _MAX_SAVINGS_VS_ASSETS * base:
+        return None
+    return (
+        f"En el registro del dataset, los ingresos netos del trabajo ({_millones(ingresos)}) "
+        f"menos los gastos personales ({_millones(gastos)}) son "
+        f"{_veces((ingresos - gastos) / base)} veces lo mayor entre los bienes al inicio, los "
+        f"bienes al cierre y las deudas al inicio ({_millones(base)}). {_INCOME_NOT_COMPARABLE}"
+    )
+
+
+def _excluded_from(r: dict, sort_key: str) -> bool:
+    """A record that doesn't add up stays out of rankings and aggregates.
+
+    A closing total that doesn't add up rules the whole DDJJ out; income that
+    doesn't add up only rules it out of the ranking by income.
+    """
+    if _inconsistency(r) is not None:
+        return True
+    return sort_key == "ingresosTrabajoNeto" and _income_inconsistency(r) is not None
 
 
 def _split_inconsistent(records: list[dict]) -> tuple[list[dict], list[str]]:
@@ -199,14 +250,17 @@ class DDJJAdapter:
             "bienes": "bienesCierre",
         }
         sort_key = key_map.get(sort_by, "patrimonioCierre")
-        # H005: a DDJJ whose total doesn't add up never enters a ranking.
-        usable, excluded = _split_inconsistent(self._dataset)
         sorted_ds = sorted(
-            usable,
+            self._dataset,
             key=lambda r: r.get(sort_key, 0),
             reverse=(order == "desc"),
         )
-        top_records = sorted_ds[:top]
+        # H005: a DDJJ whose figures don't add up never enters a ranking. Only
+        # the ones that would have made the cut are reported, and the model only
+        # gets how many: naming them in every ranking ("the 3 poorest") tied a
+        # person to a bad record in answers that had nothing to do with them.
+        top_records = [r for r in sorted_ds if not _excluded_from(r, sort_key)][:top]
+        excluded = [r.get("nombre", "") for r in sorted_ds[:top] if _excluded_from(r, sort_key)]
         label = "mayor" if order == "desc" else "menor"
         # FR-004a: ranking rows MUST be compact. Passing ``compact=True``
         # strips ``bienes_detalle``, ``bienes`` and ``resumen_bienes`` so
@@ -219,10 +273,15 @@ class DDJJAdapter:
         )
         if excluded:
             verbo = "excluyó" if len(excluded) == 1 else "excluyeron"
-            result.metadata["excluidas_por_inconsistencia"] = excluded
+            habria = "habría" if len(excluded) == 1 else "habrían"
+            result.metadata["excluidas_por_inconsistencia"] = len(excluded)
+            # Audit only: never handed to the model.
+            result.metadata["excluidas_por_inconsistencia_nombres"] = excluded
             result.metadata["description"] += (
-                f". Se {verbo} {_declaraciones(len(excluded))} cuyo total de bienes no "
-                "coincide con su propio detalle (excluidas_por_inconsistencia)."
+                f". Se {verbo} {_declaraciones(len(excluded))} que {habria} entrado en este "
+                "ranking: su registro en el dataset tiene cifras que no cierran con la propia "
+                "DDJJ (probable error de carga), así que no es comparable "
+                "(excluidas_por_inconsistencia)."
             )
         return result
 
@@ -275,13 +334,21 @@ class DDJJAdapter:
             "patrimonio_minimo_monto": min_r.get("patrimonioCierre", 0),
         }
         description = f"Estadísticas agregadas de {total} declaraciones juradas patrimoniales"
+        metadata: dict[str, Any] = {
+            "total_records": 1,
+            "fetched_at": datetime.now(UTC).isoformat(),
+        }
         if excluded:
-            stats_record["excluidas_por_inconsistencia"] = excluded
+            # The stats row reaches the model: how many, never who.
+            stats_record["excluidas_por_inconsistencia"] = len(excluded)
+            metadata["excluidas_por_inconsistencia_nombres"] = excluded
             description += (
                 f". Promedio, mediana, máximo y mínimo calculados sin "
-                f"{_declaraciones(len(excluded))} cuyo total de bienes no coincide con su "
-                "propio detalle (excluidas_por_inconsistencia)."
+                f"{_declaraciones(len(excluded))} cuyo registro en el dataset tiene un total de "
+                "bienes que no cierra con su propio detalle (probable error de carga; "
+                "excluidas_por_inconsistencia)."
             )
+        metadata["description"] = description
         return DataResult(
             source="ddjj:oficina_anticorrupcion",
             portal_name="Declaraciones Juradas Patrimoniales — Oficina Anticorrupción",
@@ -289,11 +356,7 @@ class DDJJAdapter:
             dataset_title="Estadísticas DDJJ Diputados Nacionales",
             format="json",
             records=[stats_record],
-            metadata={
-                "total_records": 1,
-                "fetched_at": datetime.now(UTC).isoformat(),
-                "description": description,
-            },
+            metadata=metadata,
         )
 
     def _to_data_result(
@@ -316,6 +379,7 @@ class DDJJAdapter:
         for r in records:
             bienes = r.get("bienes", [])
             motivo = _inconsistency(r)
+            motivo_ingresos = _income_inconsistency(r)
             row: dict[str, Any] = {
                 "cuit": r.get("cuit", ""),
                 "nombre": r.get("nombre", ""),
@@ -336,6 +400,7 @@ class DDJJAdapter:
                 "gastos_personales": r.get("gastosPersonales", 0),
                 "cantidad_bienes": len(bienes),
                 "inconsistente": motivo is not None,
+                "ingresos_inconsistentes": motivo_ingresos is not None,
             }
             if motivo is not None:
                 # H005: the declared totals stay visible (it's what the DDJJ
@@ -343,6 +408,8 @@ class DDJJAdapter:
                 # a variation.
                 row["motivo_inconsistencia"] = motivo
                 row["variacion_patrimonial"] = None
+            if motivo_ingresos is not None:
+                row["motivo_inconsistencia_ingresos"] = motivo_ingresos
             if not compact:
                 row["bienes_detalle"] = bienes
                 row["resumen_bienes"] = _summarize_assets(bienes)

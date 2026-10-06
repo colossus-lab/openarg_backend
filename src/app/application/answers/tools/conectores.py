@@ -317,11 +317,16 @@ class DeclaracionesJuradas:
             "Declaraciones juradas patrimoniales de diputados nacionales (Oficina "
             "Anticorrupción). `buscar` por nombre, `ranking` por patrimonio, ingresos o bienes, "
             "`estadisticas` para totales generales (incluye cuántos tienen patrimonio negativo). "
-            "Una fila con `inconsistente: true` declara un total de bienes que no coincide con "
-            "su propio detalle (`motivo_inconsistencia`): el ranking y las estadísticas ya la "
-            "excluyen. No la compares, no le calcules variación y nunca la presentes como "
-            "enriquecimiento ni como caso llamativo; si preguntan por esa persona, decí que el "
-            "total declarado no coincide con el detalle de sus bienes."
+            "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
+            "ni lo atribuyas a nada: describí cifras con nombre y año. "
+            "Una fila con `inconsistente: true` (total de bienes) o `ingresos_inconsistentes: "
+            "true` es un registro del dataset con cifras que no cierran con la propia DDJJ, "
+            "probable error de carga no verificado (el motivo está en la fila): no es comparable "
+            "y el ranking y las estadísticas ya la excluyen (`excluidas_por_inconsistencia` dice "
+            "cuántas). No uses esa cifra, no le calcules variación, nunca la presentes como "
+            "enriquecimiento y no nombres a la persona excluida salvo que pregunten por ella; si "
+            "preguntan, decí que en el dataset esa cifra de su DDJJ no cierra con el resto de la "
+            "declaración, sin atribuírselo a la persona."
         ),
         input_schema={
             "type": "object",
