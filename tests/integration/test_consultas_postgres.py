@@ -626,3 +626,126 @@ async def test_un_mes_sobre_fechas_mes_dia(tabla_mes_dia: str) -> None:
         hasta="2021-05",
     )
     assert res.grupos == [{"valor": 31}]
+
+
+# ── revisión del PR #154, de punta a punta ──────────────────────────────────
+
+
+@pytest.fixture
+def tabla_mensual_texto():
+    """Como mart.estadistica_mediaciones (staging): `anio` y `mes` de texto."""
+    engine = _engine()
+    name = f"cache_test_anio_mes_texto_{uuid.uuid4().hex[:8]}"
+    filas = [f"('{a}', '{m}', '{m}')" for a in (2022, 2023, 2024) for m in range(1, 13)]
+    # Un mes con blancos (sigue por las expresiones regulares) y una fila de total.
+    filas += ["('2024', ' 7 ', '5')", "('2024', 'Total', '999')"]
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE public."{name}" (anio text, mes text, cantidad text)'))
+        conn.execute(text(f'INSERT INTO public."{name}" VALUES ' + ", ".join(filas)))
+        conn.execute(text(f'ANALYZE public."{name}"'))
+    yield name
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+_TIPOS_MENSUAL_TEXTO = [("anio", "text"), ("mes", "text"), ("cantidad", "text")]
+
+
+@pytest.mark.parametrize(("mes", "suma"), [("2023-06", 6), ("2024-07", 12), ("2024-12", 12)])
+async def test_un_mes_sobre_anio_y_mes_de_texto(
+    tabla_mensual_texto: str, mes: str, suma: int
+) -> None:
+    """Con `anio` de forma conocida se filtra primero el año (más barato) y después el mes."""
+    res = await _agregar_en(
+        tabla_mensual_texto,
+        _TIPOS_MENSUAL_TEXTO,
+        operacion="suma",
+        columna="cantidad",
+        desde=mes,
+        hasta=mes,
+    )
+    assert res.query.fecha is not None and res.query.fecha.formato == "anio"
+    assert res.grupos == [{"valor": suma}]
+
+
+def test_orden_desc_sobre_anio_y_mes_de_texto(tabla_mensual_texto: str) -> None:
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    q = build_data_query(
+        DataRequest(
+            table=tabla_mensual_texto,
+            available_columns=[c for c, _ in _TIPOS_MENSUAL_TEXTO],
+            column_types=_TIPOS_MENSUAL_TEXTO,
+            columns=["anio", "mes"],
+            orden="desc",
+            limite=1,
+            formato_fecha="anio",
+        )
+    )
+    result = PgSandboxAdapter()._execute_sync(q.sql, 10, q.params)
+    assert result.error is None, (result.error, q.sql)
+    assert result.rows == [{"anio": "2024", "mes": "12"}]
+
+
+@pytest.fixture
+def tabla_mensual_mes_dia():
+    """Como biodiésel y bioetanol 26bc8483 (staging): «M/1/AAAA», ningún día mayor que 12."""
+    engine = _engine()
+    name = f"cache_test_mensual_md_{uuid.uuid4().hex[:8]}"
+    filas = [
+        f"('{m}/1/{a}', '{10 * m if a == 2017 else 1}')" for a in (2016, 2017) for m in range(1, 13)
+    ]
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE public."{name}" (fecha text, produccion_ton text)'))
+        conn.execute(text(f'INSERT INTO public."{name}" VALUES ' + ", ".join(filas)))
+        conn.execute(text(f'ANALYZE public."{name}"'))
+    yield name
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+@pytest.mark.parametrize(("mes", "suma"), [("2017-10", 100), ("2017-01", 10)])
+async def test_un_mes_sobre_una_serie_mensual_mes_dia(
+    tabla_mensual_mes_dia: str, mes: str, suma: int
+) -> None:
+    """Leída d/m, cada mes caía en enero: enero sumaba el año y octubre daba 0 filas."""
+    res = await _agregar_en(
+        tabla_mensual_mes_dia,
+        [("fecha", "text"), ("produccion_ton", "text")],
+        operacion="suma",
+        columna="produccion_ton",
+        desde=mes,
+        hasta=mes,
+    )
+    assert res.grupos == [{"valor": suma}]
+    assert res.filas_usadas == 1
+
+
+@pytest.fixture
+def tabla_periodo_anual():
+    """Como consultas_medicas_ambulatorias a29f6e30 (staging): `periodo` con años."""
+    engine = _engine()
+    name = f"cache_test_periodo_anual_{uuid.uuid4().hex[:8]}"
+    filas = [f"('{a}', '{a}')" for a in range(2013, 2022) for _ in range(3)]
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE TABLE public."{name}" (periodo text, consultas text)'))
+        conn.execute(text(f'INSERT INTO public."{name}" VALUES ' + ", ".join(filas)))
+        conn.execute(text(f'ANALYZE public."{name}"'))
+    yield name
+    with engine.begin() as conn:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{name}"'))
+
+
+async def test_un_mes_sobre_un_periodo_de_anios_se_rechaza(tabla_periodo_anual: str) -> None:
+    """H002 en una columna de años que no se llama `anio`: junio daba el año entero."""
+    from app.application.consultas.sql import CatalogRequestError
+
+    tipos = [("periodo", "text"), ("consultas", "text")]
+    with pytest.raises(CatalogRequestError, match="años enteros"):
+        await _agregar_en(
+            tabla_periodo_anual, tipos, operacion="conteo", desde="2019-06", hasta="2019-06"
+        )
+    res = await _agregar_en(
+        tabla_periodo_anual, tipos, operacion="conteo", desde="2019", hasta="2019"
+    )
+    assert res.grupos == [{"valor": 3}]

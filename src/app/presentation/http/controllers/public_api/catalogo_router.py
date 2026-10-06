@@ -493,7 +493,7 @@ async def describir_tabla(
         types = (await sandbox.get_column_types([table.table_name])).get(table.table_name, [])
         columns = [(c, t) for c, t in types if not is_internal_column(c)]
         names = [c for c, _ in columns]
-        fecha = resolve_date_column(columns)
+        fecha = resolve_date_column(columns, tabla=table.table_name)
 
         # Ni el período ni la muestra tiran la descripción: si una de esas
         # consultas falla (timeout, una columna llamada "Set."), se describe

@@ -232,12 +232,15 @@ def con_formato(fecha: ColumnaFecha, stats: TableValueStats | None) -> ColumnaFe
     En una columna de año sin forma única (un «Total» entre los años, una
     muestra de un solo valor o ninguna) se marca ``CASE_ANIO`` si la muestra
     no tiene nada más fino que un año: así un pedido de un mes sobre esa
-    columna se rechaza en vez de devolver el año entero (H002).
+    columna se rechaza en vez de devolver el año entero (H002). Lo mismo con
+    otro nombre (`periodo`, `indice_tiempo`) si la muestra tiene algún año y
+    nada más fino; sin muestra, ahí no se supone nada (revisión del PR #154).
     """
     muestra = _muestra_de(fecha.nombre, stats)
     formato = formato_uniforme(muestra, filas=stats.estimated_rows if stats else None)
-    if formato is None and fecha.clase == "anio":
-        if all(rama_fecha(v) in (None, "anio") for v in muestra):
+    if formato is None:
+        ramas = [rama_fecha(v) for v in muestra]
+        if all(r in (None, "anio") for r in ramas) and (fecha.clase == "anio" or "anio" in ramas):
             formato = CASE_ANIO
     return replace(fecha, formato=formato) if formato else fecha
 

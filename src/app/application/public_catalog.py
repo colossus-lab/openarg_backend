@@ -122,11 +122,17 @@ def resolve_table(requested: str, tables: Iterable[CachedTableInfo]) -> CachedTa
 
 
 def resolve_date_column(
-    columns: Iterable[tuple[str, str]] | Iterable[str], chosen: str | None = None
+    columns: Iterable[tuple[str, str]] | Iterable[str],
+    chosen: str | None = None,
+    tabla: str | None = None,
 ) -> ColumnaFecha | None:
-    """La columna de fecha (con su tipo), sin las internas del colector."""
+    """La columna de fecha (con su tipo), sin las internas del colector.
+
+    ``tabla``: el nombre de la tabla, para reconocer la fecha del evento que
+    registra (``resolver_columna_fecha``).
+    """
     pares = [(c, "text") if isinstance(c, str) else (str(c[0]), str(c[1])) for c in columns]
-    return resolver_columna_fecha([p for p in pares if not is_internal_column(p[0])], chosen)
+    return resolver_columna_fecha([p for p in pares if not is_internal_column(p[0])], chosen, tabla)
 
 
 def date_column(columns: Iterable[tuple[str, str]] | Iterable[str]) -> str | None:
@@ -234,7 +240,7 @@ def build_data_query(req: DataRequest) -> DataQuery:
 
     desde = validar_fecha(req.desde, "desde")
     hasta = validar_fecha(req.hasta, "hasta")
-    fecha = resolver_columna_fecha(list(tipos.items()), req.columna_fecha)
+    fecha = resolver_columna_fecha(list(tipos.items()), req.columna_fecha, req.table)
     if fecha is not None and req.formato_fecha:
         fecha = replace(fecha, formato=req.formato_fecha)
     if (desde or hasta) and fecha is None:

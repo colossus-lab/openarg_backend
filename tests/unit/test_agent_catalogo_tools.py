@@ -331,6 +331,39 @@ async def test_describir_tabla_avisa_si_reconoce_menos_del_95_por_ciento() -> No
     assert "936 de 3655" in payload["aviso_fecha"] and "«FECHA»" in payload["aviso_fecha"]
 
 
+class _SandboxDe(Sandbox):
+    """El mismo doble, con otra tabla."""
+
+    def __init__(self, tabla: str, *args: Any, **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        self.tabla = tabla
+
+    async def find_tables(self, **kw: Any) -> list[CachedTableInfo]:
+        return [CachedTableInfo(self.tabla, "ds-2", self.row_count, [])]
+
+    async def get_column_types(self, names: list[str]) -> dict[str, list[tuple[str, str]]]:
+        return {self.tabla: self.types}
+
+
+async def test_describir_tabla_de_nacimientos_no_avisa_que_su_fecha_no_es_la_del_dato() -> None:
+    """Revisión del PR #154 (H044): en caba__nacimientos `hijo_fecha_nacimiento`
+    es la fecha del dato, pero el aviso decía que no."""
+    tabla = "raw.caba__nacimientos__1c5b3921__v2"
+    sandbox = _SandboxDe(
+        tabla,
+        [("hijo_fecha_nacimiento", "text"), ("hijo_genero", "text")],
+        [
+            (
+                "AS reconocidas",
+                [{"desde": "2015-01-01", "hasta": "2024-12-31", "reconocidas": 9, "con_valor": 9}],
+            ),
+        ],
+    )
+    payload = json.loads((await DescribirTabla().run({"tabla": tabla}, _ctx(sandbox))).content)
+    assert payload["columna_fecha"] == "hijo_fecha_nacimiento"
+    assert "aviso_fecha" not in payload
+
+
 # ── revisión del PR #133 ────────────────────────────────────
 
 

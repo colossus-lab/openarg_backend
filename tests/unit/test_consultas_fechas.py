@@ -490,3 +490,304 @@ class TestFechasDeAtributo:
         )
         assert col is not None and col.nombre == "fecha_nacimiento"
         assert aviso_lectura_fecha(col) is None
+
+
+# ── revisión del PR #154 ────────────────────────────────────
+
+
+class TestSeriesMensualesConBarras:
+    """H003 en las series mensuales m/d escritas «M/1/AAAA»: ningún valor tiene
+    el día mayor que 12, así que no había evidencia y se leían d/m. Cada mes
+    caía en enero («10/1/2017» era el 10 de enero): en biodiésel y bioetanol
+    26bc8483 (staging) un pedido de enero de 2017 sumaba el año entero
+    (2.871.435 t, 415 filas; real 189.763,4 t, 30 filas) y uno de octubre daba
+    0 filas (real 293.096,3 t, 35 filas), sin aviso."""
+
+    # La muestra de pg_stats de `fecha` en esa tabla (staging, 06-oct).
+    BIODIESEL = [
+        "10/1/2014",
+        "10/1/2017",
+        "11/1/2017",
+        "1/1/2018",
+        "12/1/2017",
+        "2/1/2017",
+        "2/1/2018",
+        "3/1/2017",
+        "3/1/2018",
+        "4/1/2017",
+        "5/1/2017",
+        "6/1/2017",
+        "7/1/2017",
+        "8/1/2017",
+        "9/1/2017",
+        "10/1/2015",
+        "11/1/2014",
+        "11/1/2015",
+        "1/1/2015",
+        "1/1/2016",
+        "12/1/2014",
+        "12/1/2015",
+        "7/1/2014",
+        "8/1/2014",
+        "9/1/2014",
+        "11/1/2013",
+        "1/1/2014",
+        "12/1/2013",
+        "2/1/2016",
+        "4/1/2015",
+    ]
+
+    def test_una_serie_mensual_mes_dia_se_lee_mes_dia(self) -> None:
+        from app.application.consultas.fechas import lectura_dia_mes
+
+        assert lectura_dia_mes(self.BIODIESEL) == "mdy"
+        assert formato_uniforme(self.BIODIESEL) == "mdy"
+
+    def test_octubre_es_octubre_y_enero_no_es_el_anio_entero(self) -> None:
+        from app.application.consultas.fechas import lectura_de
+
+        lectura = lectura_de(formato_uniforme(self.BIODIESEL))
+        filas = [(f"{m}/1/2017", 10 * m) for m in range(1, 13)]
+
+        def suma(mes: str) -> int:
+            return sum(v for f, v in filas if (fecha_iso(f, lectura=lectura) or "")[:7] == mes)
+
+        assert suma("2017-10") == 100
+        assert suma("2017-01") == 10
+        # En SQL, el mes es el primer campo.
+        sql = expresion_fecha("fecha", "text", "inicio", formato_uniforme(self.BIODIESEL))
+        assert sql.index("'/', 1)") < sql.index("'/', 2)")
+
+    def test_una_serie_mensual_dia_mes_sigue_dia_mes(self) -> None:
+        from app.application.consultas.fechas import lectura_dia_mes
+
+        assert lectura_dia_mes(["1/10/2017", "1/11/2017", "1/12/2017", "1/1/2018"]) == "dmy"
+
+    def test_la_estructura_contra_un_valor_inequivoco_es_mixta(self) -> None:
+        """Si la forma de los ambiguos choca con un valor que sólo se lee de la
+        otra manera (en otro mes), no se da vuelta la columna: sólo años enteros,
+        con aviso."""
+        from app.application.consultas.fechas import lectura_dia_mes
+
+        assert lectura_dia_mes([*self.BIODIESEL, "31/5/2021"]) == "mixta"
+        dm_mensual = [f"1/{m}/2017" for m in range(7, 13)]
+        assert lectura_dia_mes(dm_mensual) == "dmy"
+        assert lectura_dia_mes([*dm_mensual, "5/31/2021"]) == "mixta"
+
+    def test_una_tabla_diaria_de_enero_sigue_dia_mes(self) -> None:
+        """Molinetes del subte 91ca9141 (staging, 500.000 filas, enero de 2020):
+        los ambiguos tienen todos el segundo campo en 1, como una serie mensual
+        m/d, pero «17/01/2020» dice que es enero leído d/m. Con la regla de la
+        revisión (forma contra inequívocos = mixta) esta tabla y otras seis
+        (radares y seguridad vial de AUSA, terrenos, residuos de Mendoza) dejaban
+        de filtrar meses."""
+        from app.application.consultas.fechas import lectura_dia_mes
+
+        molinetes = [f"{d:02d}/01/2020" for d in range(1, 29)]
+        assert lectura_dia_mes(molinetes) == "dmy"
+        assert formato_uniforme(molinetes, filas=500_000) == "dmy"
+
+    def test_con_un_valor_inequivoco_que_coincide_sigue_mes_dia(self) -> None:
+        """Las tablas hermanas de 26bc8483 ya se leían m/d por tres «1/18/2018»."""
+        from app.application.consultas.fechas import lectura_dia_mes
+
+        assert lectura_dia_mes([*self.BIODIESEL, "1/18/2018", "2/18/2018"]) == "mdy"
+
+    def test_pocos_meses_no_alcanzan_para_decidir(self) -> None:
+        """Centro de transferencia de residuos de Corrientes (staging, toda la
+        muestra): ¿1 de junio, julio y agosto, o 6, 7 y 8 de enero? Queda d/m."""
+        from app.application.consultas.fechas import lectura_dia_mes
+
+        assert lectura_dia_mes(["07/01/2020", "08/01/2020", "06/01/2020"]) == "dmy"
+        # Días y meses variando: nada que decida, d/m como siempre.
+        assert lectura_dia_mes(["3/4/2025", "5/6/2025", "7/1/2025", "2/9/2025"]) == "dmy"
+
+
+class TestFechaConAniosSinLlamarseAnio:
+    """H002 en columnas de años que no se llaman `anio`: `periodo`,
+    `indice_tiempo` o `fecha` con años (consultas_medicas_ambulatorias a29f6e30
+    en staging: «2013»…«2021») aceptaban desde=hasta=2019-06 y devolvían el año
+    entero, sin rechazo ni nota. La misma tabla con `anio` ya se rechazaba."""
+
+    @pytest.mark.parametrize("nombre", ["periodo", "indice_tiempo", "fecha"])
+    @pytest.mark.parametrize("formato", ["anio", "anio*"])
+    def test_un_pedido_mensual_se_rechaza(self, nombre: str, formato: str) -> None:
+        col = resolver_columna_fecha([(nombre, "text"), ("valor", "text")])
+        assert col is not None and col.clase == "fecha"
+        anual = ColumnaFecha(col.nombre, col.tipo, formato=formato)
+        with pytest.raises(CatalogRequestError, match="años enteros"):
+            condiciones_periodo(anual, "2019-06", "2019-06", Params())
+        # El año entero, escrito como sea, sí.
+        assert condiciones_periodo(anual, "2019", "2019", Params())
+        assert condiciones_periodo(anual, "2019-01", "2019-12", Params())
+
+    def test_por_agregar_datos_tambien(self) -> None:
+        from app.application.answers.aggregates import AggregateRequest, build_aggregate_query
+
+        req = AggregateRequest(
+            table="raw.salud__consultas_medicas_ambulatorias__a29f6e30__v1",
+            column_types=[("periodo", "text"), ("valor", "text")],
+            operacion="conteo",
+            desde="2019-06",
+            hasta="2019-06",
+            formato_fecha="anio",
+        )
+        with pytest.raises(CatalogRequestError, match="años enteros"):
+            build_aggregate_query(req)
+
+    def test_la_muestra_decide_aunque_tenga_pocos_valores_o_un_total(self) -> None:
+        """Con uno o dos años en la muestra no hay forma única (`formato_uniforme`
+        pide tres); con un «Total», tampoco. Igual son años."""
+        from app.application.consultas.preparar import con_formato
+        from app.domain.ports.sandbox.sql_sandbox import ColumnValueStats, TableValueStats
+
+        def stats(valores: list[str]) -> TableValueStats:
+            return TableValueStats(
+                estimated_rows=500,
+                columns={"periodo": ColumnValueStats("periodo", most_common_vals=valores)},
+            )
+
+        col = ColumnaFecha("periodo", "text")
+        for muestra in (["2019"], ["2019", "2020"], ["2019", "2020", "Total"]):
+            with pytest.raises(CatalogRequestError, match="años enteros"):
+                condiciones_periodo(con_formato(col, stats(muestra)), "2019-06", None, Params())
+        # Sin muestra no se decide (una fecha no es un año por el nombre).
+        assert condiciones_periodo(con_formato(col, None), "2019-06", None, Params())
+        assert condiciones_periodo(con_formato(col, stats([])), "2019-06", None, Params())
+        # Con meses, se filtra por el valor.
+        mensual = con_formato(col, stats(["2019-05", "2019-06"]))
+        assert condiciones_periodo(mensual, "2019-06", None, Params())
+
+
+class TestFechasDeAtributoEnSuTabla:
+    """H044: en las tablas de defunciones y de nacimientos, `fecha_defuncion` y
+    `hijo_fecha_nacimiento` SON la fecha del dato, pero el aviso decía «es una
+    fecha de defunción, no la del dato» (25 de las 100 tablas con el aviso en
+    staging). La revisión pedía tratarlas como atributo «fuera de las tablas de
+    nacimientos y defunciones»."""
+
+    DEFUNCIONES = "raw.caba__defunciones__91003a9e__v1"
+    COLS_DEFUNCIONES = [
+        ("FECHA_DEFUNCION", "text"),
+        ("GENERO", "text"),
+        ("DESCRIPCION_SUBTIPO", "text"),
+    ]
+    NACIMIENTOS = "raw.caba__nacimientos__1c5b3921__v2"
+    COLS_NACIMIENTOS = [
+        ("hijo_fecha_nacimiento", "text"),
+        ("hijo_genero", "text"),
+        ("madre_nacionalidad", "text"),
+        ("padre_nacionalidad", "text"),
+    ]
+
+    def test_en_su_tabla_es_la_fecha_del_dato_y_no_se_avisa(self) -> None:
+        from app.application.consultas.fechas import aviso_lectura_fecha
+
+        for tabla, cols, nombre in (
+            (self.DEFUNCIONES, self.COLS_DEFUNCIONES, "FECHA_DEFUNCION"),
+            (self.NACIMIENTOS, self.COLS_NACIMIENTOS, "hijo_fecha_nacimiento"),
+            ("raw.caba__nacimientos__d209c8fa__v3", [("fecha_nacimiento", "text")], None),
+        ):
+            col = resolver_columna_fecha(cols, tabla=tabla)
+            assert col is not None and col.nombre == (nombre or "fecha_nacimiento")
+            assert not col.atributo and aviso_lectura_fecha(col) is None
+
+    def test_en_su_tabla_le_gana_a_otra_fecha_de_atributo(self) -> None:
+        col = resolver_columna_fecha(
+            [("fecha_nacimiento", "text"), ("fecha_defuncion", "text")], tabla=self.DEFUNCIONES
+        )
+        assert col is not None and col.nombre == "fecha_defuncion" and not col.atributo
+
+    def test_no_cambia_la_eleccion_entre_las_del_dato(self) -> None:
+        """defunciones_generales_mensuales: `anio_def` y `mes_def` siguen siendo la fecha."""
+        col = resolver_columna_fecha(
+            [
+                ("region", "text"),
+                ("mes_anio_defuncion", "text"),
+                ("mes_def", "text"),
+                ("anio_def", "text"),
+                ("cantidad", "text"),
+            ],
+            tabla="raw.datos_gob_ar__defunciones_generales_mensuales_ocu__2d1590db__v1",
+        )
+        assert col is not None and (col.nombre, col.mes) == ("anio_def", "mes_def")
+
+    def test_fuera_de_su_tabla_el_aviso_no_afirma_que_no_es_la_del_dato(self) -> None:
+        from app.application.consultas.fechas import aviso_lectura_fecha
+
+        col = resolver_columna_fecha(
+            [("consultante_fecha_nacimiento", "text"), ("consulta_fecha_carga", "text")],
+            tabla="raw.datos_gob_ar__consultas_efectuadas_en_los_centros__279f7728__v1",
+        )
+        assert col is not None and col.atributo
+        aviso = aviso_lectura_fecha(col) or ""
+        assert "«consultante_fecha_nacimiento»" in aviso and "columna_fecha" in aviso
+        assert "no la del dato" not in aviso
+        assert "nacimientos" in aviso  # dice cuándo sí sería la del dato
+
+    def test_por_los_constructores_de_consultas(self) -> None:
+        from app.application.answers.aggregates import AggregateRequest, build_aggregate_query
+        from app.application.public_catalog import (
+            DataRequest,
+            build_data_query,
+            resolve_date_column,
+        )
+
+        nombres = [c for c, _ in self.COLS_DEFUNCIONES]
+        q = build_data_query(
+            DataRequest(
+                table=self.DEFUNCIONES,
+                available_columns=nombres,
+                column_types=self.COLS_DEFUNCIONES,
+                desde="2020",
+            )
+        )
+        assert q.fecha is not None and not q.fecha.atributo
+        a = build_aggregate_query(
+            AggregateRequest(
+                table=self.DEFUNCIONES,
+                column_types=self.COLS_DEFUNCIONES,
+                operacion="conteo",
+                desde="2020",
+            )
+        )
+        assert a.fecha is not None and not a.fecha.atributo
+        fecha = resolve_date_column(self.COLS_DEFUNCIONES, tabla=self.DEFUNCIONES)
+        assert fecha is not None and not fecha.atributo
+
+
+class TestCostoDelMes:
+    """En mart.estadistica_mediaciones (3,5 M de filas, `anio` y `mes` de texto)
+    el mes agregaba un CASE de cuatro expresiones regulares por fila al ORDER BY
+    de todo obtener_datos y dos CASE anidados al WHERE: medido en staging por la
+    revisión, obtener_datos desc pasó de 0,6-1,9 s a 4-6 s y un mes, de 1,8-3,2 s
+    a ~7 s (el timeout del sandbox es de 10 s)."""
+
+    def test_el_mes_escrito_como_numero_no_pasa_por_expresiones_regulares(self) -> None:
+        from app.application.consultas.fechas import expresion_mes
+
+        sql = expresion_mes("mes")
+        # Las formas de número («6», «06») se resuelven antes que cualquier
+        # regex, y sin btrim (las que tienen blancos siguen por las regex).
+        assert "\"mes\"::text IN ('1', '2'" in sql and "'01'" in sql
+        assert sql.index(" IN (") < sql.index(" ~")
+
+    def test_un_anio_con_forma_conocida_se_filtra_antes_del_mes(self) -> None:
+        from app.application.consultas.fechas import RE_ANIO
+
+        col = ColumnaFecha("anio", "text", "anio", formato="anio", mes="mes")
+        params = Params()
+        cond = condiciones_periodo(col, "2023-06", "2023-06", params)
+        assert not any(RE_ANIO in c for c in cond)
+        # Primero el año, que es barato; después la clave con el mes.
+        assert len(cond) == 4 and not any('"mes"' in c for c in cond[:2])
+        assert params.values == {
+            "p0": "2023",
+            "p1": "2023",
+            "p2": "2023-06-01",
+            "p3": "2023-06-31",
+        }
+        # Sin forma conocida (un «Total» entre los años), la guarda sigue.
+        col = ColumnaFecha("anio", "text", "anio", formato="case_anio", mes="mes")
+        cond = condiciones_periodo(col, "2023-06", "2023-06", Params())
+        assert len(cond) == 2 and all(RE_ANIO in c for c in cond)

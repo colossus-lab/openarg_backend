@@ -204,7 +204,7 @@ def build_aggregate_query(req: AggregateRequest) -> AggregateQuery:
     params = Params()
     desde = validar_fecha(req.desde, "desde")
     hasta = validar_fecha(req.hasta, "hasta")
-    fecha = resolver_columna_fecha(list(types.items()), req.columna_fecha)
+    fecha = resolver_columna_fecha(list(types.items()), req.columna_fecha, req.table)
     if fecha is not None and req.formato_fecha:
         fecha = replace(fecha, formato=req.formato_fecha)
     where: list[str] = []

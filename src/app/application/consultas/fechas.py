@@ -184,6 +184,21 @@ def _es_de_atributo(nombre: str) -> bool:
     return any(p in _PALABRAS_ATRIBUTO for p in _palabras(nombre))
 
 
+def _evento_de(nombre: str) -> str:
+    """De qué es una fecha de atributo: ``defuncion``, ``nacimiento``…, o ""."""
+    return next((p for p in _palabras(nombre) if p in _PALABRAS_ATRIBUTO), "")
+
+
+def _plural(evento: str) -> str:
+    return evento + ("es" if evento.endswith("n") else "s")
+
+
+def _de_la_tabla(nombre: str, tabla: str | None) -> bool:
+    """La fecha es del evento que registra la tabla (`fecha_defuncion` en caba__defunciones)."""
+    evento = _evento_de(nombre)
+    return bool(evento and tabla) and _plural(evento) in _palabras(tabla or "")
+
+
 def _es_columna_de_mes(nombre: str, anio: str) -> bool:
     palabras = _palabras(nombre)
     if (
@@ -215,6 +230,7 @@ def _columna_de_anio(nombre: str, tipo: str, pares: list[tuple[str, str]]) -> Co
 def resolver_columna_fecha(
     columnas: Iterable[tuple[str, str]] | Iterable[str],
     elegida: str | None = None,
+    tabla: str | None = None,
 ) -> ColumnaFecha | None:
     """La columna que ordena la tabla en el tiempo, o None.
 
@@ -230,6 +246,11 @@ def resolver_columna_fecha(
 
     ``elegida`` es la que pidió el usuario (``columna_fecha``): tiene que
     existir, y se usa aunque el nombre no parezca de fecha.
+
+    ``tabla`` es el nombre de la tabla: en la que registra ese mismo evento
+    (`fecha_defuncion` en caba__defunciones, `hijo_fecha_nacimiento` en
+    caba__nacimientos) la fecha de atributo es la del dato. Va primero entre
+    las de atributo y sin aviso; la elección entre las demás no cambia.
     """
     pares = [(c, "text") if isinstance(c, str) else (str(c[0]), str(c[1])) for c in columnas]
     if elegida:
@@ -263,12 +284,15 @@ def resolver_columna_fecha(
         ):
             return ColumnaFecha(nombre, tipo)
     atributos = [(n, t) for n, t in candidatas if _es_de_atributo(n)]
+    atributos.sort(key=lambda c: not _de_la_tabla(c[0], tabla))
     for nombre, tipo in atributos:
         if _DATE_TYPE.match(tipo or "") or any(p in _PALABRAS_FECHA for p in _palabras(nombre)):
-            return ColumnaFecha(nombre, tipo, atributo=True)
+            return ColumnaFecha(nombre, tipo, atributo=not _de_la_tabla(nombre, tabla))
     for nombre, tipo in atributos:
         if es_nombre_de_anio(nombre):
-            return replace(_columna_de_anio(nombre, tipo, pares), atributo=True)
+            return replace(
+                _columna_de_anio(nombre, tipo, pares), atributo=not _de_la_tabla(nombre, tabla)
+            )
     return None
 
 
@@ -378,6 +402,10 @@ CASE_MIXTA = "case_mixta"
 CASE_ANIO = "case_anio"
 Lectura = Literal["dmy", "mdy", "mixta"]
 _DIA_MES = re.compile(r"^([0-9]{1,2})[/-]([0-9]{1,2})[/-][0-9]{4}([^0-9]|$)")
+# Meses distintos con el día 1 para reconocer una serie mensual
+# (`_evidencia_dia_mes`). Con tres, una tabla diaria de enero leída d/m
+# («6/1/2020», «7/1/2020», «8/1/2020») se confundía con una mensual m/d.
+_MIN_MESES_SERIE = 6
 # En una tabla grande con una forma que domina la muestra (la de molinetes del
 # subte, 8,4 M de filas: 200 valores d/m/aaaa y un "8/20/2025"), el CASE pasa
 # el timeout. Ahí se usa la forma dominante con su guarda (una sola expresión
@@ -420,8 +448,26 @@ def rama_fecha(valor: object, lectura: Lectura = "dmy") -> str | None:
 
 
 def _evidencia_dia_mes(valores: Iterable[object]) -> tuple[int, int]:
-    """``(sólo d/m, sólo m/d)``: valores con barras que sólo se pueden leer de una forma."""
+    """``(d/m, m/d)``: cuántos valores con barras dicen cómo leer la columna.
+
+    Un valor que sólo se puede leer de una forma («31/5/2021», «5/31/2021»)
+    es evidencia de esa forma. Los ambiguos (las dos partes hasta 12) también
+    lo son si tienen la forma de una serie mensual: el día es siempre 1 y el
+    mes cambia. «10/1/2017», «11/1/2017», «12/1/2017»… son m/d (el segundo
+    campo, el que no cambia, es el día) y «1/10/2017», «1/11/2017»… son d/m.
+    Sin esto, en biodiésel y bioetanol 26bc8483 (staging, todas «M/1/AAAA»)
+    cada mes caía en enero (revisión del PR #154).
+
+    Esa forma no cuenta si los valores inequívocos de la otra lectura caen en
+    el mismo mes que la explica: una tabla diaria de enero leída d/m («27/1/
+    2026», «12/1/2026»…) tiene todos los ambiguos con el segundo campo en 1, y
+    el «27/1/2026» dice que es enero, no que haya meses m/d (radares de AUSA,
+    molinetes del subte 91ca9141 y otras cinco en staging).
+    """
     solo_dm = solo_md = 0
+    ambiguos: list[tuple[int, int]] = []
+    meses_dm: set[int] = set()  # el segundo campo de los que sólo son d/m
+    meses_md: set[int] = set()  # el primer campo de los que sólo son m/d
     for valor in valores:
         m = _DIA_MES.match(_texto_de(valor) or "")
         if m is None:
@@ -429,8 +475,18 @@ def _evidencia_dia_mes(valores: Iterable[object]) -> tuple[int, int]:
         primero, segundo = int(m.group(1)), int(m.group(2))
         if 12 < primero <= 31 and 1 <= segundo <= 12:
             solo_dm += 1
+            meses_dm.add(segundo)
         elif 12 < segundo <= 31 and 1 <= primero <= 12:
             solo_md += 1
+            meses_md.add(primero)
+        elif 1 <= primero <= 12 and 1 <= segundo <= 12:
+            ambiguos.append((primero, segundo))
+    primeros = {p for p, _ in ambiguos}
+    segundos = {s for _, s in ambiguos}
+    if segundos == {1} and len(primeros) >= _MIN_MESES_SERIE and meses_dm != {1}:
+        solo_md += len(ambiguos)
+    elif primeros == {1} and len(segundos) >= _MIN_MESES_SERIE and meses_md != {1}:
+        solo_dm += len(ambiguos)
     return solo_dm, solo_md
 
 
@@ -447,7 +503,10 @@ def lectura_dia_mes(valores: Iterable[object]) -> Lectura:
     puede ser mes/día y «31/5/2021» sólo día/mes. Con alguno que sólo puede
     ser m/d y ninguno que sólo puede ser d/m, la columna es m/d (la Pauta
     publicitaria de CABA); con de los dos, mezcla las lecturas (``mart.
-    pauta_oficial`` une fuentes de las dos). Si ninguno lo decide, d/m.
+    pauta_oficial`` une fuentes de las dos). Una serie mensual con el día 1
+    cuenta como evidencia de su forma (``_evidencia_dia_mes``): si choca con
+    un valor que sólo se lee de la otra en otro mes, también es mixta. Si
+    nada lo decide, d/m.
     """
     return _lectura(*_evidencia_dia_mes(valores))
 
@@ -553,11 +612,15 @@ def aviso_lectura_fecha(columna: ColumnaFecha | None) -> str | None:
             "y el orden dentro de cada año puede no ser exacto."
         )
     if columna.atributo:
-        de = next((p for p in _palabras(columna.nombre) if p in _PALABRAS_ATRIBUTO), "")
+        # No afirma que no es la fecha del dato: en una tabla de defunciones
+        # que no lo dice en el nombre, la de defunción lo es (revisión del PR
+        # #154).
+        de = _evento_de(columna.nombre)
         avisos.append(
-            f"Uso «{columna.nombre}» como fecha de la tabla porque no tiene otra, pero es una "
-            f"fecha de {'defunción' if de == 'defuncion' else de}, no la del dato: `desde`/`hasta` "
-            "y el orden van por ella. Si la tabla tiene otra columna con el período, pasala en "
+            f"Uso «{columna.nombre}» como fecha de la tabla porque no tiene otra. Es una fecha "
+            f"de {'defunción' if de == 'defuncion' else de}: si la tabla no registra "
+            f"{_plural(de)}, puede no ser la fecha del dato, y `desde`/`hasta` y el orden van "
+            "igual por ella. Si la tabla tiene otra columna con el período, pasala en "
             "`columna_fecha`."
         )
     texto = " ".join(a for a in avisos if a)
@@ -722,14 +785,28 @@ RE_MES_SOLO_NOMBRE = (
 )
 RE_MES_Y_ANIO = r"^(0?[1-9]|1[0-2])[/-][0-9]{4}$"
 RE_ISO_CON_MES = r"^[0-9]{4}-(0[1-9]|1[0-2])"
+# Los valores de RE_MES_NUMERO sin decimales, como lista (`expresion_mes`).
+_NUMEROS_DE_MES = ", ".join(
+    f"'{m}'" for m in [*(str(n) for n in range(1, 13)), *(f"0{n}" for n in range(1, 10))]
+)
 
 
 def expresion_mes(columna: str) -> str:
-    """SQL que lleva una columna de mes a dos dígitos (``06``), o NULL ("Total", "99")."""
-    x = f"btrim({quote_ident(columna)}::text)"
+    """SQL que lleva una columna de mes a dos dígitos (``06``), o NULL ("Total", "99").
+
+    El número de mes («6», «06»), que es casi siempre, se resuelve con una
+    lista y sin ``btrim`` antes que con las expresiones regulares (el resto,
+    con blancos o con nombre, sigue por ellas): en mart.estadistica_
+    mediaciones (3,5 M de filas, staging) obtener_datos con orden=desc tardaba
+    4,8-5,8 s con el mes en el ORDER BY y así 2,8-3,3 s (sin el mes, 0,6-0,9 s,
+    pero con enero como el último dato). Revisión del PR #154.
+    """
+    crudo = f"{quote_ident(columna)}::text"
+    x = f"btrim({crudo})"
     meses = " ".join(f"WHEN '{abrev}' THEN '{num}'" for abrev, num in _MESES)
     return (
         "(CASE"
+        f" WHEN {crudo} IN ({_NUMEROS_DE_MES}) THEN lpad({crudo}, 2, '0')"
         f" WHEN {x} ~ '{RE_MES_NUMERO}' THEN lpad(split_part({x}, '.', 1), 2, '0')"
         f" WHEN {x} ~* '{RE_MES_SOLO_NOMBRE}' THEN (CASE lower(left({x}, 3)) {meses} END)"
         f" WHEN {x} ~ '{RE_MES_Y_ANIO}' THEN lpad(split_part(translate({x}, '-', '/'), '/', 1),"
@@ -764,6 +841,10 @@ def _clave_anio_mes(columna: ColumnaFecha, mes: str, modo: Modo) -> str:
     """
     x = f"btrim({quote_ident(columna.nombre)}::text)"
     sufijo = "-01" if modo == "inicio" else "-31"
+    if columna.formato == "anio":
+        # Todos años en la muestra: se lee como en `expresion_fecha`, sin
+        # volver a mirar cada valor (el costo, en `expresion_mes`).
+        return f"(left(NULLIF({x}, ''), 4) || '-' || {expresion_mes(mes)} || '{sufijo}')"
     otra = expresion_fecha(columna.nombre, columna.tipo, modo, columna.formato)
     return (
         f"(CASE WHEN {x} ~ '{RE_ANIO}' THEN left({x}, 4) || '-' || "
@@ -807,18 +888,18 @@ def _anios_enteros(desde: str | None, hasta: str | None) -> bool:
 
 
 def _de_anios(columna: ColumnaFecha) -> bool:
-    """Una columna de año con años (2019), no meses ni días, hasta donde se sabe.
+    """Una columna con años (2019), no meses ni días, hasta donde se sabe.
 
     Una de texto sin muestra todavía (la primera validación, que no toca la
     base) no se decide: ``consultas.preparar.con_formato`` le pone ``anio`` o
     ``CASE_ANIO`` si la muestra tiene años, o nada si sus valores traen el mes
-    (`ano_mes` con "2016-05").
+    (`ano_mes` con "2016-05"). Vale para cualquier nombre: un `periodo` o un
+    `indice_tiempo` con años es tan anual como un `anio` (revisión del PR
+    #154). Una numérica sin muestra es de años sólo si se llama como tal.
     """
-    if columna.clase != "anio":
-        return False
     if (columna.formato or "").rstrip(GUARDADO) in ("anio", CASE_ANIO):
         return True
-    return columna.formato is None and es_tipo_numerico(columna.tipo)
+    return columna.clase == "anio" and columna.formato is None and es_tipo_numerico(columna.tipo)
 
 
 def condiciones_periodo(
@@ -834,8 +915,9 @@ def condiciones_periodo(
     fino = bool(desde or hasta) and not _anios_enteros(desde, hasta)
     mes = columna.mes if fino and columna.clase == "anio" else None
     if fino and mes is None and _de_anios(columna):
+        es = "es una columna de año" if columna.clase == "anio" else "tiene años, no meses ni días,"
         raise CatalogRequestError(
-            f"«{columna.nombre}» es una columna de año y la tabla no tiene una de mes que "
+            f"«{columna.nombre}» {es} y la tabla no tiene una columna de mes que "
             "reconozca: con `desde`/`hasta` sólo puedo filtrar años enteros (AAAA, o de "
             "AAAA-01 a AAAA-12). Pedí el año entero, o filtrá el período más fino con "
             "`filtros` sobre la columna que lo indique (trimestre, semestre…)."
@@ -847,6 +929,15 @@ def condiciones_periodo(
             "AAAA-01 a AAAA-12)."
         )
     condiciones: list[str] = []
+    if mes and columna.formato == "anio":
+        # La clave empieza con el año: filtrarlo antes evita calcular el mes en
+        # las filas de otros años (mart.estadistica_mediaciones, un mes: de
+        # 7,8-9,0 s a 2,1-2,9 s en staging). Es redundante con la clave.
+        anio = f"left(NULLIF(btrim({quote_ident(columna.nombre)}::text), ''), 4)"
+        if desde:
+            condiciones.append(f"{anio} >= {params.bind(desde[:4])}")
+        if hasta:
+            condiciones.append(f"{anio} <= {params.bind(hasta[:4])}")
     if desde:
         fin = (
             _clave_anio_mes(columna, mes, "fin")
