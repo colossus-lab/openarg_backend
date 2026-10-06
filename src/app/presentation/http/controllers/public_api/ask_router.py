@@ -121,8 +121,10 @@ async def public_ask(
     Auth: ``Authorization: Bearer oarg_sk_xxx``
     Rate limited: 2/min, a monthly allowance (10 questions free, 100 for
     Fundadores, then credits; see ``app.application.public_quota``), plus a
-    per-IP daily limit and a shared daily cap for the free plan. A question
-    is charged only when it ends in a complete answer that used the model.
+    per-person daily cap of model runs that are not charged (timeouts,
+    errors, clarifications: 20 by default), a per-IP daily limit and a shared
+    daily cap for the free plan. A question is charged only when it ends in
+    a complete answer that used the model.
     A repeat of a question answered in the last 5 minutes gets that answer
     for free, under its own per-minute limit (10, or the plan's if higher).
     Does NOT save conversations.

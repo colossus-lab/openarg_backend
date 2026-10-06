@@ -27,6 +27,7 @@ from app.application.api_key_service import (
     hash_api_key,
     replay_per_min,
     reserve_question,
+    seconds_until_utc_midnight,
     settle_question,
     verify_api_key,
 )
@@ -276,6 +277,7 @@ def _default_quotas(monkeypatch: pytest.MonkeyPatch) -> None:
         "PUBLIC_API_FOUNDER_DATOS",
         "PUBLIC_API_GLOBAL_DAILY_CAP",
         "PUBLIC_API_IP_DAILY_LIMIT",
+        "PUBLIC_API_USER_UNBILLED_DAILY_LIMIT",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -850,6 +852,186 @@ class TestCreditIsDecidedWhenCharged:
         cache.down = True
         info = await settle_question(r, cache, credits, charge=True)  # type: ignore[arg-type]
         assert info["used_credit"] is True
+
+
+def _runs_key(user_id: object) -> str:
+    return f"rl:user:{user_id}:runs:day:{_today()}"
+
+
+class TestUnbilledRunsCap:
+    """H108: tope por persona y por día de corridas del modelo que no se cobran.
+
+    Desde el cobro al terminar (#137), un timeout, un error, una aclaración o
+    una respuesta vacía devuelven la reserva del mes pero quedan contados en la
+    IP y en el tope global, porque el modelo corrió. Sin un tope por persona,
+    una sola clave gratis rotando ~10 IP llegaba a las 300 corridas del tope
+    global y dejaba sin servicio a todo el plan gratis de `/ask` y del MCP
+    hasta las 00 UTC.
+    """
+
+    async def _run(
+        self,
+        key: ApiKey,
+        cache: FakeCache,
+        client_ip: str = "",
+        credits: FakeCredits | None = None,
+        *,
+        charge: bool = False,
+        used_model: bool = True,
+    ) -> None:
+        """Una pregunta que entra y se cierra; por defecto, una corrida no cobrada."""
+        cache.counters.pop(f"rl:user:{key.user_id}:min", None)  # pasó el minuto
+        reservation = await reserve_question(
+            key,
+            cache,  # type: ignore[arg-type]
+            client_ip=client_ip,
+            credits=credits,  # type: ignore[arg-type]
+        )
+        await settle_question(
+            reservation,
+            cache,  # type: ignore[arg-type]
+            credits,  # type: ignore[arg-type]
+            charge=charge,
+            used_model=used_model,
+        )
+
+    async def _reject(self, key: ApiKey, cache: FakeCache, client_ip: str = "") -> HTTPException:
+        cache.counters.pop(f"rl:user:{key.user_id}:min", None)
+        with pytest.raises(HTTPException) as exc_info:
+            await reserve_question(key, cache, client_ip=client_ip)  # type: ignore[arg-type]
+        return exc_info.value
+
+    @pytest.mark.asyncio
+    async def test_the_21st_unbilled_run_of_the_day_is_429(self) -> None:
+        cache, key = FakeCache(), _free_key()
+        for i in range(20):
+            await self._run(key, cache, client_ip=f"10.0.0.{i % 10}")
+        exc = await self._reject(key, cache, client_ip="10.0.0.99")
+        assert exc.status_code == 429
+        assert "unbilled" in exc.detail and "20 per day" in exc.detail
+        assert exc.headers is not None
+        # Retry-After real: lo que falta para que corte el día UTC de la clave.
+        assert abs(int(exc.headers["Retry-After"]) - seconds_until_utc_midnight()) <= 2
+        # No reservó nada: ni el mes, ni la IP nueva, ni el tope global.
+        assert cache.counters[_month_key(key.user_id)] == 0
+        assert f"rl:ip:10.0.0.99:day:{_today()}" not in cache.counters
+        assert cache.counters[f"rl:global:free:day:{_today()}"] == 20
+        # Y el rechazo no se cuenta a sí mismo.
+        assert cache.counters[_runs_key(key.user_id)] == 20
+
+    @pytest.mark.asyncio
+    async def test_one_key_cannot_drain_the_shared_free_cap(self) -> None:
+        """El escenario de H108: una clave gratis con 10 IP contra el tope de 300."""
+        cache, abuser = FakeCache(), _free_key()
+        statuses: list[int] = []
+        for i in range(300):
+            cache.counters.pop(f"rl:user:{abuser.user_id}:min", None)
+            try:
+                reservation = await reserve_question(
+                    abuser,
+                    cache,  # type: ignore[arg-type]
+                    client_ip=f"10.0.0.{i % 10}",
+                )
+            except HTTPException as exc:
+                statuses.append(exc.status_code)
+                continue
+            await settle_question(reservation, cache, charge=False)  # type: ignore[arg-type]
+            statuses.append(200)
+        assert statuses[:20] == [200] * 20
+        assert set(statuses[20:]) == {429}
+        assert cache.counters[f"rl:global:free:day:{_today()}"] == 20
+        # Otra persona del plan gratis sigue teniendo servicio.
+        info = await _admit(_free_key(), cache)
+        assert info["remaining_month"] == 9
+
+    @pytest.mark.asyncio
+    async def test_charged_answers_do_not_count(self) -> None:
+        """Una respuesta cobrada la paga el cupo del mes: no es una corrida gratis."""
+        cache, key = FakeCache(), _free_key()
+        credits = FakeCredits(founder=True)  # 100 preguntas por mes
+        for _ in range(30):
+            await self._run(key, cache, credits=credits, charge=True)
+        assert cache.counters.get(_runs_key(key.user_id), 0) == 0
+        await self._run(key, cache, credits=credits)  # le quedan las 20 no cobradas
+        assert cache.counters[_runs_key(key.user_id)] == 1
+
+    @pytest.mark.asyncio
+    async def test_turns_without_the_model_do_not_count(self) -> None:
+        """Caché, saludo, bloqueo: no gastaron Bedrock, como en la IP y el tope global."""
+        cache, key = FakeCache(), _free_key()
+        for _ in range(30):
+            await self._run(key, cache, used_model=False)
+        assert cache.counters.get(_runs_key(key.user_id), 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_ip_and_global_rejections_give_the_run_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PUBLIC_API_IP_DAILY_LIMIT", "1")
+        cache = FakeCache()
+        await _admit(_free_key(), cache, client_ip="9.9.9.9")
+        other = _free_key()
+        assert (await self._reject(other, cache, client_ip="9.9.9.9")).status_code == 429
+        assert cache.counters[_runs_key(other.user_id)] == 0
+        monkeypatch.setenv("PUBLIC_API_GLOBAL_DAILY_CAP", "1")
+        assert (await self._reject(other, cache, client_ip="8.8.8.8")).status_code == 503
+        assert cache.counters[_runs_key(other.user_id)] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_quota_service_down_503_gives_the_run_back(self) -> None:
+        class _GlobalDown(FakeCache):
+            async def increment_with_ttl(self, key: str, ttl_seconds: int) -> int:
+                if key.startswith("rl:global:"):
+                    raise ConnectionError("redis down")
+                return await super().increment_with_ttl(key, ttl_seconds)
+
+        cache, key = _GlobalDown(), _free_key()
+        exc = await self._reject(key, cache)
+        assert exc.status_code == 503 and exc.detail == QUOTA_SERVICE_DOWN_DETAIL
+        assert cache.counters[_runs_key(key.user_id)] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_counter_is_per_person_and_per_utc_day(self) -> None:
+        cache, key = FakeCache(), _free_key()
+        await self._run(key, cache)
+        runs_key = _runs_key(key.user_id)
+        assert cache.counters[runs_key] == 1
+        assert cache.ttls[runs_key] == 172800  # 48 h, como los otros contadores del día
+        # Otra clave de la misma persona comparte el tope; otra persona no.
+        same_person = ApiKey(id=uuid4(), user_id=key.user_id, plan="free", is_active=True)
+        await self._run(same_person, cache)
+        await self._run(_free_key(), cache)
+        assert cache.counters[runs_key] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_cap_comes_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.application.api_key_service import unbilled_runs_daily_limit
+
+        assert unbilled_runs_daily_limit() == 20
+        monkeypatch.setenv("PUBLIC_API_USER_UNBILLED_DAILY_LIMIT", "muchas")
+        assert unbilled_runs_daily_limit() == 20
+        monkeypatch.setenv("PUBLIC_API_USER_UNBILLED_DAILY_LIMIT", "2")
+        cache, key = FakeCache(), _free_key()
+        for _ in range(2):
+            await self._run(key, cache)
+        exc = await self._reject(key, cache)
+        assert exc.status_code == 429 and "2 per day" in exc.detail
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_says_when_it_renews(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """El MCP elige el mensaje por el `detail` (ver mcp_publico/core.py)."""
+        from mcp_publico import core
+
+        monkeypatch.setenv("PUBLIC_API_USER_UNBILLED_DAILY_LIMIT", "1")
+        cache, key = FakeCache(), _free_key()
+        await self._run(key, cache)
+        exc = await self._reject(key, cache)
+        assert exc.headers is not None
+        msg = core.error_message(429, exc.detail, retry_after=exc.headers["Retry-After"])
+        assert "21:00" in msg
+        assert "minuto" not in msg and "esperá un rato" not in msg
 
 
 class TestReplayRate:

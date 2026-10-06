@@ -47,6 +47,9 @@ _MAX_TOKEN_LENGTH = 100  # Reject absurdly long tokens before hashing
 # tocar código.
 _DEFAULT_GLOBAL_FREE_DAILY_CAP = 300
 _DEFAULT_IP_DAILY_LIMIT = 30
+# Corridas del modelo que no se cobran (timeout, error, aclaración, respuesta
+# vacía), por persona y por día (H108). Ver "Cobro de las preguntas" abajo.
+_DEFAULT_USER_UNBILLED_DAILY_LIMIT = 20
 
 # Los contadores diarios llevan la fecha UTC en la clave y viven 48 h: el día
 # corta a medianoche UTC aunque haya tráfico constante. Antes era un `set`
@@ -127,6 +130,10 @@ def global_free_daily_cap() -> int:
 
 def ip_daily_limit() -> int:
     return _env_int("PUBLIC_API_IP_DAILY_LIMIT", _DEFAULT_IP_DAILY_LIMIT)
+
+
+def unbilled_runs_daily_limit() -> int:
+    return _env_int("PUBLIC_API_USER_UNBILLED_DAILY_LIMIT", _DEFAULT_USER_UNBILLED_DAILY_LIMIT)
 
 
 def _utc_day(now: datetime | None = None) -> str:
@@ -220,6 +227,18 @@ DAILY_CAPACITY_DETAIL = "Free tier daily capacity reached. Try again tomorrow."
 # rechazado por un control posterior o si el turno se resolvió sin el modelo
 # (caché, saludo, bloqueo). Un timeout o un error sí quedan contados ahí,
 # porque el modelo corrió y Bedrock cobró.
+#
+# Corridas que no se cobran (H108): un timeout, un error, una aclaración o una
+# respuesta vacía devuelven la reserva del mes, así que sin otro tope una clave
+# podía repetirlas sin límite. Rotando ~10 IP, una sola clave gratis llegaba a
+# las 300 del tope global y dejaba sin servicio a todo el plan gratis de
+# `/ask` y del MCP hasta las 00 UTC. Por eso hay un contador por persona y por
+# día UTC (`unbilled_runs_key`, tope `PUBLIC_API_USER_UNBILLED_DAILY_LIMIT`,
+# 20 por defecto, para todos los planes) que se reserva al entrar, antes de la
+# IP y del tope global, y se devuelve si la respuesta se cobra (la paga el cupo
+# del mes), si el turno no usó el modelo o si un control posterior rechaza el
+# pedido. Al pasarlo, 429 con `Retry-After` hasta las 00 UTC. Las reservas en
+# curso también ocupan lugar: es lo que lo hace exacto con pedidos simultáneos.
 
 
 @dataclass(frozen=True)
@@ -255,6 +274,7 @@ class QuestionReservation:
     needs_credit: bool
     month_counter: str
     charged_key: str
+    runs_key: str | None = None
     ip_key: str | None = None
     global_key: str | None = None
     settled: bool = False
@@ -271,6 +291,11 @@ def _replay_minute_key(user_id: object) -> str:
 def charged_counter_key(user_id: object, now: datetime | None = None) -> str:
     """Respuestas de ``/ask`` cobradas en el mes (sólo sube; decide los créditos)."""
     return f"rl:user:{user_id}:charged:month:{month_key(now)}"
+
+
+def unbilled_runs_key(user_id: object, now: datetime | None = None) -> str:
+    """Corridas de ``/ask`` del día UTC que no se cobraron (más las que están en curso)."""
+    return f"rl:user:{user_id}:runs:day:{_utc_day(now)}"
 
 
 def _plan_per_min(api_key: ApiKey) -> int:
@@ -356,9 +381,10 @@ async def reserve_question(
     """Verifica y reserva el cupo de una pregunta, sin cobrarla todavía.
 
     Orden: por minuto → cupo del mes → (si hace falta un crédito y no hay
-    saldo, 402 acá, antes de tocar la IP o el tope global) → IP del día →
-    tope global del día. El crédito no se gasta acá: lo gasta
-    `settle_question` si la respuesta se cobra.
+    saldo, 402 acá, antes de tocar la IP o el tope global) → corridas no
+    cobradas del día de la persona → IP del día → tope global del día. El
+    crédito no se gasta acá: lo gasta `settle_question` si la respuesta se
+    cobra.
 
     ``minute``: el límite por minuto ya contado (``/ask`` lo cuenta antes de
     esperar una pregunta igual que esté en curso). Sin él, se cuenta acá.
@@ -369,8 +395,8 @@ async def reserve_question(
     porque es el techo de gasto de Bedrock. Si un control rechaza el pedido,
     se devuelve lo que los anteriores ya habían reservado.
 
-    Raises HTTPException 429 (por minuto, IP), 402 (cupo del mes sin créditos)
-    or 503 (tope global o Redis caído).
+    Raises HTTPException 429 (por minuto, corridas no cobradas del día, IP),
+    402 (cupo del mes sin créditos) or 503 (tope global o Redis caído).
     """
     if minute is None:
         minute = await check_question_rate(api_key, cache)
@@ -395,6 +421,21 @@ async def reserve_question(
         await _refund(cache, reserved_month)
         raise _quota_exhausted("preguntas", tier.preguntas)
 
+    # Corridas que no se cobran (H108): sin este tope una clave rotando IP
+    # agotaba el tope global para todo el plan gratis.
+    runs_key = unbilled_runs_key(user_id, now)
+    runs_count = await _incr_fail_open(cache, runs_key, _DAY_TTL)
+    reserved_runs = runs_key if runs_count > 0 else None
+    runs_cap = unbilled_runs_daily_limit()
+    if runs_count > runs_cap:
+        logger.warning("User %s reached the daily cap of unbilled runs (%d)", user_id, runs_cap)
+        await _refund_all(cache, reserved_month, reserved_runs)
+        raise _too_many(
+            f"Daily limit of unbilled runs reached: {runs_cap} per day "
+            "(timeouts, errors, clarifications). Try again tomorrow.",
+            {"Retry-After": str(seconds_until_utc_midnight(now))},
+        )
+
     reserved_ip: str | None = None
     if client_ip:
         ip_key = f"rl:ip:{client_ip}:day:{day}"
@@ -402,7 +443,7 @@ async def reserve_question(
         reserved_ip = ip_key if ip_count > 0 else None
         if ip_count > ip_daily_limit():
             logger.warning("IP %s exceeded daily limit (%d)", client_ip, ip_count)
-            await _refund_all(cache, reserved_month, reserved_ip)
+            await _refund_all(cache, reserved_month, reserved_runs, reserved_ip)
             raise _too_many(
                 "Too many requests from this IP. Try again tomorrow.",
                 {"Retry-After": str(seconds_until_utc_midnight())},
@@ -416,7 +457,7 @@ async def reserve_question(
             global_count = await cache.increment_with_ttl(global_key, ttl_seconds=_DAY_TTL)
         except Exception:
             logger.error("Global free cap cannot be checked (cache down); rejecting (fail-closed)")
-            await _refund_all(cache, reserved_month, reserved_ip)
+            await _refund_all(cache, reserved_month, reserved_runs, reserved_ip)
             raise HTTPException(
                 status_code=503,
                 detail=QUOTA_SERVICE_DOWN_DETAIL,
@@ -425,7 +466,7 @@ async def reserve_question(
         reserved_global = global_key
         if global_count > cap:
             logger.warning("Global free daily cap reached (%d/%d)", global_count, cap)
-            await _refund_all(cache, reserved_month, reserved_ip, reserved_global)
+            await _refund_all(cache, reserved_month, reserved_runs, reserved_ip, reserved_global)
             raise HTTPException(
                 status_code=503,
                 detail=DAILY_CAPACITY_DETAIL,
@@ -441,6 +482,7 @@ async def reserve_question(
         needs_credit=needs_credit,
         month_counter=month_counter,
         charged_key=charged_key,
+        runs_key=reserved_runs,
         ip_key=reserved_ip,
         global_key=reserved_global,
     )
@@ -483,9 +525,11 @@ async def settle_question(
 
     Cobrar es dejar la reserva del mes como está y sumar la respuesta a las
     cobradas del mes; si es la número N y N supera el cupo, se gasta un
-    crédito. No cobrar es devolver la reserva del mes y, si el turno no usó
-    el modelo (``used_model=False``), también la de la IP y el tope global.
-    Idempotente: una reserva ya cerrada no se toca.
+    crédito. Una respuesta cobrada no es una corrida no cobrada: devuelve su
+    lugar en ese tope del día. No cobrar es devolver la reserva del mes y, si
+    el turno no usó el modelo (``used_model=False``), también la de las
+    corridas no cobradas, la IP y el tope global. Idempotente: una reserva ya
+    cerrada no se toca.
 
     Devuelve el cupo para la respuesta (mismas claves de siempre).
     """
@@ -495,6 +539,7 @@ async def settle_question(
         return quota_info(reservation.tier, reservation.minute, month_count, used_credit=False)
     reservation.settled = True
     if charge:
+        await _refund(cache, reservation.runs_key)
         charged = await _count_charged(reservation, cache)
         # Sin Redis, la decisión de la entrada (la única que hay).
         needs_credit = (
@@ -511,7 +556,9 @@ async def settle_question(
         if refunded is not None:
             month_count = refunded
         if not used_model:
-            await _refund_all(cache, reservation.ip_key, reservation.global_key)
+            await _refund_all(
+                cache, reservation.runs_key, reservation.ip_key, reservation.global_key
+            )
     return quota_info(reservation.tier, reservation.minute, month_count, used_credit=used_credit)
 
 

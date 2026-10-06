@@ -22,6 +22,7 @@ import asyncio
 import os
 import random
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -217,6 +218,75 @@ class TestReservationRace:
             assert await redis_cache._redis.get(charged_key) == "28"
         finally:
             await redis_cache._redis.delete(month_key, charged_key)
+
+
+class TestUnbilledRunsCap:
+    """H108 contra Redis de verdad: el tope diario de corridas no cobradas."""
+
+    @staticmethod
+    def _credits() -> AsyncMock:
+        # Saldo de sobra: que el cupo del mes (402) no se meta en la cuenta.
+        credits = AsyncMock(spec=ICreditRepository)
+        credits.get_active_supporter.return_value = None
+        credits.balance.return_value = {"preguntas": 100, "datos": 0}
+        credits.debit.return_value = True
+        return credits
+
+    async def test_twenty_five_at_once_admit_exactly_the_cap(
+        self, redis_cache: RedisCacheAdapter
+    ) -> None:
+        user = uuid4()
+        runs_key = f"rl:user:{user}:runs:day:{datetime.now(UTC):%Y-%m-%d}"
+        month_key = monthly_counter_key(user, "preguntas")
+        credits = self._credits()
+        try:
+            minute = MinuteWindow(limit=100, count=1)
+            # Plan pro: sin tope global (es una clave compartida por fecha).
+            key = ApiKey(id=uuid4(), user_id=user, plan="pro")
+
+            async def one() -> Any:
+                try:
+                    return await reserve_question(key, redis_cache, credits=credits, minute=minute)
+                except HTTPException as exc:
+                    return exc
+
+            outcomes = await asyncio.gather(*(one() for _ in range(25)))
+            admitted = [o for o in outcomes if not isinstance(o, HTTPException)]
+            rejected = [o for o in outcomes if isinstance(o, HTTPException)]
+            assert len(admitted) == 20
+            assert [e.status_code for e in rejected] == [429] * 5
+            assert all(0 < int((e.headers or {})["Retry-After"]) <= 86400 for e in rejected)
+            assert await redis_cache._redis.get(runs_key) == "20"
+            assert 0 < await redis_cache._redis.ttl(runs_key) <= 172800
+            # Los rechazados devolvieron la reserva del mes.
+            assert await redis_cache._redis.get(month_key) == "20"
+
+            # Las 20 terminan sin cobrarse (p. ej. timeouts): quedan contadas.
+            await asyncio.gather(
+                *(settle_question(r, redis_cache, credits, charge=False) for r in admitted)
+            )
+            assert await redis_cache._redis.get(runs_key) == "20"
+            assert await redis_cache._redis.get(month_key) == "0"
+            assert isinstance(await one(), HTTPException)
+            assert await redis_cache._redis.get(runs_key) == "20"
+        finally:
+            await _cleanup(redis_cache, f"rl:user:{user}:*")
+
+    async def test_a_charged_answer_gives_the_run_back(
+        self, redis_cache: RedisCacheAdapter
+    ) -> None:
+        user = uuid4()
+        runs_key = f"rl:user:{user}:runs:day:{datetime.now(UTC):%Y-%m-%d}"
+        credits = self._credits()
+        try:
+            minute = MinuteWindow(limit=100, count=1)
+            key = ApiKey(id=uuid4(), user_id=user, plan="pro")
+            reservation = await reserve_question(key, redis_cache, credits=credits, minute=minute)
+            assert await redis_cache._redis.get(runs_key) == "1"  # en curso
+            await settle_question(reservation, redis_cache, credits, charge=True)
+            assert await redis_cache._redis.get(runs_key) == "0"
+        finally:
+            await _cleanup(redis_cache, f"rl:user:{user}:*")
 
 
 class TestDedupeLock:

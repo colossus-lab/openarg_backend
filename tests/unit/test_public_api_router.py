@@ -515,6 +515,88 @@ class TestAskCharging:
         assert r.json()["usage"]["requests_remaining_month"] == 0
 
 
+class TestAskUnbilledRunsCap:
+    """H108 por HTTP: las corridas del modelo que no se cobran tienen tope por
+    persona y por día. Antes una clave gratis rotando IP las repetía sin
+    límite y vaciaba el tope global del plan gratis para todos."""
+
+    @pytest.fixture(autouse=True)
+    def _no_analytics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.application.answers import runner as runner_module
+
+        async def _record(**kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(runner_module, "record_terminal_analytics", _record)
+
+    @pytest.mark.parametrize("kind", ["timeout", "error", "aclaracion", "vacia"])
+    async def test_the_21st_unbilled_run_from_ten_ips_is_429(
+        self,
+        app: FastAPI,
+        key: tuple[str, ApiKey],
+        graph: FakeGraph,
+        cache: FakeCache,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from app.application.api_key_service import seconds_until_utc_midnight
+
+        if kind == "timeout":
+            monkeypatch.setenv("PUBLIC_API_TIMEOUT_SECONDS", "0.05")
+            graph.delay = 0.3
+        elif kind == "error":
+            graph.error = RuntimeError("boom")
+        elif kind == "aclaracion":
+            graph.result = {"clean_answer": "¿De qué año?", "plan_intent": "clarification"}
+        else:
+            graph.result = {"clean_answer": "  ", "tokens_used": 900}
+        user = key[1].user_id
+        statuses: list[int] = []
+        last: Any = None
+        for i in range(25):
+            cache.counters.pop(f"rl:user:{user}:min", None)  # pasó el minuto
+            transport = ASGITransport(app=app, client=(f"10.0.0.{i % 10}", 4321))
+            async with AsyncClient(transport=transport, base_url="http://test") as c:
+                last = await c.post(
+                    "/ask", json={"question": f"pregunta {i}"}, headers=_auth(key[0])
+                )
+            statuses.append(last.status_code)
+        assert 429 not in statuses[:20], statuses
+        assert statuses[20:] == [429] * 5, statuses
+        assert "unbilled" in last.json()["detail"]
+        assert abs(int(last.headers["Retry-After"]) - seconds_until_utc_midnight()) <= 2
+        assert len(graph.states) == 20  # el motor no volvió a correr
+        assert cache.month(user) == 0  # ninguna se cobró
+        day = datetime.now(UTC).strftime("%Y-%m-%d")
+        assert cache.counters[f"rl:global:free:day:{day}"] == 20
+
+    async def test_charged_answers_and_repeats_are_not_capped(
+        self, client: AsyncClient, key: tuple[str, ApiKey], graph: FakeGraph, cache: FakeCache
+    ) -> None:
+        """El tope es de corridas que no se cobran: no toca el cobro ni la dedupe."""
+        user = key[1].user_id
+
+        async def ask(question: str) -> Any:
+            cache.counters.pop(f"rl:user:{user}:min", None)
+            return await client.post("/ask", json={"question": question}, headers=_auth(key[0]))
+
+        for question in ("desempleo", "inflación"):
+            assert (await ask(question)).json()["usage"]["charged"] is True
+        graph.result = {"clean_answer": "¿De qué año?", "plan_intent": "clarification"}
+        for i in range(20):
+            assert (await ask(f"ambigua {i}")).status_code == 200
+        assert (await ask("ambigua 20")).status_code == 429
+        # Una pregunta ya respondida se devuelve igual: no corre el motor.
+        again = await ask("desempleo")
+        assert again.status_code == 200
+        assert again.json()["answer"].startswith("La tasa")
+        assert again.json()["usage"]["charged"] is False
+        assert len(graph.states) == 22
+        assert cache.month(user) == 2
+
+
 class TestAskChargingWithTheAgentRunner:
     """Lo mismo por el camino de prod (``ANSWERS_ENGINE=agent``): el runner
     clasifica con el clasificador real y lee el caché; el motor sólo contesta."""
