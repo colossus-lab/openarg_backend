@@ -316,7 +316,12 @@ class DeclaracionesJuradas:
         description=(
             "Declaraciones juradas patrimoniales de diputados nacionales (Oficina "
             "Anticorrupción). `buscar` por nombre, `ranking` por patrimonio, ingresos o bienes, "
-            "`estadisticas` para totales generales (incluye cuántos tienen patrimonio negativo)."
+            "`estadisticas` para totales generales (incluye cuántos tienen patrimonio negativo). "
+            "Una fila con `inconsistente: true` declara un total de bienes que no coincide con "
+            "su propio detalle (`motivo_inconsistencia`): el ranking y las estadísticas ya la "
+            "excluyen. No la compares, no le calcules variación y nunca la presentes como "
+            "enriquecimiento ni como caso llamativo; si preguntan por esa persona, decí que el "
+            "total declarado no coincide con el detalle de sus bienes."
         ),
         input_schema={
             "type": "object",
@@ -350,7 +355,10 @@ class DeclaracionesJuradas:
             raise ToolInputError("`accion` es buscar, ranking o estadisticas.")
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "Sin resultados."}))
-        return ToolOutcome(to_json(result_for_model(result)), results=[result])
+        extra: dict[str, Any] = {}
+        if excluidas := (result.metadata or {}).get("excluidas_por_inconsistencia"):
+            extra["excluidas_por_inconsistencia"] = excluidas
+        return ToolOutcome(to_json(result_for_model(result, **extra)), results=[result])
 
 
 # ── sesiones del Congreso ──────────────────────────────────
