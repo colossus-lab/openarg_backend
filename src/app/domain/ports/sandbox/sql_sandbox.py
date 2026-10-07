@@ -218,6 +218,17 @@ class ISQLSandbox(ABC):
         """
         return {}
 
+    async def table_fingerprints(self, table_names: list[str]) -> dict[str, str]:
+        """``{nombre_pelado: huella}`` del contenido de las tablas pedidas.
+
+        Dos tablas con la misma huella tienen las mismas filas (sin contar las
+        columnas ``_*`` del colector, que cambian entre copias). La búsqueda la
+        usa para no juntar hojas distintas de un mismo .xls que tienen la misma
+        forma. No es abstracto: un sandbox que no la sepa devuelve vacío y esas
+        hojas se muestran separadas.
+        """
+        return {}
+
     async def get_table_sources(self, table_names: list[str]) -> dict[str, TableSource]:
         """Return {bare_table_name: TableSource} for the tables that map to a dataset.
 

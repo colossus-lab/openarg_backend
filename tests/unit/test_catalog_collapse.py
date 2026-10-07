@@ -9,10 +9,17 @@ portales y las copias cortadas en el tope de filas.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 
-from app.application.catalog.collapse import collapse_hits, header_looks_like_data
+from app.application.catalog.collapse import (
+    MAX_FINGERPRINT_ROWS,
+    collapse_hits,
+    content_fingerprints,
+    fingerprint_candidates,
+    header_looks_like_data,
+)
 from app.application.catalog.national_prior import (
     asks_for_national,
     names_a_place,
@@ -297,7 +304,8 @@ def test_the_same_csv_under_different_titles_is_still_one_result() -> None:
 
 def test_a_csv_of_one_sheet_does_not_pull_the_other_sheets_together() -> None:
     """El mismo archivo en .xlsx (dos hojas, dos datasets) y en .csv (una
-    hoja): el CSV va con su hoja, la otra queda aparte."""
+    hoja): el CSV va con su hoja, la otra queda aparte. Con otro título y un
+    .xlsx de por medio, la forma sola no alcanza: hace falta el mismo contenido."""
     xlsx = _HCDN.format(rid="r1", file="cuadros.xlsx")
     csv = _HCDN.format(rid="r2", file="cuadros.csv")
     cols1, cols2 = ["anio", "valor"], ["provincia", "total"]
@@ -308,9 +316,13 @@ def test_a_csv_of_one_sheet_does_not_pull_the_other_sheets_together() -> None:
     ]
     tables = [_table("h1", "h1", 30, cols1), _table("h2", "h2", 24, cols2), _table("c1", "c1", 30, cols1)]  # fmt: skip
 
-    out = collapse_hits(hits, tables, {})
+    assert fingerprint_candidates(hits, tables) == ["raw.h1", "raw.c1"]
+    out = collapse_hits(hits, tables, {}, fingerprints={"h1": "30:7", "c1": "30:7"})
     # A igualdad de todo, se muestra el CSV.
     assert sorted((r.copies, r.hit.title) for r in out) == [(1, "Cuadro 2"), (2, "Cuadro 1 (CSV)")]
+
+    # Sin huella no se puede afirmar que sean la misma tabla: quedan las tres.
+    assert len(collapse_hits(hits, tables, {})) == 3
 
 
 def test_url_spelling_differences_do_not_split_a_file() -> None:
@@ -361,6 +373,252 @@ def test_without_collapsing_order_follows_score() -> None:
     out = collapse_hits(hits, [], {})
     assert [r.hit.dataset_id for r in out] == ["a", "b"]
     assert [r.archivo for r in out] == ["a.csv", "b.csv"]
+
+
+# ── hojas de un .xls con la misma forma (H092) ──────────────
+#
+# Revisión independiente del 05-oct, H092: las hojas de un .xls de INDEC tienen
+# las mismas columnas y filas y otros valores. Por la forma, el Cuadro 3.1 del
+# ISAC (serie original: asfalto de septiembre 102,2) quedaba escondido detrás
+# del 4.1 (desestacionalizada: 86,6). En prod, `sh_isac_2025.xls` tiene 20
+# datasets y salían 14 resultados; en staging (07-oct) 14 de 20, y con el
+# arreglo 18: siguen juntos sólo los cuadros 1, 6.1 y 6.3, que tienen la misma
+# tabla. Los pares y las huellas son los reales (staging, sólo lectura).
+
+_ISAC = "https://www.indec.gob.ar/ftp/cuadros/economia/sh_isac_2025.xls"
+_ISAC_T = "INDEC - ISAC — Actividad de la Construcción — "
+_POBREZA = "https://www.indec.gob.ar/ftp/cuadros/sociedad/cuadros_informe_pobreza_09_25.xls"
+_POBREZA_T = "INDEC - Informe de Pobreza — 31 aglomerados urbanos — "
+
+# (cuadro, cuadro, filas, primeras columnas, huella, huella): los cuatro pares de
+# prod con la misma forma y otro contenido.
+_ISAC_PARES = [
+    (
+        "3.1",
+        "4.1",
+        171,
+        ["Período", "Período_2", "Artículos sanitarios de cerámica", "Asfalto", "Cales"],
+        "171:96674937454929861457",
+        "171:-94578655270205905329",
+    ),
+    (
+        "2.2",
+        "2.3",
+        159,
+        ["col_0", "Enero_Febrero_Marzo_Abril_Mayo_Junio_Julio_Agosto_Septiembre_Oc", "///"],
+        "159:a2492df8",
+        "159:08fc6023",
+    ),
+    ("3.2", "4.2", 170, ["2012", "Enero", "///", "///.1", "///.2"], "170:4d34b92f", "170:2ee9872f"),
+    (
+        "7.3",
+        "7.4",
+        99,
+        ["Período", "Obras privadas_Distribución de agua y cloacas"],
+        "99:92bc61f0",
+        "99:67570ff5",
+    ),
+]
+
+
+def _cuadro(n: str, score: float, rows: int, cols: list[str], *, tabla: str | None = None):
+    ds = f"c{n}"
+    name = tabla or f"cache_indec_isac_cuadro_{n.replace('.', '_')}"
+    return _hit(ds, _ISAC_T + f"Cuadro {n}", _ISAC, score, "indec"), _table(name, ds, rows, cols)
+
+
+def _isac_31_41() -> tuple[list[SearchResult], list[CachedTableInfo]]:
+    _a, _b, rows, cols, *_ = _ISAC_PARES[0]
+    (h31, t31), (h41, t41) = _cuadro("3.1", 0.70, rows, cols), _cuadro("4.1", 0.69, rows, cols)
+    return [h31, h41], [t31, t41]
+
+
+@pytest.mark.parametrize(("a", "b", "rows", "cols", "huella_a", "huella_b"), _ISAC_PARES)
+def test_isac_sheets_with_the_same_shape_and_other_values_are_two_results(
+    a: str, b: str, rows: int, cols: list[str], huella_a: str, huella_b: str
+) -> None:
+    hit_a, table_a = _cuadro(a, 0.70, rows, cols)
+    hit_b, table_b = _cuadro(b, 0.69, rows, cols)
+    hits, tables = [hit_a, hit_b], [table_a, table_b]
+    bare = [t.table_name.split(".")[-1] for t in tables]
+
+    # Son los que se piden al sandbox: misma URL, misma forma, otro título, .xls.
+    assert fingerprint_candidates(hits, tables) == [t.table_name for t in tables]
+
+    out = collapse_hits(hits, tables, {}, fingerprints=dict(zip(bare, [huella_a, huella_b])))
+
+    assert [(r.hit.title, r.copies) for r in out] == [
+        (_ISAC_T + f"Cuadro {a}", 1),
+        (_ISAC_T + f"Cuadro {b}", 1),
+    ]
+    assert [[t.table_name for t in r.tables] for r in out] == [[t.table_name] for t in tables]
+    assert [r.score for r in out] == pytest.approx([0.70, 0.69])
+
+
+def test_isac_sheets_without_a_fingerprint_stay_apart() -> None:
+    """Sin huella (sandbox que no la sabe, tabla grande, falla) no se puede
+    afirmar que sean la misma tabla: mejor un posible duplicado que esconder
+    la serie original detrás de la desestacionalizada."""
+    hits, tables = _isac_31_41()
+
+    assert [r.copies for r in collapse_hits(hits, tables, {})] == [1, 1]
+    # Con huella de una sola, tampoco.
+    out = collapse_hits(hits, tables, {}, fingerprints={"cache_indec_isac_cuadro_3_1": "171:1"})
+    assert [r.copies for r in out] == [1, 1]
+
+
+def test_sheets_with_the_same_table_are_still_one_result() -> None:
+    """Los cuadros 1, 6.1 y 6.3 del ISAC quedaron con la misma tabla (20
+    filas, misma huella en staging): se muestran una vez. Las 15 hojas de
+    "Informe de Pobreza — 31 aglomerados" con la misma tabla son 136 pares en
+    staging: sin juntarlas por contenido serían 136 duplicados a la vista."""
+    cols = ["Índice", "_source_dataset_id"]
+    huella = "20:8138770247277535997"
+    trio = [
+        _cuadro(
+            "1",
+            0.71,
+            20,
+            cols,
+            tabla="indec__indec_isac_actividad_de_la_construccion_cu__bb0b3cef__v2",
+        ),
+        _cuadro(
+            "6.1",
+            0.70,
+            20,
+            cols,
+            tabla="indec__indec_isac_actividad_de_la_construccion_cu__230bc54c__v2",
+        ),
+        _cuadro(
+            "6.3",
+            0.69,
+            20,
+            cols,
+            tabla="indec__indec_isac_actividad_de_la_construccion_cu__e24e2f3a__v3",
+        ),
+    ]
+    _a, _b, rows, cols31, h31, h41 = _ISAC_PARES[0]
+    pair = [_cuadro("3.1", 0.68, rows, cols31), _cuadro("4.1", 0.67, rows, cols31)]
+    hits = [h for h, _ in trio + pair]
+    tables = [t for _, t in trio + pair]
+    prints = {t.table_name.split(".")[-1]: huella for _, t in trio}
+    prints |= {"cache_indec_isac_cuadro_3_1": h31, "cache_indec_isac_cuadro_4_1": h41}
+
+    out = collapse_hits(hits, tables, {}, fingerprints=prints)
+
+    assert [(r.hit.title.rsplit("— ", 1)[1], r.copies) for r in out] == [
+        ("Cuadro 1", 3),
+        ("Cuadro 3.1", 1),
+        ("Cuadro 4.1", 1),
+    ]
+
+    pobreza = [
+        _hit(f"p{n}", _POBREZA_T + f"Cuadro {n}", _POBREZA, 0.6 - i / 100, "indec")
+        for i, n in enumerate(("2.1", "2.2"))
+    ]
+    cols_p = ["Indicador", "2do. semestre 2016", "1er. semestre 2017"]
+    tables_p = [_table(f"pobreza_{n[0]}_{n[2]}", f"p{n}", 15, cols_p) for n in ("2.1", "2.2")]
+    huella_p = "15:-22985838891688675445"
+    [only] = collapse_hits(
+        pobreza, tables_p, {}, fingerprints={"pobreza_2_1": huella_p, "pobreza_2_2": huella_p}
+    )
+    assert only.copies == 2
+
+
+def test_a_csv_under_other_titles_still_joins_without_asking_for_its_content() -> None:
+    """Un CSV es una sola tabla: con la misma URL y la misma forma es el mismo
+    archivo aunque el título cambie, y no hace falta leer el contenido (prod:
+    "Sistema sociodemográfico - Grupos poblacionales e inequidades" y "PMyE -
+    Indices Multidimensionales" son `ipi-2020-depar.csv`, 525 filas)."""
+    url = "https://transparencia.obraspublicas.gob.ar/ipi-2020-depar.csv"
+    cols = ["departamento", "provincia", "indice"]
+    hits = [
+        _hit("s", "Sistema sociodemográfico - Grupos poblacionales e inequidades", url, 0.6),
+        _hit("p", "PMyE - Indices Multidimensionales", url, 0.59),
+    ]
+    tables = [_table("s", "s", 525, cols), _table("p", "p", 525, cols)]
+
+    assert fingerprint_candidates(hits, tables) == []
+    [only] = collapse_hits(hits, tables, {})
+    assert only.copies == 2
+
+
+def test_only_pairs_in_doubt_are_fingerprinted() -> None:
+    """El mismo título (gemelos de la migración) y otra forma deciden solos."""
+    _a, _b, rows, cols, *_ = _ISAC_PARES[0]
+    twin_a, table_a = _cuadro("3.1", 0.7, rows, cols)
+    twin_b = _hit("c3.1-nuevo", twin_a.title, _ISAC, 0.69, "indec")
+    table_b = _table("indec__isac_3_1__v2", "c3.1-nuevo", rows, cols)
+    other, other_table = _cuadro("5", 0.68, 131, ["2015 *", "Enero"])
+
+    assert fingerprint_candidates([twin_a, twin_b, other], [table_a, table_b, other_table]) == []
+
+
+def test_a_sheet_too_big_to_fingerprint_is_not_merged() -> None:
+    """Staging: "Casos de cáncer diagnosticados (2012-2024)" y "(2012-2022)"
+    son el mismo .xlsx con 82.106 filas. Más de ``MAX_FINGERPRINT_ROWS`` no se
+    lee en cada búsqueda: quedan separados."""
+    url = "https://datos.gob.ar/dataset/salud/resource/241d3817/download/rita-2012-2022.xlsx"
+    cols = ["anio", "sexo", "localizacion"]
+    rows = 82_106
+    assert rows > MAX_FINGERPRINT_ROWS
+    hits = [
+        _hit("a", "RITA. Casos de cáncer diagnosticados (2012-2024)", url, 0.6),
+        _hit("b", "RITA. Casos de cáncer diagnosticados (2012-2022)", url, 0.59),
+    ]
+    tables = [_table("a", "a", rows, cols), _table("b", "b", rows, cols)]
+
+    assert fingerprint_candidates(hits, tables) == []
+    assert [r.copies for r in collapse_hits(hits, tables, {})] == [1, 1]
+
+
+def test_the_declared_format_counts_when_the_url_has_no_extension() -> None:
+    url = "https://datos.ejemplo.gob.ar/descargar?recurso=17"
+    cols = ["periodo", "valor"]
+    hits = [_hit("a", "Cuadro A", url, 0.6), _hit("b", "Cuadro B", url, 0.59)]
+    tables = [_table("a", "a", 40, cols), _table("b", "b", 40, cols)]
+    profiles = {n: _profile(n, 40, fmt="xlsx") for n in ("a", "b")}
+
+    assert fingerprint_candidates(hits, tables, profiles) == ["raw.a", "raw.b"]
+    assert len(collapse_hits(hits, tables, profiles)) == 2
+    # Declarado como CSV, la forma alcanza.
+    csv_profiles = {n: _profile(n, 40, fmt="csv") for n in ("a", "b")}
+    assert fingerprint_candidates(hits, tables, csv_profiles) == []
+    assert len(collapse_hits(hits, tables, csv_profiles)) == 1
+
+
+async def test_content_fingerprints_asks_the_sandbox_only_when_needed() -> None:
+    *_, h31, h41 = _ISAC_PARES[0]
+    hits, tables = _isac_31_41()
+    asked: list[list[str]] = []
+
+    class Sandbox:
+        async def table_fingerprints(self, names: list[str]) -> dict[str, str]:
+            asked.append(names)
+            return {"cache_indec_isac_cuadro_3_1": h31, "cache_indec_isac_cuadro_4_1": h41}
+
+    prints = await content_fingerprints(Sandbox(), hits, tables, {})
+    assert asked == [["raw.cache_indec_isac_cuadro_3_1", "raw.cache_indec_isac_cuadro_4_1"]]
+    assert prints == {"cache_indec_isac_cuadro_3_1": h31, "cache_indec_isac_cuadro_4_1": h41}
+
+    # Sin pares en duda no se consulta nada.
+    csv = [_hit("x", "X", "https://x/a.csv", 0.5)]
+    assert await content_fingerprints(Sandbox(), csv, [_table("x", "x", 3, ["a"])], {}) == {}
+    assert len(asked) == 1
+
+
+async def test_content_fingerprints_without_the_method_or_on_failure_is_empty() -> None:
+    hits, tables = _isac_31_41()
+
+    class Old:  # un fake de test viejo, sin `table_fingerprints`
+        pass
+
+    class Broken:
+        async def table_fingerprints(self, names: list[str]) -> dict[str, str]:
+            raise TimeoutError("statement timeout")
+
+    assert await content_fingerprints(Old(), hits, tables, {}) == {}
+    assert await content_fingerprints(Broken(), hits, tables, {}) == {}
 
 
 # ── encabezados ─────────────────────────────────────────────
@@ -545,6 +803,102 @@ def test_sandbox_profiles_map_the_live_version_by_bare_name() -> None:
     profile = out["diputados__proyectos_parlamentarios__40eec388__v1"]
     assert (profile.rows, profile.truncated, profile.format) == (11089, False, "csv")
     assert profile.columns == ["hcdn110412 / hcdn110416", "_source_url"]
+
+
+def test_sandbox_fingerprints_hash_the_rows_without_collector_columns() -> None:
+    """Una sola consulta, de sólo lectura y con tope de tiempo; las columnas
+    `_*` del colector cambian entre copias y quedan afuera; las tablas que una
+    consulta del sandbox no puede leer no se tocan."""
+    from types import SimpleNamespace
+
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    statements: list[tuple[str, object]] = []
+    attrs = [
+        ('"raw"."cache_indec_isac_cuadro_3_1"', "Período"),
+        ('"raw"."cache_indec_isac_cuadro_3_1"', "Asfalto"),
+        ('"raw"."cache_indec_isac_cuadro_3_1"', "_source_dataset_id"),
+        ('"raw"."cache_indec_isac_cuadro_4_1"', "Período"),
+        ('"raw"."cache_indec_isac_cuadro_4_1"', 'Col "rara"'),
+    ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a) -> bool:
+            return False
+
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            statements.append((sql, params))
+            if "pg_attribute" in sql:
+                rows = [SimpleNamespace(name=n, attname=a) for n, a in attrs]
+            elif "md5" in sql:
+                rows = [
+                    SimpleNamespace(
+                        name='"raw"."cache_indec_isac_cuadro_3_1"', n=171, s=Decimal("12")
+                    ),
+                    SimpleNamespace(
+                        name='"raw"."cache_indec_isac_cuadro_4_1"', n=171, s=Decimal("-5")
+                    ),
+                ]
+            else:
+                rows = []
+            return SimpleNamespace(fetchall=lambda: rows)
+
+        def rollback(self) -> None:
+            statements.append(("ROLLBACK", None))
+
+    adapter = PgSandboxAdapter()
+    adapter._get_engine = lambda: SimpleNamespace(connect=_Conn)  # type: ignore[method-assign]
+
+    out = adapter._table_fingerprints_sync(
+        [
+            "raw.cache_indec_isac_cuadro_3_1",
+            "raw.cache_indec_isac_cuadro_4_1",
+            "datasets",
+            "public.users",
+        ]
+    )
+
+    assert out == {"cache_indec_isac_cuadro_3_1": "171:12", "cache_indec_isac_cuadro_4_1": "171:-5"}
+    sqls = [s for s, _ in statements]
+    assert sqls[0] == "SET TRANSACTION READ ONLY"
+    assert sqls[1].startswith("SET LOCAL statement_timeout")
+    assert statements[2][1] == {
+        "names": ['"raw"."cache_indec_isac_cuadro_3_1"', '"raw"."cache_indec_isac_cuadro_4_1"']
+    }
+    [fingerprint_sql] = [s for s in sqls if "md5" in s]
+    assert fingerprint_sql.count("UNION ALL") == 1
+    assert 'ROW("Período", "Asfalto")::text' in fingerprint_sql
+    assert 'ROW("Período", "Col ""rara""")::text' in fingerprint_sql
+    assert "_source_dataset_id" not in fingerprint_sql
+    assert "datasets" not in fingerprint_sql and "users" not in fingerprint_sql
+    assert sqls[-1] == "ROLLBACK"
+
+
+def test_sandbox_fingerprints_failure_or_nothing_readable_is_empty() -> None:
+    from types import SimpleNamespace
+
+    from app.infrastructure.adapters.sandbox.pg_sandbox_adapter import PgSandboxAdapter
+
+    adapter = PgSandboxAdapter()
+    adapter._get_engine = lambda: (_ for _ in ()).throw(AssertionError("no DB"))  # type: ignore[method-assign]
+    assert adapter._table_fingerprints_sync(["datasets", "public.users", ""]) == {}
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a) -> bool:
+            return False
+
+        def execute(self, statement, params=None):
+            raise RuntimeError("canceling statement due to statement timeout")
+
+    adapter._get_engine = lambda: SimpleNamespace(connect=_Conn)  # type: ignore[method-assign]
+    assert adapter._table_fingerprints_sync(["raw.cache_x"]) == {}
 
 
 def test_sandbox_profiles_without_names_do_not_touch_the_database() -> None:

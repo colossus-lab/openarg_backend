@@ -33,7 +33,7 @@ from app.application.answers.aggregates import MAX_FILTERS as MAX_AGG_FILTERS
 from app.application.answers.aggregates import MAX_GROUP_BY
 from app.application.answers.aggregates import MAX_LIMIT as MAX_AGG_LIMIT
 from app.application.api_key_service import check_catalog_rate_limit
-from app.application.catalog.collapse import collapse_hits
+from app.application.catalog.collapse import collapse_hits, content_fingerprints
 from app.application.catalog.national_prior import national_prior
 from app.application.consultas.agregar import PedidoAgregado, agregar
 from app.application.consultas.fechas import aviso_lectura_fecha
@@ -436,9 +436,14 @@ async def buscar(
                 )
         tables = await sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits])
         profiles = await sandbox.table_profiles([t.table_name for t in tables])
+        # Las hojas de un .xls con la misma forma y otro título se juntan sólo
+        # con el mismo contenido (ISAC 3.1 y 4.1 son series distintas).
+        fingerprints = await content_fingerprints(sandbox, hits, tables, profiles)
         t_tables = time.perf_counter()
 
-        collapsed = collapse_hits(hits, tables, profiles, prior=national_prior(q))
+        collapsed = collapse_hits(
+            hits, tables, profiles, prior=national_prior(q), fingerprints=fingerprints
+        )
         # Sin tabla consultable al fondo (orden estable): ocupaban lugares con
         # "Sin tabla consultable en OpenArg" y el modelo no puede usarlos.
         collapsed.sort(key=lambda c: not c.tables)

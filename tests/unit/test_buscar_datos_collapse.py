@@ -84,6 +84,60 @@ async def test_live_version_rows_replace_a_zero_row_count() -> None:
     assert dataset["tablas"][0]["filas"] == 231_043
 
 
+async def test_isac_sheets_with_the_same_shape_reach_the_model_separately() -> None:
+    """H092 (revisión del 05-oct): el Cuadro 3.1 del ISAC (serie original) y el
+    4.1 (desestacionalizada) tienen la misma forma; por la forma, el agente
+    veía uno solo y respondía con la otra serie. Con la huella del contenido
+    son dos datasets; los cuadros con la misma tabla siguen siendo uno."""
+    url = "https://www.indec.gob.ar/ftp/cuadros/economia/sh_isac_2025.xls"
+    title = "INDEC - ISAC — Actividad de la Construcción — Cuadro "
+    cols = ["Período", "Período_2", "Asfalto", "Cales"]
+    hits = [
+        SearchResult("c3.1", title + "3.1", "", "indec", url, "", 0.70),
+        SearchResult("c4.1", title + "4.1", "", "indec", url, "", 0.69),
+        SearchResult("c1", title + "1", "", "indec", url, "", 0.68),
+        SearchResult("c6.3", title + "6.3", "", "indec", url, "", 0.67),
+    ]
+    sandbox = _Sandbox(
+        [
+            CachedTableInfo("raw.cache_indec_isac_cuadro_3_1", "c3.1", 171, cols),
+            CachedTableInfo("raw.cache_indec_isac_cuadro_4_1", "c4.1", 171, cols),
+            CachedTableInfo("raw.isac_cuadro_1__v2", "c1", 20, ["Índice"]),
+            CachedTableInfo("raw.isac_cuadro_6_3__v3", "c6.3", 20, ["Índice"]),
+        ],
+        {},
+    )
+    asked: list[list[str]] = []
+
+    async def table_fingerprints(names: list[str]) -> dict[str, str]:
+        asked.append(names)
+        return {
+            "cache_indec_isac_cuadro_3_1": "171:96674937454929861457",
+            "cache_indec_isac_cuadro_4_1": "171:-94578655270205905329",
+            "isac_cuadro_1__v2": "20:8138770247277535997",
+            "isac_cuadro_6_3__v3": "20:8138770247277535997",
+        }
+
+    sandbox.table_fingerprints = table_fingerprints  # type: ignore[attr-defined]
+
+    out = await BuscarDatos().run(
+        {"texto": "construcción asfalto"},
+        ToolContext(_deps(hits, sandbox), EngineRequest("q", "u")),
+    )
+
+    datasets = json.loads(out.content)["datasets"]
+    assert [d["titulo"].rsplit("— ", 1)[1] for d in datasets] == [
+        "Cuadro 3.1",
+        "Cuadro 4.1",
+        "Cuadro 1",
+    ]
+    assert [d["tablas"][0]["tabla"] for d in datasets[:2]] == [
+        "raw.cache_indec_isac_cuadro_3_1",
+        "raw.cache_indec_isac_cuadro_4_1",
+    ]
+    assert len(asked) == 1 and len(asked[0]) == 4
+
+
 async def test_an_unknown_portal_is_named_in_the_note() -> None:
     deps = _deps([], _Sandbox([], {}))
     deps.vector_search.known_portals = AsyncMock(return_value=["datos_gob_ar", "indec"])
