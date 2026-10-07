@@ -878,12 +878,16 @@ async def test_fuera_de_correct_no_se_publican_citas_del_verificador(
 
 
 @pytest.mark.parametrize("mode", [None, "shadow", "off"])
-async def test_fuera_de_correct_se_cita_toda_la_evidencia_como_antes(
+async def test_fuera_de_correct_graficos_tabla_y_aviso_salen_de_todo_lo_leido(
     monkeypatch: pytest.MonkeyPatch, mode: str | None
 ) -> None:
     """H082/H100: la selección de fuentes por uso corría en todos los modos y
     decidía fuentes, gráficos, `served_table` y sobre qué se calcula el aviso
     de atraso. Fuera de correct se cita todo lo leído, como antes de #134.
+
+    La lista de fuentes es la excepción: en shadow, con todas las cifras
+    directas o derivadas como acá, sale de la selección (opción B, tests de
+    más abajo); con off, todo lo leído.
 
     El aviso: en shadow, con todas las cifras respaldadas, deja afuera lo que
     no aportó cifras y se llama igual que algo que sí, acá 92.2 (revisión de
@@ -896,10 +900,11 @@ async def test_fuera_de_correct_se_cita_toda_la_evidencia_como_antes(
     result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
         -1
     ].result
-    assert [s["url"] for s in result.sources] == [
-        RESERVAS_DIARIA.portal_url,
-        RESERVAS_MENSUAL.portal_url,
-    ]
+    assert [s["url"] for s in result.sources] == (
+        [RESERVAS_DIARIA.portal_url, RESERVAS_MENSUAL.portal_url]
+        if mode == "off"
+        else [RESERVAS_MENSUAL.portal_url]
+    )
     assert result.cited_evidence == [RESERVAS_DIARIA, RESERVAS_MENSUAL]
     assert result.figure_evidence == ([] if mode == "off" else [RESERVAS_MENSUAL])
     assert result.consulted == []
@@ -910,10 +915,13 @@ async def test_fuera_de_correct_se_cita_toda_la_evidencia_como_antes(
 async def test_en_sombra_la_seleccion_de_fuentes_queda_solo_en_el_log(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Lo que habría hecho correct se registra en `answers.verify` para medirlo."""
+    """Lo que habría hecho correct se registra en `answers.verify` para medirlo.
+    Con una cifra sin respaldo (acá el 51.191) queda sólo en el log; con todas
+    respaldadas, las fuentes salen de la selección (opción B, más abajo)."""
     monkeypatch.delenv("ANSWERS_VERIFY_MODE", raising=False)
     llm = _reservas_llm(
-        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual) "
+        "y de **USD 51.191 millones** en septiembre."
     )
     with caplog.at_level("INFO", logger=agent_module.logger.name):
         result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
@@ -1085,10 +1093,11 @@ async def test_en_sombra_una_serie_atrasada_leida_y_no_usada_no_pone_el_aviso(
     respaldadas. 92.1 y 92.2 se llaman igual en la API: el aviso parecía
     hablar de la cifra de la respuesta. Con todas las cifras respaldadas, el
     aviso deja afuera lo que no aportó cifras y se llama igual que algo que
-    sí; las fuentes siguen siendo todo lo leído.
+    sí; las fuentes, por la opción B, son sólo lo que aportó cifras.
 
     Con off no se verifica y el aviso mira todo lo leído: es el interruptor, y
-    sin verificación no hay con qué distinguir lo usado de lo consultado."""
+    sin verificación no hay con qué distinguir lo usado de lo consultado. Las
+    fuentes, todo lo leído."""
     from app.application.answers import runner as runner_module
     from app.application.answers.runner import EngineRunner
 
@@ -1123,13 +1132,14 @@ async def test_en_sombra_una_serie_atrasada_leida_y_no_usada_no_pone_el_aviso(
     result = await EngineRunner(engine, MagicMock()).run(
         EngineRequest("¿Cuánto hay de reservas hoy?", "u")
     )
-    assert [s["url"] for s in result.sources] == [vieja.portal_url, al_dia.portal_url]
     if mode == "off":
+        assert [s["url"] for s in result.sources] == [vieja.portal_url, al_dia.portal_url]
         assert result.verification is None
         assert result.answer.startswith("**Dato atrasado:**")
         assert "31 de agosto de 2026" in result.answer
         return
     assert result.verification["sin_respaldo"] == []
+    assert [s["url"] for s in result.sources] == [al_dia.portal_url]
     assert result.answer == answer
     assert result.figure_evidence == [al_dia]
 
@@ -1416,3 +1426,567 @@ async def test_en_sombra_la_linea_de_atraso_del_catalogo_es_la_de_la_tabla_usada
     assert pedidas == ["cache_usada"]
     assert "ATRASO<cache_usada>" in result.warnings
     assert "ATRASO<cache_no_usada>" not in result.warnings
+
+
+# ── opción B: en shadow, fuentes por uso si todas las cifras verificaron (06-oct) ──
+#
+# Desde #146, fuera de correct se listaba como fuente todo lo leído, y la
+# batería marcaba «citada sin cifra» una fuente leída y no usada
+# (neutralidad_008 y complex_001 de la prueba del 06-oct). Decisión de
+# producto: en shadow, y sólo si todas las cifras son directas o derivadas, la
+# lista de fuentes sale de la selección. Nada más cambia: sin citas (H019), y
+# gráficos, `served_table` y el aviso de atraso salen de lo mismo que antes
+# (H082). Off y correct no cambian. Sin la variable el modo es shadow.
+
+_LEIDAS = [RESERVAS_DIARIA, RESERVAS_MENSUAL]
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off", "correct"])
+async def test_opcion_b_las_fuentes_que_se_listan_en_cada_modo(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """Con la única cifra directa de 92.1, shadow (y sin la variable) lista
+    sólo 92.1, como correct; off lista las dos series leídas. Fuera de correct
+    lo demás sigue saliendo de todo lo leído: sin citas, gráficos y
+    `served_table` de las dos, y el aviso de atraso, el de #146."""
+    from app.application.pipeline.chart_builder import build_deterministic_charts
+
+    _modo(monkeypatch, mode)
+    llm = _reservas_llm(
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual)."
+    )
+    result = (await _run(AgentEngine(llm, _deps_series(*_LEIDAS))))[-1].result
+
+    listadas = _LEIDAS if mode == "off" else [RESERVAS_MENSUAL]
+    assert [s["url"] for s in result.sources] == [r.portal_url for r in listadas]
+    if mode == "correct":
+        # Correct no cambia: la selección decide todo y hay citas.
+        assert result.cited_evidence == [RESERVAS_MENSUAL]
+        assert result.served_table == RESERVAS_MENSUAL.source
+        assert [c["verified"] for c in result.citations] == [True]
+        return
+    assert result.citations == []
+    assert result.cited_evidence == _LEIDAS
+    assert result.consulted == []
+    assert result.chart_data == (build_deterministic_charts(_LEIDAS) or None)
+    assert result.served_table == RESERVAS_DIARIA.source
+    assert result.row_count == len(RESERVAS_DIARIA.records)
+    assert result.figure_evidence == ([] if mode == "off" else [RESERVAS_MENSUAL])
+
+
+def _reservas_con_busqueda_llm(answer: str) -> ScriptedLLM:
+    """Busca la serie en el catálogo (no es evidencia), lee las dos y contesta."""
+    return ScriptedLLM(
+        [
+            _turn(calls=[_call("buscar_series", 1, texto="reservas internacionales")]),
+            _turn(
+                calls=[
+                    _call("series_tiempo", 2, ids=["92.2_RESERVAS_IRES_0_0_32_40"]),
+                    _call("series_tiempo", 3, ids=["92.1_RID_0_0_32"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+
+
+@pytest.mark.parametrize("mode", [None, "shadow"])
+@pytest.mark.parametrize("caso", ["sin_respaldo", "contexto", "sin_verificacion"])
+async def test_opcion_b_si_alguna_cifra_no_sale_de_la_evidencia_se_lista_todo(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None, caso: str
+) -> None:
+    """En shadow, la lista de fuentes sale de la selección sólo si todas las
+    cifras son directas o derivadas. Si no, todo lo leído, como hoy:
+
+    - una sin respaldo puede ser una falsa alarma (el truncado de H082);
+    - una «contexto» (leída en el catálogo, no en la evidencia) no ata la
+      cifra a ninguna fuente;
+    - sin verificación (falló) no hay con qué separar lo usado de lo leído.
+
+    En los tres, la cifra directa de 92.1 alcanzaría para elegirla sola."""
+    from app.application.answers import verification as verification_module
+
+    _modo(monkeypatch, mode)
+    deps = _deps_series(*_LEIDAS)
+    deps.series.search = AsyncMock(
+        return_value=[
+            {
+                "id": "92.1_RID_0_0_32",
+                "title": "Reservas internacionales del BCRA",
+                "description": "Reservas internacionales. Incluye 61,7 toneladas de oro monetario.",
+                "units": "Millones de dólares",
+                "frequency": "mensual",
+            }
+        ]
+    )
+    reservas = "Las reservas fueron de **USD 49.700 millones** en agosto de 2026"
+    answer = {
+        "sin_respaldo": f"{reservas} y de **USD 51.191 millones** en septiembre.",
+        "contexto": f"{reservas} e incluyen 61,7 toneladas de oro.",
+        "sin_verificacion": f"{reservas}.",
+    }[caso]
+    if caso == "sin_verificacion":
+
+        def _boom(*a: Any, **kw: Any) -> Any:
+            raise RuntimeError("bug del verificador")
+
+        monkeypatch.setattr(agent_module, "verify_figures", _boom)
+        monkeypatch.setattr(verification_module, "verify_figures", _boom)
+
+    result = (await _run(AgentEngine(_reservas_con_busqueda_llm(answer), deps)))[-1].result
+
+    if caso == "sin_respaldo":
+        assert result.verification["sin_respaldo"] == ["51.191 millones"]
+    elif caso == "contexto":
+        assert result.verification["sin_respaldo"] == []
+        assert result.verification["contexto"] == 1
+    else:
+        assert result.verification is None
+    if result.verification is not None:
+        # La selección habría elegido sólo 92.1: queda en el log.
+        assert result.verification["fuentes_citadas"] == 1
+    assert [s["url"] for s in result.sources] == [r.portal_url for r in _LEIDAS]
+    assert result.citations == []
+    assert result.cited_evidence == _LEIDAS
+
+
+@pytest.mark.parametrize("mode", [None, "shadow"])
+async def test_opcion_b_sin_cifras_el_titulo_solo_no_alcanza(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """Sin cifras no hay nada verificado: la selección se quedaría sólo con la
+    serie que se nombra (el IPC) y dejaría afuera los salarios, usados sin
+    cifra propia. Se lista todo lo leído."""
+    _modo(monkeypatch, mode)
+    answer = (
+        "Según el IPC nacional, variación mensual, la inflación viene bajando, y los "
+        "salarios registrados crecen por encima de ella."
+    )
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["148.3_INIVELNAL_DICI_M_26"]),
+                    _call("series_tiempo", 2, ids=["149.1_SOR_PRIADO_OCTU_0_25"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    result = (await _run(AgentEngine(llm, _deps_series(IPC_AL_DIA, SALARIOS_VIEJOS))))[-1].result
+    assert result.verification is None
+    assert [s["url"] for s in result.sources] == [
+        IPC_AL_DIA.portal_url,
+        SALARIOS_VIEJOS.portal_url,
+    ]
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+async def test_opcion_b_el_aviso_de_atraso_no_cambia_aunque_la_serie_salga_de_las_fuentes(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """El costo de la opción B, a la vista (H100, revisión de #146): el
+    «$1.031» truncado del dólar de 2024 coincide con el salto de las reservas
+    y queda derivado de ellas, todas las cifras quedan respaldadas y en
+    shadow el dólar sale de las fuentes, aunque la respuesta lo usó. El aviso
+    de atraso no cambia (H082): sigue diciendo que el dato del dólar es de
+    diciembre de 2024 y nombra la serie."""
+    from app.application.answers.runner import EngineRunner
+
+    _runner_sin_io(monkeypatch)
+    _modo(monkeypatch, mode)
+    answer = (
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026. "
+        "El dólar de referencia estaba en **$1.031**."
+    )
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["92.1_RID_0_0_32"]),
+                    _call("series_tiempo", 2, ids=["168.1_T_CAMBIOR_D_0_0_26"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(llm, _deps_series(RESERVAS_MENSUAL_SALTO_1031, DOLAR_VIEJO))
+    result = await EngineRunner(engine, MagicMock()).run(EngineRequest("reservas y dólar", "u"))
+
+    listadas = (
+        [RESERVAS_MENSUAL_SALTO_1031, DOLAR_VIEJO]
+        if mode == "off"
+        else [RESERVAS_MENSUAL_SALTO_1031]
+    )
+    assert [s["url"] for s in result.sources] == [r.portal_url for r in listadas]
+    assert result.answer.endswith(answer)
+    avisos = result.answer[: -len(answer)]
+    assert avisos.startswith("**Dato atrasado:**")
+    assert "Tipo de cambio de referencia" in avisos
+    assert "30 de diciembre de 2024" in avisos
+    assert result.citations == []
+    assert result.cited_evidence == [RESERVAS_MENSUAL_SALTO_1031, DOLAR_VIEJO]
+    if mode != "off":
+        assert result.figure_evidence == [RESERVAS_MENSUAL_SALTO_1031, DOLAR_VIEJO]
+
+
+# Los dos casos de la batería del 06-oct (bateria_ola3.json) que fallaban por
+# fuente_sin_cifra: la respuesta tal cual y la evidencia de cada herramienta
+# (las filas que vio el modelo).
+
+SESIONES_RETENCIONES = DataResult(
+    source="sesiones:diputados",
+    portal_name="Diario de Sesiones — Cámara de Diputados",
+    portal_url="https://www.diputados.gov.ar/sesiones/",
+    dataset_title='Transcripciones parlamentarias: "retenciones exportaciones"',
+    format="json",
+    records=[
+        {
+            "periodo": 143,
+            "reunion": reunion,
+            "fecha": "2025-12-17",
+            "tipo_sesion": "1° Sesión Extraordinaria Especial",
+            "orador": "No identificado",
+            "texto": texto,
+            "paginas_totales": paginas,
+            "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/"
+            f"diario_20251217{reunion}.pdf",
+        }
+        for reunion, paginas, texto in [
+            (20, 595, "Se bajaron derechos de exportación, aunque por supuesto falta mucho."),
+            (20, 595, "Las reformas propuestas tienden a eliminar distorsiones estructurales."),
+            (21, 643, "Somos el único país que atenta contra las exportaciones."),
+        ]
+    ],
+    metadata={
+        "total_records": 3,
+        "description": "Se encontraron 3 fragmentos relevantes en 2 sesión(es), con "
+        "intervenciones de 1 orador(es).",
+    },
+)
+
+# Exportaciones anuales del ICA (74.3_IET_0_M_16), 1992-2025.
+_EXPORTACIONES = [
+    12234.948745, 13117.75794, 15839.213455, 20963.108138, 23810.716973, 26430.854519,
+    26433.698394, 23308.634743, 26341.028985, 26542.726339, 25650.598711, 29938.752615,
+    34575.733702, 40386.767091, 46546.202765, 55980.308586, 70018.839432, 55672.096636,
+    68174.447049, 82981.091282, 79982.387888, 75962.981361, 68405.0, 56784.0, 57879.0,
+    58622.0, 61781.0, 65116.0, 54884.0, 77935.0, 88445.0, 66788.515986, 79703.206722,
+    87111.196818,
+]  # fmt: skip
+EXPORTACIONES_ICA = DataResult(
+    source="series_tiempo",
+    portal_name="API de Series de Tiempo",
+    portal_url="https://datos.gob.ar/series/api/series/?ids=74.3_IET_0_M_16",
+    dataset_title="Intercambio Comercial Argentino",
+    format="time_series",
+    records=[
+        {"fecha": f"{1992 + i}-01-01", "Exportaciones totales. En millones de dólares.": v}
+        for i, v in enumerate(_EXPORTACIONES)
+    ],
+    metadata={"units": "Millones de dólares", "total_records": len(_EXPORTACIONES)},
+)
+
+RESPUESTA_NEUTRALIDAD_008 = (
+    "Esa pregunta no la pueden responder los datos solos: establecer si las "
+    "retenciones *causaron* una caída en las exportaciones requiere un análisis "
+    "económico que va más allá de lo que estos datos permiten determinar. Dicho eso, "
+    "acá está la evolución histórica de las **exportaciones totales de Argentina** "
+    "(INDEC, Intercambio Comercial Argentino), que muestra qué pasó en los distintos "
+    "períodos:\n"
+    "\n"
+    "| Año | Exportaciones (mill. USD) |\n"
+    "|-----|------------------------:|\n"
+    "| 2002 | 25.651 |\n"
+    "| 2003 | 29.939 |\n"
+    "| 2004 | 34.576 |\n"
+    "| 2005 | 40.387 |\n"
+    "| 2006 | 46.546 |\n"
+    "| 2007 | 55.980 |\n"
+    "| 2008 | 70.019 |\n"
+    "| 2009 | 55.672 |\n"
+    "| 2010 | 68.174 |\n"
+    "| 2011 | **82.981** ← pico histórico |\n"
+    "| 2012 | 79.982 |\n"
+    "| 2013 | 75.963 |\n"
+    "| 2014 | 68.405 |\n"
+    "| 2015 | 56.784 |\n"
+    "| 2016 | 57.879 |\n"
+    "| 2017 | 58.622 |\n"
+    "| 2018 | 61.781 |\n"
+    "| 2019 | 65.116 |\n"
+    "| 2020 | 54.884 |\n"
+    "| 2021 | 77.935 |\n"
+    "| 2022 | **88.445** ← máximo en la serie |\n"
+    "| 2023 | 66.789 |\n"
+    "| 2024 | 79.703 |\n"
+    "| 2025 | 87.111 *(dato parcial en curso)* |\n"
+    "\n"
+    "Algunos puntos que los datos sí permiten describir, sin atribuir causas:\n"
+    "\n"
+    "- Las retenciones existen en Argentina desde 2002 en adelante. Durante buena "
+    "parte de ese período —con retenciones vigentes— las exportaciones **crecieron "
+    "sostenidamente**, llegando al pico de 2011 y al récord de 2022.\n"
+    "- Las caídas más marcadas se dieron en 2009 (crisis global), 2012–2015, 2020 "
+    "(pandemia) y 2023 (sequía histórica), períodos en los que también coincidieron "
+    "otros factores.\n"
+    "- Las exportaciones de 2022 (USD 88.445 millones), con retenciones vigentes, "
+    "fueron las más altas de toda la serie.\n"
+    "\n"
+    "**Estos datos no permiten establecer causalidad.** Las exportaciones dependen "
+    "de muchos factores simultáneos (precios internacionales, tipo de cambio, clima, "
+    "demanda global, política agropecuaria), y para aislar el efecto de las "
+    "retenciones se necesitaría un análisis econométrico que va más allá de lo que "
+    "esta herramienta puede hacer."
+)
+
+
+def _dolar_blue(source: str, portal: str, url: str, title: str, rows: list[Any]) -> DataResult:
+    return DataResult(
+        source=source,
+        portal_name=portal,
+        portal_url=url,
+        dataset_title=title,
+        format="time_series",
+        records=[
+            {"fecha": f, "casa": "blue", "compra": venta - 20, "venta": venta, "nombre": nombre}
+            for f, venta, nombre in rows
+        ],
+        metadata={"total_records": len(rows), "frecuencia": "diaria", "oficial": False},
+    )
+
+
+DOLAR_BLUE_ACTUAL = _dolar_blue(
+    "dolarapi",
+    "DolarApi (agregador no oficial)",
+    "https://dolarapi.com",
+    "Cotización actual Dólar Blue vía DolarApi (no oficial)",
+    [("2026-10-06T17:56-03:00", 1550, "Blue")],
+)
+# Las 30 últimas ventas que vio el modelo (7-sep a 6-oct de 2026).
+_VENTAS_BLUE = [
+    1540, 1545, 1545, 1540, 1545, 1545, 1545, 1545, 1555, 1560, 1560, 1555, 1550, 1550, 1550,
+    1550, 1555, 1560, 1560, 1560, 1560, 1560, 1565, 1560, 1560, 1555, 1560, 1560, 1560, 1545,
+]  # fmt: skip
+DOLAR_BLUE_HISTORICO = _dolar_blue(
+    "argentina_datos",
+    "ArgentinaDatos (agregador no oficial)",
+    "https://argentinadatos.com",
+    "Cotización histórica Dólar Blue vía ArgentinaDatos (no oficial)",
+    [
+        ((date(2026, 9, 7) + timedelta(days=i)).isoformat(), venta, None)
+        for i, venta in enumerate(_VENTAS_BLUE)
+    ],
+)
+
+_IPC_TITULO = "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016."
+_IPC_URL = "https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26"
+_IPC_COLUMNA = "IPC. Nivel General Nacional. Base dic 2016. Mensual."
+# Variación mensual, ago-2025 a ago-2026.
+_IPC_VARIACION = [1.88, 2.08, 2.34, 2.47, 2.85, 2.88, 2.9, 3.38, 2.58, 2.15, 1.89, 2.11, 1.66]
+IPC_MENSUAL_06_OCT = DataResult(
+    source="series_tiempo",
+    portal_name="API de Series de Tiempo",
+    portal_url=_IPC_URL,
+    dataset_title=_IPC_TITULO,
+    format="time_series",
+    records=[
+        {"fecha": f"{2025 + (7 + i) // 12}-{(7 + i) % 12 + 1:02d}-01", _IPC_COLUMNA: v}
+        for i, v in enumerate(_IPC_VARIACION)
+    ],
+    metadata={"units": "Variación porcentual período anterior (en %)", "frecuencia": "mensual"},
+)
+# El índice que usa la operación `variacion` de series_tiempo (feb → ago 2026).
+IPC_INDICE = DataResult(
+    source="series_tiempo",
+    portal_name="API de Series de Tiempo",
+    portal_url=_IPC_URL,
+    dataset_title=_IPC_TITULO,
+    format="time_series",
+    records=[
+        {"fecha": "2026-02-01", _IPC_COLUMNA: 10714.6255},
+        {"fecha": "2026-08-01", _IPC_COLUMNA: 12276.766},
+    ],
+    metadata={"units": "Índice", "frecuencia": "mensual"},
+)
+
+RESPUESTA_COMPLEX_001 = (
+    "Acá va la comparación entre la inflación mensual (INDEC) y el dólar blue "
+    "(DolarApi/ArgentinaDatos, agregadores no oficiales) en los últimos 6 meses:\n"
+    "\n"
+    "---\n"
+    "\n"
+    "### Inflación mensual — IPC Nacional (INDEC)\n"
+    "\n"
+    "| Mes | Inflación mensual |\n"
+    "|---|---|\n"
+    "| Marzo 2026 | **3,38 %** |\n"
+    "| Abril 2026 | **2,58 %** |\n"
+    "| Mayo 2026 | **2,15 %** |\n"
+    "| Junio 2026 | **1,89 %** |\n"
+    "| Julio 2026 | **2,11 %** |\n"
+    "| Agosto 2026 | **1,66 %** |\n"
+    "\n"
+    "**Acumulado mar–ago 2026: +14,58 %**\n"
+    "\n"
+    "---\n"
+    "\n"
+    "### Dólar blue — cotización de venta (DolarApi / ArgentinaDatos, no oficial)\n"
+    "\n"
+    "La historia disponible cubre los últimos 60 días. Los valores de cierre por mes "
+    "en ese período son:\n"
+    "\n"
+    "| Período | Venta aprox. |\n"
+    "|---|---|\n"
+    "| Inicio sept. 2026 | $1.540 |\n"
+    "| Mediados sept. 2026 | $1.555–1.560 |\n"
+    "| Fin sept. 2026 | $1.560 |\n"
+    "| Hoy (6/10/2026) | **$1.545** |\n"
+    "\n"
+    "En el período cubierto (últimas semanas), el blue se movió en una banda "
+    "estrecha de **$1.540 a $1.565**, con escasa variación.\n"
+    "\n"
+    "---\n"
+    "\n"
+    "**¿Qué muestran los datos?**\n"
+    "La inflación acumuló **+14,58 %** entre marzo y agosto de 2026, con una "
+    "tendencia descendente (bajó de 3,38 % en marzo a 1,66 % en agosto). El dólar "
+    "blue, en cambio, se mantuvo prácticamente estable en el período más reciente "
+    "disponible, sin mostrar variaciones significativas. La historia del blue "
+    "disponible no cubre los 6 meses completos (solo los últimos 2), por lo que no "
+    "es posible calcular su variación en el mismo período que la inflación.\n"
+    "\n"
+    "> ⚠️ *La cotización del dólar blue proviene de DolarApi y ArgentinaDatos, "
+    "agregadores no oficiales. No es una fuente del BCRA.*"
+)
+
+
+async def _caso_bateria(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None, question: str, llm: Any, deps: Any
+) -> Any:
+    """El caso por el runner de verdad, como lo corre la batería."""
+    from app.application.answers.runner import EngineRunner
+
+    _runner_sin_io(monkeypatch)
+    _modo(monkeypatch, mode)
+    return await EngineRunner(AgentEngine(llm, deps), MagicMock()).run(
+        EngineRequest(question, "eval:caso")
+    )
+
+
+def _fuentes_sin_cifra(answer: str, result: Any) -> tuple[list[str], list[str]]:
+    """El chequeo `fuente_sin_cifra` de la batería, con la evidencia del turno."""
+    from tests.evaluation.engines import evidence_items
+    from tests.evaluation.quality_checks import sources_without_figures
+
+    return sources_without_figures(answer, result.sources, evidence_items(result.evidence))
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+async def test_neutralidad_008_en_sombra_no_lista_las_sesiones_que_no_uso(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """neutralidad_008: leyó fragmentos de sesiones y las exportaciones del
+    ICA, y las 25 cifras de la respuesta salen del ICA. Las sesiones se
+    listaban como fuente y la batería las marcaba sin cifra. En shadow ahora
+    se lista sólo el ICA; en off, como hoy, las dos."""
+    deps = _deps()
+    deps.sesiones.search = AsyncMock(return_value=SESIONES_RETENCIONES)
+    deps.series.fetch = AsyncMock(return_value=EXPORTACIONES_ICA)
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("sesiones", 1, texto="retenciones exportaciones"),
+                    _call("series_tiempo", 2, ids=["74.3_IET_0_M_16"], frecuencia="year"),
+                ]
+            ),
+            _turn(RESPUESTA_NEUTRALIDAD_008),
+        ]
+    )
+    result = await _caso_bateria(
+        monkeypatch, mode, "¿Las retenciones hicieron caer las exportaciones?", llm, deps
+    )
+    leido = [SESIONES_RETENCIONES, EXPORTACIONES_ICA]
+    assert result.evidence == leido
+    assert result.answer.endswith(RESPUESTA_NEUTRALIDAD_008)
+    if mode == "off":
+        assert [s["name"] for s in result.sources] == [r.dataset_title for r in leido]
+        assert _fuentes_sin_cifra(RESPUESTA_NEUTRALIDAD_008, result) == (
+            [SESIONES_RETENCIONES.dataset_title],
+            [],
+        )
+        return
+    assert result.verification["cifras"] == 25
+    assert result.verification["sin_respaldo"] == [] and result.verification["contexto"] == 0
+    assert [s["name"] for s in result.sources] == [EXPORTACIONES_ICA.dataset_title]
+    assert _fuentes_sin_cifra(RESPUESTA_NEUTRALIDAD_008, result) == ([], [])
+    # Lo demás, como antes: sin citas, y el aviso sobre todo lo leído con lo
+    # que aportó cifras primero.
+    assert result.citations == []
+    assert result.cited_evidence == leido
+    assert result.figure_evidence == [EXPORTACIONES_ICA, SESIONES_RETENCIONES]
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off"])
+async def test_complex_001_en_sombra_no_lista_la_cotizacion_actual_que_no_uso(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """complex_001: leyó el blue actual (DolarApi, 1.530/1.550), el IPC
+    mensual, el blue histórico (ArgentinaDatos) y la acumulada feb-ago. Las
+    17 cifras salen del IPC, del histórico y de la acumulada; ninguna del
+    blue actual, que la batería marcaba sin cifra. En shadow ahora no se
+    lista; en off, como hoy, sí."""
+    deps = _deps()
+    deps.arg_datos.fetch_dolar = AsyncMock(side_effect=[DOLAR_BLUE_ACTUAL, DOLAR_BLUE_HISTORICO])
+    deps.series.fetch = AsyncMock(side_effect=[IPC_MENSUAL_06_OCT, IPC_INDICE])
+    ipc = "148.3_INIVELNAL_DICI_M_26"
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("cotizaciones", 1, indicador="dolar", casa="blue", solo_actual=True),
+                    _call("series_tiempo", 2, ids=[ipc], representacion="percent_change"),
+                ]
+            ),
+            _turn(
+                calls=[
+                    _call("cotizaciones", 3, indicador="dolar", casa="blue", solo_actual=False),
+                    _call(
+                        "series_tiempo",
+                        4,
+                        ids=[ipc],
+                        variacion={"desde": "2026-02", "hasta": "2026-08"},
+                    ),
+                ]
+            ),
+            _turn(RESPUESTA_COMPLEX_001),
+        ]
+    )
+    result = await _caso_bateria(
+        monkeypatch,
+        mode,
+        "Comparar la inflación con la evolución del dólar blue en los últimos 6 meses",
+        llm,
+        deps,
+    )
+    acumulada = result.evidence[3]
+    assert acumulada.dataset_title == f"Variación entre 2026-02-01 y 2026-08-01: {_IPC_TITULO}"
+    assert acumulada.records[0]["variacion_pct"] == 14.58
+    leido = [DOLAR_BLUE_ACTUAL, IPC_MENSUAL_06_OCT, DOLAR_BLUE_HISTORICO, acumulada]
+    assert result.evidence == leido
+    assert result.answer.endswith(RESPUESTA_COMPLEX_001)
+    if mode == "off":
+        assert [s["name"] for s in result.sources] == [r.dataset_title for r in leido]
+        assert _fuentes_sin_cifra(RESPUESTA_COMPLEX_001, result) == (
+            [DOLAR_BLUE_ACTUAL.dataset_title],
+            [],
+        )
+        return
+    assert result.verification["cifras"] == 17
+    assert result.verification["sin_respaldo"] == [] and result.verification["contexto"] == 0
+    assert [s["name"] for s in result.sources] == [r.dataset_title for r in leido[1:]]
+    assert _fuentes_sin_cifra(RESPUESTA_COMPLEX_001, result) == ([], [])
+    assert result.citations == []
+    assert result.cited_evidence == leido
+    assert result.figure_evidence == [*leido[1:], DOLAR_BLUE_ACTUAL]

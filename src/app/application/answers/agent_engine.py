@@ -32,8 +32,11 @@ y las citas salían ``verified`` sin mirar el período (revisión del 05-oct:
 H019, H082, H083, H100). En ``shadow`` lo que habría elegido queda en el log,
 y si todas las cifras quedaron respaldadas el aviso de atraso deja afuera lo
 que no aportó cifras y se llama igual que algo que sí, y pone primero lo que
-las aportó (revisión de #146); con alguna sin respaldo, todo lo leído. Con
-``off``, todo lo leído. Lo
+las aportó (revisión de #146); con alguna sin respaldo, todo lo leído. Además
+en ``shadow``, si todas las cifras son directas o derivadas, la lista de
+fuentes (y nada más) sale de la selección: lo leído y no usado no se lista
+como fuente (opción B, 06-oct). Con alguna sin respaldo, sólo por contexto, o
+sin verificación, todo lo leído. Con ``off``, todo lo leído. Lo
 transversal (caché, historial, aviso de atraso, analytics, auditoría) lo hace
 ``EngineRunner``.
 """
@@ -72,6 +75,7 @@ from app.application.answers.tools.base import (
 from app.application.answers.verification import (
     VERIFY_CORRECT,
     VERIFY_OFF,
+    VERIFY_SHADOW,
     Verification,
     build_citations,
     claim_for,
@@ -479,9 +483,17 @@ class AgentEngine:
         cited, consulted, citations, figures = _choose_sources(answer, evidence, check)
         dated = figures
         summary = _verification_log(mode, answer, check, first_check, cited, consulted, verify_ms)
+        # Las fuentes que se listan. En correct, lo citado.
+        listed = cited
         if mode != VERIFY_CORRECT:
             # Fuera de correct la selección queda sólo en el log: se cita todo
             # lo leído y sin citas estructuradas, como antes del verificador.
+            # La excepción es la lista de fuentes en shadow, si todas las
+            # cifras son directas o derivadas (opción B): ahí sale de la
+            # selección. Gráficos, mapa, `served_table`, citas y el aviso de
+            # atraso no cambian.
+            backed = mode == VERIFY_SHADOW and _all_figures_backed(check)
+            listed = cited if backed else list(evidence)
             cited, consulted, citations, figures = list(evidence), [], [], []
             dated = _dated_outside_correct(evidence, check)
         if mode == VERIFY_CORRECT and check is not None and check.unsupported:
@@ -506,7 +518,7 @@ class AgentEngine:
         _record_tokens(self._llm.model, req.mode, usage)
         return EngineResult(
             answer=answer,
-            sources=_sources(cited),
+            sources=_sources(listed),
             chart_data=charts,
             map_data=map_data,
             citations=citations,
@@ -604,6 +616,26 @@ def _choose_sources(
         logger.warning("agent: source selection failed", exc_info=True)
         return list(evidence), [], [], []
     return cited, consulted, citations, figures
+
+
+_BACKED = frozenset({"directa", "derivada"})
+
+
+def _all_figures_backed(check: Verification | None) -> bool:
+    """¿Todas las cifras de la respuesta salen de la evidencia (directas o derivadas)?
+
+    Es la condición para que en shadow las fuentes salgan de la selección
+    (opción B, 06-oct): fuera de correct se listaba todo lo leído (#146) y
+    la batería marcaba como «citada sin cifra» una fuente leída y no usada
+    (neutralidad_008, complex_001). Una cifra sin respaldo puede ser una
+    falsa alarma (el truncado de H082) y una «contexto» no ata la cifra a
+    ninguna evidencia: con cualquiera de las dos, o sin verificación, no hay
+    con qué separar lo usado de lo leído y se lista todo. Sin cifras,
+    tampoco: sólo quedaría el título, y eso no prueba que no se usó lo demás.
+    """
+    if check is None or not check.checks:
+        return False
+    return all(c.status in _BACKED for c in check.checks)
 
 
 def _dated_outside_correct(
