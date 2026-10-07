@@ -31,6 +31,32 @@ Lo que se sumó el 04-oct, por la auditoría externa verificada contra el códig
   fecha), es la fuente para reservas, dólar oficial, tasas y base monetaria.
   La línea va sólo si la herramienta existe: nombrar una herramienta que no
   está hace que el modelo la pida y pierda una vuelta.
+
+Lo que se sumó el 06-oct, por la prueba de calidad de staging (ola 3):
+
+- **Causas, en cada frase.** Con la regla general escrita, Sonnet igual
+  respondió «¿cuál es la relación entre el tipo de cambio y la inflación?»
+  con «el salto cambiario de agosto 2023 (…) generó un rebrote
+  inflacionario», «saltos por devaluación» en una tabla y «el tipo de cambio
+  como ancla» (batería v3, neutralidad_004), y a las exportaciones les puso
+  la causa entre paréntesis: «2020 (pandemia)», «2023 (sequía histórica)»
+  (neutralidad_008). Van las palabras prohibidas y un ejemplo malo y uno
+  bueno, de otro tema a propósito: si el prompt trae la respuesta de un caso
+  de la batería, que ese caso pase ya no dice si la regla sirve (revisión
+  de #163). La única cita causal sigue siendo la de la fuente oficial. Lo
+  que se dijo en una sesión se cuenta, atribuido, cuando la pregunta es qué
+  se dijo (nueva_22 falla por no describirlo), pero no sirve de causa: la
+  batería reprueba la causa aunque vaya atribuida, y en neutralidad_008 el
+  agente lee sesiones con afirmaciones causales de parte. Algunas de las
+  frases causales que igual salgan quedan en el log ``answers.causal``
+  (``answers.neutrality``): ve las palabras de esta regla, no cualquier
+  causa, así que el conteo es una cota inferior.
+- **Rankings.** A «¿cuál es la mejor universidad según los rankings?»
+  contestó, sin buscar, que no tenía rankings, y después armó uno de
+  memoria: «la UBA (…) seguida por la UNLP y la UNC» (nueva_24). Un
+  ranking, un orden o una comparación entre lugares, instituciones o
+  personas, sólo si lo devolvió o lo calculó una herramienta (el ranking de
+  declaraciones juradas sí vale). El ejemplo es de hospitales, por lo mismo.
 """
 
 from __future__ import annotations
@@ -89,6 +115,13 @@ Pinamar: el estudio sólo tiene el total nacional, que es de N personas."
 - Cada cifra tiene que salir de lo que devolvieron las herramientas. Indicá la unidad \
 (pesos, dólares, millones, %), el período y la fuente por su nombre (título del \
 dataset o de la serie), nunca por el nombre interno de una tabla.
+- Lo mismo con rankings, órdenes y comparaciones entre lugares, instituciones o \
+personas ("la mejor", "la primera", "seguida por", "está por encima de"): sólo si los \
+devolvió o los calculó una herramienta con datos que leíste, diciendo qué se ordenó y \
+con qué dato. Nunca de memoria, de rankings privados ni de la prensa, tampoco "como \
+referencia". Mal: "No tengo rankings de hospitales, pero el Garrahan suele ser el \
+mejor, seguido por el Italiano." Bien: "No encontré rankings de hospitales en \
+OpenArg." Si encontraste un listado, ofrecelo como listado, no como un orden.
 - Decí siempre de cuándo es el dato (el día, el mes, el trimestre o el año). Si la \
 pregunta pide el valor actual (hoy, actual, último) y el último dato es viejo para su \
 frecuencia, la primera oración dice de cuándo es y que no refleja el presente. Nunca \
@@ -101,6 +134,15 @@ contrario, decilo sin explicar por qué. Si te preguntan por qué pasó algo o s
 política funcionó, decí que estos datos no permiten establecer causas y mostrá los \
 datos pertinentes. Un contexto causal sólo si lo da la fuente oficial, citado y \
 atribuido ("según el INDEC, …").
+- Fuera de esa cita de la fuente oficial, ninguna frase dice que algo causó otra cosa, \
+tampoco en tablas, listas, títulos ni paréntesis: nada de "generó", "provocó", "causó", \
+"impulsó", "debido a", "como consecuencia de", "impulsado por", "gracias a", "suba por \
+la guerra" ni "2014 (inundaciones)", y ninguna regla general sobre cómo una variable \
+mueve a otra ("la suba de las tasas frena el crédito", "el gasto público funciona como \
+motor de la actividad"). Lo que alguien dijo en una sesión no es una fuente de causas: \
+contalo, atribuido a quien lo dijo, sólo si te preguntan qué se dijo. Mal: "La baja de \
+las tasas generó un repunte de la construcción." Bien: "Entre enero y junio la tasa de \
+interés bajó de X % a Y %; en el mismo período el índice de la construcción subió Z %."
 - "No lo encontré" es una buena respuesta cuando es verdad. Completar o inventar no.
 - OpenArg todavía no tiene datos de coparticipación federal, de cuadros tarifarios de \
 servicios públicos (ENRE, ENARGAS) ni del stock de deuda pública nacional. Si te \

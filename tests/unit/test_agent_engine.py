@@ -1416,3 +1416,125 @@ async def test_en_sombra_la_linea_de_atraso_del_catalogo_es_la_de_la_tabla_usada
     assert pedidas == ["cache_usada"]
     assert "ATRASO<cache_usada>" in result.warnings
     assert "ATRASO<cache_no_usada>" not in result.warnings
+
+
+# ── frases causales, sólo en el log (prueba de staging del 06-oct) ──
+
+# Batería v3, neutralidad_004, textual.
+NEUTRALIDAD_004 = (
+    "El salto cambiario de agosto 2023 (de ~$270 a ~$350, mayorista) generó un rebrote "
+    "inflacionario que escaló hasta el **25,5% mensual en diciembre 2023**."
+)
+
+
+def _causal_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    return [
+        json.loads(r.getMessage().removeprefix("answers.causal "))
+        for r in caplog.records
+        if r.getMessage().startswith("answers.causal ")
+    ]
+
+
+@pytest.mark.parametrize("mode", [None, "shadow"])
+async def test_una_frase_causal_queda_en_el_log_y_la_respuesta_sale_igual(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode: str | None
+) -> None:
+    """neutralidad_004. Sin herramientas también se mira: nueva_24 contestó
+    sin ninguna."""
+    _modo(monkeypatch, mode)
+    llm = ScriptedLLM([_turn(NEUTRALIDAD_004)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        events = await _run(AgentEngine(llm, _deps()))
+    result = events[-1].result
+    assert result.answer == NEUTRALIDAD_004
+    assert len(llm.calls) == 1
+    assert not any(isinstance(e, ClearAnswerEvent) for e in events)
+    [line] = _causal_lines(caplog)
+    assert line["modo"] == "shadow"
+    [frase] = line["frases"]
+    assert "generó un rebrote inflacionario" in frase
+    assert line["atribuidas"] == []
+
+
+async def test_la_causa_atribuida_va_al_log_aparte(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Revisión de #163: la batería reprueba la causa aunque vaya atribuida (a
+    un diputado o a la fuente oficial), y el prompt permite la de la fuente
+    oficial. El log las separa para poder contar las dos."""
+    _modo(monkeypatch, None)
+    answer = "Según el INDEC, la sequía generó una caída de las exportaciones en 2023."
+    llm = ScriptedLLM([_turn(answer)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps())))[-1].result
+    assert result.answer == answer
+    [line] = _causal_lines(caplog)
+    assert line["frases"] == []
+    [frase] = line["atribuidas"]
+    assert "la sequía generó una caída" in frase
+
+
+async def test_en_correct_la_frase_causal_tampoco_cambia_la_respuesta(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """La vuelta correctiva es para cifras: una frase causal no la dispara ni
+    pone aviso."""
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "correct")
+    answer = (
+        "Las reservas fueron de **USD 49.700 millones** en agosto de 2026 (promedio mensual), "
+        "debido a la compra de divisas."
+    )
+    llm = _reservas_llm(answer)
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL))))[
+            -1
+        ].result
+    assert result.answer == answer
+    assert len(llm.calls) == 2
+    [line] = _causal_lines(caplog)
+    assert line["modo"] == "correct"
+    assert "debido a la compra de divisas" in line["frases"][0]
+
+
+async def test_en_off_las_frases_causales_no_se_miran(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ANSWERS_VERIFY_MODE", "off")
+    llm = ScriptedLLM([_turn(NEUTRALIDAD_004)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps())))[-1].result
+    assert result.answer == NEUTRALIDAD_004
+    assert _causal_lines(caplog) == []
+
+
+async def test_decir_que_los_datos_no_permiten_establecer_causas_no_se_registra(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """neutralidad_008, 06-oct: es la respuesta que pide el prompt."""
+    _modo(monkeypatch, None)
+    answer = (
+        "Estos datos no permiten establecer si las retenciones *causaron* una caída en las "
+        "exportaciones."
+    )
+    llm = ScriptedLLM([_turn(answer)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps())))[-1].result
+    assert result.answer == answer
+    assert _causal_lines(caplog) == []
+
+
+async def test_si_el_control_de_frases_causales_falla_la_respuesta_sale_igual(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _modo(monkeypatch, None)
+
+    def _falla(text: str) -> tuple[list[str], list[str]]:
+        raise RuntimeError("roto")
+
+    monkeypatch.setattr(agent_module, "scan_causal", _falla, raising=False)
+    llm = ScriptedLLM([_turn(NEUTRALIDAD_004)])
+    with caplog.at_level("INFO", logger=agent_module.logger.name):
+        result = (await _run(AgentEngine(llm, _deps())))[-1].result
+    assert result.answer == NEUTRALIDAD_004
+    assert _causal_lines(caplog) == []
+    assert any("causal phrase check failed" in r.getMessage() for r in caplog.records)

@@ -1140,7 +1140,9 @@ class Sesiones:
         description=(
             "Busca fragmentos de las versiones taquigráficas de las sesiones de la Cámara de "
             "Diputados: qué se dijo sobre un tema, opcionalmente de un orador o un período "
-            "(año legislativo)."
+            "(año legislativo). Lo que dice un orador es suyo: si te preguntan qué se dijo, "
+            "contalo atribuido a quien lo dijo («un orador» si el fragmento no lo identifica). "
+            "Nunca lo uses como un hecho ni para explicar por qué pasó algo."
         ),
         input_schema={
             "type": "object",
