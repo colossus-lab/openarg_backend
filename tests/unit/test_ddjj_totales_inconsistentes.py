@@ -548,12 +548,18 @@ def test_la_descripcion_de_la_herramienta_explica_la_marca() -> None:
 
 def test_la_descripcion_de_la_herramienta_prohibe_calificar_variaciones() -> None:
     """main y staging no tienen en el prompt la regla de neutralidad de la ola 2:
-    la regla de la fuente va en la descripción de su herramienta."""
+    la regla de la fuente va en la descripción de su herramienta.
+
+    Verificación sin LLM de #170 (07-oct): «describí cifras con nombre y año»,
+    sin condición, contradecía la regla del prompt para «quiénes de un grupo»
+    (nueva_19). La cifra de una persona sigue yendo con nombre y año; cuándo
+    se nombra a alguien lo dice ``test_agent_prompt``."""
     description = DeclaracionesJuradas.spec.description
     assert (
         "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
-        "ni lo atribuyas a nada: describí cifras con nombre y año."
+        "ni lo atribuyas a nada."
     ) in description
+    assert "La cifra de una persona va con su nombre y el año de la DDJJ." in description
 
 
 def test_la_descripcion_dice_que_los_ingresos_solo_excluyen_del_ranking_por_ingresos() -> None:
