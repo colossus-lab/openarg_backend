@@ -51,6 +51,8 @@ from app.infrastructure.adapters.connectors.series_tiempo_adapter import SeriesT
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "series_tiempo_api"
 
 IPC_ID = "148.3_INIVELNAL_DICI_M_26"
+IPIM_ID = "448.1_NIVEL_GENERAL_0_0_13_46"
+IPC_NORESTE_ID = "148.3_INIVELNEA_DICI_M_21"
 RESERVAS_ID = "174.1_RRVAS_IDOS_0_0_36"
 TIPO_CAMBIO_ID = "92.2_TIPO_CAMBIION_0_0_21_24"
 EXPO_ID = "74.3_IET_0_M_16"
@@ -163,6 +165,16 @@ def _grabada(nombre: str, sid: str) -> dict[str, Any]:
 def ipc_real() -> dict[str, Any]:
     """El IPC nacional tal como lo devolvió la API el 04-oct (117 meses)."""
     return _grabada("ipc_148_3.json", IPC_ID)
+
+
+def ipim_real() -> dict[str, Any]:
+    """El IPIM nivel general (448.1), grabado de la API el 06-oct: agosto de 2026 da 2,14 %."""
+    return _grabada("ipim_448_1.json", IPIM_ID)
+
+
+def ipc_noreste_real() -> dict[str, Any]:
+    """El IPC del Noreste (148.3), grabado de la API el 06-oct: agosto de 2026 da 1,75 %."""
+    return _grabada("ipc_noreste_148_3.json", IPC_NORESTE_ID)
 
 
 def exportaciones_reales() -> dict[str, Any]:

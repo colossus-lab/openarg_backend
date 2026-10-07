@@ -1,7 +1,8 @@
 """El catálogo curado de series contra lo que dice la API de cada id.
 
 La metadata (``field.description``) de cada id se grabó de la API el
-04-oct-2026 en ``tests/fixtures/series_tiempo_api/catalog_meta.json``.
+04-oct-2026 en ``tests/fixtures/series_tiempo_api/catalog_meta.json``; la del
+IPIM y del IPC por región, el 06-oct (``recorded_at`` de cada una).
 Cambiar un id del catálogo obliga a regrabarla y a fijar su descripción: así
 se coló ``11.3_AGCS_2004_M_41`` (EMAE comercio) rotulado como "actividad
 industrial", y el agente lo recibía como serie verificada.
@@ -21,6 +22,7 @@ from app.infrastructure.adapters.connectors.series_tiempo_adapter import (
     SERIES_CATALOG,
     catalog_mismatches,
     find_catalog_match,
+    match_catalog,
 )
 
 FIXTURE = (
@@ -62,6 +64,13 @@ def test_un_id_cambiado_se_detecta() -> None:
         ("exportaciones", "Exportaciones"),
         ("importaciones", "Importaciones"),
         ("salarios", "Salarios"),
+        ("ipim", "IPIM"),
+        ("ipc_gba", "GBA"),
+        ("ipc_pampeana", "pampeana"),
+        ("ipc_noreste", "noreste"),
+        ("ipc_noroeste", "noroeste"),
+        ("ipc_cuyo", "Cuyo"),
+        ("ipc_patagonia", "Patagonia"),
     ],
 )
 def test_la_serie_de_cada_tema_es_de_ese_tema(key: str, palabra: str) -> None:
@@ -97,6 +106,74 @@ def test_el_viejo_sigue_encontrando_lo_de_siempre() -> None:
         "74.3_IET_0_M_16",
         "74.3_IIT_0_M_25",
     ]
+
+
+def _claves(texto: str) -> list[str]:
+    matches = match_catalog(texto)
+    return [key for key, entry in SERIES_CATALOG.items() if any(entry is m for m in matches)]
+
+
+@pytest.mark.parametrize(
+    ("texto", "key"),
+    [
+        # Los textos del chequeo sin LLM del 06-oct: todos daban la entrada
+        # "inflacion" (IPC nacional) como serie verificada.
+        ("inflación mayorista", "ipim"),
+        ("¿De cuánto fue la inflación mayorista en agosto de 2026?", "ipim"),
+        ("precios mayoristas", "ipim"),
+        ("IPIM", "ipim"),
+        ("índice de precios al por mayor", "ipim"),
+        ("IPC GBA", "ipc_gba"),
+        ("¿Cuánto fue la inflación en el Gran Buenos Aires entre enero y abril?", "ipc_gba"),
+        ("IPC noreste", "ipc_noreste"),
+        ("inflación Misiones", "ipc_noreste"),
+        ("inflacion Misiones agosto 2026", "ipc_noreste"),
+        ("inflación del NEA", "ipc_noreste"),
+        ("inflación en Corrientes", "ipc_noreste"),
+        ("inflación en Jujuy", "ipc_noroeste"),
+        ("inflación de Salta", "ipc_noroeste"),
+        ("IPC Cuyo", "ipc_cuyo"),
+        ("precios en Mendoza", "ipc_cuyo"),
+        ("inflación de la región pampeana", "ipc_pampeana"),
+        ("inflación en Córdoba", "ipc_pampeana"),
+        ("IPC Patagonia", "ipc_patagonia"),
+        ("inflación en Neuquén", "ipc_patagonia"),
+    ],
+)
+def test_la_palabra_mas_especifica_excluye_el_ipc_nacional(texto: str, key: str) -> None:
+    assert _claves(texto) == [key]
+    assert find_catalog_match(texto) is SERIES_CATALOG[key]
+
+
+@pytest.mark.parametrize(
+    ("texto", "claves"),
+    [
+        ("inflación de agosto", ["inflacion"]),
+        # El nacional pedido por nombre, o junto a otro índice, se queda.
+        ("inflación nacional y del NEA", ["inflacion", "ipc_noreste"]),
+        ("inflación y precios mayoristas", ["inflacion", "ipim"]),
+        ("dólar mayorista", ["tipo_cambio"]),
+        ("comercio mayorista", ["emae_comercio"]),
+        ("exportaciones de Misiones", ["exportaciones"]),
+    ],
+)
+def test_sin_una_palabra_mas_especifica_el_ipc_nacional_sigue(
+    texto: str, claves: list[str]
+) -> None:
+    assert _claves(texto) == claves
+
+
+@pytest.mark.parametrize(
+    ("texto", "region"),
+    [
+        ("PBI a precios corrientes", "ipc_noreste"),
+        ("inflación en pesos corrientes", "ipc_noreste"),
+        ("¿por qué salta la inflación?", "ipc_noroeste"),
+        ("qué dijo la misión del FMI sobre la inflación", "ipc_noreste"),
+    ],
+)
+def test_un_lugar_que_tambien_es_palabra_comun_no_trae_la_region(texto: str, region: str) -> None:
+    assert region not in _claves(texto)
 
 
 @pytest.mark.parametrize("texto", ["reservas del BCRA", "¿cuántas reservas tiene el BCRA hoy?"])

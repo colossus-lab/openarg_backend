@@ -21,7 +21,9 @@
   el fin de la serie;
 - series de distinta frecuencia pedidas juntas avisan que la API promedió;
 - `buscar_series` compara sin acentos y por palabra completa, y el catálogo
-  ya no rotula el EMAE de comercio como "actividad industrial".
+  ya no rotula el EMAE de comercio como "actividad industrial";
+- «inflación mayorista» verifica el IPIM e «inflación Misiones» el IPC del
+  Noreste, no el IPC nacional (prueba de calidad del 06-oct, nueva_13 y 15).
 """
 
 from __future__ import annotations
@@ -50,6 +52,8 @@ from tests.unit.series_tiempo_fake import (
     GASTO_PIB_TOTAL_ID,
     GASTO_PIB_UNIVERSIDAD_ID,
     IPC_ID,
+    IPC_NORESTE_ID,
+    IPIM_ID,
     POBREZA_ID,
     RESERVAS_DIARIAS_ID,
     RESERVAS_ID,
@@ -61,7 +65,9 @@ from tests.unit.series_tiempo_fake import (
     diaria,
     exportaciones_reales,
     gasto_pib,
+    ipc_noreste_real,
     ipc_real,
+    ipim_real,
     reservas_diarias,
     reservas_mensuales,
     salarios,
@@ -635,6 +641,45 @@ async def test_buscar_series_marca_la_discontinuada_y_dice_hasta_cuando_llega() 
     assert payload["series"][0]["hasta_segun_catalogo"] == "2023-01-01"
     assert "hasta" not in payload["series"][0]
     assert "puede estar atrasado" in BuscarSeries.spec.description
+
+
+async def test_buscar_series_inflacion_mayorista_es_el_ipim_y_agosto_da_2_14() -> None:
+    """nueva_13 (prueba del 06-oct): «no está disponible», y la fuente tenía 2,14 %.
+
+    buscar_series daba como verificada la serie del IPC nacional (la entrada
+    "inflacion" coincidía por la palabra «inflación») y la /search de la API
+    no traía el IPIM: el modelo terminó en una copia guardada que llegaba a
+    julio.
+    """
+    payload = await _buscar("¿De cuánto fue la inflación mayorista en agosto de 2026?")
+    assert _ids(payload) == {IPIM_ID}
+    assert "mayorista" in payload["verificadas"][0]["descripcion"]
+
+    serie_ipim, _ = await _run(
+        FakeSeriesApi(ipim_real()),
+        {"ids": [IPIM_ID], "representacion": "percent_change", "desde": "2026-08-01"},
+    )
+    assert [f["fecha"] for f in serie_ipim["filas"]] == ["2026-08-01"]
+    assert 2.14 in serie_ipim["filas"][0].values()
+
+
+async def test_buscar_series_inflacion_de_misiones_es_el_noreste_y_agosto_da_1_75() -> None:
+    """nueva_15 (prueba del 06-oct): no hay IPC de Misiones y el del Noreste no aparecía.
+
+    Con la serie nacional como única verificada, el modelo explicó que no hay
+    dato provincial y ofreció el del Noreste en vez de darlo.
+    """
+    payload = await _buscar("inflación Misiones agosto 2026")
+    assert _ids(payload) == {IPC_NORESTE_ID}
+    descripcion = payload["verificadas"][0]["descripcion"]
+    assert "Misiones" in descripcion and "región" in descripcion
+
+    serie_nea, _ = await _run(
+        FakeSeriesApi(ipc_noreste_real()),
+        {"ids": [IPC_NORESTE_ID], "representacion": "percent_change", "desde": "2026-08-01"},
+    )
+    assert [f["fecha"] for f in serie_nea["filas"]] == ["2026-08-01"]
+    assert 1.75 in serie_nea["filas"][0].values()
 
 
 async def test_buscar_series_reservas_ofrece_primero_la_diaria() -> None:

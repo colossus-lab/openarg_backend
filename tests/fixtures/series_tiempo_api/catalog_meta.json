@@ -42,6 +42,28 @@
    "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
    "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)"
   },
+  "148.3_INIVELANA_DICI_M_26": {
+   "description": "IPC. Nivel General Región pampeana. Base dic 2016. Mensual.",
+   "units": "Índice",
+   "frequency": "R/P1M",
+   "time_index_start": "2016-12-01",
+   "time_index_end": "2026-08-01",
+   "is_updated": "True",
+   "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-06"
+  },
+  "148.3_INIVELGBA_DICI_M_21": {
+   "description": "IPC. Nivel General. GBA. Base dic 2016. Mensual.",
+   "units": "Índice",
+   "frequency": "R/P1M",
+   "time_index_start": "2016-12-01",
+   "time_index_end": "2026-08-01",
+   "is_updated": "True",
+   "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-06"
+  },
   "148.3_INIVELNAL_DICI_M_26": {
    "description": "IPC. Nivel General Nacional. Base dic 2016. Mensual.",
    "units": "Índice",
@@ -52,6 +74,28 @@
    "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
    "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)"
   },
+  "148.3_INIVELNEA_DICI_M_21": {
+   "description": "IPC. Nivel General Región noreste. Base dic 2016. Mensual.",
+   "units": "Índice",
+   "frequency": "R/P1M",
+   "time_index_start": "2016-12-01",
+   "time_index_end": "2026-08-01",
+   "is_updated": "True",
+   "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-06"
+  },
+  "148.3_INIVELNIA_DICI_M_27": {
+   "description": "IPC. Nivel General Patagonia. Base dic 2016. Mensual.",
+   "units": "Índice",
+   "frequency": "R/P1M",
+   "time_index_start": "2016-12-01",
+   "time_index_end": "2026-08-01",
+   "is_updated": "True",
+   "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-06"
+  },
   "148.3_INIVELNOA_DICI_M_21": {
    "description": "IPC. Nivel General Región noroeste. Base dic 2016. Mensual.",
    "units": "Índice",
@@ -61,6 +105,17 @@
    "is_updated": "True",
    "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
    "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)"
+  },
+  "148.3_INIVELUYO_DICI_M_22": {
+   "description": "IPC. Nivel General Cuyo. Base dic 2016. Mensual.",
+   "units": "Índice",
+   "frequency": "R/P1M",
+   "time_index_start": "2016-12-01",
+   "time_index_end": "2026-08-01",
+   "is_updated": "True",
+   "dataset_title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-06"
   },
   "149.1_TL_INDIIOS_OCTU_0_21": {
    "description": "Índice de Salarios",
@@ -121,6 +176,17 @@
    "is_updated": "False",
    "dataset_title": "Factores de explicación de Base Monetaria",
    "dataset_source": "Banco Central de la República Argentina (BCRA)"
+  },
+  "448.1_NIVEL_GENERAL_0_0_13_46": {
+   "description": "IPIM Nivel general",
+   "units": "Índice Dic-2015=100",
+   "frequency": "R/P1M",
+   "time_index_start": "2015-12-01",
+   "time_index_end": "2026-08-01",
+   "is_updated": "True",
+   "dataset_title": "Índice de Precios Internos al por Mayor (IPIM). Dic-2015 = 100",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-06"
   },
   "45.2_ECTDT_0_T_33": {
    "description": "Tasa de desempleo total. En porcentaje.",
