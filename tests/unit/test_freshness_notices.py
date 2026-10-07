@@ -499,8 +499,13 @@ def test_una_serie_parada_justo_en_el_cierre_pedido_no_es_un_dato_atrasado() -> 
         "2026-08-31",
     )
     assert freshness_notices([mensual, diaria], HOY, PREGUNTA_09) == []
-    # La 331.2 de la misma respuesta se corta el 12-jun: no llega al cierre
-    # pedido y sigue avisando.
+    # Una serie que no llega al cierre pedido sigue avisando: la 331.2 se
+    # corta el 12-jun. En nueva_09 ese aviso igual no corresponde, y este test
+    # no lo da por bueno: las dos cifras de base de la respuesta están en
+    # «Base monetaria (BCRA)», que llega al 5-oct, y la 331.2 sólo comparte la
+    # del 30-dic-2025. Entra en lo que se fecha porque, fuera de `correct`, se
+    # fecha todo lo leído (`dated_evidence`, H082). Eso es de la selección de
+    # evidencia, no de data_age (revisión de #159).
     saldo = _variacion(
         "Variación entre 2025-12-30 y 2026-06-12: Factores de explicación de Base Monetaria",
         "2026-06-12",
