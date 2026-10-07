@@ -463,3 +463,38 @@ async def test_una_serie_parada_sin_time_index_end_vigente_sigue_avisando(
 )
 def test_la_fecha_como_la_diria_una_persona(last: date, freq: str, label: str) -> None:
     assert observation_label(last, freq) == label
+
+
+@pytest.mark.parametrize(
+    ("hoy", "avisa"),
+    [
+        # El 2° semestre de 2026 sale a fines de marzo de 2027: hasta ahí el
+        # 1er semestre de 2026 es el último publicado, ~275 días después del
+        # 30-jun. Con 270 días de margen salía «Dato atrasado».
+        (date(2027, 3, 29), False),
+        # Un año después del fin del semestre la serie sí está parada.
+        (date(2027, 6, 30), True),
+    ],
+)
+async def test_la_pobreza_semestral_no_avisa_atraso_antes_del_proximo_semestre(
+    hoy: date, avisa: bool
+) -> None:
+    """Con la pobreza fechada como la fuente (el adaptador corrige el
+    semestre que la API corre, 06-oct), el margen semestral se mide desde el
+    fin real del semestre."""
+    from tests.unit.series_tiempo_fake import (
+        POBREZA_GRAN_ROSARIO_ID,
+        FakeSeriesApi,
+        pobreza_gran_rosario_real,
+    )
+
+    result = (
+        await FakeSeriesApi(pobreza_gran_rosario_real()).adapter().fetch([POBREZA_GRAN_ROSARIO_ID])
+    )
+    assert result is not None
+    assert result.metadata["ultima_observacion"] == "2026-01-01"
+
+    avisos = freshness_notices([result], hoy, "¿Cuál es la pobreza en Gran Rosario hoy?")
+    assert bool(avisos) is avisa, avisos
+    if avisa:
+        assert "el 1.er semestre de 2026" in avisos[0]

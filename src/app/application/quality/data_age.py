@@ -432,12 +432,19 @@ def staleness_warning(engine: Engine, served: str | None) -> str | None:
 # days past the end of July and the API says it is current (the INDEC publishes
 # it ~50 days after the month), so "two periods" would have flagged it. The
 # daily reserves series, 34 days behind, is flagged by any margin.
+#
+# Semestral: the INDEC publishes each semester's poverty about 90 days after it
+# ends (late March and late September), so right before a release the latest
+# semester is ~275 days past its end. With 270 it was flagged for the last days
+# before every release; it never showed because the API dated poverty one
+# semester late (see `_dated_one_semester_late` in the Series de Tiempo
+# adapter, 06-oct).
 FRESHNESS_MARGIN_DAYS: dict[str, int] = {
     "diaria": 7,
     "semanal": 21,
     "mensual": 75,
     "trimestral": 120,
-    "semestral": 270,
+    "semestral": 300,
     "anual": 550,
 }
 

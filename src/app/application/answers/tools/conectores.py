@@ -76,8 +76,10 @@ def _period_label(fecha: str, step: int | None, *, dated_by_end: bool = False) -
     La API no fecha todas las series igual. El PBI trimestral fecha cada
     período por su primer día (el 2° trimestre de 2026 es `2026-04-01`), pero
     las series semestrales de pobreza del INDEC lo fechan por el día siguiente
-    a su fin (el 1er semestre de 2024, 52,9 %, es `2024-07-01`). Con
-    ``dated_by_end`` la fecha cierra el período anterior.
+    a su fin (el 1er semestre de 2024, 52,9 %, es `2024-07-01`). El adaptador
+    ya las devuelve fechadas como la fuente, por su primer día (ver
+    ``_dated_one_semester_late``). Con ``dated_by_end`` la fecha cierra el
+    período anterior.
     """
     if not step or len(fecha) < 7:
         return None
@@ -104,6 +106,13 @@ def _is_dated_by_end(last_fecha: str, step: int, today: date) -> bool:
     un semestre en curso. Medido en staging el 02-oct: la tasa de pobreza
     termina en `2026-07-01`, que leído como inicio sería el 2° semestre de
     2026, y el modelo lo presentó así.
+
+    Depende de la fecha de hoy y de que la última fila sea la última
+    publicada: con `hasta`, o entre el fin de un semestre y su publicación,
+    no lo detecta y rotula todo corrido (06-oct). Por eso la pobreza ya llega
+    fechada como la fuente desde el adaptador; esto queda para lo que el
+    adaptador no reconoce. Con fechas por el primer día no se activa: ningún
+    período publicado está en curso.
     """
     try:
         year, month = int(last_fecha[:4]), int(last_fecha[5:7])
@@ -117,6 +126,32 @@ def _is_dated_by_end(last_fecha: str, step: int, today: date) -> bool:
 def _short(text: Any, limit: int = 80) -> str:
     clean = " ".join(str(text or "").split())
     return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
+
+
+def _published_after(meta: dict[str, Any]) -> str | None:
+    """Si la serie ya publicó algo después de lo traído, dicho para el modelo.
+
+    nueva_12 del 06-oct: para el IPI del 1er semestre pidió hasta junio y
+    escribió «Último dato disponible: junio 2026», con `la_fuente_llega_hasta`
+    2026-07-01 al lado: tomó `ultima_observacion` (la última fila del rango
+    pedido) por el último dato de la serie. Se compara el fin del período de
+    esa fila: una semestral `2026-01-01` cubre hasta junio.
+    """
+    last = str(meta.get("ultima_observacion") or "")[:10]
+    source_end = str(meta.get("fecha_fin_fuente") or "")[:10]
+    if not last or not source_end or meta.get("fecha_fin_fuente_inferida"):
+        return None
+    covered = _observation_end(last, _STEP_MONTHS.get(str(meta.get("frecuencia"))))
+    try:
+        if covered is None or date.fromisoformat(source_end) <= covered:
+            return None
+    except ValueError:
+        return None
+    return (
+        f"La última fila traída es la de {last}, por el rango o la frecuencia pedidos; la serie "
+        f"ya publicó datos hasta {source_end}. Si decís cuál es el último dato disponible, es el "
+        f"de {source_end}, no el de {last}."
+    )
 
 
 def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
@@ -158,6 +193,9 @@ def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
             out["la_fuente_llega_hasta"] = meta["fecha_fin_fuente"]
         if meta.get("actualizada_en_fuente") is not None:
             out["actualizada_en_fuente"] = meta["actualizada_en_fuente"]
+        later = _published_after(meta)
+        if later:
+            out["ultimo_dato_publicado"] = later
     scaled = [s for s in series if s.get("escalada_a_porcentaje")]
     if meta.get("unidad") == "porcentaje":
         out["escala"] = "Los valores ya están en %: 33.54 es 33,54 %."
@@ -395,9 +433,10 @@ class BuscarSeries:
                 "fuente": s.get("source"),
             }
             # Hasta cuándo llega cada serie según el catálogo: entre dos que
-            # miden lo mismo, la que está al día. No es el último dato: la
-            # pobreza 64.2 dice 2026-01-01 y ya publicó 2026-07-01, y con
-            # «hasta» el modelo lo tomaba como el fin de la serie.
+            # miden lo mismo, la que está al día. No es el último dato: con
+            # «hasta» el modelo lo tomaba como el fin de la serie (en la
+            # pobreza 64.2 la API fechaba las filas un semestre después que
+            # este metadato; ver _dated_one_semester_late en el adaptador).
             if s.get("time_index_end"):
                 item["hasta_segun_catalogo"] = s["time_index_end"]
             series.append(item)
@@ -790,12 +829,28 @@ def _complete_periods_note(meta: dict[str, Any], frequency: str | None) -> str |
     return f"Cada fila es un {singular} completo: la API no agrega {plural} sin terminar."
 
 
+def _missing_series_note(missing: list[str]) -> str:
+    names = ", ".join(f"`{s}`" for s in missing)
+    return (
+        f"La API de Series de Tiempo respondió que no existe la serie {names}: la fuente "
+        "funciona, el id está mal. Usá el id exacto que devolvió buscar_series, sin armarlo ni "
+        "cambiarle partes (si no lo tenés, volvé a buscar la serie)."
+    )
+
+
 async def _fetch_series(
     ctx: ToolContext, ids: list[str], kwargs: dict[str, Any]
 ) -> DataResult | None:
     try:
         return await ctx.deps.series.fetch(series_ids=ids, **kwargs)
     except ConnectorError as exc:
+        # Un id inexistente vuelve como pedido inválido, no como fuente caída:
+        # con «La fuente no respondió. Probá con otra.» el modelo dejó la API
+        # y contestó la pobreza de Gran Rosario con una copia vieja del
+        # catálogo, con los semestres corridos (nueva_08 del 06-oct).
+        missing = exc.details.get("series_inexistentes")
+        if missing:
+            raise ToolInputError(_missing_series_note([str(s) for s in missing])) from None
         # Se reintenta sin frecuencia SÓLO con el 400 de frecuencia inválida
         # (p. ej. mensual sobre una trimestral). Un timeout o un 5xx no: con
         # frecuencia=year y agregacion=sum, el reintento devolvía la mensual
