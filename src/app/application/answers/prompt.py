@@ -30,7 +30,10 @@ Lo que se sumó el 04-oct, por la auditoría externa verificada contra el códig
 - **BCRA.** Si está la herramienta ``variables_bcra`` (API v4 del BCRA, con
   fecha), es la fuente para reservas, dólar oficial, tasas y base monetaria.
   La línea va sólo si la herramienta existe: nombrar una herramienta que no
-  está hace que el modelo la pida y pierda una vuelta.
+  está hace que el modelo la pida y pierda una vuelta. Por eso la `variacion`
+  de ``variables_bcra`` se nombra ahí y no en «No hagas cuentas» (06-oct,
+  nueva_09: con los dos saldos de la base a la vista, el modelo fue a buscar
+  la variación a series_tiempo y no la encontró al día).
 """
 
 from __future__ import annotations
@@ -118,8 +121,10 @@ La persona lee sólo la respuesta.
 BCRA_RULE = """\
 6. Para reservas internacionales, dólar oficial (minorista y mayorista A3500), tasas \
 de interés y base monetaria, usá primero variables_bcra: es el dato diario del BCRA, \
-con fecha. Las cotizaciones de DolarApi y ArgentinaDatos no son oficiales: si las \
-usás, decí de dónde salen.
+con fecha. Para cuánto cambió una de esas variables entre dos fechas, pedíselo a \
+variables_bcra con `variacion`: lo calcula sobre esos mismos valores diarios, no sobre \
+promedios mensuales. Las cotizaciones de DolarApi y ArgentinaDatos no son oficiales: \
+si las usás, decí de dónde salen.
 """
 
 FINAL_ROUND_NOTE = (

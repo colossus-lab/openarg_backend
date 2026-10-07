@@ -73,6 +73,20 @@ def test_la_regla_del_bcra_va_solo_si_esta_la_herramienta() -> None:
     assert "DolarApi y ArgentinaDatos no son oficiales" in con
 
 
+def test_la_variacion_de_una_variable_del_bcra_se_la_calcula_variables_bcra() -> None:
+    """Revisión de #164 (nueva_09): «No hagas cuentas» nombra como
+    calculadoras sólo a series_tiempo y calcular. El 06-oct el modelo leyó
+    los dos saldos de la base en variables_bcra y buscó la variación en
+    series_tiempo, donde la base está atrasada o es un promedio mensual
+    (90.1_BMT_0_0_20). Va en la regla del BCRA: sólo si la herramienta está."""
+    con = system_prompt(date(2026, 10, 6), tool_names={"buscar_series", BCRA_TOOL})
+    assert (
+        f"Para cuánto cambió una de esas variables entre dos fechas, pedíselo a {BCRA_TOOL} "
+        "con `variacion`"
+    ) in con
+    assert "lo calcula sobre esos mismos valores diarios, no sobre promedios mensuales" in con
+
+
 def test_el_prompt_no_tiene_llaves_sueltas_del_formato() -> None:
     """El texto pasa por ``str.format``: una llave sin escapar lo rompería."""
     prompt = system_prompt(date(2026, 10, 4), tool_names={BCRA_TOOL})
