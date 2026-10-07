@@ -984,10 +984,19 @@ def main_text(text: str) -> str:
 
 _SMALL_COUNTER_LIMIT = 32
 # Una fuente que sólo trae conteos chicos cuenta como usada si la respuesta
-# escribe todos sus conteos distintos, y son al menos estos. Uno solo («los
-# últimos 3 meses») o algunos (el puesto de un ranking, «| 2 |») pueden ser
-# casualidad.
+# escribe al menos estos conteos distintos de ella. Uno solo («los últimos 3
+# meses») puede ser casualidad. Todos no: complex_003 del 05-oct escribió 10
+# y 13 de los 10, 11 y 13 que leyó, y es un uso.
 _MIN_COUNTS_WRITTEN = 2
+# Lo que en la respuesta es un índice y no un conteo: la primera celda de una
+# fila de tabla («| 2 | **Ana Carla Carrizo** |», el puesto del ranking) y los
+# ordinales («1°S 2024», «2.º semestre», «1er», «2do»). Los marcadores de
+# lista («1. Foo») ya los saca ``numbers_in_answer``.
+_INDEX_RE = re.compile(
+    r"(?m)^[ \t]*\|[ \t]*(?:\*\*)?\d+(?:\*\*)?[ \t]*(?=\|)"
+    r"|(?<![\d.,])\d+\.?(?:[°ºª]|(?:er|ra|ro|do|da|to|ta|mo|ma|vo|va|no|na)\b)",
+    re.IGNORECASE,
+)
 
 
 def _small_counter(n: NumberInText) -> bool:
@@ -1009,8 +1018,9 @@ def figures_for_sourcing(text: str) -> list[NumberInText]:
 
 
 def _counts_for_sourcing(text: str) -> set[float]:
-    """Los contadores chicos de la respuesta: lo que ``figures_for_sourcing`` deja afuera."""
-    clean = main_text(answer_body(text)).replace("−", "-")
+    """Los contadores chicos de la respuesta (lo que ``figures_for_sourcing``
+    deja afuera), sin los índices de ``_INDEX_RE``."""
+    clean = _INDEX_RE.sub(_blank, main_text(answer_body(text)).replace("−", "-"))
     return {float(n.value) for n in numbers_in_answer(clean) if _small_counter(n)}
 
 
@@ -1160,10 +1170,11 @@ def sources_without_figures(
     reservas y las tres cifras salían de una sola.
 
     Una fuente que sólo trae conteos chicos aportó si la respuesta escribe
-    todos sus conteos distintos (al menos ``_MIN_COUNTS_WRITTEN``): los
-    contadores no cuentan como cifras, y complex_003 (06-oct) salía «citada
-    sin cifra» con la tabla de tramos de viaje copiada entera de «Viajes
-    Nacionales — conteo».
+    al menos ``_MIN_COUNTS_WRITTEN`` de sus conteos distintos, sin contar los
+    índices (el puesto de un ranking, el «1» de «1°S»; ver ``_INDEX_RE``):
+    los contadores no cuentan como cifras, y complex_003 salía «citada sin
+    cifra» con los tramos de viaje de «Viajes Nacionales — conteo» escritos
+    en el texto (06-oct: los seis; 05-oct: dos de los tres que leyó).
     """
     figures = figures_for_sourcing(answer)
     if not figures:
@@ -1210,7 +1221,7 @@ def sources_without_figures(
             for d in derived
         ):
             continue
-        if _only_counts(nums) and len(set(nums)) >= _MIN_COUNTS_WRITTEN and set(nums) <= counts:
+        if _only_counts(nums) and len(set(nums) & counts) >= _MIN_COUNTS_WRITTEN:
             continue
         sin_cifra.append(name)
     return sin_cifra, sin_evidencia

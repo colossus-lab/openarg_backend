@@ -283,29 +283,36 @@ def test_los_contadores_chicos_no_hacen_pasar_una_fuente() -> None:
     assert sin_cifra == ["T"]
 
 
+_VIAJES_URL = "http://www3.hcdn.gob.ar/Datos_doc/DocumentacionViajesNacionales.pdf"
+_DDJJ_URL = "https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos"
+_RANKING_DDJJ = {
+    "title": "Ranking: 5 diputados con mayor patrimonio",
+    "url": _DDJJ_URL,
+    "numbers": [2024.0, 8224603053.57, 7071726120.91, 6671913676.0, 5744958621.0, 2941858170.0],
+}
+_FUENTES_C003 = [
+    {"name": "Ranking: 5 diputados con mayor patrimonio", "url": _DDJJ_URL},
+    {"name": "Viajes Nacionales — conteo", "url": _VIAJES_URL},
+]
+
+
+def _viajes(*conteos: list[float]) -> list[dict[str, Any]]:
+    return [
+        {"title": "Viajes Nacionales — conteo", "url": _VIAJES_URL, "numbers": c} for c in conteos
+    ]
+
+
 def test_una_fuente_de_conteos_cuenta_si_la_respuesta_escribe_sus_conteos() -> None:
     """complex_003 (batería del 06-oct): la respuesta escribe en una tabla los
     tramos de viaje de dos diputados (10, 13, 11, 20; 2, 4), que son todo lo
     que trajo «Viajes Nacionales — conteo». Como los conteos son enteros
     chicos, no contaban como cifras, y la fuente salía «citada sin cifra»
-    aunque la tabla entera sale de ella. Tiene que escribir todos los conteos:
-    uno suelto (test de arriba: «los últimos 3 meses») o algunos que coinciden
-    con el puesto del ranking siguen sin alcanzar. La corrida del 05-oct
-    escribió 10 y 13 pero no el 11 que leyó: sigue marcada."""
-    viajes = "http://www3.hcdn.gob.ar/Datos_doc/DocumentacionViajesNacionales.pdf"
-    ddjj = "https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos"
-    items = [
-        {"title": "Ranking: 5 diputados con mayor patrimonio", "url": ddjj,
-         "numbers": [2024.0, 8224603053.57, 7071726120.91]},
-        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [10.0]},
-        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [13.0, 2.0]},
-        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [11.0]},
-        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [20.0, 4.0]},
-    ]  # fmt: skip
-    sources = [
-        {"name": "Ranking: 5 diputados con mayor patrimonio", "url": ddjj},
-        {"name": "Viajes Nacionales — conteo", "url": viajes},
-    ]
+    aunque la tabla entera sale de ella. Alcanza con dos conteos distintos de
+    la fuente que no sean índices: la corrida del 05-oct escribió 10 y 13 de
+    los 10, 11 y 13 que leyó, y también es un uso. Uno suelto (test de arriba:
+    «los últimos 3 meses») sigue sin alcanzar, y el puesto de un ranking no
+    cuenta (test de abajo)."""
+    items = [_RANKING_DDJJ, *_viajes([10.0], [13.0, 2.0], [11.0], [20.0, 4.0])]
     answer = (
         "| # | Nombre | Patrimonio neto |\n|---|---|---|\n"
         "| 1 | **Máximo Kirchner** | $ 8.224.603.054 |\n"
@@ -315,14 +322,53 @@ def test_una_fuente_de_conteos_cuenta_si_la_respuesta_escribe_sus_conteos() -> N
         "| Ana Carla Carrizo | 10 | 13 | 11 | 20 |\n"
         "| Aníbal Randazzo | — | 2 | — | 4 |\n"
     )
-    assert sources_without_figures(answer, sources, items) == ([], [])
-    # Con sólo algunos conteos (el 10, y el 2 que es un puesto del ranking)
-    # puede ser casualidad: sigue marcada.
+    assert sources_without_figures(answer, _FUENTES_C003, items) == ([], [])
+    # Con un solo conteo (el 10; el 2 es un puesto del ranking) puede ser
+    # casualidad: sigue marcada.
     algunos = answer.split("Lo que sí")[0] + "Ana Carla Carrizo registró 10 tramos."
-    assert sources_without_figures(algunos, sources, items) == (
+    assert sources_without_figures(algunos, _FUENTES_C003, items) == (
         ["Viajes Nacionales — conteo"],
         [],
     )
+    # complex_003 del 05-oct: leyó 13, 11 y 10, y escribió 10 y 13 (texto real).
+    del_05_oct = (
+        answer.split("Lo que sí")[0]
+        + "Lo único que puedo decir es que, de las tablas disponibles, **Ana Carla "
+        "Carrizo** (la única de los 5 que aparece en los registros) tuvo **10 tramos "
+        "emitidos en el 1er semestre de 2024** y **13 en el 2do semestre de 2024**. "
+        "Los otros 4 diputados directamente no registran tramos en ese período."
+    )
+    items_05_oct = [_RANKING_DDJJ, *_viajes([13.0], [11.0], [10.0])]
+    assert sources_without_figures(del_05_oct, _FUENTES_C003, items_05_oct) == ([], [])
+
+
+def test_los_puestos_de_un_ranking_y_los_ordinales_no_son_conteos_de_la_fuente() -> None:
+    """Revisión de #161: la respuesta de complex_003 siempre trae el top 5, y
+    los puestos («| 1 |» a «| 5 |») y los ordinales de los semestres («1°S»,
+    «2.º», «1er», «2do») contaban como conteos de la respuesta. Una fuente de
+    conteos chicos, leída y no usada, pasaba sola."""
+    ranking = (
+        "### Los 5 diputados más ricos (patrimonio al cierre 2024)\n\n"
+        "| # | Nombre | Patrimonio neto |\n|---|--------|----------------|\n"
+        "| 1 | **Máximo Kirchner** | $ 8.224.603.054 |\n"
+        "| 2 | **Ana Carla Carrizo** | $ 7.071.726.121 |\n"
+        "| 3 | **Cristian Ritondo** | $ 6.671.913.676 |\n"
+        "| 4 | **Atilio Benedetti** | $ 5.744.958.621 |\n"
+        "| 5 | **Aníbal Randazzo** | $ 2.941.858.170 |\n\n"
+    )
+    marcada: tuple[list[str], list[str]] = (["Viajes Nacionales — conteo"], [])
+    # Leyó sólo los tramos de Randazzo (2 y 4) y no los escribe.
+    sin_usar = ranking + "Ninguno de los cinco registra tramos de viaje en los datos de la Cámara."
+    items = [_RANKING_DDJJ, *_viajes([2.0], [4.0])]
+    assert sources_without_figures(sin_usar, _FUENTES_C003, items) == marcada
+    # Sólo los encabezados de semestre, con evidencia [1, 2].
+    encabezados = (
+        ranking + "| Diputado | 1°S 2025 | 2°S 2025 |\n|---|---|---|\n"
+        "| Máximo Kirchner | sin datos | sin datos |\n\n"
+        "En el 2.º semestre, y antes en el 1er y el 2do de 2024, no hubo tramos."
+    )
+    items = [_RANKING_DDJJ, *_viajes([1.0, 2.0])]
+    assert sources_without_figures(encabezados, _FUENTES_C003, items) == marcada
 
 
 def test_los_numeros_de_la_evidencia_no_incluyen_fechas() -> None:
