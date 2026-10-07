@@ -917,10 +917,19 @@ async def test_calcular_conteo_filtrado_dice_de_cuantas_filas_de_la_tabla_es_par
     assert payload["filas_usadas"] == 99_558
     assert payload["filas_tabla"] == 110_179
     aviso = payload["aviso_parte"]
-    assert "la tabla tiene 110179 filas" in aviso
-    assert "dejaron afuera 10621" in aviso and "99558 es lo que cumple los filtros" in aviso
-    # Revisión de #171: las filas de la tabla no se llaman «el total».
-    assert "el total es" not in aviso
+    assert aviso.startswith(
+        "Los filtros dejaron afuera 10621 filas: la tabla entera tiene 110179, y 99558 es sólo "
+        "la parte que queda."
+    )
+    # Verificación de la ola 5: el aviso no le deja leer PADRON = 202207 como
+    # una foto mensual. La tabla no tiene columna de fecha: es una sola foto,
+    # y su total es el conteo sin filtros.
+    assert "si el filtro elige un período, una foto" not in aviso
+    assert "La tabla no apila períodos (no tiene columna de fecha): es una sola foto" in aviso
+    assert "su total es el conteo sin filtros, 110179" in aviso
+    assert "Filtrar por «PADRON» no elige otro período ni otra foto" in aviso
+    # Sin columna de fecha no hay período que leer.
+    assert not any("AS reconocidas" in sql for sql, _ in sandbox.calls)
     # El conteo de toda la tabla, sin el filtro.
     cuenta = sandbox.sql_with("AS filas_tabla")
     assert "WHERE" not in cuenta and "GROUP BY" not in cuenta
@@ -992,6 +1001,8 @@ async def test_calcular_conteo_filtrado_en_tabla_grande_no_cuenta_la_tabla_enter
     aviso = payload["aviso_parte"]
     assert "unas 2400000" in aviso and "estimación" in aviso
     assert "el total es" not in aviso
+    # La estimación no se da como el total de la foto: que lo cuente.
+    assert "su total es el conteo sin filtros (contalo con calcular, sin filtros)" in aviso
     assert len(out.results) == 1
 
 
@@ -1057,17 +1068,29 @@ HOMICIDIOS_TIPOS = [
 ]
 
 
-async def test_calcular_conteo_de_un_tipo_de_fila_no_da_las_filas_de_la_tabla_como_total() -> None:
-    sandbox = _SandboxDePortal(
+# El rango de `fecha_hecho` en la tabla del SNIC de staging.
+_RANGO_HOMICIDIOS = [
+    {"desde": "2014-01-01", "hasta": "2023-12-31", "reconocidas": 38_126, "con_valor": 38_126}
+]
+
+
+def _homicidios(respuestas: list[tuple[str, Any]]) -> Sandbox:
+    return _SandboxDePortal(
         HOMICIDIOS,
         "datos_gob_ar",
         HOMICIDIOS_TIPOS,
+        [("AS reconocidas", _RANGO_HOMICIDIOS), *respuestas],
+        stats=TableValueStats(estimated_rows=38_126),
+        row_count=38_126,
+    )
+
+
+async def test_calcular_conteo_de_un_tipo_de_fila_no_da_las_filas_de_la_tabla_como_total() -> None:
+    sandbox = _homicidios(
         [
             ("AS filas_tabla", [{"filas_tabla": 38_126}]),
             ("AS valor", [{"valor": 17_325, "__filas": 17_325}]),
-        ],
-        stats=TableValueStats(estimated_rows=38_126),
-        row_count=38_126,
+        ]
     )
     pide = {
         "tabla": HOMICIDIOS,
@@ -1078,10 +1101,18 @@ async def test_calcular_conteo_de_un_tipo_de_fila_no_da_las_filas_de_la_tabla_co
     payload = json.loads(out.content)
     assert payload["filas_usadas"] == 17_325 and payload["filas_tabla"] == 38_126
     aviso = payload["aviso_parte"]
-    assert "el total es" not in aviso
-    # Dice cuándo las filas de la tabla no son un total.
-    assert "no son por sí un total" in aviso
-    assert "un período, una foto o un tipo de fila" in aviso
+    assert aviso.startswith(
+        "Los filtros dejaron afuera 20801 filas: la tabla entera tiene 38126, y 17325 es sólo "
+        "la parte que queda."
+    )
+    # La tabla apila períodos: lo dice con la columna que los distingue, y no
+    # llama total a sus filas (verificación de la ola 5).
+    assert (
+        "La tabla apila períodos en «fecha_hecho» (de 2014-01-01 a 2023-12-31): sus 38126 "
+        "filas juntan todos esos períodos, no son el total de uno solo."
+    ) in aviso
+    assert "el total es" not in aviso and "su total es" not in aviso
+    assert "una sola foto" not in aviso
     # Sin segunda evidencia: el total inflado no queda respaldado.
     [result] = out.results
     assert result.records == [{"valor": 17_325}]
@@ -1142,8 +1173,18 @@ async def test_calcular_conteo_con_filtro_de_periodo_no_avisa_ni_cuenta_la_tabla
     assert len(out.results) == 1
 
 
-async def test_calcular_conteo_con_desde_hasta_no_avisa_ni_cuenta_la_tabla() -> None:
-    """`desde`/`hasta` es un filtro de período (n16_alt_periodo de la revisión)."""
+# ── verificación de la ola 5 sobre #171 ───────────────────────────────────
+#
+# Dos hallazgos. El aviso genérico («si el filtro elige un período, una foto…,
+# la tabla los suma a todos») le daba al modelo la salida para quedarse con
+# PADRON = 202207, que parece justo una foto mensual. Y la forma natural de
+# pedir «en 2022» (`columna_fecha=PADRON` con `desde`/`hasta`) seguía dando
+# 99.558 sin aviso, porque contaba como un filtro de período. PADRON no es la
+# fecha de la tabla: la tabla no tiene columna de fecha.
+
+
+async def test_calcular_conteo_en_2022_por_padron_con_desde_hasta_avisa_que_es_una_parte() -> None:
+    """n16_alt_periodo: antes de esta revisión, 99.558 sin aviso."""
     sandbox = _tarifa(
         [
             ("AS filas_tabla", [{"filas_tabla": 110_179}]),
@@ -1160,6 +1201,182 @@ async def test_calcular_conteo_con_desde_hasta_no_avisa_ni_cuenta_la_tabla() -> 
     out = await Calcular().run(pide, _ctx(sandbox))
     payload = json.loads(out.content)
     assert payload["filas_usadas"] == 99_558
+    assert payload["filas_tabla"] == 110_179
+    assert payload["aviso_parte"] == (
+        "El período pedido sobre «PADRON» dejó afuera 10621 filas: la tabla entera tiene 110179, "
+        "y 99558 es sólo la parte que queda. La tabla no apila períodos (no tiene columna de "
+        "fecha): es una sola foto, así que su total es el conteo sin filtros, 110179. Filtrar por "
+        "«PADRON» no elige otro período ni otra foto: elige una parte de esa foto."
+    )
+    [result] = out.results
+    assert result.records == [{"valor": 99_558}]
+
+
+async def test_calcular_conteo_por_padron_como_columna_fecha_y_filtro_tambien_avisa() -> None:
+    """`columna_fecha=PADRON` con el filtro `PADRON = 202207`: antes contaba como
+    filtro de período y no avisaba."""
+    sandbox = _tarifa([("AS filas_tabla", [{"filas_tabla": 110_179}]), ("AS valor", _FILAS_202207)])
+    out = await Calcular().run({**_PIDE_202207, "columna_fecha": "PADRON"}, _ctx(sandbox))
+    aviso = json.loads(out.content)["aviso_parte"]
+    assert "su total es el conteo sin filtros, 110179" in aviso
+
+
+async def test_calcular_conteo_con_periodo_de_la_tabla_que_los_apila_y_otro_filtro_no_avisa() -> (
+    None
+):
+    """Víctimas de 2023 en el SNIC: el período va sobre la fecha de la tabla, que
+    apila años. Contar sin el período no da un total: no avisa ni cuenta la tabla."""
+    sandbox = _homicidios(
+        [
+            ("AS filas_tabla", [{"filas_tabla": 38_126}]),
+            ("AS valor", [{"valor": 1_790, "__filas": 1_790}]),
+        ]
+    )
+    pide = {
+        "tabla": HOMICIDIOS,
+        "operacion": "conteo",
+        "desde": "2023",
+        "hasta": "2023",
+        "filtros": [{"columna": "tipo_persona", "operador": "=", "valor": "Víctima"}],
+    }
+    out = await Calcular().run(pide, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == 1_790
     assert "filas_tabla" not in payload and "aviso_parte" not in payload
-    assert not any("filas_tabla" in sql for sql, _ in sandbox.calls)
-    assert len(out.results) == 1
+    assert not any("AS filas_tabla" in sql for sql, _ in sandbox.calls)
+
+
+async def test_calcular_conteo_con_otra_columna_de_periodo_en_tabla_que_apila_no_miente() -> None:
+    """`anio = 2023` en el SNIC (su fecha es `fecha_hecho`): el aviso dice que la
+    tabla apila períodos y no afirma que la parte junte todos los años."""
+    sandbox = _homicidios(
+        [
+            ("AS filas_tabla", [{"filas_tabla": 38_126}]),
+            ("AS valor", [{"valor": 3_500, "__filas": 3_500}]),
+        ]
+    )
+    pide = {
+        "tabla": HOMICIDIOS,
+        "operacion": "conteo",
+        "filtros": [{"columna": "anio", "operador": "=", "valor": "2023"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert "apila períodos en «fecha_hecho»" in aviso
+    assert "una sola foto" not in aviso and "su total es" not in aviso
+
+
+PADRON_ANUAL = "raw.x__padron_anual__1a2b3c4d__v1"
+PADRON_ANUAL_TIPOS = [("anio", "bigint"), ("categoria", "text")]
+ALTAS = "raw.x__beneficiarios__1a2b3c4d__v1"
+
+
+async def test_calcular_conteo_en_tabla_de_un_solo_periodo_dice_que_es_una_foto() -> None:
+    sandbox = _SandboxDePortal(
+        PADRON_ANUAL,
+        "x",
+        PADRON_ANUAL_TIPOS,
+        [
+            (
+                "AS reconocidas",
+                [{"desde": "2022", "hasta": "2022", "reconocidas": 9, "con_valor": 9}],
+            ),
+            ("AS filas_tabla", [{"filas_tabla": 1000}]),
+            ("AS valor", [{"valor": 300, "__filas": 300}]),
+        ],
+        stats=TableValueStats(estimated_rows=1000),
+        row_count=1000,
+    )
+    pide = {
+        "tabla": PADRON_ANUAL,
+        "operacion": "conteo",
+        "filtros": [{"columna": "categoria", "operador": "=", "valor": "A"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert (
+        "La tabla no apila períodos (toda la tabla es de 2022 según «anio»): es una sola foto, así "
+        "que su total es el conteo sin filtros, 1000."
+    ) in aviso
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "avisa"),
+    [
+        ("2022", "2022", True),  # abarca de 2022-01-01 a 2022-12-31
+        ("2021-06", "2023", True),
+        ("2022-06", "2022-12", False),  # deja afuera enero a mayo: un período de la tabla
+    ],
+)
+async def test_calcular_conteo_con_un_periodo_que_abarca_toda_la_tabla(
+    desde: str, hasta: str, avisa: bool
+) -> None:
+    sandbox = _SandboxDePortal(
+        PADRON_ANUAL,
+        "x",
+        [("fecha", "text"), ("categoria", "text")],
+        [
+            (
+                "AS reconocidas",
+                [{"desde": "2022-01-01", "hasta": "2022-12-31", "reconocidas": 9, "con_valor": 9}],
+            ),
+            ("AS filas_tabla", [{"filas_tabla": 1000}]),
+            ("AS valor", [{"valor": 300, "__filas": 300}]),
+        ],
+        stats=TableValueStats(estimated_rows=1000),
+        row_count=1000,
+    )
+    pide = {
+        "tabla": PADRON_ANUAL,
+        "operacion": "conteo",
+        "desde": desde,
+        "hasta": hasta,
+        "filtros": [{"columna": "categoria", "operador": "=", "valor": "A"}],
+    }
+    payload = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)
+    if not avisa:
+        assert "aviso_parte" not in payload and "filas_tabla" not in payload
+        return
+    assert payload["aviso_parte"] == (
+        "Los filtros dejaron afuera 700 filas: la tabla entera tiene 1000, y 300 es sólo la parte "
+        "que queda. El período pedido abarca toda la tabla (de 2022-01-01 a 2022-12-31 según "
+        "«fecha»), así que el total de ese período es el conteo sin filtros, 1000."
+    )
+
+
+@pytest.mark.parametrize(
+    ("tabla", "tipos", "pide", "dudosa"),
+    [
+        # Sin fecha, pero con una columna de mes: puede apilar meses.
+        (
+            PADRON_ANUAL,
+            [("mes", "text"), ("categoria", "text")],
+            {"filtros": [{"columna": "categoria", "operador": "=", "valor": "A"}]},
+            "«mes» puede distinguirlos",
+        ),
+        # Su única fecha es de alta: describe a cada fila y puede no separar
+        # períodos (un padrón como el de Mendoza, con la fecha reconocida).
+        (
+            ALTAS,
+            [("fecha_alta", "text"), ("corte", "text"), ("categoria", "text")],
+            {"desde": "2022", "hasta": "2022"},
+            "«fecha_alta» o «corte» pueden distinguirlos",
+        ),
+    ],
+)
+async def test_calcular_conteo_sin_saber_si_la_tabla_apila_periodos_lo_dice(
+    tabla: str, tipos: list[tuple[str, str]], pide: dict[str, Any], dudosa: str
+) -> None:
+    sandbox = _SandboxDePortal(
+        tabla,
+        "x",
+        tipos,
+        [
+            ("AS filas_tabla", [{"filas_tabla": 1000}]),
+            ("AS valor", [{"valor": 300, "__filas": 300}]),
+        ],
+        stats=TableValueStats(estimated_rows=1000),
+        row_count=1000,
+    )
+    out = await Calcular().run({"tabla": tabla, "operacion": "conteo", **pide}, _ctx(sandbox))
+    aviso = json.loads(out.content)["aviso_parte"]
+    assert f"No sé si la tabla apila períodos: {dudosa}." in aviso
+    assert "La tabla no apila períodos" not in aviso

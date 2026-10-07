@@ -164,6 +164,20 @@ def es_nombre_de_anio(nombre: str) -> bool:
     return not es_metadato(nombre) and any(p in _PALABRAS_ANIO for p in _palabras(nombre))
 
 
+# Además de las de `_PALABRAS_PERIODO`: nombres de una columna que separa
+# fotos o ediciones de un mismo padrón o relevamiento (`corte`, `version`).
+_PALABRAS_FOTO = frozenset(
+    {"cuatrimestre", "corte", "version", "snapshot", "foto", "onda", "ronda"}
+)
+
+
+def es_nombre_de_periodo(nombre: str) -> bool:
+    """Un nombre que sugiere un período o una foto sin ser una fecha que sepamos
+    leer (``mes``, ``trimestre``, ``corte``, ``version``): la tabla puede apilar
+    períodos aunque ``resolver_columna_fecha`` no encuentre su fecha."""
+    return any(p in _PALABRAS_PERIODO or p in _PALABRAS_FOTO for p in _palabras(nombre))
+
+
 @dataclass(frozen=True)
 class ColumnaFecha:
     nombre: str
@@ -985,6 +999,20 @@ def condiciones_periodo(
         )
         condiciones.append(f"{inicio} <= {params.bind(_fin(hasta))}")
     return condiciones
+
+
+def abarca_rango(desde: str | None, hasta: str | None, primera: str, ultima: str) -> bool:
+    """El período pedido se solapa con todas las fechas de la columna.
+
+    ``primera`` y ``ultima`` son el rango de la columna en ISO (``AAAA``,
+    ``AAAA-MM`` o ``AAAA-MM-DD``, como lo da ``consulta_rango``). Con la misma
+    condición que ``condiciones_periodo``, un período que abarca el rango no
+    deja ninguna fila afuera.
+    """
+    primera, ultima = primera[:10], ultima[:10]
+    if desde and _fin(primera) < _inicio(desde):
+        return False
+    return not (hasta and _inicio(ultima) > _fin(hasta))
 
 
 def orden_fecha(columna: ColumnaFecha) -> str:

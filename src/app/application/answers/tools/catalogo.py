@@ -29,6 +29,8 @@ from typing import Any
 from app.application.answers.aggregates import (
     FILTER_OPERATORS,
     OPERATIONS,
+    AggregateQuery,
+    AggregateRequest,
 )
 from app.application.answers.aggregates import (
     MAX_FILTERS as MAX_AGG_FILTERS,
@@ -48,10 +50,17 @@ from app.application.answers.tools.base import (
 from app.application.catalog.collapse import _ROW_CAPS, collapse_hits
 from app.application.catalog.national_prior import NATIONAL_PORTALS, national_prior
 from app.application.consultas.agregar import PedidoAgregado, agregar
-from app.application.consultas.fechas import aviso_lectura_fecha
+from app.application.consultas.fechas import (
+    ColumnaFecha,
+    abarca_rango,
+    aviso_lectura_fecha,
+    es_nombre_de_periodo,
+    resolver_columna_fecha,
+)
 from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import (
     TIMEOUT_CONFIRMAR_S,
+    Periodo,
     Preparado,
     describir_periodo,
     ejecutar,
@@ -739,14 +748,226 @@ async def _filas_de_la_tabla(sandbox: Any, tabla: str) -> tuple[int | None, int 
     return int(result.rows[0]["filas_tabla"]), estimada
 
 
-# Las filas de la tabla, dichas sin llamarlas «el total»: en una tabla que
-# apila períodos, fotos o tipos de fila no son el total de nada (revisión de
-# #171: homicidios del SNIC = 20.801 imputados + 17.325 víctimas).
-_FILAS_NO_SON_TOTAL = (
-    "Las filas de la tabla no son por sí un total: si el filtro elige un período, una foto o "
-    "un tipo de fila, la tabla los suma a todos. Si cada fila es una unidad distinta y la "
-    "pregunta es por todo lo que cubre la tabla, el conteo es sin filtros."
-)
+@dataclass(frozen=True)
+class _Forma:
+    """Si la tabla es una sola foto o apila períodos, para el aviso de un conteo filtrado.
+
+    ``clase``:
+
+    - ``foto``: no apila períodos (``motivo`` dice por qué). Su total es el
+      conteo sin filtros, y un filtro elige una parte de esa foto.
+    - ``abarca``: tiene varios períodos en su columna de fecha (``columna``, de
+      ``desde`` a ``hasta``), pero el pedido sobre esa columna los abarca a todos.
+    - ``apila``: apila períodos en ``columna`` (de ``desde`` a ``hasta``): sus
+      filas juntan todos y no son el total de uno solo.
+    - ``dudosa``: no se sabe; ``dudosas`` son las columnas que podrían
+      distinguir períodos.
+    """
+
+    clase: str
+    motivo: str = ""
+    columna: str = ""
+    desde: str | None = None
+    hasta: str | None = None
+    aproximado: bool = False
+    dudosas: tuple[str, ...] = ()
+
+
+def _lista(columnas: list[str], y: str = "y") -> str:
+    """«A» / «A» y «B» / «A», «B» y «C»."""
+    citadas = [f"«{c}»" for c in dict.fromkeys(columnas)]
+    if len(citadas) == 1:
+        return citadas[0]
+    return f"{', '.join(citadas[:-1])} {y} {citadas[-1]}"
+
+
+async def _forma_de_la_tabla(
+    sandbox: Any,
+    tabla: str,
+    query: AggregateQuery,
+    propia: ColumnaFecha | None,
+    periodo_propio: bool,
+) -> _Forma:
+    """Si la tabla apila períodos, según su propia columna de fecha.
+
+    ``propia`` es la que reconoce ``resolver_columna_fecha`` sin lo que haya
+    pedido el modelo en ``columna_fecha``; ``periodo_propio``, si
+    ``desde``/``hasta`` va sobre ella.
+    """
+    if propia is None or propia.atributo:
+        # Sin fecha, la tabla es una sola foto, salvo que una columna con
+        # nombre de período o de foto (`mes`, `corte`) deje la duda. Una fecha
+        # de alta o de nacimiento describe a cada fila y puede no separar
+        # períodos: también queda la duda.
+        dudosas = [propia.nombre] if propia else []
+        dudosas += [c for c in query.tipos if es_nombre_de_periodo(c)]
+        if dudosas:
+            return _Forma("dudosa", dudosas=tuple(dict.fromkeys(dudosas))[:3])
+        return _Forma("foto", motivo="no tiene columna de fecha")
+    try:
+        periodo = await describir_periodo(
+            sandbox, tabla, propia, timeout_seconds=TIMEOUT_CONFIRMAR_S
+        )
+    except Exception:
+        # El cálculo ya está hecho: no se lo pierde por un dato del aviso.
+        logger.warning("calcular: no se pudo leer el período de %s", tabla, exc_info=True)
+        periodo = Periodo()
+    nombre = _lista([propia.nombre, propia.mes] if propia.mes else [propia.nombre])
+    if periodo.desde is None or periodo.hasta is None:
+        return _Forma("dudosa", dudosas=(propia.nombre,))
+    if periodo.desde == periodo.hasta:
+        if periodo.aproximado:  # una muestra con un solo valor no dice que haya uno solo
+            return _Forma("dudosa", dudosas=(propia.nombre,))
+        return _Forma("foto", motivo=f"toda la tabla es de {periodo.desde} según {nombre}")
+    if (
+        periodo_propio
+        and not periodo.aproximado
+        and abarca_rango(query.desde, query.hasta, periodo.desde, periodo.hasta)
+    ):
+        return _Forma("abarca", columna=nombre, desde=periodo.desde, hasta=periodo.hasta)
+    return _Forma(
+        "apila",
+        columna=nombre,
+        desde=periodo.desde,
+        hasta=periodo.hasta,
+        aproximado=periodo.aproximado,
+    )
+
+
+def _texto_aviso_parte(
+    forma: _Forma,
+    *,
+    total: int,
+    exacto: int | None,
+    filas: int,
+    filtradas: list[str],
+    fecha_pedida: str | None,
+    con_filtros: bool,
+) -> str:
+    """El aviso de un conteo filtrado: qué dejó afuera y qué es la tabla."""
+    if forma.clase == "abarca" or fecha_pedida is None:
+        # En `abarca` el período no dejó ninguna fila afuera: fueron los filtros.
+        quien = "Los filtros dejaron"
+    elif con_filtros:
+        quien = f"Los filtros y el período pedido sobre «{fecha_pedida}» dejaron"
+    else:
+        quien = f"El período pedido sobre «{fecha_pedida}» dejó"
+    if exacto is not None:
+        cabeza = (
+            f"{quien} afuera {exacto - total} filas: la tabla entera tiene {exacto}, y {total} "
+            "es sólo la parte que queda."
+        )
+        filas_tabla, conteo_sin_filtros = str(exacto), f"el conteo sin filtros, {exacto}"
+    else:
+        cabeza = (
+            f"{quien} afuera unas {filas - total} filas: la tabla entera tiene unas {filas} "
+            f"(una estimación de la base, no un conteo), y {total} es sólo la parte que queda."
+        )
+        filas_tabla = f"unas {filas}"
+        conteo_sin_filtros = "el conteo sin filtros (contalo con calcular, sin filtros)"
+    if forma.clase == "foto":
+        cola = (
+            f"La tabla no apila períodos ({forma.motivo}): es una sola foto, así que su total es "
+            f"{conteo_sin_filtros}. Filtrar por {_lista(filtradas)} no elige otro período ni "
+            "otra foto: elige una parte de esa foto."
+        )
+    elif forma.clase == "abarca":
+        cola = (
+            f"El período pedido abarca toda la tabla (de {forma.desde} a {forma.hasta} según "
+            f"{forma.columna}), así que el total de ese período es {conteo_sin_filtros}."
+        )
+    elif forma.clase == "apila":
+        rango = f"de {forma.desde} a {forma.hasta}"
+        if forma.aproximado:
+            rango = f"aproximadamente {rango}, según una muestra"
+        cola = (
+            f"La tabla apila períodos en {forma.columna} ({rango}): sus {filas_tabla} filas "
+            "juntan todos esos períodos, no son el total de uno solo. Para un período, filtralo "
+            "con `desde`/`hasta`."
+        )
+    else:
+        puede = "pueden" if len(forma.dudosas) > 1 else "puede"
+        cola = (
+            f"No sé si la tabla apila períodos: {_lista(list(forma.dudosas), 'o')} {puede} "
+            f"distinguirlos. Si los distingue, sus {filas_tabla} filas juntan todos y no son el "
+            "total de uno solo; si no, la tabla es una sola foto y su total es el conteo sin "
+            "filtros."
+        )
+    return f"{cabeza} {cola}"
+
+
+async def _aviso_parte(
+    sandbox: Any, tabla: str, req: AggregateRequest, query: AggregateQuery, total: int
+) -> tuple[int | None, str | None]:
+    """``(filas_tabla, aviso_parte)`` de un conteo filtrado, o ``(None, None)``.
+
+    Prueba de calidad del 07-oct (nueva_16): con la Tarifa Social de Mendoza,
+    el agente filtró ``PADRON = 202207`` (el mes de alta en el padrón) y
+    presentó esas 99.558 filas como el padrón de 2022, que tiene 110.179. La
+    tabla es un solo archivo: no apila períodos.
+
+    El aviso dice cuántas filas dejó afuera el filtro y cuántas tiene la tabla,
+    y después qué es la tabla, sin dejarle al modelo una lectura que justifique
+    la parte. El de antes decía «si el filtro elige un período, una foto…, la
+    tabla los suma a todos», y ``PADRON = 202207`` parece justo una foto
+    mensual (verificación de la ola 5):
+
+    - una sola foto (sin columna de fecha, o con un solo período): su total es
+      el conteo sin filtros, y filtrar elige una parte de esa foto;
+    - ``desde``/``hasta`` sobre su columna de fecha abarca todos sus períodos:
+      el total de ese período es el conteo sin filtros;
+    - apila períodos: lo dice con la columna que los distingue, y sus filas no
+      son el total de uno solo (homicidios del SNIC: 38.126 filas con
+      ``fecha_hecho`` de varios años, y además imputados y víctimas);
+    - no se sabe: lo dice, con la columna que podría distinguirlos.
+
+    Cubre también ``desde``/``hasta`` sobre una columna que no es la fecha de
+    la tabla (``columna_fecha=PADRON``, «en 2022»: los mismos 99.558, que antes
+    salían sin aviso). Un período sobre la fecha de una tabla que los apila no
+    avisa: contar sin él suma todos, y no hay total que dar.
+    """
+    propia = resolver_columna_fecha(list(query.tipos.items()), None, tabla)
+    # Una fecha de alta o de nacimiento no separa los períodos de la tabla: un
+    # filtro sobre ella no es «el período de la tabla».
+    de_periodo = propia if propia is not None and not propia.atributo else None
+    columnas_propias = (
+        {c for c in (de_periodo.nombre, de_periodo.mes) if c} if de_periodo else set()
+    )
+    fecha_pedida = query.fecha.nombre if (query.desde or query.hasta) and query.fecha else None
+    periodo_propio = (
+        fecha_pedida is not None and de_periodo is not None and fecha_pedida == de_periodo.nombre
+    )
+    filtro_propio = any(f.columna in columnas_propias for f in req.filtros)
+    if all(f.columna in columnas_propias for f in req.filtros) and (
+        periodo_propio or fecha_pedida is None
+    ):
+        # Sólo el período de la tabla: si dejó filas afuera, son de otros
+        # períodos, y si no, no hay nada que avisar. Sin consultas de más.
+        return None, None
+    forma: _Forma | None = None
+    if periodo_propio or filtro_propio:
+        # Un período de una tabla que los apila, más otros filtros: contar sin
+        # el período tampoco da un total. Se mira antes de contar la tabla.
+        forma = await _forma_de_la_tabla(sandbox, tabla, query, propia, periodo_propio)
+        if forma.clase in ("apila", "dudosa"):
+            return None, None
+    exacto, estimada = await _filas_de_la_tabla(sandbox, tabla)
+    filas = exacto if exacto is not None else estimada
+    if not filas or filas <= total:
+        return None, None
+    if forma is None:
+        forma = await _forma_de_la_tabla(sandbox, tabla, query, propia, periodo_propio)
+    filtradas = [f.columna for f in req.filtros] + ([fecha_pedida] if fecha_pedida else [])
+    aviso = _texto_aviso_parte(
+        forma,
+        total=total,
+        exacto=exacto,
+        filas=filas,
+        filtradas=filtradas,
+        fecha_pedida=fecha_pedida,
+        con_filtros=bool(req.filtros),
+    )
+    return exacto, aviso
 
 
 class Calcular:
@@ -774,8 +995,10 @@ class Calcular:
             "muestra. Las columnas de texto se convierten a número según su formato (argentino "
             "1.234,5 o inglés 1,234.5, decidido con una muestra de la columna); si el formato es "
             "ambiguo, no calcula y lo dice. Cada resultado trae `filas_usadas` (sobre cuántas "
-            "filas se calculó). Un conteo con filtros que no son de período trae además "
-            "`filas_tabla` (las filas de toda la tabla): el conteo filtrado no es la tabla entera. "
+            "filas se calculó). Un conteo con filtros que dejan filas afuera trae además "
+            "`filas_tabla` (las filas de toda la tabla) y `aviso_parte`, que dice si la tabla es "
+            "una sola foto (su total es el conteo sin filtros) o apila períodos, y en qué columna; "
+            "no viene si el único filtro es un período de la columna de fecha de la tabla. "
             "Si ninguna fila cumple los filtros no hay valor: viene `aviso` con los valores que sí "
             "existen."
         ),
@@ -903,44 +1126,25 @@ class Calcular:
         if total is not None:
             payload[clave_filas] = total
         # Un conteo filtrado es una parte de la tabla, y el resultado no lo
-        # decía. Prueba de calidad del 07-oct (nueva_16): con la Tarifa Social
-        # de Mendoza agrupada por PADRON (el mes de alta), el agente filtró
-        # PADRON = 202207 y presentó esas 99.558 filas como el padrón de 2022,
-        # que tiene 110.179. Sólo el conteo sin ponderador: ahí la tabla se
-        # mide en filas.
+        # decía (nueva_16, ver `_aviso_parte`). Sólo el conteo sin ponderador:
+        # ahí la tabla se mide en filas.
         #
-        # Revisión de #171: las filas de la tabla no se llaman «el total» ni
-        # se citan como evidencia. En una tabla que apila períodos, fotos o
-        # tipos de fila no son el total de nada, y citadas el verificador
-        # daba por respaldado el total inflado (y en la batería, la fuente de
-        # complex_003 dejaba de ser «sólo conteos chicos»). Tampoco se avisa
-        # con un filtro de período (`desde`/`hasta` o la columna de fecha): ahí
-        # contar sin él suma todos los períodos.
-        fecha = res.query.fecha
-        de_periodo = {fecha.nombre, fecha.mes} if fecha else set()
+        # Revisión de #171: las filas de la tabla no se citan como evidencia
+        # (van sólo en lo que lee el modelo). Citadas, el verificador daba por
+        # respaldado un total inflado, y en la batería la fuente de complex_003
+        # dejaba de ser «sólo conteos chicos».
         if (
             req.operacion == "conteo"
             and not req.ponderar_por
-            and req.filtros
-            and not (req.desde or req.hasta)
-            and not any(f.columna in de_periodo for f in req.filtros)
+            and (req.filtros or query.desde or query.hasta)
             and total
             and not parcial
         ):
-            exacto, estimada = await _filas_de_la_tabla(sandbox, table.name)
-            if exacto is not None and exacto > total:
-                payload["filas_tabla"] = exacto
-                payload["aviso_parte"] = (
-                    f"Sin filtros la tabla tiene {exacto} filas: los filtros dejaron afuera "
-                    f"{exacto - total}, y {total} es lo que cumple los filtros, no toda la tabla. "
-                    f"{_FILAS_NO_SON_TOTAL}"
-                )
-            elif exacto is None and estimada and estimada > total:
-                payload["aviso_parte"] = (
-                    f"Con los filtros se contaron {total} filas, una parte de la tabla (que tiene "
-                    f"unas {estimada}, según una estimación de la base): {total} es lo que cumple "
-                    f"los filtros, no toda la tabla. {_FILAS_NO_SON_TOTAL}"
-                )
+            filas_tabla, aviso_parte = await _aviso_parte(sandbox, table.name, req, query, total)
+            if filas_tabla is not None:
+                payload["filas_tabla"] = filas_tabla
+            if aviso_parte:
+                payload["aviso_parte"] = aviso_parte
         if notas:
             payload["notas"] = notas
         return ToolOutcome(

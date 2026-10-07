@@ -15,10 +15,12 @@ import pytest
 
 from app.application.consultas.fechas import (
     ColumnaFecha,
+    abarca_rango,
     aviso_formato_guardado,
     claves_orden,
     condiciones_periodo,
     es_nombre_de_fecha,
+    es_nombre_de_periodo,
     expresion_fecha,
     fecha_iso,
     formato_uniforme,
@@ -964,3 +966,41 @@ class TestOrdenConAnioYMesNumericos:
         assert "BETWEEN" not in orden_fecha(ColumnaFecha("periodo", "bigint", formato="aaaamm"))
         # Una numérica sin muestra que no se llama como un año: no se supone nada.
         assert "BETWEEN" not in orden_fecha(ColumnaFecha("periodo", "bigint"))
+
+
+# ── verificación de la ola 5 sobre #171: si una tabla apila períodos ──────
+
+
+@pytest.mark.parametrize(
+    ("nombre", "esperado"),
+    [
+        ("mes", True),
+        ("trimestre", True),
+        ("corte_padron", True),
+        ("version", True),
+        ("PADRON", False),  # Mendoza: el mes de alta, no una foto
+        ("SITUACION", False),
+        ("tipo_persona", False),
+    ],
+)
+def test_es_nombre_de_periodo(nombre: str, esperado: bool) -> None:
+    assert es_nombre_de_periodo(nombre) is esperado
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "primera", "ultima", "esperado"),
+    [
+        ("2022", "2022", "2022-01-01", "2022-12-31", True),
+        (None, "2022", "2022-01", "2022-07", True),
+        ("2022", None, "2021-12", "2022-07", False),  # diciembre de 2021 queda afuera
+        ("2022-06", "2022-12", "2022-01-01", "2022-12-31", False),
+        ("2020", "2023", "2022", "2022", True),
+        ("2023", "2023", "2014-01-01", "2023-12-31", False),
+        # La misma condición que `condiciones_periodo`: un año se solapa con junio.
+        ("2022-06", "2022-06", "2022", "2022", True),
+    ],
+)
+def test_abarca_rango(
+    desde: str | None, hasta: str | None, primera: str, ultima: str, esperado: bool
+) -> None:
+    assert abarca_rango(desde, hasta, primera, ultima) is esperado

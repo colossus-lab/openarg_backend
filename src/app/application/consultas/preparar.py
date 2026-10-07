@@ -244,19 +244,27 @@ class Periodo:
     aproximado: bool = False
 
 
-async def describir_periodo(sandbox: Any, tabla: str, fecha: ColumnaFecha | None) -> Periodo:
+async def describir_periodo(
+    sandbox: Any, tabla: str, fecha: ColumnaFecha | None, timeout_seconds: int | None = None
+) -> Periodo:
     """El período que cubre la columna de fecha, para ``describir_tabla``.
 
     Nunca falla: si la consulta del rango no corre (timeout en una tabla
     grande, palabra reservada en el nombre de una columna), se describe la
     tabla igual, con el aviso. Antes cualquier error acá era el 400 genérico
     "Probá con otros filtros" del modo datos (16 en prod desde el 30-sep).
+
+    ``timeout_seconds``: un tope más corto que el del sandbox, para quien lo
+    usa como dato de un aviso (``calcular``); al pasarlo vale el rango de la
+    muestra, como con cualquier error.
     """
     if fecha is None:
         return Periodo()
     stats = await estadisticas(sandbox, tabla, [fecha.nombre])
     fecha = con_formato(fecha, stats)
-    result = await ejecutar(sandbox, consulta_rango(quote_qualified(tabla), fecha), {})
+    result = await ejecutar(
+        sandbox, consulta_rango(quote_qualified(tabla), fecha), {}, timeout_seconds=timeout_seconds
+    )
     if result.error_kind == "blocked":
         # Tabla retirada por un problema de calidad: no se informa un período
         # sacado de sus estadísticas como si se pudiera usar. Se dice por qué.
