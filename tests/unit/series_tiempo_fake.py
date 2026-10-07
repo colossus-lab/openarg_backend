@@ -26,6 +26,12 @@ descartar nada.
 
 Medido el 06-oct:
 
+- lo de los períodos incompletos vale para avg, sum y end_of_period con
+  ``collapse`` quarter o year. Con max o min el período en curso y el
+  primero incompleto quedan (exportaciones con year+max traen 2026-01-01, de
+  enero a agosto; el IPC trae 2016-01-01, sólo diciembre). Y
+  ``collapse=semester`` desde una mensual agrupa desde el primer mes de la
+  serie y no recorta el semestre en curso (``_monthly_to_semesters``);
 - ``min_value`` y ``max_value`` de la metadata son el rango de TODA la serie:
   no cambian con la ventana, la representación ni el ``collapse``;
 - ``time_index_end`` puede estar atrasado: la pobreza 64.2 dice 2026-01-01 y
@@ -534,6 +540,8 @@ def _period_start(fecha: str, months: int) -> str:
 def _collapse(
     window: list[tuple[str, float]], source_months: int, target_months: int, how: str
 ) -> list[tuple[str, float]]:
+    if source_months == 1 and target_months == 6:
+        return _monthly_to_semesters(window, how)
     groups: dict[str, list[float]] = {}
     for fecha, value in window:
         groups.setdefault(_period_start(fecha, target_months), []).append(value)
@@ -542,9 +550,39 @@ def _collapse(
         (period, _AGGREGATE[how](values))
         for period, values in groups.items()
         # Como la API: los períodos incompletos (el año en curso, el primero
-        # si la serie arranca a mitad de año) quedan afuera.
-        if expected is None or len(values) >= expected
+        # si la serie arranca a mitad de año) quedan afuera. Con max y min no:
+        # la API los calcula al consultar, sin ese recorte.
+        if expected is None or how in ("max", "min") or len(values) >= expected
     ]
+
+
+def _monthly_to_semesters(window: list[tuple[str, float]], how: str) -> list[tuple[str, float]]:
+    """De una mensual a semestres, como la API (medido el 06-oct).
+
+    Agrupa de a seis meses desde el primer mes de la serie. Si ese mes no es
+    enero, corre la fecha de cada grupo `mes − 1` meses para atrás, descarta
+    el primer grupo y, si la fecha del siguiente no cae en el mes en que
+    arranca la serie, también ese (``index_transform`` y
+    ``handle_month_semester`` de series-tiempo-ar-api). El semestre sin
+    terminar queda: en exportaciones, 2026-07-01 es julio más agosto
+    (17.736,44); en el IPC, que arranca en 2016-12, 2025-07-01 es el promedio
+    de junio a agosto de 2026.
+    """
+    first_year, first_month = int(window[0][0][:4]), int(window[0][0][5:7])
+    groups: dict[int, list[float]] = {}
+    for fecha, value in window:
+        months = (int(fecha[:4]) - first_year) * 12 + int(fecha[5:7]) - first_month
+        groups.setdefault(months // 6, []).append(value)
+    offset = first_month - 1
+    out = []
+    for index, values in sorted(groups.items()):
+        year, month = divmod(first_year * 12 + first_month - 1 + index * 6 - offset, 12)
+        out.append((date(year, month + 1, 1).isoformat(), _AGGREGATE[how](values)))
+    if offset:
+        out = out[1:]
+    if out and int(out[0][0][5:7]) != first_month:
+        out = out[1:]
+    return out
 
 
 class FakeSeriesApi:

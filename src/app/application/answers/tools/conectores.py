@@ -533,7 +533,11 @@ class SeriesTiempo:
                 n for n in (payload.get("nota"), _dropped_frequency_note(dropped)) if n
             )
         complete = _complete_periods_note(
-            result.metadata or {}, frequency, result.records, iso_date(kwargs["end_date"])
+            result.metadata or {},
+            frequency,
+            result.records,
+            iso_date(kwargs["end_date"]),
+            aggregation=aggregation,
         )
         if complete:
             payload["periodos"] = complete
@@ -733,7 +737,9 @@ class SeriesTiempo:
             payload["sin_dato"] = missing
         if notes:
             payload["nota"] = " ".join(notes)
-        complete = _complete_periods_note(meta, applied_frequency, result.records, end_bounds[1])
+        complete = _complete_periods_note(
+            meta, applied_frequency, result.records, end_bounds[1], aggregation=aggregation
+        )
         if complete:
             payload["periodos"] = complete
         payload.update(_freshness_for_model(computed.metadata))
@@ -759,12 +765,20 @@ def _dropped_frequency_note(frequency: str) -> str:
     )
 
 
+# Las frecuencias con las que la API deja afuera el período sin terminar. Sin
+# `semester`: desde una mensual agrupa desde el primer mes de la serie y no
+# recorta el semestre en curso (medido el 06-oct: en exportaciones, 2026-07-01
+# es julio más agosto; en el IPC, que arranca en 2016-12, 2025-07-01 es el
+# promedio de junio a agosto de 2026).
 _COLLAPSE_NOUNS = {
     "month": (1, "meses", "mes"),
     "quarter": (3, "trimestres", "trimestre"),
-    "semester": (6, "semestres", "semestre"),
     "year": (12, "años", "año"),
 }
+# Y las agregaciones: avg, sum y end_of_period las calcula al indexar y recorta
+# el período sin terminar; max y min, al consultar y sin recortar (exportaciones
+# con year+max traen 2026-01-01, de enero a agosto).
+_COMPLETE_AGGREGATIONS = ("avg", "sum", "end_of_period")
 _NATIVE_MONTHS = {"mensual": 1, "trimestral": 3, "semestral": 6, "anual": 12}
 # Lo que junta un período agregado, por los meses de la serie original. Las
 # semestrales no: la pobreza del INDEC fecha cada semestre por el día
@@ -791,6 +805,8 @@ def _complete_periods_note(
     frequency: str | None,
     records: list[dict[str, Any]] | None = None,
     until: str | None = None,
+    *,
+    aggregation: str | None = None,
 ) -> str | None:
     """Que la API agrega sólo períodos completos, dicho para que el modelo no lo verifique.
 
@@ -811,9 +827,18 @@ def _complete_periods_note(
     Sólo si la ventana pedida (`until`, el `hasta` como fecha) no lo deja
     afuera: con hasta=2023-12-31, 2024 falta por la ventana y no por estar
     incompleto.
+
+    Nada de esto con `semester` ni con `aggregation` max o min: ahí la API sí
+    trae el período sin terminar, y la nota daba por entero un número parcial
+    («El último año completo es 2026» con exportaciones year+max, de enero a
+    agosto). Revisión de #162.
     """
     nouns = _COLLAPSE_NOUNS.get(frequency or "")
-    if nouns is None or meta.get(_DROPPED_FREQUENCY):
+    if (
+        nouns is None
+        or meta.get(_DROPPED_FREQUENCY)
+        or (aggregation or "avg") not in _COMPLETE_AGGREGATIONS
+    ):
         return None
     target, plural, singular = nouns
     series = [s for s in meta.get("series") or [] if isinstance(s, dict)]
