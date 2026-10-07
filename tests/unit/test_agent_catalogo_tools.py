@@ -24,6 +24,7 @@ import pytest
 from app.application.answers.engine import EngineRequest
 from app.application.answers.tools.base import ToolContext, ToolInputError
 from app.application.answers.tools.catalogo import Calcular, DescribirTabla, ObtenerDatos
+from app.application.answers.verification import verify_figures
 from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
     ColumnValueStats,
@@ -863,3 +864,302 @@ async def test_describir_tabla_bloqueada_no_inventa_un_periodo_de_pg_stats() -> 
     payload = json.loads(out.content)
     assert payload["desde"] is None and payload["hasta"] is None
     assert "problema de calidad" in payload["aviso_fecha"]
+
+
+# ── prueba de calidad del 07-oct (ola 4): nueva_16 ─────────────────────────
+#
+# El agente agrupó la Tarifa Social de Mendoza por PADRON (el mes de alta en
+# el padrón: 33 valores, de 201702 a 202207), se quedó con PADRON = 202207 y
+# presentó esas 99.558 filas como el padrón de 2022. Son 110.179: las otras
+# 10.621 también están «EN PADRON». `calcular` devolvía el conteo filtrado
+# sin decir de cuántas filas de la tabla era una parte.
+
+# Lo que devolvió `calcular` en la corrida (q25_ola4.json, nueva_16), igual a
+# lo que da hoy sobre la tabla de staging.
+_SITUACION_202207 = [
+    ("EN PADRON TS-JUBILADOS Y PENSIONADOS", 35870),
+    ("EN PADRON TS-TRANSITORIOS", 24712),
+    ("EN PADRON TS-PROGRAMAS SOCIALES NO MONETARIOS", 11011),
+    ("EN PADRON TS-PROGRAMAS SOCIALES", 10580),
+    ("EN PADRON TS-PNC", 7954),
+    ("EN PADRON TS-EMPLEO DEPENDIENTE", 7109),
+    ("EN PADRON TS-SERVICIO DOMESTICO", 1202),
+    ("EN PADRON TS-REGISTRO CASOS ESPECIALES", 463),
+    ("EN PADRON TS-ELECTRODEPENDIENTES", 262),
+    ("EN PADRON TS-DESEMPLEO", 207),
+    ("EN PADRON TS-CASOS TRANSITORIOS", 117),
+    ("EN PADRON TS-VETERANOS DE GUERRA", 52),
+    ("EN PADRON TS-REGISTRO CASOS ESPECIALES-1569", 15),
+    ("EN PADRON TS-MEDIDORES COMUNITARIOS", 3),
+    ("EN PADRON TS-POSEE UN INGRESO SUPERIOR A 2 SMVM", 1),
+]
+_FILAS_202207 = [
+    {"SITUACION": s, "valor": n, "__filas": n, "__filas_total": 99_558}
+    for s, n in _SITUACION_202207
+]
+_PIDE_202207 = {
+    "tabla": TARIFA,
+    "operacion": "conteo",
+    "agrupar_por": ["SITUACION"],
+    "filtros": [{"columna": "PADRON", "operador": "=", "valor": "202207"}],
+}
+
+
+def _tarifa(respuestas: list[tuple[str, Any]], estimadas: int | None = 110_179) -> Sandbox:
+    stats = TableValueStats(estimated_rows=estimadas) if estimadas else None
+    return _SandboxDePortal(TARIFA, "mendoza", TARIFA_TIPOS, respuestas, stats=stats, row_count=0)
+
+
+async def test_calcular_conteo_filtrado_dice_de_cuantas_filas_de_la_tabla_es_parte() -> None:
+    sandbox = _tarifa([("AS filas_tabla", [{"filas_tabla": 110_179}]), ("AS valor", _FILAS_202207)])
+    out = await Calcular().run(_PIDE_202207, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == 99_558
+    assert payload["filas_tabla"] == 110_179
+    aviso = payload["aviso_parte"]
+    assert "la tabla tiene 110179 filas" in aviso
+    assert "dejaron afuera 10621" in aviso and "99558 es lo que cumple los filtros" in aviso
+    # Revisión de #171: las filas de la tabla no se llaman «el total».
+    assert "el total es" not in aviso
+    # El conteo de toda la tabla, sin el filtro.
+    cuenta = sandbox.sql_with("AS filas_tabla")
+    assert "WHERE" not in cuenta and "GROUP BY" not in cuenta
+    assert TARIFA.split(".")[1] in cuenta
+    # Y no se cita como evidencia: la única es el conteo filtrado.
+    [result] = out.results
+    assert result.metadata["filas_usadas"] == 99_558
+
+
+async def test_calcular_conteo_sin_filtros_no_vuelve_a_contar_la_tabla() -> None:
+    """Sin filtros, el conteo ya es de toda la tabla: no se paga otra consulta."""
+    filas = [
+        {"PADRON": 202207, "valor": 99_558, "__filas": 99_558, "__filas_total": 110_179},
+        {"PADRON": 201702, "valor": 1983, "__filas": 1983, "__filas_total": 110_179},
+    ]
+    sandbox = _tarifa([("AS filas_tabla", [{"filas_tabla": 110_179}]), ("AS valor", filas)])
+    out = await Calcular().run(
+        {"tabla": TARIFA, "operacion": "conteo", "agrupar_por": ["PADRON"]}, _ctx(sandbox)
+    )
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == 110_179
+    assert "filas_tabla" not in payload and "aviso_parte" not in payload
+    assert not any("filas_tabla" in sql for sql, _ in sandbox.calls)
+    assert len(out.results) == 1
+
+
+async def test_calcular_suma_filtrada_no_cuenta_la_tabla() -> None:
+    """Sólo el conteo: el total de una suma no es la cantidad de filas."""
+    sandbox = Sandbox(
+        TYPES,
+        [
+            ("AS filas_tabla", [{"filas_tabla": 4794}]),
+            ("AS valor", [{"valor": 1000, "__filas": 10, "__filas_con_valor": 10}]),
+        ],
+    )
+    out = await Calcular().run(
+        {
+            "tabla": T,
+            "operacion": "suma",
+            "columna": "credito_devengado",
+            "filtros": [{"columna": "jurisdiccion_desc", "operador": "=", "valor": "Salud"}],
+        },
+        _ctx(sandbox),
+    )
+    assert "aviso_parte" not in json.loads(out.content)
+    assert not any("filas_tabla" in sql for sql, _ in sandbox.calls)
+
+
+async def test_calcular_conteo_con_un_filtro_que_no_deja_nada_afuera_no_avisa() -> None:
+    filas = [{**f, "__filas_total": 110_179} for f in _FILAS_202207]
+    sandbox = _tarifa([("AS filas_tabla", [{"filas_tabla": 110_179}]), ("AS valor", filas)])
+    out = await Calcular().run(_PIDE_202207, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert "filas_tabla" not in payload and "aviso_parte" not in payload
+    assert len(out.results) == 1
+
+
+async def test_calcular_conteo_filtrado_en_tabla_grande_no_cuenta_la_tabla_entera() -> None:
+    """En una tabla de millones de filas el `count(*)` pasaría el tope: va la
+    estimación de la base, dicha como tal."""
+    sandbox = _tarifa(
+        [("AS filas_tabla", [{"filas_tabla": 2_400_000}]), ("AS valor", _FILAS_202207)],
+        estimadas=2_400_000,
+    )
+    out = await Calcular().run(_PIDE_202207, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert not any("filas_tabla" in sql for sql, _ in sandbox.calls)
+    assert "filas_tabla" not in payload
+    aviso = payload["aviso_parte"]
+    assert "unas 2400000" in aviso and "estimación" in aviso
+    assert "el total es" not in aviso
+    assert len(out.results) == 1
+
+
+async def test_calcular_conteo_filtrado_si_falla_el_conteo_de_la_tabla_da_el_resultado() -> None:
+    sandbox = _tarifa(
+        [
+            ("AS filas_tabla", "canceling statement due to statement timeout"),
+            ("AS valor", _FILAS_202207),
+        ]
+    )
+    out = await Calcular().run(_PIDE_202207, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == 99_558
+    assert "filas_tabla" not in payload
+    assert "unas 110179" in payload["aviso_parte"]
+    [result] = out.results
+    assert result.metadata["filas_usadas"] == 99_558
+
+
+async def test_calcular_conteo_filtrado_si_el_conteo_de_la_tabla_explota_no_se_cae() -> None:
+    class _Explota(_SandboxDePortal):
+        async def execute_readonly(
+            self, sql: str, timeout_seconds: int = 10, *, params: Any = None
+        ) -> SandboxResult:
+            if "AS filas_tabla" in sql:
+                raise RuntimeError("se cortó la conexión")
+            return await super().execute_readonly(sql, timeout_seconds, params=params)
+
+    sandbox = _Explota(
+        TARIFA,
+        "mendoza",
+        TARIFA_TIPOS,
+        [("AS valor", _FILAS_202207)],
+        stats=TableValueStats(estimated_rows=110_179),
+        row_count=0,
+    )
+    out = await Calcular().run(_PIDE_202207, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == 99_558 and "filas_tabla" not in payload
+    assert "unas 110179" in payload["aviso_parte"]
+
+
+# ── revisión de #171: las filas de la tabla no son «el total» ──────────────
+#
+# En una tabla que apila períodos, fotos o tipos de fila, contar sin filtros
+# no da el total de nada. En staging: los homicidios del SNIC son 20.801
+# imputados y 17.325 víctimas (38.126 filas); el rendimiento de
+# establecimientos de salud de PBA, 19 años de unos 2.300 establecimientos
+# (41.354 filas, 2.406 establecimientos distintos); los transportes
+# autorizados de CABA, 13 fotos mensuales del padrón (52.367 filas). La
+# primera versión de #171 decía «el total es N» y lo citaba como evidencia:
+# el verificador daba por respaldado el total inflado, y en la batería la
+# fuente de complex_003 dejaba de ser «sólo conteos chicos».
+
+HOMICIDIOS = "raw.datos_gob_ar__homicidios_dolosos_sistema_de_alert__2ba03073__v1"
+HOMICIDIOS_TIPOS = [
+    ("id_hecho", "text"),
+    ("tipo_persona", "text"),
+    ("provincia_nombre", "text"),
+    ("anio", "bigint"),
+    ("mes", "bigint"),
+    ("fecha_hecho", "text"),
+]
+
+
+async def test_calcular_conteo_de_un_tipo_de_fila_no_da_las_filas_de_la_tabla_como_total() -> None:
+    sandbox = _SandboxDePortal(
+        HOMICIDIOS,
+        "datos_gob_ar",
+        HOMICIDIOS_TIPOS,
+        [
+            ("AS filas_tabla", [{"filas_tabla": 38_126}]),
+            ("AS valor", [{"valor": 17_325, "__filas": 17_325}]),
+        ],
+        stats=TableValueStats(estimated_rows=38_126),
+        row_count=38_126,
+    )
+    pide = {
+        "tabla": HOMICIDIOS,
+        "operacion": "conteo",
+        "filtros": [{"columna": "tipo_persona", "operador": "=", "valor": "Víctima"}],
+    }
+    out = await Calcular().run(pide, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == 17_325 and payload["filas_tabla"] == 38_126
+    aviso = payload["aviso_parte"]
+    assert "el total es" not in aviso
+    # Dice cuándo las filas de la tabla no son un total.
+    assert "no son por sí un total" in aviso
+    assert "un período, una foto o un tipo de fila" in aviso
+    # Sin segunda evidencia: el total inflado no queda respaldado.
+    [result] = out.results
+    assert result.records == [{"valor": 17_325}]
+    verificado = verify_figures("El SNIC registra 38.126 homicidios dolosos en total.", out.results)
+    assert [c.status for c in verificado.checks] == ["sin_respaldo"]
+
+
+RENDIMIENTO = "raw.cache_buenos_aires_rendimiento_de_establecimientos__r576cd5036b"
+RENDIMIENTO_TIPOS = [("establecimiento_id", "text"), ("anio", "bigint"), ("egresos", "bigint")]
+TRANSPORTES = "raw.caba__transportes_autorizados__1a2b3c4d__v1"
+TRANSPORTES_TIPOS = [("barrio", "text"), ("periodo", "text"), ("numero_documento", "text")]
+DEFUNCIONES_MES = "raw.caba__defunciones__91003a9e__v1"
+DEFUNCIONES_MES_TIPOS = [("anio", "bigint"), ("mes", "bigint"), ("causa", "text")]
+
+
+@pytest.mark.parametrize(
+    ("tabla", "tipos", "columna", "valor", "filas", "parte"),
+    [
+        # Un año de una tabla con una fila por establecimiento y año.
+        (RENDIMIENTO, RENDIMIENTO_TIPOS, "anio", "2023", 41_354, 2361),
+        # La última foto de un padrón apilado (`periodo` es su columna_fecha).
+        (TRANSPORTES, TRANSPORTES_TIPOS, "periodo", "2018 SEPTIEMBRE", 52_367, 4458),
+        # El mes de una tabla con año y mes separados.
+        (DEFUNCIONES_MES, DEFUNCIONES_MES_TIPOS, "mes", "3", 120_000, 10_000),
+    ],
+)
+async def test_calcular_conteo_con_filtro_de_periodo_no_avisa_ni_cuenta_la_tabla(
+    tabla: str,
+    tipos: list[tuple[str, str]],
+    columna: str,
+    valor: str,
+    filas: int,
+    parte: int,
+) -> None:
+    """Un filtro sobre la columna de fecha elige un período: contar sin él suma
+    todos los períodos, no da un total."""
+    sandbox = _SandboxDePortal(
+        tabla,
+        "x",
+        tipos,
+        [
+            ("AS filas_tabla", [{"filas_tabla": filas}]),
+            ("AS valor", [{"valor": parte, "__filas": parte}]),
+        ],
+        stats=TableValueStats(estimated_rows=filas),
+        row_count=filas,
+    )
+    pide = {
+        "tabla": tabla,
+        "operacion": "conteo",
+        "filtros": [{"columna": columna, "operador": "=", "valor": valor}],
+    }
+    out = await Calcular().run(pide, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == parte
+    assert "filas_tabla" not in payload and "aviso_parte" not in payload
+    assert not any("filas_tabla" in sql for sql, _ in sandbox.calls)
+    assert len(out.results) == 1
+
+
+async def test_calcular_conteo_con_desde_hasta_no_avisa_ni_cuenta_la_tabla() -> None:
+    """`desde`/`hasta` es un filtro de período (n16_alt_periodo de la revisión)."""
+    sandbox = _tarifa(
+        [
+            ("AS filas_tabla", [{"filas_tabla": 110_179}]),
+            ("AS valor", [{"valor": 99_558, "__filas": 99_558}]),
+        ]
+    )
+    pide = {
+        "tabla": TARIFA,
+        "operacion": "conteo",
+        "columna_fecha": "PADRON",
+        "desde": "2022-01-01",
+        "hasta": "2022-12-31",
+    }
+    out = await Calcular().run(pide, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas_usadas"] == 99_558
+    assert "filas_tabla" not in payload and "aviso_parte" not in payload
+    assert not any("filas_tabla" in sql for sql, _ in sandbox.calls)
+    assert len(out.results) == 1
