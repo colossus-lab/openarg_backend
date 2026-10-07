@@ -29,6 +29,30 @@ def _extract_terms(text: str) -> list[str]:
     return [term for term in _TERM_RE.findall(text.lower()) if len(term) > 2]
 
 
+_MAX_SESSIONS_LISTED = 4
+
+
+def _sessions_by_date(chunks: list[dict[str, Any]]) -> str:
+    """The sessions of ``chunks`` by date and meeting, not as a count."""
+    sessions = sorted(
+        {(str(c.get("fecha") or ""), str(c.get("periodo")), str(c.get("reunion"))) for c in chunks}
+    )
+    dated = all(fecha for fecha, _, _ in sessions)
+    names = [
+        f"{fecha} (reuni\u00f3n {reunion})" if dated else f"la reuni\u00f3n {reunion}"
+        for fecha, _, reunion in sessions[:_MAX_SESSIONS_LISTED]
+    ]
+    if len(sessions) > _MAX_SESSIONS_LISTED:
+        listed = ", ".join(names) + ", entre otras"
+    elif len(names) > 1:
+        listed = ", ".join(names[:-1]) + " y " + names[-1]
+    else:
+        listed = names[0]
+    if not dated:
+        return listed
+    return ("la sesi\u00f3n del " if len(sessions) == 1 else "las sesiones del ") + listed
+
+
 class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
     """Congressional session search with pgvector (primary) + local keyword fallback."""
 
@@ -263,6 +287,7 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         limit: int,
         *,
         filtered_after_limit: bool = False,
+        orador: str | None = None,
     ) -> DataResult:
         """Convert chunks to DataResult.
 
@@ -271,9 +296,22 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         the cap, not a total (nueva_06, 06-oct: "12 fragmentos registrados"
         when staging had 51 about the topic). A filter applied after the SQL
         LIMIT (``orador`` in pgvector) is also a cut over the nearest rows.
+
+        Hitting the cap says nothing about the topic either: pgvector orders by
+        distance with no threshold, so with the 1.030 staging rows it always
+        returns ``limit + 1``, even for a topic with no fragment at all. When
+        capped, neither the sessions nor the speakers of the fetched fragments
+        are given as a count (sesiones_001: the answer said the 12 fragments
+        came from "3 sesiones", and the topic is in 4).
         """
         capped = filtered_after_limit or len(chunks) > limit
         chunks = chunks[:limit]
+        # `orador` asked, but no fragment carries it: in staging `speaker` is
+        # NULL, so the local fallback returns anyone's fragments about the words.
+        orador_lower = (orador or "").lower()
+        unattributed = bool(orador_lower) and not any(
+            orador_lower in str(c.get("speaker") or "").lower() for c in chunks
+        )
         records = [
             {
                 "periodo": c.get("periodo"),
@@ -291,18 +329,22 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         unique_sessions = {f"P{c.get('periodo')}-R{c.get('reunion')}" for c in chunks}
         unique_speakers = {c.get("speaker") for c in chunks if c.get("speaker")}
 
-        origin = f"{len(unique_sessions)} sesi\u00f3n(es)"
-        if unique_speakers:
-            origin += f", con intervenciones de {len(unique_speakers)} orador(es)"
         if capped:
             description = (
-                f"Los {len(records)} fragmentos m\u00e1s parecidos a la b\u00fasqueda, de {origin}. "
-                f"La b\u00fasqueda trae como m\u00e1ximo {limit}: no es la cantidad de "
-                "fragmentos, intervenciones ni oradores sobre el tema."
+                f"Los {len(records)} fragmentos m\u00e1s parecidos a la b\u00fasqueda, de "
+                f"{_sessions_by_date(chunks)}. La b\u00fasqueda trae como m\u00e1ximo {limit}, "
+                "por parecido: puede traer otros temas y no es la cantidad de "
+                "fragmentos, sesiones, intervenciones ni oradores sobre el tema."
             )
         else:
+            origin = f"{len(unique_sessions)} sesi\u00f3n(es)"
+            if unique_speakers:
+                origin += f", con intervenciones de {len(unique_speakers)} orador(es)"
             description = f"Se encontraron {len(records)} fragmentos relevantes en {origin}."
-        if not unique_speakers:
+        if unattributed:
+            description += f" Ninguno trae a \u00ab{orador}\u00bb como orador"
+            description += ": no tienen el orador identificado." if not unique_speakers else "."
+        elif not unique_speakers:
             # `speaker` is NULL in every staging row: "0 orador(es)" read as a count.
             description += " Los fragmentos no traen el orador identificado."
 
@@ -311,6 +353,7 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
             "description": description,
             "tope_busqueda": limit,
             "tope_alcanzado": capped,
+            "orador_sin_atribuir": unattributed,
         }
         if not capped:
             metadata["total_records"] = len(records)
@@ -339,14 +382,14 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
             chunks = await self._search_pgvector(query, periodo, orador, limit + 1)
             if chunks:
                 return self._chunks_to_data_result(
-                    query, chunks, limit, filtered_after_limit=bool(orador)
+                    query, chunks, limit, filtered_after_limit=bool(orador), orador=orador
                 )
             logger.info("pgvector returned no results, falling back to local keyword search")
 
             # Fallback to local keyword search
             chunks = self._search_local(query, periodo, orador, limit + 1)
             if chunks:
-                return self._chunks_to_data_result(query, chunks, limit)
+                return self._chunks_to_data_result(query, chunks, limit, orador=orador)
 
             return None
         except ConnectorError:

@@ -968,28 +968,44 @@ class Sesiones:
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         periodo = args.get("periodo")
+        orador = str_arg(args, "orador", max_len=120)
         result = await ctx.deps.sesiones.search(
             str_arg(args, "texto", required=True, max_len=300) or "",
             periodo=int(periodo) if periodo else None,
-            orador=str_arg(args, "orador", max_len=120),
+            orador=orador,
             limit=12,
         )
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "Sin fragmentos sobre eso."}))
         meta = result.metadata or {}
         extra: dict[str, Any] = {}
+        avisos: list[str] = []
         if meta.get("tope_alcanzado"):
             # El tope no es un total: con `filas_totales: 12` el agente dijo
-            # "12 fragmentos registrados" y había 51 (nueva_06, 06-oct).
+            # "12 fragmentos registrados" y había 51 (nueva_06, 06-oct). Tampoco
+            # es un mínimo: la búsqueda ordena por parecido sin umbral y con la
+            # tabla de staging llega al tope siempre, aunque el tema no tenga
+            # ningún fragmento ("ocupación de Airbnb", revisión de #158).
             n = len(result.records)
             tope = meta.get("tope_busqueda") or n
-            extra["filas_totales"] = f"al menos {n} (tope de la búsqueda: {tope})"
-            extra["aviso"] = (
-                f"La búsqueda trae como máximo {tope} fragmentos, los más parecidos, así que "
-                "estos no son todos: no digas cuántos fragmentos, intervenciones u oradores "
-                "hubo sobre el tema, porque no se contaron. Si hace falta una cantidad, decí "
-                f"«al menos {n}»."
+            extra["filas_totales"] = f"sin contar: son los {n} más parecidos (tope: {tope})"
+            avisos.append(
+                f"Son los {n} fragmentos más parecidos a la búsqueda, no los que hay sobre el "
+                "tema: pueden ser de otros temas y no indican cuántos hay. No digas cuántos "
+                "fragmentos, sesiones, intervenciones u oradores hubo sobre el tema, porque no "
+                "se contaron. Usá sólo los que traten el tema; si ninguno lo trata, decí que no "
+                "se encontró nada sobre eso."
             )
+        if meta.get("orador_sin_atribuir") and orador:
+            # En staging `speaker` es NULL en los 1.030 fragmentos: con orador,
+            # la búsqueda trae fragmentos de cualquiera (revisión de #158).
+            avisos.append(
+                f"Ninguno está atribuido a «{orador}»: los fragmentos no traen el orador "
+                "identificado, así que la búsqueda no pudo filtrar por esa persona. No los "
+                "presentes como intervenciones suyas ni digas cuántas veces habló."
+            )
+        if avisos:
+            extra["aviso"] = " ".join(avisos)
         return ToolOutcome(to_json(result_for_model(result, **extra)), results=[result])
 
 
