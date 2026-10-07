@@ -58,6 +58,7 @@ from app.application.answers.engine import (
     EngineResult,
     StatusEvent,
 )
+from app.application.answers.monologo import sin_monologo
 from app.application.answers.pricing import cost_usd
 from app.application.answers.prompt import FINAL_ROUND_NOTE, system_prompt, user_message
 from app.application.answers.tools import build_tools
@@ -535,13 +536,18 @@ class AgentEngine:
 
 
 def _answer_of(turn: AgentTurn) -> tuple[str, list[str]]:
-    """El texto de la respuesta (el que se verifica y se entrega) y sus avisos."""
+    """El texto de la respuesta (el que se verifica y se entrega) y sus avisos.
+
+    Sin el preámbulo en que el modelo cuenta su proceso ni nombres de
+    herramientas (``monologo``, H063). Lo que ya salió en streaming lo
+    reemplaza el runner, porque el texto final es otro.
+    """
     if turn.stop_reason == "refusal":
         return _REFUSAL, []
     warnings: list[str] = []
     if turn.stop_reason == "max_tokens":
         warnings.append("La respuesta se cortó por largo; puede estar incompleta.")
-    return turn.text.strip() or _NO_ANSWER, warnings
+    return sin_monologo(turn.text.strip()) or _NO_ANSWER, warnings
 
 
 def _safe_verify(

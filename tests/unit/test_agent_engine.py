@@ -294,6 +294,64 @@ async def test_el_texto_sale_en_streaming_y_limpio() -> None:
     assert "cache_diputados" not in streamed
 
 
+async def test_el_preambulo_de_proceso_no_se_publica_ni_se_verifica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H063 y prueba del 06-oct (nueva_16): el turno final arrancaba con el
+    razonamiento del modelo y salía tal cual. Se recorta antes de verificar:
+    una cifra del preámbulo no es una cifra de la respuesta."""
+    monkeypatch.delenv("ANSWERS_VERIFY_MODE", raising=False)
+    preambulo = "Ahora tengo toda la información necesaria. La serie diaria llega a 51.191."
+    answer = "Las reservas fueron de **USD 49.700 millones** en agosto de 2026."
+    llm = _reservas_llm(f"{preambulo}\n\n{answer}")
+    deps = _deps_series(RESERVAS_DIARIA, RESERVAS_MENSUAL)
+    result = (await _run(AgentEngine(llm, deps)))[-1].result
+    assert result.answer == answer
+    assert result.verification["sin_respaldo"] == []
+
+
+async def test_lo_que_ya_salio_con_el_preambulo_se_reemplaza(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El chat web muestra lo que le llegó en streaming: el preámbulo ya
+    salió cuando se sabe que lo es. El runner reemplaza el texto, como con el
+    aviso de atraso."""
+    import contextlib
+
+    from app.application.answers import runner as runner_module
+    from app.application.answers.engine import CHANNEL_WS
+    from app.application.answers.runner import EngineRunner
+
+    async def _nada(*a: Any, **kw: Any) -> None:
+        return None
+
+    async def _sin_cache(*a: Any, **kw: Any) -> tuple[None, None]:
+        return None, None
+
+    monkeypatch.setattr(runner_module, "record_terminal_analytics", _nada)
+    monkeypatch.setattr(runner_module, "check_cache", _sin_cache)
+    monkeypatch.setattr(runner_module, "write_cache", _nada)
+    monkeypatch.setattr(runner_module, "audit_query", lambda **kw: None)
+
+    preambulo = 'Todos los registros del padrón 2022 son "EN PADRON TS". El total es claro.'
+    answer = "El padrón registraba **110.179 usuarios**."
+    llm = ScriptedLLM([_turn(f"{preambulo}\n\n{answer}")])
+    runner = EngineRunner(AgentEngine(llm, _deps()), MagicMock())
+    req = EngineRequest(
+        "¿Cuántos usuarios tenían tarifa social eléctrica en Mendoza en 2022?",
+        "u",
+        channel=CHANNEL_WS,
+    )
+    async with contextlib.aclosing(runner.stream(req)) as stream:
+        events = [e async for e in stream]
+    streamed = "".join(e.content for e in events[:-3] if isinstance(e, ChunkEvent))
+    assert "El total es claro" in streamed  # salió mientras se escribía
+    kinds = [type(e).__name__ for e in events]
+    assert kinds[-3:] == ["ClearAnswerEvent", "ChunkEvent", "CompleteEvent"]
+    assert events[-2].content == answer
+    assert events[-1].result.answer == answer
+
+
 async def test_un_error_de_herramienta_vuelve_al_modelo() -> None:
     llm = ScriptedLLM(
         [
