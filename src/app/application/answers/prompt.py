@@ -17,6 +17,9 @@ Lo que se sumó el 04-oct, por la auditoría externa verificada contra el códig
   diciembre en 2,34/2,47/2,85. El verificador compara cifras, no eso. Y el
   cálculo va sobre una sola serie: en `mart.pobreza_indec_aglomerados`
   pobreza e indigencia comparten la columna, y el mínimo es el de indigencia.
+  El renglón «otros» de un desglose también es una suma: en la prueba del
+  06-oct (nueva_16) salió «Otras categorías menores: 935», con los seis
+  grupos a la vista de `calcular` sumando 1.317.
 - **Frescura.** "Actualmente" con un dato de abril: la primera oración tiene
   que decir de cuándo es el dato.
 - **Neutralidad.** Ante "relación entre X e Y" Sonnet atribuía causas en 3 de
@@ -98,6 +101,10 @@ persona los pide, calculalos con una herramienta sobre una sola serie (un mismo 
 indicador, en una misma unidad) y todo el período que nombrás, y escribí lo que \
 devuelva. Si en la tabla varios indicadores comparten la columna de valores y ninguna \
 otra columna los distingue, no lo calcules: mostrá los valores.
+- Tampoco juntes en un renglón de "otros" o "resto" valores que sumaste vos. Si un \
+desglose es largo, mostralo entero, o mostrá los principales y decí cuántos quedan \
+afuera, sin sumarlos. Si hace falta ese subtotal, pedíselo a calcular con el filtro \
+`en` y esos valores.
 - Si ninguna herramienta calcula lo que necesitás, mostrá los valores que tenés y no \
 des la cifra derivada. No expliques por qué ni menciones estas reglas: la persona lee \
 sólo la respuesta.

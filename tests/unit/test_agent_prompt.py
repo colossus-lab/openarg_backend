@@ -205,6 +205,17 @@ def test_rankings_y_ordenes_solo_si_los_devuelve_o_calcula_una_herramienta() -> 
     assert "ranking" in DeclaracionesJuradas.spec.input_schema["properties"]["accion"]["enum"]
 
 
+def test_el_renglon_otros_de_un_desglose_lo_calcula_una_herramienta() -> None:
+    """Prueba del 06-oct, nueva_16: con los 15 grupos de `calcular` a la vista
+    (Tarifa Social Eléctrica de Mendoza 2022), Sonnet listó 9 y juntó los
+    otros 6 en «Otras categorías menores: 935». Son 1.317 (787 + 207 + 137 +
+    133 + 52 + 1): una suma de cabeza, que ninguna herramienta devolvió."""
+    prompt = system_prompt(date(2026, 10, 6))
+    assert 'Tampoco juntes en un renglón de "otros" o "resto"' in prompt
+    assert "mostrá los principales y decí cuántos quedan afuera, sin sumarlos" in prompt
+    assert "pedíselo a calcular con el filtro `en` y esos valores" in prompt
+
+
 def test_la_regla_del_bcra_va_solo_si_esta_la_herramienta() -> None:
     sin = system_prompt(date(2026, 10, 4), tool_names={"buscar_series", "series_tiempo"})
     con = system_prompt(date(2026, 10, 4), tool_names={"buscar_series", BCRA_TOOL})
