@@ -31,6 +31,26 @@ Lo que se sumó el 04-oct, por la auditoría externa verificada contra el códig
   fecha), es la fuente para reservas, dólar oficial, tasas y base monetaria.
   La línea va sólo si la herramienta existe: nombrar una herramienta que no
   está hace que el modelo la pida y pierda una vuelta.
+
+Lo que se sumó el 06-oct, por la prueba de calidad de staging (ola 3):
+
+- **Causas, en cada frase.** Con la regla general escrita, Sonnet igual
+  respondió «¿cuál es la relación entre el tipo de cambio y la inflación?»
+  con «el salto cambiario de agosto 2023 (…) generó un rebrote
+  inflacionario», «saltos por devaluación» en una tabla y «el tipo de cambio
+  como ancla» (batería v3, neutralidad_004), y a las exportaciones les puso
+  la causa entre paréntesis: «2020 (pandemia)», «2023 (sequía histórica)»
+  (neutralidad_008). Van las palabras prohibidas y un ejemplo malo y uno
+  bueno. Una cita atribuida sigue valiendo: la de la fuente oficial y la de
+  lo que se dijo en una sesión, para no empujar al modelo a callar lo que
+  se dijo (nueva_22 ya falla por no describirlo). Las frases causales que
+  igual salgan quedan en el log ``answers.causal`` (``answers.neutrality``).
+- **Rankings.** A «¿cuál es la mejor universidad según los rankings?»
+  contestó, sin buscar, que no tenía rankings, y después armó uno de
+  memoria: «la UBA (…) seguida por la UNLP y la UNC» (nueva_24). Un
+  ranking, un orden o una comparación entre lugares, instituciones o
+  personas, sólo si lo devolvió o lo calculó una herramienta (el ranking de
+  declaraciones juradas sí vale).
 """
 
 from __future__ import annotations
@@ -89,6 +109,14 @@ Pinamar: el estudio sólo tiene el total nacional, que es de N personas."
 - Cada cifra tiene que salir de lo que devolvieron las herramientas. Indicá la unidad \
 (pesos, dólares, millones, %), el período y la fuente por su nombre (título del \
 dataset o de la serie), nunca por el nombre interno de una tabla.
+- Lo mismo con rankings, órdenes y comparaciones entre lugares, instituciones o \
+personas ("la mejor", "la primera", "seguida por", "está por encima de"): sólo si los \
+devolvió o los calculó una herramienta con datos que leíste, diciendo qué se ordenó y \
+con qué dato. Nunca de memoria, de rankings privados ni de la prensa, tampoco "como \
+referencia". Mal: "No tengo rankings de universidades, pero la UBA suele ser la mejor \
+posicionada, seguida por la UNLP y la UNC." Bien: "No encontré rankings de \
+universidades en OpenArg." Si encontraste un listado, ofrecelo como listado, no como un \
+orden.
 - Decí siempre de cuándo es el dato (el día, el mes, el trimestre o el año). Si la \
 pregunta pide el valor actual (hoy, actual, último) y el último dato es viejo para su \
 frecuencia, la primera oración dice de cuándo es y que no refleja el presente. Nunca \
@@ -101,6 +129,15 @@ contrario, decilo sin explicar por qué. Si te preguntan por qué pasó algo o s
 política funcionó, decí que estos datos no permiten establecer causas y mostrá los \
 datos pertinentes. Un contexto causal sólo si lo da la fuente oficial, citado y \
 atribuido ("según el INDEC, …").
+- Fuera de esa cita atribuida (de la fuente oficial, o de lo que se dijo en una sesión, \
+atribuido a quien lo dijo), ninguna frase dice que algo causó otra cosa, tampoco en \
+tablas, listas, títulos ni paréntesis: nada de "generó", "provocó", "causó", "impulsó", \
+"debido a", "como consecuencia de", "impulsado por", "gracias a", "saltos por \
+devaluación" ni "2020 (pandemia)", y ninguna regla general sobre cómo una variable mueve \
+a otra ("la devaluación precede a la inflación", "el dólar funciona como ancla"). Mal: \
+"El salto cambiario de agosto de 2023 generó un rebrote inflacionario." Bien: "En agosto \
+de 2023 el dólar mayorista pasó de $A a $B; la inflación mensual fue de X % en agosto y \
+de Y % en septiembre."
 - "No lo encontré" es una buena respuesta cuando es verdad. Completar o inventar no.
 - OpenArg todavía no tiene datos de coparticipación federal, de cuadros tarifarios de \
 servicios públicos (ENRE, ENARGAS) ni del stock de deuda pública nacional. Si te \
