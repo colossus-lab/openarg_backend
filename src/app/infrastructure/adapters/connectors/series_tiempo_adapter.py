@@ -573,27 +573,39 @@ def _fields_by_id(raw: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
 
 
 def _native_semesters(raw: Mapping[str, Any], series_ids: list[str]) -> bool:
-    """¿Todas las series pedidas son semestrales en la fuente y vinieron en semestres?"""
+    """¿Vino en semestres y alguna de las series pedidas es semestral en la fuente?
+
+    Las demás pueden ser de otra frecuencia (el desempleo trimestral, que la
+    API promedia a semestres): cada columna se confirma aparte.
+    """
     meta = raw.get("meta") or []
     if not meta or not isinstance(meta[0], Mapping) or meta[0].get("frequency") != "semester":
         return False
     fields = _fields_by_id(raw)
-    return all((fields.get(sid) or {}).get("frequency") == _SEMESTER_ISO for sid in series_ids)
+    return any((fields.get(sid) or {}).get("frequency") == _SEMESTER_ISO for sid in series_ids)
 
 
-def _dated_one_semester_late(raw: Mapping[str, Any], series_ids: list[str]) -> bool:
-    """¿La API fechó estas series un semestre después que su metadata?
+def _dated_one_semester_late(raw: Mapping[str, Any], series_ids: list[str]) -> set[int]:
+    """Las columnas (posición en `series_ids`) que la API fechó un semestre después que su metadata.
 
-    Sobre la serie entera y en valores: la última fila con dato tiene que caer
-    un semestre después de time_index_end Y tener su last_value. Una metadata
-    atrasada de verdad no pasa: su last_value sería el del semestre anterior.
+    Serie por serie, sobre la serie entera y en valores: la última fila con
+    dato de esa columna tiene que caer un semestre después de su
+    time_index_end Y tener su last_value. No pasan una metadata atrasada de
+    verdad (su last_value sería el del semestre anterior), una semestral
+    fechada por el inicio (la 64.1 de 2001-2003) ni las de otra frecuencia:
+    quedan como vienen. Se exigía que TODAS lo confirmaran, y la 64.2 pedida
+    junto con la 64.1 o con el desempleo trimestral salía corrida (revisión
+    de #166).
     """
     if not _native_semesters(raw, series_ids):
-        return False
+        return set()
     fields = _fields_by_id(raw)
     data = raw.get("data") or []
+    late: set[int] = set()
     for idx, sid in enumerate(series_ids):
         field = fields.get(sid) or {}
+        if field.get("frequency") != _SEMESTER_ISO:
+            continue
         end = iso_date(str(field.get("time_index_end") or "")[:10])
         last_value = _as_float(field.get("last_value"))
         last = next(
@@ -601,13 +613,40 @@ def _dated_one_semester_late(raw: Mapping[str, Any], series_ids: list[str]) -> b
             None,
         )
         if end is None or last_value is None or last is None:
-            return False
+            continue
         value = _as_float(last[idx + 1])
         if str(last[0])[:10] != _months_back(_semester_start(end), -6):
-            return False
+            continue
         if value is None or not math.isclose(value, last_value, rel_tol=1e-9, abs_tol=1e-12):
-            return False
-    return True
+            continue
+        late.add(idx)
+    return late
+
+
+def _back_one_semester(rows: list[list[Any]], late: set[int]) -> list[list[Any]]:
+    """Retrocede un semestre los valores de las columnas `late` y realinea las filas.
+
+    Las demás columnas quedan en su fecha: en la fila de un semestre van los
+    valores de ESE semestre de todas las series. Un semestre sin ningún dato
+    queda si la API lo mandó para todas las columnas (la 64.2 no tiene 2007
+    a 2016 y la API manda esas filas vacías); uno que queda vacío sólo por
+    el corrimiento (el último, con la pobreza junto al desempleo) no.
+    """
+    width = max((len(r) for r in rows), default=1) - 1
+    by_date: dict[str, list[Any]] = {}
+    seen: dict[str, set[int]] = {}
+    for row in rows:
+        fecha = str(row[0])[:10]
+        for i in range(width):
+            target = _months_back(fecha, 6) if i in late else fecha
+            seen.setdefault(target, set()).add(i)
+            value = row[i + 1] if i + 1 < len(row) else None
+            if value is not None:
+                by_date.setdefault(target, [None] * width)[i] = value
+    for target, columns in seen.items():
+        if len(columns) == width:
+            by_date.setdefault(target, [None] * width)
+    return [[fecha, *values] for fecha, values in sorted(by_date.items())]
 
 
 def _missing_series(exc: Exception) -> list[str]:
@@ -816,8 +855,11 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
 
             # Pobreza e indigencia semestrales (ver _dated_one_semester_late):
             # la serie entera son unas 50 filas. Se confirma el corrimiento
-            # con la metadata, se fecha cada semestre por su primer día, como
-            # la fuente, y la ventana pedida se aplica sobre esas fechas.
+            # serie por serie con la metadata, se fechan los semestres de las
+            # confirmadas por su primer día, como la fuente, y la ventana
+            # pedida se aplica sobre esas fechas. Las demás columnas (otra
+            # semestral fechada por el inicio, el desempleo trimestral que la
+            # API promedia a semestres) quedan en su fecha.
             if _native_semesters(raw, series_ids):
                 plain = {
                     k: v
@@ -825,7 +867,8 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     if k not in ("start_date", "end_date", "representation_mode")
                 }
                 whole = raw if plain == params else await self._get_series(plain)
-                if _dated_one_semester_late(whole, series_ids):
+                late = _dated_one_semester_late(whole, series_ids)
+                if late:
                     if "representation_mode" in params:
                         whole = await self._get_series(
                             {**plain, "representation_mode": params["representation_mode"]}
@@ -835,10 +878,7 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     raw = whole
                     data = [
                         row
-                        for row in (
-                            [_months_back(str(r[0])[:10], 6), *r[1:]]
-                            for r in whole.get("data") or []
-                        )
+                        for row in _back_one_semester(whole.get("data") or [], late)
                         if (window_start is None or row[0] >= window_start)
                         and (window_end is None or row[0] <= window_end)
                     ]

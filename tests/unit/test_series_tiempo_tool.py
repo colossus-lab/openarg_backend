@@ -19,9 +19,10 @@
 - `la_fuente_llega_hasta` no es anterior al último dato aunque la metadata
   de la API esté atrasada, y `buscar_series` no presenta ese metadato como
   el fin de la serie;
-- la pobreza semestral llega con los semestres de la fuente, con `hasta` y
-  antes de que se publique el semestre siguiente, y un id inexistente vuelve
-  como pedido inválido y no como fuente caída (nueva_08);
+- la pobreza semestral llega con los semestres de la fuente, con `hasta`,
+  antes de que se publique el semestre siguiente y pedida junto con otras
+  series, y un id inexistente vuelve como pedido inválido y no como fuente
+  caída (nueva_08);
 - si la serie publicó algo después de lo traído, se dice cuál es el último
   dato (nueva_12);
 - series de distinta frecuencia pedidas juntas avisan que la API promedió;
@@ -48,6 +49,7 @@ from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
 from tests.unit.series_tiempo_fake import (
     ACTIVIDAD_ID,
+    DESEMPLEO_GRAN_ROSARIO_ID,
     DESEMPLEO_ID,
     EXPO_ID,
     GASTO_PIB_CIENCIA_ID,
@@ -56,6 +58,7 @@ from tests.unit.series_tiempo_fake import (
     GASTO_PIB_UNIVERSIDAD_ID,
     IPC_ID,
     POBREZA_GRAN_ROSARIO_ID,
+    POBREZA_GRAN_ROSARIO_PUNTUAL_ID,
     POBREZA_ID,
     RESERVAS_DIARIAS_ID,
     RESERVAS_ID,
@@ -64,11 +67,13 @@ from tests.unit.series_tiempo_fake import (
     TIPO_CAMBIO_ID,
     FakeSeriesApi,
     desempleo,
+    desempleo_gran_rosario,
     diaria,
     exportaciones_reales,
     gasto_pib,
     ipc_real,
     pobreza_con_metadata_atrasada,
+    pobreza_gran_rosario_puntual,
     pobreza_gran_rosario_real,
     reservas_diarias,
     reservas_mensuales,
@@ -632,6 +637,54 @@ async def test_la_variacion_de_la_pobreza_compara_los_semestres_pedidos() -> Non
         23.1,
         -17.79,
     )
+
+
+GRAN_ROSARIO_LABEL = (
+    "Población con ingresos debajo de línea de pobreza (%) desde 2003. Gran Rosario. EPH continua."
+)
+DESEMPLEO_GRAN_ROSARIO_LABEL = "Tasa de desempleo total Gran Rosario. En porcentaje."
+
+
+async def test_la_pobreza_pedida_con_otras_series_rotula_los_semestres_como_sola() -> None:
+    """Revisión de #166: la corrección de las fechas era todo o nada. Con el
+    desempleo trimestral, «pobreza y desempleo en Gran Rosario en 2025» daba
+    32,4 % (2S-2024) como 2025-S1; con la 64.1 de 2001-2003 (la que el
+    modelo mezcló en nueva_08), la continua salía corrida y la fuente
+    «llegaba» a 2026-07-01."""
+
+    def pobreza(payload: dict[str, Any]) -> list[tuple[str, float]]:
+        return [
+            (f["periodo"], f[GRAN_ROSARIO_LABEL])
+            for f in payload["filas"]
+            if f.get(GRAN_ROSARIO_LABEL) is not None
+        ]
+
+    ids = [POBREZA_GRAN_ROSARIO_ID, DESEMPLEO_GRAN_ROSARIO_ID]
+    api = FakeSeriesApi(pobreza_gran_rosario_real(), desempleo_gran_rosario())
+    con_desempleo, _ = await _run(api, {"ids": ids, "desde": "2025-01-01", "hasta": "2025-12-31"})
+    assert pobreza(con_desempleo) == [("2025-S1", 28.1), ("2025-S2", 22.3)]
+    assert [f[DESEMPLEO_GRAN_ROSARIO_LABEL] for f in con_desempleo["filas"]] == [7.4, 7.7]
+    # La variación del 1er semestre de 2025 al de 2026, también con las dos.
+    variacion, _ = await _run(
+        api, {"ids": ids, "variacion": {"desde": "2025-01", "hasta": "2026-06"}}
+    )
+    fila = next(f for f in variacion["filas"] if f["serie"] == GRAN_ROSARIO_LABEL)
+    assert (fila["valor_desde"], fila["valor_hasta"], fila["variacion_pct"]) == (
+        28.1,
+        23.1,
+        -17.79,
+    )
+
+    ids = [POBREZA_GRAN_ROSARIO_PUNTUAL_ID, POBREZA_GRAN_ROSARIO_ID]
+    api = FakeSeriesApi(pobreza_gran_rosario_puntual(), pobreza_gran_rosario_real())
+    con_puntual, _ = await _run(api, {"ids": ids, "desde": "2002-01-01", "hasta": "2004-12-31"})
+    assert pobreza(con_puntual)[0] == ("2003-S1", 54.6)
+    sin_rango, _ = await _run(api, {"ids": ids, "ultimos": 2})
+    assert [s["la_fuente_llega_hasta"] for s in sin_rango["por_serie"]] == [
+        "2003-05-01",
+        "2026-01-01",
+    ]
+    assert pobreza(sin_rango) == [("2025-S2", 22.3), ("2026-S1", 23.1)]
 
 
 async def test_un_id_inexistente_vuelve_como_pedido_invalido_y_no_como_fuente_caida() -> None:

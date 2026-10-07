@@ -34,7 +34,11 @@ Medido el 06-oct:
   fechan el 1er semestre de 2026 en 2026-01-01 y la API trae ese valor en la
   fila 2026-07-01. No es una metadata atrasada: ``last_value`` es el de la
   última fila (``serie(time_index_end=…)``). Una atrasada de verdad se
-  simula con ``last_value`` del período de ``time_index_end``;
+  simula con ``last_value`` del período de ``time_index_end``. Pedida junto
+  con otras, cada serie conserva su fecha: la 64.1 de 2001-2003 va por el
+  inicio del semestre y el desempleo trimestral promediado a semestres
+  también (2025-01-01 es el promedio del 1er y 2° trimestre de 2025), y la
+  pobreza sigue corrida en la misma fila;
 - un id que no existe da 400 con ``failed_series`` (sólo el primero que
   falta): ``{"errors": [{"error": "Serie inexistente: X"}],
   "failed_series": ["X"]}``;
@@ -372,6 +376,73 @@ def pobreza_gran_rosario_fuente() -> list[tuple[str, float]]:
     2026 (0,231) y 2024-01-01 el 1er semestre de 2024.
     """
     return [(f, v) for f, v in _pobreza_gran_rosario_grabada()["fuente_csv"]["data"]]
+
+
+POBREZA_GRAN_ROSARIO_PUNTUAL_ID = "64.1_GR_0_0_12"
+
+
+def pobreza_gran_rosario_puntual() -> dict[str, Any]:
+    """Pobreza de Gran Rosario de la EPH puntual (64.1, 2001-2003), API del 06-oct.
+
+    Semestral fechada por el inicio: la última fila es 2003-01-01 (61 %, la
+    onda de mayo de 2003) con time_index_end 2003-05-01 y last_value 0,61.
+    En nueva_08 el modelo mezcló su id con el de la 64.2.
+    """
+    return serie(
+        POBREZA_GRAN_ROSARIO_PUNTUAL_ID,
+        [
+            ("2001-01-01", 0.358),
+            ("2001-07-01", 0.412),
+            ("2002-01-01", 0.562),
+            ("2002-07-01", 0.609),
+            ("2003-01-01", 0.61),
+        ],
+        description=(
+            "Población con ingresos debajo de línea de pobreza (%) de 2001 a 2003. Gran Rosario. "
+            "EPH puntual."
+        ),
+        units="Porcentaje de población",
+        frequency="R/P6M",
+        is_updated=False,
+        dataset="Población con ingresos por debajo de la línea de pobreza. EPH puntual y continua.",
+        time_index_end="2003-05-01",
+    )
+
+
+DESEMPLEO_GRAN_ROSARIO_ID = "45.2_ECTDTGR_0_T_46"
+
+
+def desempleo_gran_rosario() -> dict[str, Any]:
+    """Desempleo de Gran Rosario (45.2, trimestral) desde 2023, API del 06-oct.
+
+    Junto con la pobreza, la API lo lleva a semestres promediando y lo fecha
+    por el inicio: 2025-01-01 = (0,071 + 0,0771) / 2 = 7,4 % y 2026-01-01 =
+    (0,082 + 0,115) / 2 = 9,85 %.
+    """
+    return serie(
+        DESEMPLEO_GRAN_ROSARIO_ID,
+        [
+            ("2023-01-01", 0.0791686257560138),
+            ("2023-04-01", 0.053),
+            ("2023-07-01", 0.0525881997580512),
+            ("2023-10-01", 0.047),
+            ("2024-01-01", 0.0559999999999999),
+            ("2024-04-01", 0.0723736257343959),
+            ("2024-07-01", 0.0579999999999999),
+            ("2024-10-01", 0.06),
+            ("2025-01-01", 0.071),
+            ("2025-04-01", 0.0770504140543383),
+            ("2025-07-01", 0.089),
+            ("2025-10-01", 0.065),
+            ("2026-01-01", 0.0819999999999999),
+            ("2026-04-01", 0.115),
+        ],
+        description="Tasa de desempleo total Gran Rosario. En porcentaje.",
+        units="Porcentaje",
+        frequency="R/P3M",
+        dataset="Principales variables ocupacionales. EPH continua. Desempleo",
+        value_range=(0.043, 0.229),
+    )
 
 
 def plazo_fijo_usd() -> dict[str, Any]:

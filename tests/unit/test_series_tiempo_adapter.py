@@ -25,7 +25,8 @@ Lo que se prueba:
   llega al `hasta` va marcada como inferida;
 - series de distinta frecuencia pedidas juntas marcan cuál promedió la API;
 - la pobreza semestral (63.2, 64.2), que la API fecha un semestre tarde,
-  sale fechada como la fuente, con y sin `desde`/`hasta` (nueva_08);
+  sale fechada como la fuente, con y sin `desde`/`hasta` (nueva_08), y
+  también pedida junto con otras series: se corrige serie por serie;
 - un id inexistente se distingue de una fuente caída.
 """
 
@@ -41,10 +42,12 @@ import pytest
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.infrastructure.adapters.connectors.series_tiempo_adapter import (
     SeriesTiempoAdapter,
+    _back_one_semester,
     _reaches_end,
 )
 from tests.unit.series_tiempo_fake import (
     ACTIVIDAD_ID,
+    DESEMPLEO_GRAN_ROSARIO_ID,
     DESEMPLEO_ID,
     DESOCUPACION_AGLOMERADO_ID,
     EMPLEO_ID,
@@ -56,6 +59,7 @@ from tests.unit.series_tiempo_fake import (
     HOGARES_POBRES_ID,
     IPC_ID,
     POBREZA_GRAN_ROSARIO_ID,
+    POBREZA_GRAN_ROSARIO_PUNTUAL_ID,
     POBREZA_ID,
     RESERVAS_DIARIAS_ID,
     RESERVAS_ID,
@@ -64,6 +68,7 @@ from tests.unit.series_tiempo_fake import (
     TIPO_CAMBIO_ID,
     FakeSeriesApi,
     desempleo,
+    desempleo_gran_rosario,
     diaria,
     exportaciones_reales,
     gasto_pib,
@@ -71,6 +76,7 @@ from tests.unit.series_tiempo_fake import (
     plazo_fijo_usd,
     pobreza_con_metadata_atrasada,
     pobreza_gran_rosario_fuente,
+    pobreza_gran_rosario_puntual,
     pobreza_gran_rosario_real,
     reservas_diarias,
     reservas_mensuales,
@@ -765,6 +771,132 @@ async def test_las_semestrales_fechadas_por_el_inicio_no_se_tocan() -> None:
 
     assert result is not None
     assert [r["fecha"] for r in result.records] == ["2002-07-01", "2003-01-01"]
+
+
+PUNTUAL_LABEL = (
+    "Población con ingresos debajo de línea de pobreza (%) de 2001 a 2003. Gran Rosario. "
+    "EPH puntual."
+)
+DESEMPLEO_GRAN_ROSARIO_LABEL = "Tasa de desempleo total Gran Rosario. En porcentaje."
+
+
+async def test_la_continua_se_corrige_junto_a_una_semestral_fechada_por_el_inicio() -> None:
+    """Revisión de #166: la corrección era todo o nada. Junto con la 64.1 de
+    2001-2003, fechada por el inicio, la 64.2 no se corregía y el 54,6 % del
+    1er semestre de 2003 salía en 2003-07-01. Se confirma serie por serie y
+    se retrocede sólo la columna corrida."""
+    ids = [POBREZA_GRAN_ROSARIO_PUNTUAL_ID, POBREZA_GRAN_ROSARIO_ID]
+    api = FakeSeriesApi(pobreza_gran_rosario_puntual(), pobreza_gran_rosario_real())
+    rango = {"start_date": "2002-01-01", "end_date": "2004-12-31"}
+    juntas = await api.adapter().fetch(ids, **rango)
+    sola = await api.adapter().fetch([POBREZA_GRAN_ROSARIO_ID], **rango)
+
+    assert juntas is not None and sola is not None
+    continua = [
+        ("2003-01-01", 54.6),
+        ("2003-07-01", 47.9),
+        ("2004-01-01", 42.0),
+        ("2004-07-01", 36.5),
+    ]
+    assert _filas(juntas) == continua
+    assert _filas(sola) == continua
+    # La puntual queda como viene, y el 1er semestre de 2003 de las dos va en
+    # la misma fila.
+    assert _filas(juntas, PUNTUAL_LABEL) == [
+        ("2002-01-01", 56.2),
+        ("2002-07-01", 60.9),
+        ("2003-01-01", 61.0),
+    ]
+    assert juntas.records[2] == {
+        "fecha": "2003-01-01",
+        PUNTUAL_LABEL: 61.0,
+        GRAN_ROSARIO_LABEL: 54.6,
+    }
+
+    # Sin rango, el fin de la continua es el de su metadata (2026-01-01), no
+    # la fila corrida.
+    sin_rango = await api.adapter().fetch(ids)
+    assert sin_rango is not None
+    assert _filas(sin_rango)[-1] == ("2026-01-01", 23.1)
+    assert sin_rango.metadata["ultima_observacion"] == "2026-01-01"
+    assert [s["fecha_fin_fuente"] for s in sin_rango.metadata["series"]] == [
+        "2003-05-01",
+        "2026-01-01",
+    ]
+
+
+async def test_la_pobreza_junto_al_desempleo_trimestral_se_corrige_en_su_columna() -> None:
+    """Revisión de #166: con una serie de otra frecuencia no se corregía nada.
+    La API lleva el desempleo a semestres fechándolo por el inicio y deja la
+    pobreza corrida: «pobreza y desempleo en Gran Rosario en 2025» daba
+    32,4 % (2S-2024) como 2025-S1, y la fila 2025-07-01 juntaba el 1er
+    semestre de pobreza con el 2° de desempleo."""
+    ids = [POBREZA_GRAN_ROSARIO_ID, DESEMPLEO_GRAN_ROSARIO_ID]
+    api = FakeSeriesApi(pobreza_gran_rosario_real(), desempleo_gran_rosario())
+
+    def filas(result: Any) -> list[tuple[str, float, float]]:
+        return [
+            (r["fecha"], r[GRAN_ROSARIO_LABEL], r[DESEMPLEO_GRAN_ROSARIO_LABEL])
+            for r in result.records
+        ]
+
+    del_2025 = await api.adapter().fetch(ids, start_date="2025-01-01", end_date="2025-12-31")
+    assert del_2025 is not None
+    assert filas(del_2025) == [("2025-01-01", 28.1, 7.4), ("2025-07-01", 22.3, 7.7)]
+    # El desempleo sigue marcado como promediado por la API.
+    assert [bool(s.get("promediada_por_api")) for s in del_2025.metadata["series"]] == [
+        False,
+        True,
+    ]
+
+    # Sin rango: el último semestre de cada una, en su fila, y la fila
+    # 2026-07-01 (la pobreza corrida, sin desempleo) desaparece.
+    sin_rango = await api.adapter().fetch(ids)
+    assert sin_rango is not None
+    assert filas(sin_rango)[-2:] == [("2025-07-01", 22.3, 7.7), ("2026-01-01", 23.1, 9.85)]
+    assert sin_rango.metadata["series"][0]["fecha_fin_fuente"] == "2026-01-01"
+
+    # Con una representación, cada columna contra su semestre anterior: la
+    # pobreza 0,281 / 0,324 − 1 y el desempleo 0,0740 / 0,059 − 1.
+    variacion = await api.adapter().fetch(
+        ids, start_date="2025-01-01", end_date="2025-12-31", representation="percent_change"
+    )
+    assert variacion is not None
+    assert filas(variacion) == [("2025-01-01", -13.27, 25.47), ("2025-07-01", -20.64, 4.02)]
+
+
+def test_al_correr_una_columna_las_filas_sin_dato_de_la_api_no_se_pierden() -> None:
+    # La API real manda las filas sin dato (la 64.2 de Gran Rosario no tiene
+    # del 1er semestre de 2007 al 1er semestre de 2016: 19 filas vacías); la
+    # falsa las descarta. Sola, cada fila va a su semestre, vacía o no.
+    sola = [["2006-07-01", 0.229], ["2007-01-01", None], ["2007-07-01", 0.21]]
+    assert _back_one_semester(sola, {0}) == [
+        ["2006-01-01", 0.229],
+        ["2006-07-01", None],
+        ["2007-01-01", 0.21],
+    ]
+    # Con el desempleo al lado, la última fila de la API (pobreza corrida y
+    # sin desempleo) queda vacía por el corrimiento y no se agrega.
+    juntas = [["2026-01-01", 0.223, 0.0985], ["2026-07-01", 0.231, None]]
+    assert _back_one_semester(juntas, {0}) == [
+        ["2025-07-01", 0.223, None],
+        ["2026-01-01", 0.231, 0.0985],
+    ]
+    # Con la 64.1 al lado (fechada por el inicio), el hueco de la 64.2 sigue
+    # empezando en el 1er semestre de 2007, no en el 2°; y la última fila,
+    # vacía sólo por el corrimiento, tampoco se agrega.
+    hueco = [
+        ["2006-07-01", None, 0.274],
+        ["2007-01-01", None, 0.229],
+        ["2007-07-01", None, None],
+        ["2008-01-01", None, None],
+    ]
+    assert _back_one_semester(hueco, {1}) == [
+        ["2006-01-01", None, 0.274],
+        ["2006-07-01", None, 0.229],
+        ["2007-01-01", None, None],
+        ["2007-07-01", None, None],
+    ]
 
 
 async def test_un_id_inexistente_no_es_una_fuente_caida() -> None:
