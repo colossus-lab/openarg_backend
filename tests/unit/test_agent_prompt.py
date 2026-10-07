@@ -98,16 +98,40 @@ def test_ninguna_frase_atribuye_causas_con_las_palabras_y_un_ejemplo_malo() -> N
     assert "o de lo que se dijo en una sesión, atribuido a quien lo dijo" in prompt
 
 
+def _regla_causal(prompt: str) -> str:
+    m = re.search(r"^- Fuera de esa cita.*?(?=^- )", prompt, re.MULTILINE | re.DOTALL)
+    assert m is not None
+    return m.group(0)
+
+
 def test_el_ejemplo_malo_del_prompt_lo_marca_el_control_y_el_bueno_no() -> None:
-    """El prompt y el control en sombra (``answers.neutrality``) dicen lo mismo."""
+    """Sólo los dos ejemplos. Lo demás que nombra la regla está en el test de
+    abajo; lo que el control no ve fuera de la regla, en el docstring de
+    ``answers.neutrality``."""
     from app.application.answers.neutrality import causal_phrases
 
-    prompt = system_prompt(date(2026, 10, 6))
-    mal = re.search(r'Mal: "(El salto cambiario[^"]+)"', prompt)
-    bien = re.search(r'Bien: "(En agosto de 2023[^"]+)"', prompt)
+    regla = _regla_causal(system_prompt(date(2026, 10, 6)))
+    mal = re.search(r'Mal: "([^"]+)"', regla)
+    bien = re.search(r'Bien: "([^"]+)"', regla)
     assert mal is not None and bien is not None
     assert causal_phrases(mal.group(1))
     assert causal_phrases(bien.group(1)) == []
+
+
+def test_el_control_marca_cada_frase_entre_comillas_de_la_regla() -> None:
+    """Revisión de #163: el control no veía «impulsó» ni «gracias a», que están
+    en la lista del prompt, ni las causas entre paréntesis o en tablas ni las
+    reglas generales. Cada frase entre comillas de la regla, salvo el ejemplo
+    bueno, tiene que salir en ``answers.causal``."""
+    from app.application.answers.neutrality import causal_phrases
+
+    regla = _regla_causal(system_prompt(date(2026, 10, 6)))
+    bien = re.search(r'Bien: "([^"]+)"', regla)
+    assert bien is not None
+    citas = [c for c in re.findall(r'"([^"]+)"', regla) if c != bien.group(1)]
+    assert len(citas) >= 13
+    sin_marcar = [c for c in citas if not causal_phrases(c)]
+    assert sin_marcar == []
 
 
 def test_lo_que_dijo_un_orador_va_atribuido_y_no_como_causa() -> None:

@@ -22,8 +22,9 @@ Cada turno:
    por defecto) sólo se registran en el log ``answers.verify``. Con ``off``
    no se verifica;
 6. salvo con ``off``, las frases causales de la respuesta («generó»,
-   «debido a»…) van al log ``answers.causal`` (``answers.neutrality``).
-   Nunca cambian la respuesta, tampoco con ``correct``.
+   «debido a»…), propias y atribuidas, van al log ``answers.causal``
+   (``answers.neutrality``; es una cota inferior). Nunca cambian la
+   respuesta, tampoco con ``correct``.
 
 Sólo con ``correct`` el verificador decide además qué se cita: las fuentes,
 los gráficos, el mapa, `served_table`, las citas estructuradas y la evidencia
@@ -61,7 +62,7 @@ from app.application.answers.engine import (
     EngineResult,
     StatusEvent,
 )
-from app.application.answers.neutrality import causal_phrases
+from app.application.answers.neutrality import scan_causal
 from app.application.answers.pricing import cost_usd
 from app.application.answers.prompt import FINAL_ROUND_NOTE, system_prompt, user_message
 from app.application.answers.tools import build_tools
@@ -678,16 +679,20 @@ def _causal_log(mode: str, answer: str) -> None:
 
     Sólo el log: la respuesta sale igual en todos los modos. Una línea JSON
     por respuesta que tenga alguna, con o sin datos leídos (nueva_24 contestó
-    sin ninguna herramienta).
+    sin ninguna herramienta): ``frases`` las propias y ``atribuidas`` las que
+    van con un «según», un «dijo»… o entre comillas.
     """
     try:
-        phrases = causal_phrases(answer)
+        phrases, attributed = scan_causal(answer)
     except Exception:
         logger.warning("agent: causal phrase check failed", exc_info=True)
         return
-    if phrases:
+    if phrases or attributed:
         logger.info(
-            "answers.causal %s", json.dumps({"modo": mode, "frases": phrases}, ensure_ascii=False)
+            "answers.causal %s",
+            json.dumps(
+                {"modo": mode, "frases": phrases, "atribuidas": attributed}, ensure_ascii=False
+            ),
         )
 
 
