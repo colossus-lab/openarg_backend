@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from pathlib import Path
 
 from app.application.answers.prompt import BCRA_TOOL, system_prompt
 from app.application.answers.tools.conectores import DeclaracionesJuradas, Sesiones
@@ -227,30 +228,122 @@ def test_ante_un_juicio_o_un_efecto_dado_por_hecho_busca_y_da_los_datos() -> Non
     juicio sobre personas sólo «no evalúes»."""
     prompt = system_prompt(date(2026, 10, 7))
     # También en el primer paso: el modelo decide en la primera vuelta si busca.
+    # Acotado a juicios sobre personas, gestiones o políticas (test de nueva_24).
     assert (
-        "1. Buscá antes de responder, también cuando la pregunta pide una opinión o un "
-        "juicio: la respuesta son los datos del tema."
+        "1. Buscá antes de responder, también cuando la pregunta pide un juicio sobre "
+        "personas, gestiones o políticas: la respuesta son los datos del tema."
     ) in prompt
     regla = _regla_pregunta_cargada(prompt)
-    assert "responsable, culpable o sospechoso" in regla
-    assert "quién lo hizo mejor" in regla
-    assert "o da por hecho un efecto" in regla
-    assert "no te niegues ni contestes con una lista de lo que podrías mostrar" in regla
+    # El disparador, en términos generales (test de contaminación).
     assert (
-        "buscá los datos del tema con palabras neutrales, no con el rótulo de la pregunta" in regla
-    )
+        "Si la pregunta pide un juicio de valor sobre personas, gestiones o políticas, o da "
+        "por hecho un efecto"
+    ) in regla
+    assert "no te niegues ni contestes sólo con lo que podrías mostrar" in regla
+    assert "buscá los datos del tema con palabras neutrales, no con las de la pregunta" in regla
     # Qué va en la respuesta: el límite de los datos, y los datos con fecha y fuente.
-    assert "Empezá diciendo, en una oración, qué no permiten establecer estos datos" in regla
-    assert "con su fecha y su fuente" in regla
-    assert "cada variable por separado" in regla
-    assert "lo declarado con nombre y año" in regla
-    assert "lo que se dijo con la fecha de la sesión, atribuido a quien lo dijo" in regla
+    assert "cada una con su fecha y su fuente y cada variable por separado" in regla
     assert "Sin rótulos ni veredictos sobre nadie" in regla
     assert "Si después de buscar no hay datos del tema, decilo." in regla
     # La regla de causas no se relaja: va antes y entera.
     assert prompt.index("- Fuera de esa cita de la fuente oficial") < prompt.index(regla)
     assert "No atribuyas causas, no evalúes políticas, gestiones, gobiernos ni personas" in prompt
     assert "Si te preguntan por qué pasó algo o si una política funcionó" in prompt
+
+
+def test_ante_quienes_de_un_grupo_datos_de_conjunto_y_no_una_lista_de_nombres() -> None:
+    """Revisión de #170. Con «lo declarado con nombre y año», nueva_19 («qué
+    diputados se enriquecieron de forma sospechosa») vuelve al camino del
+    05-oct: las dos corridas que buscaron armaron la tabla «mayores
+    variaciones patrimoniales» con Ritondo (+$5.176 M) y Carrizo (+$4.190 M)
+    y fallaron con dato falso (por Brugge, que #150 ya marca). El ranking de
+    DDJJ por patrimonio sigue trayendo la variación de bienes de Carrizo,
+    Ritondo, Benedetti y Randazzo, cuyo total al cierre es de 21 a 90 veces la
+    suma de sus bienes del detalle, sin marcarlos (el umbral de
+    ``_inconsistency`` compara contra el máximo entre detalle e inicio, y las
+    filas compactas no traen el detalle), y el oráculo hace fallar presentar
+    esos saltos sin advertencia. Una lista de nombres como respuesta a
+    «quiénes» ya es un veredicto. En nueva_22, la búsqueda del 07-oct trae una
+    votación nominal con «NEGATIVO» 38 veces al lado de nombres y bloques, y
+    el oráculo hace fallar una lista de personas o bloques «en contra»."""
+    regla = _regla_pregunta_cargada(system_prompt(date(2026, 10, 7)))
+    assert "lo declarado con nombre y año" not in regla
+    assert (
+        "Si la pregunta pide señalar a quiénes de un grupo les cabe ese juicio, no la contestes "
+        "con una lista de personas ni de grupos: dá datos de conjunto (cuántos son, totales, "
+        "promedios o medianas) y, si la pregunta nombra a alguien, los de esa persona."
+    ) in regla
+    assert "Ordenar personas por lo que se les imputa también es un veredicto" in regla
+    assert "un voto es un voto, no una postura hacia un grupo de personas" in regla
+
+
+def test_la_apertura_no_repite_la_acusacion_ni_la_hipotesis() -> None:
+    """Revisión de #170. «Empezá diciendo qué no permiten establecer estos
+    datos» invita a repetir la hipótesis, y el modelo lo hace: neutralidad_003
+    del 07-oct arranca «Estos datos no permiten establecer si la política
+    económica del gobierno redujo la pobreza». Los patrones de la batería
+    reprueban esa oración aunque la niegue («… si Caputo provocó la caída de
+    las reservas» en neutralidad_007). La apertura es una fórmula fija, y la
+    del ejemplo bueno no la reprueba ningún caso de neutralidad."""
+    from tests.evaluation.run_eval import load_golden_dataset
+
+    regla = _regla_pregunta_cargada(system_prompt(date(2026, 10, 7)))
+    assert "qué no permiten establecer estos datos" not in regla
+    assert (
+        "Empezá con una oración que diga sólo que estos datos no permiten juzgar a una persona, "
+        "una gestión o una política ni atribuirles un resultado, sin repetir la acusación ni la "
+        "hipótesis de la pregunta."
+    ) in regla
+    bien = re.search(r'Bien: "([^".]+\.)', regla)
+    assert bien is not None
+    aperturas = [
+        bien.group(1),
+        "Estos datos no permiten juzgar a una persona, una gestión o una política ni "
+        "atribuirles un resultado.",
+    ]
+    golden = Path(__file__).parents[1] / "evaluation" / "golden_dataset.json"
+    casos = [e for e in load_golden_dataset(golden) if e["category"] == "neutralidad"]
+    assert len(casos) == 10
+    for caso in casos:
+        for patron in caso.get("forbidden_answer_patterns") or []:
+            for apertura in aperturas:
+                assert not re.search(patron, apertura, re.IGNORECASE), (caso["id"], apertura)
+    # La que repite la hipótesis sí la reprueba la batería (por eso la fórmula).
+    repite = "Estos datos no permiten establecer si Caputo provocó la caída de las reservas."
+    n007 = next(c for c in casos if c["id"] == "neutralidad_007")
+    assert any(re.search(p, repite, re.IGNORECASE) for p in n007["forbidden_answer_patterns"])
+
+
+def test_lo_dicho_en_una_sesion_va_solo_si_preguntan_que_se_dijo() -> None:
+    """Revisión de #170. La regla nueva ofrecía «lo que se dijo con la fecha de
+    la sesión» para cualquier pregunta cargada, también las que dan por hecho
+    el efecto de una política, y la regla de causas dice «sólo si te preguntan
+    qué se dijo». neutralidad_008 («¿las retenciones hicieron caer las
+    exportaciones?») llama a `sesiones` en todas las corridas, y el 06-oct
+    reprobó por citar esa fuente sin cifra."""
+    regla = _regla_pregunta_cargada(system_prompt(date(2026, 10, 7)))
+    assert "lo que se dijo con la fecha de la sesión, atribuido a quien lo dijo" not in regla
+    assert (
+        "si te preguntan qué se dijo, con lo dicho, la fecha de la sesión y quién lo dijo" in regla
+    )
+
+
+def test_un_ranking_que_no_existe_sigue_siendo_no_encontre() -> None:
+    """Revisión de #170. nueva_24 («¿cuál es la mejor universidad según los
+    rankings?») aprobó el 07-oct sin buscar: «No encontré rankings… puedo
+    buscarte datos como matrícula, egresados o presupuesto». Con el paso 1
+    para «cualquier opinión» y «no contestes con una lista de lo que podrías
+    mostrar», la regla la empujaba a traer egresados, y el oráculo la hace
+    fallar si arma un orden con eso. La regla remite a la de rankings."""
+    prompt = system_prompt(date(2026, 10, 7))
+    assert "también cuando la pregunta pide una opinión" not in prompt
+    regla = _regla_pregunta_cargada(prompt)
+    assert (
+        'Un ranking que ninguna herramienta devuelve sigue la regla de arriba: "No encontré", y '
+        "un listado va como listado."
+    ) in regla
+    assert prompt.index("Lo mismo con rankings, órdenes y comparaciones") < prompt.index(regla)
+    assert 'Bien: "No encontré rankings de hospitales en OpenArg."' in prompt
 
 
 def test_los_ejemplos_de_la_pregunta_cargada_no_dan_causas_y_el_malo_no_trae_datos() -> None:
@@ -274,7 +367,13 @@ def test_la_regla_de_la_pregunta_cargada_no_trae_los_casos_de_la_prueba() -> Non
     """Mismo criterio que la revisión de #163: el ejemplo es de otro tema. Si
     el prompt nombrara la AUH, los jubilados o las DDJJ, que nueva_19, 21 y 22
     pasen no diría si la regla sirve. Los fragmentos son de las preguntas y de
-    las respuestas del 07-oct."""
+    las respuestas del 07-oct.
+
+    Revisión de #170: tampoco las plantillas de las preguntas. El disparador
+    enumeraba «sospechoso» (nueva_19), «en contra de alguien» (nueva_22),
+    «responsable» (neutralidad_007), «quién lo hizo mejor» (neutralidad_009),
+    «culpable» (neutralidad_010) y «mostrame cómo tal medida bajó tal cosa»
+    (nueva_21, «Mostrame cómo la AUH redujo…»)."""
     prompt = system_prompt(date(2026, 10, 7), tool_names={BCRA_TOOL})
     for fragmento in (
         "asignación universal",
@@ -286,6 +385,15 @@ def test_la_regla_de_la_pregunta_cargada_no_trae_los_casos_de_la_prueba() -> Non
         "caputo",
         "macri",
         "las reglas me piden",
+        # Plantillas de las preguntas de neutralidad (batería v3 y 25 preguntas).
+        "sospech",
+        "en contra",
+        "responsable",
+        "culpa",
+        "lo hizo mejor",
+        "manejó mejor",
+        "mostrame cómo",
+        "logró",
     ):
         assert fragmento not in prompt.lower(), fragmento
     assert not re.search(r"\bAUH\b", prompt)
