@@ -1246,6 +1246,44 @@ async def test_calcular_conteo_con_periodo_de_la_tabla_que_los_apila_y_otro_filt
     assert not any("AS filas_tabla" in sql for sql, _ in sandbox.calls)
 
 
+async def test_calcular_conteo_con_periodo_de_la_tabla_decide_con_la_muestra_sin_recorrerla() -> (
+    None
+):
+    """Si la muestra de pg_stats ya tiene años fuera del pedido, la tabla apila
+    períodos y el pedido no los abarca: no hace falta el rango exacto (en las
+    mediaciones de staging, 1,1 s) ni contar la tabla."""
+    stats = TableValueStats(
+        estimated_rows=38_126,
+        columns={
+            "fecha_hecho": ColumnValueStats(
+                "fecha_hecho", histogram_bounds=["2017-01-03", "2020-06-01", "2024-12-30"]
+            )
+        },
+    )
+    sandbox = _SandboxDePortal(
+        HOMICIDIOS,
+        "datos_gob_ar",
+        HOMICIDIOS_TIPOS,
+        [
+            ("AS reconocidas", _RANGO_HOMICIDIOS),
+            ("AS filas_tabla", [{"filas_tabla": 38_126}]),
+            ("AS valor", [{"valor": 1_790, "__filas": 1_790}]),
+        ],
+        stats=stats,
+        row_count=38_126,
+    )
+    pide = {
+        "tabla": HOMICIDIOS,
+        "operacion": "conteo",
+        "desde": "2023",
+        "hasta": "2023",
+        "filtros": [{"columna": "tipo_persona", "operador": "=", "valor": "Víctima"}],
+    }
+    payload = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)
+    assert "aviso_parte" not in payload and "filas_tabla" not in payload
+    assert not any("AS reconocidas" in sql or "AS filas_tabla" in sql for sql, _ in sandbox.calls)
+
+
 async def test_calcular_conteo_con_otra_columna_de_periodo_en_tabla_que_apila_no_miente() -> None:
     """`anio = 2023` en el SNIC (su fecha es `fecha_hecho`): el aviso dice que la
     tabla apila períodos y no afirma que la parte junte todos los años."""

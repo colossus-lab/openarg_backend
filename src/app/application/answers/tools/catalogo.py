@@ -68,6 +68,7 @@ from app.application.consultas.preparar import (
     estadisticas,
     filas_estimadas,
     preparar,
+    rango_de_muestra,
 )
 from app.application.consultas.sugerencias import diagnosticar_vacio
 from app.application.public_catalog import (
@@ -789,12 +790,20 @@ async def _forma_de_la_tabla(
     query: AggregateQuery,
     propia: ColumnaFecha | None,
     periodo_propio: bool,
+    *,
+    con_muestra: bool = False,
 ) -> _Forma:
     """Si la tabla apila períodos, según su propia columna de fecha.
 
     ``propia`` es la que reconoce ``resolver_columna_fecha`` sin lo que haya
     pedido el modelo en ``columna_fecha``; ``periodo_propio``, si
     ``desde``/``hasta`` va sobre ella.
+
+    ``con_muestra``: si la muestra de ``pg_stats`` ya tiene dos períodos y el
+    pedido no la abarca, la tabla apila períodos y el pedido no los abarca a
+    todos (el rango real contiene al de la muestra): se decide sin recorrer
+    la tabla. Lo usa el pedido con un período de la tabla, donde ``apila`` no
+    avisa (en las mediaciones, 914 mil filas, el rango exacto tarda 1,1 s).
     """
     if propia is None or propia.atributo:
         # Sin fecha, la tabla es una sola foto, salvo que una columna con
@@ -806,6 +815,21 @@ async def _forma_de_la_tabla(
         if dudosas:
             return _Forma("dudosa", dudosas=tuple(dict.fromkeys(dudosas))[:3])
         return _Forma("foto", motivo="no tiene columna de fecha")
+    nombre = _lista([propia.nombre, propia.mes] if propia.mes else [propia.nombre])
+    if con_muestra:
+        try:
+            muestra = await rango_de_muestra(sandbox, tabla, propia)
+        except Exception:
+            logger.warning("calcular: no se pudo leer la muestra de %s", tabla, exc_info=True)
+            muestra = None
+        if (
+            muestra is not None
+            and muestra[0] != muestra[1]
+            and not (periodo_propio and abarca_rango(query.desde, query.hasta, *muestra))
+        ):
+            return _Forma(
+                "apila", columna=nombre, desde=muestra[0], hasta=muestra[1], aproximado=True
+            )
     try:
         periodo = await describir_periodo(
             sandbox, tabla, propia, timeout_seconds=TIMEOUT_CONFIRMAR_S
@@ -814,7 +838,6 @@ async def _forma_de_la_tabla(
         # El cálculo ya está hecho: no se lo pierde por un dato del aviso.
         logger.warning("calcular: no se pudo leer el período de %s", tabla, exc_info=True)
         periodo = Periodo()
-    nombre = _lista([propia.nombre, propia.mes] if propia.mes else [propia.nombre])
     if periodo.desde is None or periodo.hasta is None:
         return _Forma("dudosa", dudosas=(propia.nombre,))
     # Un rango de una muestra, o con valores que no se leyeron como fecha, no
@@ -957,7 +980,9 @@ async def _aviso_parte(
     if periodo_propio or filtro_propio:
         # Un período de una tabla que los apila, más otros filtros: contar sin
         # el período tampoco da un total. Se mira antes de contar la tabla.
-        forma = await _forma_de_la_tabla(sandbox, tabla, query, propia, periodo_propio)
+        forma = await _forma_de_la_tabla(
+            sandbox, tabla, query, propia, periodo_propio, con_muestra=True
+        )
         if forma.clase in ("apila", "dudosa"):
             return None, None
     exacto, estimada = await _filas_de_la_tabla(sandbox, tabla)

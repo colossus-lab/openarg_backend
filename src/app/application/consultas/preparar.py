@@ -337,6 +337,16 @@ def con_formato(fecha: ColumnaFecha, stats: TableValueStats | None) -> ColumnaFe
     return replace(fecha, formato=formato) if formato else fecha
 
 
+async def rango_de_muestra(sandbox: Any, tabla: str, fecha: ColumnaFecha) -> tuple[str, str] | None:
+    """El rango de la columna de fecha en la muestra de ``pg_stats``, sin recorrer
+    la tabla (milisegundos), o None si no hay muestra.
+
+    Los valores de la muestra son de la tabla: el rango real lo contiene.
+    """
+    stats = await estadisticas(sandbox, tabla, [fecha.nombre])
+    return _rango_de_muestra(con_formato(fecha, stats), stats)
+
+
 def _rango_de_muestra(fecha: ColumnaFecha, stats: TableValueStats | None) -> tuple[str, str] | None:
     lectura = lectura_de(fecha.formato)
     muestra = _muestra_de(fecha.nombre, stats)
