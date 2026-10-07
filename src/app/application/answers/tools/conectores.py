@@ -1074,7 +1074,8 @@ class DeclaracionesJuradas:
         description=(
             "Declaraciones juradas patrimoniales de diputados nacionales (Oficina "
             "Anticorrupción). `buscar` por nombre, `ranking` por patrimonio, ingresos o bienes, "
-            "`estadisticas` para totales generales (incluye cuántos tienen patrimonio negativo). "
+            "`estadisticas` para totales generales (`cantidad_con_patrimonio_negativo` es "
+            "cuántos tienen patrimonio negativo). "
             "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
             "ni lo atribuyas a nada. La cifra de una persona va con su nombre y el año de la "
             "DDJJ. Si la pregunta pide señalar a quiénes les cabe un juicio, no contestes con "

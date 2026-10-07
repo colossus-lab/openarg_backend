@@ -51,6 +51,7 @@ sale cuando ``fecha_nacimiento`` cuenta como fecha):
 from __future__ import annotations
 
 import json
+import statistics
 from unittest.mock import MagicMock
 
 import pytest
@@ -259,6 +260,39 @@ def test_las_estadisticas_se_calculan_sin_la_inconsistente(adapter: DDJJAdapter)
     assert "sin 1 declaración" in result.metadata["description"]
 
 
+def test_la_mediana_con_una_cantidad_par_promedia_los_dos_centrales() -> None:
+    """Verificación sin LLM de #170 (07-oct): ``patrimonios[n // 2]`` es el
+    valor central de arriba cuando n es par. Con las 194 DDJJ que quedan sin
+    la excluida, daba 101,9 M y la mediana es 98,9 M (3 % de diferencia; el
+    oráculo de nueva_19 tolera 0,5 %). Coincidía con la mediana de las 195
+    por casualidad. La excluida tampoco entra en la mediana ni en el conteo de
+    patrimonios negativos."""
+    a = DDJJAdapter()
+    a._loaded = True
+    a._dataset = [
+        _ddjj("A", inicio=10 * M, cierre=10 * M, detalle=[10 * M], deudas=30 * M),  # −20 M
+        _ddjj("B", inicio=10 * M, cierre=10 * M, detalle=[10 * M], deudas=15 * M),  # −5 M
+        _ddjj("C", inicio=40 * M, cierre=40 * M, detalle=[40 * M]),
+        _ddjj("D", inicio=900 * M, cierre=900 * M, detalle=[900 * M]),
+        CARGA_ERRONEA,  # 31.000 M que no cierran: afuera
+    ]
+    result = a.stats()
+    [stats] = result.records
+    # Cuatro que cierran: −20, −5, 40 y 900. La mediana es (−5 + 40) / 2.
+    assert stats["patrimonio_mediano"] == pytest.approx(17.5 * M)
+    assert stats["cantidad_con_patrimonio_negativo"] == 2
+    # El mínimo es una persona, no el conteo (ddjj_004 del 07-oct: «el
+    # diputado con patrimonio negativo es 1», y son 2).
+    assert stats["patrimonio_minimo_monto"] == pytest.approx(-20 * M)
+    assert "cantidad con patrimonio negativo" in result.metadata["description"]
+
+    # Con una cantidad impar, el del medio.
+    a._dataset = a._dataset[1:]
+    [stats] = a.stats().records
+    assert stats["patrimonio_mediano"] == pytest.approx(40 * M)
+    assert stats["cantidad_con_patrimonio_negativo"] == 1
+
+
 def test_el_motivo_se_lo_atribuye_al_dataset_no_a_la_persona(adapter: DDJJAdapter) -> None:
     """No se verificó si el error viene de la Oficina Anticorrupción o de la conversión."""
     [row] = adapter.search("lopez").records
@@ -421,6 +455,23 @@ def test_real_las_estadisticas_no_las_infla_la_carga_erronea(real: DDJJAdapter) 
     assert "BRUGGE" not in json.dumps(stats)
 
 
+def test_real_la_mediana_y_los_patrimonios_negativos(real: DDJJAdapter) -> None:
+    """Las dos cifras de `estadisticas` que la descripción manda a decir ante
+    «quiénes» (nueva_19) y la que promete (cuántos tienen patrimonio
+    negativo), contra el dataset del repo: 194 DDJJ sin la excluida, un
+    número par. El oráculo de nueva_19 cuenta 2 con patrimonio negativo."""
+    [stats] = real.stats().records
+    usables = [
+        r["patrimonioCierre"] for r in real._dataset if r["nombre"] != "BRUGGE JUAN FERNANDO"
+    ]
+    assert len(usables) == 194
+    assert stats["patrimonio_mediano"] == pytest.approx(statistics.median(usables))
+    assert stats["patrimonio_mediano"] == pytest.approx(98_920_452.2, abs=0.01)
+    # Lo que devolvía antes: el central de arriba.
+    assert stats["patrimonio_mediano"] != pytest.approx(101_905_165.53, rel=0.005)
+    assert stats["cantidad_con_patrimonio_negativo"] == 2
+
+
 def test_real_los_rankings_que_no_la_incluian_no_la_nombran(real: DDJJAdapter) -> None:
     """Brugge quedaba en el puesto 195 por menor patrimonio y en el 35 por ingresos."""
     asc = real.ranking(sort_by="patrimonio", top=3, order="asc")
@@ -504,6 +555,23 @@ async def test_herramienta_estadisticas_no_le_pasa_el_nombre(real: DDJJAdapter) 
     [fila] = json.loads(out.content)["filas"]
     assert fila["excluidas_por_inconsistencia"] == 1
     assert "BRUGGE" not in out.content
+
+
+async def test_herramienta_estadisticas_trae_lo_que_promete_la_descripcion(
+    real: DDJJAdapter,
+) -> None:
+    """La descripción prometía «cuántos tienen patrimonio negativo» y la fila
+    no lo traía: el 07-oct, ddjj_004 contestó «el diputado con patrimonio
+    negativo es 1» y ddjj_003 «al menos 1», tomando el mínimo como conteo."""
+    out = await DeclaracionesJuradas().run({"accion": "estadisticas"}, _ctx(real))
+    [fila] = json.loads(out.content)["filas"]
+    description = DeclaracionesJuradas.spec.description
+    assert "`cantidad_con_patrimonio_negativo` es cuántos tienen patrimonio negativo" in description
+    assert fila["cantidad_con_patrimonio_negativo"] == 2
+    # Lo que la descripción manda a decir ante «quiénes»: el total, el
+    # promedio y la mediana, con su año.
+    for campo in ("total", "patrimonio_promedio", "patrimonio_mediano", "anio"):
+        assert campo in fila, campo
 
 
 async def test_herramienta_ranking_ascendente_sin_aviso(real: DDJJAdapter) -> None:
