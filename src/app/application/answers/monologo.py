@@ -27,8 +27,9 @@ peor que dejar un preámbulo):
 
 - los párrafos del principio que narran el proceso (``_PROCESO``, o que
   nombran una herramienta), si no tienen negrita (la cifra principal va en
-  negrita, por el prompt) ni dicen «No encontré…», y si después queda algo
-  que no es preámbulo;
+  negrita, por el prompt) ni dicen que el dato falta («No encontré…», «No
+  hay dato para…», «No existe…»: ``_FALTA_EL_DATO``), y si después queda
+  algo que no es preámbulo;
 - la raya que separaba ese preámbulo de la respuesta;
 - en el resto, los nombres de herramientas, cambiados por lo que son para
   quien lee.
@@ -45,8 +46,9 @@ from collections.abc import Iterator
 
 # Narrar el proceso, sobre el párrafo en minúsculas y sin tildes. Un "no"
 # adelante es una respuesta, no un proceso: «No tengo todos los datos de
-# 2026», «No voy a usar proyecciones privadas».
-_NO = r"(?<!\bno )(?<!\bnunca )"
+# 2026», «No voy a usar proyecciones privadas», «No hago pronósticos ni voy a
+# usar proyecciones privadas».
+_NO = r"(?<!\bno )(?<!\bnunca )(?<!\bni )(?<!\btampoco )"
 _PROCESO = re.compile(
     r"\bhmm+\b"
     r"|^(?:perfecto|excelente|listo)\b"
@@ -63,11 +65,27 @@ _PROCESO = re.compile(
     r"|\b(?:armo|armar|redacto|redactar|preparo|preparar|aclaro|incluyo) (?:la|en la) respuesta\b"
     r"|\b(?:aqui|aca) (?:va|esta|tenes) la respuesta\b"
     r"|\brespuesta final\b"
-    rf"|^con (?:los|estos|esos|todos los) datos\b[^.]*{_NO}\bpuedo\b"
+    # Sin pasar por encima de un «no puedo» de la misma oración: «Con los
+    # datos disponibles no puedo calcular X, pero puedo mostrar…» es la
+    # respuesta.
+    rf"|^con (?:los|estos|esos|todos los) datos\b(?:(?!\bno puedo\b)[^.])*{_NO}\bpuedo\b"
     r"|\b(?:el|la) (?:total|dato|respuesta|cifra) (?:es|esta|queda) clar[oa]\b"
     r"|\bturnos? de herramientas\b"
 )
-_NO_ENCONTRE = re.compile(r"\bno (?:lo |la |los |las )?encontre\b")
+# Decir que el dato falta es la respuesta: lo que pide el prompt («No
+# encontré…», «No hay dato para Pinamar: …», «OpenArg todavía no lo cubre»)
+# y sus variantes. Un párrafo así no se saca aunque además narre: «No hay
+# dato para Misiones. Voy a usar la del Noreste:» se borraba entero y la
+# cifra del Noreste quedaba como la pedida (revisión de #165).
+_FALTA_EL_DATO = re.compile(
+    r"\bno (?:lo |la |los |las )?(?:encontre|cubre)\b"
+    r"|\bno hay\b"
+    r"|\bno exist(?:e|en)\b"
+    r"|\bno (?:esta|estan) disponibles?\b"
+    r"|\bno (?:puedo|pude|es posible) (?:responder|calcular|dar|decir|informar|confirmar)\b"
+    r"|\bno (?:tengo|cuento con|dispongo de)\b"
+    r"|\bno permiten?\b"
+)
 
 # Lo que es cada herramienta para quien lee. Un test exige que estén todas.
 NOMBRES_PUBLICOS = {
@@ -121,9 +139,9 @@ def _bloques(texto: str) -> Iterator[tuple[int, int]]:
 
 def _es_proceso(parrafo: str) -> bool:
     plano = _plano(parrafo)
-    # Con negrita o con «No encontré…» (lo que pide el prompt cuando falta el
-    # dato) el párrafo es la respuesta, aunque además narre.
-    if "**" in parrafo or _NO_ENCONTRE.search(plano):
+    # Con negrita o diciendo que el dato falta el párrafo es la respuesta,
+    # aunque además narre.
+    if "**" in parrafo or _FALTA_EL_DATO.search(plano):
         return False
     return bool(_PROCESO.search(plano) or _HERRAMIENTA.search(parrafo))
 

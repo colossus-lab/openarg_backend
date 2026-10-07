@@ -138,6 +138,53 @@ def test_una_respuesta_sin_preambulo_no_cambia(texto: str) -> None:
     assert sin_monologo(texto) == texto
 
 
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # Revisión de #165: el mismo par que «No encontré la serie de
+        # Misiones…», con otra forma de decir que falta el dato. Se borraba
+        # el primer párrafo y la cifra del Noreste quedaba como la pedida.
+        "No hay dato para Misiones. Voy a usar la del Noreste:\n\n- **1,75 %** en agosto.",
+        "No existe una serie de Misiones. Voy a usar la del Noreste:\n\n- **1,75 %** en agosto.",
+        "No está disponible la serie de Misiones. Voy a usar la del Noreste:\n\n- **1,75 %**.",
+        "No tengo la serie de Misiones, así que voy a usar la del Noreste:\n\n- **1,75 %**.",
+        "Ya tengo los dos saldos, pero no pude calcular la variación:\n\n- **$47.451.537 M**.",
+        # Variantes mínimas de respuestas reales (nueva_17, nueva_25 y negativo_003).
+        "No hay dato de desempleo para Villa Gesell: la EPH no releva ese partido, así que voy "
+        "a usar el de la región pampeana como referencia.\n\nEn la región pampeana la "
+        "desocupación fue **7,1 %** en el 2.º trimestre de 2026 (INDEC, EPH).",
+        "No hay información suficiente para responder sobre la ocupación de Airbnb en "
+        "Bariloche: ese dato no está en los portales de datos abiertos.\n\nLo más cercano es la "
+        "**Encuesta de Ocupación Hotelera (EOH)** del INDEC.",
+        "Noto que el Estudio Nacional sobre el Perfil de las Personas con Discapacidad no tiene "
+        "columnas de partido: no hay dato para Pinamar.\n\nPara el total del país, el estudio "
+        "estima **3.571.983 personas** con dificultad (2018).",
+        # «ni» y «tampoco» niegan como «no» (nueva_23).
+        "No hago pronósticos ni voy a usar proyecciones privadas.\n\nLo que sí puedo decirte es "
+        "**a cuánto está el dólar oficial hoy**: $1.540 (venta) al 06/10/2026.",
+        "No hago pronósticos y tampoco voy a usar proyecciones privadas.\n\nEl último dato es "
+        "**$1.540** (venta) al 06/10/2026.",
+        # «Con los datos … puedo» no vale si antes dice «no puedo» (nueva_09).
+        "Con los datos disponibles no puedo calcular la variación de la base monetaria, pero "
+        "puedo mostrarte los dos saldos que informa el BCRA:\n\n- 31/12/2025: **$42.956.965 "
+        "millones**\n- 31/08/2026: **$47.451.537 millones**",
+        "Con los datos disponibles no puedo hacer esa cuenta, pero puedo mostrarte los dos "
+        "saldos:\n\n- 31/08/2026: **$47.451.537 millones**",
+    ],
+)
+def test_un_parrafo_que_dice_que_falta_el_dato_no_se_saca(texto: str) -> None:
+    assert sin_monologo(texto) == texto
+
+
+def test_si_dice_que_falta_el_dato_solo_se_cambia_el_nombre_de_la_herramienta() -> None:
+    texto = (
+        "No existe una serie del IPC de Misiones en series_tiempo: el INDEC publica sólo el "
+        "total nacional y las regiones.\n\nEn el Noreste (que incluye a Misiones) la inflación "
+        "de agosto de 2026 fue **1,75 %**."
+    )
+    assert sin_monologo(texto) == texto.replace("series_tiempo", "la API de Series de Tiempo")
+
+
 def test_los_nombres_de_herramientas_se_cambian_por_lo_que_son() -> None:
     texto = (
         "**USD 48.657 millones** al 2 de octubre, según `variables_bcra`.\n\n"
