@@ -214,8 +214,9 @@ def test_el_viejo_responde_reservas_con_la_diaria(texto: str) -> None:
     "texto",
     [
         "¿Cuál es la tasa de actividad según la última EPH?",
-        # Con «EPH» la /search de la API trae sólo la anual 42.1, que termina
-        # en 2025, y nunca la trimestral (medido el 07-oct contra la API).
+        # Con «EPH» la /search de la API nunca trae la trimestral del total:
+        # casi siempre, sólo la anual 42.1, que termina en 2025 (medido el
+        # 07-oct contra la API).
         "tasa de actividad EPH",
         "EPH tasa de actividad trimestral",
         "tasas de actividad",

@@ -443,11 +443,12 @@ SERIES_CATALOG: dict[str, dict] = {
         "default_collapse": "month",
     },
     # Prueba de calidad del 07-oct (nueva_10): con «EPH» en el texto, la
-    # /search de la API trae sólo la anual 42.1_EPAT_0_A_27 (hasta 2025) y
-    # nunca la trimestral. El modelo leyó esa anual y una copia guardada de la
-    # trimestral que terminaba en el 1.er trimestre de 2026, y lo dio como el
-    # último dato (el 05-oct, igual). La anual promedia los cuatro trimestres
-    # (2025: 48,38). Va al final: el pipeline viejo toma la primera entrada.
+    # /search de la API nunca trae la trimestral del total; casi siempre, sólo
+    # la anual 42.1_EPAT_0_A_27 (hasta 2025). El modelo leyó esa anual y una
+    # copia guardada de la trimestral que terminaba en el 1.er trimestre de
+    # 2026, y lo dio como el último dato (el 05-oct, igual). La anual promedia
+    # los cuatro trimestres (2025: 48,38). Va al final: el pipeline viejo toma
+    # la primera entrada.
     "actividad": {
         "ids": ["43.2_ECTAT_0_T_33"],
         "description": (
