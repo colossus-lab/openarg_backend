@@ -729,14 +729,15 @@ class ObtenerDatos:
 # ── calcular ───────────────────────────────────────────────
 
 
-async def _filas_de_la_tabla(sandbox: Any, tabla: str) -> tuple[int | None, int | None]:
+async def _filas_de_la_tabla(
+    sandbox: Any, tabla: str, estimada: int | None
+) -> tuple[int | None, int | None]:
     """Las filas de toda la tabla: (conteo exacto, estimación de Postgres).
 
     El conteo exacto sólo en las tablas chicas (``es_tolerante``): en una de
     millones de filas el ``count(*)`` pasaría el tope. Ahí, o si el conteo
     falla, queda sólo la estimación (None si tampoco la hay).
     """
-    estimada = filas_estimadas(await estadisticas(sandbox, tabla, []), None)
     if not es_tolerante(estimada):
         return None, estimada
     sql = f"SELECT count(*) AS filas_tabla FROM {quote_qualified(tabla)}"
@@ -896,6 +897,7 @@ async def _forma_de_la_tabla(
     periodo_propio: bool,
     *,
     con_muestra: bool = False,
+    recorrer: bool = True,
 ) -> _Forma:
     """Si la tabla apila períodos, según su propia columna de fecha.
 
@@ -908,32 +910,47 @@ async def _forma_de_la_tabla(
     todos (el rango real contiene al de la muestra): se decide sin recorrer
     la tabla. Lo usa el pedido con un período de la tabla, donde ``apila`` no
     avisa (en las mediaciones, 914 mil filas, el rango exacto tarda 1,1 s).
+
+    ``recorrer``: False en una tabla de un millón de filas o más
+    (``es_tolerante``, el mismo corte que el conteo exacto de
+    ``_filas_de_la_tabla``). Ahí el rango exacto tarda segundos, y muchas
+    veces llega al tope de 5 s para terminar en el de la muestra
+    (verificación de #171: los movimientos pecuarios del SENASA, 10,8 M de
+    filas, y las transferencias del registro automotor, 9,4 M; de 8 tablas de
+    1,2 a 3 M de filas en staging, 4 llegaron al tope y las otras tardaron de
+    1,5 a 2,5 s). Se usa directamente el de la muestra, como aproximado.
     """
     if propia is None or propia.atributo:
         return await _forma_sin_fecha(sandbox, tabla, query, propia)
     nombre = _lista([propia.nombre, propia.mes] if propia.mes else [propia.nombre])
-    if con_muestra:
+    muestra: tuple[str, str] | None = None
+    if con_muestra or not recorrer:
         try:
             muestra = await rango_de_muestra(sandbox, tabla, propia)
         except Exception:
             logger.warning("calcular: no se pudo leer la muestra de %s", tabla, exc_info=True)
-            muestra = None
         if (
-            muestra is not None
+            con_muestra
+            and muestra is not None
             and muestra[0] != muestra[1]
             and not (periodo_propio and abarca_rango(query.desde, query.hasta, *muestra))
         ):
             return _Forma(
                 "apila", columna=nombre, desde=muestra[0], hasta=muestra[1], aproximado=True
             )
-    try:
-        periodo = await describir_periodo(
-            sandbox, tabla, propia, timeout_seconds=TIMEOUT_CONFIRMAR_S
+    if not recorrer:
+        periodo = (
+            Periodo(desde=muestra[0], hasta=muestra[1], aproximado=True) if muestra else Periodo()
         )
-    except Exception:
-        # El cálculo ya está hecho: no se lo pierde por un dato del aviso.
-        logger.warning("calcular: no se pudo leer el período de %s", tabla, exc_info=True)
-        periodo = Periodo()
+    else:
+        try:
+            periodo = await describir_periodo(
+                sandbox, tabla, propia, timeout_seconds=TIMEOUT_CONFIRMAR_S
+            )
+        except Exception:
+            # El cálculo ya está hecho: no se lo pierde por un dato del aviso.
+            logger.warning("calcular: no se pudo leer el período de %s", tabla, exc_info=True)
+            periodo = Periodo()
     if periodo.desde is None or periodo.hasta is None:
         return _Forma("dudosa", dudosas=(propia.nombre,))
     # Un rango de una muestra, o con valores que no se leyeron como fecha, no
@@ -1080,21 +1097,27 @@ async def _aviso_parte(
         # Sólo el período de la tabla: si dejó filas afuera, son de otros
         # períodos, y si no, no hay nada que avisar. Sin consultas de más.
         return None, None
+    estimada = filas_estimadas(await estadisticas(sandbox, tabla, []), None)
+    # En una tabla grande no se recorre la tabla para el aviso: ni el conteo
+    # ni el rango de fechas (ver `_forma_de_la_tabla`).
+    recorrer = es_tolerante(estimada)
     forma: _Forma | None = None
     if periodo_propio or filtro_propio:
         # Un período de una tabla que los apila, más otros filtros: contar sin
         # el período tampoco da un total. Se mira antes de contar la tabla.
         forma = await _forma_de_la_tabla(
-            sandbox, tabla, query, propia, periodo_propio, con_muestra=True
+            sandbox, tabla, query, propia, periodo_propio, con_muestra=True, recorrer=recorrer
         )
         if forma.clase in ("apila", "dudosa"):
             return None, None
-    exacto, estimada = await _filas_de_la_tabla(sandbox, tabla)
+    exacto, estimada = await _filas_de_la_tabla(sandbox, tabla, estimada)
     filas = exacto if exacto is not None else estimada
     if not filas or filas <= total:
         return None, None
     if forma is None:
-        forma = await _forma_de_la_tabla(sandbox, tabla, query, propia, periodo_propio)
+        forma = await _forma_de_la_tabla(
+            sandbox, tabla, query, propia, periodo_propio, recorrer=recorrer
+        )
     filtradas = [f.columna for f in req.filtros] + ([fecha_pedida] if fecha_pedida else [])
     aviso = _texto_aviso_parte(
         forma,

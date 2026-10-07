@@ -1750,3 +1750,65 @@ async def test_calcular_conteo_en_tabla_sin_fecha_dice_foto_solo_con_la_muestra(
     }
     aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
     assert esperado in aviso
+
+
+# ── verificación de #171: en una tabla grande, el rango de la muestra ──────
+#
+# Los movimientos pecuarios del SENASA en staging (el mart
+# `magyp_senasa_movimientos_pecuarios`, 10,8 M de filas): el rango exacto de
+# `fecha` cortaba a los 5 s y terminaba en el de la muestra, que ya estaba en
+# milisegundos. Acá, como tabla del catálogo (el doble no resuelve marts).
+
+SENASA = "raw.magyp__movimientos_pecuarios__1a2b3c4d__v1"
+SENASA_TIPOS = [("fecha", "text"), ("especie", "text")]
+SENASA_STATS = TableValueStats(
+    estimated_rows=10_790_326,
+    columns={
+        "fecha": ColumnValueStats(
+            "fecha", histogram_bounds=["2013-01", "2014-06", "2016-03", "2018-12"]
+        )
+    },
+)
+
+
+@pytest.mark.parametrize(
+    ("pide", "aviso"),
+    [
+        (
+            {"filtros": [{"columna": "especie", "operador": "=", "valor": "bovinos"}]},
+            "La tabla apila períodos en «fecha» (aproximadamente de 2013-01 a 2018-12, según una "
+            "muestra)",
+        ),
+        # El período sobre la fecha de la tabla abarca la muestra: sin el rango
+        # exacto no se sabe si abarca toda la tabla, y no avisa.
+        (
+            {
+                "desde": "2013",
+                "hasta": "2018",
+                "filtros": [{"columna": "especie", "operador": "=", "valor": "bovinos"}],
+            },
+            None,
+        ),
+    ],
+)
+async def test_calcular_conteo_en_tabla_grande_usa_el_rango_de_la_muestra(
+    pide: dict[str, Any], aviso: str | None
+) -> None:
+    sandbox = _SandboxDePortal(
+        SENASA,
+        "magyp",
+        SENASA_TIPOS,
+        [
+            ("AS reconocidas", "Query timed out after 5 seconds."),
+            ("AS valor", [{"valor": 8_926_938, "__filas": 8_926_938}]),
+        ],
+        stats=SENASA_STATS,
+        row_count=0,
+    )
+    pide = {"tabla": SENASA, "operacion": "conteo", **pide}
+    payload = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)
+    assert not any("AS reconocidas" in sql or "AS filas_tabla" in sql for sql, _ in sandbox.calls)
+    if aviso is None:
+        assert "aviso_parte" not in payload
+    else:
+        assert aviso in payload["aviso_parte"]
