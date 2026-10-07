@@ -9,6 +9,8 @@
 - ok.1: `describir_tabla` no se cae si falla la consulta del período.
 - Prueba del 06-oct (nueva_16): `describir_tabla` con `row_count` 0 en el
   catálogo, y el aviso geográfico de una tabla de un portal provincial.
+- Revisión de #165: un conteo del catálogo que Postgres no confirma, y una
+  tabla cortada en el tope del colector.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from app.domain.ports.sandbox.sql_sandbox import (
     CachedTableInfo,
     ColumnValueStats,
     SandboxResult,
+    TableProfile,
     TableSource,
     TableValueStats,
 )
@@ -655,15 +658,148 @@ async def test_describir_tabla_sin_conteo_ni_estimacion_lo_dice() -> None:
     assert out.summary == "Revisó «Tarifa Social Eléctrica 2022»"
 
 
-async def test_describir_tabla_con_conteo_en_el_catalogo_no_pide_estimacion() -> None:
+async def test_describir_tabla_con_el_conteo_del_catalogo_confirmado_no_avisa() -> None:
+    """Antes este test fijaba creerle al catálogo aunque Postgres dijera otra
+    cosa (catálogo 4.794, estimación 1). La revisión de #165 mostró que el
+    conteo del catálogo también está mal cuando no es 0: ahora vale sólo si
+    Postgres dice lo mismo (ver el test siguiente)."""
     sandbox = _SandboxDePortal(
-        TARIFA, "mendoza", TARIFA_TIPOS, [], stats=TableValueStats(estimated_rows=1), row_count=4794
+        TARIFA,
+        "mendoza",
+        TARIFA_TIPOS,
+        [],
+        stats=TableValueStats(estimated_rows=4794),
+        row_count=4794,
     )
     out = await DescribirTabla().run({"tabla": TARIFA}, _ctx(sandbox))
     payload = json.loads(out.content)
     assert payload["filas"] == 4794
     assert "filas_estimadas" not in payload and "aviso_filas" not in payload
     assert out.summary == "Revisó «Tarifa Social Eléctrica 2022» (4.794 filas)"
+
+
+async def test_describir_tabla_con_un_conteo_viejo_en_el_catalogo_da_la_estimacion() -> None:
+    """Revisión de #165: la Tarifa Social Eléctrica de Mendoza 2019 anuncia
+    107.067 filas en `raw.cached_datasets` y tiene 7.065 (`count(*)` y
+    `reltuples`, staging). En staging, 1.482 de las 11.491 tablas listas con
+    conteo en el catálogo no coinciden con `reltuples`; en una muestra de 45
+    tablas en que no coincidían, `reltuples` era el `count(*)` en 44."""
+    sandbox = _SandboxDePortal(
+        "raw.mendoza__tarifa_social_electrica_2019__613931d3__v1",
+        "mendoza",
+        TARIFA_TIPOS,
+        [],
+        stats=TableValueStats(estimated_rows=7065),
+        row_count=107_067,
+    )
+    out = await DescribirTabla().run(
+        {"tabla": "raw.mendoza__tarifa_social_electrica_2019__613931d3__v1"}, _ctx(sandbox)
+    )
+    payload = json.loads(out.content)
+    assert payload["filas"] is None
+    assert payload["filas_estimadas"] == 7065
+    assert "estimación" in payload["aviso_filas"] and "calcular" in payload["aviso_filas"]
+    assert "107" not in out.content and "107" not in (out.summary or "")
+    assert out.summary == "Revisó «Tarifa Social Eléctrica 2022» (unas 7.065 filas)"
+
+
+async def test_describir_tabla_sin_estimacion_usa_el_conteo_del_catalogo() -> None:
+    """Sin estadísticas (tabla bloqueada, o nunca analizada) no hay contra qué
+    comparar: queda el conteo del catálogo, como antes."""
+    sandbox = _SandboxDePortal(TARIFA, "mendoza", TARIFA_TIPOS, [], stats=None, row_count=4794)
+    out = await DescribirTabla().run({"tabla": TARIFA}, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas"] == 4794 and "aviso_filas" not in payload
+    assert out.summary == "Revisó «Tarifa Social Eléctrica 2022» (4.794 filas)"
+
+
+class _SandboxConPerfil(_SandboxDePortal):
+    """Con lo que registró el colector de la versión viva (`table_profiles`)."""
+
+    def __init__(self, *args: Any, perfil: TableProfile, **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        self.perfil = perfil
+
+    async def table_profiles(self, names: list[str]) -> dict[str, TableProfile]:
+        return {self.perfil.table_name: self.perfil}
+
+
+DEFUNCIONES = "raw.caba__defunciones__91003a9e__v1"
+DEFUNCIONES_TIPOS = [("anio", "bigint"), ("causa", "text"), ("sexo", "text")]
+
+
+@pytest.mark.parametrize(
+    ("row_count", "estimada", "perfil", "tope"),
+    [
+        # Revisión de #165: catálogo en 0 y `reltuples` en el tope (211 tablas
+        # en staging, entre ellas caba__defunciones y caba__elecciones_2015).
+        (0, 500_000, None, "500.000"),
+        # Catálogo y Postgres de acuerdo en el tope: antes no avisaba nada.
+        (500_000, 500_000, None, "500.000"),
+        # Marcada cortada y con `reltuples` estimado debajo del tope (42 en
+        # staging): el tope sale de las filas de la versión viva.
+        (0, 499_986, TableProfile("caba__defunciones__91003a9e__v1", 500_000, True), "500.000"),
+        # Un tope de otra época del colector.
+        (2_500_000, 2_500_000, None, "2.500.000"),
+    ],
+)
+async def test_describir_tabla_cortada_en_el_tope_no_pide_contar_el_total(
+    row_count: int, estimada: int, perfil: TableProfile | None, tope: str
+) -> None:
+    """Revisión de #165: a una tabla que el colector cortó en el tope le
+    decía «Para un total, contalo con calcular (operacion=conteo)». Ese
+    conteo es el tope, no el total de la fuente."""
+    kw: dict[str, Any] = {"stats": TableValueStats(estimated_rows=estimada), "row_count": row_count}
+    if perfil is None:
+        sandbox: _SandboxDePortal = _SandboxDePortal(
+            DEFUNCIONES, "caba", DEFUNCIONES_TIPOS, [], **kw
+        )
+    else:
+        sandbox = _SandboxConPerfil(DEFUNCIONES, "caba", DEFUNCIONES_TIPOS, [], perfil=perfil, **kw)
+    out = await DescribirTabla().run({"tabla": DEFUNCIONES}, _ctx(sandbox))
+    payload = json.loads(out.content)
+    # Lo guardado es justo el tope, aunque `reltuples` lo estime un poco debajo.
+    assert payload["filas"] == int(tope.replace(".", "")) and "filas_estimadas" not in payload
+    aviso = payload["aviso_filas"]
+    assert f"cortada en {tope} filas" in aviso
+    assert "no el total de la fuente" in aviso
+    assert "Para un total" not in aviso
+    assert out.summary == f"Revisó «Tarifa Social Eléctrica 2022» (al menos {tope} filas)"
+
+
+async def test_un_conteo_viejo_del_catalogo_en_el_tope_no_marca_cortada_la_tabla() -> None:
+    """Si Postgres dice otra cosa, el 500.000 del catálogo es de otra versión."""
+    sandbox = _SandboxDePortal(
+        DEFUNCIONES,
+        "caba",
+        DEFUNCIONES_TIPOS,
+        [],
+        stats=TableValueStats(estimated_rows=7065),
+        row_count=500_000,
+    )
+    out = await DescribirTabla().run({"tabla": DEFUNCIONES}, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["filas"] is None and payload["filas_estimadas"] == 7065
+    assert "cortada" not in payload["aviso_filas"]
+    assert out.summary == "Revisó «Tarifa Social Eléctrica 2022» (unas 7.065 filas)"
+
+
+async def test_describir_tabla_marcada_cortada_sin_tope_conocido_lo_dice_sin_numero() -> None:
+    perfil = TableProfile("caba__defunciones__91003a9e__v1", None, True)
+    sandbox = _SandboxConPerfil(
+        DEFUNCIONES,
+        "caba",
+        DEFUNCIONES_TIPOS,
+        [],
+        perfil=perfil,
+        stats=TableValueStats(estimated_rows=491_667),
+        row_count=0,
+    )
+    out = await DescribirTabla().run({"tabla": DEFUNCIONES}, _ctx(sandbox))
+    payload = json.loads(out.content)
+    assert payload["aviso_filas"].startswith("La tabla está cortada:")
+    assert "Para un total" not in payload["aviso_filas"]
+    assert out.summary == "Revisó «Tarifa Social Eléctrica 2022» (al menos 491.667 filas)"
 
 
 async def test_describir_tabla_de_un_portal_provincial_no_dice_nacional() -> None:

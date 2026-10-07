@@ -45,7 +45,7 @@ from app.application.answers.tools.base import (
     str_arg,
     to_json,
 )
-from app.application.catalog.collapse import collapse_hits
+from app.application.catalog.collapse import _ROW_CAPS, collapse_hits
 from app.application.catalog.national_prior import NATIONAL_PORTALS, national_prior
 from app.application.consultas.agregar import PedidoAgregado, agregar
 from app.application.consultas.fechas import aviso_lectura_fecha
@@ -70,7 +70,7 @@ from app.application.public_catalog import (
 )
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.agent_llm import AgentTool
-from app.domain.ports.sandbox.sql_sandbox import MartInfo
+from app.domain.ports.sandbox.sql_sandbox import MartInfo, TableProfile
 from app.domain.value_objects.table_reference import bare_name
 
 logger = logging.getLogger(__name__)
@@ -376,6 +376,20 @@ def _nivel_del_portal(portal: str) -> str | None:
     return f"lo que cubre el portal «{portal}»"
 
 
+async def _perfil(sandbox: Any, tabla: str) -> TableProfile | None:
+    """Lo que registró el colector de la versión viva (filas, si quedó
+    cortada), o None si el sandbox no lo da o falla: describe igual."""
+    getter = getattr(sandbox, "table_profiles", None)
+    if getter is None:
+        return None
+    try:
+        perfiles: dict[str, TableProfile] = await getter([tabla])
+    except Exception:
+        logger.warning("describir_tabla: no se pudo leer el perfil de %s", tabla, exc_info=True)
+        return None
+    return perfiles.get(bare_name(tabla))
+
+
 def _aviso_geografico(portal: str) -> str:
     nivel = _nivel_del_portal(portal)
     if nivel is None:
@@ -447,14 +461,33 @@ class DescribirTabla:
                 if isinstance(col, dict) and col.get("name") and col.get("description"):
                     described[str(col["name"])] = str(col["description"])[:200]
 
-        # Un `row_count` 0 del catálogo no es una tabla vacía: en staging lo
-        # tienen 18.134 de 31.236 tablas listas con filas (chequeo del 06-oct),
-        # y `"filas": 0` es lo que el modelo leía. Sin conteo, la estimación de
-        # Postgres (`reltuples`), dicha como tal.
-        filas = table.row_count or None
-        estimadas = (
-            None if filas else filas_estimadas(await estadisticas(sandbox, table.name, []), None)
-        )
+        # El conteo del catálogo no es confiable. Un `row_count` 0 no es una
+        # tabla vacía: en staging lo tienen 18.134 de 31.236 tablas listas con
+        # filas (chequeo del 06-oct). Y uno distinto de 0 puede ser viejo:
+        # 1.482 de 11.491 no coinciden con Postgres, y la Tarifa Social
+        # Eléctrica de Mendoza 2019 anuncia 107.067 filas y tiene 7.065
+        # (revisión de #165). En una muestra de 45 que no coincidían,
+        # `reltuples` era el `count(*)` en 44. Así que el del catálogo va como
+        # conteo sólo si Postgres dice lo mismo (o no dice nada); si no, la
+        # estimación de Postgres, dicha como tal.
+        estimada = filas_estimadas(await estadisticas(sandbox, table.name, []), None)
+        catalogo = table.row_count or None
+        if catalogo and estimada in (None, catalogo):
+            filas, estimadas = catalogo, None
+        else:
+            filas, estimadas = None, estimada
+        # Una tabla que el colector cortó en el tope: contarla da el tope, no
+        # el total de la fuente. En staging, 499 tablas listas tienen
+        # `reltuples` en un tope y 303 están marcadas como cortadas, 42 de
+        # ellas con `reltuples` fuera de los topes (revisión de #165).
+        # Sólo cuentan los números de la tabla viva: un conteo viejo del
+        # catálogo en el tope no dice que la de hoy esté cortada.
+        perfil = None if table.mart else await _perfil(sandbox, table.name)
+        en_tope = (filas, perfil.rows if perfil else None, estimada)
+        tope = next((n for n in en_tope if n in _ROW_CAPS), None)
+        cortada = tope is not None or bool(perfil and perfil.truncated)
+        if tope:
+            filas, estimadas = tope, None  # lo guardado es justo el tope
 
         weights = [c for c in names if _WEIGHT_RE.match(c)]
         geo = [c for c in names if _GEO_RE.search(c)]
@@ -480,6 +513,14 @@ class DescribirTabla:
         }
         if estimadas:
             payload["filas_estimadas"] = estimadas
+        if cortada:
+            en = f" en {count(tope, 'fila', 'filas')}" if tope else ""
+            payload["aviso_filas"] = (
+                f"La tabla está cortada{en}: OpenArg guardó sólo las primeras filas del archivo "
+                "de la fuente. Un conteo o una suma sobre esta tabla da lo guardado, no el total "
+                "de la fuente: no lo presentes como total."
+            )
+        elif estimadas:
             payload["aviso_filas"] = (
                 "El catálogo no tiene la cantidad exacta de filas: filas_estimadas es una "
                 "estimación de la base. Para un total, contalo con calcular (operacion=conteo)."
@@ -503,7 +544,9 @@ class DescribirTabla:
             )
         if not geo:
             payload["aviso_geografico"] = _aviso_geografico(table.portal)
-        if filas:
+        if cortada and (tope or filas or estimadas):
+            tamano = f" (al menos {count(tope or filas or estimadas, 'fila', 'filas')})"
+        elif filas:
             tamano = f" ({count(filas, 'fila', 'filas')})"
         elif estimadas:
             tamano = f" (unas {count(estimadas, 'fila', 'filas')})"
