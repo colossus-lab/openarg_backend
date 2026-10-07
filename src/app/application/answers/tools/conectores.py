@@ -803,7 +803,7 @@ def _complete_periods_note(
 
     Con la frase genérica sola, el modelo seguía tomando 2024 como «el último
     año completo» de exportaciones y decía que la fila 2025 traía «los meses
-    ya publicados» (batería v3, series_012: 05 y 06-oct, tres corridas). Leía
+    ya publicados» (batería v3, series_012: las dos corridas del 06-oct). Leía
     `ultima_observacion` 2025-01-01, un día de enero, y `la_fuente_llega_hasta`
     2026-08-01 sobre filas anuales. Con `records`, y desde series mensuales o
     trimestrales, se nombra el último período completo con sus meses y se
