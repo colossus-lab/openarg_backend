@@ -272,7 +272,13 @@
      "dólar oficial",
      "cotización oficial"
     ],
-    "dólar"
+    [
+     "dólar",
+     "USD",
+     "US$",
+     "A 3500",
+     "A3500"
+    ]
    ],
    "expected_sources": [
     "Series de Tiempo"
@@ -288,7 +294,7 @@
     ]
    ],
    "must_deflect": false,
-   "rationale": "En 2 de 3 corridas del 01-oct dijo \"dólar oficial\" en vez de \"tipo de cambio\", que es lo mismo: se aceptan las dos."
+   "rationale": "En 2 de 3 corridas del 01-oct dijo \"dólar oficial\" en vez de \"tipo de cambio\", que es lo mismo: se aceptan las dos. El 06-oct (staging, ola 3) dio la serie mensual del BCRA en \"$/USD\", con los cierres de cada mes exactos, y falló por no escribir \"dólar\": USD y US$ son el código y el símbolo de la misma moneda. Una respuesta correcta del 05-oct tampoco los escribía: la tabla decía \"Mayorista (A 3500)\". La Comunicación A 3500 es el tipo de cambio de referencia del dólar mayorista que publica el BCRA. El caso no controla cifras: el cierre de cada mes sólo lo mira el juez de alucinación."
   },
   {
    "id": "series_003",
@@ -405,8 +411,10 @@
    "question": "Cómo está el EMAE este año?",
    "expected_intent": "emae",
    "expected_answer_contains": [
-    "EMAE",
-    "actividad"
+    [
+     "EMAE",
+     "Estimador Mensual de Actividad"
+    ]
    ],
    "expected_sources": [
     "Series de Tiempo"
@@ -420,7 +428,8 @@
      "datos_gob_ar"
     ]
    ],
-   "must_deflect": false
+   "must_deflect": false,
+   "rationale": "Pedía \"EMAE\" y además \"actividad\". El 05-oct y el 06-oct (staging) dio la variación interanual de cada mes de 2026, exacta contra la API de Series de Tiempo, y falló por no escribir \"actividad\". Ahora sólo se pide nombrar el indicador, por sigla o por nombre. El caso no controla ninguna cifra: una respuesta que nombra al EMAE y da otro indicador (\"el EMAE no se publicó; el IPI cayó 2,2 %\") aprueba; antes fallaba sólo si además no escribía \"actividad\". Por el mismo motivo pasan a aprobar dos corridas viejas (agent_haiku_x3 corrida 2 y legacy_normal_x3 corrida 0) que leen como dinámica los niveles de la serie original, sin desestacionalizar: dicen \"pico en mayo\", y en la desestacionalizada el pico es marzo. Otras cuatro con la misma lectura ya aprobaban porque decían \"actividad\". Para frenarlas hace falta un oráculo de cifras, y eso queda pendiente (ver test_eval_bateria_sinonimos.py)."
   },
   {
    "id": "series_007",
@@ -514,7 +523,10 @@
    "question": "Dólar CCL hoy",
    "expected_intent": "dolar",
    "expected_answer_contains": [
-    "CCL"
+    [
+     "CCL",
+     "contado con liqui"
+    ]
    ],
    "expected_sources": [
     "ArgentinaDatos"
@@ -526,7 +538,8 @@
      "argentina_datos"
     ]
    ],
-   "must_deflect": false
+   "must_deflect": false,
+   "rationale": "El 06-oct (staging, ola 3) contestó \"el dólar contado con liquidación cotiza hoy… $1.610,80\", el valor de DolarApi de ese día, y falló por no escribir la sigla. \"contado con liqui\" cubre \"liquidación\", \"liquidacion\" y \"liqui\"; el MEP o el blue siguen fallando."
   },
   {
    "id": "argentina_datos_004",
