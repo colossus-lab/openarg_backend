@@ -54,6 +54,7 @@ IPC_ID = "148.3_INIVELNAL_DICI_M_26"
 RESERVAS_ID = "174.1_RRVAS_IDOS_0_0_36"
 TIPO_CAMBIO_ID = "92.2_TIPO_CAMBIION_0_0_21_24"
 EXPO_ID = "74.3_IET_0_M_16"
+IMPO_ID = "74.3_IIT_0_M_25"
 DESEMPLEO_ID = "45.2_ECTDT_0_T_33"
 ACTIVIDAD_ID = "43.2_ECTAT_0_T_33"
 EMPLEO_ID = "42.3_EPH_PUNTUATAL_0_M_24"
@@ -172,6 +173,15 @@ def exportaciones_reales() -> dict[str, Any]:
     diciembre: 7.049,0 → 7.482,4 (+6,15 %).
     """
     return _grabada("expo_74_3.json", EXPO_ID)
+
+
+def importaciones_reales() -> dict[str, Any]:
+    """Importaciones totales (74.3) de 2023-01 a 2026-08, grabadas de la API el 06-oct.
+
+    Suma 2024: 60.775,6 (saldo 2024 con las exportaciones: 18.927,6); suma
+    2025: 75.791,1.
+    """
+    return _grabada("impo_74_3.json", IMPO_ID)
 
 
 def desempleo() -> dict[str, Any]:

@@ -532,7 +532,9 @@ class SeriesTiempo:
             payload["nota"] = " ".join(
                 n for n in (payload.get("nota"), _dropped_frequency_note(dropped)) if n
             )
-        complete = _complete_periods_note(result.metadata or {}, frequency)
+        complete = _complete_periods_note(
+            result.metadata or {}, frequency, result.records, iso_date(kwargs["end_date"])
+        )
         if complete:
             payload["periodos"] = complete
         return ToolOutcome(to_json(payload), results=[result])
@@ -731,7 +733,7 @@ class SeriesTiempo:
             payload["sin_dato"] = missing
         if notes:
             payload["nota"] = " ".join(notes)
-        complete = _complete_periods_note(meta, applied_frequency)
+        complete = _complete_periods_note(meta, applied_frequency, result.records, end_bounds[1])
         if complete:
             payload["periodos"] = complete
         payload.update(_freshness_for_model(computed.metadata))
@@ -764,9 +766,32 @@ _COLLAPSE_NOUNS = {
     "year": (12, "años", "año"),
 }
 _NATIVE_MONTHS = {"mensual": 1, "trimestral": 3, "semestral": 6, "anual": 12}
+# Lo que junta un período agregado, por los meses de la serie original. Las
+# semestrales no: la pobreza del INDEC fecha cada semestre por el día
+# siguiente a su fin y la API agrupa por la fecha.
+_NATIVE_NOUNS = {1: "meses", 3: "trimestres"}
+_MESES = (
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
 
 
-def _complete_periods_note(meta: dict[str, Any], frequency: str | None) -> str | None:
+def _complete_periods_note(
+    meta: dict[str, Any],
+    frequency: str | None,
+    records: list[dict[str, Any]] | None = None,
+    until: str | None = None,
+) -> str | None:
     """Que la API agrega sólo períodos completos, dicho para que el modelo no lo verifique.
 
     Medido el 05-oct: con `collapse` la API deja afuera el período en curso
@@ -775,19 +800,102 @@ def _complete_periods_note(meta: dict[str, Any], frequency: str | None) -> str |
     después de «exportaciones 2025, year+sum» el modelo pedía los 12 meses
     para comprobar que el año estaba entero: una vuelta más. Sólo desde
     series mensuales o más gruesas (de una diaria no está medido).
+
+    Con la frase genérica sola, el modelo seguía tomando 2024 como «el último
+    año completo» de exportaciones y decía que la fila 2025 traía «los meses
+    ya publicados» (batería v3, series_012: 05 y 06-oct, tres corridas). Leía
+    `ultima_observacion` 2025-01-01, un día de enero, y `la_fuente_llega_hasta`
+    2026-08-01 sobre filas anuales. Con `records`, y desde series mensuales o
+    trimestrales, se nombra el último período completo con sus meses y se
+    dice por qué el siguiente, del que la fuente ya tiene datos, no tiene fila.
+    Sólo si la ventana pedida (`until`, el `hasta` como fecha) no lo deja
+    afuera: con hasta=2023-12-31, 2024 falta por la ventana y no por estar
+    incompleto.
     """
     nouns = _COLLAPSE_NOUNS.get(frequency or "")
     if nouns is None or meta.get(_DROPPED_FREQUENCY):
         return None
     target, plural, singular = nouns
-    natives = [
-        _NATIVE_MONTHS.get(str(s.get("frecuencia")))
-        for s in meta.get("series") or []
-        if isinstance(s, dict)
-    ]
+    series = [s for s in meta.get("series") or [] if isinstance(s, dict)]
+    natives = [_NATIVE_MONTHS.get(str(s.get("frecuencia"))) for s in series]
     if not natives or any(n is None or n >= target for n in natives):
         return None
-    return f"Cada fila es un {singular} completo: la API no agrega {plural} sin terminar."
+    note = f"Cada fila es un {singular} completo: la API no agrega {plural} sin terminar."
+    if not records or any(n not in _NATIVE_NOUNS for n in natives):
+        return note
+    # (serie, último período, el siguiente si la fuente tiene datos de él, hasta
+    # dónde llega la fuente, meses de la serie)
+    found: list[tuple[dict[str, Any], str, str | None, str, int]] = []
+    for entry, native in zip(series, natives, strict=True):
+        last = _last_dated(entry, records)
+        if _period_label(last, target) is None:
+            continue
+        following = _shift_iso_months(last, target)
+        end = str(entry.get("fecha_fin_fuente") or "")[:10]
+        if end >= following:
+            found.append((entry, last, following, end, native or 0))
+        else:
+            found.append((entry, last, None, "", native or 0))
+    if not found:
+        return note
+    newest = max(f[1] for f in found)
+    parts = [
+        note,
+        f"Cada {singular} va fechado por su primer día: {newest} es el {singular} "
+        f"{_period_label(newest, target)} entero.",
+    ]
+    # La API filtra cada período por su primer día: si el siguiente empieza
+    # después del `hasta`, falta por la ventana y no se sabe si está completo.
+    known = [f for f in found if f[2] is None or not until or f[2] <= until]
+    if len(known) == len(series) and len({f[1:] for f in known}) == 1:
+        # Todas iguales (exportaciones e importaciones): una sola vez, sin títulos.
+        parts.append(_complete_period_sentences(*known[0][1:], target, singular))
+    else:
+        parts.extend(
+            _complete_period_sentences(*f[1:], target, singular, title=f[0].get("titulo"))
+            for f in known
+        )
+    return " ".join(parts)
+
+
+def _last_dated(entry: dict[str, Any], records: list[dict[str, Any]]) -> str:
+    """La fecha de la última fila con dato de la serie (las filas la traen por título o id)."""
+    keys = {k for k in (entry.get("titulo"), entry.get("id")) if k}
+    return next(
+        (
+            str(r.get("fecha", ""))[:10]
+            for r in reversed(records)
+            if any(r.get(k) is not None for k in keys)
+        ),
+        "",
+    )
+
+
+def _complete_period_sentences(
+    fecha: str,
+    following: str | None,
+    end: str,
+    native: int,
+    target: int,
+    singular: str,
+    *,
+    title: Any = None,
+) -> str:
+    """«El último año completo es 2025: tiene sus 12 meses, de enero a diciembre.»"""
+    month = int(fecha[5:7])
+    span = f"de {_MESES[month - 1]} a {_MESES[(month + target - 2) % 12]}"
+    count_text = f"sus {target // native} {_NATIVE_NOUNS[native]}"
+    of = f" de «{_short(title)}»" if title else ""
+    text = (
+        f"El último {singular} completo{of} es {_period_label(fecha, target)}: tiene "
+        f"{count_text}, {span}."
+    )
+    if following:
+        text += (
+            f" {_period_label(following, target)} no tiene fila{of} porque todavía no tiene "
+            f"{count_text}: la fuente llega hasta {end}."
+        )
+    return text
 
 
 async def _fetch_series(
