@@ -855,16 +855,75 @@ _LOOKAHEAD_CHARS = 150
 
 # La base de una comparación: "cayó 4,9 % interanual respecto de julio de
 # 2025" habla de julio de 2026, no de 2025.
-_BASE_CUE_RE = re.compile(
-    r"(?:respecto\s+(?:de|a|al|del)|contra|frente\s+a[l]?|comparad[oa]s?\s+con|"
-    r"en\s+comparaci[oó]n\s+con|vs\.?|versus|con\s+relaci[oó]n\s+a[l]?|desde|"
-    r"que\s+en)\s+(?:(?:el|la|los|las|del|al|igual\s+mes\s+de|mismo\s+mes\s+de)\s+)?$",
-    re.IGNORECASE,
+_COMPARACION_CUE = (
+    r"respecto\s+(?:de|a|al|del)|contra|frente\s+a[l]?|comparad[oa]s?\s+con|"
+    r"en\s+comparaci[oó]n\s+con|vs\.?|versus|con\s+relaci[oó]n\s+a[l]?"
 )
+_BASE_ARTICULO = r"\s+(?:(?:el|la|los|las|del|al|igual\s+mes\s+de|mismo\s+mes\s+de)\s+)?$"
+_BASE_CUE_RE = re.compile(rf"(?:{_COMPARACION_CUE}|desde|que\s+en){_BASE_ARTICULO}", re.I)
+# La base de una variación ("respecto a julio 2026"), sin "desde" ni "que
+# en": "el más alto desde el 1T 2025" no dice de qué trimestre es el dato.
+_VARIACION_CUE_RE = re.compile(rf"(?:{_COMPARACION_CUE}){_BASE_ARTICULO}", re.I)
 
 
 def _is_base(text: str, p: Period) -> bool:
     return _BASE_CUE_RE.search(text[max(0, p.pos - 40) : p.pos]) is not None
+
+
+# Cuántos meses hay de un período al siguiente, según su granularidad.
+_STEP_MONTHS = {"mes": 1, "trimestre": 3, "semestre": 6, "anio": 12}
+
+
+def _months_after(d: date, months: int) -> date:
+    y, m = divmod(d.month - 1 + months, 12)
+    return date(d.year + y, m + 1, 1)
+
+
+def _period_implied_by_base(
+    n: NumberInText, base: Period, periods: list[Period], text: str
+) -> Period | None:
+    """El período del dato que implica la base de su comparación, si un título
+    o encabezado anterior lo nombra.
+
+    "El último dato disponible es de agosto de 2026 … - Inflación mensual:
+    1,66 % (variación respecto a julio 2026)" fechaba el 1,66 en julio
+    (series_009, prueba de staging del 07-oct). Una variación contra julio de
+    2026 es de agosto de 2026 (el período siguiente) y una interanual contra
+    agosto de 2025 también (un año después). Sólo cuenta ese período, no
+    cualquiera de alrededor: con "informe difundido el 9 de septiembre de
+    2026: −2,4 % interanual (respecto a abril 2025)" o "publicó estos datos el
+    14 de agosto de 2026" un dato viejo quedaba fechado como vigente (revisión
+    del PR #169). Además:
+
+    - la base tiene que ser la de una variación ("respecto a", "contra",
+      "frente a"…; ver ``_VARIACION_CUE_RE``);
+    - tiene que ir después de la cifra y sin otro número en el medio. En
+      "respecto al 4° trimestre de 2023 (5,7 %)" la cifra es el valor de la
+      base, y en "julio 2,11 % → agosto 1,66 %, … respecto a julio" la base es
+      del 1,66, no del 2,11;
+    - el período se busca sólo hacia atrás (el título o el encabezado), y no
+      puede ser a su vez una base.
+
+    None si no se cumple: la cifra se queda con la base, como antes.
+    """
+    step = _STEP_MONTHS.get(base.granularity)
+    if (
+        step is None
+        or base.pos < n.end
+        or re.search(r"\d", text[n.end : base.pos])
+        or not _VARIACION_CUE_RE.search(text[max(0, base.pos - 40) : base.pos])
+    ):
+        return None
+    implied = {_months_after(base.start, step), _months_after(base.start, 12)}
+    back = [
+        p
+        for p in periods
+        if 0 <= n.start - p.endpos <= _LOOKBACK_CHARS
+        and p.granularity == base.granularity
+        and p.start in implied
+        and not _is_base(text, p)
+    ]
+    return max(back, key=lambda p: (p.end, p.pos)) if back else None
 
 
 def period_of(n: NumberInText, periods: list[Period], text: str) -> Period | None:
@@ -876,25 +935,22 @@ def period_of(n: NumberInText, periods: list[Period], text: str) -> Period | Non
     2025"). Si la oración no nombra ninguno, el más reciente de los
     alrededores: un título o el encabezado de una tabla.
 
-    Si la oración sólo nombra la base, el período del dato también se busca
-    en los alrededores, sin las bases: "El último dato disponible es de
-    agosto de 2026 … - Inflación mensual: 1,66 % (variación respecto a julio
-    2026)" fechaba el 1,66 en julio (series_009, prueba de staging del
-    07-oct). Si alrededor no hay otro, queda la base, como antes.
+    Si la oración sólo nombra la base, el período que esa base implica, si
+    un título anterior lo nombra (``_period_implied_by_base``); si no, la
+    base, como antes.
     """
     s0, s1 = _sentence_span(text, n.start)
     same = [p for p in periods if p.pos < s1 and p.endpos > s0]
     if same and not all(_is_base(text, p) for p in same):
         return min(same, key=lambda p: (_is_base(text, p), _distance(p, n), p.pos > n.start))
+    if same:
+        base = min(same, key=lambda p: (_distance(p, n), p.pos > n.start))
+        return _period_implied_by_base(n, base, periods, text) or base
     near = [
         p
         for p in periods
         if 0 <= n.start - p.endpos <= _LOOKBACK_CHARS or 0 <= p.pos - n.end <= _LOOKAHEAD_CHARS
     ]
-    if same:
-        near = [p for p in near if not _is_base(text, p)]
-        if not near:
-            return min(same, key=lambda p: (_distance(p, n), p.pos > n.start))
     return max(near, key=lambda p: p.end) if near else None
 
 
