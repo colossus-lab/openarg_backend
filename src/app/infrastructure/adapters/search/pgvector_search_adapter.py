@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Sequence
+from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import Row, TextClause, text
 
 from app.domain.ports.search.vector_search import IVectorSearch, SearchResult
 from app.infrastructure.persistence_sqla.provider import MainAsyncSession
@@ -16,21 +18,58 @@ class PgVectorSearchAdapter(IVectorSearch):
     _RETRIEVAL_VECTOR_ONLY = "vector_only"
     _RETRIEVAL_HYBRID_FULL = "hybrid_full"
 
-    # hnsw.ef_search for every ANN search, whatever the limit: pgvector's
-    # ceiling. It used to be max(200, limit*10), which for the MCP (limit 20)
-    # and the agent (limit 16) was always 200, and at 200 the greedy walk got
-    # stuck in clusters of near-identical documents built from one template
-    # (Córdoba municipalities' "Transparencia activa", one "Presupuesto APN"
-    # per year). Measured on 2026-10-04: in prod "salario mínimo vital y
-    # móvil" returned five Córdoba municipalities (0.517) while the exact
-    # search puts SMVM first (0.746); on staging "votaciones nominales" topped
-    # at 0.479 against 0.675, and recall@10 against the exact search averaged
-    # 0.886 over 36 queries (11 below 0.95). At 1000 the same 36 match the
-    # exact search, for ~0.4 s on staging's 76k chunks and 0.7-1.1 s on prod's
-    # 112k (the walk at 200 took 0.01 s, which is what it saved).
-    _ANN_EF_SEARCH = 1000
-    # Chunks fetched through the index before grouping by dataset. An index
-    # scan returns at most ef_search rows, so asking for more buys nothing.
+    # hnsw.ef_search for every ANN search, whatever the limit.
+    #
+    # It was max(200, limit*10), 200 for the MCP and the agent, and at 200
+    # the walk got stuck in clusters of near-identical documents built from
+    # one template (Córdoba municipalities' "Transparencia activa", one
+    # "Presupuesto APN" per year): on 2026-10-04 prod's "salario mínimo vital
+    # y móvil" topped at 0.517 with five Córdoba municipalities while the
+    # exact search puts SMVM first (0.746).
+    #
+    # #131 raised it to 1000, and at 1000 there was no walk at all. pgvector's
+    # cost estimate grows with ef_search, and past ~400 on staging (76k
+    # chunks) and ~600 on prod (102k) the planner prefers a parallel seq scan
+    # of dataset_chunks (EXPLAIN, 2026-10-05): the "index search" read the
+    # same 350k buffers as the exact one. Its recall of 1.0 was brute force,
+    # at 2.2 s median with 8 concurrent searches on staging (69-86 ms at 200)
+    # and 10.1 s cold on prod.
+    #
+    # 300 is under both thresholds, and the walk no longer depends on them
+    # (``_walk_index`` keeps it on the index). With the iterative scan the
+    # width that matters is the candidates', not the frontier's: with the
+    # index forced, recall@10 against the exact search over the canary's 20
+    # queries on staging was 0.915 at ef_search 40 and the same at 1000
+    # (2026-10-05).
+    _ANN_EF_SEARCH = 300
+    # Chunks fetched through the index before grouping by dataset (about 3
+    # per dataset, and the MCP asks for up to 100 datasets). With the
+    # iterative scan the walk goes on past ef_search until it has this many,
+    # up to hnsw.max_scan_tuples (20,000 by default); without it (pgvector
+    # before 0.8) one scan stops at ef_search.
+    #
+    # This is the recall/latency knob, and 1000 is a trade, not a free lunch.
+    # Staging, 2026-10-07, 36 real queries, recall against the exact search
+    # counting ties, as served (fall back included, it ran 0 times), and the
+    # walk alone with 8 searches at once (warm cache):
+    #
+    #   candidates        recall@32  recall@40  p95 with 8
+    #   400 (main, prod)  0.904      0.909      63 ms
+    #   1000              0.942      0.943      101-184 ms
+    #   2000              0.949      0.950      237-263 ms
+    #   4000              0.973      0.977      558 ms
+    #   8000              1.000      0.999      938 ms
+    #   exact (#131)      1.0        1.0        2.2 s median (2026-10-05)
+    #
+    # What 1000 misses is in the graph but far along the walk: groups of
+    # datasets with (almost) the same vector (30 Córdoba "Listado de agentes
+    # del Poder Ejecutivo" at 0.663, 28 "Elecciones legislativas Entre Ríos
+    # 2013" at 0.627) and re-embedded chunks, reached after 4000-8000
+    # tuples. Three of the 36 queries lose half or more of their top 32, and
+    # their best score (0.607-0.643) is above _ANN_WEAK_TOP_SCORE, so
+    # ``search_datasets_ann`` serves them as they are. 1000 keeps the most
+    # room under 8 at once (prod has a third more chunks than staging); a
+    # wider walk buys recall with latency, a REINDEX is not measured to help.
     _ANN_CANDIDATES = 1000
     # A best score under this is not trusted and the exact search runs
     # instead. With Cohere v3 an unrelated dataset scores 0.50-0.57 and a
@@ -101,11 +140,18 @@ class PgVectorSearchAdapter(IVectorSearch):
 
         What every caller uses (``/catalogo/buscar`` for the MCP, the agent's
         ``buscar_datos``, ``/data/search``). The index answers first
-        (``search_datasets_hnsw``); its answer is distrusted, and the exact
-        search (``search_datasets_exact``) runs instead, when it brings fewer
-        datasets than asked for or its best score is weak. A trapped walk
-        does not come back empty: it comes back full of the wrong neighbours
-        with low scores, which is the signal checked here.
+        (``search_datasets_hnsw``, a walk of the graph and never a scan of
+        the table); its answer is distrusted, and the exact search
+        (``search_datasets_exact``, the only one that reads every chunk) runs
+        instead, when it brings fewer datasets than asked for or its best
+        score is weak. A trapped walk does not come back empty: it comes back
+        full of the wrong neighbours with low scores, which is the signal
+        checked here.
+
+        What the check does not see: neighbours the walk never reaches while
+        it brings good ones. Those answers are served, so what callers get is
+        not the exact search's answer (recall@40 0.943 against it on staging,
+        2026-10-07; see ``_ANN_CANDIDATES``).
 
         Before pgvector 0.8 there is no iterative scan, and an index scan
         filtered by portal can come back empty for a small portal; with a
@@ -174,19 +220,21 @@ class PgVectorSearchAdapter(IVectorSearch):
 
         Two pgvector settings make the index return what the query asks for:
 
-        - ``hnsw.ef_search`` is both the size of the walk's frontier and the
-          ceiling on the rows one index scan returns (40 by default). It is
-          set to the maximum on every search: see ``_ANN_EF_SEARCH``.
+        - ``hnsw.ef_search`` is the size of the walk's frontier and, without
+          an iterative scan, the ceiling on the rows one index scan returns
+          (40 by default). See ``_ANN_EF_SEARCH``.
         - ``hnsw.iterative_scan`` keeps scanning when the first pass falls
-          short. With a portal filter it is what finds the portal's chunks
-          behind closer ones of other portals (filtering after the fetch
-          returned nothing for caba and neuquen_legislatura even with 1000
-          candidates). Without a filter it changes nothing measurable, and is
-          set anyway so both paths walk the same way.
+          short. It is what brings the candidates past ef_search (1000
+          chunks against a frontier of 300), and with a portal filter what
+          finds the portal's chunks behind closer ones of other portals
+          (filtering after the fetch returned nothing for caba and
+          neuquen_legislatura even with 1000 candidates).
 
-        Both are set with ``is_local`` and end with the transaction. Public
-        so the recall canary can compare it against the exact search; callers
-        that serve results use ``search_datasets_ann``.
+        Both are set with ``is_local`` and end with the transaction. The walk
+        itself runs through ``_walk_index``, which keeps the planner off a
+        seq scan. Public so the recall canary can compare the index alone
+        against the exact search; callers that serve results use
+        ``search_datasets_ann``.
         """
         await self._session.execute(
             text("SELECT set_config('hnsw.ef_search', :ef, true)"),
@@ -226,7 +274,37 @@ class PgVectorSearchAdapter(IVectorSearch):
             ")"
             f"{self._RESULT_SELECT}"
         )
-        return self._results(await self._session.execute(query, params))
+        return self._results(await self._walk_index(query, params))
+
+    async def _walk_index(self, query: TextClause, params: dict) -> Sequence[Row[Any]]:
+        """Run the index walk with sequential scans off, then put them back.
+
+        Reading every chunk is ``search_datasets_exact``'s job, and it runs
+        only when the index's answer is distrusted; the walk must not do it
+        on its own. Left to the planner it does: the choice between the
+        index and a parallel seq scan moves with ef_search and with the
+        table's size (1000 crossed it on staging and prod, see
+        ``_ANN_EF_SEARCH``), and the recall canary then compares the exact
+        search against itself. With a portal filter the planner still picks
+        between the index and the btree on ``dataset_id``; only the scan of
+        the whole table is off.
+
+        ``enable_seqscan`` goes back to the value it had right after the
+        fetch, before anything else runs in the transaction: the agent shares
+        it across a whole turn, and the exact search has to scan. A failed or
+        cancelled walk skips that, and the rollback the transaction needs
+        anyway (``reset``) undoes the local setting with it.
+        """
+        before = (
+            await self._session.execute(text("SELECT current_setting('enable_seqscan')"))
+        ).scalar()
+        await self._session.execute(text("SELECT set_config('enable_seqscan', 'off', true)"))
+        rows = (await self._session.execute(query, params)).fetchall()
+        await self._session.execute(
+            text("SELECT set_config('enable_seqscan', :before, true)"),
+            {"before": str(before or "on")},
+        )
+        return rows
 
     async def search_datasets_exact(
         self,
@@ -242,9 +320,11 @@ class PgVectorSearchAdapter(IVectorSearch):
         ``SET LOCAL enable_indexscan = off``, which would stay on for the rest
         of a transaction the agent shares across a whole turn. Measured on
         2026-10-04: 0.45 s on staging (76k chunks, p95 0.73 s) and 0.71-0.77 s
-        on prod (112k, parallel seq scan), about what the index takes at
-        ef_search=1000. Unlike ``search_datasets`` it keeps the threshold out
-        of the WHERE and does not window over every chunk.
+        on prod (112k, parallel seq scan); cold on prod the same scan took
+        10.1 s and read ~885 MB (2026-10-05), and with 8 at once on staging
+        2.2 s median. That is why it runs only behind the index. Unlike
+        ``search_datasets`` it keeps the threshold out of the WHERE and does
+        not window over every chunk.
         """
         params: dict = {
             "embedding": self._literal(query_embedding),
@@ -269,7 +349,7 @@ class PgVectorSearchAdapter(IVectorSearch):
             ")"
             f"{self._RESULT_SELECT}"
         )
-        return self._results(await self._session.execute(query, params))
+        return self._results((await self._session.execute(query, params)).fetchall())
 
     # Shared tail of the HNSW and exact searches: only the `limit` datasets
     # that survived are joined, not every chunk the scan touched.
@@ -285,7 +365,7 @@ class PgVectorSearchAdapter(IVectorSearch):
         return "[" + ",".join(str(v) for v in query_embedding) + "]"
 
     @staticmethod
-    def _results(result) -> list[SearchResult]:
+    def _results(rows: Sequence[Row[Any]]) -> list[SearchResult]:
         return [
             SearchResult(
                 dataset_id=row.dataset_id,
@@ -296,7 +376,7 @@ class PgVectorSearchAdapter(IVectorSearch):
                 columns=row.columns or "",
                 score=float(row.score),
             )
-            for row in result.fetchall()
+            for row in rows
         ]
 
     async def search_datasets(

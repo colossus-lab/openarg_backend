@@ -4,14 +4,26 @@ El índice cambia de un día para otro: el SMVM aparecía primero el 03-oct y el
 04-oct ya no (los chunks de ese dataset se habían re-embebido esa tarde), y
 nadie se enteró hasta que una auditoría externa lo buscó a mano. Con
 ``ef_search=200`` el recall@10 contra la exacta llegó a 0 en varias consultas.
-``search_datasets_ann`` ahora recorre con 1000 y cae a la exacta cuando duda,
-pero eso tapa una degradación del índice en vez de avisarla.
+``search_datasets_ann`` recorre el índice y cae a la exacta cuando duda, pero
+eso tapa una degradación del índice en vez de avisarla.
 
 Esto la mide todas las noches: unas 20 consultas fijas, el top 10 del índice
 solo (``search_datasets_hnsw``) contra el de la exacta, y un aviso si el
 promedio baja de 0,95.
 
-Dos detalles que deciden si el canario mide algo:
+Tres detalles que deciden si el canario mide algo:
+
+- **Que el índice sea el índice.** Con ``ef_search=1000`` el planificador
+  dejaba el HNSW y recorría la tabla entera, y el canario comparaba la exacta
+  contra la exacta: 1,0 siempre (revisión del 05-oct, H208). Ahora
+  ``search_datasets_hnsw`` recorre el grafo con el seq scan apagado, así que
+  lo que se mide es el grafo. Con 1000 candidatos esas 20 consultas dan 0,915
+  en staging (05 y 07-oct), debajo del piso: el canario avisa desde la
+  primera noche, y ese aviso es el estado conocido del grafo, no una
+  degradación nueva. Lo que falta está en el grafo y lejos en el recorrido
+  (grupos de datasets con el mismo vector, chunks re-embebidos): con 4000 a
+  8000 candidatos aparece (07-oct). Que un REINDEX acorte ese recorrido no
+  está medido; ver ``detail_es`` para qué hacer con la alerta.
 
 - **Embeddings de consulta reales.** Cohere embebe la consulta como
   ``search_query`` y los documentos como ``search_document``. Con el vector de
@@ -111,6 +123,14 @@ class CanaryReport:
         return sorted(self.results, key=lambda r: (r.recall, r.query))[:n]
 
     def detail_es(self) -> str:
+        """Qué dice la alerta y qué hacer con ella, sin empujar a un REINDEX.
+
+        La identidad de la alerta es la banda (``recall_band``): si queda fija,
+        ``notify`` la reabre a la 3ª, 10ª, 30ª y 100ª vez y no todas las noches.
+        Una banda fija es el estado conocido del grafo; una más baja, algo que
+        cambió. Un REINDEX del índice (~1 GB en prod) no está medido como
+        arreglo, y el texto no lo presenta como tarea pendiente.
+        """
         peores = ", ".join(
             f"«{r.query}» {r.recall:.1f} ({r.hnsw_top:.3f} vs {r.exact_top:.3f})"
             for r in self.worst()
@@ -118,7 +138,11 @@ class CanaryReport:
         )
         return (
             f"Peores: {peores}. "
-            "El buscador cae a la búsqueda exacta cuando el índice trae poco o con puntaje "
-            "bajo, pero esto mide el índice solo: si sigue bajo, el grafo HNSW se degradó "
-            "(churn de embeddings, REINDEX pendiente)."
+            "Mide el índice solo; el buscador sirve esto mismo salvo cuando el índice trae "
+            "poco o con puntaje bajo, y ahí cae a la exacta. "
+            "Si es la misma alerta noche tras noche (misma banda), es el estado conocido del "
+            "grafo y no una degradación nueva: en staging, el 07-oct, estas consultas daban "
+            "0,915. Si baja de banda, algo cambió: comparar las peores con las de la noche "
+            "anterior en el log. Un REINDEX no está medido como arreglo: sólo con OK, "
+            "primero en staging y midiendo antes y después."
         )

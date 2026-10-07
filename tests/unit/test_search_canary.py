@@ -62,6 +62,31 @@ def test_detail_names_the_worst_queries() -> None:
     assert "«q0»" not in detail
 
 
+def test_detail_does_not_order_a_reindex() -> None:
+    """Revisión del #176: el texto decía "REINDEX pendiente" y se leía como una
+    orden (un REINDEX de ~1 GB en prod), cuando no está medido que arregle el
+    0,915 de staging. Dice qué significa una alerta fija y qué hacer."""
+    detail = _report(1.0, 0.0, 0.5).detail_es()
+    assert "REINDEX pendiente" not in detail
+    assert "REINDEX no está medido como arreglo" in detail
+    assert "con OK" in detail and "primero en staging" in detail
+    # Qué es una alerta que queda fija y qué una que empeora.
+    assert "misma banda" in detail and "estado conocido" in detail
+    assert "baja de banda" in detail
+    assert "0,915" in detail
+
+
+def test_detail_says_what_the_alert_identity_does_with_a_fixed_band() -> None:
+    """El texto promete que una alerta fija no es una degradación nueva: eso es
+    cierto sólo si la misma banda da la misma alerta y `notify` la reabre de a
+    ratos, no todas las noches."""
+    from app.application.quality.alerting import REOPEN_AT
+
+    assert REOPEN_AT == (3, 10, 30, 100)  # lo que dice el docstring de detail_es
+    assert recall_band(0.915) == recall_band(0.90) == 90
+    assert recall_band(0.895) == 85
+
+
 def test_the_canary_queries_include_the_audits_fourteen() -> None:
     assert len(CANARY_QUERIES) >= 20
     assert "salario mínimo vital y móvil" in CANARY_QUERIES
