@@ -283,6 +283,48 @@ def test_los_contadores_chicos_no_hacen_pasar_una_fuente() -> None:
     assert sin_cifra == ["T"]
 
 
+def test_una_fuente_de_conteos_cuenta_si_la_respuesta_escribe_sus_conteos() -> None:
+    """complex_003 (batería del 06-oct): la respuesta escribe en una tabla los
+    tramos de viaje de dos diputados (10, 13, 11, 20; 2, 4), que son todo lo
+    que trajo «Viajes Nacionales — conteo». Como los conteos son enteros
+    chicos, no contaban como cifras, y la fuente salía «citada sin cifra»
+    aunque la tabla entera sale de ella. Tiene que escribir todos los conteos:
+    uno suelto (test de arriba: «los últimos 3 meses») o algunos que coinciden
+    con el puesto del ranking siguen sin alcanzar. La corrida del 05-oct
+    escribió 10 y 13 pero no el 11 que leyó: sigue marcada."""
+    viajes = "http://www3.hcdn.gob.ar/Datos_doc/DocumentacionViajesNacionales.pdf"
+    ddjj = "https://www.argentina.gob.ar/anticorrupcion/consultar-declaraciones-juradas-de-funcionarios-publicos"
+    items = [
+        {"title": "Ranking: 5 diputados con mayor patrimonio", "url": ddjj,
+         "numbers": [2024.0, 8224603053.57, 7071726120.91]},
+        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [10.0]},
+        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [13.0, 2.0]},
+        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [11.0]},
+        {"title": "Viajes Nacionales — conteo", "url": viajes, "numbers": [20.0, 4.0]},
+    ]  # fmt: skip
+    sources = [
+        {"name": "Ranking: 5 diputados con mayor patrimonio", "url": ddjj},
+        {"name": "Viajes Nacionales — conteo", "url": viajes},
+    ]
+    answer = (
+        "| # | Nombre | Patrimonio neto |\n|---|---|---|\n"
+        "| 1 | **Máximo Kirchner** | $ 8.224.603.054 |\n"
+        "| 2 | **Ana Carla Carrizo** | $ 7.071.726.121 |\n\n"
+        "Lo que sí pude contar son **tramos de viaje registrados**:\n\n"
+        "| Diputado/a | 1°S 2024 | 2°S 2024 | 1°S 2025 | 2°S 2025 |\n|---|---|---|---|---|\n"
+        "| Ana Carla Carrizo | 10 | 13 | 11 | 20 |\n"
+        "| Aníbal Randazzo | — | 2 | — | 4 |\n"
+    )
+    assert sources_without_figures(answer, sources, items) == ([], [])
+    # Con sólo algunos conteos (el 10, y el 2 que es un puesto del ranking)
+    # puede ser casualidad: sigue marcada.
+    algunos = answer.split("Lo que sí")[0] + "Ana Carla Carrizo registró 10 tramos."
+    assert sources_without_figures(algunos, sources, items) == (
+        ["Viajes Nacionales — conteo"],
+        [],
+    )
+
+
 def test_los_numeros_de_la_evidencia_no_incluyen_fechas() -> None:
     rows = [{"fecha": "2026-08-01", "valor": 1.66, "texto": "12.500", "flag": True}]
     assert evidence_numbers(rows) == [1.66, 12500.0]

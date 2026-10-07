@@ -982,12 +982,20 @@ def main_text(text: str) -> str:
     return _URL_RE.sub(" ", body)
 
 
+_SMALL_COUNTER_LIMIT = 32
+# Una fuente que sólo trae conteos chicos cuenta como usada si la respuesta
+# escribe todos sus conteos distintos, y son al menos estos. Uno solo («los
+# últimos 3 meses») o algunos (el puesto de un ranking, «| 2 |») pueden ser
+# casualidad.
+_MIN_COUNTS_WRITTEN = 2
+
+
 def _small_counter(n: NumberInText) -> bool:
     """ "Los últimos 3 meses", "las 2 series": un entero menor a 32 sin % ni
     multiplicador no es un dato."""
     return (
         n.rounding == 0
-        and abs(n.value) < 32
+        and abs(n.value) < _SMALL_COUNTER_LIMIT
         and "%" not in n.raw
         and _multiplier(n.raw) == 1.0
         and float(n.value).is_integer()
@@ -998,6 +1006,17 @@ def figures_for_sourcing(text: str) -> list[NumberInText]:
     """Las cifras que tienen que venir de alguna fuente (sin contadores chicos)."""
     clean = main_text(answer_body(text)).replace("−", "-")
     return [n for n in numbers_in_answer(clean) if not _small_counter(n)]
+
+
+def _counts_for_sourcing(text: str) -> set[float]:
+    """Los contadores chicos de la respuesta: lo que ``figures_for_sourcing`` deja afuera."""
+    clean = main_text(answer_body(text)).replace("−", "-")
+    return {float(n.value) for n in numbers_in_answer(clean) if _small_counter(n)}
+
+
+def _only_counts(values: list[float]) -> bool:
+    """La evidencia de la fuente son sólo enteros chicos (los tramos de viaje de un diputado)."""
+    return all(float(v).is_integer() and abs(v) < _SMALL_COUNTER_LIMIT for v in values)
 
 
 _NUMERIC_STR_RE = re.compile(r"[-+]?\d[\d.,]*")
@@ -1139,10 +1158,17 @@ def sources_without_figures(
     ``derived_variations``). Las fuentes sin números en la evidencia (texto)
     no se juzgan. Reproducción del 04-oct: el agente citó tres series de
     reservas y las tres cifras salían de una sola.
+
+    Una fuente que sólo trae conteos chicos aportó si la respuesta escribe
+    todos sus conteos distintos (al menos ``_MIN_COUNTS_WRITTEN``): los
+    contadores no cuentan como cifras, y complex_003 (06-oct) salía «citada
+    sin cifra» con la tabla de tramos de viaje copiada entera de «Viajes
+    Nacionales — conteo».
     """
     figures = figures_for_sourcing(answer)
     if not figures:
         return [], []
+    counts = _counts_for_sourcing(answer)
     percents = [f for f in figures if "%" in f.raw]
     by_pair: dict[tuple[str, str], _Evidence] = {}
     by_title: dict[str, _Evidence] = {}
@@ -1183,6 +1209,8 @@ def sources_without_figures(
             for f in percents
             for d in derived
         ):
+            continue
+        if _only_counts(nums) and len(set(nums)) >= _MIN_COUNTS_WRITTEN and set(nums) <= counts:
             continue
         sin_cifra.append(name)
     return sin_cifra, sin_evidencia
