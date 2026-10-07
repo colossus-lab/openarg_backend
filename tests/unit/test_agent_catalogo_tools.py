@@ -1270,16 +1270,19 @@ PADRON_ANUAL_TIPOS = [("anio", "bigint"), ("categoria", "text")]
 ALTAS = "raw.x__beneficiarios__1a2b3c4d__v1"
 
 
-async def test_calcular_conteo_en_tabla_de_un_solo_periodo_dice_que_es_una_foto() -> None:
+@pytest.mark.parametrize("reconocidas", [9, 7])
+async def test_calcular_conteo_en_tabla_de_un_solo_periodo_dice_que_es_una_foto(
+    reconocidas: int,
+) -> None:
+    """Con todos los valores leídos y uno solo, es una foto. Si quedan valores
+    sin leer como fecha, pueden ser otros períodos: no lo afirma."""
+    rango = [{"desde": "2022", "hasta": "2022", "reconocidas": reconocidas, "con_valor": 9}]
     sandbox = _SandboxDePortal(
         PADRON_ANUAL,
         "x",
         PADRON_ANUAL_TIPOS,
         [
-            (
-                "AS reconocidas",
-                [{"desde": "2022", "hasta": "2022", "reconocidas": 9, "con_valor": 9}],
-            ),
+            ("AS reconocidas", rango),
             ("AS filas_tabla", [{"filas_tabla": 1000}]),
             ("AS valor", [{"valor": 300, "__filas": 300}]),
         ],
@@ -1292,9 +1295,43 @@ async def test_calcular_conteo_en_tabla_de_un_solo_periodo_dice_que_es_una_foto(
         "filtros": [{"columna": "categoria", "operador": "=", "valor": "A"}],
     }
     aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
-    assert (
+    foto = (
         "La tabla no apila períodos (toda la tabla es de 2022 según «anio»): es una sola foto, así "
         "que su total es el conteo sin filtros, 1000."
+    )
+    if reconocidas == 9:
+        assert foto in aviso
+    else:
+        assert "La tabla no apila períodos" not in aviso
+        assert "No sé si la tabla apila períodos: «anio» puede distinguirlos." in aviso
+
+
+async def test_calcular_conteo_con_fechas_sin_leer_no_da_el_rango_por_completo() -> None:
+    """Transportes autorizados de CABA en staging: los bimestres («2016
+    NOVIEMBRE-DICIEMBRE») no se leen como fecha, y el rango leído empieza en
+    2017-01. El aviso lo dice."""
+    rango = [{"desde": "2017-01", "hasta": "2018-09", "reconocidas": 28_000, "con_valor": 45_091}]
+    sandbox = _SandboxDePortal(
+        TRANSPORTES,
+        "caba",
+        TRANSPORTES_TIPOS,
+        [
+            ("AS reconocidas", rango),
+            ("AS filas_tabla", [{"filas_tabla": 52_367}]),
+            ("AS valor", [{"valor": 846, "__filas": 846}]),
+        ],
+        stats=TableValueStats(estimated_rows=52_367),
+        row_count=52_367,
+    )
+    pide = {
+        "tabla": TRANSPORTES,
+        "operacion": "conteo",
+        "filtros": [{"columna": "barrio", "operador": "=", "valor": "Flores"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert (
+        "La tabla apila períodos en «periodo» (de 2017-01 a 2018-09, sin contar 17091 valores que "
+        "no reconozco como fecha): sus 52367 filas juntan todos esos períodos"
     ) in aviso
 
 

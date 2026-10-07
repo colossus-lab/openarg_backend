@@ -770,6 +770,8 @@ class _Forma:
     desde: str | None = None
     hasta: str | None = None
     aproximado: bool = False
+    # Valores de la columna de fecha que no se leyeron: el rango no los cuenta.
+    sin_reconocer: int = 0
     dudosas: tuple[str, ...] = ()
 
 
@@ -815,13 +817,17 @@ async def _forma_de_la_tabla(
     nombre = _lista([propia.nombre, propia.mes] if propia.mes else [propia.nombre])
     if periodo.desde is None or periodo.hasta is None:
         return _Forma("dudosa", dudosas=(propia.nombre,))
+    # Un rango de una muestra, o con valores que no se leyeron como fecha, no
+    # alcanza para decir que la tabla tiene un solo período ni que el pedido
+    # los abarca a todos: los que faltan pueden ser otros.
+    rango_completo = not periodo.aproximado and not periodo.sin_reconocer
     if periodo.desde == periodo.hasta:
-        if periodo.aproximado:  # una muestra con un solo valor no dice que haya uno solo
+        if not rango_completo:
             return _Forma("dudosa", dudosas=(propia.nombre,))
         return _Forma("foto", motivo=f"toda la tabla es de {periodo.desde} según {nombre}")
     if (
         periodo_propio
-        and not periodo.aproximado
+        and rango_completo
         and abarca_rango(query.desde, query.hasta, periodo.desde, periodo.hasta)
     ):
         return _Forma("abarca", columna=nombre, desde=periodo.desde, hasta=periodo.hasta)
@@ -831,6 +837,7 @@ async def _forma_de_la_tabla(
         desde=periodo.desde,
         hasta=periodo.hasta,
         aproximado=periodo.aproximado,
+        sin_reconocer=periodo.sin_reconocer,
     )
 
 
@@ -880,6 +887,8 @@ def _texto_aviso_parte(
         rango = f"de {forma.desde} a {forma.hasta}"
         if forma.aproximado:
             rango = f"aproximadamente {rango}, según una muestra"
+        elif forma.sin_reconocer:
+            rango += f", sin contar {forma.sin_reconocer} valores que no reconozco como fecha"
         cola = (
             f"La tabla apila períodos en {forma.columna} ({rango}): sus {filas_tabla} filas "
             "juntan todos esos períodos, no son el total de uno solo. Para un período, filtralo "

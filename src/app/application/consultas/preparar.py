@@ -242,6 +242,10 @@ class Periodo:
     # El rango sale de la muestra de `pg_stats`, no de recorrer la tabla: el
     # máximo real puede ser posterior a `hasta`.
     aproximado: bool = False
+    # Valores no nulos de la columna que no se reconocieron como fecha: quedan
+    # fuera de `desde`/`hasta` (en los transportes autorizados de CABA, los
+    # bimestres como «2016 NOVIEMBRE-DICIEMBRE").
+    sin_reconocer: int = 0
 
 
 async def describir_periodo(
@@ -305,6 +309,7 @@ async def describir_periodo(
         desde=None if desde is None else str(desde),
         hasta=None if hasta is None else str(hasta),
         aviso=" ".join(a for a in avisos if a) or None,
+        sin_reconocer=max(con_valor - reconocidas, 0),
     )
 
 
