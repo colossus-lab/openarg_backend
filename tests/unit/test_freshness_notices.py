@@ -527,6 +527,16 @@ def test_una_serie_parada_justo_en_el_cierre_pedido_no_es_un_dato_atrasado() -> 
         ("¿Cómo cerró el PBI de 2026 comparado con 2025?", True),
         # Un año que no es el período pedido: la serie termina mucho después.
         ("¿Cuál es el PBI a precios de 2004?", True),
+        # Un mes sin año va con el del mes con año más cercano; si viene
+        # después y es anterior en el calendario, con el siguiente: lo pedido
+        # termina en marzo de 2026, no en diciembre de 2025.
+        ("¿Cuánto creció el PBI entre diciembre de 2025 y marzo?", True),
+        ("¿Cuánto creció el PBI entre octubre y diciembre de 2025?", False),
+        # Un mes sin año que ningún mes con año ubica: no se sabe dónde
+        # termina lo pedido, y se mide como siempre.
+        ("¿Cuánto creció el PBI entre fin de 2025 y marzo?", True),
+        # Pide hasta hoy.
+        ("¿Cuánto creció el PBI de 2025 a la fecha?", True),
     ],
 )
 def test_el_pbi_parado_en_el_cuarto_trimestre_cubre_2025(pregunta: str, avisa: bool) -> None:
@@ -545,6 +555,9 @@ def test_el_pbi_parado_en_el_cuarto_trimestre_cubre_2025(pregunta: str, avisa: b
     if avisa:
         assert "4.º trimestre de 2025" in avisos[0]
         assert "la fuente no la actualizó" in avisos[0]
+
+
+_A3500 = ("A3500", ["2026-08-30", "2026-08-31"], "diaria")
 
 
 @pytest.mark.parametrize(
@@ -568,6 +581,24 @@ def test_el_pbi_parado_en_el_cuarto_trimestre_cubre_2025(pregunta: str, avisa: b
             "¿Cuánto subió el dólar mayorista en agosto de 2026?",
             False,
         ),
+        # Nombra agosto de 2026 pero pide también algo posterior sin año
+        # (revisión de #159): la serie parada no llega ahí, y sin el aviso
+        # nada impide presentar el 31-ago como el valor de hoy.
+        (*_A3500, "¿Cómo se compara el dólar A3500 de agosto de 2026 con el de este mes?", True),
+        (*_A3500, "¿Cuánto varió el dólar A3500 entre agosto de 2026 y septiembre?", True),
+        (
+            *_A3500,
+            "¿Cuánto subió el dólar A3500 entre agosto de 2026 y lo que va de octubre?",
+            True,
+        ),
+        (*_A3500, "¿Cuánto subió el dólar A3500 a partir de agosto de 2026?", True),
+        (*_A3500, "¿Cuánto subió el dólar A3500 de agosto de 2026 a la fecha?", True),
+        (*_A3500, "¿Cuánto subió el dólar A3500 en el mes en curso contra agosto de 2026?", True),
+        (*_A3500, "¿El dólar A3500 de agosto de 2026 es el más alto de este año?", True),
+        # Un mes sin año antes del que lo tiene, o una fecha puntual: sigue
+        # siendo agosto de 2026.
+        (*_A3500, "¿Cuánto subió el dólar A3500 entre julio y agosto de 2026?", False),
+        (*_A3500, "¿Cuál era el dólar A3500 a la fecha del 31 de agosto de 2026?", False),
         # La tasa de política monetaria de nueva_18: parada el 10-jul-2025.
         (
             "Principales tasas de interés",
