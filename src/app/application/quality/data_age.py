@@ -571,12 +571,40 @@ _CURRENT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _YEAR_IN_QUESTION_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_MONTH_NUMBERS = {name: i for i, name in enumerate(_MONTHS_ES, start=1)} | {"setiembre": 9}
+# «fin de agosto de 2026», «agosto 2026», «agosto del 2026».
+_MONTH_YEAR_RE = re.compile(
+    r"\b(" + "|".join(_MONTH_NUMBERS) + r")(?:\s+del?)?\s+((?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
 
 
 def asks_for_named_period(question: str) -> bool:
     """¿La pregunta nombra un período (un año) y no pide el valor actual?"""
     text = question or ""
     return bool(_YEAR_IN_QUESTION_RE.search(text)) and not _CURRENT_INTENT_RE.search(text)
+
+
+def _named_period_end(question: str) -> date | None:
+    """El último día del período más reciente que nombra la pregunta.
+
+    Un mes con su año termina el último día de ese mes; un año suelto, el 31
+    de diciembre. «Entre fin de 2025 y fin de agosto de 2026» termina el
+    31-ago-2026.
+    """
+    text = question or ""
+    ends: list[date] = []
+    with_month: set[int] = set()  # dónde empiezan los años que van con un mes
+    for m in _MONTH_YEAR_RE.finditer(text):
+        first = date(int(m.group(2)), _MONTH_NUMBERS[m.group(1).lower()], 1)
+        ends.append(_period_end(first, "mensual"))
+        with_month.add(m.start(2))
+    ends += [
+        date(int(m.group()), 12, 31)
+        for m in _YEAR_IN_QUESTION_RE.finditer(text)
+        if m.start() not in with_month
+    ]
+    return max(ends, default=None)
 
 
 def _observations_for(result: Any, today: date, question: str = "") -> list[ObservationAge]:
@@ -679,6 +707,17 @@ def _observation_age(
     # período pasado es el fin de lo pedido, y «¿cuál fue la inflación de
     # 2019?» salía con «Dato atrasado… es de diciembre de 2019».
     if (source_end is None or source_end_inferred) and asks_for_named_period(question):
+        return None
+    # Con la fecha de fin, tampoco si la serie termina justo en el período que
+    # nombra la pregunta: su último período contiene el fin de lo pedido. Las
+    # reservas 92.2, paradas el 31-ago con is_updated=False, salían con «Dato
+    # atrasado» en «¿cuánto cambiaron entre fin de 2025 y fin de agosto de
+    # 2026?», y el PBI 166.2, parado en el 4.º trimestre, en «¿cuánto creció
+    # en 2025?» (prueba de calidad del 06-oct). Si la serie no llega al fin de
+    # lo pedido, o termina mucho después (un «base 2004» no es un período
+    # pedido), se mide como siempre.
+    named_end = _named_period_end(question) if asks_for_named_period(question) else None
+    if named_end is not None and last <= named_end <= _period_end(last, frequency or ""):
         return None
     return observation_staleness(
         source_end or last,
