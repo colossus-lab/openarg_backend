@@ -905,8 +905,53 @@ _PIDE_202207 = {
 }
 
 
+# `pg_stats` de la tabla en staging (07-oct). `PADRON` es el mes de alta en el
+# padrón: 32 valores, con 202207 en el 90 % de las filas. `SUMINISTRO` no es un
+# valor distinto por fila: Excel pasó los números largos a «1,31603E+14», y
+# quedó un 19 % de valores distintos.
+_TARIFA_STATS = {
+    "DISTRIBUIDORA": ColumnValueStats(
+        "DISTRIBUIDORA",
+        n_distinct=11,
+        most_common_vals=["EDEMSA", "EDESTE", "GODOY CRUZ"],
+        most_common_freqs=[0.6497, 0.0912, 0.0912],
+    ),
+    "SUMINISTRO": ColumnValueStats(
+        "SUMINISTRO",
+        n_distinct=-0.19267736,
+        most_common_vals=["1,31603E+14", "1,20273E+14", "1,207E+14"],
+        most_common_freqs=[0.0008, 0.0007, 0.0006],
+        histogram_bounds=["100001", "11002377", "1,10088E+14", "81600011", "9995000001"],
+    ),
+    "SITUACION": ColumnValueStats(
+        "SITUACION",
+        n_distinct=15,
+        most_common_vals=["EN PADRON TS-JUBILADOS Y PENSIONADOS", "EN PADRON TS-TRANSITORIOS"],
+        most_common_freqs=[0.3253, 0.2362],
+    ),
+    "PADRON": ColumnValueStats(
+        "PADRON",
+        n_distinct=32,
+        most_common_vals=["202207", "201702", "202110", "202004", "202106", "202012"],
+        most_common_freqs=[0.9047, 0.0173, 0.0128, 0.0058, 0.0053, 0.0051],
+    ),
+    "SINTYS": ColumnValueStats(
+        "SINTYS",
+        n_distinct=45,
+        most_common_vals=["JUBILADOS Y PENSIONADOS", "POSEE UN INGRESO SUPERIOR A 2 SMVM"],
+        most_common_freqs=[0.328, 0.176],
+    ),
+}
+# Así queda el aviso de la tabla: `PADRON` tiene forma de período, pero el 90 %
+# de las filas tiene el mismo valor (verificación de #171).
+_TARIFA_FOTO = (
+    "La tabla no apila períodos (el 90 % de sus filas tiene el mismo «PADRON», 202207: esa "
+    "columna describe a cada fila, no separa fotos): es una sola foto, así que su total es "
+)
+
+
 def _tarifa(respuestas: list[tuple[str, Any]], estimadas: int | None = 110_179) -> Sandbox:
-    stats = TableValueStats(estimated_rows=estimadas) if estimadas else None
+    stats = TableValueStats(estimated_rows=estimadas, columns=_TARIFA_STATS) if estimadas else None
     return _SandboxDePortal(TARIFA, "mendoza", TARIFA_TIPOS, respuestas, stats=stats, row_count=0)
 
 
@@ -922,11 +967,11 @@ async def test_calcular_conteo_filtrado_dice_de_cuantas_filas_de_la_tabla_es_par
         "la parte que queda."
     )
     # Verificación de la ola 5: el aviso no le deja leer PADRON = 202207 como
-    # una foto mensual. La tabla no tiene columna de fecha: es una sola foto,
-    # y su total es el conteo sin filtros.
+    # una foto mensual. La tabla es una sola foto, y su total es el conteo sin
+    # filtros. Verificación de #171: no por no tener columna de fecha, sino
+    # porque el 90 % de las filas tiene el mismo PADRON.
     assert "si el filtro elige un período, una foto" not in aviso
-    assert "La tabla no apila períodos (no tiene columna de fecha): es una sola foto" in aviso
-    assert "su total es el conteo sin filtros, 110179" in aviso
+    assert _TARIFA_FOTO + "el conteo sin filtros, 110179." in aviso
     assert "Filtrar por «PADRON» no elige otro período ni otra foto" in aviso
     # Sin columna de fecha no hay período que leer.
     assert not any("AS reconocidas" in sql for sql, _ in sandbox.calls)
@@ -1204,9 +1249,8 @@ async def test_calcular_conteo_en_2022_por_padron_con_desde_hasta_avisa_que_es_u
     assert payload["filas_tabla"] == 110_179
     assert payload["aviso_parte"] == (
         "El período pedido sobre «PADRON» dejó afuera 10621 filas: la tabla entera tiene 110179, "
-        "y 99558 es sólo la parte que queda. La tabla no apila períodos (no tiene columna de "
-        "fecha): es una sola foto, así que su total es el conteo sin filtros, 110179. Filtrar por "
-        "«PADRON» no elige otro período ni otra foto: elige una parte de esa foto."
+        f"y 99558 es sólo la parte que queda. {_TARIFA_FOTO}el conteo sin filtros, 110179. "
+        "Filtrar por «PADRON» no elige otro período ni otra foto: elige una parte de esa foto."
     )
     [result] = out.results
     assert result.records == [{"valor": 99_558}]
@@ -1455,3 +1499,254 @@ async def test_calcular_conteo_sin_saber_si_la_tabla_apila_periodos_lo_dice(
     aviso = json.loads(out.content)["aviso_parte"]
     assert f"No sé si la tabla apila períodos: {dudosa}." in aviso
     assert "La tabla no apila períodos" not in aviso
+
+
+# ── verificación de #171: «una sola foto» sólo con pruebas ─────────────────
+#
+# Sin fecha reconocida, el aviso daba la tabla por una sola foto. En staging,
+# 118 tablas sin fecha tenían una columna con 2 a 60 años, AAAAMM o campañas,
+# y la mayoría apilaba períodos de verdad. Casos y `pg_stats` reales.
+
+RECICLABILIDAD = "raw.caba__indice_de_reciclabilidad__a856d7a1__v1"
+RECICLABILIDAD_TIPOS = [
+    ("medicion", "bigint"),
+    ("material", "text"),
+    ("reciclabilidad", "double precision"),
+    ("clasificacion", "text"),
+]
+RECICLABILIDAD_STATS = {
+    "medicion": ColumnValueStats(
+        "medicion",
+        n_distinct=3,
+        most_common_vals=["2022", "2023", "2024"],
+        most_common_freqs=[0.3521, 0.3239, 0.3239],
+    ),
+    "material": ColumnValueStats(
+        "material",
+        n_distinct=-0.64788735,
+        most_common_vals=["Papel", "Telgopor", "Vidrio"],
+        most_common_freqs=[0.0423, 0.0423, 0.0423],
+        histogram_bounds=["Aerosol de metal", "Bandeja plástica", "Tetra Brik"],
+    ),
+    "reciclabilidad": ColumnValueStats(
+        "reciclabilidad",
+        n_distinct=-0.53521127,
+        most_common_vals=["5", "1", "3", "3.56"],
+        most_common_freqs=[0.2958, 0.1127, 0.0563, 0.0282],
+        histogram_bounds=["1.15", "1.16", "4.87", "4.91"],
+    ),
+    "clasificacion": ColumnValueStats(
+        "clasificacion",
+        n_distinct=3,
+        most_common_vals=["ALTA", "BAJA", "MEDIA"],
+        most_common_freqs=[0.5775, 0.2676, 0.1549],
+    ),
+}
+
+
+def _sin_fecha(
+    tabla: str,
+    tipos: list[tuple[str, str]],
+    columnas: dict[str, ColumnValueStats] | None,
+    filas: int,
+    parte: int,
+) -> Sandbox:
+    """Una tabla sin fecha reconocida; ``columnas`` None: sin ``pg_stats``."""
+    stats = TableValueStats(estimated_rows=filas, columns=columnas) if columnas else None
+    return _SandboxDePortal(
+        tabla,
+        "x",
+        tipos,
+        [
+            ("AS filas_tabla", [{"filas_tabla": filas}]),
+            ("AS valor", [{"valor": parte, "__filas": parte}]),
+        ],
+        stats=stats,
+        row_count=filas,
+    )
+
+
+async def test_calcular_conteo_en_tabla_sin_fecha_que_apila_mediciones_no_dice_que_es_foto() -> (
+    None
+):
+    """Índice de reciclabilidad de CABA en staging: 71 filas, tres mediciones
+    (2022 a 2024) en `medicion`. Con `material = Papel` el aviso decía «La tabla
+    no apila períodos (no tiene columna de fecha): es una sola foto, así que su
+    total es el conteo sin filtros, 71»."""
+    sandbox = _sin_fecha(RECICLABILIDAD, RECICLABILIDAD_TIPOS, RECICLABILIDAD_STATS, 71, 3)
+    pide = {
+        "tabla": RECICLABILIDAD,
+        "operacion": "conteo",
+        "filtros": [{"columna": "material", "operador": "=", "valor": "Papel"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert aviso == (
+        "Los filtros dejaron afuera 68 filas: la tabla entera tiene 71, y 3 es sólo la parte que "
+        "queda. No sé si la tabla apila períodos: «medicion» puede distinguirlos. Si los "
+        "distingue, sus 71 filas juntan todos y no son el total de uno solo; si no, la tabla es "
+        "una sola foto y su total es el conteo sin filtros."
+    )
+
+
+async def test_calcular_conteo_con_meses_de_encabezado_roto_no_dice_que_es_una_foto() -> None:
+    """complex_003: la cuarta tabla de viajes de Diputados tiene el encabezado
+    roto, y sus seis meses (jul-25 a dic-25) quedaron en la columna «dic-25».
+    Las otras tres decían «apila períodos»; ésta, «una sola foto, 5414»."""
+    tabla = "raw.diputados__viajes_nacionales__ea3c103a__v1"
+    tipos = [("dic-25", "text"), ("RAVIER ADRIAN OSVALDO", "text"), ("AEREO", "text")]
+    columnas = {
+        "dic-25": ColumnValueStats(
+            "dic-25",
+            n_distinct=6,
+            most_common_vals=["ago-25", "oct-25", "sept-25", "nov-25", "jul-25", "dic-25"],
+            most_common_freqs=[0.1982, 0.1806, 0.1727, 0.1694, 0.1505, 0.1286],
+        ),
+        "AEREO": ColumnValueStats("AEREO", n_distinct=2, most_common_vals=["AEREO", "TERRESTRE"]),
+    }
+    sandbox = _sin_fecha(tabla, tipos, columnas, 5414, 5113)
+    pide = {
+        "tabla": tabla,
+        "operacion": "conteo",
+        "filtros": [{"columna": "AEREO", "operador": "=", "valor": "AEREO"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert "No sé si la tabla apila períodos: «dic-25» puede distinguirlos." in aviso
+    assert "La tabla no apila períodos" not in aviso
+
+
+async def test_calcular_conteo_con_el_anio_mal_codificado_dice_que_apila_anios() -> None:
+    """Inventario de gases de CABA: 24 años en `a±o`. Ahora es la fecha de la
+    tabla, y el aviso dice que apila años (antes: «una sola foto»)."""
+    tabla = "raw.caba__inventario_de_gases_de_efecto_invernadero__9ca5aaf9__v1"
+    tipos = [("a±o", "double precision"), ("sector", "text"), ("valor", "text")]
+    rango = [{"desde": "2000", "hasta": "2023", "reconocidas": 1008, "con_valor": 1008}]
+    sandbox = _SandboxDePortal(
+        tabla,
+        "x",
+        tipos,
+        [
+            ("AS reconocidas", rango),
+            ("AS filas_tabla", [{"filas_tabla": 1008}]),
+            ("AS valor", [{"valor": 120, "__filas": 120}]),
+        ],
+        stats=TableValueStats(estimated_rows=1008),
+        row_count=1008,
+    )
+    pide = {
+        "tabla": tabla,
+        "operacion": "conteo",
+        "filtros": [{"columna": "sector", "operador": "=", "valor": "Residuos"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert "La tabla apila períodos en «a±o» (de 2000 a 2023)" in aviso
+    assert '"a±o"' in sandbox.sql_with("AS reconocidas")
+
+
+async def test_calcular_conteo_en_el_padron_de_2021_sin_un_valor_dominante_no_decide() -> None:
+    """El padrón 2021 de la Tarifa Social de staging: 202110 tiene el 89,5 % de
+    las filas, debajo del 90 %. No se lo da por una sola foto: queda la duda."""
+    columnas = {
+        **_TARIFA_STATS,
+        "PADRON": ColumnValueStats(
+            "PADRON",
+            n_distinct=32,
+            most_common_vals=["202110", "202106", "201702", "202004"],
+            most_common_freqs=[0.8951, 0.0213, 0.0201, 0.0064],
+        ),
+    }
+    tabla = "raw.mendoza__tarifa_social_electrica_2021__ff0db2ea__v1"
+    sandbox = _sin_fecha(tabla, TARIFA_TIPOS, columnas, 109_270, 97_800)
+    pide = {
+        "tabla": tabla,
+        "operacion": "conteo",
+        "filtros": [{"columna": "PADRON", "operador": "=", "valor": "202110"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert "No sé si la tabla apila períodos: «PADRON» puede distinguirlos." in aviso
+
+
+async def test_calcular_conteo_con_un_anio_dominante_entre_dos_no_decide() -> None:
+    """Datos de salud de ACUMAR en staging (encabezado roto): «Lanús_2» es el
+    año, con 2023 en el 93 % de las filas y 2022 en el 7 %, y la tabla apila
+    además semanas. Con dos valores, el dominante puede ser el único año
+    completo: no se da la tabla por una sola foto."""
+    tabla = "raw.cache_acumar_datos_demogr_ficos_y_de_salud_en_la_cu_r0410db9b59"
+    tipos = [("Lanús_2", "bigint"), ("Lanús_3", "bigint"), ("Total", "text")]
+    columnas = {
+        "Lanús_2": ColumnValueStats(
+            "Lanús_2",
+            n_distinct=2,
+            most_common_vals=["2023", "2022"],
+            most_common_freqs=[0.9334, 0.0666],
+        ),
+        "Lanús_3": ColumnValueStats(
+            "Lanús_3", n_distinct=52, most_common_vals=["39", "40", "41", "42"]
+        ),
+        "Total": ColumnValueStats("Total", n_distinct=2, most_common_vals=["Total", "0-4 años"]),
+    }
+    sandbox = _sin_fecha(tabla, tipos, columnas, 8022, 5214)
+    pide = {
+        "tabla": tabla,
+        "operacion": "conteo",
+        "filtros": [{"columna": "Total", "operador": "=", "valor": "Total"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert "No sé si la tabla apila períodos: «Lanús_2» puede distinguirlos." in aviso
+
+
+async def test_calcular_conteo_no_toma_una_fecha_de_carga_como_periodo() -> None:
+    """Las fechas de carga o auditoría no son la fecha de la tabla
+    (`resolver_columna_fecha`), y tampoco dejan la duda por sus valores."""
+    tabla = "raw.x__registro_de_empresas__1a2b3c4d__v1"
+    tipos = [("fecha_modificacion", "text"), ("categoria", "text")]
+    columnas = {
+        "fecha_modificacion": ColumnValueStats(
+            "fecha_modificacion", histogram_bounds=["2019-03-01", "2021-07-15", "2024-01-30"]
+        ),
+        "categoria": ColumnValueStats("categoria", most_common_vals=["A", "B"]),
+    }
+    sandbox = _sin_fecha(tabla, tipos, columnas, 1000, 300)
+    pide = {
+        "tabla": tabla,
+        "operacion": "conteo",
+        "filtros": [{"columna": "categoria", "operador": "=", "valor": "A"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert "La tabla no apila períodos (no tiene columna de fecha ni otra" in aviso
+
+
+@pytest.mark.parametrize(
+    ("columnas", "esperado"),
+    [
+        # Con muestra y ninguna columna que pueda distinguir períodos.
+        (
+            {
+                "provincia": ColumnValueStats(
+                    "provincia", most_common_vals=["Mendoza", "Salta", "Jujuy"]
+                ),
+                "categoria": ColumnValueStats("categoria", most_common_vals=["A", "B"]),
+            },
+            "La tabla no apila períodos (no tiene columna de fecha ni otra con valores de "
+            "período): es una sola foto, así que su total es el conteo sin filtros, 1000.",
+        ),
+        # Sin muestra (una tabla que nunca se analizó): no se sabe.
+        (
+            None,
+            "No sé si la tabla apila períodos: no tiene columna de fecha, y sin una muestra de "
+            "sus valores no puedo ver si otra los distingue.",
+        ),
+    ],
+)
+async def test_calcular_conteo_en_tabla_sin_fecha_dice_foto_solo_con_la_muestra(
+    columnas: dict[str, ColumnValueStats] | None, esperado: str
+) -> None:
+    tabla = "raw.x__beneficiarios_por_provincia__1a2b3c4d__v1"
+    tipos = [("provincia", "text"), ("categoria", "text")]
+    sandbox = _sin_fecha(tabla, tipos, columnas, 1000, 300)
+    pide = {
+        "tabla": tabla,
+        "operacion": "conteo",
+        "filtros": [{"columna": "categoria", "operador": "=", "valor": "A"}],
+    }
+    aviso = json.loads((await Calcular().run(pide, _ctx(sandbox))).content)["aviso_parte"]
+    assert esperado in aviso

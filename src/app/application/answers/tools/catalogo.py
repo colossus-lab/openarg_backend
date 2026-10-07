@@ -54,8 +54,11 @@ from app.application.consultas.fechas import (
     ColumnaFecha,
     abarca_rango,
     aviso_lectura_fecha,
+    descarta_valores_de_periodo,
     es_nombre_de_periodo,
+    es_valor_de_periodo,
     resolver_columna_fecha,
+    tiene_valores_de_periodo,
 )
 from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import (
@@ -82,7 +85,7 @@ from app.application.public_catalog import (
 )
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.agent_llm import AgentTool
-from app.domain.ports.sandbox.sql_sandbox import MartInfo, TableProfile
+from app.domain.ports.sandbox.sql_sandbox import MartInfo, TableProfile, TableValueStats
 from app.domain.value_objects.table_reference import bare_name, quote_qualified
 
 logger = logging.getLogger(__name__)
@@ -762,7 +765,8 @@ class _Forma:
     - ``apila``: apila períodos en ``columna`` (de ``desde`` a ``hasta``): sus
       filas juntan todos y no son el total de uno solo.
     - ``dudosa``: no se sabe; ``dudosas`` son las columnas que podrían
-      distinguir períodos.
+      distinguir períodos (ninguna si la tabla no tiene fecha y no hay
+      muestra de sus valores).
     """
 
     clase: str
@@ -782,6 +786,106 @@ def _lista(columnas: list[str], y: str = "y") -> str:
     if len(citadas) == 1:
         return citadas[0]
     return f"{', '.join(citadas[:-1])} {y} {citadas[-1]}"
+
+
+# Desde qué parte de las filas un solo valor con forma de período no deja
+# repartir la tabla en períodos (ver `_forma_sin_fecha`). Si la columna sí
+# los separara, ese período tendría el 90 % de las filas o más, y el conteo
+# sin filtros se pasaría de su total en un 11 % como mucho.
+_DOMINANTE_FOTO = 0.9
+# Y con cuántos valores distintos en la columna. Con pocos, uno con el 90 %
+# puede ser el único período completo y otro a medio cargar: en dos tablas
+# de salud de ACUMAR en staging, 2023 y 2022 tienen el 93 % y el 7 %, y la
+# tabla apila además semanas. Con diez o más, los demás se reparten el 10 %
+# que queda, alrededor de un 1 % cada uno: no son fotos de una misma población.
+_MIN_VALORES_DOMINANTE = 10
+
+
+def _valores_de_muestra(stats: TableValueStats | None, columna: str) -> list[str]:
+    st = stats.columns.get(columna) if stats else None
+    return [*st.most_common_vals, *st.histogram_bounds] if st else []
+
+
+def _dominante(stats: TableValueStats | None, columna: str) -> tuple[str, float] | None:
+    """El valor con forma de período que tiene ``_DOMINANTE_FOTO`` de las filas, en
+    una columna con ``_MIN_VALORES_DOMINANTE`` valores distintos o más; o None."""
+    st = stats.columns.get(columna) if stats else None
+    if not st or not st.most_common_vals or not st.most_common_freqs or st.n_distinct is None:
+        return None
+    # `n_distinct` negativo es una fracción de las filas (convención de Postgres).
+    filas = (stats.estimated_rows if stats else None) or 0
+    distintos = st.n_distinct if st.n_distinct > 0 else -st.n_distinct * filas
+    valor, parte = st.most_common_vals[0], st.most_common_freqs[0]
+    if (
+        parte < _DOMINANTE_FOTO
+        or distintos < _MIN_VALORES_DOMINANTE
+        or not es_valor_de_periodo(valor)
+    ):
+        return None
+    return valor, parte
+
+
+async def _forma_sin_fecha(
+    sandbox: Any, tabla: str, query: AggregateQuery, propia: ColumnaFecha | None
+) -> _Forma:
+    """La forma de una tabla sin fecha propia (``propia`` es None o de alta,
+    nacimiento…).
+
+    No haber encontrado la fecha no alcanza para decir que la tabla no apila
+    períodos (verificación de #171): en staging, 118 tablas sin fecha tenían
+    una columna con 2 a 60 años, AAAAMM o campañas, y unas 40 de las primeras
+    60 apilaban de verdad (`medicion` en el índice de reciclabilidad, 3 años;
+    `ciclo_lectivo`, `campania`, `eleccion`, `a±o`). Queda la duda si una
+    columna puede distinguir períodos:
+
+    - por el nombre (`mes`, `corte`, `campania`, `ciclo_lectivo`), o una fecha
+      de alta o de nacimiento, que describe a cada fila y puede no separarlos;
+    - por los valores de la muestra de ``pg_stats`` (``tiene_valores_de_periodo``).
+
+    Por los valores no cuentan las fechas de carga o auditoría
+    (`fecha_modificacion`, `proceso_fecha`), igual que en
+    ``resolver_columna_fecha``, ni los identificadores (`E0079_ID`), con
+    números que caen entre 1800 y 2099 (``descarta_valores_de_periodo``).
+
+    Salvo que un solo valor de la columna tenga el 90 % de las filas o más, y
+    la columna diez valores distintos o más: en la Tarifa Social de Mendoza
+    (nueva_16), `PADRON` es el mes de alta en el padrón, con 32 valores, y
+    202207 tiene el 90 % de las 110.179 filas. Una columna que separara fotos
+    de una misma población no se reparte así, y aun si las separara, el
+    conteo sin filtros se pasaría del total de esa foto en un 11 % como mucho.
+    La prueba que proponía la verificación (una columna con un valor distinto
+    por fila) no sirve: `SUMINISTRO` tiene un 19 % de valores distintos (Excel
+    los pasó a «1,31603E+14»), y en tablas que apilan sí hay columnas así (la
+    producción de tabaco por campaña, los montos del comercio de minerales).
+
+    Sin muestra (una tabla que nunca se analizó) no se sabe.
+    """
+    dudosas = [propia.nombre] if propia else []
+    dudosas += [c for c in query.tipos if es_nombre_de_periodo(c)]
+    stats = await estadisticas(sandbox, tabla, list(query.tipos))
+    con_muestra = stats is not None and bool(stats.columns)
+    dudosas += [
+        c
+        for c in query.tipos
+        if not descarta_valores_de_periodo(c)
+        and tiene_valores_de_periodo(_valores_de_muestra(stats, c))
+    ]
+    dudosas = list(dict.fromkeys(dudosas))
+    if not dudosas:
+        if not con_muestra:
+            return _Forma("dudosa")
+        return _Forma("foto", motivo="no tiene columna de fecha ni otra con valores de período")
+    dominantes = {c: d for c in dudosas if (d := _dominante(stats, c))}
+    if len(dominantes) == len(dudosas):
+        columna, (valor, parte) = next(iter(dominantes.items()))
+        return _Forma(
+            "foto",
+            motivo=(
+                f"el {round(100 * parte)} % de sus filas tiene el mismo «{columna}», {valor}: "
+                "esa columna describe a cada fila, no separa fotos"
+            ),
+        )
+    return _Forma("dudosa", dudosas=tuple(c for c in dudosas if c not in dominantes)[:3])
 
 
 async def _forma_de_la_tabla(
@@ -806,15 +910,7 @@ async def _forma_de_la_tabla(
     avisa (en las mediaciones, 914 mil filas, el rango exacto tarda 1,1 s).
     """
     if propia is None or propia.atributo:
-        # Sin fecha, la tabla es una sola foto, salvo que una columna con
-        # nombre de período o de foto (`mes`, `corte`) deje la duda. Una fecha
-        # de alta o de nacimiento describe a cada fila y puede no separar
-        # períodos: también queda la duda.
-        dudosas = [propia.nombre] if propia else []
-        dudosas += [c for c in query.tipos if es_nombre_de_periodo(c)]
-        if dudosas:
-            return _Forma("dudosa", dudosas=tuple(dict.fromkeys(dudosas))[:3])
-        return _Forma("foto", motivo="no tiene columna de fecha")
+        return await _forma_sin_fecha(sandbox, tabla, query, propia)
     nombre = _lista([propia.nombre, propia.mes] if propia.mes else [propia.nombre])
     if con_muestra:
         try:
@@ -917,13 +1013,20 @@ def _texto_aviso_parte(
             "juntan todos esos períodos, no son el total de uno solo. Para un período, filtralo "
             "con `desde`/`hasta`."
         )
-    else:
+    elif forma.dudosas:
         puede = "pueden" if len(forma.dudosas) > 1 else "puede"
         cola = (
             f"No sé si la tabla apila períodos: {_lista(list(forma.dudosas), 'o')} {puede} "
             f"distinguirlos. Si los distingue, sus {filas_tabla} filas juntan todos y no son el "
             "total de uno solo; si no, la tabla es una sola foto y su total es el conteo sin "
             "filtros."
+        )
+    else:
+        cola = (
+            "No sé si la tabla apila períodos: no tiene columna de fecha, y sin una muestra de "
+            f"sus valores no puedo ver si otra los distingue. Si los apila, sus {filas_tabla} "
+            "filas juntan todos y no son el total de uno solo; si no, la tabla es una sola foto "
+            "y su total es el conteo sin filtros."
         )
     return f"{cabeza} {cola}"
 
@@ -944,8 +1047,9 @@ async def _aviso_parte(
     tabla los suma a todos», y ``PADRON = 202207`` parece justo una foto
     mensual (verificación de la ola 5):
 
-    - una sola foto (sin columna de fecha, o con un solo período): su total es
-      el conteo sin filtros, y filtrar elige una parte de esa foto;
+    - una sola foto (sin columna de fecha ni otra que pueda distinguir
+      períodos, o con un solo período): su total es el conteo sin filtros, y
+      filtrar elige una parte de esa foto (ver `_forma_sin_fecha`);
     - ``desde``/``hasta`` sobre su columna de fecha abarca todos sus períodos:
       el total de ese período es el conteo sin filtros;
     - apila períodos: lo dice con la columna que los distingue, y sus filas no
