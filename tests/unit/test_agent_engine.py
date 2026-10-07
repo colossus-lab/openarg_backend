@@ -1468,6 +1468,9 @@ async def test_opcion_b_las_fuentes_que_se_listan_en_cada_modo(
     assert result.citations == []
     assert result.cited_evidence == _LEIDAS
     assert result.consulted == []
+    # Las dos series se llaman igual, así que acá no se ve que en shadow el
+    # gráfico de una serie no listada sigue: eso lo fija, con títulos
+    # distintos, test_opcion_b_serie_vieja_no_usada_sale_de_las_fuentes_...
     assert result.chart_data == (build_deterministic_charts(_LEIDAS) or None)
     assert result.served_table == RESERVAS_DIARIA.source
     assert result.row_count == len(RESERVAS_DIARIA.records)
@@ -1990,3 +1993,132 @@ async def test_complex_001_en_sombra_no_lista_la_cotizacion_actual_que_no_uso(
     assert result.citations == []
     assert result.cited_evidence == leido
     assert result.figure_evidence == [*leido[1:], DOLAR_BLUE_ACTUAL]
+
+
+# ── lo que la opción B deja a la vista (revisión de #167) ──
+#
+# La opción B que se aprobó en #161 cambia las fuentes «y nada más»: el aviso
+# de atraso, los gráficos, el mapa y los documentos siguen saliendo de todo lo
+# leído. Con series de títulos distintos se ve lo que eso implica en shadow:
+# un gráfico o un «Dato atrasado» que nombran una serie que ya no figura en
+# las fuentes. Estos tests lo fijan para que cambiarlo sea una decisión.
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off", "correct"])
+async def test_opcion_b_serie_vieja_no_usada_sale_de_las_fuentes_pero_no_del_grafico_ni_del_aviso(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """Leyó una serie de 2023 («Exportaciones de complejos oleaginosos») y el
+    IPC, y la respuesta usa sólo el 1,7 % del IPC. Es el patrón de nueva_11 y
+    nueva_18 de las 25 preguntas del 06-oct, y no es un caso suelto: pasa
+    cada vez que se lee una serie vieja que no aporta cifras y se llama
+    distinto de lo usado, porque el aviso la cuenta (#146: puede haberse
+    usado sin cifra propia) y la lista de fuentes no (opción B).
+
+    En shadow (y sin la variable) la serie sale de las fuentes, pero su
+    gráfico sigue y el aviso de atraso la nombra. En off se lista, como hoy.
+    En correct no hay ni fuente, ni gráfico, ni aviso de esa serie."""
+    from app.application.answers.runner import EngineRunner
+
+    _runner_sin_io(monkeypatch)
+    _modo(monkeypatch, mode)
+    answer = "En septiembre de 2026 la inflación mensual fue de **1,7 %**."
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("series_tiempo", 1, ids=["74.3_IEC_0_M_24"]),
+                    _call("series_tiempo", 2, ids=["148.3_INIVELNAL_DICI_M_26"]),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    engine = AgentEngine(llm, _deps_series(EXPORTACIONES_VIEJAS, IPC_AL_DIA))
+    result = await EngineRunner(engine, MagicMock()).run(
+        EngineRequest("¿Cuánto fue la inflación de septiembre?", "u")
+    )
+
+    vieja = EXPORTACIONES_VIEJAS.dataset_title
+    fuentes = [s["name"] for s in result.sources]
+    graficos = [c["title"] for c in result.chart_data or []]
+    assert result.answer.endswith(answer)
+    avisos = result.answer[: -len(answer)]
+    if mode != "off":
+        assert result.verification["cifras"] == 1
+        assert result.verification["sin_respaldo"] == [] and result.verification["contexto"] == 0
+    if mode == "correct":
+        assert fuentes == [IPC_AL_DIA.dataset_title]
+        assert not any(t.startswith(vieja) for t in graficos)
+        assert avisos == ""
+        return
+    # Fuera de correct, el gráfico y el aviso salen de todo lo leído.
+    assert any(t.startswith(vieja) for t in graficos)
+    assert avisos.startswith("**Dato atrasado:**")
+    assert f"«{vieja}»" in avisos
+    assert "diciembre de 2023" in avisos
+    if mode == "off":
+        assert fuentes == [vieja, IPC_AL_DIA.dataset_title]
+        return
+    # Shadow: la serie que el aviso nombra y que tiene gráfico no está listada.
+    assert fuentes == [IPC_AL_DIA.dataset_title]
+    assert vieja not in fuentes
+
+
+@pytest.mark.parametrize("mode", [None, "shadow", "off", "correct"])
+async def test_opcion_b_una_cita_textual_sin_cifra_propia_sale_de_las_fuentes(
+    monkeypatch: pytest.MonkeyPatch, mode: str | None
+) -> None:
+    """La respuesta cita tal cual un fragmento de las sesiones y da una cifra
+    del ICA. La única cifra es directa del ICA, así que en shadow la lista de
+    fuentes sale de la selección, y la selección sólo suma algo sin cifras si
+    su título aparece en el texto: el título de las sesiones
+    ('Transcripciones parlamentarias: "retenciones exportaciones"') el
+    modelo no lo escribe. La cita queda sin su fuente, aunque el gráfico de
+    las sesiones sigue. Es la clase «usada sin cifra propia» del costo
+    aceptado (H100), y en correct pasa lo mismo.
+
+    Off lista las dos, y el chequeo `fuente_sin_cifra` de la batería marca
+    las sesiones: su evidencia tiene números (período, reunión, páginas) y
+    ninguno está en la respuesta. Listar la cita también la haría marcar."""
+    deps = _deps()
+    deps.sesiones.search = AsyncMock(return_value=SESIONES_RETENCIONES)
+    deps.series.fetch = AsyncMock(return_value=EXPORTACIONES_ICA)
+    answer = (
+        "En el debate del Diario de Sesiones de Diputados, un legislador sostuvo que "
+        "«somos el único país que atenta contra las exportaciones». Según el INDEC, "
+        "las exportaciones fueron de **USD 87.111 millones** en 2025."
+    )
+    llm = ScriptedLLM(
+        [
+            _turn(
+                calls=[
+                    _call("sesiones", 1, texto="retenciones exportaciones"),
+                    _call("series_tiempo", 2, ids=["74.3_IET_0_M_16"], frecuencia="year"),
+                ]
+            ),
+            _turn(answer),
+        ]
+    )
+    result = await _caso_bateria(
+        monkeypatch, mode, "¿Qué se dijo de las retenciones y cuánto se exportó?", llm, deps
+    )
+
+    sesiones = SESIONES_RETENCIONES.dataset_title
+    fuentes = [s["name"] for s in result.sources]
+    graficos = [c["title"] for c in result.chart_data or []]
+    assert result.answer == answer
+    assert "somos el único país que atenta contra las exportaciones" in answer.lower()
+    if mode == "off":
+        assert fuentes == [sesiones, EXPORTACIONES_ICA.dataset_title]
+        assert _fuentes_sin_cifra(answer, result) == ([sesiones], [])
+        return
+    assert result.verification["cifras"] == 1
+    assert result.verification["directas"] == 1
+    assert result.verification["sin_respaldo"] == [] and result.verification["contexto"] == 0
+    assert fuentes == [EXPORTACIONES_ICA.dataset_title]
+    assert _fuentes_sin_cifra(answer, result) == ([], [])
+    if mode == "correct":
+        assert sesiones not in graficos
+    else:
+        assert sesiones in graficos

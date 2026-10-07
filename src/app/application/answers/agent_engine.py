@@ -491,7 +491,9 @@ class AgentEngine:
             # La excepción es la lista de fuentes en shadow, si todas las
             # cifras son directas o derivadas (opción B): ahí sale de la
             # selección. Gráficos, mapa, `served_table`, citas y el aviso de
-            # atraso no cambian.
+            # atraso no cambian, así que en shadow un gráfico o un «Dato
+            # atrasado» pueden nombrar una serie leída que ya no figura en
+            # las fuentes (revisión de #167; lo fijan los tests de la opción B).
             backed = mode == VERIFY_SHADOW and _all_figures_backed(check)
             listed = cited if backed else list(evidence)
             cited, consulted, citations, figures = list(evidence), [], [], []
