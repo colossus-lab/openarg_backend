@@ -46,6 +46,17 @@ sale cuando ``fecha_nacimiento`` cuenta como fecha):
 - las marcas booleanas no son series;
 - la fila que no cierra no decide qué series hay;
 - con ``ingresos_inconsistentes`` se anulan sus ingresos, no la fila.
+
+Y la descripción de la herramienta prometía que ``estadisticas`` «incluye
+cuántos tienen patrimonio negativo», pero la fila no traía ese conteo: el
+modelo podía afirmar una cantidad que ninguna herramienta le dio
+(«¿Cuántos diputados tienen patrimonio negativo?», ddjj_004 del golden):
+
+- la fila de estadísticas trae ``patrimonio_negativo_cantidad``, contado
+  sobre las mismas DDJJ que el promedio: la que no cierra no cuenta, porque
+  su patrimonio sale de un total de bienes que su propio detalle desmiente;
+- cero también se informa;
+- con el dataset real son 2.
 """
 
 from __future__ import annotations
@@ -259,6 +270,34 @@ def test_las_estadisticas_se_calculan_sin_la_inconsistente(adapter: DDJJAdapter)
     assert "sin 1 declaración" in result.metadata["description"]
 
 
+def test_las_estadisticas_cuentan_los_patrimonios_negativos() -> None:
+    a = DDJJAdapter()
+    a._loaded = True
+    a._dataset = [
+        COHERENTE,
+        # Debe más de lo que tiene, y sus bienes cierran con el detalle.
+        _ddjj("RUIZ MARTA", inicio=80 * M, cierre=70 * M, detalle=[70 * M], deudas=140 * M),
+        # Total al cierre en cero con $30 M en el detalle: su patrimonio
+        # negativo sale de un total que no cierra.
+        _ddjj("DIAZ LUIS", inicio=0, cierre=0, detalle=[30 * M], deudas=5 * M),
+    ]
+    result = a.stats()
+    [stats] = result.records
+    assert stats["total"] == 3
+    # Sobre las mismas DDJJ que el promedio, el máximo y el mínimo.
+    assert stats["excluidas_por_inconsistencia"] == 1
+    assert stats["patrimonio_negativo_cantidad"] == 1
+    assert "DIAZ" not in json.dumps(stats)
+    # Con exclusiones, la descripción dice que el conteo tampoco las toma.
+    assert "y cuántas tienen patrimonio negativo" in result.metadata["description"]
+
+
+def test_cero_patrimonios_negativos_tambien_se_informa(adapter: DDJJAdapter) -> None:
+    """La descripción de la herramienta lo promete: un cero es la respuesta."""
+    [stats] = adapter.stats().records
+    assert stats["patrimonio_negativo_cantidad"] == 0
+
+
 def test_el_motivo_se_lo_atribuye_al_dataset_no_a_la_persona(adapter: DDJJAdapter) -> None:
     """No se verificó si el error viene de la Oficina Anticorrupción o de la conversión."""
     [row] = adapter.search("lopez").records
@@ -421,6 +460,16 @@ def test_real_las_estadisticas_no_las_infla_la_carga_erronea(real: DDJJAdapter) 
     assert "BRUGGE" not in json.dumps(stats)
 
 
+def test_real_dos_ddjj_con_patrimonio_negativo(real: DDJJAdapter) -> None:
+    """El oráculo de ddjj_004: 2 DDJJ 2024 con patrimonio al cierre negativo.
+
+    Las dos cierran con su propio detalle, así que contar sobre todo el
+    dataset o sin la carga errónea da lo mismo.
+    """
+    [stats] = real.stats().records
+    assert stats["patrimonio_negativo_cantidad"] == 2
+
+
 def test_real_los_rankings_que_no_la_incluian_no_la_nombran(real: DDJJAdapter) -> None:
     """Brugge quedaba en el puesto 195 por menor patrimonio y en el 35 por ingresos."""
     asc = real.ranking(sort_by="patrimonio", top=3, order="asc")
@@ -504,6 +553,20 @@ async def test_herramienta_estadisticas_no_le_pasa_el_nombre(real: DDJJAdapter) 
     [fila] = json.loads(out.content)["filas"]
     assert fila["excluidas_por_inconsistencia"] == 1
     assert "BRUGGE" not in out.content
+
+
+async def test_herramienta_estadisticas_trae_lo_que_promete_la_descripcion(
+    real: DDJJAdapter,
+) -> None:
+    """La descripción promete cuántos tienen patrimonio negativo: sin el conteo
+    en la fila, el modelo podía afirmar una cantidad que nada le devolvió."""
+    assert "cuántos tienen patrimonio negativo" in DeclaracionesJuradas.spec.description
+    out = await DeclaracionesJuradas().run({"accion": "estadisticas"}, _ctx(real))
+    payload = json.loads(out.content)
+    [fila] = payload["filas"]
+    assert fila["patrimonio_negativo_cantidad"] == 2
+    # La base del conteo llega entera, aunque la descripción se recorta.
+    assert "y cuántas tienen patrimonio negativo" in payload["descripcion"]
 
 
 async def test_herramienta_ranking_ascendente_sin_aviso(real: DDJJAdapter) -> None:

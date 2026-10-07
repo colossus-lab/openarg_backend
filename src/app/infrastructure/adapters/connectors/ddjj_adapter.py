@@ -315,6 +315,11 @@ class DDJJAdapter:
         max_val, min_val = float("-inf"), float("inf")
         max_r = min_r = usable[0]
         patrimonios: list[float] = []
+        # The tool description promises how many have a negative net worth.
+        # Counted over the same DDJJ as the average: the net worth of one that
+        # doesn't add up comes from the total its own items contradict (a
+        # closing total of zero with debts reads as negative).
+        negativos = 0
         for r in usable:
             p = r.get("patrimonioCierre", 0)
             patrimonios.append(p)
@@ -323,6 +328,8 @@ class DDJJAdapter:
                 max_val, max_r = p, r
             if p < min_val:
                 min_val, min_r = p, r
+            if p < 0:
+                negativos += 1
         patrimonios.sort()
 
         stats_record = {
@@ -334,6 +341,7 @@ class DDJJAdapter:
             "patrimonio_maximo_monto": max_r.get("patrimonioCierre", 0),
             "patrimonio_minimo_nombre": min_r.get("nombre", ""),
             "patrimonio_minimo_monto": min_r.get("patrimonioCierre", 0),
+            "patrimonio_negativo_cantidad": negativos,
         }
         description = f"Estadísticas agregadas de {total} declaraciones juradas patrimoniales"
         metadata: dict[str, Any] = {
@@ -345,10 +353,10 @@ class DDJJAdapter:
             stats_record["excluidas_por_inconsistencia"] = len(excluded)
             metadata["excluidas_por_inconsistencia_nombres"] = excluded
             description += (
-                f". Promedio, mediana, máximo y mínimo calculados sin "
-                f"{_declaraciones(len(excluded))} cuyo registro en el dataset tiene un total de "
-                "bienes que no cierra con su propio detalle (probable error de carga; "
-                "excluidas_por_inconsistencia)."
+                ". Promedio, mediana, máximo, mínimo y cuántas tienen patrimonio negativo, "
+                f"calculados sin {_declaraciones(len(excluded))} cuyo registro en el dataset "
+                "tiene un total de bienes que no cierra con su propio detalle (probable error "
+                "de carga; excluidas_por_inconsistencia)."
             )
         metadata["description"] = description
         return DataResult(
