@@ -875,16 +875,26 @@ def period_of(n: NumberInText, periods: list[Period], text: str) -> Period | Non
     2025), salvo que sea la base de una comparación ("respecto de julio de
     2025"). Si la oración no nombra ninguno, el más reciente de los
     alrededores: un título o el encabezado de una tabla.
+
+    Si la oración sólo nombra la base, el período del dato también se busca
+    en los alrededores, sin las bases: "El último dato disponible es de
+    agosto de 2026 … - Inflación mensual: 1,66 % (variación respecto a julio
+    2026)" fechaba el 1,66 en julio (series_009, prueba de staging del
+    07-oct). Si alrededor no hay otro, queda la base, como antes.
     """
     s0, s1 = _sentence_span(text, n.start)
     same = [p for p in periods if p.pos < s1 and p.endpos > s0]
-    if same:
+    if same and not all(_is_base(text, p) for p in same):
         return min(same, key=lambda p: (_is_base(text, p), _distance(p, n), p.pos > n.start))
     near = [
         p
         for p in periods
         if 0 <= n.start - p.endpos <= _LOOKBACK_CHARS or 0 <= p.pos - n.end <= _LOOKAHEAD_CHARS
     ]
+    if same:
+        near = [p for p in near if not _is_base(text, p)]
+        if not near:
+            return min(same, key=lambda p: (_distance(p, n), p.pos > n.start))
     return max(near, key=lambda p: p.end) if near else None
 
 
@@ -1151,7 +1161,8 @@ def _figure_matches(n: NumberInText, values: list[float]) -> bool:
     return False
 
 
-_Evidence = tuple[list[float], list[float]]  # (números, variaciones derivadas)
+# (números, variaciones derivadas, cuentas de filas del cálculo)
+_Evidence = tuple[list[float], list[float], list[float]]
 
 
 def sources_without_figures(
@@ -1175,6 +1186,10 @@ def sources_without_figures(
     los contadores no cuentan como cifras, y complex_003 salía «citada sin
     cifra» con los tramos de viaje de «Viajes Nacionales — conteo» escritos
     en el texto (06-oct: los seis; 05-oct: dos de los tres que leyó).
+
+    Las cuentas de filas de un cálculo (``conteos_de_filas``, ver
+    ``engines.evidence_items``) también son cifras de la fuente: el total de
+    filas de ckan_002 (07-oct). No entran en la regla de los conteos chicos.
     """
     figures = figures_for_sourcing(answer)
     if not figures:
@@ -1189,13 +1204,15 @@ def sources_without_figures(
         url = str(item.get("url") or "").strip()
         item_numbers = [float(n) for n in item.get("numbers") or []]
         item_derived = [float(n) for n in item.get("derivadas") or []]
-        for nums, derived in (
-            by_pair.setdefault((title, url), ([], [])),
-            by_title.setdefault(title, ([], [])),
-            by_url.setdefault(url, ([], [])),
+        item_rows = [float(n) for n in item.get("conteos_de_filas") or []]
+        for nums, derived, rows in (
+            by_pair.setdefault((title, url), ([], [], [])),
+            by_title.setdefault(title, ([], [], [])),
+            by_url.setdefault(url, ([], [], [])),
         ):
             nums.extend(item_numbers)
             derived.extend(item_derived)
+            rows.extend(item_rows)
     sin_cifra: list[str] = []
     sin_evidencia: list[str] = []
     for s in sources or []:
@@ -1210,10 +1227,10 @@ def sources_without_figures(
         if ev is None:
             sin_evidencia.append(name)
             continue
-        nums, derived = ev
+        nums, derived, rows = ev
         if not nums:
             continue
-        if any(_figure_matches(f, nums) for f in figures):
+        if any(_figure_matches(f, nums + rows) for f in figures):
             continue
         if any(
             abs(abs(f.value) - abs(d)) <= _figure_tolerance(f) + 1e-9

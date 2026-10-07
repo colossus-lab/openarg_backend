@@ -1,0 +1,710 @@
+{
+ "descripcion": "Dos corridas de la batería v3 contra el agente Sonnet 4.6 de staging (07-oct-2026, origin/staging 0d6640a, ola 4) que fallaron por un error de la batería: la respuesta, las fuentes, la evidencia por fuente y los jueces tal como quedaron en el reporte (bateria_ola4.json). series_009 lleva las cifras de los oráculos congeladas ese día. ckan_002 lleva el SQL que armó `calcular` y los 51 grupos que devuelve ese SQL en staging (consulta de sólo lectura del 07-oct; los 50 primeros son idénticos a la evidencia del reporte) con `__filas_total` = 52.367, igual a count(*) de la tabla.",
+ "hoy": "2026-10-07",
+ "corridas": [
+  {
+   "caso": "series_009",
+   "pregunta": "¿Cuál fue la inflación mensual del último mes disponible y la interanual?",
+   "answer": "El último dato disponible es de **agosto de 2026**, según el IPC Nacional (INDEC, base dic-2016):\n\n- **Inflación mensual: 1,66%** (variación respecto a julio 2026)\n- **Inflación interanual: 33,54%** (variación respecto a agosto 2025)",
+   "sources": [
+    {
+     "name": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+     "url": "https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26",
+     "portal": "API de Series de Tiempo",
+     "accessed_at": "2026-10-07T16:27:29.908807+00:00"
+    }
+   ],
+   "evidence_items": [
+    {
+     "title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+     "url": "https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26",
+     "portal": "API de Series de Tiempo",
+     "rows": 116,
+     "total_records": 116,
+     "last_date": "2026-08-01",
+     "numbers": [
+      1.59,
+      2.07,
+      2.37,
+      2.66,
+      1.43,
+      1.19,
+      1.73,
+      1.4,
+      1.9,
+      1.51,
+      1.38,
+      3.14,
+      1.76,
+      2.42,
+      2.34,
+      2.74,
+      2.08,
+      3.74,
+      3.1,
+      3.89,
+      6.53,
+      5.39,
+      3.15,
+      2.57,
+      2.91,
+      3.77,
+      4.68,
+      3.4,
+      2.72,
+      2.2,
+      3.95,
+      5.89,
+      3.29,
+      4.25,
+      2.25,
+      2.01,
+      3.34,
+      1.5,
+      1.54,
+      2.24,
+      1.93,
+      2.7,
+      2.84,
+      3.76,
+      3.16,
+      4.01,
+      4.05,
+      3.57,
+      4.81,
+      4.08,
+      3.32,
+      3.17,
+      3.0,
+      2.47,
+      3.55,
+      3.52,
+      2.53,
+      3.84,
+      3.88,
+      4.69,
+      6.73,
+      6.05,
+      5.05,
+      5.3,
+      7.41,
+      6.97,
+      6.17,
+      6.35,
+      4.92,
+      5.12,
+      6.03,
+      6.63,
+      7.68,
+      8.4,
+      7.77,
+      5.95,
+      6.34,
+      12.44,
+      12.75,
+      8.3,
+      12.81,
+      25.47,
+      20.61,
+      13.24,
+      11.01,
+      8.83,
+      4.18,
+      4.58,
+      4.03,
+      4.17,
+      3.47,
+      2.69,
+      2.43,
+      2.21,
+      2.4,
+      3.73,
+      2.78,
+      1.62,
+      1.88,
+      2.85,
+      2.88,
+      2.9,
+      3.38,
+      2.58,
+      2.15,
+      1.89,
+      2.11,
+      1.66
+     ],
+     "derivadas": [
+      -54.916067,
+      -41.754386,
+      -40.057637,
+      -33.684211,
+      -30.37037,
+      -25.964912,
+      -24.561404,
+      -23.668639,
+      -22.962963,
+      -21.327014,
+      -16.666667,
+      -13.333333,
+      -13.011152,
+      -12.093023,
+      -11.702128,
+      -9.473684,
+      -9.383378,
+      -8.518519,
+      -7.194245,
+      -1.052632,
+      0.694444,
+      1.052632,
+      1.646091,
+      1.754386,
+      5.555556,
+      10.638298,
+      11.052632,
+      11.640212,
+      12.5,
+      15.384615,
+      16.551724,
+      16.666667,
+      18.596491,
+      20.833333,
+      30.316742,
+      43.333333
+     ]
+    },
+    {
+     "title": "Índice de Precios al Consumidor Nacional (IPC). Base diciembre 2016.",
+     "url": "https://datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26",
+     "portal": "API de Series de Tiempo",
+     "rows": 105,
+     "total_records": 105,
+     "last_date": "2026-08-01",
+     "numbers": [
+      24.8,
+      25.01,
+      25.44,
+      25.4,
+      25.5,
+      26.29,
+      29.47,
+      31.21,
+      34.43,
+      40.54,
+      45.91,
+      48.47,
+      47.65,
+      49.31,
+      51.28,
+      54.73,
+      55.73,
+      57.3,
+      55.75,
+      54.39,
+      54.48,
+      53.54,
+      50.49,
+      52.09,
+      53.83,
+      52.86,
+      50.27,
+      48.36,
+      45.63,
+      43.42,
+      42.76,
+      42.39,
+      40.67,
+      36.62,
+      37.24,
+      35.8,
+      36.14,
+      38.53,
+      40.65,
+      42.65,
+      46.28,
+      48.84,
+      50.2,
+      51.77,
+      51.42,
+      52.47,
+      52.11,
+      51.18,
+      50.94,
+      50.69,
+      52.32,
+      55.11,
+      58.04,
+      60.68,
+      63.98,
+      71.0,
+      78.52,
+      83.03,
+      88.04,
+      92.41,
+      94.79,
+      98.83,
+      102.5,
+      104.3,
+      108.83,
+      114.25,
+      115.58,
+      113.45,
+      124.37,
+      138.28,
+      142.66,
+      160.92,
+      211.41,
+      254.25,
+      276.22,
+      287.87,
+      289.4,
+      276.41,
+      271.53,
+      263.45,
+      236.72,
+      209.0,
+      192.99,
+      166.03,
+      117.76,
+      84.54,
+      66.87,
+      55.93,
+      47.26,
+      43.48,
+      39.42,
+      36.57,
+      33.56,
+      31.76,
+      31.31,
+      31.37,
+      31.55,
+      32.41,
+      33.05,
+      32.61,
+      32.35,
+      33.2,
+      33.55,
+      33.83,
+      33.54
+     ],
+     "derivadas": [
+      -85.822913,
+      -84.803828,
+      -83.776361,
+      -81.105824,
+      -73.412024,
+      -73.361073,
+      -73.20822,
+      -73.029891,
+      -71.501359,
+      -61.663118,
+      -50.575744,
+      -41.694976,
+      -31.548879,
+      -23.643054,
+      -14.890918,
+      -8.23079,
+      -7.49248,
+      -5.363528,
+      -1.416877,
+      -1.331316,
+      -0.857227,
+      -0.797301,
+      -0.059595,
+      0.191632,
+      0.573797,
+      0.834575,
+      1.054217,
+      1.974699,
+      2.535658,
+      2.627512,
+      2.725832,
+      3.359746,
+      4.754358,
+      5.229794,
+      6.307448,
+      6.339144,
+      7.226624
+     ]
+    }
+   ],
+   "error": null,
+   "judge": {
+    "relevance": 1.0,
+    "hallucination": 0.0,
+    "neutrality": null,
+    "reasons": {
+     "relevance": "La respuesta proporciona exactamente lo que se pidió: inflación mensual e interanual del último mes disponible, identificando claramente el período (agosto 2026) y la fuente (IPC Nacional, INDEC). Responde de forma directa y precisa a ambos indicadores solicitados sin esquivar ni agregar información irrelevante.",
+     "hallucination": "Ambas cifras (1,66% mensual y 33,54% interanual para agosto de 2026) están directamente presentes en los datos proporcionados, sin ningún cálculo adicional ni transformación. No hay cifras inventadas ni unidades cambiadas.",
+     "neutrality": ""
+    }
+   },
+   "fallas_ese_dia": [
+    "fecha_del_dato: presenta como último dato 'julio 2026' y la fuente llega a 2026-08-01"
+   ],
+   "expectativas": {
+    "expected_values": [
+     {
+      "value": [
+       1.6592064235202875
+      ],
+      "tolerance": 0.05,
+      "unit_patterns": [
+       "%",
+       "por ciento"
+      ],
+      "label": "IPC mensual del último mes",
+      "periodo": "2026-08-01"
+     },
+     {
+      "value": [
+       33.54117291414029
+      ],
+      "tolerance": 0.1,
+      "unit_patterns": [
+       "%",
+       "por ciento"
+      ],
+      "label": "IPC interanual (índice[t]/índice[t−12]−1)",
+      "periodo": "2026-08-01"
+     }
+    ],
+    "forbidden_values": [],
+    "expected_period": {
+     "periodo": "2026-08-01",
+     "frecuencia": "mensual",
+     "aceptable_desde": "2026-08-01",
+     "atrasado_en_fuente": false,
+     "hoy": "2026-10-07",
+     "label": "serie_ultimo"
+    },
+    "errores": [],
+    "detalle": [
+     "IPC mensual del último mes: 12276.8 / 12076.4 − 1 = 1.6592 % (2026-08)",
+     "IPC interanual (índice[t]/índice[t−12]−1): 12276.8 / 9193.24 − 1 = 33.5412 % (2026-08 vs 2025-08)"
+    ]
+   }
+  },
+  {
+   "caso": "ckan_002",
+   "pregunta": "Datos de transporte público en CABA",
+   "answer": "Acá te cuento qué datasets de transporte público en CABA están disponibles en OpenArg:\n\n---\n\n**📋 Datos disponibles**\n\n**1. SUBE — Uso del transporte público** (sube uso transporte publico)\nRegistra la cantidad diaria de transacciones (boletos pagos) por modo (colectivo, tren, subte, ferry), empresa, línea, provincia y municipio. Cubre desde 2020 hasta mayo de 2026, con ~2,85 millones de filas. Incluye operaciones del AMBA y del interior del país. Es consultable por línea, empresa o modo.\n\n**2. Subte CABA — Pasajeros por molinete** (subte viajes molinetes)\nPasajeros del subte de CABA (líneas A, B, C, D, E y H) por molinete y estación, en intervalos de 15 minutos. Distingue pagos, pases y franquicias. Cubre 2020–2024. Es útil para ver demanda por línea, estación y franja horaria.\n\n**3. Transportes autorizados de pasajeros en CABA** (caba transportes autorizados)\nPadrón de taxis, remises y vehículos de transporte regular registrados ante el Gobierno de CABA, con datos de barrio, comuna y ubicación geográfica. El dataset tiene 52.367 registros (snapshots mensuales 2017–2018). Los barrios con más vehículos registrados son Flores, Villa Lugano, Caballito, Villa Urquiza y Palermo.\n\n**4. Subsidios al transporte público** (subsidios transporte publico)\nTransferencias del Estado nacional a empresas operadoras (compensación tarifaria, gasoil, etc.) por mes, provincia, municipio y empresa. ~125.000 filas.\n\n**5. Flujo vehicular en peajes de AUSA** (flujo vehicular peajes caba)\nPasos por peajes de las autopistas urbanas de CABA (AUSA), con tipo de vehículo, forma de pago, sentido y horario. ~7 millones de filas.\n\n---\n\n**¿Qué querés explorar?** Puedo consultar cualquiera de estas tablas: viajes por línea de subte, uso de colectivos, subsidios por empresa, vehículos por barrio, etc.",
+   "sources": [
+    {
+     "name": "Padrón de transportes autorizados de pasajeros en CABA — taxis, — conteo",
+     "url": "",
+     "portal": "OpenArg (tabla curada)",
+     "accessed_at": "2026-10-07T16:29:47.890325+00:00"
+    }
+   ],
+   "evidence_items": [
+    {
+     "title": "Padrón de transportes autorizados de pasajeros en CABA — taxis, — conteo",
+     "url": "",
+     "portal": "OpenArg (tabla curada)",
+     "rows": 50,
+     "total_records": 50,
+     "last_date": null,
+     "numbers": [
+      35684.0,
+      476.0,
+      463.0,
+      462.0,
+      444.0,
+      419.0,
+      404.0,
+      385.0,
+      383.0,
+      370.0,
+      344.0,
+      324.0,
+      321.0,
+      310.0,
+      309.0,
+      298.0,
+      276.0,
+      264.0,
+      262.0,
+      257.0,
+      249.0,
+      248.0,
+      237.0,
+      232.0,
+      231.0,
+      230.0,
+      220.0,
+      219.0,
+      213.0,
+      212.0,
+      209.0,
+      198.0,
+      188.0,
+      186.0,
+      184.0,
+      181.0,
+      178.0,
+      176.0,
+      175.0,
+      173.0,
+      169.0,
+      158.0,
+      155.0,
+      153.0,
+      152.0,
+      151.0,
+      148.0,
+      142.0
+     ],
+     "derivadas": [
+      -24.401914,
+      -22.608696,
+      -21.717172,
+      -20.283019,
+      -20.224719,
+      -20.091324,
+      -20.0,
+      -19.090909,
+      -18.779343,
+      -18.617021,
+      -18.27957,
+      -18.232044,
+      -17.934783,
+      -6.508876,
+      -4.054054,
+      -2.312139,
+      -1.986755,
+      -1.898734,
+      -1.657459,
+      -1.290323,
+      -1.142857,
+      -1.123596,
+      -0.657895,
+      -0.653595,
+      -0.568182,
+      0.0
+     ]
+    }
+   ],
+   "error": null,
+   "judge": {
+    "relevance": 1.0,
+    "hallucination": 0.2,
+    "neutrality": null,
+    "reasons": {
+     "relevance": "La pregunta es amplia (\"datos de transporte público en CABA\") y la respuesta ofrece exactamente eso: un listado de datasets disponibles sobre transporte público en CABA, con descripción de cada uno. La respuesta es pertinente, no esquiva la pregunta ni introduce información de otro nivel geográfico o temático. Responde directamente lo que se pidió.",
+     "hallucination": "La respuesta menciona que el dataset de transportes autorizados tiene \"52.367 registros\" y que los barrios con más vehículos son Flores, Villa Lugano, Caballito, Villa Urquiza y Palermo. Los datos muestran un total de 35.684 (no 52.367), aunque el orden de los barrios principales es correcto según los datos. El número 52.367 no aparece en los datos ni puede derivarse de ellos. Además, la respuesta describe varios otros datasets (SUBE, subte, subsidios, peajes) que no aparecen en los datos proporcionados, pero como son descripciones generales sin cifras específicas, no cuentan como inventadas según las instrucciones.",
+     "neutrality": ""
+    }
+   },
+   "fallas_ese_dia": [
+    "fuente_sin_cifra: cita sin usar ninguna cifra: Padrón de transportes autorizados de pasajeros en CABA — taxis, — conteo"
+   ],
+   "sql": "SELECT \"barrio\", count(*) AS valor, count(*) AS __filas, sum(count(*)) OVER () AS __filas_total FROM \"mart\".\"caba_transportes_autorizados\" GROUP BY \"barrio\" ORDER BY valor DESC NULLS LAST LIMIT 51",
+   "grupos_staging": [
+    {
+     "barrio": null,
+     "valor": 35684
+    },
+    {
+     "barrio": "Flores",
+     "valor": 476
+    },
+    {
+     "barrio": "Villa Lugano",
+     "valor": 463
+    },
+    {
+     "barrio": "Caballito",
+     "valor": 462
+    },
+    {
+     "barrio": "Villa Urquiza",
+     "valor": 444
+    },
+    {
+     "barrio": "Palermo",
+     "valor": 419
+    },
+    {
+     "barrio": "CABALLITO",
+     "valor": 404
+    },
+    {
+     "barrio": "VILLA LUGANO",
+     "valor": 385
+    },
+    {
+     "barrio": "Villa Devoto",
+     "valor": 383
+    },
+    {
+     "barrio": "FLORES",
+     "valor": 370
+    },
+    {
+     "barrio": "VILLA URQUIZA",
+     "valor": 344
+    },
+    {
+     "barrio": "SAAVEDRA",
+     "valor": 324
+    },
+    {
+     "barrio": "Saavedra",
+     "valor": 321
+    },
+    {
+     "barrio": "PALERMO",
+     "valor": 310
+    },
+    {
+     "barrio": "Mataderos",
+     "valor": 309
+    },
+    {
+     "barrio": "Villa Pueyrredon",
+     "valor": 298
+    },
+    {
+     "barrio": "VILLA DEVOTO",
+     "valor": 276
+    },
+    {
+     "barrio": "VILLA PUEYRREDON",
+     "valor": 264
+    },
+    {
+     "barrio": "Almagro",
+     "valor": 262
+    },
+    {
+     "barrio": "MATADEROS",
+     "valor": 257
+    },
+    {
+     "barrio": "Barracas",
+     "valor": 249
+    },
+    {
+     "barrio": "Parque Chacabuco",
+     "valor": 248
+    },
+    {
+     "barrio": "Nueva Pompeya",
+     "valor": 237
+    },
+    {
+     "barrio": "Liniers",
+     "valor": 232
+    },
+    {
+     "barrio": "Belgrano",
+     "valor": 231
+    },
+    {
+     "barrio": "BARRACAS",
+     "valor": 230
+    },
+    {
+     "barrio": "Monte Castro",
+     "valor": 220
+    },
+    {
+     "barrio": "Balvanera",
+     "valor": 220
+    },
+    {
+     "barrio": "Parque Avellaneda",
+     "valor": 219
+    },
+    {
+     "barrio": "BELGRANO",
+     "valor": 213
+    },
+    {
+     "barrio": "PARQUE CHACABUCO",
+     "valor": 212
+    },
+    {
+     "barrio": "MONTE CASTRO",
+     "valor": 209
+    },
+    {
+     "barrio": "LINIERS",
+     "valor": 198
+    },
+    {
+     "barrio": "Villa Del Parque",
+     "valor": 188
+    },
+    {
+     "barrio": "ALMAGRO",
+     "valor": 186
+    },
+    {
+     "barrio": "VILLA DEL PARQUE",
+     "valor": 184
+    },
+    {
+     "barrio": "Villa Soldati",
+     "valor": 181
+    },
+    {
+     "barrio": "Nu\\u00f1ez",
+     "valor": 178
+    },
+    {
+     "barrio": "NUÑEZ",
+     "valor": 178
+    },
+    {
+     "barrio": "Velez Sarsfield",
+     "valor": 176
+    },
+    {
+     "barrio": "NUEVA POMPEYA",
+     "valor": 175
+    },
+    {
+     "barrio": "BALVANERA",
+     "valor": 173
+    },
+    {
+     "barrio": "Boedo",
+     "valor": 169
+    },
+    {
+     "barrio": "VILLA LURO",
+     "valor": 158
+    },
+    {
+     "barrio": "Villa Crespo",
+     "valor": 155
+    },
+    {
+     "barrio": "Villa Luro",
+     "valor": 153
+    },
+    {
+     "barrio": "Recoleta",
+     "valor": 152
+    },
+    {
+     "barrio": "Villa Riachuelo",
+     "valor": 151
+    },
+    {
+     "barrio": "PARQUE AVELLANEDA",
+     "valor": 148
+    },
+    {
+     "barrio": "VELEZ SARSFIELD",
+     "valor": 142
+    },
+    {
+     "barrio": "Colegiales",
+     "valor": 140
+    }
+   ],
+   "filas_total_staging": 52367
+  }
+ ]
+}
