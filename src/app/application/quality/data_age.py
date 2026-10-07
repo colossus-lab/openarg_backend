@@ -432,12 +432,19 @@ def staleness_warning(engine: Engine, served: str | None) -> str | None:
 # days past the end of July and the API says it is current (the INDEC publishes
 # it ~50 days after the month), so "two periods" would have flagged it. The
 # daily reserves series, 34 days behind, is flagged by any margin.
+#
+# Semestral: the INDEC publishes each semester's poverty about 90 days after it
+# ends (late March and late September), so right before a release the latest
+# semester is ~275 days past its end. With 270 it was flagged for the last days
+# before every release; it never showed because the API dated poverty one
+# semester late (see `_dated_one_semester_late` in the Series de Tiempo
+# adapter, 06-oct).
 FRESHNESS_MARGIN_DAYS: dict[str, int] = {
     "diaria": 7,
     "semanal": 21,
     "mensual": 75,
     "trimestral": 120,
-    "semestral": 270,
+    "semestral": 300,
     "anual": 550,
 }
 
@@ -565,18 +572,70 @@ _CONTRACT_KEYS = ("ultima_observacion", "frecuencia", "fecha_fin_fuente", "actua
 # hubo entre inflación y salarios en 2025?": la pregunta pide un período que
 # nombra, y que la serie termine ahí no es un atraso. Medido en la calibración
 # del 04-oct: sin esta guarda, 3 de los 9 avisos de atraso eran de este tipo.
+# «este mes», «lo que va de octubre», «a partir de agosto de 2026», «a la
+# fecha» también piden hasta hoy, aunque nombren un año (revisión de #159).
 _CURRENT_INTENT_RE = re.compile(
     r"\b(?:actual\w*|hoy|ahora|[uú]ltim[oa]s?|reciente\w*|vigente|desde|"
-    r"c[oó]mo\s+(?:viene|est[aá]|va)|en\s+este\s+momento)\b",
+    r"c[oó]mo\s+(?:viene|est[aá]|va)|en\s+este\s+momento|"
+    r"este\s+(?:mes|a[ñn]o|trimestre|semestre)|esta\s+semana|lo\s+que\s+va|"
+    r"a\s+partir\s+de|en\s+curso|(?:hasta|a)\s+la\s+fecha(?!\s+del?\b))\b",
     re.IGNORECASE,
 )
 _YEAR_IN_QUESTION_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_MONTH_NUMBERS = {name: i for i, name in enumerate(_MONTHS_ES, start=1)} | {"setiembre": 9}
+_MONTH_RE = re.compile(r"\b(" + "|".join(_MONTH_NUMBERS) + r")\b", re.IGNORECASE)
+# «fin de agosto de 2026», «agosto 2026», «agosto del 2026».
+_MONTH_YEAR_RE = re.compile(
+    r"\b(" + "|".join(_MONTH_NUMBERS) + r")(?:\s+del?)?\s+((?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
 
 
 def asks_for_named_period(question: str) -> bool:
     """¿La pregunta nombra un período (un año) y no pide el valor actual?"""
     text = question or ""
     return bool(_YEAR_IN_QUESTION_RE.search(text)) and not _CURRENT_INTENT_RE.search(text)
+
+
+def _named_period_end(question: str) -> date | None:
+    """El último día del período más reciente que nombra la pregunta.
+
+    Un mes con su año termina el último día de ese mes; un año suelto, el 31
+    de diciembre. «Entre fin de 2025 y fin de agosto de 2026» termina el
+    31-ago-2026.
+
+    Un mes sin año va con el año del mes con año más cercano y, si viene
+    después y es anterior en el calendario, con el siguiente: «entre agosto
+    de 2026 y septiembre» termina el 30-sep-2026, y «entre diciembre de 2025
+    y marzo», el 31-mar-2026. Sin un mes con año que lo ubique («entre fin de
+    2025 y marzo») no se sabe dónde termina lo pedido: None, y se mide como
+    siempre.
+    """
+    text = question or ""
+    ends: list[date] = []
+    with_month: set[int] = set()  # dónde empiezan los años que van con un mes
+    dated: list[tuple[int, int, int]] = []  # (posición, año, mes)
+    for m in _MONTH_YEAR_RE.finditer(text):
+        year, month = int(m.group(2)), _MONTH_NUMBERS[m.group(1).lower()]
+        ends.append(_period_end(date(year, month, 1), "mensual"))
+        with_month.add(m.start(2))
+        dated.append((m.start(), year, month))
+    for m in _MONTH_RE.finditer(text):
+        if any(m.start() == pos for pos, _, _ in dated):
+            continue
+        if not dated:
+            return None
+        pos, year, month = min(dated, key=lambda d: abs(d[0] - m.start()))
+        bare = _MONTH_NUMBERS[m.group(1).lower()]
+        if m.start() > pos and bare < month:
+            year += 1
+        ends.append(_period_end(date(year, bare, 1), "mensual"))
+    ends += [
+        date(int(m.group()), 12, 31)
+        for m in _YEAR_IN_QUESTION_RE.finditer(text)
+        if m.start() not in with_month
+    ]
+    return max(ends, default=None)
 
 
 def _observations_for(result: Any, today: date, question: str = "") -> list[ObservationAge]:
@@ -679,6 +738,20 @@ def _observation_age(
     # período pasado es el fin de lo pedido, y «¿cuál fue la inflación de
     # 2019?» salía con «Dato atrasado… es de diciembre de 2019».
     if (source_end is None or source_end_inferred) and asks_for_named_period(question):
+        return None
+    # Con la fecha de fin, tampoco si la serie termina justo en el período que
+    # nombra la pregunta: su último período contiene el fin de lo pedido. Las
+    # reservas 92.2, paradas el 31-ago con is_updated=False, salían con «Dato
+    # atrasado» en «¿cuánto cambiaron entre fin de 2025 y fin de agosto de
+    # 2026?», y el PBI 166.2, parado en el 4.º trimestre, en «¿cuánto creció
+    # en 2025?» (prueba de calidad del 06-oct). Si la serie no llega al fin de
+    # lo pedido, o termina mucho después (un «base 2004» no es un período
+    # pedido), se mide como siempre. Lo pedido incluye lo que se nombra sin
+    # año: «entre agosto de 2026 y septiembre» termina el 30-sep, y «agosto de
+    # 2026 contra este mes» pide el valor actual. En los dos, el A3500 parado
+    # el 31-ago avisa (revisión de #159).
+    named_end = _named_period_end(question) if asks_for_named_period(question) else None
+    if named_end is not None and last <= named_end <= _period_end(last, frequency or ""):
         return None
     return observation_staleness(
         source_end or last,

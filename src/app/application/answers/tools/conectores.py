@@ -76,8 +76,10 @@ def _period_label(fecha: str, step: int | None, *, dated_by_end: bool = False) -
     La API no fecha todas las series igual. El PBI trimestral fecha cada
     período por su primer día (el 2° trimestre de 2026 es `2026-04-01`), pero
     las series semestrales de pobreza del INDEC lo fechan por el día siguiente
-    a su fin (el 1er semestre de 2024, 52,9 %, es `2024-07-01`). Con
-    ``dated_by_end`` la fecha cierra el período anterior.
+    a su fin (el 1er semestre de 2024, 52,9 %, es `2024-07-01`). El adaptador
+    ya las devuelve fechadas como la fuente, por su primer día (ver
+    ``_dated_one_semester_late``). Con ``dated_by_end`` la fecha cierra el
+    período anterior.
     """
     if not step or len(fecha) < 7:
         return None
@@ -104,6 +106,13 @@ def _is_dated_by_end(last_fecha: str, step: int, today: date) -> bool:
     un semestre en curso. Medido en staging el 02-oct: la tasa de pobreza
     termina en `2026-07-01`, que leído como inicio sería el 2° semestre de
     2026, y el modelo lo presentó así.
+
+    Depende de la fecha de hoy y de que la última fila sea la última
+    publicada: con `hasta`, o entre el fin de un semestre y su publicación,
+    no lo detecta y rotula todo corrido (06-oct). Por eso la pobreza ya llega
+    fechada como la fuente desde el adaptador; esto queda para lo que el
+    adaptador no reconoce. Con fechas por el primer día no se activa: ningún
+    período publicado está en curso.
     """
     try:
         year, month = int(last_fecha[:4]), int(last_fecha[5:7])
@@ -117,6 +126,32 @@ def _is_dated_by_end(last_fecha: str, step: int, today: date) -> bool:
 def _short(text: Any, limit: int = 80) -> str:
     clean = " ".join(str(text or "").split())
     return clean if len(clean) <= limit else clean[: limit - 1].rstrip() + "…"
+
+
+def _published_after(meta: dict[str, Any]) -> str | None:
+    """Si la serie ya publicó algo después de lo traído, dicho para el modelo.
+
+    nueva_12 del 06-oct: para el IPI del 1er semestre pidió hasta junio y
+    escribió «Último dato disponible: junio 2026», con `la_fuente_llega_hasta`
+    2026-07-01 al lado: tomó `ultima_observacion` (la última fila del rango
+    pedido) por el último dato de la serie. Se compara el fin del período de
+    esa fila: una semestral `2026-01-01` cubre hasta junio.
+    """
+    last = str(meta.get("ultima_observacion") or "")[:10]
+    source_end = str(meta.get("fecha_fin_fuente") or "")[:10]
+    if not last or not source_end or meta.get("fecha_fin_fuente_inferida"):
+        return None
+    covered = _observation_end(last, _STEP_MONTHS.get(str(meta.get("frecuencia"))))
+    try:
+        if covered is None or date.fromisoformat(source_end) <= covered:
+            return None
+    except ValueError:
+        return None
+    return (
+        f"La última fila traída es la de {last}, por el rango o la frecuencia pedidos; la serie "
+        f"ya publicó datos hasta {source_end}. Si decís cuál es el último dato disponible, es el "
+        f"de {source_end}, no el de {last}."
+    )
 
 
 def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
@@ -158,6 +193,9 @@ def _freshness_for_model(meta: dict[str, Any]) -> dict[str, Any]:
             out["la_fuente_llega_hasta"] = meta["fecha_fin_fuente"]
         if meta.get("actualizada_en_fuente") is not None:
             out["actualizada_en_fuente"] = meta["actualizada_en_fuente"]
+        later = _published_after(meta)
+        if later:
+            out["ultimo_dato_publicado"] = later
     scaled = [s for s in series if s.get("escalada_a_porcentaje")]
     if meta.get("unidad") == "porcentaje":
         out["escala"] = "Los valores ya están en %: 33.54 es 33,54 %."
@@ -395,9 +433,10 @@ class BuscarSeries:
                 "fuente": s.get("source"),
             }
             # Hasta cuándo llega cada serie según el catálogo: entre dos que
-            # miden lo mismo, la que está al día. No es el último dato: la
-            # pobreza 64.2 dice 2026-01-01 y ya publicó 2026-07-01, y con
-            # «hasta» el modelo lo tomaba como el fin de la serie.
+            # miden lo mismo, la que está al día. No es el último dato: con
+            # «hasta» el modelo lo tomaba como el fin de la serie (en la
+            # pobreza 64.2 la API fechaba las filas un semestre después que
+            # este metadato; ver _dated_one_semester_late en el adaptador).
             if s.get("time_index_end"):
                 item["hasta_segun_catalogo"] = s["time_index_end"]
             series.append(item)
@@ -532,7 +571,13 @@ class SeriesTiempo:
             payload["nota"] = " ".join(
                 n for n in (payload.get("nota"), _dropped_frequency_note(dropped)) if n
             )
-        complete = _complete_periods_note(result.metadata or {}, frequency)
+        complete = _complete_periods_note(
+            result.metadata or {},
+            frequency,
+            result.records,
+            iso_date(kwargs["end_date"]),
+            aggregation=aggregation,
+        )
         if complete:
             payload["periodos"] = complete
         return ToolOutcome(to_json(payload), results=[result])
@@ -731,7 +776,9 @@ class SeriesTiempo:
             payload["sin_dato"] = missing
         if notes:
             payload["nota"] = " ".join(notes)
-        complete = _complete_periods_note(meta, applied_frequency)
+        complete = _complete_periods_note(
+            meta, applied_frequency, result.records, end_bounds[1], aggregation=aggregation
+        )
         if complete:
             payload["periodos"] = complete
         payload.update(_freshness_for_model(computed.metadata))
@@ -757,16 +804,49 @@ def _dropped_frequency_note(frequency: str) -> str:
     )
 
 
+# Las frecuencias con las que la API deja afuera el período sin terminar. Sin
+# `semester`: desde una mensual agrupa desde el primer mes de la serie y no
+# recorta el semestre en curso (medido el 06-oct: en exportaciones, 2026-07-01
+# es julio más agosto; en el IPC, que arranca en 2016-12, 2025-07-01 es el
+# promedio de junio a agosto de 2026).
 _COLLAPSE_NOUNS = {
     "month": (1, "meses", "mes"),
     "quarter": (3, "trimestres", "trimestre"),
-    "semester": (6, "semestres", "semestre"),
     "year": (12, "años", "año"),
 }
+# Y las agregaciones: avg, sum y end_of_period las calcula al indexar y recorta
+# el período sin terminar; max y min, al consultar y sin recortar (exportaciones
+# con year+max traen 2026-01-01, de enero a agosto).
+_COMPLETE_AGGREGATIONS = ("avg", "sum", "end_of_period")
 _NATIVE_MONTHS = {"mensual": 1, "trimestral": 3, "semestral": 6, "anual": 12}
+# Lo que junta un período agregado, por los meses de la serie original. Las
+# semestrales no: la pobreza del INDEC fecha cada semestre por el día
+# siguiente a su fin y la API agrupa por la fecha.
+_NATIVE_NOUNS = {1: "meses", 3: "trimestres"}
+_MESES = (
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
 
 
-def _complete_periods_note(meta: dict[str, Any], frequency: str | None) -> str | None:
+def _complete_periods_note(
+    meta: dict[str, Any],
+    frequency: str | None,
+    records: list[dict[str, Any]] | None = None,
+    until: str | None = None,
+    *,
+    aggregation: str | None = None,
+) -> str | None:
     """Que la API agrega sólo períodos completos, dicho para que el modelo no lo verifique.
 
     Medido el 05-oct: con `collapse` la API deja afuera el período en curso
@@ -775,19 +855,120 @@ def _complete_periods_note(meta: dict[str, Any], frequency: str | None) -> str |
     después de «exportaciones 2025, year+sum» el modelo pedía los 12 meses
     para comprobar que el año estaba entero: una vuelta más. Sólo desde
     series mensuales o más gruesas (de una diaria no está medido).
+
+    Con la frase genérica sola, el modelo seguía tomando 2024 como «el último
+    año completo» de exportaciones y decía que la fila 2025 traía «los meses
+    ya publicados» (batería v3, series_012: las dos corridas del 06-oct). Leía
+    `ultima_observacion` 2025-01-01, un día de enero, y `la_fuente_llega_hasta`
+    2026-08-01 sobre filas anuales. Con `records`, y desde series mensuales o
+    trimestrales, se nombra el último período completo con sus meses y se
+    dice por qué el siguiente, del que la fuente ya tiene datos, no tiene fila.
+    Sólo si la ventana pedida (`until`, el `hasta` como fecha) no lo deja
+    afuera: con hasta=2023-12-31, 2024 falta por la ventana y no por estar
+    incompleto.
+
+    Nada de esto con `semester` ni con `aggregation` max o min: ahí la API sí
+    trae el período sin terminar, y la nota daba por entero un número parcial
+    («El último año completo es 2026» con exportaciones year+max, de enero a
+    agosto). Revisión de #162.
     """
     nouns = _COLLAPSE_NOUNS.get(frequency or "")
-    if nouns is None or meta.get(_DROPPED_FREQUENCY):
+    if (
+        nouns is None
+        or meta.get(_DROPPED_FREQUENCY)
+        or (aggregation or "avg") not in _COMPLETE_AGGREGATIONS
+    ):
         return None
     target, plural, singular = nouns
-    natives = [
-        _NATIVE_MONTHS.get(str(s.get("frecuencia")))
-        for s in meta.get("series") or []
-        if isinstance(s, dict)
-    ]
+    series = [s for s in meta.get("series") or [] if isinstance(s, dict)]
+    natives = [_NATIVE_MONTHS.get(str(s.get("frecuencia"))) for s in series]
     if not natives or any(n is None or n >= target for n in natives):
         return None
-    return f"Cada fila es un {singular} completo: la API no agrega {plural} sin terminar."
+    note = f"Cada fila es un {singular} completo: la API no agrega {plural} sin terminar."
+    if not records or any(n not in _NATIVE_NOUNS for n in natives):
+        return note
+    # (serie, último período, el siguiente si la fuente tiene datos de él, hasta
+    # dónde llega la fuente, meses de la serie)
+    found: list[tuple[dict[str, Any], str, str | None, str, int]] = []
+    for entry, native in zip(series, natives, strict=True):
+        last = _last_dated(entry, records)
+        if _period_label(last, target) is None:
+            continue
+        following = _shift_iso_months(last, target)
+        end = str(entry.get("fecha_fin_fuente") or "")[:10]
+        if end >= following:
+            found.append((entry, last, following, end, native or 0))
+        else:
+            found.append((entry, last, None, "", native or 0))
+    if not found:
+        return note
+    newest = max(f[1] for f in found)
+    parts = [
+        note,
+        f"Cada {singular} va fechado por su primer día: {newest} es el {singular} "
+        f"{_period_label(newest, target)} entero.",
+    ]
+    # La API filtra cada período por su primer día: si el siguiente empieza
+    # después del `hasta`, falta por la ventana y no se sabe si está completo.
+    known = [f for f in found if f[2] is None or not until or f[2] <= until]
+    if len(known) == len(series) and len({f[1:] for f in known}) == 1:
+        # Todas iguales (exportaciones e importaciones): una sola vez, sin títulos.
+        parts.append(_complete_period_sentences(*known[0][1:], target, singular))
+    else:
+        parts.extend(
+            _complete_period_sentences(*f[1:], target, singular, title=f[0].get("titulo"))
+            for f in known
+        )
+    return " ".join(parts)
+
+
+def _last_dated(entry: dict[str, Any], records: list[dict[str, Any]]) -> str:
+    """La fecha de la última fila con dato de la serie (las filas la traen por título o id)."""
+    keys = {k for k in (entry.get("titulo"), entry.get("id")) if k}
+    return next(
+        (
+            str(r.get("fecha", ""))[:10]
+            for r in reversed(records)
+            if any(r.get(k) is not None for k in keys)
+        ),
+        "",
+    )
+
+
+def _complete_period_sentences(
+    fecha: str,
+    following: str | None,
+    end: str,
+    native: int,
+    target: int,
+    singular: str,
+    *,
+    title: Any = None,
+) -> str:
+    """«El último año completo es 2025: tiene sus 12 meses, de enero a diciembre.»"""
+    month = int(fecha[5:7])
+    span = f"de {_MESES[month - 1]} a {_MESES[(month + target - 2) % 12]}"
+    count_text = f"sus {target // native} {_NATIVE_NOUNS[native]}"
+    of = f" de «{_short(title)}»" if title else ""
+    text = (
+        f"El último {singular} completo{of} es {_period_label(fecha, target)}: tiene "
+        f"{count_text}, {span}."
+    )
+    if following:
+        text += (
+            f" {_period_label(following, target)} no tiene fila{of} porque todavía no tiene "
+            f"{count_text}: la fuente llega hasta {end}."
+        )
+    return text
+
+
+def _missing_series_note(missing: list[str]) -> str:
+    names = ", ".join(f"`{s}`" for s in missing)
+    return (
+        f"La API de Series de Tiempo respondió que no existe la serie {names}: la fuente "
+        "funciona, el id está mal. Usá el id exacto que devolvió buscar_series, sin armarlo ni "
+        "cambiarle partes (si no lo tenés, volvé a buscar la serie)."
+    )
 
 
 async def _fetch_series(
@@ -796,6 +977,13 @@ async def _fetch_series(
     try:
         return await ctx.deps.series.fetch(series_ids=ids, **kwargs)
     except ConnectorError as exc:
+        # Un id inexistente vuelve como pedido inválido, no como fuente caída:
+        # con «La fuente no respondió. Probá con otra.» el modelo dejó la API
+        # y contestó la pobreza de Gran Rosario con una copia vieja del
+        # catálogo, con los semestres corridos (nueva_08 del 06-oct).
+        missing = exc.details.get("series_inexistentes")
+        if missing:
+            raise ToolInputError(_missing_series_note([str(s) for s in missing])) from None
         # Se reintenta sin frecuencia SÓLO con el 400 de frecuencia inválida
         # (p. ej. mensual sobre una trimestral). Un timeout o un 5xx no: con
         # frecuencia=year y agregacion=sum, el reintento devolvía la mensual
@@ -952,7 +1140,11 @@ class Sesiones:
         description=(
             "Busca fragmentos de las versiones taquigráficas de las sesiones de la Cámara de "
             "Diputados: qué se dijo sobre un tema, opcionalmente de un orador o un período "
-            "(año legislativo)."
+            "(año legislativo). Trae los fragmentos más parecidos, con un tope: no sirve para "
+            "contar cuántas veces se habló de algo. Lo que dice un orador es suyo: si te "
+            "preguntan qué se dijo, contalo atribuido a quien lo dijo («un orador» si el "
+            "fragmento no lo identifica). Nunca lo uses como un hecho ni para explicar por qué "
+            "pasó algo."
         ),
         input_schema={
             "type": "object",
@@ -967,15 +1159,45 @@ class Sesiones:
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         periodo = args.get("periodo")
+        orador = str_arg(args, "orador", max_len=120)
         result = await ctx.deps.sesiones.search(
             str_arg(args, "texto", required=True, max_len=300) or "",
             periodo=int(periodo) if periodo else None,
-            orador=str_arg(args, "orador", max_len=120),
+            orador=orador,
             limit=12,
         )
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "Sin fragmentos sobre eso."}))
-        return ToolOutcome(to_json(result_for_model(result)), results=[result])
+        meta = result.metadata or {}
+        extra: dict[str, Any] = {}
+        avisos: list[str] = []
+        if meta.get("tope_alcanzado"):
+            # El tope no es un total: con `filas_totales: 12` el agente dijo
+            # "12 fragmentos registrados" y había 51 (nueva_06, 06-oct). Tampoco
+            # es un mínimo: la búsqueda ordena por parecido sin umbral y con la
+            # tabla de staging llega al tope siempre, aunque el tema no tenga
+            # ningún fragmento ("ocupación de Airbnb", revisión de #158).
+            n = len(result.records)
+            tope = meta.get("tope_busqueda") or n
+            extra["filas_totales"] = f"sin contar: son los {n} más parecidos (tope: {tope})"
+            avisos.append(
+                f"Son los {n} fragmentos más parecidos a la búsqueda, no los que hay sobre el "
+                "tema: pueden ser de otros temas y no indican cuántos hay. No digas cuántos "
+                "fragmentos, sesiones, intervenciones u oradores hubo sobre el tema, porque no "
+                "se contaron. Usá sólo los que traten el tema; si ninguno lo trata, decí que no "
+                "se encontró nada sobre eso."
+            )
+        if meta.get("orador_sin_atribuir") and orador:
+            # En staging `speaker` es NULL en los 1.030 fragmentos: con orador,
+            # la búsqueda trae fragmentos de cualquiera (revisión de #158).
+            avisos.append(
+                f"Ninguno está atribuido a «{orador}»: los fragmentos no traen el orador "
+                "identificado, así que la búsqueda no pudo filtrar por esa persona. No los "
+                "presentes como intervenciones suyas ni digas cuántas veces habló."
+            )
+        if avisos:
+            extra["aviso"] = " ".join(avisos)
+        return ToolOutcome(to_json(result_for_model(result, **extra)), results=[result])
 
 
 # ── personal legislativo ───────────────────────────────────

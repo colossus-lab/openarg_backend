@@ -20,7 +20,11 @@ Cada turno:
    que ya salió se borra con ``clear_answer``); si después siguen, la
    respuesta lleva un aviso arriba que las nombra. Con ``shadow`` (el modo
    por defecto) sólo se registran en el log ``answers.verify``. Con ``off``
-   no se verifica.
+   no se verifica;
+6. salvo con ``off``, las frases causales de la respuesta («generó»,
+   «debido a»…), propias y atribuidas, van al log ``answers.causal``
+   (``answers.neutrality``; es una cota inferior). Nunca cambian la
+   respuesta, tampoco con ``correct``.
 
 Sólo con ``correct`` el verificador decide además qué se cita: las fuentes,
 los gráficos, el mapa, `served_table`, las citas estructuradas y la evidencia
@@ -32,8 +36,11 @@ y las citas salían ``verified`` sin mirar el período (revisión del 05-oct:
 H019, H082, H083, H100). En ``shadow`` lo que habría elegido queda en el log,
 y si todas las cifras quedaron respaldadas el aviso de atraso deja afuera lo
 que no aportó cifras y se llama igual que algo que sí, y pone primero lo que
-las aportó (revisión de #146); con alguna sin respaldo, todo lo leído. Con
-``off``, todo lo leído. Lo
+las aportó (revisión de #146); con alguna sin respaldo, todo lo leído. Además
+en ``shadow``, si todas las cifras son directas o derivadas, la lista de
+fuentes (y nada más) sale de la selección: lo leído y no usado no se lista
+como fuente (opción B, 06-oct). Con alguna sin respaldo, sólo por contexto, o
+sin verificación, todo lo leído. Con ``off``, todo lo leído. Lo
 transversal (caché, historial, aviso de atraso, analytics, auditoría) lo hace
 ``EngineRunner``.
 """
@@ -58,6 +65,8 @@ from app.application.answers.engine import (
     EngineResult,
     StatusEvent,
 )
+from app.application.answers.monologo import sin_monologo
+from app.application.answers.neutrality import scan_causal
 from app.application.answers.pricing import cost_usd
 from app.application.answers.prompt import FINAL_ROUND_NOTE, system_prompt, user_message
 from app.application.answers.tools import build_tools
@@ -72,6 +81,7 @@ from app.application.answers.tools.base import (
 from app.application.answers.verification import (
     VERIFY_CORRECT,
     VERIFY_OFF,
+    VERIFY_SHADOW,
     Verification,
     build_citations,
     claim_for,
@@ -467,6 +477,8 @@ class AgentEngine:
         from app.application.pipeline.nodes.finalize import _extract_documents
 
         answer, warnings = _answer_of(turn)
+        if mode != VERIFY_OFF and turn.stop_reason != "refusal":
+            _causal_log(mode, answer)
         if isinstance(check, _Unchecked):
             check = (
                 _safe_verify(answer, evidence, evidence_seen, context_seen)
@@ -479,9 +491,19 @@ class AgentEngine:
         cited, consulted, citations, figures = _choose_sources(answer, evidence, check)
         dated = figures
         summary = _verification_log(mode, answer, check, first_check, cited, consulted, verify_ms)
+        # Las fuentes que se listan. En correct, lo citado.
+        listed = cited
         if mode != VERIFY_CORRECT:
             # Fuera de correct la selección queda sólo en el log: se cita todo
             # lo leído y sin citas estructuradas, como antes del verificador.
+            # La excepción es la lista de fuentes en shadow, si todas las
+            # cifras son directas o derivadas (opción B): ahí sale de la
+            # selección. Gráficos, mapa, `served_table`, citas y el aviso de
+            # atraso no cambian, así que en shadow un gráfico o un «Dato
+            # atrasado» pueden nombrar una serie leída que ya no figura en
+            # las fuentes (revisión de #167; lo fijan los tests de la opción B).
+            backed = mode == VERIFY_SHADOW and _all_figures_backed(check)
+            listed = cited if backed else list(evidence)
             cited, consulted, citations, figures = list(evidence), [], [], []
             dated = _dated_outside_correct(evidence, check)
         if mode == VERIFY_CORRECT and check is not None and check.unsupported:
@@ -506,7 +528,7 @@ class AgentEngine:
         _record_tokens(self._llm.model, req.mode, usage)
         return EngineResult(
             answer=answer,
-            sources=_sources(cited),
+            sources=_sources(listed),
             chart_data=charts,
             map_data=map_data,
             citations=citations,
@@ -535,13 +557,18 @@ class AgentEngine:
 
 
 def _answer_of(turn: AgentTurn) -> tuple[str, list[str]]:
-    """El texto de la respuesta (el que se verifica y se entrega) y sus avisos."""
+    """El texto de la respuesta (el que se verifica y se entrega) y sus avisos.
+
+    Sin el preámbulo en que el modelo cuenta su proceso ni nombres de
+    herramientas (``monologo``, H063). Lo que ya salió en streaming lo
+    reemplaza el runner, porque el texto final es otro.
+    """
     if turn.stop_reason == "refusal":
         return _REFUSAL, []
     warnings: list[str] = []
     if turn.stop_reason == "max_tokens":
         warnings.append("La respuesta se cortó por largo; puede estar incompleta.")
-    return turn.text.strip() or _NO_ANSWER, warnings
+    return sin_monologo(turn.text.strip()) or _NO_ANSWER, warnings
 
 
 def _safe_verify(
@@ -606,6 +633,26 @@ def _choose_sources(
     return cited, consulted, citations, figures
 
 
+_BACKED = frozenset({"directa", "derivada"})
+
+
+def _all_figures_backed(check: Verification | None) -> bool:
+    """¿Todas las cifras de la respuesta salen de la evidencia (directas o derivadas)?
+
+    Es la condición para que en shadow las fuentes salgan de la selección
+    (opción B, 06-oct): fuera de correct se listaba todo lo leído (#146) y
+    la batería marcaba como «citada sin cifra» una fuente leída y no usada
+    (neutralidad_008, complex_001). Una cifra sin respaldo puede ser una
+    falsa alarma (el truncado de H082) y una «contexto» no ata la cifra a
+    ninguna evidencia: con cualquiera de las dos, o sin verificación, no hay
+    con qué separar lo usado de lo leído y se lista todo. Sin cifras,
+    tampoco: sólo quedaría el título, y eso no prueba que no se usó lo demás.
+    """
+    if check is None or not check.checks:
+        return False
+    return all(c.status in _BACKED for c in check.checks)
+
+
 def _dated_outside_correct(
     evidence: list[DataResult], check: Verification | None
 ) -> list[DataResult]:
@@ -665,6 +712,28 @@ def _verification_log(
     if mode != VERIFY_OFF:
         logger.info("answers.verify %s", json.dumps(summary, ensure_ascii=False))
     return summary
+
+
+def _causal_log(mode: str, answer: str) -> None:
+    """Las frases causales de la respuesta (``answers.causal``), para medir.
+
+    Sólo el log: la respuesta sale igual en todos los modos. Una línea JSON
+    por respuesta que tenga alguna, con o sin datos leídos (nueva_24 contestó
+    sin ninguna herramienta): ``frases`` las propias y ``atribuidas`` las que
+    van con un «según», un «dijo»… o entre comillas.
+    """
+    try:
+        phrases, attributed = scan_causal(answer)
+    except Exception:
+        logger.warning("agent: causal phrase check failed", exc_info=True)
+        return
+    if phrases or attributed:
+        logger.info(
+            "answers.causal %s",
+            json.dumps(
+                {"modo": mode, "frases": phrases, "atribuidas": attributed}, ensure_ascii=False
+            ),
+        )
 
 
 def _record_tokens(model: str, mode: str, usage: AgentUsage) -> None:

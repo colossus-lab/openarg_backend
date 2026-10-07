@@ -23,7 +23,11 @@ Lo que se prueba:
 - la fecha de fin de la fuente nunca queda antes del último dato traído
   (la metadata de la API puede estar atrasada), y si sale de ahí y ese dato
   llega al `hasta` va marcada como inferida;
-- series de distinta frecuencia pedidas juntas marcan cuál promedió la API.
+- series de distinta frecuencia pedidas juntas marcan cuál promedió la API;
+- la pobreza semestral (63.2, 64.2), que la API fecha un semestre tarde,
+  sale fechada como la fuente, con y sin `desde`/`hasta` (nueva_08), y
+  también pedida junto con otras series: se corrige serie por serie;
+- un id inexistente se distingue de una fuente caída.
 """
 
 from __future__ import annotations
@@ -32,11 +36,18 @@ from collections.abc import Callable
 from datetime import date, timedelta
 from typing import Any
 
+import httpx
 import pytest
 
-from app.infrastructure.adapters.connectors.series_tiempo_adapter import _reaches_end
+from app.domain.exceptions.connector_errors import ConnectorError
+from app.infrastructure.adapters.connectors.series_tiempo_adapter import (
+    SeriesTiempoAdapter,
+    _back_one_semester,
+    _reaches_end,
+)
 from tests.unit.series_tiempo_fake import (
     ACTIVIDAD_ID,
+    DESEMPLEO_GRAN_ROSARIO_ID,
     DESEMPLEO_ID,
     DESOCUPACION_AGLOMERADO_ID,
     EMPLEO_ID,
@@ -47,6 +58,8 @@ from tests.unit.series_tiempo_fake import (
     GASTO_PIB_UNIVERSIDAD_ID,
     HOGARES_POBRES_ID,
     IPC_ID,
+    POBREZA_GRAN_ROSARIO_ID,
+    POBREZA_GRAN_ROSARIO_PUNTUAL_ID,
     POBREZA_ID,
     RESERVAS_DIARIAS_ID,
     RESERVAS_ID,
@@ -55,11 +68,16 @@ from tests.unit.series_tiempo_fake import (
     TIPO_CAMBIO_ID,
     FakeSeriesApi,
     desempleo,
+    desempleo_gran_rosario,
     diaria,
     exportaciones_reales,
     gasto_pib,
     ipc_real,
     plazo_fijo_usd,
+    pobreza_con_metadata_atrasada,
+    pobreza_gran_rosario_fuente,
+    pobreza_gran_rosario_puntual,
+    pobreza_gran_rosario_real,
     reservas_diarias,
     reservas_mensuales,
     salarios,
@@ -505,10 +523,12 @@ async def test_la_diferencia_con_escalas_mixtas_dice_puntos_porcentuales_en_cada
 
 
 async def test_la_fecha_de_fin_de_la_fuente_no_queda_antes_del_ultimo_dato() -> None:
-    # 64.2: la metadata dice time_index_end 2026-01-01 y la API ya trae la
-    # fila 2026-07-01 (1er semestre de 2026, 32,3 %). El modelo descartó ese
-    # dato porque «la fuente llega hasta 2026-01-01».
-    api = FakeSeriesApi(tasa(POBREZA_ID))
+    # Una metadata atrasada de verdad: time_index_end 2026-01-01 con el
+    # last_value de esa fila, y la API ya trae 2026-07-01 (32,3 %). Con «la
+    # fuente llega hasta 2026-01-01» el modelo descartaba ese dato. (Se creyó
+    # que era el caso de la 64.2; ahí eran las filas corridas un semestre,
+    # ver test_la_pobreza_semestral_sale_fechada_como_la_fuente.)
+    api = FakeSeriesApi(pobreza_con_metadata_atrasada())
     result = await api.adapter().fetch([POBREZA_ID])
 
     assert result is not None
@@ -541,16 +561,15 @@ async def test_el_fin_que_sale_del_ultimo_dato_va_marcado_como_inferido() -> Non
     assert sin_fin.metadata["fecha_fin_fuente_inferida"] is True
     assert sin_fin.metadata["series"][0]["fecha_fin_fuente_inferida"] is True
 
-    # La metadata atrasada (64.2) también se reemplaza por el último dato,
-    # pero sin `hasta` ese dato es el fin de la serie, no el de una ventana.
-    pobreza = await FakeSeriesApi(tasa(POBREZA_ID)).adapter().fetch([POBREZA_ID])
+    # Una metadata atrasada también se reemplaza por el último dato, pero sin
+    # `hasta` ese dato es el fin de la serie, no el de una ventana.
+    atrasada = pobreza_con_metadata_atrasada
+    pobreza = await FakeSeriesApi(atrasada()).adapter().fetch([POBREZA_ID])
     assert pobreza is not None
     assert pobreza.metadata["fecha_fin_fuente"] == "2026-07-01"
     assert pobreza.metadata["fecha_fin_fuente_inferida"] is False
     # Con un `hasta` al que llega ese último semestre, la ventana pudo cortarla.
-    pobreza = (
-        await FakeSeriesApi(tasa(POBREZA_ID)).adapter().fetch([POBREZA_ID], end_date="2026-12-31")
-    )
+    pobreza = await FakeSeriesApi(atrasada()).adapter().fetch([POBREZA_ID], end_date="2026-12-31")
     assert pobreza is not None
     assert pobreza.metadata["fecha_fin_fuente"] == "2026-07-01"
     assert pobreza.metadata["fecha_fin_fuente_inferida"] is True
@@ -662,3 +681,238 @@ async def test_con_frecuencia_pedida_o_una_sola_serie_no_hay_promedio_implicito(
     for result in (pedida, sola):
         assert "agregada_por_api" not in result.metadata
         assert not any(s.get("promediada_por_api") for s in result.metadata["series"])
+
+
+# ── pobreza semestral: la API la fecha un semestre tarde (nueva_08, 06-oct) ──
+
+GRAN_ROSARIO_LABEL = (
+    "Población con ingresos debajo de línea de pobreza (%) desde 2003. Gran Rosario. EPH continua."
+)
+
+
+def _filas(result: Any, label: str = GRAN_ROSARIO_LABEL) -> list[tuple[str, float]]:
+    return [(r["fecha"], r[label]) for r in result.records if r[label] is not None]
+
+
+async def test_la_pobreza_semestral_sale_fechada_como_la_fuente() -> None:
+    """La API trae el 1er semestre de 2026 de Gran Rosario (23,1 %) en la fila
+    2026-07-01; el CSV de la fuente y la metadata de la misma API, en
+    2026-01-01. Leído por su primer día, cada semestre salía corrido uno y el
+    22,3 % del 2° semestre de 2025 pasaba por el 1er semestre de 2026."""
+    api = FakeSeriesApi(pobreza_gran_rosario_real())
+    result = await api.adapter().fetch([POBREZA_GRAN_ROSARIO_ID])
+
+    assert result is not None
+    fuente = [(f, round(v * 100, 2)) for f, v in pobreza_gran_rosario_fuente()]
+    assert _filas(result) == fuente
+    assert _filas(result)[-2:] == [("2025-07-01", 22.3), ("2026-01-01", 23.1)]
+    assert result.metadata["ultima_observacion"] == "2026-01-01"
+    assert result.metadata["fecha_fin_fuente"] == "2026-01-01"
+    assert result.metadata["fecha_fin_fuente_inferida"] is False
+    assert result.metadata["frecuencia"] == "semestral"
+
+
+@pytest.mark.parametrize(
+    ("pedido", "esperado"),
+    [
+        # «Pobreza de 2025»: los dos semestres de 2025, no 2S-2024 y 1S-2025
+        # rotulados como 2025.
+        (
+            {"start_date": "2025-01-01", "end_date": "2025-12-31"},
+            [("2025-01-01", 28.1), ("2025-07-01", 22.3)],
+        ),
+        ({"start_date": "2025", "end_date": "2025"}, [("2025-01-01", 28.1), ("2025-07-01", 22.3)]),
+        # `hasta` en junio: hasta el 1er semestre, como lee la API un AAAA-MM.
+        (
+            {"start_date": "2024-01-01", "end_date": "2025-06"},
+            [("2024-01-01", 46.8), ("2024-07-01", 32.4), ("2025-01-01", 28.1)],
+        ),
+        ({"start_date": "2026-01-01"}, [("2026-01-01", 23.1)]),
+    ],
+)
+async def test_la_ventana_de_la_pobreza_semestral_va_sobre_las_fechas_de_la_fuente(
+    pedido: dict[str, str], esperado: list[tuple[str, float]]
+) -> None:
+    api = FakeSeriesApi(pobreza_gran_rosario_real())
+    result = await api.adapter().fetch([POBREZA_GRAN_ROSARIO_ID], **pedido)
+
+    assert result is not None
+    assert _filas(result) == esperado
+    # El fin de la fuente es el de la metadata: 2026-01-01, el 1er semestre
+    # de 2026, aunque la ventana termine antes.
+    assert result.metadata["fecha_fin_fuente"] == "2026-01-01"
+
+
+async def test_la_variacion_de_la_pobreza_semestral_va_con_las_fechas_de_la_fuente() -> None:
+    api = FakeSeriesApi(pobreza_gran_rosario_real())
+    result = await api.adapter().fetch(
+        [POBREZA_GRAN_ROSARIO_ID], start_date="2025-01-01", representation="percent_change"
+    )
+
+    assert result is not None
+    # 1S-2025 contra 2S-2024: 0,281 / 0,324 − 1.
+    assert _filas(result) == [("2025-01-01", -13.27), ("2025-07-01", -20.64), ("2026-01-01", 3.59)]
+
+
+async def test_una_metadata_atrasada_de_verdad_no_corre_las_fechas() -> None:
+    # El last_value es el de time_index_end: la fila siguiente se publicó
+    # después de la metadata. Las filas quedan como vienen.
+    result = await FakeSeriesApi(pobreza_con_metadata_atrasada()).adapter().fetch([POBREZA_ID])
+
+    assert result is not None
+    assert result.records[-1]["fecha"] == "2026-07-01"
+
+
+async def test_las_semestrales_fechadas_por_el_inicio_no_se_tocan() -> None:
+    # Desocupación por aglomerado 1974-2003: fechada por el inicio del
+    # semestre, como su metadata.
+    sid = DESOCUPACION_AGLOMERADO_ID
+    result = await FakeSeriesApi(tasa(sid)).adapter().fetch([sid])
+
+    assert result is not None
+    assert [r["fecha"] for r in result.records] == ["2002-07-01", "2003-01-01"]
+
+
+PUNTUAL_LABEL = (
+    "Población con ingresos debajo de línea de pobreza (%) de 2001 a 2003. Gran Rosario. "
+    "EPH puntual."
+)
+DESEMPLEO_GRAN_ROSARIO_LABEL = "Tasa de desempleo total Gran Rosario. En porcentaje."
+
+
+async def test_la_continua_se_corrige_junto_a_una_semestral_fechada_por_el_inicio() -> None:
+    """Revisión de #166: la corrección era todo o nada. Junto con la 64.1 de
+    2001-2003, fechada por el inicio, la 64.2 no se corregía y el 54,6 % del
+    1er semestre de 2003 salía en 2003-07-01. Se confirma serie por serie y
+    se retrocede sólo la columna corrida."""
+    ids = [POBREZA_GRAN_ROSARIO_PUNTUAL_ID, POBREZA_GRAN_ROSARIO_ID]
+    api = FakeSeriesApi(pobreza_gran_rosario_puntual(), pobreza_gran_rosario_real())
+    rango = {"start_date": "2002-01-01", "end_date": "2004-12-31"}
+    juntas = await api.adapter().fetch(ids, **rango)
+    sola = await api.adapter().fetch([POBREZA_GRAN_ROSARIO_ID], **rango)
+
+    assert juntas is not None and sola is not None
+    continua = [
+        ("2003-01-01", 54.6),
+        ("2003-07-01", 47.9),
+        ("2004-01-01", 42.0),
+        ("2004-07-01", 36.5),
+    ]
+    assert _filas(juntas) == continua
+    assert _filas(sola) == continua
+    # La puntual queda como viene, y el 1er semestre de 2003 de las dos va en
+    # la misma fila.
+    assert _filas(juntas, PUNTUAL_LABEL) == [
+        ("2002-01-01", 56.2),
+        ("2002-07-01", 60.9),
+        ("2003-01-01", 61.0),
+    ]
+    assert juntas.records[2] == {
+        "fecha": "2003-01-01",
+        PUNTUAL_LABEL: 61.0,
+        GRAN_ROSARIO_LABEL: 54.6,
+    }
+
+    # Sin rango, el fin de la continua es el de su metadata (2026-01-01), no
+    # la fila corrida.
+    sin_rango = await api.adapter().fetch(ids)
+    assert sin_rango is not None
+    assert _filas(sin_rango)[-1] == ("2026-01-01", 23.1)
+    assert sin_rango.metadata["ultima_observacion"] == "2026-01-01"
+    assert [s["fecha_fin_fuente"] for s in sin_rango.metadata["series"]] == [
+        "2003-05-01",
+        "2026-01-01",
+    ]
+
+
+async def test_la_pobreza_junto_al_desempleo_trimestral_se_corrige_en_su_columna() -> None:
+    """Revisión de #166: con una serie de otra frecuencia no se corregía nada.
+    La API lleva el desempleo a semestres fechándolo por el inicio y deja la
+    pobreza corrida: «pobreza y desempleo en Gran Rosario en 2025» daba
+    32,4 % (2S-2024) como 2025-S1, y la fila 2025-07-01 juntaba el 1er
+    semestre de pobreza con el 2° de desempleo."""
+    ids = [POBREZA_GRAN_ROSARIO_ID, DESEMPLEO_GRAN_ROSARIO_ID]
+    api = FakeSeriesApi(pobreza_gran_rosario_real(), desempleo_gran_rosario())
+
+    def filas(result: Any) -> list[tuple[str, float, float]]:
+        return [
+            (r["fecha"], r[GRAN_ROSARIO_LABEL], r[DESEMPLEO_GRAN_ROSARIO_LABEL])
+            for r in result.records
+        ]
+
+    del_2025 = await api.adapter().fetch(ids, start_date="2025-01-01", end_date="2025-12-31")
+    assert del_2025 is not None
+    assert filas(del_2025) == [("2025-01-01", 28.1, 7.4), ("2025-07-01", 22.3, 7.7)]
+    # El desempleo sigue marcado como promediado por la API.
+    assert [bool(s.get("promediada_por_api")) for s in del_2025.metadata["series"]] == [
+        False,
+        True,
+    ]
+
+    # Sin rango: el último semestre de cada una, en su fila, y la fila
+    # 2026-07-01 (la pobreza corrida, sin desempleo) desaparece.
+    sin_rango = await api.adapter().fetch(ids)
+    assert sin_rango is not None
+    assert filas(sin_rango)[-2:] == [("2025-07-01", 22.3, 7.7), ("2026-01-01", 23.1, 9.85)]
+    assert sin_rango.metadata["series"][0]["fecha_fin_fuente"] == "2026-01-01"
+
+    # Con una representación, cada columna contra su semestre anterior: la
+    # pobreza 0,281 / 0,324 − 1 y el desempleo 0,0740 / 0,059 − 1.
+    variacion = await api.adapter().fetch(
+        ids, start_date="2025-01-01", end_date="2025-12-31", representation="percent_change"
+    )
+    assert variacion is not None
+    assert filas(variacion) == [("2025-01-01", -13.27, 25.47), ("2025-07-01", -20.64, 4.02)]
+
+
+def test_al_correr_una_columna_las_filas_sin_dato_de_la_api_no_se_pierden() -> None:
+    # La API real manda las filas sin dato (la 64.2 de Gran Rosario no tiene
+    # del 1er semestre de 2007 al 1er semestre de 2016: 19 filas vacías); la
+    # falsa las descarta. Sola, cada fila va a su semestre, vacía o no.
+    sola = [["2006-07-01", 0.229], ["2007-01-01", None], ["2007-07-01", 0.21]]
+    assert _back_one_semester(sola, {0}) == [
+        ["2006-01-01", 0.229],
+        ["2006-07-01", None],
+        ["2007-01-01", 0.21],
+    ]
+    # Con el desempleo al lado, la última fila de la API (pobreza corrida y
+    # sin desempleo) queda vacía por el corrimiento y no se agrega.
+    juntas = [["2026-01-01", 0.223, 0.0985], ["2026-07-01", 0.231, None]]
+    assert _back_one_semester(juntas, {0}) == [
+        ["2025-07-01", 0.223, None],
+        ["2026-01-01", 0.231, 0.0985],
+    ]
+    # Con la 64.1 al lado (fechada por el inicio), el hueco de la 64.2 sigue
+    # empezando en el 1er semestre de 2007, no en el 2°; y la última fila,
+    # vacía sólo por el corrimiento, tampoco se agrega.
+    hueco = [
+        ["2006-07-01", None, 0.274],
+        ["2007-01-01", None, 0.229],
+        ["2007-07-01", None, None],
+        ["2008-01-01", None, None],
+    ]
+    assert _back_one_semester(hueco, {1}) == [
+        ["2006-01-01", None, 0.274],
+        ["2006-07-01", None, 0.229],
+        ["2007-01-01", None, None],
+        ["2007-07-01", None, None],
+    ]
+
+
+async def test_un_id_inexistente_no_es_una_fuente_caida() -> None:
+    """nueva_08: el modelo armó el id 64.2_GR_0_0_12. La API responde 400 con
+    `failed_series`, y el error lo lleva para que el agente no lo trate como
+    una fuente caída."""
+    api = FakeSeriesApi(pobreza_gran_rosario_real())
+    with pytest.raises(ConnectorError) as err:
+        await api.adapter().fetch(["64.2_GR_0_0_12"])
+    assert err.value.details["series_inexistentes"] == ["64.2_GR_0_0_12"]
+
+    # Una fuente caída de verdad no lo trae.
+    def caida(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="Service Unavailable")
+
+    adapter = SeriesTiempoAdapter(httpx.AsyncClient(transport=httpx.MockTransport(caida)))
+    with pytest.raises(ConnectorError) as err:
+        await adapter.fetch([POBREZA_GRAN_ROSARIO_ID])
+    assert "series_inexistentes" not in err.value.details

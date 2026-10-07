@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
 from collections.abc import Mapping
@@ -18,6 +19,28 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://apis.datos.gob.ar/series/api"
 
+_IPC_NACIONAL = "148.3_INIVELNAL_DICI_M_26"
+
+
+def _ipc_region(sid: str, api_description: str, region: str, cubre: str, places: list[str]) -> dict:
+    """El IPC de una región del INDEC, de la misma familia que el nacional (base dic-2016)."""
+    return {
+        "ids": [sid],
+        "description": (
+            f"IPC {region} del INDEC, nivel general, base dic-2016=100 (mensual, desde 2016). "
+            "Con representacion=percent_change da la inflación mensual de la región. Cubre "
+            f"{cubre}. El INDEC no publica el IPC por provincia ni por ciudad: para un lugar de "
+            "la región, esta es la serie más cercana; dala aclarando que es la de la región. El "
+            f"IPC nacional es {_IPC_NACIONAL}."
+        ),
+        "expected_description": {sid: api_description},
+        "keywords": [],
+        "places": places,
+        "default_collapse": "month",
+        "default_representation": "percent_change",
+    }
+
+
 # Catálogo curado de series de la API de Series de Tiempo.
 #
 # - ``ids``: los ids que se piden juntos.
@@ -30,6 +53,20 @@ BASE_URL = "https://apis.datos.gob.ar/series/api"
 #   grabados de la API: cambiar un id tiene que ser deliberado.
 # - ``keywords``: se comparan sin acentos y por palabra completa
 #   (``match_catalog``), nunca como subcadena: "emi" encontraba "emisiones".
+# - ``places``: lugares que, junto a una palabra del IPC (``_IPC_WORDS``) en
+#   cualquier parte del texto, hacen coincidir la entrada: «inflación Misiones
+#   agosto 2026» es el IPC del Noreste. Se comparan sin acentos y sin
+#   singularizar («misión» no es Misiones); los que también son palabras
+#   comunes van con «en» o «de» delante, o pegados a «inflación» o «IPC»
+#   («inflación Salta»), nunca sueltos («precios corrientes», «¿por qué salta
+#   la inflación?»). ``_NOT_PLACES`` saca los que pegados son un verbo.
+# - ``generic``: la entrada amplia de un tema (el IPC nacional). Se descarta si
+#   las palabras con que coincidió están todas dentro de las de otras entradas
+#   («inflación mayorista» contiene «inflación»): el 06-oct «inflación
+#   mayorista», «IPC GBA» e «inflación Misiones» daban como verificada la
+#   serie del IPC nacional, y la del IPIM o la de la región no aparecía. Una
+#   frase que también es suya no la cubre: «costo de vida» es el IPC y también
+#   la canasta básica, y no es más específica.
 # - ``discontinued``: la fuente dejó de actualizar la serie.
 # - ``default_collapse`` / ``default_representation``: sólo los usa el
 #   pipeline viejo (``pipeline/connectors/series.py``).
@@ -55,10 +92,108 @@ SERIES_CATALOG: dict[str, dict] = {
         "expected_description": {
             "148.3_INIVELNAL_DICI_M_26": "IPC. Nivel General Nacional. Base dic 2016. Mensual."
         },
-        "keywords": ["inflacion", "ipc", "precios", "indice de precios", "costo de vida"],
+        "keywords": [
+            "inflacion",
+            "ipc",
+            "precios",
+            "indice de precios",
+            "costo de vida",
+            # Con una región en el mismo texto, el nacional se pidió por nombre.
+            "inflacion nacional",
+            "ipc nacional",
+        ],
+        "generic": True,
         "default_collapse": "month",
         "default_representation": "percent_change",
     },
+    "ipim": {
+        "ids": ["448.1_NIVEL_GENERAL_0_0_13_46"],
+        "description": (
+            "IPIM: Índice de Precios Internos al por Mayor del INDEC, nivel general, base "
+            "dic-2015=100 (mensual, desde 2015). Es la inflación mayorista, no el IPC: con "
+            "representacion=percent_change da la variación % mensual."
+        ),
+        "expected_description": {"448.1_NIVEL_GENERAL_0_0_13_46": "IPIM Nivel general"},
+        "keywords": [
+            "ipim",
+            "inflacion mayorista",
+            "inflacion al por mayor",
+            "precios mayoristas",
+            "precios al por mayor",
+            "indice de precios mayoristas",
+            "indice de precios al por mayor",
+            "indice de precios internos al por mayor",
+        ],
+        "default_collapse": "month",
+        "default_representation": "percent_change",
+    },
+    # Los ids se verificaron contra la metadata de la API el 06-oct: agosto de
+    # 2026 da 1,75 % en el Noreste (el nacional, 1,66 %).
+    "ipc_gba": _ipc_region(
+        "148.3_INIVELGBA_DICI_M_21",
+        "IPC. Nivel General. GBA. Base dic 2016. Mensual.",
+        "del Gran Buenos Aires (GBA)",
+        "la Ciudad de Buenos Aires y los 24 partidos del conurbano",
+        ["gba", "gran buenos aires", "conurbano"],
+    ),
+    "ipc_pampeana": _ipc_region(
+        "148.3_INIVELANA_DICI_M_26",
+        "IPC. Nivel General Región pampeana. Base dic 2016. Mensual.",
+        "de la región Pampeana",
+        "Córdoba, Entre Ríos, La Pampa, Santa Fe y la provincia de Buenos Aires fuera del GBA",
+        ["pampeana", "cordoba", "entre rios", "la pampa", "santa fe"],
+    ),
+    "ipc_noreste": _ipc_region(
+        "148.3_INIVELNEA_DICI_M_21",
+        "IPC. Nivel General Región noreste. Base dic 2016. Mensual.",
+        "de la región Noreste (NEA)",
+        "Chaco, Corrientes, Formosa y Misiones",
+        [
+            "nea",
+            "noreste",
+            "nordeste",
+            "misiones",
+            "chaco",
+            "formosa",
+            "en corrientes",
+            "de corrientes",
+            "inflacion corrientes",
+            "ipc corrientes",
+        ],
+    ),
+    "ipc_noroeste": _ipc_region(
+        "148.3_INIVELNOA_DICI_M_21",
+        "IPC. Nivel General Región noroeste. Base dic 2016. Mensual.",
+        "de la región Noroeste (NOA)",
+        "Catamarca, Jujuy, La Rioja, Salta, Santiago del Estero y Tucumán",
+        [
+            "noa",
+            "noroeste",
+            "catamarca",
+            "jujuy",
+            "la rioja",
+            "santiago del estero",
+            "tucuman",
+            "en salta",
+            "de salta",
+            "inflacion salta",
+            "ipc salta",
+        ],
+    ),
+    "ipc_cuyo": _ipc_region(
+        "148.3_INIVELUYO_DICI_M_22",
+        "IPC. Nivel General Cuyo. Base dic 2016. Mensual.",
+        "de la región Cuyo",
+        "Mendoza, San Juan y San Luis",
+        ["cuyo", "mendoza", "san juan", "san luis"],
+    ),
+    "ipc_patagonia": _ipc_region(
+        "148.3_INIVELNIA_DICI_M_27",
+        "IPC. Nivel General Patagonia. Base dic 2016. Mensual.",
+        "de la región Patagonia",
+        "Chubut, Neuquén, Río Negro, Santa Cruz y Tierra del Fuego",
+        ["patagonia", "chubut", "neuquen", "rio negro", "santa cruz", "tierra del fuego"],
+    ),
     "tipo_cambio": {
         "ids": ["92.2_TIPO_CAMBIION_0_0_21_24"],
         "description": (
@@ -78,7 +213,10 @@ SERIES_CATALOG: dict[str, dict] = {
             "148.3_INIVELNOA_DICI_M_21",
             "145.3_INGCUYUYO_DICI_M_11",
         ],
-        "description": "IPC Regional: Nacional, GBA, NOA, y Cuyo (mensual)",
+        "description": (
+            "IPC Regional: Nacional, GBA, NOA, y Cuyo (mensual). Las seis regiones del INDEC "
+            "(también Pampeana, Noreste y Patagonia) se buscan por su nombre: «IPC Noreste»."
+        ),
         "expected_description": {
             "148.3_INIVELNAL_DICI_M_26": "IPC. Nivel General Nacional. Base dic 2016. Mensual.",
             "103.1_I2N_2016_M_19": "IPC-GBA. Nivel General. Base abr 2016. Mensual",
@@ -327,13 +465,22 @@ def _stem(word: str) -> str:
     return word
 
 
+def _words(text: str) -> list[str]:
+    return _WORD_RE.findall(_strip_accents(text.lower()))
+
+
 def _tokens(text: str) -> list[str]:
-    return [_stem(w) for w in _WORD_RE.findall(_strip_accents(text.lower()))]
+    return [_stem(w) for w in _words(text)]
 
 
-def _contains_phrase(words: list[str], phrase: tuple[str, ...]) -> bool:
+def _positions(words: list[str], phrase: tuple[str, ...]) -> set[int]:
+    """Las posiciones de ``words`` que ocupa ``phrase``, en todas sus apariciones."""
     n = len(phrase)
-    return n > 0 and any(tuple(words[i : i + n]) == phrase for i in range(len(words) - n + 1))
+    found: set[int] = set()
+    for i in range(len(words) - n + 1):
+        if n and tuple(words[i : i + n]) == phrase:
+            found.update(range(i, i + n))
+    return found
 
 
 # Palabras clave tokenizadas una vez, en el orden del catálogo.
@@ -343,22 +490,61 @@ _CATALOG_NORMALIZED: list[tuple[tuple[str, ...], str, dict]] = [
     for kw in entry["keywords"]
 ]
 
+# Cómo se nombra al IPC junto a un lugar (``places``). Sin «costo de vida»,
+# que también es la canasta básica.
+_IPC_WORDS: list[tuple[str, ...]] = [
+    tuple(_tokens(w)) for w in ("inflacion", "ipc", "precios", "indice de precios")
+]
+_PLACES_NORMALIZED: list[tuple[tuple[str, ...], str]] = [
+    (tuple(_words(place)), key)
+    for key, entry in SERIES_CATALOG.items()
+    for place in entry.get("places", [])
+]
+# Un lugar pegado a la palabra del IPC que en realidad es un verbo.
+_NOT_PLACES: list[tuple[str, ...]] = [
+    tuple(_words(text)) for text in ("la inflacion salta", "el ipc salta")
+]
+# Las frases de una entrada ``generic``: en otra entrada no la cubren.
+_GENERIC_PHRASES: set[tuple[str, ...]] = {
+    phrase for phrase, _key, entry in _CATALOG_NORMALIZED if entry.get("generic")
+}
+
 
 def match_catalog(query: str) -> list[dict]:
     """Las entradas del catálogo con alguna palabra clave entera en el texto.
 
     Sin acentos y por palabra completa: «inflación» encuentra la inflación,
     pero «emisiones» ya no encuentra la base monetaria ni «cambio climático»
-    el tipo de cambio. En el orden del catálogo, sin repetir.
+    el tipo de cambio. Una entrada con ``places`` coincide con una palabra del
+    IPC y uno de sus lugares en cualquier parte del texto, y la ``generic``
+    se descarta si las palabras con que coincidió están todas en frases de
+    otras entradas que no son suyas: «inflación mayorista» es el IPIM y no
+    también el IPC nacional, y «costo de vida» es los dos, el IPC y la
+    canasta. En el orden del catálogo, sin repetir.
     """
-    words = _tokens(query)
-    found: list[dict] = []
-    seen: set[str] = set()
-    for phrase, key, entry in _CATALOG_NORMALIZED:
-        if key not in seen and _contains_phrase(words, phrase):
-            seen.add(key)
-            found.append(entry)
-    return found
+    raw = _words(query)
+    words = [_stem(w) for w in raw]
+    covered: dict[str, set[int]] = {}
+    # Lo que cada entrada cubre con frases que la genérica no tiene: «costo de
+    # vida» es del IPC y de la canasta, y no descarta al IPC.
+    specific: dict[str, set[int]] = {}
+    for phrase, key, _entry in _CATALOG_NORMALIZED:
+        if at := _positions(words, phrase):
+            covered.setdefault(key, set()).update(at)
+            if phrase not in _GENERIC_PHRASES:
+                specific.setdefault(key, set()).update(at)
+    ipc_at = set().union(*(_positions(words, phrase) for phrase in _IPC_WORDS))
+    if ipc_at:
+        not_places = set().union(*(_positions(raw, phrase) for phrase in _NOT_PLACES))
+        for place, key in _PLACES_NORMALIZED:
+            if (at := _positions(raw, place)) and not at <= not_places:
+                covered.setdefault(key, set()).update(at | ipc_at)
+                specific.setdefault(key, set()).update(at | ipc_at)
+    for key in [k for k in covered if SERIES_CATALOG[k].get("generic")]:
+        others = set().union(*(at for k, at in specific.items() if k != key))
+        if covered[key] <= others:
+            del covered[key]
+    return [entry for key, entry in SERIES_CATALOG.items() if key in covered]
 
 
 def find_catalog_match(query: str) -> dict | None:
@@ -520,6 +706,148 @@ def _reaches_end(last: str, end: str, frequency: str | None) -> bool:
         return (date.fromisoformat(end) - date.fromisoformat(last)).days <= slack
     except ValueError:
         return True
+
+
+def _period_end(text: str | None) -> str | None:
+    """El último día del período que nombra un `hasta`, como lo lee la API.
+
+    `end_date=2025` trae todo 2025 y `end_date=2025-06` llega al 30 de junio
+    (medido el 06-oct).
+    """
+    match = _DATE_RE.fullmatch(str(text or "").strip())
+    if not match:
+        return None
+    year = int(match.group(1))
+    if match.group(2) is None:
+        return f"{year}-12-31"
+    if match.group(3) is not None:
+        return iso_date(text)
+    try:
+        following = date.fromisoformat(_months_back(f"{year:04d}-{int(match.group(2)):02d}-01", -1))
+    except ValueError:
+        return None
+    return date.fromordinal(following.toordinal() - 1).isoformat()
+
+
+# Pobreza e indigencia de la EPH continua (63.2 y 64.2, las 78 series medidas
+# el 06-oct): la API fecha cada semestre por el día siguiente a su fin, un
+# semestre más tarde que la fuente y que su propia metadata. El CSV de la
+# fuente (64.2) fecha el 1er semestre de 2024, 52,9 %, en `2024-01-01`; la API
+# lo devuelve en `2024-07-01`. La metadata coincide con la fuente:
+# time_index_end 2026-01-01 con last_value 0,231 (Gran Rosario, 1er semestre
+# de 2026), y la API trae ese 0,231 en la fila `2026-07-01`. No es una
+# metadata atrasada. Leídas por su primer día, todas las filas quedaban
+# corridas un semestre; con `hasta` no quedaba ni la última para notarlo
+# (pobreza de 2025 daba 2S-2024 y 1S-2025 rotulados 2025-S1 y 2025-S2). Las
+# semestrales viejas (61.1, 62.1: time_index_end 2003-05-01, fila
+# `2003-01-01`) están fechadas por el inicio: no se tocan.
+_SEMESTER_ISO = "R/P6M"
+
+
+def _semester_start(iso: str) -> str:
+    return f"{iso[:4]}-{'01' if int(iso[5:7]) <= 6 else '07'}-01"
+
+
+def _fields_by_id(raw: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    out: dict[str, Mapping[str, Any]] = {}
+    for m in (raw.get("meta") or [])[1:]:
+        field = m.get("field") if isinstance(m, Mapping) else None
+        if isinstance(field, Mapping) and field.get("id"):
+            out[str(field["id"])] = field
+    return out
+
+
+def _native_semesters(raw: Mapping[str, Any], series_ids: list[str]) -> bool:
+    """¿Vino en semestres y alguna de las series pedidas es semestral en la fuente?
+
+    Las demás pueden ser de otra frecuencia (el desempleo trimestral, que la
+    API promedia a semestres): cada columna se confirma aparte.
+    """
+    meta = raw.get("meta") or []
+    if not meta or not isinstance(meta[0], Mapping) or meta[0].get("frequency") != "semester":
+        return False
+    fields = _fields_by_id(raw)
+    return any((fields.get(sid) or {}).get("frequency") == _SEMESTER_ISO for sid in series_ids)
+
+
+def _dated_one_semester_late(raw: Mapping[str, Any], series_ids: list[str]) -> set[int]:
+    """Las columnas (posición en `series_ids`) que la API fechó un semestre después que su metadata.
+
+    Serie por serie, sobre la serie entera y en valores: la última fila con
+    dato de esa columna tiene que caer un semestre después de su
+    time_index_end Y tener su last_value. No pasan una metadata atrasada de
+    verdad (su last_value sería el del semestre anterior), una semestral
+    fechada por el inicio (la 64.1 de 2001-2003) ni las de otra frecuencia:
+    quedan como vienen. Se exigía que TODAS lo confirmaran, y la 64.2 pedida
+    junto con la 64.1 o con el desempleo trimestral salía corrida (revisión
+    de #166).
+    """
+    if not _native_semesters(raw, series_ids):
+        return set()
+    fields = _fields_by_id(raw)
+    data = raw.get("data") or []
+    late: set[int] = set()
+    for idx, sid in enumerate(series_ids):
+        field = fields.get(sid) or {}
+        if field.get("frequency") != _SEMESTER_ISO:
+            continue
+        end = iso_date(str(field.get("time_index_end") or "")[:10])
+        last_value = _as_float(field.get("last_value"))
+        last = next(
+            (row for row in reversed(data) if idx + 1 < len(row) and row[idx + 1] is not None),
+            None,
+        )
+        if end is None or last_value is None or last is None:
+            continue
+        value = _as_float(last[idx + 1])
+        if str(last[0])[:10] != _months_back(_semester_start(end), -6):
+            continue
+        if value is None or not math.isclose(value, last_value, rel_tol=1e-9, abs_tol=1e-12):
+            continue
+        late.add(idx)
+    return late
+
+
+def _back_one_semester(rows: list[list[Any]], late: set[int]) -> list[list[Any]]:
+    """Retrocede un semestre los valores de las columnas `late` y realinea las filas.
+
+    Las demás columnas quedan en su fecha: en la fila de un semestre van los
+    valores de ESE semestre de todas las series. Un semestre sin ningún dato
+    queda si la API lo mandó para todas las columnas (la 64.2 no tiene 2007
+    a 2016 y la API manda esas filas vacías); uno que queda vacío sólo por
+    el corrimiento (el último, con la pobreza junto al desempleo) no.
+    """
+    width = max((len(r) for r in rows), default=1) - 1
+    by_date: dict[str, list[Any]] = {}
+    seen: dict[str, set[int]] = {}
+    for row in rows:
+        fecha = str(row[0])[:10]
+        for i in range(width):
+            target = _months_back(fecha, 6) if i in late else fecha
+            seen.setdefault(target, set()).add(i)
+            value = row[i + 1] if i + 1 < len(row) else None
+            if value is not None:
+                by_date.setdefault(target, [None] * width)[i] = value
+    for target, columns in seen.items():
+        if len(columns) == width:
+            by_date.setdefault(target, [None] * width)
+    return [[fecha, *values] for fecha, values in sorted(by_date.items())]
+
+
+def _missing_series(exc: Exception) -> list[str]:
+    """Los ids que la API dice que no existen (400 «Serie inexistente: …»).
+
+    Nombra sólo el primero aunque falten varios (medido el 06-oct).
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, httpx.Response) or response.status_code != 400:
+        return []
+    try:
+        body = response.json()
+    except ValueError:
+        return []
+    failed = body.get("failed_series") if isinstance(body, dict) else None
+    return [str(s) for s in failed] if isinstance(failed, list) else []
 
 
 def _as_int(value: Any) -> int | None:
@@ -710,6 +1038,38 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     raw = await self._get_series({**params, "start": str(tail_start)})
                     data = raw.get("data") or []
 
+            # Pobreza e indigencia semestrales (ver _dated_one_semester_late):
+            # la serie entera son unas 50 filas. Se confirma el corrimiento
+            # serie por serie con la metadata, se fechan los semestres de las
+            # confirmadas por su primer día, como la fuente, y la ventana
+            # pedida se aplica sobre esas fechas. Las demás columnas (otra
+            # semestral fechada por el inicio, el desempleo trimestral que la
+            # API promedia a semestres) quedan en su fecha.
+            if _native_semesters(raw, series_ids):
+                plain = {
+                    k: v
+                    for k, v in params.items()
+                    if k not in ("start_date", "end_date", "representation_mode")
+                }
+                whole = raw if plain == params else await self._get_series(plain)
+                late = _dated_one_semester_late(whole, series_ids)
+                if late:
+                    if "representation_mode" in params:
+                        whole = await self._get_series(
+                            {**plain, "representation_mode": params["representation_mode"]}
+                        )
+                    window_start = iso_date(query_start)
+                    window_end = _period_end(end_date)
+                    raw = whole
+                    data = [
+                        row
+                        for row in _back_one_semester(whole.get("data") or [], late)
+                        if (window_start is None or row[0] >= window_start)
+                        and (window_end is None or row[0] <= window_end)
+                    ]
+                    total = len(data)
+                    tail_start = 0
+
             if not data:
                 return None
 
@@ -724,10 +1084,10 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             if not data:
                 return None
 
-            # La última fila con dato de cada serie. La metadata de la API
-            # puede estar atrasada: la pobreza 64.2_POBLACION_NUA_0_0_34_74
-            # dice time_index_end 2026-01-01 y ya trae la fila 2026-07-01; con
-            # «la fuente llega hasta 2026-01-01» el modelo descartó ese dato.
+            # La última fila con dato de cada serie: el fin de la fuente nunca
+            # queda antes de un dato traído (H065). En la pobreza 64.2 no era
+            # una metadata atrasada sino las filas corridas un semestre (ver
+            # _dated_one_semester_late); ya fechadas como la fuente, coinciden.
             last_by_id: dict[str, str] = {}
             for idx, sid in enumerate(series_ids):
                 for row in reversed(data):
@@ -972,7 +1332,14 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 representation,
                 detalle,
             )
+            details: dict[str, Any] = {"series_ids": series_ids, "reason": detalle}
+            # Un id que no existe no es una fuente caída: el agente lo leía
+            # como «La fuente no respondió» y se iba a una copia vieja
+            # (nueva_08 del 06-oct, con el id armado 64.2_GR_0_0_12).
+            missing = _missing_series(exc)
+            if missing:
+                details["series_inexistentes"] = missing
             raise ConnectorError(
                 error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-                details={"series_ids": series_ids, "reason": detalle},
+                details=details,
             ) from exc

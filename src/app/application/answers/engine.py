@@ -154,7 +154,9 @@ class EngineResult:
     # Los que se citan: con ANSWERS_VERIFY_MODE=correct, los que aportaron una
     # cifra o se nombran en el texto (``answers.verification.select_evidence``);
     # si no, toda la evidencia. De acá salen las fuentes, los gráficos,
-    # `served_table` y el aviso de atraso. Vacío = toda la evidencia.
+    # `served_table` y el aviso de atraso. Vacío = toda la evidencia. La
+    # excepción son las fuentes en shadow con todas las cifras directas o
+    # derivadas: salen de la selección, y esto sigue siendo todo lo leído.
     cited_evidence: list[Any] = field(default_factory=list, repr=False)
     # De las citadas, las que aportaron alguna cifra respaldada. El aviso de
     # atraso mira éstas: una citada sólo por el título no lo dispara. Vacío =

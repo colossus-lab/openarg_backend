@@ -28,7 +28,9 @@ from app.application.answers.tools import build_tools
 from app.application.answers.tools.base import ToolContext, ToolInputError
 from app.application.answers.tools.bcra import VARIABLES, VariablesBCRA
 from app.application.answers.tools.conectores import Cotizaciones
+from app.application.answers.verification import seen_numbers, verify_figures
 from app.application.pipeline.chart_builder import build_deterministic_charts
+from app.application.quality.data_age import freshness_notices
 from app.domain.exceptions.connector_errors import ConnectorError
 from app.domain.exceptions.error_codes import ErrorCode
 from app.domain.ports.llm.agent_llm import AgentTurn, AgentUsage, TextDelta, ToolCall
@@ -537,3 +539,187 @@ async def test_con_el_bcra_colgado_el_circuito_se_abre(monkeypatch: pytest.Monke
     assert time.monotonic() - started < 0.2
     assert "El BCRA no respondió" in outcome.content
     assert fake.data_attempts == intentos
+
+
+# ── variación entre dos períodos ───────────────────────────
+
+# Reservas (1) y base monetaria (15) de la API v4, consultada el 06-oct, cerca
+# de fin de 2025 y de fin de agosto de 2026 (no hay dato el 31/12/2025).
+_RESERVAS_REALES = [
+    ("2025-12-26", 43617.0),
+    ("2025-12-29", 41894.0),
+    ("2025-12-30", 41095.0),
+    ("2026-01-02", 43105.0),
+    ("2026-08-27", 50861.0),
+    ("2026-08-28", 49793.0),
+    ("2026-08-31", 48259.0),
+    ("2026-09-01", 50205.0),
+    ("2026-09-29", 47482.0),
+    ("2026-09-30", 46092.0),
+]
+_BASE_REALES = [
+    ("2025-12-26", 42492789.0),
+    ("2025-12-29", 42305192.0),
+    ("2025-12-30", 42956965.0),
+    ("2026-01-02", 42960320.0),
+    ("2026-08-27", 45621808.0),
+    ("2026-08-28", 45776921.0),
+    ("2026-08-31", 47451537.0),
+    ("2026-09-01", 47216078.0),
+    ("2026-09-29", 46262060.0),
+    ("2026-09-30", 46909419.0),
+]
+_NUEVA_09 = (
+    "¿Cuánto cambiaron las reservas del BCRA y la base monetaria entre fin de 2025 y fin de "
+    "agosto de 2026?"
+)
+
+
+def _fake_puntas(**kw: Any) -> FakeBCRA:
+    return FakeBCRA(series={1: _RESERVAS_REALES, 15: _BASE_REALES}, **kw)
+
+
+@pytest.mark.parametrize("desde", ["2025", "2025-12", "2025-12-31"])
+async def test_la_variacion_de_la_base_monetaria_hasta_agosto_da_10_46(desde: str) -> None:
+    """nueva_09 (prueba del 06-oct): mostraba los dos saldos y decía «no pude calcular».
+
+    variables_bcra no calculaba variaciones y la base monetaria de
+    series_tiempo está parada en la fuente (331.1 en mayo, 331.2 el 12-jun).
+    """
+    fake = _fake_puntas()
+    out = await _run(
+        fake,
+        variables=["reservas", "base_monetaria"],
+        variacion={"desde": desde, "hasta": "2026-08"},
+    )
+
+    payload = json.loads(out.content)
+    filas = {f["variable"]: f for f in payload["variaciones"]}
+    base = filas["base_monetaria"]
+    assert (base["desde"], base["valor_desde"]) == ("2025-12-30", 42956965.0)
+    assert (base["hasta"], base["valor_hasta"]) == ("2026-08-31", 47451537.0)
+    assert base["variacion_pct"] == 10.46
+    assert base["diferencia"] == 4494572.0
+    assert base["unidades"] == "millones de pesos"
+    reservas = filas["reservas"]
+    assert (reservas["desde"], reservas["hasta"]) == ("2025-12-30", "2026-08-31")
+    assert (reservas["variacion_pct"], reservas["diferencia"]) == (17.43, 7164.0)
+    assert "decí la fecha de cada una" in payload["nota"]
+    # La evidencia: un resultado citable por variable, del BCRA.
+    titles = [r.dataset_title for r in out.results]
+    assert titles == [
+        f"Variación entre 2025-12-30 y 2026-08-31: {VARIABLES['reservas'].titulo}",
+        f"Variación entre 2025-12-30 y 2026-08-31: {VARIABLES['base_monetaria'].titulo}",
+    ]
+    assert all(r.source == "bcra" and r.metadata["oficial"] for r in out.results)
+    assert out.results[1].records[0]["variacion_pct"] == 10.46
+    assert out.summary == "Calculó la variación de 2 variables del BCRA"
+    # Sólo las puntas: sin `desde`, hasta el fin de cada período.
+    pedidos = [dict(r.url.params) for r in fake.requests if r.url.path.endswith("/15")]
+    assert sorted(p["hasta"] for p in pedidos) == ["2025-12-31", "2026-08-31"]
+    assert all("desde" not in p for p in pedidos)
+
+
+async def test_la_variacion_calculada_respalda_la_cifra_y_no_es_un_dato_atrasado() -> None:
+    out = await _run(
+        _fake_puntas(),
+        variables=["reservas", "base_monetaria"],
+        variacion={"desde": "2025-12", "hasta": "2026-08"},
+    )
+    answer = (
+        "Entre el 30/12/2025 y el 31/08/2026 las reservas pasaron de USD 41.095 millones a "
+        "USD 48.259 millones (**+17,43 %**, +USD 7.164 millones) y la base monetaria de "
+        "$42.956.965 millones a $47.451.537 millones (**+10,46 %**, +$4.494.572 millones)."
+    )
+    seen = [seen_numbers(out.content)] * len(out.results)
+    check = verify_figures(answer, out.results, seen)
+    # Las ocho cifras salen tal cual de lo que devolvió la herramienta: la
+    # variación y la diferencia ya no son una cuenta del modelo.
+    assert [c.status for c in check.checks] == ["directa"] * 8
+    # La punta es del 31/08 pero el BCRA publica hasta el 30/09: es un
+    # período pedido, no un dato atrasado (los avisos de nueva_09 venían de
+    # series_tiempo).
+    assert freshness_notices(out.results, today=HOY, question=_NUEVA_09) == []
+
+
+async def test_la_variacion_con_el_periodo_final_abierto_lo_avisa() -> None:
+    out = await _run(
+        _fake_puntas(), variables=["base_monetaria"], variacion={"desde": "2025", "hasta": "2026"}
+    )
+    payload = json.loads(out.content)
+    assert payload["variaciones"][0]["hasta"] == "2026-09-30"
+    assert "El período final (2026) no está completo" in payload["nota"]
+    assert "30/09/2026" in payload["nota"]
+    assert out.summary == "Calculó la variación de «Base monetaria (BCRA)» del BCRA"
+
+
+async def test_la_variacion_de_la_uva_no_usa_lo_publicado_por_adelantado() -> None:
+    fake = FakeBCRA()
+    out = await _run(fake, variables=["uva"], variacion={"desde": "2026-06", "hasta": "2026-10"})
+    fila = json.loads(out.content)["variaciones"][0]
+    assert fila["hasta"] == HOY.isoformat()
+    assert out.results[0].metadata["ultima_observacion"] == HOY.isoformat()
+    datos = [r for r in fake.requests if r.url.path.endswith("/31")]
+    assert datos and all(dict(r.url.params)["hasta"] <= HOY.isoformat() for r in datos)
+
+
+async def test_la_variacion_con_una_variable_caida_calcula_las_demas() -> None:
+    out = await _run(
+        _fake_puntas(fail_ids={15}),
+        variables=["reservas", "base_monetaria"],
+        variacion={"desde": "2025-12", "hasta": "2026-08"},
+    )
+    payload = json.loads(out.content)
+    filas = {f["variable"]: f for f in payload["variaciones"]}
+    assert filas["reservas"]["variacion_pct"] == 17.43
+    assert "error" in filas["base_monetaria"]
+    assert "El BCRA no respondió" in payload["aviso"]
+    assert len(out.results) == 1
+
+
+async def test_la_variacion_sin_respuesta_del_bcra_es_error_de_la_fuente() -> None:
+    out = await _run(
+        _fake_puntas(fail_ids={15}),
+        variables=["base_monetaria"],
+        variacion={"desde": "2025-12", "hasta": "2026-08"},
+    )
+    assert out.is_error
+    assert "El BCRA no respondió" in out.content
+    assert out.results == []
+
+
+async def test_la_variacion_sin_dato_en_la_punta_vuelve_al_modelo() -> None:
+    # La BADLAR del doble empieza en 2025: no hay dato para 2020.
+    with pytest.raises(ToolInputError, match="tasa BADLAR: el BCRA no tiene dato para 2020-01"):
+        await _run(
+            FakeBCRA(), variables=["badlar"], variacion={"desde": "2020-01", "hasta": "2026-08"}
+        )
+
+
+@pytest.mark.parametrize(
+    "variacion",
+    [
+        "2025-12",
+        {"desde": "fin de 2025", "hasta": "2026-08"},
+        {"desde": "2026-08", "hasta": "2025-12"},
+        {"desde": "2026-08", "hasta": "2026-08-31"},
+        {"desde": "2025-12", "hasta": "2026-11"},
+    ],
+)
+async def test_una_variacion_invalida_vuelve_al_modelo(variacion: Any) -> None:
+    fake = FakeBCRA()
+    with pytest.raises(ToolInputError):
+        await _run(fake, variables=["base_monetaria"], variacion=variacion)
+    assert fake.requests == []
+
+
+def test_la_variacion_esta_en_la_descripcion_y_en_los_pasos() -> None:
+    assert "`variacion`" in VariablesBCRA.spec.description
+    assert VariablesBCRA.spec.input_schema["properties"]["variacion"]["required"] == [
+        "desde",
+        "hasta",
+    ]
+    text = VariablesBCRA().describe(
+        {"variables": ["base_monetaria"], "variacion": {"desde": "2025-12", "hasta": "2026-08"}}
+    )
+    assert text == "Calculando la variación en el BCRA: base monetaria"
