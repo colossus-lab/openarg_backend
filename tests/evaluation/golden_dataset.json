@@ -272,7 +272,11 @@
      "dólar oficial",
      "cotización oficial"
     ],
-    "dólar"
+    [
+     "dólar",
+     "USD",
+     "US$"
+    ]
    ],
    "expected_sources": [
     "Series de Tiempo"
@@ -288,7 +292,7 @@
     ]
    ],
    "must_deflect": false,
-   "rationale": "En 2 de 3 corridas del 01-oct dijo \"dólar oficial\" en vez de \"tipo de cambio\", que es lo mismo: se aceptan las dos."
+   "rationale": "En 2 de 3 corridas del 01-oct dijo \"dólar oficial\" en vez de \"tipo de cambio\", que es lo mismo: se aceptan las dos. El 06-oct (staging, ola 3) dio la serie mensual del BCRA en \"$/USD\", con los cierres de cada mes exactos, y falló por no escribir \"dólar\": USD y US$ son el código y el símbolo de la misma moneda."
   },
   {
    "id": "series_003",
@@ -405,8 +409,10 @@
    "question": "Cómo está el EMAE este año?",
    "expected_intent": "emae",
    "expected_answer_contains": [
-    "EMAE",
-    "actividad"
+    [
+     "EMAE",
+     "Estimador Mensual de Actividad"
+    ]
    ],
    "expected_sources": [
     "Series de Tiempo"
@@ -420,7 +426,8 @@
      "datos_gob_ar"
     ]
    ],
-   "must_deflect": false
+   "must_deflect": false,
+   "rationale": "Pedía \"EMAE\" y además \"actividad\". El 05-oct y el 06-oct (staging) dio la variación interanual de cada mes de 2026, exacta contra la API de Series de Tiempo, y falló por no escribir \"actividad\". EMAE es el Estimador Mensual de Actividad Económica: la segunda palabra no controlaba nada que no controle la sigla. Se pide nombrar el indicador, por sigla o por nombre; una respuesta sobre la actividad sacada de otro indicador (PBI, IPI) sigue fallando."
   },
   {
    "id": "series_007",
@@ -514,7 +521,10 @@
    "question": "Dólar CCL hoy",
    "expected_intent": "dolar",
    "expected_answer_contains": [
-    "CCL"
+    [
+     "CCL",
+     "contado con liqui"
+    ]
    ],
    "expected_sources": [
     "ArgentinaDatos"
@@ -526,7 +536,8 @@
      "argentina_datos"
     ]
    ],
-   "must_deflect": false
+   "must_deflect": false,
+   "rationale": "El 06-oct (staging, ola 3) contestó \"el dólar contado con liquidación cotiza hoy… $1.610,80\", el valor de DolarApi de ese día, y falló por no escribir la sigla. \"contado con liqui\" cubre \"liquidación\", \"liquidacion\" y \"liqui\"; el MEP o el blue siguen fallando."
   },
   {
    "id": "argentina_datos_004",
