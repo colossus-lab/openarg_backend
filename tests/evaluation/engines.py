@@ -431,6 +431,21 @@ def summarize_evidence(results: list[Any], answer: str = "") -> str:
     return "\n\n".join(_item_summary(r, budget, terms) for r in unique)[:_EVIDENCE_MAX_CHARS]
 
 
+# Las cuentas de filas que `calcular` le da al modelo junto a los grupos y
+# guarda en los metadatos del resultado (`answers/tools/catalogo.py`): sobre
+# cuántas filas se calculó, de todos los grupos o sólo de los mostrados, y
+# cuántas tenían número. No están en `records`.
+_CONTROL_COUNT_KEYS = ("filas_usadas", "filas_usadas_en_grupos_mostrados", "filas_con_valor")
+
+
+def _control_counts(meta: dict[str, Any]) -> list[float]:
+    return [
+        float(v)
+        for k in _CONTROL_COUNT_KEYS
+        if isinstance(v := meta.get(k), int) and not isinstance(v, bool)
+    ]
+
+
 def evidence_items(results: list[Any]) -> list[dict[str, Any]]:
     """La evidencia como la cita el motor: título y URL de la fuente, y sus números.
 
@@ -439,6 +454,12 @@ def evidence_items(results: list[Any]) -> list[dict[str, Any]]:
     lo que esa fuente devolvió. ``derivadas`` son las variaciones que el
     modelo puede calcular de la cola de la serie (interanual sobre el
     índice, por ejemplo): también cuentan como aporte de la fuente.
+
+    ``conteos_de_filas`` son las cuentas de filas de un cálculo
+    (``_CONTROL_COUNT_KEYS``). Sin ellas, "la tabla tiene 52.367 registros"
+    salía citada sin cifra aunque fuera el ``filas_usadas`` del conteo que
+    se citaba (ckan_002, prueba de staging del 07-oct). Van aparte de
+    ``numbers`` para no cambiar qué fuente "sólo trae conteos chicos".
     """
     from tests.evaluation.quality_checks import derived_variations, evidence_numbers
 
@@ -463,6 +484,7 @@ def evidence_items(results: list[Any]) -> list[dict[str, Any]]:
                 ),
                 "numbers": evidence_numbers(records),
                 "derivadas": derived_variations(records),
+                "conteos_de_filas": _control_counts(meta),
             }
         )
     return out
