@@ -621,6 +621,192 @@ async def test_content_fingerprints_without_the_method_or_on_failure_is_empty() 
     assert await content_fingerprints(Broken(), hits, tables, {}) == {}
 
 
+# ── tablas distintas de un .zip en copias con el mismo título ─
+#
+# Revisión de #177 (07-oct): las copias de un .zip con el mismo título y la
+# misma URL se juntan sin mirar la forma, y cada una puede traer otra tabla del
+# archivo. Main mostraba la entrada con las tablas de todas las copias; con
+# #131 sólo salían las de la copia elegida. Metadatos de prod en sólo lectura:
+# 34 tablas distintas escondidas en 32 archivos (32 en 31 en staging).
+
+_IGJ = (
+    "https://datos.jus.gob.ar/dataset/da045e06-35cb-4bdd-9b5e-ddee6712c86c/resource/"
+    "e7ac500b-e02a-4d1e-8686-1a417f058896/download/igj-2022-semestre-1.zip"
+)
+_IGJ_T = "Entidades constituidas en la Inspección General de Justicia"
+_IGJ_BASE = ["numero_correlativo", "tipo_societario", "descripcion_tipo_societario", "razon_social"]
+_ENTIDADES = [*_IGJ_BASE, "dada_de_baja", "codigo_baja", "detalle_baja", "cuit"]
+_ADMINISTRADORES = [
+    "numero_correlativo",
+    "apellido_nombre",
+    "tipo_administrador",
+    "descripcion_tipo_administrador",
+    "fecha_designacion",
+]
+
+
+def _zip_copy(ds: str, rows: int, cols: list[str], *, portal="datos_gob_ar", score=0.7, **kw):
+    """Una copia del .zip de la IGJ con una tabla; el perfil trae las filas reales."""
+    name = f"igj_2022_s1_{ds}"
+    hit = _hit(ds, _IGJ_T, _IGJ, score, portal)
+    return hit, _table(name, ds, 0, cols), {name: _profile(name, rows, fmt="zip", **kw)}
+
+
+def _collapse_copies(*copies):
+    hits = [h for h, _, _ in copies]
+    tables = [t for _, t, _ in copies]
+    profiles = {k: v for _, _, p in copies for k, v in p.items()}
+    return hits, tables, profiles
+
+
+def test_igj_twins_with_another_table_of_the_zip_show_it_and_not_the_cut_copy() -> None:
+    """Prod: main mostraba las entidades, los administradores y las entidades
+    cortadas; la rama de #177, sólo las entidades (305.684 filas). Los
+    administradores son otra tabla del mismo .zip y vuelven; la copia cortada
+    de las entidades es otra versión de una tabla que ya está y no se suma."""
+    hits, tables, profiles = _collapse_copies(
+        _zip_copy("entidades", 305_684, _ENTIDADES, portal="justicia", created=_OLD),
+        _zip_copy("administradores", 2_500_000, _ADMINISTRADORES, score=0.69),
+        _zip_copy("cortada", 500_000, _ENTIDADES, score=0.68, truncated=True),
+    )
+
+    # El mismo título decide solo: no hace falta leer contenido.
+    assert fingerprint_candidates(hits, tables, profiles) == []
+    [only] = collapse_hits(hits, tables, profiles)
+
+    assert only.hit.dataset_id == "entidades"  # la completa gana, como antes
+    assert only.copies == 3
+    assert [(t.table_name, t.row_count) for t in only.tables] == [
+        ("raw.igj_2022_s1_administradores", 2_500_000),
+        ("raw.igj_2022_s1_entidades", 305_684),
+    ]
+
+
+def test_igj_twins_with_three_different_tables_show_the_three() -> None:
+    """Staging: las tres copias de "igj-2022-semestre-1.zip" traen las
+    asambleas, las bajas y los domicilios. Comparten las cuatro primeras
+    columnas; las que siguen dicen qué tabla es cada una."""
+    asambleas = [*_IGJ_BASE, "tipo_asamblea", "descripcion_tipo_asamblea", "numero_asamblea"]
+    domicilios = [*_IGJ_BASE, "tipo_domicilio", "descripcion_tipo_domicilio", "calle"]
+    hits, tables, profiles = _collapse_copies(
+        _zip_copy("asambleas", 2_501_642, asambleas),
+        _zip_copy("bajas", 2_000_223, _ENTIDADES),
+        _zip_copy("domicilios", 305_684, domicilios, portal="justicia", created=_OLD),
+    )
+
+    [only] = collapse_hits(hits, tables, profiles)
+
+    assert [t.row_count for t in only.tables] == [2_501_642, 2_000_223, 305_684]
+
+
+def test_pj_penal_2019_twins_show_cases_people_and_crimes() -> None:
+    """Prod: main mostraba casos, personas y delitos de
+    "pj-penal-archivos-recibidos-2019.zip"; la rama, sólo los casos."""
+    url = (
+        "https://datos.jus.gob.ar/dataset/90178b26-0796-403e-b90b-d71d993db7ff/resource/"
+        "9c978fd4-7b1d-4cb7-8494-e725e2015bed/download/pj-penal-archivos-recibidos-2019.zip"
+    )
+    title = "Archivos recibidos de los poderes judiciales provinciales - Penal - 2019"
+    hits = [
+        _hit("casos", title, url, 0.7),
+        _hit("personas", title, url, 0.69, "justicia"),
+        _hit("delitos", title, url, 0.68),
+    ]
+    tables = [
+        _table("pj_casos", "casos", 35_796, ["caso_tipoisj", "id_caso", "id_circunscripcion"]),
+        _table("pj_personas", "personas", 27_117, ["persona_tipoisj", "id_caso", "item_caso"]),
+        _table("pj_delitos", "delitos", 15_575, ["evento_tipoisj", "id_caso", "item_caso"]),
+    ]
+
+    assert fingerprint_candidates(hits, tables) == []
+    [only] = collapse_hits(hits, tables, {})
+
+    assert only.hit.dataset_id == "casos"
+    assert [t.table_name for t in only.tables] == [
+        "raw.pj_casos",
+        "raw.pj_personas",
+        "raw.pj_delitos",
+    ]
+
+
+def test_a_copy_with_more_files_of_the_same_columns_adds_only_the_missing_ones() -> None:
+    """Si otra copia trae más archivos con las mismas columnas que la elegida,
+    los que faltan se suman, sin los cortados en el tope ni los que tienen las
+    mismas filas que uno ya mostrado (son otra versión de ese).
+
+    Staging: "poderes-judiciales-causas-no-penales-2013-2023.zip" de la era
+    vieja trae una tabla de 797.178 filas; la nueva, una cortada en 500.000 y
+    otra de 410.715. "dnrpa-transferencias-autos-2018.zip": la elegida trae
+    1.278.565 filas y otra copia esa misma más 283.952 y 20.820."""
+    url = "https://datos.jus.gob.ar/dataset/x/resource/y/download/causas-no-penales-2013-2023.zip"
+    cols = ["provincia_id", "provincia_nombre", "causa_id", "materia_id"]
+    hits = [
+        _hit("vieja", "Causas no penales", url, 0.7),
+        _hit("nueva", "Causas no penales", url, 0.69),
+    ]
+    tables = [
+        _table("causas_v1", "vieja", 797_178, cols),
+        _table("causas_s2b615c3e", "nueva", 500_000, cols),
+        _table("causas_sc7116b08", "nueva", 410_715, cols),
+    ]
+
+    [only] = collapse_hits(hits, tables, {})
+    assert only.hit.dataset_id == "vieja"
+    assert [t.row_count for t in only.tables] == [797_178, 410_715]
+
+    url = (
+        "https://datos.jus.gob.ar/dataset/x/resource/z/download/dnrpa-transferencias-autos-2018.zip"
+    )
+    cols = ["tramite_tipo", "tramite_fecha", "fecha_inscripcion_inicial"]
+    hits = [_hit("a", "Transferencias 2018", url, 0.7), _hit("b", "Transferencias 2018", url, 0.6)]
+    tables = [
+        _table("dnrpa_a", "a", 1_278_565, cols),
+        _table("dnrpa_b_1", "b", 1_278_565, cols),
+        _table("dnrpa_b_2", "b", 283_952, cols),
+        _table("dnrpa_b_3", "b", 20_820, cols),
+    ]
+
+    [only] = collapse_hits(hits, tables, {})
+    assert [t.table_name for t in only.tables] == ["raw.dnrpa_a", "raw.dnrpa_b_2", "raw.dnrpa_b_3"]
+
+
+def test_twins_of_the_same_table_in_another_version_add_nothing() -> None:
+    """La misma tabla en dos cargas: una con la marca de orden de bytes pegada
+    al primer encabezado ("ď»żejercicio_presupuestario", presupuesto 1995-2000
+    en staging) y las columnas de ``columns_json``; la otra sin columnas en el
+    catálogo, con las del perfil (las 15 primeras de pg, con las del colector
+    adelante). Son la misma clase: se muestra la elegida sola."""
+    url = "https://dgsiaf-repo.mecon.gob.ar/repository/pa/datasets/1997/d-ubicacion-geografica-1997.zip"
+    names = ["ubicacion_geografica_id", "ubicacion_geografica_desc", "ultima_actualizacion_fecha"]
+    names += [f"col_{n}" for n in range(12)]
+    full = ["ď»żejercicio_presupuestario", *names, "_source_dataset_id"]
+    collector = [f"_source_{n}" for n in ("dataset_id", "url", "file_hash", "parser", "collector")]
+    profile_cols = (collector + ["ejercicio_presupuestario", *names])[:15]
+    hits = [_hit("nueva", "Ubicación geográfica 1997", url, 0.7), _hit("vieja", "Ubicación geográfica 1997", url, 0.69)]  # fmt: skip
+    tables = [_table("ubic_nueva", "nueva", 28, full), _table("ubic_vieja", "vieja", 0)]
+    profiles = {"ubic_vieja": _profile("ubic_vieja", 27, fmt="zip", columns=profile_cols)}
+
+    [only] = collapse_hits(hits, tables, profiles)
+    assert [t.table_name for t in only.tables] == ["raw.ubic_nueva"]
+
+
+def test_twins_of_a_single_table_file_with_other_columns_show_one_table() -> None:
+    """Un JSON o un CSV es una sola tabla: con otras columnas es otra versión
+    del mismo archivo (georef cambió ``gobierno_local`` por ``municipio``) y se
+    muestra la de la copia elegida, como hasta ahora."""
+    url = "https://infra.datos.gob.ar/georef/localidades.json"
+    title = "Servicio de normalización de direcciones y unidades territoriales"
+    base = ["id", "nombre", "fuente", "categoria", "provincia_id"]
+    hits = [_hit("a", title, url, 0.7), _hit("b", title, url, 0.69)]
+    tables = [
+        _table("loc_a", "a", 4037, [*base, "municipio_id", "municipio_nombre"]),
+        _table("loc_b", "b", 4028, [*base, "gobierno_local_id", "gobierno_local_nombre"]),
+    ]
+
+    [only] = collapse_hits(hits, tables, {})
+    assert [t.table_name for t in only.tables] == ["raw.loc_a"]
+
+
 # ── encabezados ─────────────────────────────────────────────
 
 

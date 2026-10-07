@@ -555,6 +555,46 @@ async def test_buscar_keeps_two_sheets_with_the_same_shape_and_other_values(
     )
 
 
+async def test_buscar_shows_every_table_of_a_zip_even_from_another_copy(
+    client: AsyncClient, sandbox: FakeSandbox, search: AsyncMock
+) -> None:
+    """Revisión de #177: en prod, una copia de "igj-2022-semestre-1.zip" trae las
+    entidades y otra, con el mismo título, los administradores. Main mostraba
+    las dos tablas; con sólo las de la copia elegida, los administradores
+    dejaban de aparecer en `buscar_datasets`. La copia cortada de las
+    entidades sigue sin sumarse."""
+    url = (
+        "https://datos.jus.gob.ar/dataset/da045e06/resource/e7ac500b/download/"
+        "igj-2022-semestre-1.zip"
+    )
+    title = "Entidades constituidas en la Inspección General de Justicia"
+    search.search_datasets_ann.return_value = [
+        SearchResult("entidades", title, "", "justicia", url, "", 0.70),
+        SearchResult("administradores", title, "", "datos_gob_ar", url, "", 0.69),
+        SearchResult("cortada", title, "", "datos_gob_ar", url, "", 0.68),
+    ]
+    entidades = ["numero_correlativo", "razon_social", "dada_de_baja", "cuit"]
+    sandbox.tables = [
+        CachedTableInfo("raw.igj_entidades", "entidades", 305_684, entidades),
+        CachedTableInfo(
+            "raw.igj_administradores",
+            "administradores",
+            2_500_000,
+            ["numero_correlativo", "apellido_nombre", "tipo_administrador"],
+        ),
+        CachedTableInfo("raw.igj_entidades_cortada", "cortada", 500_000, entidades),
+    ]
+
+    r = await client.get("/catalogo/buscar", params={"q": "administradores de sociedades"})
+
+    assert r.status_code == 200, r.text
+    [only] = r.json()["resultados"]
+    assert only["tablas"] == [
+        {"tabla": "raw.igj_administradores", "filas": 2_500_000},
+        {"tabla": "raw.igj_entidades", "filas": 305_684},
+    ]
+
+
 async def test_buscar_uses_the_live_version_rows_and_sends_tableless_to_the_bottom(
     client: AsyncClient, sandbox: FakeSandbox, search: AsyncMock
 ) -> None:

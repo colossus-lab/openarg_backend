@@ -56,6 +56,21 @@ Cuál copia se muestra (``_copy_rank``), en este orden:
 5. recién después, la era nueva y el CSV. Preferir "la más nueva" o "el CSV"
    de entrada elegía mal en 153 gemelos y en Proyectos.
 
+Qué tablas lleva la entrada (``_entry_tables``): todas las de la copia elegida
+y, si el archivo guarda varias tablas (.zip, .xls...), también las de las
+otras copias que son **otra tabla**. Cada copia de un .zip puede traer una
+tabla distinta del mismo archivo: los tres gemelos de "igj-2022-semestre-1.zip"
+en staging traen las asambleas, las bajas y los domicilios, uno cada uno, y en
+prod uno trae los administradores. Quedarse con las de la copia elegida
+escondía esas tablas, que main (agrupar por título y URL con las tablas de
+todas las copias) mostraba (revisión de #177: 32 tablas distintas en 31
+archivos de staging, 34 en 32 de prod). Qué tabla es cada una lo dicen sus
+primeras columnas visibles (``_table_kind``): una tabla que la elegida ya trae
+en otra versión (cortada, de la era vieja) no se suma, salvo que otra copia
+traiga más archivos con esas columnas. En un CSV o un JSON (una sola tabla)
+otras columnas son otra versión del mismo archivo y se muestra sólo la de la
+copia elegida.
+
 No borra ni modifica nada: sólo decide qué se muestra. ``datasets.title`` no se
 toca (la clave (título, url) la usa ``reconcile_dataset_identities``).
 """
@@ -65,6 +80,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -90,6 +106,25 @@ _DATA_EXTENSIONS = frozenset(
 # archivo de un .zip puede ser un dataset aparte con la misma URL.
 _MULTI_TABLE_FORMATS = frozenset({"xls", "xlsx", "ods", "zip"})
 
+# Cuántas columnas visibles dicen qué tabla de un archivo es cada una. El
+# perfil (``table_profiles``) trae las primeras 15 columnas de pg y, cuando las
+# del colector (``_source_*``) van primero, quedan 10 visibles; ``columns_json``
+# trae todas. Con las primeras 10 las dos fuentes dicen lo mismo de una tabla.
+_KIND_COLUMNS = 10
+
+# La marca de orden de bytes de un CSV queda pegada al primer encabezado de
+# una carga y no de otra, a veces mal decodificada: "ï»¿anio",
+# "ď»żejercicio_presupuestario" (presupuesto 1995-2000 en staging).
+_BOMS = (
+    "\ufeff",  # la marca misma
+    "\u00ef\u00bb\u00bf",  # "ï»¿", leída como cp1252
+    "\u010f\u00bb\u017c",  # "ď»ż", cp1250
+    "\u013c\u00bb\u00e6",  # "ļ»æ", cp1257
+    "\u00ff\u00fe",  # UTF-16 LE leída como latin-1
+    "\u00fe\u00ff",  # UTF-16 BE
+)
+
+
 # Hasta cuántas filas reales se pide la huella del contenido. La suma de md5
 # por fila tarda ~80 ms con 30.475 filas en staging (IPC aperturas); más
 # grande, el par queda separado.
@@ -101,7 +136,9 @@ class CollapsedResult:
     """Un archivo del catálogo, con la copia que se muestra."""
 
     hit: SearchResult  # la copia elegida
-    tables: list[CachedTableInfo]  # sus tablas, con ``row_count`` = filas reales
+    # Las tablas del archivo, con ``row_count`` = filas reales: las de la copia
+    # elegida y, en un .zip/.xls, las de otras copias que son otra tabla.
+    tables: list[CachedTableInfo]
     score: float  # el mejor puntaje del grupo, más el prior si lo hay
     copies: int  # cuántos datasets del catálogo son este mismo archivo
     archivo: str | None  # nombre del archivo de descarga, para distinguir hermanos
@@ -246,6 +283,33 @@ def _columns(table: CachedTableInfo, profile: TableProfile | None) -> list[str]:
     if table.columns:
         return [str(c) for c in table.columns]
     return list(profile.columns) if profile else []
+
+
+def _column_key(name: str) -> str:
+    """El nombre de una columna sin lo que cambia entre cargas del mismo
+    archivo: mayúsculas, acentos, signos y la marca de orden de bytes."""
+    for bom in _BOMS:
+        name = name.replace(bom, "")
+    plain = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "", plain.lower())
+
+
+def _table_kind(table: CachedTableInfo) -> tuple[str, ...]:
+    """Qué tabla de un archivo es: sus primeras columnas visibles.
+
+    Dos copias de la misma tabla (gemelos de la migración, espejos) traen las
+    mismas columnas aunque cambien las filas: una cortada en el tope, otra
+    actualizada. Dos tablas distintas de un .zip, no: en las copias de
+    "igj-2022-semestre-1.zip", después de ``razon_social`` unas siguen con la
+    asamblea, otras con la baja y otras con el domicilio. Sin columnas no se
+    sabe y cuenta como otra tabla.
+    """
+    keys = [
+        key
+        for c in table.columns
+        if c and not str(c).startswith("_") and (key := _column_key(str(c)))
+    ]
+    return tuple(keys[:_KIND_COLUMNS]) or ("", table.table_name)
 
 
 def _norm_title(title: str) -> str:
@@ -470,36 +534,87 @@ def collapse_hits(
         ]
         return max(stamps).timestamp() if stamps else 0.0
 
+    def _table_rank(t: CachedTableInfo) -> tuple[bool, bool, int]:
+        """Encabezado sano, completa y con más filas, en ese orden."""
+        return (
+            header_looks_like_data(t.columns),
+            _is_truncated(t.row_count or 0, profiles.get(bare_name(t.table_name))),
+            -(t.row_count or 0),
+        )
+
     def _copy_rank(i: int) -> tuple:
         h = hits[i]
         own = by_dataset.get(str(h.dataset_id), [])
         if not own:
             return (1, 0, 0, 0, 0.0, 0, i)
-        best = min(
-            own,
-            key=lambda t: (
-                header_looks_like_data(t.columns),
-                _is_truncated(t.row_count or 0, profiles.get(bare_name(t.table_name))),
-                -(t.row_count or 0),
-            ),
-        )
-        garbage = header_looks_like_data(best.columns)
-        truncated = _is_truncated(best.row_count or 0, profiles.get(bare_name(best.table_name)))
+        garbage, truncated, minus_rows = _table_rank(min(own, key=_table_rank))
         return (
             0,
             int(garbage),
             int(truncated),
-            -(best.row_count or 0),
+            minus_rows,
             -_dataset_created(str(h.dataset_id)),
             int(view.format(h) != "csv"),
             i,
         )
 
+    def _entry_tables(members: list[int], chosen: int) -> list[CachedTableInfo]:
+        """Las tablas de la copia elegida, todas, más las de las otras copias
+        de un archivo de varias tablas que la elegida no trae.
+
+        Por clase de tabla (``_table_kind``), mirando las copias de la que
+        tiene la mejor versión de esa clase a la peor (``_table_rank``):
+
+        - si la entrada todavía no trae esa clase, se suman todas las tablas
+          de esa clase de la copia (los administradores de la IGJ);
+        - si ya la trae, sólo cuando la copia tiene **más** tablas de esa clase
+          que la entrada: son archivos del .zip con las mismas columnas que
+          la entrada no tiene. Se suman las que faltan, sin las que tienen las
+          mismas filas que una ya mostrada ni las cortadas en el tope (son
+          otra versión de una que ya está).
+
+        Con una tabla por copia, la de otra versión (la copia cortada de las
+        entidades, la de la era vieja) no se suma: la elegida ganó por tener
+        la mejor.
+        """
+        entry = list(view.own(chosen))
+        kind_of: dict[str, tuple[str, ...]] = {}
+
+        def kind(t: CachedTableInfo) -> tuple[str, ...]:
+            if t.table_name not in kind_of:
+                kind_of[t.table_name] = _table_kind(t)
+            return kind_of[t.table_name]
+
+        offers: dict[tuple[str, ...], list[tuple[tuple, list[CachedTableInfo]]]] = {}
+        for i in members:
+            if i == chosen or not view.multi[i]:
+                continue
+            by_kind: dict[tuple[str, ...], list[CachedTableInfo]] = {}
+            for t in view.own(i):
+                by_kind.setdefault(kind(t), []).append(t)
+            for k, same in by_kind.items():
+                same.sort(key=_table_rank)
+                offers.setdefault(k, []).append(((_table_rank(same[0]), _copy_rank(i)), same))
+
+        for k, copies in offers.items():
+            shown = [t for t in entry if kind(t) == k]
+            for _, same in sorted(copies, key=lambda c: c[0]):
+                if not shown:
+                    fresh = same
+                else:
+                    rows = {t.row_count for t in shown}
+                    fresh = [t for t in same if t.row_count not in rows and not _table_rank(t)[1]]
+                    fresh = fresh[: max(0, len(same) - len(shown))]
+                entry += fresh
+                shown += fresh
+        return sorted(entry, key=lambda t: -(t.row_count or 0))
+
     results: list[tuple[float, int, CollapsedResult]] = []
     for root, members in groups.items():
-        chosen = hits[min(members, key=_copy_rank)]
+        best = min(members, key=_copy_rank)
+        chosen = hits[best]
         score = max(hits[i].score + (prior(hits[i]) if prior else 0.0) for i in members)
-        own = sorted(by_dataset.get(str(chosen.dataset_id), []), key=lambda t: -(t.row_count or 0))
+        own = _entry_tables(members, best)
         fmt = view.format(chosen)
         results.append(
             (

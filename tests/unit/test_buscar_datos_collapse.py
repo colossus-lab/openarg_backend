@@ -138,6 +138,42 @@ async def test_isac_sheets_with_the_same_shape_reach_the_model_separately() -> N
     assert len(asked) == 1 and len(asked[0]) == 4
 
 
+async def test_each_table_of_a_zip_reaches_the_model_even_from_another_copy() -> None:
+    """Revisión de #177: las tres copias de "pj-penal-archivos-recibidos-2019.zip"
+    (mismo título, misma URL) traen los casos, las personas y los delitos. Main
+    le mostraba las tres tablas al agente; con sólo las de la copia elegida
+    veía los casos y no encontraba a las personas."""
+    url = (
+        "https://datos.jus.gob.ar/dataset/90178b26/resource/9c978fd4/download/"
+        "pj-penal-archivos-recibidos-2019.zip"
+    )
+    title = "Archivos recibidos de los poderes judiciales provinciales - Penal - 2019"
+    hits = [
+        SearchResult("casos", title, "", "datos_gob_ar", url, "", 0.70),
+        SearchResult("personas", title, "", "justicia", url, "", 0.69),
+        SearchResult("delitos", title, "", "datos_gob_ar", url, "", 0.68),
+    ]
+    sandbox = _Sandbox(
+        [
+            CachedTableInfo("raw.pj_casos", "casos", 35_796, ["caso_tipoisj", "id_caso"]),
+            CachedTableInfo("raw.pj_personas", "personas", 27_117, ["persona_tipoisj", "id_caso"]),
+            CachedTableInfo("raw.pj_delitos", "delitos", 15_575, ["evento_tipoisj", "id_caso"]),
+        ],
+        {},
+    )
+
+    out = await BuscarDatos().run(
+        {"texto": "personas imputadas"}, ToolContext(_deps(hits, sandbox), EngineRequest("q", "u"))
+    )
+
+    [dataset] = json.loads(out.content)["datasets"]
+    assert [t["tabla"] for t in dataset["tablas"]] == [
+        "raw.pj_casos",
+        "raw.pj_personas",
+        "raw.pj_delitos",
+    ]
+
+
 async def test_an_unknown_portal_is_named_in_the_note() -> None:
     deps = _deps([], _Sandbox([], {}))
     deps.vector_search.known_portals = AsyncMock(return_value=["datos_gob_ar", "indec"])
