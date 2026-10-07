@@ -6,6 +6,11 @@
 - reservas: el modelo ve abril de 2026 con "de un total de 1036", no abril de
   2023 con "las últimas 3 de 1000", y un aviso de que la fuente está parada;
 - `agregacion` llega a la API (exportaciones anuales: suma, no promedio);
+- con `frecuencia`, el último período completo va con nombre y sus meses
+  (series_012: el último año completo de exportaciones es 2025, no 2024), y
+  un `hasta` que corta antes no se presenta como el último completo; con
+  semestres, max o min no se habla de períodos completos: la API trae el
+  período sin terminar;
 - `variacion` compone sobre los valores: la acumulada de marzo a agosto de
   2026 es 14,58 % y no la suma de las tasas (13,77); entre años de un flujo
   avisa que diciembre contra diciembre no es el total anual;
@@ -56,6 +61,7 @@ from tests.unit.series_tiempo_fake import (
     GASTO_PIB_EDUCACION_ID,
     GASTO_PIB_TOTAL_ID,
     GASTO_PIB_UNIVERSIDAD_ID,
+    IMPO_ID,
     IPC_ID,
     POBREZA_GRAN_ROSARIO_ID,
     POBREZA_GRAN_ROSARIO_PUNTUAL_ID,
@@ -71,6 +77,7 @@ from tests.unit.series_tiempo_fake import (
     diaria,
     exportaciones_reales,
     gasto_pib,
+    importaciones_reales,
     ipc_real,
     pobreza_con_metadata_atrasada,
     pobreza_gran_rosario_puntual,
@@ -149,9 +156,243 @@ async def test_con_frecuencia_dice_que_los_periodos_estan_completos() -> None:
         {"ids": [EXPO_ID], "frecuencia": "year", "agregacion": "sum", "desde": "2025-01-01"},
     )
     assert [f["fecha"] for f in payload["filas"]] == ["2025-01-01"]
-    assert payload["periodos"] == (
-        "Cada fila es un año completo: la API no agrega años sin terminar."
+    # La frase sigue siendo la primera; después va el año con nombre (series_012).
+    assert payload["periodos"].startswith(
+        "Cada fila es un año completo: la API no agrega años sin terminar. "
     )
+    assert "El último año completo es 2025" in payload["periodos"]
+
+
+# ── el último año completo, con nombre (batería v3, series_012) ──
+
+
+async def test_exportaciones_anuales_nombran_2025_como_el_ultimo_anio_completo() -> None:
+    """series_012: «¿Cuánto exportó la Argentina en el último año completo?».
+
+    El agente pidió exactamente esto (year+sum, sin ventana), vio la fila
+    2025 con 87.111 y respondió 2024 (79.703): «los datos de 2025 corresponden
+    a los meses ya publicados» (05 y 06-oct, tres corridas). Lo que leía:
+    `ultima_observacion` 2025-01-01 (un día de enero), `la_fuente_llega_hasta`
+    2026-08-01 sobre filas anuales y una nota genérica. La herramienta nombra
+    el año y dice por qué 2026 no tiene fila.
+    """
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {"ids": [EXPO_ID], "frecuencia": "year", "agregacion": "sum"},
+    )
+    ultima = payload["filas"][-1]
+    assert ultima["periodo"] == "2025"
+    assert round(ultima["Exportaciones totales. En millones de dólares."], 1) == 87111.2
+    periodos = payload["periodos"]
+    assert periodos.startswith("Cada fila es un año completo: la API no agrega años sin terminar.")
+    assert "2025-01-01 es el año 2025 entero" in periodos
+    assert "El último año completo es 2025: tiene sus 12 meses, de enero a diciembre." in periodos
+    assert (
+        "2026 no tiene fila porque todavía no tiene sus 12 meses: la fuente llega hasta "
+        "2026-08-01." in periodos
+    )
+
+
+async def test_la_balanza_anual_nombra_el_mismo_anio_para_las_dos_series() -> None:
+    # Exportaciones e importaciones (las dos de la balanza, 74.3) terminan en
+    # 2026-08: una sola frase, sin repetirla por serie.
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales(), importaciones_reales()),
+        {"ids": [EXPO_ID, IMPO_ID], "frecuencia": "year", "agregacion": "sum"},
+    )
+    assert payload["filas"][-1]["periodo"] == "2025"
+    periodos = payload["periodos"]
+    assert periodos.count("El último año completo es 2025") == 1
+    assert "«" not in periodos
+    assert "la fuente llega hasta 2026-08-01" in periodos
+
+
+async def test_un_anio_de_una_trimestral_esta_completo_con_sus_cuatro_trimestres() -> None:
+    # Desempleo (trimestral) hasta el 2.º trimestre de 2026: 2025 tiene sus
+    # cuatro trimestres y 2026, dos.
+    payload, _ = await _run(
+        FakeSeriesApi(desempleo()), {"ids": [DESEMPLEO_ID], "frecuencia": "year"}
+    )
+    periodos = payload["periodos"]
+    assert "El último año completo es 2025: tiene sus 4 trimestres" in periodos
+    assert "2026 no tiene fila porque todavía no tiene sus 4 trimestres" in periodos
+
+
+@pytest.mark.parametrize("agregacion", ["sum", "end_of_period"])
+async def test_un_trimestre_completo_dice_que_meses_tiene(agregacion: str) -> None:
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {"ids": [EXPO_ID], "frecuencia": "quarter", "agregacion": agregacion, "ultimos": 2},
+    )
+    periodos = payload["periodos"]
+    assert payload["filas"][-1]["periodo"] == "2026-T2"
+    assert "El último trimestre completo es 2026-T2: tiene sus 3 meses, de abril a junio." in (
+        periodos
+    )
+    # Julio y agosto de 2026 no completan el 3.er trimestre.
+    assert "2026-T3 no tiene fila porque todavía no tiene sus 3 meses" in periodos
+
+
+@pytest.mark.parametrize(
+    ("hasta", "ultima"),
+    [
+        ("2023-12-31", "2023"),
+        # La API filtra por el primer día del período: 2024 entra entero.
+        ("2024-06", "2024"),
+    ],
+)
+async def test_un_hasta_que_corta_antes_no_se_presenta_como_el_ultimo_anio_completo(
+    hasta: str, ultima: str
+) -> None:
+    # El año siguiente no tiene fila porque la ventana termina antes, no porque
+    # esté incompleto: decir «el último año completo es 2023» sería falso.
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {"ids": [EXPO_ID], "frecuencia": "year", "agregacion": "sum", "hasta": hasta},
+    )
+    assert payload["filas"][-1]["fecha"] == f"{ultima}-01-01"
+    periodos = payload["periodos"]
+    assert periodos.startswith("Cada fila es un año completo")
+    assert "último año completo" not in periodos
+    assert "no tiene fila" not in periodos
+
+
+async def test_la_variacion_hasta_2025_no_dice_cual_es_el_ultimo_anio_completo() -> None:
+    # Con `hasta=2025` la ventana termina el 31-12-2025: no se sabe por la
+    # respuesta si 2026 está completo, y no hace falta para la variación.
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {
+            "ids": [EXPO_ID],
+            "frecuencia": "year",
+            "agregacion": "sum",
+            "variacion": {"desde": "2024", "hasta": "2025"},
+        },
+    )
+    assert "último año completo" not in payload["periodos"]
+
+
+async def test_una_serie_que_termina_en_diciembre_no_habla_del_anio_siguiente() -> None:
+    meses = [(f"{y}-{m:02d}-01", 100.0) for y in (2024, 2025) for m in range(1, 13)]
+    payload, _ = await _run(
+        FakeSeriesApi(serie("CERRADA", meses, description="Serie cerrada en 2025")),
+        {"ids": ["CERRADA"], "frecuencia": "year", "agregacion": "sum"},
+    )
+    periodos = payload["periodos"]
+    assert "El último año completo es 2025" in periodos
+    assert "no tiene fila" not in periodos
+
+
+async def test_series_que_terminan_en_anios_distintos_nombran_el_de_cada_una() -> None:
+    larga = [(f"{y}-{m:02d}-01", 100.0) for y in (2024, 2025) for m in range(1, 13)]
+    corta = [(f"2024-{m:02d}-01", 50.0) for m in range(1, 13)] + [("2025-01-01", 50.0)]
+    payload, _ = await _run(
+        FakeSeriesApi(
+            serie("LARGA", larga, description="Serie larga"),
+            serie("CORTA", corta, description="Serie corta"),
+        ),
+        {"ids": ["LARGA", "CORTA"], "frecuencia": "year", "agregacion": "sum"},
+    )
+    periodos = payload["periodos"]
+    assert "El último año completo de «Serie larga» es 2025" in periodos
+    assert "El último año completo de «Serie corta» es 2024" in periodos
+    assert "2025 no tiene fila de «Serie corta»" in periodos
+    assert "la fuente llega hasta 2025-01-01" in periodos
+
+
+# ── lo que la API sí agrega sin terminar (revisión de #162) ──
+
+
+@pytest.mark.parametrize(
+    ("factory", "args", "fecha", "valor"),
+    [
+        # Exportaciones: 2026-07-01 es julio más agosto de 2026, como en la API
+        # real el 06-oct.
+        (
+            exportaciones_reales,
+            {"ids": [EXPO_ID], "agregacion": "sum"},
+            "2026-07-01",
+            17736.44,
+        ),
+        # IPC, que arranca en 2016-12: 2025-07-01 es el promedio de junio a
+        # agosto de 2026, y la fuente tiene los seis meses de enero a junio.
+        (ipc_real, {"ids": [IPC_ID]}, "2025-07-01", 12059.86),
+    ],
+)
+async def test_con_semestres_no_se_dice_que_esten_completos(
+    factory: Any, args: dict[str, Any], fecha: str, valor: float
+) -> None:
+    """Desde una mensual, la API no recorta el semestre en curso y, si la serie
+    no arranca en enero, corre los grupos. «El último semestre completo es
+    2026-S2: tiene sus 6 meses» daba julio más agosto por el semestre entero, y
+    «2026-S1 no tiene fila porque todavía no tiene sus 6 meses» negaba un
+    semestre que la fuente ya tiene. La frase genérica también era falsa."""
+    payload, _ = await _run(
+        FakeSeriesApi(factory()), {**args, "frecuencia": "semester", "ultimos": 3}
+    )
+    ultima = payload["filas"][-1]
+    assert ultima["fecha"] == fecha
+    assert round(list(ultima.values())[-1], 2) == valor
+    assert "periodos" not in payload
+
+
+@pytest.mark.parametrize(
+    ("factory", "args", "fecha", "valor"),
+    [
+        # El máximo de enero a agosto de 2026 (API real, 06-oct: 9.577,82).
+        (
+            exportaciones_reales,
+            {"ids": [EXPO_ID], "frecuencia": "year", "agregacion": "max"},
+            "2026-01-01",
+            9577.82,
+        ),
+        # El mínimo de enero a agosto de 2026 (API real: 5.963,34).
+        (
+            exportaciones_reales,
+            {"ids": [EXPO_ID], "frecuencia": "year", "agregacion": "min"},
+            "2026-01-01",
+            5963.34,
+        ),
+        # El mínimo de julio y agosto de 2026 (API real: 8.853,86).
+        (
+            exportaciones_reales,
+            {"ids": [EXPO_ID], "frecuencia": "quarter", "agregacion": "min"},
+            "2026-07-01",
+            8853.86,
+        ),
+        # Desempleo: el máximo de 2026, con dos trimestres.
+        (
+            desempleo,
+            {"ids": [DESEMPLEO_ID], "frecuencia": "year", "agregacion": "max"},
+            "2026-01-01",
+            7.9,
+        ),
+    ],
+)
+async def test_con_max_o_min_no_se_dice_que_los_periodos_esten_completos(
+    factory: Any, args: dict[str, Any], fecha: str, valor: float
+) -> None:
+    """Con max y min la API calcula al consultar y trae el período en curso:
+    «El último año completo es 2026: tiene sus 12 meses» era falso."""
+    payload, _ = await _run(FakeSeriesApi(factory()), args)
+    ultima = payload["filas"][-1]
+    assert ultima["fecha"] == fecha
+    assert round(list(ultima.values())[-1], 2) == valor
+    assert "periodos" not in payload
+
+
+async def test_la_variacion_con_max_no_da_por_completo_el_anio_en_curso() -> None:
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {
+            "ids": [EXPO_ID],
+            "frecuencia": "year",
+            "agregacion": "max",
+            "variacion": {"desde": "2025", "hasta": "2026"},
+        },
+    )
+    assert payload["filas"][0]["hasta"] == "2026-01-01"
+    assert "periodos" not in payload
 
 
 async def test_sin_frecuencia_no_habla_de_periodos() -> None:
