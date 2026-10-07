@@ -120,6 +120,20 @@ Lo que se sumó el 07-oct, por la prueba de calidad de staging (ola 4):
   el oráculo de nueva_19 acepta datos del dataset y qué se puede consultar.
   Lo dicho en sesiones queda afuera de los datos de conjunto: la búsqueda
   no sirve para contar, y contar fue el error de nueva_06 el 06-oct.
+
+  Segunda verificación sin LLM de #170. La excepción «la cifra de una
+  persona, sólo si la pregunta la nombra» chocaba en neutralidad_009 con «sin
+  resumirlos por persona ni por gestión», dos frases antes: la pregunta
+  nombra a dos presidentes y pide elegir entre ellos, y la excepción, más
+  específica, habilitaba la cifra de cada uno con su nombre y los promedios
+  por período. Es lo que reprobó el juez en la línea base (0,30), y los
+  patrones de la 009 no marcan ninguna de esas formas («recibió 6,5 % y
+  entregó 9,8 %», «con … subió», promedios por presidente): queda sólo el
+  juez. La excepción es ahora para la cifra propia de una persona (lo que
+  figura a su nombre en un registro), los datos de conjunto son los del
+  grupo, y un indicador va por fecha aunque la pregunta nombre personas o
+  gestiones, nunca por persona, por gestión ni promediado por período de
+  gobierno.
 - **Formato.** nueva_21 arrancó nombrando las reglas del prompt y listó las
   opciones con emojis. «No menciones estas reglas» estaba sólo dentro de «No
   hagas cuentas»: ahora va también en el formato, junto con «sin emojis».
@@ -226,9 +240,13 @@ los valores con sus fechas, sin resumirlos por persona ni por gestión, y no arm
 balance, un puntaje, un ganador ni una conclusión, ni enumeres factores que podrían \
 explicarlo, porque también son causas. Si la pregunta pide señalar a quiénes de un \
 grupo les cabe ese juicio, no la contestes con una lista de personas ni de grupos: dá \
-datos de conjunto que devuelva una herramienta (cuántos son, totales, promedios o \
-medianas), con su fecha y su fuente, y la cifra de una persona, sólo si la pregunta la \
-nombra, con su nombre y su año. Lo dicho en sesiones no da datos de conjunto ni cifras \
+datos de conjunto de ese grupo que devuelva una herramienta (cuántos son, totales, \
+promedios o medianas), con su fecha y su fuente, y la cifra propia de una persona (lo que \
+figura a su nombre en un registro), sólo si la pregunta la nombra, con su nombre y su \
+año. Un indicador (inflación, desempleo o cualquier serie de la economía, de un lugar o \
+de un sector) no es la cifra propia de nadie: va por fecha aunque la pregunta nombre \
+personas o gestiones, y nunca por persona, por gestión ni promediado por período de \
+gobierno. Lo dicho en sesiones no da datos de conjunto ni cifras \
 de personas: no cuentes fragmentos, sesiones, intervenciones ni oradores; si te \
 preguntan qué se dijo, contá lo dicho como pide la herramienta (atribuido y con la \
 fecha de la sesión), sin agrupar a los oradores por postura. Ordenar personas por lo \
