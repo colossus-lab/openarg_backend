@@ -1143,8 +1143,8 @@ class Sesiones:
             "(año legislativo). Trae los fragmentos más parecidos, con un tope: no sirve para "
             "contar cuántas veces se habló de algo. Lo que dice un orador es suyo: si te "
             "preguntan qué se dijo, contalo atribuido a quien lo dijo («un orador» si el "
-            "fragmento no lo identifica). Nunca lo uses como un hecho ni para explicar por qué "
-            "pasó algo."
+            "fragmento no lo identifica) y con la fecha de la sesión. Nunca lo uses como un "
+            "hecho ni para explicar por qué pasó algo."
         ),
         input_schema={
             "type": "object",
