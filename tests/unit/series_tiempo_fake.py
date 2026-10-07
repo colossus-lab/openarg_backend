@@ -28,8 +28,18 @@ Medido el 06-oct:
 
 - ``min_value`` y ``max_value`` de la metadata son el rango de TODA la serie:
   no cambian con la ventana, la representación ni el ``collapse``;
-- ``time_index_end`` puede estar atrasado: la pobreza 64.2 dice 2026-01-01 y
-  ya trae la fila 2026-07-01 (``serie(time_index_end=…)``);
+- la pobreza y la indigencia de la EPH continua (63.2, 64.2) vienen
+  fechadas un semestre tarde: el CSV de la fuente y la metadata de la API
+  (``time_index_end`` 2026-01-01, ``last_value`` 0,231 en Gran Rosario)
+  fechan el 1er semestre de 2026 en 2026-01-01 y la API trae ese valor en la
+  fila 2026-07-01. No es una metadata atrasada: ``last_value`` es el de la
+  última fila (``serie(time_index_end=…)``). Una atrasada de verdad se
+  simula con ``last_value`` del período de ``time_index_end``;
+- un id que no existe da 400 con ``failed_series`` (sólo el primero que
+  falta): ``{"errors": [{"error": "Serie inexistente: X"}],
+  "failed_series": ["X"]}``;
+- un ``end_date`` parcial llega al fin de su período (``2025`` al 31 de
+  diciembre, ``2025-06`` al 30 de junio);
 - sin ``collapse``, series de distinta frecuencia van al eje de la más gruesa
   y la API PROMEDIA las más finas (reservas diaria + mensual: 2026-08 da
   49.700,26, el promedio de agosto; el saldo al 31 es 48.259). La metadata
@@ -111,12 +121,16 @@ def serie(
     time_index_end: str | None = None,
     value_range: tuple[float, float] | None = None,
     with_range: bool = True,
+    last_value: float | None = None,
 ) -> dict[str, Any]:
     """Una serie de la API falsa.
 
     ``value_range`` es el (mínimo, máximo) de toda la serie en la fuente; por
-    defecto, el de ``data``. ``time_index_end`` simula una metadata atrasada.
+    defecto, el de ``data``. ``time_index_end`` es el fin según la metadata.
+    ``last_value``, como en la API, es el último valor con dato (texto); se
+    puede fijar otro para simular una metadata atrasada.
     """
+    with_value = [v for _, v in data if v is not None]
     field: dict[str, Any] = {
         "id": sid,
         "description": description,
@@ -127,6 +141,8 @@ def serie(
         "time_index_size": str(len(data)),
         "is_updated": "True" if is_updated else "False",
     }
+    if last_value is not None or with_value:
+        field["last_value"] = str(last_value if last_value is not None else with_value[-1])
     if with_range:
         values = [v for _, v in data if v is not None]
         low, high = value_range or (min(values), max(values))
@@ -241,8 +257,9 @@ _TASAS: dict[str, dict[str, Any]] = {
             ("2026-04-01", 0.115),
         ],
     },
-    # Las dos de pobreza tienen la metadata atrasada: time_index_end dice
-    # 2026-01-01 y la API ya trae 2026-07-01 (el 1er semestre de 2026).
+    # Las dos de pobreza, con las filas como las fecha la API: un semestre
+    # tarde. time_index_end dice 2026-01-01 (el 1er semestre de 2026, como la
+    # fuente) y la API trae ese valor en la fila 2026-07-01.
     HOGARES_POBRES_ID: {
         "description": (
             "Hogares con ingresos debajo de línea de pobreza (%) desde 2003. Rawson - Trelew. "
@@ -305,6 +322,56 @@ def tasa(sid: str) -> dict[str, Any]:
         value_range=spec["value_range"],
         time_index_end=spec.get("time_index_end"),
     )
+
+
+def pobreza_con_metadata_atrasada() -> dict[str, Any]:
+    """La 64.2 total con una metadata atrasada DE VERDAD (no medida en la API real).
+
+    time_index_end 2026-01-01 con el last_value de ESA fila (0,282): la fila
+    2026-07-01 se publicó después de la metadata. Sirve para el fin de la
+    fuente que nunca queda antes del último dato (H065).
+    """
+    s = tasa(POBREZA_ID)
+    s["field"]["last_value"] = "0.282"
+    return s
+
+
+POBREZA_GRAN_ROSARIO_ID = "64.2_POBLACION_NUA_0_0_41_1"
+
+
+def _pobreza_gran_rosario_grabada() -> dict[str, Any]:
+    return json.loads((FIXTURES / "pobreza_64_2_gran_rosario.json").read_text(encoding="utf-8"))
+
+
+def pobreza_gran_rosario_real() -> dict[str, Any]:
+    """Pobreza de Gran Rosario (64.2), la serie entera como la devolvió la API el 06-oct.
+
+    Las filas vienen un semestre tarde: 0,231 (1er semestre de 2026) en
+    2026-07-01, con time_index_end 2026-01-01 y last_value 0,231.
+    """
+    raw = _pobreza_gran_rosario_grabada()
+    field = raw["field"]
+    return serie(
+        POBREZA_GRAN_ROSARIO_ID,
+        [(f, v) for f, v in raw["data"]],
+        description=field["description"],
+        units=field["units"],
+        frequency=field["frequency"],
+        dataset=raw["dataset"]["title"],
+        source=raw["dataset"]["source"],
+        time_index_end=field["time_index_end"],
+        value_range=(float(field["min_value"]), float(field["max_value"])),
+        last_value=float(field["last_value"]),
+    )
+
+
+def pobreza_gran_rosario_fuente() -> list[tuple[str, float]]:
+    """La misma serie en el CSV de la fuente (SSPM, EPH del INDEC), grabado el 06-oct.
+
+    Fecha cada semestre por su primer día: 2026-01-01 es el 1er semestre de
+    2026 (0,231) y 2024-01-01 el 1er semestre de 2024.
+    """
+    return [(f, v) for f, v in _pobreza_gran_rosario_grabada()["fuente_csv"]["data"]]
 
 
 def plazo_fijo_usd() -> dict[str, Any]:
@@ -501,19 +568,44 @@ def _transform(window: list[tuple[str, float]], mode: str, per_year: int) -> lis
     for i, (fecha, value) in enumerate(window):
         if mode == "value":
             out.append((fecha, value))
-        elif mode == "change" and i >= 1:
-            out.append((fecha, value - values[i - 1]))
-        elif mode == "percent_change" and i >= 1:
-            out.append((fecha, value / values[i - 1] - 1))
+            continue
+        if mode in ("change", "percent_change") and i >= 1:
+            base = values[i - 1]
         elif mode == "percent_change_a_year_ago" and i >= per_year:
-            out.append((fecha, value / values[i - per_year] - 1))
+            base = values[i - per_year]
         elif mode == "percent_change_since_beginning_of_year":
             # Como la API real: contra el PRIMER dato del año dentro de la
             # ventana (enero), no contra el cierre del año anterior.
             year = fecha[:4]
-            first = next(v for f, v in window if f[:4] == year)
-            out.append((fecha, value / first - 1))
+            base = next(v for f, v in window if f[:4] == year)
+        else:
+            continue
+        if value is None or base is None:
+            # Como la API: sin dato (la pobreza 64.2 no tiene 2007 a 2016),
+            # la variación tampoco.
+            out.append((fecha, None))
+        elif mode == "change":
+            out.append((fecha, value - base))
+        else:
+            out.append((fecha, value / base - 1))
     return out
+
+
+def _bound(text: str | None, *, end: bool) -> str | None:
+    """Un `start_date`/`end_date` parcial como lo lee la API (medido el 06-oct).
+
+    `2025` va del 1° de enero al 31 de diciembre y `2025-06` hasta el 30 de
+    junio; una fecha completa queda como está.
+    """
+    if not text or len(text) >= 10:
+        return text
+    parts = [int(p) for p in text.split("-")]
+    if not end:
+        return date(parts[0], parts[1] if len(parts) > 1 else 1, 1).isoformat()
+    if len(parts) == 1:
+        return f"{parts[0]}-12-31"
+    year, month = divmod(parts[0] * 12 + parts[1], 12)
+    return (date(year, month + 1, 1) - timedelta(days=1)).isoformat()
 
 
 def _period_start(fecha: str, months: int) -> str:
@@ -553,11 +645,22 @@ class FakeSeriesApi:
                 400, json={"errors": ["Parámetro limit por encima del límite permitido (5000)"]}
             )
         start = int(params.get("start", 0))
-        start_date, end_date = params.get("start_date"), params.get("end_date")
+        start_date = _bound(params.get("start_date"), end=False)
+        end_date = _bound(params.get("end_date"), end=True)
         mode = params.get("representation_mode", "value")
         collapse = params.get("collapse")
         how = params.get("collapse_aggregation", "avg")
         ids = params["ids"].split(",")
+        missing = [i for i in ids if i not in self.series]
+        if missing:
+            # Como la API: nombra sólo el primero que falta.
+            return httpx.Response(
+                400,
+                json={
+                    "errors": [{"error": f"Serie inexistente: {missing[0]}"}],
+                    "failed_series": [missing[0]],
+                },
+            )
         chosen = [self.series[i] for i in ids]
         # Sin `collapse` y con frecuencias distintas, todas van a la más
         # gruesa con promedio.

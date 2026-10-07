@@ -19,6 +19,11 @@
 - `la_fuente_llega_hasta` no es anterior al último dato aunque la metadata
   de la API esté atrasada, y `buscar_series` no presenta ese metadato como
   el fin de la serie;
+- la pobreza semestral llega con los semestres de la fuente, con `hasta` y
+  antes de que se publique el semestre siguiente, y un id inexistente vuelve
+  como pedido inválido y no como fuente caída (nueva_08);
+- si la serie publicó algo después de lo traído, se dice cuál es el último
+  dato (nueva_12);
 - series de distinta frecuencia pedidas juntas avisan que la API promedió;
 - `buscar_series` compara sin acentos y por palabra completa, y el catálogo
   ya no rotula el EMAE de comercio como "actividad industrial".
@@ -50,6 +55,7 @@ from tests.unit.series_tiempo_fake import (
     GASTO_PIB_TOTAL_ID,
     GASTO_PIB_UNIVERSIDAD_ID,
     IPC_ID,
+    POBREZA_GRAN_ROSARIO_ID,
     POBREZA_ID,
     RESERVAS_DIARIAS_ID,
     RESERVAS_ID,
@@ -62,6 +68,8 @@ from tests.unit.series_tiempo_fake import (
     exportaciones_reales,
     gasto_pib,
     ipc_real,
+    pobreza_con_metadata_atrasada,
+    pobreza_gran_rosario_real,
     reservas_diarias,
     reservas_mensuales,
     salarios,
@@ -527,13 +535,181 @@ async def test_la_variacion_de_dos_tasas_en_porcentaje_no_habla_de_escalas_mixta
 
 
 async def test_la_fuente_llega_hasta_el_ultimo_dato_aunque_la_metadata_este_atrasada() -> None:
-    # Pobreza 64.2: la metadata dice 2026-01-01 y la API ya trae 2026-07-01.
-    # Con «la fuente llega hasta 2026-01-01» el modelo descartó el 1S-2026.
-    payload, _ = await _run(FakeSeriesApi(tasa(POBREZA_ID)), {"ids": [POBREZA_ID], "ultimos": 2})
+    # Una metadata atrasada de verdad (time_index_end 2026-01-01 con el
+    # last_value de esa fila) y la API ya trae 2026-07-01: con «la fuente
+    # llega hasta 2026-01-01» el modelo descartaba el último dato. (En la
+    # 64.2 eran las filas corridas un semestre: ver el test de abajo.)
+    payload, _ = await _run(
+        FakeSeriesApi(pobreza_con_metadata_atrasada()), {"ids": [POBREZA_ID], "ultimos": 2}
+    )
     assert payload["ultima_observacion"] == "2026-07-01"
     assert payload["la_fuente_llega_hasta"] == "2026-07-01"
+    assert 32.3 in payload["filas"][-1].values()
+
+
+async def test_la_pobreza_64_2_llega_con_las_fechas_de_la_fuente_y_el_1s_2026() -> None:
+    # La 64.2 como la da la API: 32,3 % (1er semestre de 2026) en la fila
+    # 2026-07-01 con time_index_end 2026-01-01. Sale fechada como la fuente,
+    # y el fin de la fuente no queda antes del último dato.
+    payload, _ = await _run(FakeSeriesApi(tasa(POBREZA_ID)), {"ids": [POBREZA_ID], "ultimos": 2})
+    assert payload["ultima_observacion"] == "2026-01-01"
+    assert payload["la_fuente_llega_hasta"] == "2026-01-01"
     assert payload["filas"][-1]["periodo"] == "2026-S1"
     assert 32.3 in payload["filas"][-1].values()
+
+
+# ── pobreza de Gran Rosario: los semestres no salen corridos (nueva_08) ──
+
+
+def _semestres(payload: dict[str, Any]) -> list[tuple[str, float]]:
+    return [
+        (f["periodo"], next(v for k, v in f.items() if k not in ("fecha", "periodo")))
+        for f in payload["filas"]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("args", "esperado"),
+    [
+        # El último dato: 23,1 % del 1er semestre de 2026 (y 22,3 % el 2°
+        # de 2025), como el CSV de la fuente.
+        ({"ultimos": 2}, [("2025-S2", 22.3), ("2026-S1", 23.1)]),
+        # Con `hasta` el rótulo salía de la fecha de hoy y quedaba todo
+        # corrido: 22,3 % rotulado 2026-S1 y 46,8 % (1S-2024) como 2024-S2.
+        (
+            {"desde": "2024-01-01", "hasta": "2026-06-30"},
+            [
+                ("2024-S1", 46.8),
+                ("2024-S2", 32.4),
+                ("2025-S1", 28.1),
+                ("2025-S2", 22.3),
+                ("2026-S1", 23.1),
+            ],
+        ),
+        ({"desde": "2025-01-01", "hasta": "2025-12-31"}, [("2025-S1", 28.1), ("2025-S2", 22.3)]),
+    ],
+)
+async def test_la_pobreza_de_gran_rosario_rotula_bien_los_semestres(
+    args: dict[str, Any], esperado: list[tuple[str, float]]
+) -> None:
+    payload, _ = await _run(
+        FakeSeriesApi(pobreza_gran_rosario_real()), {"ids": [POBREZA_GRAN_ROSARIO_ID], **args}
+    )
+    assert _semestres(payload) == esperado
+
+
+async def test_entre_el_fin_del_semestre_y_su_publicacion_no_se_corre_el_rotulo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El 15-ene-2027 el 2° semestre de 2026 todavía no se publicó (sale en
+    marzo): el rótulo dependía de la fecha de hoy y el 23,1 % pasaba a
+    2026-S2."""
+    from app.application.answers.tools import conectores
+
+    class _Enero2027(date):
+        @classmethod
+        def today(cls) -> date:
+            return date(2027, 1, 15)
+
+    monkeypatch.setattr(conectores, "date", _Enero2027)
+    payload, _ = await _run(
+        FakeSeriesApi(pobreza_gran_rosario_real()),
+        {"ids": [POBREZA_GRAN_ROSARIO_ID], "ultimos": 1},
+    )
+    assert _semestres(payload) == [("2026-S1", 23.1)]
+
+
+async def test_la_variacion_de_la_pobreza_compara_los_semestres_pedidos() -> None:
+    # 1er semestre de 2025 (28,1 %) contra 1er semestre de 2026 (23,1 %).
+    # Corrida, comparaba 2S-2024 (32,4 %) con 2S-2025 (22,3 %): −31,17 %.
+    payload, _ = await _run(
+        FakeSeriesApi(pobreza_gran_rosario_real()),
+        {"ids": [POBREZA_GRAN_ROSARIO_ID], "variacion": {"desde": "2025-01", "hasta": "2026-06"}},
+    )
+    fila = payload["filas"][0]
+    assert (fila["valor_desde"], fila["valor_hasta"], fila["variacion_pct"]) == (
+        28.1,
+        23.1,
+        -17.79,
+    )
+
+
+async def test_un_id_inexistente_vuelve_como_pedido_invalido_y_no_como_fuente_caida() -> None:
+    """nueva_08: el modelo armó el id 64.2_GR_0_0_12. El 400 «Serie
+    inexistente» llegaba al motor como ConnectorError y el modelo leía «La
+    fuente no respondió. Probá con otra.»: dejó la API y contestó con una
+    copia vieja del catálogo, con los semestres corridos."""
+    api = FakeSeriesApi(pobreza_gran_rosario_real())
+    with pytest.raises(ToolInputError, match="no existe la serie `64.2_GR_0_0_12`") as err:
+        await _run(api, {"ids": ["64.2_GR_0_0_12"]})
+    assert "buscar_series" in str(err.value)
+    # Igual con la variación.
+    with pytest.raises(ToolInputError, match="no existe la serie"):
+        await _run(
+            api, {"ids": ["64.2_GR_0_0_12"], "variacion": {"desde": "2025", "hasta": "2026"}}
+        )
+
+
+async def test_el_motor_le_dice_al_modelo_que_el_id_no_existe() -> None:
+    from app.application.answers.agent_engine import AgentEngine
+    from app.domain.ports.llm.agent_llm import ToolCall
+
+    api = FakeSeriesApi(pobreza_gran_rosario_real())
+    engine = AgentEngine(AsyncMock(), SimpleNamespace(series=api.adapter()))
+    call = ToolCall(id="t1", name="series_tiempo", input={"ids": ["64.2_GR_0_0_12"]})
+    outcome = await engine._run_tool(SeriesTiempo(), call, _ctx(api.adapter()))
+
+    assert outcome.is_error is True
+    assert "La fuente no respondió" not in outcome.content
+    assert "no existe la serie `64.2_GR_0_0_12`" in outcome.content
+
+
+# ── el último dato publicado, aunque lo traído termine antes (nueva_12) ──
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"desde": "2025-01-01", "hasta": "2026-06-30"},
+        {
+            "desde": "2025-01-01",
+            "hasta": "2026-06-30",
+            "representacion": "percent_change_a_year_ago",
+        },
+        {"variacion": {"desde": "2025-06", "hasta": "2026-06"}},
+    ],
+)
+async def test_si_la_serie_sigue_despues_de_lo_traido_se_dice_cual_es_el_ultimo_dato(
+    args: dict[str, Any],
+) -> None:
+    """nueva_12: pidió el IPI hasta junio y escribió «Último dato disponible:
+    junio 2026» con `la_fuente_llega_hasta` 2026-07-01 al lado. Acá con el
+    IPC, que llega a agosto."""
+    payload, _ = await _run(FakeSeriesApi(ipc_real()), {"ids": [IPC_ID], **args})
+    assert payload["ultima_observacion"] == "2026-06-01"
+    assert payload["la_fuente_llega_hasta"] == "2026-08-01"
+    assert "es el de 2026-08-01, no el de 2026-06-01" in payload["ultimo_dato_publicado"]
+
+
+async def test_con_frecuencia_el_ultimo_dato_publicado_es_el_de_la_serie() -> None:
+    # Exportaciones con year+sum llegan a 2025 (el año en curso no entra):
+    # el último dato publicado es agosto de 2026.
+    payload, _ = await _run(
+        FakeSeriesApi(exportaciones_reales()),
+        {"ids": [EXPO_ID], "frecuencia": "year", "agregacion": "sum"},
+    )
+    assert payload["ultima_observacion"] == "2025-01-01"
+    assert "2026-08-01" in payload["ultimo_dato_publicado"]
+
+
+async def test_si_lo_traido_llega_al_ultimo_dato_no_se_agrega_nada() -> None:
+    sin_rango, _ = await _run(FakeSeriesApi(ipc_real()), {"ids": [IPC_ID], "ultimos": 2})
+    semestre, _ = await _run(
+        FakeSeriesApi(pobreza_gran_rosario_real()),
+        {"ids": [POBREZA_GRAN_ROSARIO_ID], "ultimos": 2},
+    )
+    assert "ultimo_dato_publicado" not in sin_rango
+    assert "ultimo_dato_publicado" not in semestre
 
 
 # ── frecuencias distintas en un pedido: la API promedia (H086) ──

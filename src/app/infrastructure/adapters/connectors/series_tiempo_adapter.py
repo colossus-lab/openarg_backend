@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
 from collections.abc import Mapping
@@ -522,6 +523,109 @@ def _reaches_end(last: str, end: str, frequency: str | None) -> bool:
         return True
 
 
+def _period_end(text: str | None) -> str | None:
+    """El último día del período que nombra un `hasta`, como lo lee la API.
+
+    `end_date=2025` trae todo 2025 y `end_date=2025-06` llega al 30 de junio
+    (medido el 06-oct).
+    """
+    match = _DATE_RE.fullmatch(str(text or "").strip())
+    if not match:
+        return None
+    year = int(match.group(1))
+    if match.group(2) is None:
+        return f"{year}-12-31"
+    if match.group(3) is not None:
+        return iso_date(text)
+    try:
+        following = date.fromisoformat(_months_back(f"{year:04d}-{int(match.group(2)):02d}-01", -1))
+    except ValueError:
+        return None
+    return date.fromordinal(following.toordinal() - 1).isoformat()
+
+
+# Pobreza e indigencia de la EPH continua (63.2 y 64.2, las 78 series medidas
+# el 06-oct): la API fecha cada semestre por el día siguiente a su fin, un
+# semestre más tarde que la fuente y que su propia metadata. El CSV de la
+# fuente (64.2) fecha el 1er semestre de 2024, 52,9 %, en `2024-01-01`; la API
+# lo devuelve en `2024-07-01`. La metadata coincide con la fuente:
+# time_index_end 2026-01-01 con last_value 0,231 (Gran Rosario, 1er semestre
+# de 2026), y la API trae ese 0,231 en la fila `2026-07-01`. No es una
+# metadata atrasada. Leídas por su primer día, todas las filas quedaban
+# corridas un semestre; con `hasta` no quedaba ni la última para notarlo
+# (pobreza de 2025 daba 2S-2024 y 1S-2025 rotulados 2025-S1 y 2025-S2). Las
+# semestrales viejas (61.1, 62.1: time_index_end 2003-05-01, fila
+# `2003-01-01`) están fechadas por el inicio: no se tocan.
+_SEMESTER_ISO = "R/P6M"
+
+
+def _semester_start(iso: str) -> str:
+    return f"{iso[:4]}-{'01' if int(iso[5:7]) <= 6 else '07'}-01"
+
+
+def _fields_by_id(raw: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    out: dict[str, Mapping[str, Any]] = {}
+    for m in (raw.get("meta") or [])[1:]:
+        field = m.get("field") if isinstance(m, Mapping) else None
+        if isinstance(field, Mapping) and field.get("id"):
+            out[str(field["id"])] = field
+    return out
+
+
+def _native_semesters(raw: Mapping[str, Any], series_ids: list[str]) -> bool:
+    """¿Todas las series pedidas son semestrales en la fuente y vinieron en semestres?"""
+    meta = raw.get("meta") or []
+    if not meta or not isinstance(meta[0], Mapping) or meta[0].get("frequency") != "semester":
+        return False
+    fields = _fields_by_id(raw)
+    return all((fields.get(sid) or {}).get("frequency") == _SEMESTER_ISO for sid in series_ids)
+
+
+def _dated_one_semester_late(raw: Mapping[str, Any], series_ids: list[str]) -> bool:
+    """¿La API fechó estas series un semestre después que su metadata?
+
+    Sobre la serie entera y en valores: la última fila con dato tiene que caer
+    un semestre después de time_index_end Y tener su last_value. Una metadata
+    atrasada de verdad no pasa: su last_value sería el del semestre anterior.
+    """
+    if not _native_semesters(raw, series_ids):
+        return False
+    fields = _fields_by_id(raw)
+    data = raw.get("data") or []
+    for idx, sid in enumerate(series_ids):
+        field = fields.get(sid) or {}
+        end = iso_date(str(field.get("time_index_end") or "")[:10])
+        last_value = _as_float(field.get("last_value"))
+        last = next(
+            (row for row in reversed(data) if idx + 1 < len(row) and row[idx + 1] is not None),
+            None,
+        )
+        if end is None or last_value is None or last is None:
+            return False
+        value = _as_float(last[idx + 1])
+        if str(last[0])[:10] != _months_back(_semester_start(end), -6):
+            return False
+        if value is None or not math.isclose(value, last_value, rel_tol=1e-9, abs_tol=1e-12):
+            return False
+    return True
+
+
+def _missing_series(exc: Exception) -> list[str]:
+    """Los ids que la API dice que no existen (400 «Serie inexistente: …»).
+
+    Nombra sólo el primero aunque falten varios (medido el 06-oct).
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, httpx.Response) or response.status_code != 400:
+        return []
+    try:
+        body = response.json()
+    except ValueError:
+        return []
+    failed = body.get("failed_series") if isinstance(body, dict) else None
+    return [str(s) for s in failed] if isinstance(failed, list) else []
+
+
 def _as_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -710,6 +814,37 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                     raw = await self._get_series({**params, "start": str(tail_start)})
                     data = raw.get("data") or []
 
+            # Pobreza e indigencia semestrales (ver _dated_one_semester_late):
+            # la serie entera son unas 50 filas. Se confirma el corrimiento
+            # con la metadata, se fecha cada semestre por su primer día, como
+            # la fuente, y la ventana pedida se aplica sobre esas fechas.
+            if _native_semesters(raw, series_ids):
+                plain = {
+                    k: v
+                    for k, v in params.items()
+                    if k not in ("start_date", "end_date", "representation_mode")
+                }
+                whole = raw if plain == params else await self._get_series(plain)
+                if _dated_one_semester_late(whole, series_ids):
+                    if "representation_mode" in params:
+                        whole = await self._get_series(
+                            {**plain, "representation_mode": params["representation_mode"]}
+                        )
+                    window_start = iso_date(query_start)
+                    window_end = _period_end(end_date)
+                    raw = whole
+                    data = [
+                        row
+                        for row in (
+                            [_months_back(str(r[0])[:10], 6), *r[1:]]
+                            for r in whole.get("data") or []
+                        )
+                        if (window_start is None or row[0] >= window_start)
+                        and (window_end is None or row[0] <= window_end)
+                    ]
+                    total = len(data)
+                    tail_start = 0
+
             if not data:
                 return None
 
@@ -724,10 +859,10 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
             if not data:
                 return None
 
-            # La última fila con dato de cada serie. La metadata de la API
-            # puede estar atrasada: la pobreza 64.2_POBLACION_NUA_0_0_34_74
-            # dice time_index_end 2026-01-01 y ya trae la fila 2026-07-01; con
-            # «la fuente llega hasta 2026-01-01» el modelo descartó ese dato.
+            # La última fila con dato de cada serie: el fin de la fuente nunca
+            # queda antes de un dato traído (H065). En la pobreza 64.2 no era
+            # una metadata atrasada sino las filas corridas un semestre (ver
+            # _dated_one_semester_late); ya fechadas como la fuente, coinciden.
             last_by_id: dict[str, str] = {}
             for idx, sid in enumerate(series_ids):
                 for row in reversed(data):
@@ -972,7 +1107,14 @@ class SeriesTiempoAdapter(ISeriesTiempoConnector):
                 representation,
                 detalle,
             )
+            details: dict[str, Any] = {"series_ids": series_ids, "reason": detalle}
+            # Un id que no existe no es una fuente caída: el agente lo leía
+            # como «La fuente no respondió» y se iba a una copia vieja
+            # (nueva_08 del 06-oct, con el id armado 64.2_GR_0_0_12).
+            missing = _missing_series(exc)
+            if missing:
+                details["series_inexistentes"] = missing
             raise ConnectorError(
                 error_code=ErrorCode.CN_SERIES_UNAVAILABLE,
-                details={"series_ids": series_ids, "reason": detalle},
+                details=details,
             ) from exc
