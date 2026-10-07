@@ -612,6 +612,64 @@ async def test_la_variacion_de_un_anio_pasado_sin_time_index_end_no_es_un_dato_a
     assert computed.metadata["fecha_fin_fuente_inferida"] is True
 
 
+async def test_la_variacion_hasta_el_cierre_pedido_de_una_serie_parada_no_es_un_dato_atrasado() -> (
+    None
+):
+    """Prueba de calidad del 06-oct, nueva_09: las reservas 92.2 terminan el
+    31-ago con is_updated=False, y la pregunta pide hasta fin de agosto. Las
+    dos variaciones (por mes, con end_of_period, y por día) salían con
+    «Dato atrasado… no refleja el valor actual»."""
+    api = FakeSeriesApi(reservas_diarias())
+    _, mensual = await _run(
+        api,
+        {
+            "ids": [RESERVAS_DIARIAS_ID],
+            "frecuencia": "month",
+            "agregacion": "end_of_period",
+            "variacion": {"desde": "2026-06", "hasta": "2026-08"},
+        },
+    )
+    _, diaria = await _run(
+        api,
+        {"ids": [RESERVAS_DIARIAS_ID], "variacion": {"desde": "2026-06-30", "hasta": "2026-08-31"}},
+    )
+    computed = [mensual.results[0], diaria.results[0]]
+    assert [c.metadata["actualizada_en_fuente"] for c in computed] == [False, False]
+    assert [c.metadata["fecha_fin_fuente"] for c in computed] == ["2026-08-31", "2026-08-31"]
+
+    q = "¿Cuánto cambiaron las reservas del BCRA entre fin de junio y fin de agosto de 2026?"
+    assert freshness_notices(computed, date(2026, 10, 6), q) == []
+    # Pedida como el valor actual, la serie parada sigue avisando.
+    hoy = "¿Cuántas reservas tiene hoy el BCRA?"
+    assert len(freshness_notices(computed, date(2026, 10, 6), hoy)) == 2
+
+
+@pytest.mark.parametrize(
+    "pregunta",
+    [
+        "¿Cómo se compara el dólar A3500 de agosto de 2026 con el de este mes?",
+        "¿Cuánto varió el dólar A3500 entre agosto de 2026 y septiembre?",
+        "¿Cuánto subió el dólar A3500 entre agosto de 2026 y lo que va de octubre?",
+        "¿Cuánto subió el dólar A3500 a partir de agosto de 2026?",
+    ],
+)
+async def test_una_serie_parada_en_agosto_avisa_si_se_pide_tambien_algo_posterior(
+    pregunta: str,
+) -> None:
+    """Revisión de #159: el A3500 (175.1_DR_REFE500_0_0_25) termina el 31-ago
+    con is_updated=False. La pregunta nombra agosto de 2026, pero también algo
+    posterior sin año, y el aviso de atraso se perdía."""
+    _, outcome = await _run(FakeSeriesApi(diaria()), {"ids": [TIPO_CAMBIO_ID], "ultimos": 30})
+    [result] = outcome.results
+    assert result.metadata["fecha_fin_fuente"] == "2026-08-31"
+    assert result.metadata["actualizada_en_fuente"] is False
+
+    [aviso] = freshness_notices([result], date(2026, 10, 6), pregunta)
+    assert "31 de agosto de 2026" in aviso
+    q = "¿Cuánto subió el dólar A3500 en agosto de 2026?"
+    assert freshness_notices([result], date(2026, 10, 6), q) == []
+
+
 async def test_la_variacion_anual_con_el_anio_en_curso_explica_por_que_no_hay_dato() -> None:
     # Con collapse=year la API deja afuera 2026, que no terminó.
     with pytest.raises(ToolInputError, match="deja afuera el período que todavía no terminó"):

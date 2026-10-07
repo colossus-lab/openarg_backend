@@ -134,7 +134,8 @@ def test_sin_fecha_de_fin_una_pregunta_por_un_periodo_no_lleva_aviso() -> None:
     vieja = _serie("Base monetaria", ["2026-04-01", "2026-05-01"])
     assert freshness_notices([vieja], HOY, "¿Cuál es la base monetaria actual?")
     assert freshness_notices([vieja], HOY, "¿Cómo viene la base monetaria desde 2024?")
-    # Con la fecha de fin de la fuente manda la fuente, nombre o no un período.
+    # Con la fecha de fin de la fuente manda la fuente: una serie que termina
+    # en febrero no cubre el 2025 que se pidió, y avisa.
     con_fin = _serie("Saldo comercial", ["2025-01-01", "2025-02-01"], fecha_fin_fuente="2025-02-01")
     assert freshness_notices([con_fin], HOY, "¿Cuál fue el saldo comercial de 2025?")
 
@@ -449,6 +450,218 @@ async def test_una_serie_parada_sin_time_index_end_vigente_sigue_avisando(
     assert "diciembre de 2024" in avisos[0]
     assert ("no la actualizó" in avisos[0]) is not actualizada
     assert result.metadata["fecha_fin_fuente_inferida"] is False
+
+
+# ── la serie termina justo en el período pedido (prueba de calidad del 06-oct) ──
+
+PREGUNTA_09 = (
+    "¿Cuánto cambiaron las reservas del BCRA y la base monetaria entre fin de 2025 y fin de "
+    "agosto de 2026?"
+)
+PREGUNTA_11 = "¿Cuánto creció el producto bruto interno de la Argentina en 2025?"
+
+
+def _variacion(title: str, ultima: str, frecuencia: str, fin: str) -> DataResult:
+    """Como la arma `series_tiempo` con `variacion`: una fila y el contrato de la serie."""
+    return DataResult(
+        source="series_tiempo",
+        portal_name="API de Series de Tiempo",
+        portal_url="https://datos.gob.ar/series/api/series/?ids=x",
+        dataset_title=title,
+        format="json",
+        records=[{"serie": title, "desde": "2025-12-01", "hasta": ultima, "variacion_pct": 1.0}],
+        metadata={
+            "ultima_observacion": ultima,
+            "frecuencia": frecuencia,
+            "fecha_fin_fuente": fin,
+            "fecha_fin_fuente_inferida": False,
+            "actualizada_en_fuente": False,
+            "truncada": False,
+        },
+    )
+
+
+def test_una_serie_parada_justo_en_el_cierre_pedido_no_es_un_dato_atrasado() -> None:
+    """nueva_09: la 92.2 de reservas termina el 31-ago-2026 y la API la da
+    desactualizada (metadata del 06-oct). La pregunta pide hasta fin de agosto
+    y salían dos avisos, uno por variación: la guarda de período pedido sólo
+    miraba series sin fecha de fin, y la API sí la dice."""
+    mensual = _variacion(
+        "Variación entre 2025-12-01 y 2026-08-01: Reservas internacionales y pasivos del BCRA",
+        "2026-08-01",
+        "mensual",
+        "2026-08-31",
+    )
+    diaria = _variacion(
+        "Variación entre 2025-12-30 y 2026-08-31: Reservas internacionales y pasivos del BCRA",
+        "2026-08-31",
+        "diaria",
+        "2026-08-31",
+    )
+    assert freshness_notices([mensual, diaria], HOY, PREGUNTA_09) == []
+    # Una serie que no llega al cierre pedido sigue avisando: la 331.2 se
+    # corta el 12-jun. En nueva_09 ese aviso igual no corresponde, y este test
+    # no lo da por bueno: las dos cifras de base de la respuesta están en
+    # «Base monetaria (BCRA)», que llega al 5-oct, y la 331.2 sólo comparte la
+    # del 30-dic-2025. Entra en lo que se fecha porque, fuera de `correct`, se
+    # fecha todo lo leído (`dated_evidence`, H082). Eso es de la selección de
+    # evidencia, no de data_age (revisión de #159).
+    saldo = _variacion(
+        "Variación entre 2025-12-30 y 2026-06-12: Factores de explicación de Base Monetaria",
+        "2026-06-12",
+        "diaria",
+        "2026-06-12",
+    )
+    [aviso] = freshness_notices([mensual, diaria, saldo], HOY, PREGUNTA_09)
+    assert "Factores de explicación de Base Monetaria" in aviso
+    assert "12 de junio de 2026" in aviso
+    # Si pide el valor actual, las de reservas también avisan.
+    assert len(freshness_notices([mensual, diaria], HOY, "¿Cuántas reservas tiene hoy?")) == 2
+
+
+@pytest.mark.parametrize(
+    ("pregunta", "avisa"),
+    [
+        # nueva_11: el 4.º trimestre cierra el año pedido.
+        (PREGUNTA_11, False),
+        ("¿Cuánto creció el PBI en diciembre de 2025?", False),
+        # Batería, series_003: pide el valor actual.
+        ("Cuál es el PBI de Argentina?", True),
+        # Un año al que la serie no llega.
+        ("¿Cuánto creció el PBI en 2026?", True),
+        ("¿Cómo cerró el PBI de 2026 comparado con 2025?", True),
+        # Un año que no es el período pedido: la serie termina mucho después.
+        ("¿Cuál es el PBI a precios de 2004?", True),
+        # Un mes sin año va con el del mes con año más cercano; si viene
+        # después y es anterior en el calendario, con el siguiente: lo pedido
+        # termina en marzo de 2026, no en diciembre de 2025.
+        ("¿Cuánto creció el PBI entre diciembre de 2025 y marzo?", True),
+        ("¿Cuánto creció el PBI entre octubre y diciembre de 2025?", False),
+        # Un mes sin año que ningún mes con año ubica: no se sabe dónde
+        # termina lo pedido, y se mide como siempre.
+        ("¿Cuánto creció el PBI entre fin de 2025 y marzo?", True),
+        # Pide hasta hoy.
+        ("¿Cuánto creció el PBI de 2025 a la fecha?", True),
+    ],
+)
+def test_el_pbi_parado_en_el_cuarto_trimestre_cubre_2025(pregunta: str, avisa: bool) -> None:
+    """La 166.2 termina en el 4.º trimestre de 2025 y la API la da
+    desactualizada (el PIB de Oferta y Demanda ya llega al 2.º de 2026)."""
+    ppib = _serie(
+        "Ingreso nacional, Ahorro nacional y Préstamo neto. Base 2004.",
+        ["2025-04-01", "2025-07-01", "2025-10-01"],
+        ultima_observacion="2025-10-01",
+        frecuencia="trimestral",
+        fecha_fin_fuente="2025-10-01",
+        actualizada_en_fuente=False,
+    )
+    avisos = freshness_notices([ppib], HOY, pregunta)
+    assert bool(avisos) is avisa, avisos
+    if avisa:
+        assert "4.º trimestre de 2025" in avisos[0]
+        assert "la fuente no la actualizó" in avisos[0]
+
+
+_A3500 = ("A3500", ["2026-08-30", "2026-08-31"], "diaria")
+
+
+@pytest.mark.parametrize(
+    ("titulo", "fechas", "frecuencia", "pregunta", "avisa"),
+    [
+        # A3500 (175.1_DR_REFE500_0_0_25): diaria hasta el 31-ago-2026,
+        # is_updated=False en la API el 06-oct.
+        ("A3500", ["2026-08-30", "2026-08-31"], "diaria", "¿A cuánto está el dólar A3500?", True),
+        ("A3500", ["2026-08-30", "2026-08-31"], "diaria", "¿Cuánto subió el A3500 en 2026?", True),
+        (
+            "A3500",
+            ["2026-08-30", "2026-08-31"],
+            "diaria",
+            "¿Cuánto subió el dólar mayorista en septiembre de 2026?",
+            True,
+        ),
+        (
+            "A3500",
+            ["2026-08-30", "2026-08-31"],
+            "diaria",
+            "¿Cuánto subió el dólar mayorista en agosto de 2026?",
+            False,
+        ),
+        # Nombra agosto de 2026 pero pide también algo posterior sin año
+        # (revisión de #159): la serie parada no llega ahí, y sin el aviso
+        # nada impide presentar el 31-ago como el valor de hoy.
+        (*_A3500, "¿Cómo se compara el dólar A3500 de agosto de 2026 con el de este mes?", True),
+        (*_A3500, "¿Cuánto varió el dólar A3500 entre agosto de 2026 y septiembre?", True),
+        (
+            *_A3500,
+            "¿Cuánto subió el dólar A3500 entre agosto de 2026 y lo que va de octubre?",
+            True,
+        ),
+        (*_A3500, "¿Cuánto subió el dólar A3500 a partir de agosto de 2026?", True),
+        (*_A3500, "¿Cuánto subió el dólar A3500 de agosto de 2026 a la fecha?", True),
+        (*_A3500, "¿Cuánto subió el dólar A3500 en el mes en curso contra agosto de 2026?", True),
+        (*_A3500, "¿El dólar A3500 de agosto de 2026 es el más alto de este año?", True),
+        # Un mes sin año antes del que lo tiene, o una fecha puntual: sigue
+        # siendo agosto de 2026.
+        (*_A3500, "¿Cuánto subió el dólar A3500 entre julio y agosto de 2026?", False),
+        (*_A3500, "¿Cuál era el dólar A3500 a la fecha del 31 de agosto de 2026?", False),
+        # La tasa de política monetaria de nueva_18: parada el 10-jul-2025.
+        (
+            "Principales tasas de interés",
+            ["2025-07-09", "2025-07-10"],
+            "diaria",
+            "¿En cuánto está la tasa de política monetaria del BCRA?",
+            True,
+        ),
+        (
+            "Principales tasas de interés",
+            ["2025-07-09", "2025-07-10"],
+            "diaria",
+            "¿Cuál fue la tasa de política monetaria en julio de 2025?",
+            True,
+        ),
+        # Gasto público nacional (451.3), anual y discontinuada en 2023.
+        ("Gasto público", ["2022-01-01", "2023-01-01"], "anual", "¿Y en 2025?", True),
+        ("Gasto público", ["2022-01-01", "2023-01-01"], "anual", "¿Cuánto fue en 2023?", False),
+    ],
+)
+def test_una_serie_parada_que_no_llega_al_periodo_pedido_sigue_avisando(
+    titulo: str, fechas: list[str], frecuencia: str, pregunta: str, avisa: bool
+) -> None:
+    serie = _serie(
+        titulo,
+        fechas,
+        ultima_observacion=fechas[-1],
+        frecuencia=frecuencia,
+        fecha_fin_fuente=fechas[-1],
+        actualizada_en_fuente=False,
+    )
+    avisos = freshness_notices([serie], HOY, pregunta)
+    assert bool(avisos) is avisa, avisos
+
+
+async def test_del_adaptador_el_pbi_parado_no_avisa_si_se_pide_2025() -> None:
+    """nueva_11 de punta a punta, con la metadata que arma el adaptador: la
+    API dice el fin (time_index_end) y que no se actualiza."""
+    from tests.unit.series_tiempo_fake import FakeSeriesApi, serie
+
+    ppib_id = "166.2_PPIB_0_0_3"
+    ppib = serie(
+        ppib_id,
+        [(f"{a}-{m:02d}-01", 100.0 + a - 2024 + m) for a in (2024, 2025) for m in (1, 4, 7, 10)],
+        description="Producto interno bruto",
+        frequency="R/P3M",
+        is_updated=False,
+        dataset="Ingreso nacional, Ahorro nacional y Préstamo neto. Base 2004.",
+    )
+    result = await FakeSeriesApi(ppib).adapter().fetch([ppib_id])
+    assert result is not None
+    assert result.metadata["fecha_fin_fuente"] == "2025-10-01"
+    assert result.metadata["fecha_fin_fuente_inferida"] is False
+    assert result.metadata["actualizada_en_fuente"] is False
+
+    assert freshness_notices([result], HOY, PREGUNTA_11) == []
+    [aviso] = freshness_notices([result], HOY, "Cuál es el PBI de Argentina?")
+    assert "4.º trimestre de 2025" in aviso
 
 
 @pytest.mark.parametrize(
