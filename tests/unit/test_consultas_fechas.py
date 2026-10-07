@@ -15,10 +15,15 @@ import pytest
 
 from app.application.consultas.fechas import (
     ColumnaFecha,
+    abarca_rango,
     aviso_formato_guardado,
     claves_orden,
     condiciones_periodo,
+    descarta_valores_de_periodo,
+    es_nombre_de_anio,
     es_nombre_de_fecha,
+    es_nombre_de_periodo,
+    es_valor_de_periodo,
     expresion_fecha,
     fecha_iso,
     formato_uniforme,
@@ -26,6 +31,7 @@ from app.application.consultas.fechas import (
     rama_fecha,
     resolver_columna_fecha,
     sin_columna_fecha,
+    tiene_valores_de_periodo,
     validar_fecha,
 )
 from app.application.consultas.sql import CatalogRequestError, Params
@@ -964,3 +970,157 @@ class TestOrdenConAnioYMesNumericos:
         assert "BETWEEN" not in orden_fecha(ColumnaFecha("periodo", "bigint", formato="aaaamm"))
         # Una numérica sin muestra que no se llama como un año: no se supone nada.
         assert "BETWEEN" not in orden_fecha(ColumnaFecha("periodo", "bigint"))
+
+
+# ── verificación de la ola 5 sobre #171: si una tabla apila períodos ──────
+
+
+@pytest.mark.parametrize(
+    ("nombre", "esperado"),
+    [
+        ("mes", True),
+        ("trimestre", True),
+        ("corte_padron", True),
+        ("version", True),
+        ("PADRON", False),  # Mendoza: el mes de alta, no una foto
+        ("SITUACION", False),
+        ("tipo_persona", False),
+        # Verificación de #171: los nombres con que apilan las tablas de staging.
+        ("ciclo_lectivo", True),
+        ("campania", True),
+        ("campaña", True),
+        ("eleccion", True),
+        ("convocatoria", True),
+        ("medicion", True),
+        ("ULTIMO OPERATIVO", True),
+        ("TEMPORADA", True),
+        ("bienio", True),
+        ("ciclovia", False),
+        ("material", False),
+    ],
+)
+def test_es_nombre_de_periodo(nombre: str, esperado: bool) -> None:
+    assert es_nombre_de_periodo(nombre) is esperado
+
+
+# ── verificación de #171: el «año» que no se reconocía ─────────────────────
+#
+# Nombres reales de staging, en tablas que el aviso de `calcular` daba por
+# «una sola foto» porque no encontraba su fecha.
+
+
+@pytest.mark.parametrize(
+    "nombre",
+    [
+        "ANYO",  # comercio de minerales de datos.gob.ar
+        "a±o",  # inventario de gases de efecto invernadero de CABA
+        "aÃ±o",  # participación ciudadana de CABA
+        "AÃ±o",
+        "Ańo",  # Córdoba, T 2010 provincia
+        "Ańo base",  # metas ODS de Entre Ríos
+        "ańo_emision",
+        "A¥O-TARIFA",  # alojamientos turísticos de Mendoza
+        "aÒo",  # seguridad de la tenencia de CABA
+        "desde_aÉ˝o",  # existencias ovinas
+        "hasta_a˝o",
+        "año",
+        "AÑO",
+    ],
+)
+def test_es_nombre_de_anio_con_la_ene_mal_codificada(nombre: str) -> None:
+    assert es_nombre_de_anio(nombre)
+
+
+@pytest.mark.parametrize("nombre", ["aéreo", "Área", "años_servicio", "ao", "Aerosoles", "anyone"])
+def test_es_nombre_de_anio_no_toma_otras_palabras(nombre: str) -> None:
+    assert not es_nombre_de_anio(nombre)
+
+
+def test_la_columna_de_anio_mal_codificada_es_la_fecha_de_la_tabla() -> None:
+    """Inventario de gases de CABA en staging: 24 años en `a±o`, y la tabla
+    quedaba sin fecha (el aviso decía «una sola foto»)."""
+    tipos = [("a±o", "double precision"), ("sector", "text"), ("valor", "text")]
+    assert resolver_columna_fecha(tipos) == ColumnaFecha("a±o", "double precision", "anio")
+
+
+@pytest.mark.parametrize(
+    "valor",
+    [
+        "2022",
+        "202207",
+        "2019/01",  # meses de ejecución presupuestaria de Mendoza en `Unnamed: 8`
+        "2020-10",
+        "1969/70",  # campañas agrícolas de PBA
+        "1992/1993",
+        "2013-2014",  # bienios
+        "2015-2019",  # mandatos
+        "ago-25",  # el encabezado roto de complex_003 («dic-25»)
+        "sept-25",
+        "2018.0",
+    ],
+)
+def test_es_valor_de_periodo(valor: str) -> None:
+    assert es_valor_de_periodo(valor)
+
+
+@pytest.mark.parametrize("valor", ["6322", "500", "1,31603E+14", "Papel", "3.56", "", "12500"])
+def test_no_es_valor_de_periodo(valor: str) -> None:
+    assert not es_valor_de_periodo(valor)
+
+
+@pytest.mark.parametrize(
+    ("muestra", "esperado"),
+    [
+        (["2022", "2023", "2024"], True),  # `medicion` del índice de reciclabilidad
+        (["1969/70", "1978/79", "2024/25"], True),
+        (["ago-25", "oct-25", "sept-25", "nov-25", "jul-25", "dic-25"], True),
+        (["202207", "201702", "202110"], True),  # `PADRON`: la forma sola no decide
+        # Un «Total» entre diez años no la descarta.
+        ([str(a) for a in range(2010, 2020)] + ["Total"], True),
+        (["2022"], False),  # un solo período
+        (["2022", "Total", "Parcial"], False),
+        # Una medida con algún valor que parece un año (superficie sembrada).
+        (["500", "1000", "200", "2000", "0", "1013", "10400", "99957"], False),
+        (["6322", "6770", "6070"], False),  # códigos de municipio
+        ([], False),
+    ],
+)
+def test_tiene_valores_de_periodo(muestra: list[str], esperado: bool) -> None:
+    assert tiene_valores_de_periodo(muestra) is esperado
+
+
+@pytest.mark.parametrize(
+    ("nombre", "esperado"),
+    [
+        ("fecha_modificacion", True),  # registro de empresas de datos.gob.ar
+        ("proceso_fecha", True),
+        ("updated_at", True),
+        ("E0079_ID", True),  # Córdoba: identificadores de 685 a 1828
+        ("id", True),
+        ("proceso_numero", False),  # «proceso» es de carga, pero no es una fecha
+        ("id_mes", False),
+        ("medicion", False),
+        ("PADRON", False),
+    ],
+)
+def test_descarta_valores_de_periodo(nombre: str, esperado: bool) -> None:
+    assert descarta_valores_de_periodo(nombre) is esperado
+
+
+@pytest.mark.parametrize(
+    ("desde", "hasta", "primera", "ultima", "esperado"),
+    [
+        ("2022", "2022", "2022-01-01", "2022-12-31", True),
+        (None, "2022", "2022-01", "2022-07", True),
+        ("2022", None, "2021-12", "2022-07", False),  # diciembre de 2021 queda afuera
+        ("2022-06", "2022-12", "2022-01-01", "2022-12-31", False),
+        ("2020", "2023", "2022", "2022", True),
+        ("2023", "2023", "2014-01-01", "2023-12-31", False),
+        # La misma condición que `condiciones_periodo`: un año se solapa con junio.
+        ("2022-06", "2022-06", "2022", "2022", True),
+    ],
+)
+def test_abarca_rango(
+    desde: str | None, hasta: str | None, primera: str, ultima: str, esperado: bool
+) -> None:
+    assert abarca_rango(desde, hasta, primera, ultima) is esperado

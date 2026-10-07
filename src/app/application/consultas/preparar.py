@@ -242,21 +242,33 @@ class Periodo:
     # El rango sale de la muestra de `pg_stats`, no de recorrer la tabla: el
     # máximo real puede ser posterior a `hasta`.
     aproximado: bool = False
+    # Valores no nulos de la columna que no se reconocieron como fecha: quedan
+    # fuera de `desde`/`hasta` (en los transportes autorizados de CABA, los
+    # bimestres como «2016 NOVIEMBRE-DICIEMBRE").
+    sin_reconocer: int = 0
 
 
-async def describir_periodo(sandbox: Any, tabla: str, fecha: ColumnaFecha | None) -> Periodo:
+async def describir_periodo(
+    sandbox: Any, tabla: str, fecha: ColumnaFecha | None, timeout_seconds: int | None = None
+) -> Periodo:
     """El período que cubre la columna de fecha, para ``describir_tabla``.
 
     Nunca falla: si la consulta del rango no corre (timeout en una tabla
     grande, palabra reservada en el nombre de una columna), se describe la
     tabla igual, con el aviso. Antes cualquier error acá era el 400 genérico
     "Probá con otros filtros" del modo datos (16 en prod desde el 30-sep).
+
+    ``timeout_seconds``: un tope más corto que el del sandbox, para quien lo
+    usa como dato de un aviso (``calcular``); al pasarlo vale el rango de la
+    muestra, como con cualquier error.
     """
     if fecha is None:
         return Periodo()
     stats = await estadisticas(sandbox, tabla, [fecha.nombre])
     fecha = con_formato(fecha, stats)
-    result = await ejecutar(sandbox, consulta_rango(quote_qualified(tabla), fecha), {})
+    result = await ejecutar(
+        sandbox, consulta_rango(quote_qualified(tabla), fecha), {}, timeout_seconds=timeout_seconds
+    )
     if result.error_kind == "blocked":
         # Tabla retirada por un problema de calidad: no se informa un período
         # sacado de sus estadísticas como si se pudiera usar. Se dice por qué.
@@ -297,6 +309,7 @@ async def describir_periodo(sandbox: Any, tabla: str, fecha: ColumnaFecha | None
         desde=None if desde is None else str(desde),
         hasta=None if hasta is None else str(hasta),
         aviso=" ".join(a for a in avisos if a) or None,
+        sin_reconocer=max(con_valor - reconocidas, 0),
     )
 
 
@@ -322,6 +335,16 @@ def con_formato(fecha: ColumnaFecha, stats: TableValueStats | None) -> ColumnaFe
         if all(r in (None, "anio") for r in ramas) and (fecha.clase == "anio" or "anio" in ramas):
             formato = CASE_ANIO
     return replace(fecha, formato=formato) if formato else fecha
+
+
+async def rango_de_muestra(sandbox: Any, tabla: str, fecha: ColumnaFecha) -> tuple[str, str] | None:
+    """El rango de la columna de fecha en la muestra de ``pg_stats``, sin recorrer
+    la tabla (milisegundos), o None si no hay muestra.
+
+    Los valores de la muestra son de la tabla: el rango real lo contiene.
+    """
+    stats = await estadisticas(sandbox, tabla, [fecha.nombre])
+    return _rango_de_muestra(con_formato(fecha, stats), stats)
 
 
 def _rango_de_muestra(fecha: ColumnaFecha, stats: TableValueStats | None) -> tuple[str, str] | None:
