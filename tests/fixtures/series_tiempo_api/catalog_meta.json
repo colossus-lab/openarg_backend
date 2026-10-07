@@ -177,6 +177,28 @@
    "dataset_title": "Factores de explicación de Base Monetaria",
    "dataset_source": "Banco Central de la República Argentina (BCRA)"
   },
+  "4.2_OGP_2004_T_17": {
+   "description": "PIB a precios de comprador, en millones de pesos de 2004 y Trimestral.",
+   "units": "Millones de pesos a precios de 2004",
+   "frequency": "R/P3M",
+   "time_index_start": "2004-01-01",
+   "time_index_end": "2026-04-01",
+   "is_updated": "True",
+   "dataset_title": "Oferta y Demanda Globales. Base 2004",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-07"
+  },
+  "43.2_ECTAT_0_T_33": {
+   "description": "Tasa de actividad total. En porcentaje.",
+   "units": "Porcentaje",
+   "frequency": "R/P3M",
+   "time_index_start": "2003-01-01",
+   "time_index_end": "2026-04-01",
+   "is_updated": "True",
+   "dataset_title": "Principales variables ocupacionales. EPH continua. Actividad",
+   "dataset_source": "Instituto Nacional de Estadística y Censos (INDEC)",
+   "recorded_at": "2026-10-07"
+  },
   "448.1_NIVEL_GENERAL_0_0_13_46": {
    "description": "IPIM Nivel general",
    "units": "Índice Dic-2015=100",

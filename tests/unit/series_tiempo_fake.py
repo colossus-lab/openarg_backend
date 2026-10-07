@@ -92,6 +92,7 @@ GASTO_PIB_EDUCACION_ID = "451.2_GPC_EDUCACPIB_0_0_24_72"
 GASTO_PIB_UNIVERSIDAD_ID = "451.2_GPC_EDUCACPIB_0_0_31_23"
 GASTO_PIB_CIENCIA_ID = "451.2_GPC_CIENCIPIB_0_0_23_49"
 TASA_JAPON_ID = "131.1_OIRJT_0_0_34"
+PIB_ID = "4.2_OGP_2004_T_17"
 
 _AXIS_FREQUENCY = {
     "R/P1D": "day",
@@ -202,6 +203,15 @@ def ipim_real() -> dict[str, Any]:
 def ipc_noreste_real() -> dict[str, Any]:
     """El IPC del Noreste (148.3), grabado de la API el 06-oct: agosto de 2026 da 1,75 %."""
     return _grabada("ipc_noreste_148_3.json", IPC_NORESTE_ID)
+
+
+def pib_real() -> dict[str, Any]:
+    """El PIB a precios de 2004 (4.2, trimestral), la serie entera grabada de la API el 07-oct.
+
+    Suma 2024: 2.831.951,5; suma 2025: 2.958.914,9 (+4,48 %). Llega al 2.º
+    trimestre de 2026.
+    """
+    return _grabada("pib_4_2.json", PIB_ID)
 
 
 def exportaciones_reales() -> dict[str, Any]:

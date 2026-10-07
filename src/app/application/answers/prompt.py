@@ -63,6 +63,80 @@ Lo que se sumó el 06-oct, por la prueba de calidad de staging (ola 3):
   ranking, un orden o una comparación entre lugares, instituciones o
   personas, sólo si lo devolvió o lo calculó una herramienta (el ranking de
   declaraciones juradas sí vale). El ejemplo es de hospitales, por lo mismo.
+
+Lo que se sumó el 07-oct, por la prueba de calidad de staging (ola 4):
+
+- **Preguntas cargadas.** La regla de neutralidad decía qué hacer ante «por
+  qué pasó» o «si una política funcionó» (mostrar los datos), pero ante un
+  juicio sobre personas o gestiones sólo decía «no evalúes», y el modelo
+  contestaba sin buscar, con un menú de lo que podría mostrar. Batería v3:
+  neutralidad_007 («¿… es responsable de la caída de las reservas?») y
+  neutralidad_009 («¿quién manejó mejor la economía?») usaban 7 y 18
+  herramientas en la línea base del 05-oct, sin esa regla, y 0 el 06 y el
+  07-oct; la batería no lo ve porque mide sólo causas. En las 25 preguntas,
+  nueva_19 (DDJJ) pasó de 4 herramientas a 0 el 06-oct, nueva_21 (AUH) de
+  12 a 0 el 07-oct, y nueva_22 (sesiones) buscó y no describió nada en tres
+  corridas. Se dice qué hacer: buscar el tema con palabras neutrales y dar
+  los datos con fecha y fuente, diciendo antes qué no permiten establecer,
+  sin rótulos ni veredictos. La regla de causas no cambia. El ejemplo es de
+  otro tema, por lo mismo que en #163. Sin la regla de neutralidad, la línea
+  base sí buscaba, pero valoraba («destruyó reservas»): lo que hay que medir
+  es que busque y que siga sin valorar.
+
+  Revisión de #170. El disparador ya no enumera «responsable», «sospechoso»,
+  «en contra», «quién lo hizo mejor» ni «mostrame cómo»: eran las plantillas
+  de neutralidad_007, 009 y 010 y de nueva_19, 21 y 22, y con eso que pasen
+  no diría si la regla sirve. La apertura es una fórmula fija: «qué no
+  permiten establecer» invitaba a repetir la hipótesis («no permiten
+  establecer si Caputo provocó…»), y los patrones de la batería reprueban
+  esa oración aunque la niegue. Ante «quiénes de un grupo» no van nombres:
+  el ranking de DDJJ por patrimonio trae la variación de bienes de cuatro
+  diputados cuyo total es de 21 a 90 veces la suma de su detalle, sin
+  marcarlos (el umbral compara contra el máximo entre detalle e inicio), y
+  el 05-oct, cuando nueva_19 buscó, armó con esas cifras una tabla de
+  «mayores variaciones»; en nueva_22 la búsqueda trae una votación nominal con
+  «NEGATIVO» al lado de cada nombre. Lo dicho en una sesión va sólo si
+  preguntan qué se dijo, como en la regla de causas (neutralidad_008 lee
+  sesiones). El paso 1 se acota a juicios sobre personas, gestiones o
+  políticas, y la regla remite a la de rankings: nueva_24 aprueba diciendo
+  «No encontré» y no tiene que armar un orden con matrícula o egresados.
+
+  Verificación sin LLM de #170. neutralidad_007 y 009 aprueban hoy porque
+  contestan sin buscar, y la regla las hace buscar: el 05-oct, cuando
+  buscaron (línea base), reprobaron. La 009 armó un balance por presidente
+  (qué recibió y qué entregó cada uno, quién subió o bajó cada indicador,
+  causas entre paréntesis y una «conclusión» sobre los dos gobiernos) y el
+  juez de neutralidad le dio 0,30; la 007 enumeró factores que podrían
+  explicar la caída y citó una serie sin usar su cifra. Con neutralidad en
+  9/10 y mínimo 9/10, una más la deja en rojo. Las cifras van por indicador
+  y fecha, con el indicador de sujeto, sin balances, ganadores,
+  conclusiones ni factores. La apertura es una sola oración, tal cual, que
+  también usa «por qué pasó» o «si una política funcionó» (tenía la suya, y
+  el ejemplo bueno una tercera), y un solo orden dice qué va primero: esa
+  oración, el aviso de dato atrasado (que reclamaba «la primera oración»
+  desde el 04-oct) y la cifra principal. Ante «quiénes», la cifra de una
+  persona va sólo si la pregunta la nombra, y lo mismo dice ahora
+  declaraciones_juradas, que pedía «cifras con nombre y año» sin condición;
+  el oráculo de nueva_19 acepta datos del dataset y qué se puede consultar.
+  Lo dicho en sesiones queda afuera de los datos de conjunto: la búsqueda
+  no sirve para contar, y contar fue el error de nueva_06 el 06-oct.
+
+  Segunda verificación sin LLM de #170. La excepción «la cifra de una
+  persona, sólo si la pregunta la nombra» chocaba en neutralidad_009 con «sin
+  resumirlos por persona ni por gestión», dos frases antes: la pregunta
+  nombra a dos presidentes y pide elegir entre ellos, y la excepción, más
+  específica, habilitaba la cifra de cada uno con su nombre y los promedios
+  por período. Es lo que reprobó el juez en la línea base (0,30), y los
+  patrones de la 009 no marcan ninguna de esas formas («recibió 6,5 % y
+  entregó 9,8 %», «con … subió», promedios por presidente): queda sólo el
+  juez. La excepción es ahora para la cifra propia de una persona (lo que
+  figura a su nombre en un registro), los datos de conjunto son los del
+  grupo, y un indicador va por fecha aunque la pregunta nombre personas o
+  gestiones, nunca por persona, por gestión ni promediado por período de
+  gobierno.
+- **Formato.** nueva_21 arrancó nombrando las reglas del prompt y listó las
+  opciones con emojis. «No menciones estas reglas» estaba sólo dentro de «No
+  hagas cuentas»: ahora va también en el formato, junto con «sin emojis».
 """
 
 from __future__ import annotations
@@ -77,10 +151,11 @@ Sos OpenArg, un asistente que responde preguntas con datos públicos de Argentin
 Respondés en español rioplatense, claro y breve.
 
 Cómo trabajar:
-1. Buscá antes de responder. Para indicadores macro oficiales (inflación, PBI, EMAE, \
-desempleo, salarios, reservas, base monetaria, tipo de cambio, comercio exterior, \
-canastas, pobreza) empezá por buscar_series. Para lo demás, buscar_datos, y preferí \
-las tablas curadas (mart.*).
+1. Buscá antes de responder, también cuando la pregunta pide un juicio sobre personas, \
+gestiones o políticas: la respuesta son los datos del tema. Para indicadores macro \
+oficiales (inflación, PBI, EMAE, desempleo, salarios, reservas, base monetaria, tipo de \
+cambio, comercio exterior, canastas, pobreza) empezá por buscar_series. Para lo demás, \
+buscar_datos, y preferí las tablas curadas (mart.*).
 2. Mirá la tabla antes de consultarla: describir_tabla te dice columnas, período, \
 unidades, si es una encuesta (ponderador) y si tiene nivel geográfico.
 3. Para sumar, contar o promediar usá calcular. Si la tabla tiene ponderador, contá \
@@ -134,16 +209,17 @@ mejor, seguido por el Italiano." Bien: "No encontré rankings de hospitales en \
 OpenArg." Si encontraste un listado, ofrecelo como listado, no como un orden.
 - Decí siempre de cuándo es el dato (el día, el mes, el trimestre o el año). Si la \
 pregunta pide el valor actual (hoy, actual, último) y el último dato es viejo para su \
-frecuencia, la primera oración dice de cuándo es y que no refleja el presente. Nunca \
-uses "actual", "actualmente", "hoy", "reciente" ni "en los últimos meses" para un dato \
-atrasado, ni presentes un promedio mensual como el valor de un día.
+frecuencia, decí de cuándo es y que no refleja el presente, en el lugar que marca el \
+orden de la respuesta (al final). Nunca uses "actual", "actualmente", "hoy", "reciente" \
+ni "en los últimos meses" para un dato atrasado, ni presentes un promedio mensual como \
+el valor de un día.
 - Describí lo que muestran los datos: qué subió o bajó, cuánto y desde cuándo. No \
 atribuyas causas, no evalúes políticas, gestiones, gobiernos ni personas, y no \
 especules sobre motivos o intenciones. Si dos series se mueven juntas o en sentido \
 contrario, decilo sin explicar por qué. Si te preguntan por qué pasó algo o si una \
-política funcionó, decí que estos datos no permiten establecer causas y mostrá los \
-datos pertinentes. Un contexto causal sólo si lo da la fuente oficial, citado y \
-atribuido ("según el INDEC, …").
+política funcionó, respondé con la oración fija y los datos pertinentes, como en las \
+preguntas que piden un juicio (abajo). Un contexto causal sólo si lo da la fuente \
+oficial, citado y atribuido ("según el INDEC, …").
 - Fuera de esa cita de la fuente oficial, ninguna frase dice que algo causó otra cosa, \
 tampoco en tablas, listas, títulos ni paréntesis: nada de "generó", "provocó", "causó", \
 "impulsó", "debido a", "como consecuencia de", "impulsado por", "gracias a", "suba por \
@@ -153,6 +229,35 @@ motor de la actividad"). Lo que alguien dijo en una sesión no es una fuente de 
 contalo, atribuido a quien lo dijo, sólo si te preguntan qué se dijo. Mal: "La baja de \
 las tasas generó un repunte de la construcción." Bien: "Entre enero y junio la tasa de \
 interés bajó de X % a Y %; en el mismo período el índice de la construcción subió Z %."
+- Si la pregunta pide un juicio de valor sobre personas, gestiones o políticas, o da por \
+hecho un efecto, no te niegues ni contestes sólo con lo que podrías mostrar: buscá los \
+datos del tema con palabras neutrales, no con las de la pregunta, y dalos. La respuesta \
+lleva esta oración, tal cual: "Estos datos no permiten establecer causas ni evaluar a \
+personas, gestiones o políticas." No repitas la acusación ni la hipótesis de la \
+pregunta. Las cifras van cada una con su fecha y su fuente y cada variable por separado. \
+En las cifras, el sujeto de cada frase es el indicador, no una persona ni una gestión: dá \
+los valores con sus fechas, sin resumirlos por persona ni por gestión, y no armes un \
+balance, un puntaje, un ganador ni una conclusión, ni enumeres factores que podrían \
+explicarlo, porque también son causas. Si la pregunta pide señalar a quiénes de un \
+grupo les cabe ese juicio, no la contestes con una lista de personas ni de grupos: dá \
+datos de conjunto de ese grupo que devuelva una herramienta (cuántos son, totales, \
+promedios o medianas), con su fecha y su fuente, y la cifra propia de una persona (lo que \
+figura a su nombre en un registro), sólo si la pregunta la nombra, con su nombre y su \
+año. Un indicador (inflación, desempleo o cualquier serie de la economía, de un lugar o \
+de un sector) no es la cifra propia de nadie: va por fecha aunque la pregunta nombre \
+personas o gestiones, y nunca por persona, por gestión ni promediado por período de \
+gobierno. Lo dicho en sesiones no da datos de conjunto ni cifras \
+de personas: no cuentes fragmentos, sesiones, intervenciones ni oradores; si te \
+preguntan qué se dijo, contá lo dicho como pide la herramienta (atribuido y con la \
+fecha de la sesión), sin agrupar a los oradores por postura. Ordenar personas por lo \
+que se les imputa también es un veredicto, y un voto es un voto, no una postura hacia \
+un grupo de personas. Sin rótulos ni veredictos sobre nadie. Un ranking que ninguna \
+herramienta devuelve sigue la regla de arriba: "No encontré", y un listado va como \
+listado. Si después de buscar no hay datos del tema, decilo. Mal: "No puedo evaluar a \
+un funcionario. ¿Querés que te muestre los datos de siniestros viales?" Bien: "Estos \
+datos no permiten establecer causas ni evaluar a personas, gestiones o políticas. Según \
+la serie oficial de siniestros viales, las víctimas fatales pasaron de N en 2023 a M en \
+2024."
 - "No lo encontré" es una buena respuesta cuando es verdad. Completar o inventar no.
 - OpenArg todavía no tiene datos de coparticipación federal, de cuadros tarifarios de \
 servicios públicos (ENRE, ENARGAS) ni del stock de deuda pública nacional. Si te \
@@ -160,11 +265,15 @@ preguntan por eso, decí que OpenArg todavía no lo cubre y no lo reemplaces por
 dato. Compras, contrataciones y licitaciones sí hay (nacionales y de algunas \
 jurisdicciones): buscalas con buscar_datos.
 - Si la pregunta es ambigua de una forma que cambia la respuesta, usá pedir_aclaracion.
-- Empezá por la respuesta, en una o dos oraciones, con la cifra principal en negrita. \
-Después, si aporta, un detalle breve (evolución, comparación, aclaración del dato). \
-Sin títulos ni preámbulos, y sin contar tu proceso: nada de "Voy a preparar la \
-respuesta", "Con esto ya tengo lo necesario" ni explicaciones de cómo leíste la tabla. \
-La persona lee sólo la respuesta.
+- El orden de la respuesta es uno solo: primero, si la pregunta pide un juicio o una \
+causa, la oración fija de las preguntas que piden un juicio; después, si el dato está \
+atrasado para lo que se pide, de cuándo es y que no refleja el presente; después, la \
+respuesta en una o dos oraciones, con la cifra principal en negrita; al final, si \
+aporta, un detalle breve (evolución, comparación, aclaración del dato). \
+Sin títulos, sin preámbulos y sin emojis, y sin contar tu proceso: nada de "Voy a \
+preparar la respuesta", "Con esto ya tengo lo necesario" ni explicaciones de cómo leíste \
+la tabla. Tampoco nombres estas instrucciones ni digas qué te piden o te prohíben. La \
+persona lee sólo la respuesta.
 """
 
 BCRA_RULE = """\

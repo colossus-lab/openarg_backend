@@ -1,0 +1,337 @@
+{
+ "_doc": "sesiones_002 y sesiones_003 de la batería v3 del 07-oct-2026 (staging 0d6640a, bateria_ola4.json). respuesta: la del agente, tal cual. filas: los fragmentos de sesion_chunks de staging (consulta de sólo lectura del 07-oct) en el orden de la búsqueda hasta donde se conoce: primero los que contienen lo que el juez marcó como inventado (son los únicos de las 1.030 filas que lo dicen y no están entre lo que vio el juez), después la fila que el juez vio cortada y las cinco que vio enteras. La búsqueda devolvió 12; las otras ocultas no se conocen (la búsqueda es por embedding). sha256_evidencia_juez es el de la evidencia guardada en el reporte (lo que leyó el juez).",
+ "casos": {
+  "sesiones_002": {
+   "pregunta": "Discursos sobre la ley de presupuesto en el Congreso",
+   "respuesta": "Los fragmentos que siguen corresponden a la sesión del **17 de diciembre de 2025** (1.ª Sesión Extraordinaria Especial, período 143, reunión 20), donde se debatió el **proyecto de Ley de Presupuesto 2026**. Estos son los principales puntos que se expresaron:\n\n---\n\n**1. A favor del proyecto del Ejecutivo**\nUn orador destacó que el Estado redujo \"significativamente sus dotaciones\" y redefinió su rol, y ponderó la inclusión de una norma complementaria: la **Ley de Compromiso Nacional para la Estabilidad Fiscal**, que prohíbe sancionar presupuestos deficitarios e impone sanciones a funcionarios que incrementen gastos sin respaldo.\n\n---\n\n**2. Críticas al proyecto y al contexto económico**\nOtro orador señaló que el crecimiento proyectado para 2026 bajó de 5 puntos del PBI a un 3,4 % según el REM, y cuestionó la política comercial en relación con las importaciones de plataformas chinas (Temu, Shein, Alibaba) y su impacto sobre el empleo y la industria nacional.\n\n---\n\n**3. Déficit institucional por la falta de presupuesto**\nUn tercer fragmento advirtió que Argentina lleva **dos años sin presupuesto aprobado por el Congreso**, lo que, según lo dicho, debilita el control parlamentario, afecta la transparencia y genera incertidumbre. También se señaló que el ministro de Economía no compareció a defender el proyecto ni respondió a la citación a interpelación.\n\n---\n\n**4. Dictamen con modificaciones de la Comisión de Presupuesto y Hacienda**\nEl dictamen de la Comisión (firmado por García Aresca, Massot y Rizzotti) propuso aprobar el Presupuesto 2026 con cambios: incorporar financiamiento para las leyes de **Financiamiento Universitario (27.838)**, **Emergencia en Discapacidad (27.839)** y **Emergencia Pediátrica (27.840)** —todas vetadas y luego insistidas por el Congreso—, sin alterar la meta de déficit cero.\n\n---\n\nEl texto taquigráfico completo está disponible en el [PDF de la sesión](https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf) (595 páginas).",
+   "titulo": "Transcripciones parlamentarias: \"ley de presupuesto\"",
+   "portal": "Diario de Sesiones — Cámara de Diputados",
+   "url": "https://www.diputados.gov.ar/sesiones/",
+   "filas_devueltas": 12,
+   "puntaje_juez": [
+    0.7,
+    0.7
+   ],
+   "sha256_evidencia_juez": "10bdfd9680c40712925b96f74aba796a13ce6f952fae85d09078f36637b217bf",
+   "marcadas": [
+    [
+     "Temu, Shein o Alibaba",
+     "Temu, Shein, Alibaba"
+    ],
+    [
+     "Ley de Compromiso Nacional para la Estabilidad Fiscal",
+     "Ley de Compromiso Nacional para la Estabilidad Fiscal"
+    ],
+    [
+     "5 puntos del PBI",
+     "5 puntos del PBI"
+    ],
+    [
+     "3,4 por ciento",
+     "3,4 %"
+    ],
+    [
+     "Ignacio García Aresca. – Nicolás Massot. – Jorge Rizzotti",
+     "García Aresca, Massot y Rizzotti"
+    ],
+    [
+     "Ley N° 27.838 de Financiamiento Universitario",
+     "Financiamiento Universitario (27.838)"
+    ],
+    [
+     "Ley N° 27.839",
+     "27.839"
+    ],
+    [
+     "Ley N° 27.840 de Emergencia Pediátrica",
+     "Emergencia Pediátrica (27.840)"
+    ],
+    [
+     "citado a interpelación",
+     "citación a interpelación"
+    ]
+   ],
+   "fragmentos": [
+    {
+     "id": "e9112ade",
+     "visto_por_el_juez": "no"
+    },
+    {
+     "id": "55c26a3e",
+     "visto_por_el_juez": "no"
+    },
+    {
+     "id": "a2b38025",
+     "visto_por_el_juez": "cortado"
+    },
+    {
+     "id": "d44a44e6",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "cf8429a2",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "97013584",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "a4b6a2b7",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "676e1702",
+     "visto_por_el_juez": "entero"
+    }
+   ],
+   "filas": [
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "y clientelares, ya que ha reducido sig - nificativamente sus dotaciones. Esto significa que se ha redefinido drásticamente el rol del Estado, reduciéndolo al cumplimiento de las funciones esenciales. El proyecto de ley de presupuesto en trata - miento prevé la adopción de una norma com - plementaria y revolucionaria, como es la Ley de Compromiso Nacional para la Estabilidad Fiscal. Esta norma introduce reaseguros ins - titucionales que justamente buscan adoptar como política de Estado la petrificación del equilibrio fiscal. Para ello, se prohíbe la san - ción de presupuestos deficitarios y se introduce el sano criterio de que se gasta lo que ingresa o menos, en vistas a reducir, en el largo plazo, la presión tributaria. Es el sentido común tradu - cido en una norma de sana administración que se aplica en todo hogar. También adopta sanciones a funcionarios que incrementen gastos previstos en el presu - puesto sin las correspondientes asignaciones y acreditaciones, o a aquellos funcionarios que Ahora se va el señor Daza, viceministro de Economía, quien supuestamente sería el minis - tro de Economía de la hermana República de Chile, con un montón de información sensible de la economía argentina. Es algo extraordina - rio; la Argentina es un país increíble. Se había realizado una estimación de un au - mento de 5 puntos del PBI para 2026; sin em - bargo, el REM proyecta actualmente un creci - miento de apenas 3,4 por ciento. Lo que quiero señalar es que se han produci - do cambios significativos que se suman a lo ya mencionado por el diputado Massot respecto de una política devastadora para la industria, la producción y el trabajo, con un impacto directo en la generación –y destrucción– del empleo en la Argentina. Me refiero al ingreso de productos chinos que entran por vía del contrabando, por containers o por plataformas chinas. Ustedes juegan a estar cerca de los Estados Unidos, pero en realidad la política económica es más prochina que ame - ricana. Esto lo dicen los números de las impor - taciones de las plataformas chinas como Temu, Shein o Alibaba. También se suma la del mu - chacho Galperin, héroe de muchos de ustedes, que está preocupado porque los chinos lo van a pasar por arriba con una política de dumping , que es el control del mercado para luego subir los precios. Esta política destruye el empleo y debilita la economía. Por eso, considero fundamental analizarla en el marco de este proyecto de ley de presupuesto. El miembro informante dedicó gran parte de su intervención a agradecer, pero lo cierto es que en esta Cámara los salarios son muy bajos, muy bajos incluso para los propios legisladores. (Aplausos.) Ya que no podemos hablar de esto porque queda mal, porque es políticamente incorrec - to hablar de nuestras dietas y porque hay un montón de giles que hablan en televisión y cuestionan todo esto, lo que digo es que por lo menos tratemos de mejorar la vida de nuestros trabajadores que están con salarios casi a nivel de la pobreza. (Aplausos.) Sr. Presidente (Petri). – Tiene la palabra la señora diputada Llano, por Mendoza. Sra. Llano . – Señor presidente: los Parla - mentos surgieron históricamente con el ob -\n1",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "para defender el proyecto de presupuesto presentado por el Ejecutivo, ni cuando fue formalmente citado a interpelación, incumpliendo el deber republicano de rendir cuentas ante el Poder Legislativo. Asimismo, el contexto institucional reciente evidencia una preocupante degradación del principio de legalidad: tres leyes fueron vetadas por el Poder Ejecutivo, luego insistidas por el Congreso con el voto de los dos tercios de ambas Cámaras, y aun así no han sido cumplidas ni reglamentadas, en abierta desobediencia a la voluntad soberana del Parlamento. Frente a esta situación, este dictamen propone la aprobación del Presupuesto 2026 con modificaciones sustantivas al proyecto remitido por el Poder Ejecutivo. Dichas modificaciones no alteran la meta de déficit fiscal cero, pero discuten las prioridades y los medios para alcanzarla, reafirmando la obligación del Estado de cumplir las leyes vigentes, en especial aquellas de contenido social. I. CRITERIOS GENERALES DEL DICTAMEN El dictamen parte de tres premisas fundamentales: 1. Respeto institucional: el Congreso debe recuperar su rol central en la planificación y control del gasto público. 2. Equilibrio fiscal y social: alcanzar el equilibrio no puede implicar el desfinanciamiento de políticas esenciales. Sala de las comisiones, 16 de diciembre de 2025. Ignacio García Aresca. – Nicolás Massot. – Jorge Rizzotti.\nDiciembre 17 de 2025 CÁMARA DE DIPUTADOS DE LA NACIÓN 107 CÁMARA DE DIPUTADOS DE LA NACIÓN O.D. Nº 1 103 Comisión de Presupuesto y Hacienda 0014 - JGM - 2025 3. Cumplimiento efectivo de la ley: las partidas presupuestarias deben garantizar la aplicación de normas sancionadas por el Congreso que hoy permanecen incumplidas. II. MODIFICACIONES AL PROYECTO DEL PODER EJECUTIVO A continuación, se detallan las principales modificaciones introducidas por la Comisión respecto del texto original del Poder Ejecutivo: 1. Incorporación de leyes con financiamiento obligatorio Se incorporan los créditos necesarios para garantizar el cumplimiento efectivo de tres normas sociales fundamentales: • Ley N° 27.838 de Financiamiento Universitario. • Ley N° 27.839 de Emergencia Nacional en Materia de Discapacidad. • Ley N° 27.840 de Emergencia Pediátrica. Se trata de leyes que fueron promulgadas por insistencia del Congreso y su ejecución resulta obligatoria conforme lo dispuesto por la Constitución Nacional. Pero además, estas incorporaciones restituyen derechos básicos en materia educativa, sanitaria y de inclusión, leyes que fueron vetadas y luego insistidas por el Congreso Nacional. Se reafirma que el déficit cero no puede usarse como argumento para incumplir leyes sancionadas, especialmente las de contenido social y educativo. La austeridad fiscal debe ser selectiva y legalmente compatible con los derechos constitucionales. 2. Refuerzo presupuestario a la educación superior Se fija un crédito para Universidades Nacionales, garantizando funcionamiento y actualización salarial, reafirmando el artículo 7º de la Ley 26.075 sobre financiamiento educativo y la distribución automática a las provincias. 3.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "onga palos en las ruedas por poner. Es por esto que cuando uno pide que la Ar - gentina tenga un presupuesto –y eso está a punto de pasar– tiene que evaluar muchas co - sas para poder acompañar o no. La queja es constante, como le decía re - cién, han sido muchos puntos, pero ¿sabe qué, señor presidente? Mi mamá falleció hace cua - tro años, ya mi mamá hace cuatro años atrás, cuando gobernaba el partido de la “Señora Libre”, no tenía para los remedios y nosotros, los hijos, la ayudábamos. Entonces no es algo nuevo, no vengan a pedir que lo solucionen, ¿por qué no lo solucionaron en su momento? Parece que no se enteraron. Sr. Rossi . – No utilice a su madre para hacer un discurso, respete a su mamá. Sra. Picón Martínez . – Señor, mire señor, usted es grande, yo los respeto, respete. Sr. Rossi . – Respete a su madre. Sra. Picón Martínez . – Por supuesto que la respeto y por eso lo digo.\n190 CÁMARA DE DIPUTADOS DE LA NACIÓN Reunión 20ª está prohibido en la Ley de Financiamiento de la Administración Pública. Reitero que es insó - lito, pero lo más preocupante es que no es sano para la democracia. Las leyes que regulan la educación, la cien - cia, la tecnología, la salud y la defensa del país no pueden ser derogadas dentro de un proyecto de ley de presupuesto como si fueran un casi - llero más en una planillita de Excel, es decir, de manera rápida y sin debate público, porque fueron logradas mediante consensos que lleva - ron muchos años. Reitero: la ley de presupuesto no debería convertirse en una ley ómnibus, como se pro - pone aquí, escondiendo la derogación de una numerosa cantidad de normas y leyes, porque no debería ser un atajo para que el Poder Eje - cutivo esquive el debate público. Tampoco puede convertirse en la herramien - ta a través de la cual el gobierno intente quitar - le facultades al Congreso. Si algo me preocupa de este texto es justamente que este proyecto de ley de presupuesto propone delegar nume - rosas facultades al Poder Ejecutivo. La excu - sa de la administración flexible lo único que hace es erosionar lo que el constituyente ideó cuando escribió la Constitución Nacional. Me refiero al sistema de pesos y contrapesos que consolida una democracia sana, que tanto nos costó lograr a los argentinos. Entonces, hablando de democracia, debería - mos pensar lo siguiente: ¿la democracia sola - mente se debilita cuando se la ataca o también con cuestiones como las que estamos experi - mentando ahora? Es decir, cuando se la des - gasta constantemente, cuando se la reduce a una mera formalidad, cuando se vacía de poder al vector garante de la República, que es este Honorable Congreso de la Nación. Quiero expresar a los señores diputados que no podemos renunciar a nuestro rol histórico. No podemos aceptar que en nombre del orden fiscal se construya un presupuesto a costa de los discapacitados, de la ciencia, de la educa - ción, de la salud de los argentinos, de la defen - sa y, por sobre todas las cosas, del federalismo, que fue el pilar sobre el cual se construyó la República Argentina.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": ", de la ciencia, de la educa - ción, de la salud de los argentinos, de la defen - sa y, por sobre todas las cosas, del federalismo, que fue el pilar sobre el cual se construyó la República Argentina. una ley de definiciones morales y políticas? Porque es la ley que traza el camino por el cual el Estado define qué defiende, a quién defiende y por sobre todo, lo más importante, cuál es el futuro al que se encamina nuestra nación. Entonces, la forma concreta, y hay que de - cirlo con total claridad, en la que se utiliza el presupuesto es muy importante. ¿Y cómo no debe utilizarse? No debe utilizarse para dero - gar leyes, para desarmar políticas públicas, ni para concentrar más poder en el Poder Ejecu - tivo. Debe ser un instrumento de orden, pero lo que aquí se propone, en este proyecto de ley, en vez de que sea un instrumento de orden, es que la ley de presupuesto sea un problema ins - titucional. Tenemos que recordar todos los que aquí hemos sido electos que esta composición del Congreso no fue elegida para convalidar silen - ciosamente los anhelos del Poder Ejecutivo; fue elegido para deliberar, para pensar, para corregir aquellos errores que, noblemente, pueda cometer cualquier funcionario del Po - der Ejecutivo. Pero por sobre todas las cosas, fuimos elegidos para poner límites, límites que sean garantes de la República. Este proyecto que hoy se somete a votación exhibe superávit. Eso es cierto, pero –permí - tame, señor presidente– es un superávit men - tiroso, porque no computa los intereses reales de la deuda. De todos modos, sigamos con el relato so - bre el pequeño superávit que se exhibe. En fun - ción de ese relato, lo que debemos preguntar - nos todos los diputados aquí presentes es si en verdad este superávit propone beneficios. ¿A qué costo estamos sometiendo a la población argentina para lograr este resultado? Formulo esta pregunta porque, por definición, no todo superávit es virtuoso; no todo equilibrio con - table es equilibrio social; y, por sobre todas las cosas, no toda disciplina contable ayuda a con - solidar la democracia. Aquí se propone recortar el financiamiento universitario, recortar partidas para discapaci - tados, debilitar el sistema científico, desarticu - lar políticas educativas, y lo más insólito es la modificación del marco legal de áreas sensi - bles mediante la ley de presupuesto, algo que\nDiciembre 17 de 2025 CÁMARA DE DIPUTADOS DE LA NACIÓN 191 las noventa y tres comunas, tenemos obras que recorren la provincia a lo largo y a lo ancho. El presupuesto es muy necesario: es nece - sario para los municipios, para cada una de las provincias –a fin de que cada gobierno pueda llevar a cabo su gestión–, y también es necesa - rio para el gobierno nacional. En ese sentido, mencionaré algunos ejem - plos. En mi provincia inauguramos doce es - cuelas con recursos propios. Además, median - te convenios con la universidad nacional y los municipios y las comunas del interior, acerca - mos la educación superior a todos los rincones de la provincia. Es decir que a muchos tucu - manos a quienes quizás les cuesta viajar, hoy les llevamos la educación superior a una zona próxima a las localidades en las que viven.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "sabilidad de gobernar, ver qué es lo que el pueblo necesita. Este proyecto de ley de presupuesto que hoy estamos tratando está lejos de tener en consi - deración las necesidades del pueblo argentino. Este proyecto de ley de presupuesto no solo tiene equilibrio fiscal, sino también desequili - brio social y federal. Nosotros fuimos capaces de elaborar una al - ternativa para ponerla en consideración en el día de hoy, en la cual fundamentalmente tene - mos presente el equilibrio fiscal con equilibrio social, pero en presencia del federalismo de muchas de las provincias que tienen equilibrio fiscal y de cientos de municipios que también lo tienen y que no tiran a nadie a la banquina. Sra. Bregman . – Pero no me deja terminar. Déjeme expresarlo porque me parece muy grave. Acá se está aplaudiendo cualquier cosa a cambio de ATN. Yo quiero plantear una cues - tión en serio. Estados Unidos interviene en la región po - líticamente, Marco Rubio pidió la condena de Cristina Fernández de Kirchner el 21 de mar - zo, antes del fallo de la Corte Suprema. Luego, pidió la impunidad de Bolsonaro, y avanzan condicionando nuestro país cuando Bessent y Trump señalan a quién hay que votar en la Ar - gentina. Ahora vemos esta avanzada militar… Entonces, lo denunciamos y pedimos que un país que tiene a los ingleses en Malvinas se pronuncie mayoritaria y públicamente en las calles contra esta injerencia imperialista. Nos dicen que van a combatir el narcotráfico cuando Trump acaba de indultar a Hernández, que estaba condenado a 45 años por narcotráfi - co. ¿Esa gente va a defendernos? Ahora solamente dejo planteado esto. Des - pués lo voy a ampliar. Sinceramente, me pa - rece muy grave que acá se aplauda una cosa por el estilo. Es gravísimo. Y no me vengan con que es defender a Maduro y esas cosas que dicen ustedes, porque la verdad es que podrían leer algo más que Twitter. (Aplausos.) Sra. Presidenta (Moreau). – La cuestión de privilegio planteada pasa a la Comisión de Asuntos Constitucionales. 10 PRESUPUESTO GENERAL PARA LA ADMINISTRACIÓN NACIONAL PARA EL EJERCICIO FISCAL CORRESPONDIENTE AL AÑO 2026 (Continuación) Sra. Presidenta (Moreau). – Prosigue la consideración del asunto en tratamiento. Tiene la palabra el señor diputado Rizzotti, por Jujuy. Sr. Rizzotti . – Señora presidenta: volviendo al tema del presupuesto, una de las cosas sobre las que quiero expresar mi verdad, es que en el marco de la gestión de este gobierno al que tanto felicitan y le reconocen el logro de haber presentado un presupuesto equilibrado, es que\n202 CÁMARA DE DIPUTADOS DE LA NACIÓN Reunión 20ª cesita 40.000 millones de pesos para terminar un tramo que está iniciado y cuyo valor final es de más de 200.000 millones de pesos. Si no terminamos la ruta, toda la plata que está inver - tida quedará en la nada. Por eso quiero hacer una reflexión frente a esto. ¿Qué es ser degenerado fiscal? Es nada más ni nada menos que bajar los impuestos a los autos importados y a las ganancias, joder a los jubilados, no atender a la discapacidad y, peor que eso, cerrar nuestras universidades. (Aplausos.) Sra. Presidenta (Moreau). – Tiene la pa - labra el señor diputado Lousteau, por Buenos Aires. Sr.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "Ese presupuesto ter - minó siendo la nada misma apenas una semana después de haber sido votado. ¡Aquí me acotan que fue al otro día! Ese ministro se llamaba Caputo y esta historia tuvo lugar en 2017. Ahora, a diferencia de aquella vez –como decía el diputado Pichetto–, les hizo bolsa el presupuesto dos días antes de votarlo: le cam - bió todos los parámetros. Incluso, cambió las bandas de flotación del dólar. ¡Van a votar pa - pel picado! ¡Esto no sirve de nada! Ahora bien: hay un tema que, como neuqui - no y patagónico, tengo que dejar más que claro sin quitar todas y cada una de las cosas que dijeron varios diputados de distintos bloques. Este presupuesto deja de lado, recorta y saca temas tales como el presupuesto universitario, ciencia y tecnología y discapacidad. También deroga leyes. Quiero hablarles a los patagónicos y a los habitantes de muchas otras provincias sobre El equilibrio fiscal es la posibilidad de plani - ficar hacia adelante con criterio, orden, previsi - bilidad y estabilidad, un elemento fundamental para el desarrollo de la Nación en su conjunto y, particularmente, de las provincias en un país realmente federal. Durante muchos años se planteó al déficit fiscal como una verdadera solución, pero en realidad en cada uno de esos momentos se ha ido hipotecando el futuro de los argentinos con decisiones erróneas y se ha ido consolidando un verdadero proceso de desinversión pública. Como bien dijo el diputado Benegas Lynch, se ha constituido al Estado como una verdadera hiedra venenosa sobre las espaldas del sector privado. Por eso, nosotros entendemos que es funda - mental este equilibrio fiscal, pero con responsa - bilidad. Esa responsabilidad tiene que ver con la equidad, que es una bandera que sostiene el espacio político al que represento. En definiti - va, entendemos que para que este crecimiento sea verdadero y sostenible en el tiempo deberá abarcar a todos los sectores de la sociedad, con una mirada especial para las provincias y los sectores más vulnerables y postergados de la Argentina. En ese sentido, quiero decir que hay mu - chos diputados nuevos de distintas provincias. Quisiera convocar fundamentalmente a los del Norte Grande, a los de la región Litoral –y a los de la provincia del Chaco en especial– a traba - jar todos juntos en el desarrollo productivo y económico de nuestras regiones postergadas. Los convoco a trabajar todos juntos en verda - deras recomposiciones, como por ejemplo en regímenes de zonas cálidas. Es una materia pendiente en provincias con temperaturas real - mente extremas y con una matriz de electro - dependencia total. La idea es que trabajemos todos juntos. Señor presidente: quiero decirles que acom - pañamos el proceso de profundo cambio, pero para sostenerlo en el tiempo entendemos prio - ritaria la construcción institucional. Dentro de la construcción institucional, este Congreso de la Nación tiene un rol fundamental, por lo cual, más allá de los debates, más allá de las diferencias ideológicas, más allá de los puntos de vista distintos –que en definitiva son todos escuchables y todos para considerar–, me pare -\n1",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "de la pobreza. (Aplausos.) Sr. Presidente (Petri). – Tiene la palabra la señora diputada Llano, por Mendoza. Sra. Llano . – Señor presidente: los Parla - mentos surgieron históricamente con el ob -\n146 CÁMARA DE DIPUTADOS DE LA NACIÓN Reunión 20ª tudios. Se trata de un ordenamiento fiscal con visión económica. El presupuesto busca abandonar la lógica de financiar con emisiones o endeudamiento, que es lo que vinimos haciendo todos estos años y así nos fue. También busca garantizar la transparencia, cosa que entiendo que a algunas personas y bloques les cuesta entender. Pretende mantener como prioridad las ju - bilaciones. Se suele decir que nos olvidamos de los jubilados o de los discapacitados, pero, lejos de eso, más del 70 por ciento del presu - puesto va a ir a esos sectores. Busca también el control de las universida - des, ya que hablaron del tema. Por eso fue tan importante auditarlas, debido al desastre que estaban haciendo. Estamos ante una nueva forma de hacer po - lítica con ordenamiento fiscal, estabilidad mo - netaria y afianzamiento de la confianza entre el Estado y los ciudadanos, que se perdió por culpa del kirchnerismo. Este proyecto de ley de presupuesto tiene como fin lo que dice el Preámbulo de nuestra Constitución, que es promover el bienestar ge - neral y asegurar los beneficios de la libertad. Oponerse a estas reformas es oponerse al pue - blo argentino. (Aplausos.) Sr. Presidente (Petri). – Tiene la palabra el señor diputado Agüero, por Chaco. Sr. Agüero . – Señor presidente: al igual que la diputada preopinante, es la primera vez que hablo en una sesión. Es un verdadero honor re - presentar como diputado nacional al pueblo de la provincia del Chaco, así como formar parte del bloque de la UCR, que a su vez conforma un interbloque con el PRO, el MID y Adelante Buenos Aires. Es un honor también participar del trata - miento del proyecto de ley de presupuesto para 2026, luego de una prórroga de dos años. En - tendemos que es una herramienta fundamental que debemos brindar al gobierno federal para la gestión del Estado. Nosotros consideramos que alcanzar el equilibrio fiscal y sostenerlo en el tiempo constituye una estructura conceptual primaria, fundamental e indispensable. Esto debe estar por encima de toda cuestión de na - turaleza ideológica. emitan monedas espurias para financiar el Te - soro y saquear de ese modo a la ciudadanía. Asimismo, condiciona la presentación de proyectos legislativos que originen o modifi - quen gastos a la incorporación de informes de impacto fiscal, desincentivando de este modo el impulso de normas irresponsables y dema - gógicas y profesionalizando también el trabajo legislativo, que tendrá que estar sustentado en datos y no en aspiraciones y deseos. El patrimonio de los ciudadanos es sagra - do. El Poder Legislativo debe ser su principal guardián. En ese sentido, este proyecto de ley introduce candados para que ningún populis - mo corrupto e irresponsable vuelva a destrozar el valor de la moneda, a sobrecargar al sector privado, a construir burocracias militantes y, principalmente, a hipotecar el futuro de nues - tros jóvenes. (Aplausos.) Sr. Presidente (Petri).",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "s jubilados, no atender a la discapacidad y, peor que eso, cerrar nuestras universidades. (Aplausos.) Sra. Presidenta (Moreau). – Tiene la pa - labra el señor diputado Lousteau, por Buenos Aires. Sr. Lousteau . – Señora presidenta: estamos debatiendo el proyecto de ley de presupuesto, que es la llamada Ley de Leyes. Son proyec - ciones acerca de lo que el gobierno espera que vaya a ocurrir con la economía y, a partir de eso, cuánto va a recaudar y cómo lo va a gastar. Es decir, es una mirada del gobierno sobre la sociedad. Quiero desgranar estos puntos: cuáles son las proyecciones y cuál es la mirada que tiene el gobierno acerca de la sociedad. Para cumplir la proyección de inflación de 2025 que está en este proyecto de ley de presu - puesto, hace falta que noviembre y diciembre sean deflacionarios. En los meses de noviem - bre y diciembre la inflación estará entre el 2 y el 2,5 por ciento. Es decir que la proyección de inflación de este año en el presupuesto no se cumple. El valor del dólar que figura en este proyecto para fin de este año es de 1.325 pesos; para el año que viene, de 1.423 pesos y para 2027, de 1.470 pesos. Hoy en el Banco Nación la coti - zación del dólar vendedor es de 1.475 pesos, es decir, es más alta que la proyectada para 2027. Además, acaban de cambiar la dinámica de las bandas, con lo cual el tipo de cambio se va a mover al ritmo de la inflación de los dos meses anteriores. Con esto vamos a tener más desplazamiento cambiario y, por ende, más dificultad de cum - plir con la meta inflacionaria. De hecho, el mercado, las consultoras que releva el Banco Central, pronostican una inflación, sin el cam - Pertenezco a un bloque que tiene repre - sentantes de varias provincias que comparten nuestro proyecto político. Todas tienen equi - librio fiscal, a pesar del recorte y de la discre - cionalidad que tiene el gobierno nacional para con todas ellas. Este proyecto de ley de presupuesto es, sin lugar a dudas, el plan de gobierno que presentó Milei con su motosierra cuando dijo que venía a destruir al Estado. Está logrando destruir el Estado de bienestar en nuestro país, yendo en contra de pilares fundamentales, como es la salud pública. Las provincias están haciendo un gran es - fuerzo para sostener la salud pública, destinan - do recursos a programas que eran para medi - camentos oncológicos, para protección de los diabéticos y para emergencias pediátricas, algo respecto de lo cual este gobierno está deser - tando. Desde los gobiernos provinciales seguimos sosteniendo la calidad educativa. En mi pro - vincia, cientos de miles de argentinos comen en los comedores escolares. En mi provincia, que tiene equilibrio fiscal, seguimos sosteniendo el boleto estudiantil gra - tuito, primario, secundario y universitario, y todos los docentes que se transportan en ella lo hacen en forma gratuita y con equilibrio fiscal. Eso es, sin lugar a dudas, pensar en la necesi - dad de la gente con responsabilidad de Estado. No puedo dejar de mencionar la necesidad de que el gobierno nacional esté presente en la obra pública. Mi provincia atraviesa la ruta más larga del país, la número 40.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    }
+   ]
+  },
+  "sesiones_003": {
+   "pregunta": "Qué dijo Milei en las sesiones del Congreso?",
+   "respuesta": "Los fragmentos encontrados en los diarios de sesiones no corresponden a intervenciones de Javier Milei como orador, sino a discursos de **otros diputados que mencionaron su nombre**. Esto se debe a que Milei no es diputado nacional: el sistema de versiones taquigráficas cubre únicamente las sesiones de la **Cámara de Diputados de la Nación**, y él actualmente es Presidente de la República.\n\nEn los fragmentos disponibles (sesiones de febrero de 2026), distintos oradores no identificados mencionaron a Milei en el contexto de:\n\n- **La oferta de tropas argentinas para Gaza** y críticas a sus viajes al exterior.\n- **El escándalo en la ANDIS** (presuntos sobreprecios en medicamentos para personas con discapacidad) y pedidos de interpelación a Karina Milei y Mario Lugones.\n- **El cierre de empresas y la reforma laboral**, con referencias a las políticas del gobierno.\n\nSi te interesa saber qué dijo Milei **cuando era diputado** (período 2021–2023), puedo buscar en las sesiones de esa etapa.",
+   "titulo": "Transcripciones parlamentarias: \"Milei\"",
+   "portal": "Diario de Sesiones — Cámara de Diputados",
+   "url": "https://www.diputados.gov.ar/sesiones/",
+   "filas_devueltas": 12,
+   "puntaje_juez": [
+    0.6,
+    0.6
+   ],
+   "sha256_evidencia_juez": "3e61fd1008cef084ef7120bac9ab26cbdb481e33958ff6f57682239990fba5ec",
+   "marcadas": [
+    [
+     "ofreció tropas para desplegar en la Franja de Gaza",
+     "oferta de tropas argentinas para Gaza"
+    ],
+    [
+     "viajes y lujos",
+     "viajes al exterior"
+    ],
+    [
+     "cooptó la ANDIS",
+     "escándalo en la ANDIS"
+    ],
+    [
+     "sobreprecios",
+     "sobreprecios"
+    ],
+    [
+     "interpelar a Karina Milei y a Mario Lugones",
+     "interpelación a Karina Milei y Mario Lugones"
+    ]
+   ],
+   "fragmentos": [
+    {
+     "id": "f3d96413",
+     "visto_por_el_juez": "no"
+    },
+    {
+     "id": "65dc96a6",
+     "visto_por_el_juez": "no"
+    },
+    {
+     "id": "b3427efc",
+     "visto_por_el_juez": "no"
+    },
+    {
+     "id": "03351eb1",
+     "visto_por_el_juez": "cortado"
+    },
+    {
+     "id": "6a044f7b",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "bceb089f",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "209dd84c",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "8e2b36a0",
+     "visto_por_el_juez": "entero"
+    },
+    {
+     "id": "9a2161c2",
+     "visto_por_el_juez": "entero"
+    }
+   ],
+   "filas": [
+    {
+     "periodo": 143,
+     "reunion": 22,
+     "fecha": "2026-02-19",
+     "tipo_sesion": "3° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "Trump y en esa fiestita criminal, que se llama “Consejo de Guerra”, busca consolidar un proyecto colonial para Gaza y consolidar el genocidio que se está llevando adelante contra el pueblo palestino. Hace unos minutos nada más, la agenci a France - Presse informa que el presidente argentino, Milei, ofreció tropas para desplegar en la Franja de Gaza, en la reunión inaugural de la Junta de Paz. Exactamente, lo que faltaba: ¡ofreció tropas! Me gustaría que alguien acá, los de Milei o los cómplices, pueda justificar esto que está pasando en este momento. Mientras él gasta millones, acá se está votando una reforma que le quita todo tipo de derechos a la clase trabajadora y se los niega, por ley, a los que hoy no los tienen. En su política deliberada de primarización de la economía, de promocionar el extractivismo, se presume que ya se perdieron 300.000 puestos de trabajo genuinos desde que gobierna Javier Milei. Así que estos viajes y lujos que se da el señor presidente cada vez se vuelven más obscenos.\n170 Además, si contemplamos lo que está pasando en la empresa Fate, el conflicto de Ultramax y todo lo que están viviendo los trabajadores y las trabajadoras de nuestro país, que él esté de joda por ahí es bastante ofensivo. Por eso, me pregunto: ¿cuánto cuest an esos viajes? ¿Por qué se niegan, cuando hacemos pedidos de acceso a la información pública, a contestar cuánto cuestan esos viajes? ¿Cuánto cuestan esos operativos represivos? Porque además advierto, en este recinto semivacío - como suele ocurrir - , que están reprimiend o de nuevo afuera. ¿Cuánto cuestan estas represiones? ¿Se podría haber aumentado a los jubilados y a las jubiladas con lo que han gastado en estos dos años y pico de gobierno? ¿Es mejor destino la represión? ¿Es mejor destino sacarles los ojos a los manifestantes? Eso es lo que está pasando ahora afuera. Y una pregunta más: ¿cuánto cuestan estas voluntades para votar leyes infames como esta? ¿Cuánto cuesta que se vote a escondidas en febrero? ¿Cuánto cuesta que los señores diputados y senadores que nunca aparecen en el\n171 verano, que no consiguen pasaje s — no sé la cantidad de tragedias que les ocurren a estos pobres millonarios — , hoy estén todos acá sentaditos? Eso cuesta plata. Una se va dando manija mientras escucha, y escuché muchas veces la palabra \"traidores\", que yo también la uso. Existen traidores, claro que los hay, que se hacen elegir por una lista e ideas, diciendo que son opositores a Milei, y se pasan. En este recinto y en el Senado todos los bloques votaron la reiterancia y la reincidencia. Entonces, pregunto: cuando la conducta política se repite, cuando los de Tucumán y de otras provincias estaban con Milei antes de las elecciones de octubre y vuelve n a estar después, ¿no se aplica la reiterancia y la reincidencia para la conducta política? ¿Por qué son traidores? Son canallas. Si ya venían siendo así antes de las elecciones de octubre, o ahora parece que los bendecimos para las elecciones, vuelven a ser buenos y después nos traicionan. Ojo con la palabra \"traidores\", porque es una palabra que tiene mucho peso simbólico.\n172 Pero acá no hay traidores; acá hay reiterancia y reincidencia.",
+     "paginas_totales": 639,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2026021922.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 21,
+     "fecha": "2026-02-12",
+     "tipo_sesion": "2° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "ciudadano argentino oriundo de la provincia de Catamarca, miembro de la G endarmería N acional , que está detenido de manera arbitraria en la R epública de Venezuela desde el 8 de diciembre de 2024. Por su carácter urgente y especial solicitamos al gobierno nacional que arbitre todos los medios necesarios, diplomático s , políticos y consula res para exigir su liberación. Además, solicitamos que en la próxima sesión se trate el expediente 7250 - D. - 2025 , proyecto de declaración de mi autoría que refleja esta situación que genera una gran incertidumbre no solo para la familia de Nahuel sino para\n482 toda la provincia de Cata marca , ya que no hay novedades al respecto. Sra. Presidenta ( Santillán Juárez Brahim). - La cuestión de privilegio será girada a la C omisión de Asuntos C onstitucionales para su posterior consideración . Tiene la palabra la señora diputada Banfi. Sra. Banfi. - Señora presidenta: en relación a lo planteado por el diputado preopinante , nosotros , con el diputado Ferraro y el presidente de bloque de L a L ibertad A vanza , diputado Bornoroni, nos hemos expresado en el mismo senti do . Le solicitamos a la P residencia que en cuanto comience n las sesiones ordinarias podamos despachar el proyecto - creo que está incluso en la comisión que usted preside , de Relaciones Exteriores y Culto - y traer a este recinto la declaración de la liberac ión de Nahuel G allo y Germán Giuliani, que están detenidos bajo la dictadura de M aduro por ser argentinos.\n483 Sra. Presidenta (Santillán Juárez Brahim). - Tiene la palabra la señora diputada Giudici. Sra. Giudici. - Señora presidenta: e n el mismo sentido que el diputado Nóblega y la diputada Banfi , nosotros hemos trabajado mucho. H ace poco hemos recibido a los familiares de Nahuel Gallo y de Germán Giuliani . Aten d iendo al reglamento , y ya que en esta sesión no se puede incorporar, le pedimos que , en la primera reunión de la C omisión de R elaciones Exteriores y Culto , antes de que se constituya el grupo de Venezuela incluso, nos convoque a trabajar la redacción propuesta por el diputado de Catamarca. Sra. Presidenta ( Santillán Juárez Brahim). - Por supuest o, a sí será.\n484 - 23 - CUESTIÓN DE PRIVILEG IO Sra. Presidenta (Santillán Juárez Brahim). - Para una cuestión de privilegio, tiene la palabra el señor diputado M arino , por Buenos Aires. Sr. Marino. - Señora presidenta: la cuestión de privilegio está dirigida contra el Poder Ejecutivo nacional. Está motivada por el hecho de que el día lunes 9 de febrero el juez Casanello emitió una resolución , en la cual procesó a Diego Spagnuolo y a otr a s 18 personas por asociación ilícita, por cohecho - es decir , coimas - y por otros delitos , por haber malversado la Age ncia Nacional de Discapacidad. Una red de corrupción que cooptó la ANDIS. De acuerdo con el dictamen del fiscal Picardi - que trascendió a través de los medios de comunicación - instrumentaron sobreprecios e n la compra de medicamentos de hasta dos mil por ciento. Según el fiscal Picardi, desviaron, como mínimo, 37.000 millones de pesos a cuatro droguerías a través de compulsas manipuladas que se\n4",
+     "paginas_totales": 643,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2026021221.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 21,
+     "fecha": "2026-02-12",
+     "tipo_sesion": "2° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "onde. Tenemos que agregar - por eso esta cuestión d e privilegio es también contra el presidente Javier Milei - que el 31 de diciembre - Año Nuevo - firmó el desmantelamiento de la ANDIS por decreto. Así de crueles son: corruptos que se quedaban con la plata de los medicamentos para personas con discapacidad y crueles que disuelven la ANDIS y les quitan las pensiones a las personas con discapacidad. No se puede\n488 tolerar. Por eso tiene que venir Mario Lugones a explicar qué están haciendo. Ahora se supone que el Ministerio de Salud absorbió las funciones de la AN DIS para seguir garantizando los derechos que le corresponden por la Constitución y la Convención Internacional de Derechos para Personas con Discapacidad. Por ello, señor presidente, solicitamos que se trate en la Comisión de Asuntos Constitucionales y en este recinto el proyecto que hemos presentado para interpelar a Karina Milei y a Mario Lugones. (Aplausos.) Sr. Presidente (Menem). - La cuestión de privilegio planteada será girada a la Comisión de Asuntos Constitucionales para su posterior consideraci ón. Aprovecho para decirles a los diputados presentes que quedan dos o tres cuestiones de privilegio más y luego empezamos con el tratamiento del Tratado Mercosur - Unión Europea.\n489 - 24 - CUESTIÓN DE PRIVILEGIO Sr. Presidente (Menem). - Para una cuestión de privil egio, tiene la palabra el señor diputado Glinski, por Chubut. Sr. Glinski . - Señor presidente: esta cuestión de privilegio es contra el jefe de Gabinete de Ministros, Manuel Adorni, y contra el doctor Guillermo Defossé, que ocupa el cargo de secretario de Ciencia y Tecnología de la provincia de Chubut y es presidente del Centro de Investigaciones Andino - Patagónicas - CIEFAP - que conforman las provincias andino patagónicas, por su responsabilidad en la propagación de los incendios de la Patagonia y en particu lar de la provincia de Chubut. Señor presidente: haré un breve repaso. En los primeros días del mes de diciembre, una tormenta eléctrica dio inicio a un incendio devastador en la provincia de Chubut, más precisamente en el Parque Nacional Los Alerces. Se trató de un incendio que se podría haber evitado porque luego de que haya prendido en una zona absolutamente\n490 intangible y de imposible llegada… Voy a pedir silencio, señor presidente. Somos muy poquitos y hay mucho ruido. Sr. Presidente (Menem). - Diputada Banfi: no se me enoje pero está haciendo uso de la palabra y se escucha muy fuerte su voz. El diputado Glinski está haciendo una cuestión de privilegio. Continúa en el uso de la palabra el señor diputado Glinski, por Chubut. Sr. Glinski . - Gracias, diput ada Banfi. Decía que este incendio se podría haber evitado porque, una vez detectado ese primer foco, se deberían haber utilizado medios aéreos para apagarlo. Sin embargo, por una notable negligencia de quienes estaban a cargo de esa situación en Parques Nacionales se confió en que naturalmente se podía apagar y eso no sucedió. Lo realmente trágico de lo que está ocurriendo en nuestra Patagonia, y en particular en la provincia de Chubut, tiene que ver con las fallas en\n4",
+     "paginas_totales": 643,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2026021221.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 22,
+     "fecha": "2026-02-19",
+     "tipo_sesion": "3° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "os trabajadores de Salta como diputado. Quiero aclararle también que usted acaba de decir que el modelo de Milei fracasa, pero que va a votar esta ley por las pymes y por los trabajadores informales. Si el modelo de Milei fracasa - y hay un elemento fundamental en esto - es por la destrucción del salario y de las jubilaciones y la disminución de ingresos de las grandes mayorías ; las pequeñas empresas, microempresas - como usted dijo - o los pequeños comercios se arruinan porque no tienen quiénes les compren, porque los salarios están por el piso.\n193 Entonces, si usted quisiera beneficiar a las pymes, en primer lugar, tendría que estar en contra de este proyecto que desprotege a las trabajadoras y a los trabajadores informales. Esto le quita la posibilidad de que en algún momento tenga un trabajo form al para exigir un salario que le alcance para vivir y darle de comer a su familia, mandar a sus hijos a la escuela, a las universidades, que es lo que quiere destruir este gobierno. Entonces, no sea tan chanta, diputado: ¡cómo va a decir que el modelo de Milei fracasa y que va a votar este proyecto por las pymes! Ustedes defienden a las mineras, defienden a los terratenientes. Para ellos gobiernan, para las tabacaleras, para los grandes empresarios y, por supuesto, para la oligarquía. Y para las pymes - insisto - se han hecho estos proyectos de darles beneficios para que registren trabajadores, y pasó lo contrario: aumentó el trabajo no registrado.\n194 Está demostrado en todos los estudios que mientras más se protege al trabajador o a la trabajadora, más registración laboral hay, no menos. Acá se premia al que no registra. Entonces, ¿cómo van a registrar? ¿Cómo van a hacerlo, si total después lo perdona n, le dan rebaja de contribuciones y demás? Por eso tenemos tanto trabajo informal… Sr. Presidente (Petri). - Por favor, señor diputado, concluya su exposición. Sr. Del Caño . - Sí, señor presidente, quería contestarle al diputado preopinante. Sr. Presidente (Petri). - Tiene la palabra la señora diputada Zigarán, por Jujuy. Sra. Zigarán . - Señor presidente: quiero decir, en primer lugar, que rechazo terminantemente la metodología con la que\n195 se pretende llevar adelante esta sesión, pero también la forma en la cual se trató una reforma estructural que modifica de manera radical el orden público laboral. El viernes llegó a esta Cámara el proyecto que fue aprobado por el Senado, el martes se llamó a la reunión plenaria de comisiones y el miércoles se llamó a esta sesión, es decir, un día antes. Esta manera de tratamiento de una reforma tan importante para la Argentina - porque nuestro país necesita una reforma laboral - , pone en tela de juicio la calidad del proyecto que hoy está puesto a consideración. Lo que se está haciendo es un atropello institucional, es un simulacro de la democracia, porque la democracia no es sólo el gobierno de la mayoría, sino también el respeto de las minorías y la construcción de consensos. Nada de eso ha ocurrido en este pro ceso. Se nos trata de imponer una reforma que ha tenido muy poco debate y casi nula participación pública, porque lo que hubo ayer en e l plenari o de comisiones no fue una\n1",
+     "paginas_totales": 639,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2026021922.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "de este presupuesto, aprovecho para exigir al gobier - no nacional la reactivación inmediata de los trabajos de mantenimiento de rutas, la asignación de recursos para garantizar obras públicas esenciales, el aumen - to significativo de los recursos coparticipables y la reanudación de las transferencias de los fondos espe - cíficos. La reducción de la inversión pública por parte del gobierno nacional no es solo una estadística, en nu - merosas ciudades de la Argentina tiene impacto di - recto con consecuencias en la salud, la educación o la seguridad, además de comprometer las economías regionales y la integración del país. Asimismo, coincidiendo con lo planteado por la CTERA “este presupuesto no solo consolida el ajuste, sino que representa un ataque directo a la educación pública, a la ciencia y a la tecnología, pilares estraté - gicos para el desarrollo de nuestro país”. Considero que el proyecto de ley de presupuesto 2026 presentado por el gobierno oficializa la parálisis del sistema científico, el deterioro del ámbito educati - vo nacional y la retracción de la presencia del Estado nacional en todos los ámbitos. Ningún país desarrollado del mundo abandonó la inversión pública, la educación y su sistema científico-tecnológico; por el contrario, todos han fo -\n552 CÁMARA DE DIPUTADOS DE LA NACIÓN Reunión 20ª Público Nacional y explicita que estos recursos son independientes de los asignados al ministerio y a las fuerzas armadas en el presupuesto nacional. Este in - ciso 1 del artículo 4º de la ley 27.565 es el que le da sentido al fondo; es el corazón del FONDEF. En el proyecto de ley de presupuesto que estamos debatiendo hoy, el presidente Milei quiere eliminar este inciso 1 del artículo 4º de la ley del FONDEF. Así lo expresa el artículo 30 del proyecto enviado por el Ejecutivo. Entre otros fondos, propone derogar el inciso que le da sentido al FONDEF. Para hacer una inversión se necesita tiempo y se necesita saber con qué recursos se va a contar. Ahora Milei está eliminando esta herramienta de previsibi - lidad para las fuerzas armadas que creamos y ejecu - tamos ininterrumpidamente entre 2021 y 2023. Ni siquiera plantean la suspensión de este inciso –como sucedió en 2025–, sino que directamente proponen eliminarlo. Así, el presidente Milei le quita a las fuer - zas armadas la previsibilidad para las inversiones des - tinadas a su reequipamiento. Por todo lo expresado anteriormente, me parece que sería un retroceso enorme que se apruebe el artículo 30 tal como está en el despacho del proyecto que en - vió el Poder Ejecutivo, que se convirtió en el despa - cho de la mayoría. Quiero resaltar también la estrategia que lleva - mos adelante para implementar eficientemente el FONDEF, identificando una misma lógica vinculada al marco normativo de la defensa nacional que permi - tió alinear las prioridades materiales del Plan Camil con las posibilidades de financiamiento del FONDEF. Cuantitativamente, solo en el primer año de ejecu - ción del FONDEF se presentaron más de 64 proyectos de inversión, y las presentaciones posteriores reflejan una progresión anual constante.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "rota argentina y el pue - blo en la calle echó al que el presidente Milei llamó “el mejor ministro de Economía de la historia”: Domingo Cavallo. Es un pueblo que se levantó contra el estado de sitio. Trataron de ahogarlo con la represión, como ahora lo hacen las tropas de Bullrich con el clamor popular contra el hambre, la des - ocupación y la confiscación de los ahorristas. Tantos parecidos a este momento nos llevan a traer la memoria histórica a las nuevas genera -\nDiciembre 17 de 2025 CÁMARA DE DIPUTADOS DE LA NACIÓN 283 ciones, recordando la rebelión popular del 19 y 20 de diciembre. Pero vamos a recordar también que el 20 de diciembre del 2023 ganábamos la calle con el movimiento piquetero, con el Polo Obrero a la cabeza, con sindicatos combativos, porque no queríamos aceptar este régimen de democracia de infantería que nos estaban proponiendo des - de el primer minuto. Como resultado de esa movilización históri - ca –porque abrió la lucha del pueblo para ganar la calle, que sigue hasta el día de hoy y tuvo grandes expresiones– hemos tenido un juicio armado por los servicios de inteligencia, bo - chornoso, con acusaciones penales gravísimas contra 18 dirigentes del Polo Obrero, funda - mentalmente, y otros movimientos piqueteros que fueron elevados escandalosamente a jui - cio por la Justicia de lo que deberíamos llamar “Inodoro Py”. Esa es la corrupción de la justi - cia federal argentina, que es un brazo del poder político para perseguir a los que luchan. Es muy oportuno también porque mañana, 18 de diciembre, se cumple un aniversario de las grandes jornadas del 2017, me refiero a la gran movilización de la clase obrera, de los trabajado - res de distintos gremios, centenares de miles que salieron en diciembre del 2017 contra el robo a los jubilados del gobierno de Macri y mandaron al archivo la reforma laboral de 145 artículos que tenía preparada el gobierno de Macri. Esto es muy oportuno porque mañana, 18 de diciembre, estaremos en la calle con el movi - miento obrero combativo, con el movimiento piquetero y con la izquierda. Vamos a movili - zarnos con las banderas de un paro activo nacio - nal, de un plan de lucha para derrotar, esta vez también, la nefasta reforma laboral de Milei y todo el paquete de leyes antiobreras, represivas, entreguistas y coloniales del gobierno de Milei. Sr. Presidente (Menem). – Diputado Val - dés, ¿usted tenía un homenaje? Sr. Valdés . – No. 19 CUESTIÓN DE PRIVILEGIO Sr. Presidente (Menem). – Para una cues - tión de privilegio, tiene la palabra el señor diputado Marino, por Buenos Aires. Sr. Marino . – Señor presidente: esta cues - tión de privilegio está destinada al Poder Eje - cutivo nacional. Estamos atravesando una si - tuación de extrema gravedad en América La - tina y el Caribe. Tenemos el mayor despliegue militar en dé - cadas en nuestra región por parte del gobierno de Estados Unidos. Tenemos todos los días al buque de guerra más poderoso del mundo, el “USS Gerald Ford”, en el Mar Caribe, amena - zándonos.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "acerse es por qué la Argentina pudo gobernarse sin política de endeudamiento, por qué la Argen - tina pudo gobernarse durante tantos años sin generar este endeudamiento feroz que tiene hoy y que todo indica que se va a ir profun - dizando. Entonces, cuando nosotros venimos acá a poner el cartel de “Cristina libre”, lo hacemos porque reivindicamos a la presidenta de nues - tro partido, el Partido Justicialista, porque cree - mos y estamos convencidos de que Cristina es inocente; porque cuando uno mira y analiza la totalidad del juicio que le llevaron adelante, no encuentra vinculación alguna entre los delitos que allí se le imputan con la responsabilidad como presidenta de la Nación de Cristina Fer - nández de Kirchner. Quizá no es el momento, pero sí quiero de - cirlo para quedarme tranquilo con mi concien - cia: ustedes son un bloque que en un momen - to del debate nos quisieron dar clase de ética y de moral. Pero yo les quiero decir, señores diputados de La Libertad Avanza, que tienen un presidente denunciado y acusado por estafa agravada… Sra. Santillán Juárez Brahim . – ¡Está con - denada! –Varios señores diputados hablan a la vez. Sr. Rossi . – Tienen un presidente denuncia - do y acusado por estafa agravada. ¡Es-ta-fa- dor! El presidente Milei… –Varios señores diputados hablan a la vez. Sr. Rossi . – …no solamente acá en la Ar - gentina, sino también en los Estados Unidos. Además, tiene una “copresidenta” denunciada por coimera… –Varios señores diputados hablan a la vez. Sr. Rossi . – ¡Por el 3 por ciento de coimas está denunciada la “copresidenta”, la hermana del presidente Milei! –Varios señores diputados hablan a la vez. Sr. Rossi . – ¡Tuvieron que separar al expre - sidente de la Comisión de Presupuesto y Ha - cienda y cabeza de lista de La Libertad Avanza por relaciones con el vínculo narco! –Varios señores diputados hablan a la vez. Sr. Rossi . – ¡Y tienen protegida dentro de su bloque a una diputada denunciada también por vinculaciones narco! ¡No tienen autoridad ética ni autoridad moral para inculparle ningún delito absolutamente a nadie! –Varios señores diputados hablan a la vez. Sr. Rossi . – ¡Empiecen a mirarse su propio ombligo porque, señor presidente, están más sucios que una bolsa de papas! (Aplausos.) II A las jornadas del 19 y 20 de diciembre de 2001 Sr. Presidente (Menem). – Para un home - naje, tiene la palabra el señor diputado Pitrola, por Buenos Aires. Sr. Pitrola . – Señor presidente: queremos recordar en este homenaje las jornadas del 19 y 20 de diciembre de 2001 por muchos mo - tivos. Se trató de una rebelión popular donde se unieron piquetes y cacerolas para echar a un gobierno responsable del “Megacanje”, res - ponsable del rescate del FMI, responsable de la corrupción de la “Banelco”. Veníamos de la convertibilidad importadora, veníamos de la bancarrota argentina y el pue - blo en la calle echó al que el presidente Milei llamó “el mejor ministro de Economía de la historia”: Domingo Cavallo. Es un pueblo que se levantó contra el estado de sitio.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "te sea lo más orde - nado posible. Ustedes defienden las ideas que nos lleva - ron al fracaso, pero los argentinos ya eligieron. ¡Gracias a Dios no los eligieron! Entiéndanlo, asúmanlo; es más fácil. Ellos eligieron el com - promiso con el país y que la Argentina vuelva a ser grande, pero, esta vez, en serio. Se ve que ustedes no se han dado cuenta.\nDiciembre 17 de 2025 CÁMARA DE DIPUTADOS DE LA NACIÓN 217 Sr. Presidente (Menem). – Tiene la palabra el señor diputado Bornoroni, quien será el úl - timo orador. Les pido a los diputados que ocu - pen sus bancas para poder votar. Sr. Bornoroni . – Seré breve, señor presi - dente. Estamos por votar el presupuesto, que es la ley más importante que votaremos en el año. Estaría bueno que esta votación nos encuentre juntos trabajando en un presupuesto para todos los argentinos. El presidente Milei se ha ocupado de que la Argentina tenga equilibrio fiscal, algo que es importante, no solo para los argentinos, sino para el mundo. El mundo trabaja sobre pre - supuestos con equilibrio fiscal y esa es la pie - dra angular del presidente Milei en su trabajo cotidiano. Me refiero a mantener el equilibrio fiscal para que los argentinos no vuelvan a la inflación que les dejaron los gobiernos ante - riores. Ese trabajo que hace el presidente llega hoy en forma de un presupuesto a esta Cámara de Diputados para que entre todos lo podamos lle - var adelante. Sería muy importante que entre todos los diputados podamos apoyar el presu - puesto con equilibrio fiscal que envía el presi - dente Milei. Él lo toma como la piedra angular del trabajo que hace por los argentinos. No es un mero capricho hablar de equilibrio fiscal, sino que es lo que nos da la posibilidad de bajar impuestos y de eliminar la inflación para siempre, que es lo más importante para to - dos los argentinos. Si eliminamos impuestos y bajamos la inflación a cero, seguramente habrá más trabajo para los argentinos. También pensamos –y muchas veces se dijo– que la fórmula era importante. Se trabajó en distintas fórmulas. Acá se ha cambiado la fórmula y se ha cambiado el cocinero para que podamos hacer una Argentina distinta. Ese es el trabajo mediante el cual nosotros venimos a presentar este presupuesto del presidente Mi - lei. Celebramos que se hayan bajado la infla - ción, la pobreza, los impuestos y que se haya salido del cepo. Insisto con eso porque el equilibrio fiscal más el equilibrio monetario lleva a una Argen - tina próspera. Cuando uno genera puestos de trabajo, sabemos que a fin de mes lo que hemos generado quedará en los bolsillos de cada uno Aumentaron los aranceles del sistema en - tre un 29 y un 35 por ciento para garantizar la continuidad de las prestaciones. ¿Y ustedes nos dicen que no tenemos sensibilidad social? Señor presidente: además de esto, existen actualizaciones previstas en el presupuesto por IPC, es decir, por una inflación que está contro - lada. ¡Pensar que es la misma a la que le iban a declarar la guerra los muchachos que están gritando enfrente! Se prevé un aumento de las pensiones por discapacidad del 5 por ciento por encima de la inflación.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    },
+    {
+     "periodo": 143,
+     "reunion": 20,
+     "fecha": "2025-12-17",
+     "tipo_sesion": "1° Sesión Extraordinaria Especial",
+     "orador": "No identificado",
+     "texto": "strozar el valor de la moneda, a sobrecargar al sector privado, a construir burocracias militantes y, principalmente, a hipotecar el futuro de nues - tros jóvenes. (Aplausos.) Sr. Presidente (Petri). – Tiene la palabra la señora diputada Muñoz, por Neuquén. Sra. Muñoz . – Señor presidente: buenas tar - des a todos. Esta es mi primera vez en sesión y me toca este tema tan importante, que es el proyecto de ley de presupuesto para 2026. Voy a decir algo que quizás es de sentido co - mún: por primera vez en la Argentina tenemos un presidente que es economista. No solo sabe de economía, sino que sabe cómo administrar este presupuesto. Nos lo ha demostrado en es - tos dos años de gobierno logrando el primer superávit presupuestario después de treinta años. También logró una reducción enorme del gasto público y del déficit fiscal, así como con - siguió apoyo financiero internacional y forta - lecimiento fiscal. La gente votó esto y apoya al gobierno de Javier Milei. Algunos tal vez eso no lo saben, ya que a veces hablan como si la tuvieran superclara. Si hubiesen hecho todo esto antes, los hubiésemos votado. Pero ganó Milei. Es lo que la gente apoya y es importante recordar eso. Pasamos del 211 por ciento de inflación al 31,5 por ciento, lo cual merece otro aplauso (Aplausos.) Es increíble lo que hizo Milei en la Argenti - na y no hay que olvidarse de eso. Estos logros no son casuales, sino conse - cuencia de un presupuesto administrativo téc - nico que corresponde a su personalidad y es -\nDiciembre 17 de 2025 CÁMARA DE DIPUTADOS DE LA NACIÓN 147 ce que jerarquizar al Congreso de la Nación es un elemento central para construir la Argenti - na que nosotros queremos y uno de los pilares fundamentales de esa tarea. (Aplausos.) Sr. Presidente (Petri). – Tiene la palabra el señor diputado Todero, por Neuquén. Sr. Todero . – No me toma la huella, señor presidente. Sr. Presidente (Petri). – No es necesario en estos momentos, señor diputado. Adelante. Sr. Todero . – Señor presidente: he escucha - do hablar del presupuesto a algunos diputados y diputadas. Según ellos, ahora sí el gobierno con este presupuesto le va a dar a las empresas estabilidad, certezas y un sendero por el cual caminar y por el cual invertir. Creo que tal vez, en primer lugar, tendríamos que hacer algo de historia reciente. Escuché al diputado Pichetto hablar de algunas cuestiones que voy a repetir porque creo que son bastante importantes. Respecto del tema de la historia reciente, hay diputadas y diputados nuevos en esta Cámara. Algunos tienen una historia po - lítica de tres meses y quizás no conocen esta historia y por eso hay que contarla. Una vez en la Argentina, un ministro mandó votar un presupuesto. Se votó el presupuesto y el día 28 de diciembre –Día de los Santos Ino - centes y tal vez en sentido de broma– le cam - bió todos los parámetros. Ese presupuesto ter - minó siendo la nada misma apenas una semana después de haber sido votado. ¡Aquí me acotan que fue al otro día! Ese ministro se llamaba Caputo y esta historia tuvo lugar en 2017.",
+     "paginas_totales": 595,
+     "pdf": "https://www3.hcdn.gob.ar/dependencias/dtaquigrafos/diarios/periodo-143/diario_2025121720.pdf"
+    }
+   ]
+  }
+ }
+}

@@ -56,8 +56,14 @@ Modo = Literal["iso", "inicio", "fin"]
 _NOMBRES_FECHA = frozenset({"fecha", "indice_tiempo", "periodo", "period", "date"})
 # Una palabra del nombre que dice "fecha" (fecha_inicio, PUBLICACION_FECHA).
 _PALABRAS_FECHA = frozenset({"fecha", "date"})
-# Columnas de año: se filtran como período anual.
-_PALABRAS_ANIO = frozenset({"anio", "año", "ano", "year", "ejercicio"})
+# Columnas de año: se filtran como período anual. `anyo` está en el comercio de
+# minerales de datos.gob.ar (`ANYO`, 32 años).
+_PALABRAS_ANIO = frozenset({"anio", "año", "ano", "anyo", "year", "ejercicio"})
+# «Año» con la ñ mal codificada, como palabra suelta: `a±o`, `aÃ±o`, `Ańo`,
+# `A¥O-TARIFA`, `aÒo`, `desde_aÉ˝o`. De las 118 tablas que la verificación de
+# #171 encontró dadas por «una sola foto» (07-oct), 17 tienen un año así y 2
+# más uno `ANYO`: quedaban sin fecha.
+_ANIO_MAL_CODIFICADO = re.compile(r"(?<![0-9A-Za-z])[Aa][^\x00-\x7f]{1,3}[Oo](?![0-9A-Za-z])")
 # Fechas de carga o de auditoría, no del dato: `ultima_actualizacion_fecha`
 # (1.091 tablas en prod) es cuándo se publicó el archivo, no de cuándo es el
 # dato; `updated_ts`/`updated_at` son de la base; `update_date`/`last_update`
@@ -118,6 +124,7 @@ def es_tipo_fecha(tipo: str) -> bool:
 
 
 def _palabras(nombre: str) -> list[str]:
+    nombre = _ANIO_MAL_CODIFICADO.sub("año", nombre)
     return [p for p in _SEPARADORES.split(plegar(_CAMEL.sub("_", nombre))) if p]
 
 
@@ -162,6 +169,96 @@ def es_nombre_de_fecha(nombre: str) -> bool:
 
 def es_nombre_de_anio(nombre: str) -> bool:
     return not es_metadato(nombre) and any(p in _PALABRAS_ANIO for p in _palabras(nombre))
+
+
+# Además de las de `_PALABRAS_PERIODO`: nombres de una columna que separa
+# fotos o ediciones de un mismo padrón o relevamiento (`corte`, `version`), o
+# los ciclos, campañas y elecciones que apilan las tablas de staging
+# (`ciclo_lectivo`, `campania`, `eleccion`, `medicion`; verificación de #171).
+_PALABRAS_FOTO = frozenset(
+    {
+        "cuatrimestre",
+        "corte",
+        "version",
+        "snapshot",
+        "foto",
+        "onda",
+        "ronda",
+        "ciclo",
+        "campania",
+        "campaña",
+        "eleccion",
+        "convocatoria",
+        "medicion",
+        "operativo",
+        "temporada",
+        "bienio",
+    }
+)
+
+
+def es_nombre_de_periodo(nombre: str) -> bool:
+    """Un nombre que sugiere un período o una foto sin ser una fecha que sepamos
+    leer (``mes``, ``trimestre``, ``corte``, ``version``): la tabla puede apilar
+    períodos aunque ``resolver_columna_fecha`` no encuentre su fecha."""
+    return any(p in _PALABRAS_PERIODO or p in _PALABRAS_FOTO for p in _palabras(nombre))
+
+
+# Formas de período que no son una fecha que sepamos filtrar: campañas,
+# bienios y mandatos («1969/70», «1992/1993», «2013-2014») y meses con el año
+# en dos cifras («jul-25», «sept-25»: el encabezado roto de complex_003).
+_PERIODO_DE_ANIOS = re.compile(r"^(1[89]|20)[0-9]{2}\s*[/-]\s*((1[89]|20)[0-9]{2}|[0-9]{2})$")
+_MES_ANIO_CORTO = re.compile(
+    r"^(ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[a-z]*\.?\s*[-/ ]\s*[0-9]{2}$",
+    re.IGNORECASE,
+)
+# Hasta qué parte de los valores distintos de la muestra puede no tener forma
+# de período (un «Total», un encabezado repetido).
+_MIN_VALORES_DE_PERIODO = 0.9
+
+
+def es_valor_de_periodo(valor: object) -> bool:
+    """Un valor con forma de período: una fecha que reconocemos (``2022``,
+    ``202207``, ``2019/01``, ``jul 2025``…), una campaña (``1969/70``) o un mes
+    con el año en dos cifras (``jul-25``)."""
+    if rama_fecha(valor) is not None:
+        return True
+    texto = _texto_de(valor)
+    return texto is not None and bool(
+        _PERIODO_DE_ANIOS.match(texto) or _MES_ANIO_CORTO.match(texto)
+    )
+
+
+# Columnas que terminan en estas palabras son identificadores (`E0079_ID`,
+# `id`): sus números pueden caer entre 1800 y 2099 sin ser años.
+_PALABRAS_IDENTIFICADOR = frozenset({"id", "cod", "codigo"})
+
+
+def descarta_valores_de_periodo(nombre: str) -> bool:
+    """Una columna cuyos valores no separan períodos de la tabla aunque lo
+    parezcan: una fecha de carga o auditoría (``fecha_modificacion``,
+    ``proceso_fecha``, que tampoco son la fecha de la tabla) o un identificador
+    (``E0079_ID``, ``id``)."""
+    palabras = _palabras(nombre)
+    return bool(palabras) and (
+        palabras[-1] in _PALABRAS_IDENTIFICADOR
+        or (es_metadato(nombre) and _parece_temporal(nombre))
+    )
+
+
+def tiene_valores_de_periodo(valores: Iterable[object]) -> bool:
+    """La muestra de una columna parece de períodos: dos o más valores distintos
+    con forma de período y casi ninguno de otra forma.
+
+    Sin una fecha reconocida, la tabla puede apilar períodos en una columna
+    cuyo nombre no lo dice: en staging, 118 tablas sin fecha tenían una columna
+    con 2 a 60 años, AAAAMM o campañas, y unas 40 de las primeras 60 apilaban
+    de verdad (`medicion`, `ciclo_lectivo`, `campania`, `a±o`, meses de
+    ejecución presupuestaria en `Unnamed: 8`; verificación de #171).
+    """
+    distintos = {t for t in (_texto_de(v) for v in valores) if t}
+    de_periodo = [v for v in distintos if es_valor_de_periodo(v)]
+    return len(de_periodo) >= 2 and len(de_periodo) >= _MIN_VALORES_DE_PERIODO * len(distintos)
 
 
 @dataclass(frozen=True)
@@ -985,6 +1082,20 @@ def condiciones_periodo(
         )
         condiciones.append(f"{inicio} <= {params.bind(_fin(hasta))}")
     return condiciones
+
+
+def abarca_rango(desde: str | None, hasta: str | None, primera: str, ultima: str) -> bool:
+    """El período pedido se solapa con todas las fechas de la columna.
+
+    ``primera`` y ``ultima`` son el rango de la columna en ISO (``AAAA``,
+    ``AAAA-MM`` o ``AAAA-MM-DD``, como lo da ``consulta_rango``). Con la misma
+    condición que ``condiciones_periodo``, un período que abarca el rango no
+    deja ninguna fila afuera.
+    """
+    primera, ultima = primera[:10], ultima[:10]
+    if desde and _fin(primera) < _inicio(desde):
+        return False
+    return not (hasta and _inicio(ultima) > _fin(hasta))
 
 
 def orden_fecha(columna: ColumnaFecha) -> str:

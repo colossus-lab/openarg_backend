@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import statistics
 import time
 import unicodedata
 from datetime import UTC, datetime
@@ -308,7 +309,7 @@ class DDJJAdapter:
                 metadata={"total_records": 0, "fetched_at": datetime.now(UTC).isoformat()},
             )
 
-        # Single pass: collect min, max, sum, and sorted list simultaneously
+        # Single pass: collect min, max, sum and the values for the median
         total = len(self._dataset)
         n = len(usable)
         suma = 0.0
@@ -323,13 +324,18 @@ class DDJJAdapter:
                 max_val, max_r = p, r
             if p < min_val:
                 min_val, min_r = p, r
-        patrimonios.sort()
 
         stats_record = {
             "total": total,
             "anio": self._dataset[0].get("anioDeclaracion", ""),
-            "patrimonio_promedio": suma / n if n else 0,
-            "patrimonio_mediano": patrimonios[n // 2] if n else 0,
+            "patrimonio_promedio": suma / n,
+            # #170 check: ``patrimonios[n // 2]`` is the upper middle value
+            # when n is even (101.9 M with the 194 usable DDJJ; the median is
+            # 98.9 M, 3 % off).
+            "patrimonio_mediano": statistics.median(patrimonios),
+            # The tool description promised this count and the row didn't
+            # carry it: the model read the minimum (one person) as the count.
+            "cantidad_con_patrimonio_negativo": sum(1 for p in patrimonios if p < 0),
             "patrimonio_maximo_nombre": max_r.get("nombre", ""),
             "patrimonio_maximo_monto": max_r.get("patrimonioCierre", 0),
             "patrimonio_minimo_nombre": min_r.get("nombre", ""),
@@ -345,8 +351,9 @@ class DDJJAdapter:
             stats_record["excluidas_por_inconsistencia"] = len(excluded)
             metadata["excluidas_por_inconsistencia_nombres"] = excluded
             description += (
-                f". Promedio, mediana, máximo y mínimo calculados sin "
-                f"{_declaraciones(len(excluded))} cuyo registro en el dataset tiene un total de "
+                ". Promedio, mediana, máximo, mínimo y cantidad con patrimonio negativo "
+                f"calculados sin {_declaraciones(len(excluded))} cuyo registro en el dataset "
+                "tiene un total de "
                 "bienes que no cierra con su propio detalle (probable error de carga; "
                 "excluidas_por_inconsistencia)."
             )

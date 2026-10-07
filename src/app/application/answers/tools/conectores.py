@@ -1074,9 +1074,16 @@ class DeclaracionesJuradas:
         description=(
             "Declaraciones juradas patrimoniales de diputados nacionales (Oficina "
             "Anticorrupción). `buscar` por nombre, `ranking` por patrimonio, ingresos o bienes, "
-            "`estadisticas` para totales generales (incluye cuántos tienen patrimonio negativo). "
+            "`estadisticas` para totales generales (`cantidad_con_patrimonio_negativo` es "
+            "cuántos tienen patrimonio negativo). "
             "No califiques ninguna variación, patrimonio ni ingreso como sospechoso o llamativo "
-            "ni lo atribuyas a nada: describí cifras con nombre y año. "
+            "ni lo atribuyas a nada. La cifra de una persona va con su nombre y el año de la "
+            "DDJJ. Si la pregunta pide señalar a quiénes les cabe un juicio, no contestes con "
+            "nombres ni con un ranking: usá `estadisticas` y dá el total, el promedio y la "
+            "mediana, con su año; si trae `excluidas_por_inconsistencia`, decí cuántas "
+            "declaraciones quedaron afuera por inconsistencia, y decí que se puede buscar la "
+            "DDJJ de un diputado por su nombre. En ese caso, la cifra propia de una persona, sólo "
+            "si la pregunta la nombra. "
             "Una fila con `inconsistente: true` (total de bienes) o `ingresos_inconsistentes: "
             "true` es un registro del dataset con cifras que no cierran con la propia DDJJ, "
             "probable error de carga no verificado (el motivo está en la fila), y esa cifra no es "
@@ -1143,8 +1150,8 @@ class Sesiones:
             "(año legislativo). Trae los fragmentos más parecidos, con un tope: no sirve para "
             "contar cuántas veces se habló de algo. Lo que dice un orador es suyo: si te "
             "preguntan qué se dijo, contalo atribuido a quien lo dijo («un orador» si el "
-            "fragmento no lo identifica). Nunca lo uses como un hecho ni para explicar por qué "
-            "pasó algo."
+            "fragmento no lo identifica) y con la fecha de la sesión. Nunca lo uses como un "
+            "hecho ni para explicar por qué pasó algo."
         ),
         input_schema={
             "type": "object",
