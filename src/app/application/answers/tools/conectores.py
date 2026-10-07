@@ -952,7 +952,8 @@ class Sesiones:
         description=(
             "Busca fragmentos de las versiones taquigráficas de las sesiones de la Cámara de "
             "Diputados: qué se dijo sobre un tema, opcionalmente de un orador o un período "
-            "(año legislativo)."
+            "(año legislativo). Trae los fragmentos más parecidos, con un tope: no sirve para "
+            "contar cuántas veces se habló de algo."
         ),
         input_schema={
             "type": "object",
@@ -975,7 +976,21 @@ class Sesiones:
         )
         if result is None or not result.records:
             return ToolOutcome(to_json({"filas": [], "nota": "Sin fragmentos sobre eso."}))
-        return ToolOutcome(to_json(result_for_model(result)), results=[result])
+        meta = result.metadata or {}
+        extra: dict[str, Any] = {}
+        if meta.get("tope_alcanzado"):
+            # El tope no es un total: con `filas_totales: 12` el agente dijo
+            # "12 fragmentos registrados" y había 51 (nueva_06, 06-oct).
+            n = len(result.records)
+            tope = meta.get("tope_busqueda") or n
+            extra["filas_totales"] = f"al menos {n} (tope de la búsqueda: {tope})"
+            extra["aviso"] = (
+                f"La búsqueda trae como máximo {tope} fragmentos, los más parecidos, así que "
+                "estos no son todos: no digas cuántos fragmentos, intervenciones u oradores "
+                "hubo sobre el tema, porque no se contaron. Si hace falta una cantidad, decí "
+                f"«al menos {n}»."
+            )
+        return ToolOutcome(to_json(result_for_model(result, **extra)), results=[result])
 
 
 # ── personal legislativo ───────────────────────────────────

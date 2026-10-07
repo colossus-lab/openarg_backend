@@ -256,8 +256,24 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         top_chunks = [self._chunks[idx] for _, idx in heapq.nlargest(limit, scored)]
         return top_chunks if top_chunks else None
 
-    def _chunks_to_data_result(self, query: str, chunks: list[dict[str, Any]]) -> DataResult:
-        """Convert chunks to DataResult."""
+    def _chunks_to_data_result(
+        self,
+        query: str,
+        chunks: list[dict[str, Any]],
+        limit: int,
+        *,
+        filtered_after_limit: bool = False,
+    ) -> DataResult:
+        """Convert chunks to DataResult.
+
+        ``chunks`` comes from a search asked for ``limit + 1`` rows: one more
+        than ``limit`` means the search hit its cap, so the number of rows is
+        the cap, not a total (nueva_06, 06-oct: "12 fragmentos registrados"
+        when staging had 51 about the topic). A filter applied after the SQL
+        LIMIT (``orador`` in pgvector) is also a cut over the nearest rows.
+        """
+        capped = filtered_after_limit or len(chunks) > limit
+        chunks = chunks[:limit]
         records = [
             {
                 "periodo": c.get("periodo"),
@@ -275,6 +291,30 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         unique_sessions = {f"P{c.get('periodo')}-R{c.get('reunion')}" for c in chunks}
         unique_speakers = {c.get("speaker") for c in chunks if c.get("speaker")}
 
+        origin = f"{len(unique_sessions)} sesi\u00f3n(es)"
+        if unique_speakers:
+            origin += f", con intervenciones de {len(unique_speakers)} orador(es)"
+        if capped:
+            description = (
+                f"Los {len(records)} fragmentos m\u00e1s parecidos a la b\u00fasqueda, de {origin}. "
+                f"La b\u00fasqueda trae como m\u00e1ximo {limit}: no es la cantidad de "
+                "fragmentos, intervenciones ni oradores sobre el tema."
+            )
+        else:
+            description = f"Se encontraron {len(records)} fragmentos relevantes en {origin}."
+        if not unique_speakers:
+            # `speaker` is NULL in every staging row: "0 orador(es)" read as a count.
+            description += " Los fragmentos no traen el orador identificado."
+
+        metadata: dict[str, Any] = {
+            "fetched_at": datetime.now(UTC).isoformat(),
+            "description": description,
+            "tope_busqueda": limit,
+            "tope_alcanzado": capped,
+        }
+        if not capped:
+            metadata["total_records"] = len(records)
+
         return DataResult(
             source="sesiones:diputados",
             portal_name="Diario de Sesiones \u2014 C\u00e1mara de Diputados",
@@ -282,15 +322,7 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
             dataset_title=f'Transcripciones parlamentarias: "{query}"',
             format="json",
             records=records,
-            metadata={
-                "total_records": len(records),
-                "fetched_at": datetime.now(UTC).isoformat(),
-                "description": (
-                    f"Se encontraron {len(records)} fragmentos relevantes en "
-                    f"{len(unique_sessions)} sesi\u00f3n(es), con intervenciones de "
-                    f"{len(unique_speakers)} orador(es)."
-                ),
-            },
+            metadata=metadata,
         )
 
     async def search(
@@ -301,16 +333,20 @@ class SesionesAdapter(ISesionesConnector):  # type: ignore[misc]
         limit: int = 15,
     ) -> DataResult | None:
         try:
+            # Both searches ask for one row more than `limit` to know whether
+            # they hit the cap (see _chunks_to_data_result).
             # Try pgvector search first
-            chunks = await self._search_pgvector(query, periodo, orador, limit)
+            chunks = await self._search_pgvector(query, periodo, orador, limit + 1)
             if chunks:
-                return self._chunks_to_data_result(query, chunks)
+                return self._chunks_to_data_result(
+                    query, chunks, limit, filtered_after_limit=bool(orador)
+                )
             logger.info("pgvector returned no results, falling back to local keyword search")
 
             # Fallback to local keyword search
-            chunks = self._search_local(query, periodo, orador, limit)
+            chunks = self._search_local(query, periodo, orador, limit + 1)
             if chunks:
-                return self._chunks_to_data_result(query, chunks)
+                return self._chunks_to_data_result(query, chunks, limit)
 
             return None
         except ConnectorError:
