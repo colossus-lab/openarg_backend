@@ -2,7 +2,8 @@
 
 La metadata (``field.description``) de cada id se grabó de la API el
 04-oct-2026 en ``tests/fixtures/series_tiempo_api/catalog_meta.json``; la del
-IPIM y del IPC por región, el 06-oct (``recorded_at`` de cada una).
+IPIM y del IPC por región, el 06-oct, y la de la tasa de actividad y el PIB,
+el 07-oct (``recorded_at`` de cada una).
 Cambiar un id del catálogo obliga a regrabarla y a fijar su descripción: así
 se coló ``11.3_AGCS_2004_M_41`` (EMAE comercio) rotulado como "actividad
 industrial", y el agente lo recibía como serie verificada.
@@ -71,6 +72,8 @@ def test_un_id_cambiado_se_detecta() -> None:
         ("ipc_noroeste", "noroeste"),
         ("ipc_cuyo", "Cuyo"),
         ("ipc_patagonia", "Patagonia"),
+        ("actividad", "Tasa de actividad"),
+        ("pbi", "PIB"),
     ],
 )
 def test_la_serie_de_cada_tema_es_de_ese_tema(key: str, palabra: str) -> None:
@@ -202,3 +205,67 @@ def test_el_viejo_responde_reservas_con_la_diaria(texto: str) -> None:
     assert entry["ids"] == ["92.2_RESERVAS_IRES_0_0_32_40"]
     assert "default_collapse" not in entry
     assert _api()["174.1_RRVAS_IDOS_0_0_36"]["is_updated"] == "False"
+
+
+# ── tasa de actividad y PIB (prueba de calidad del 07-oct, nueva_10 y 11) ──
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "¿Cuál es la tasa de actividad según la última EPH?",
+        # Con «EPH» la /search de la API trae sólo la anual 42.1, que termina
+        # en 2025, y nunca la trimestral (medido el 07-oct contra la API).
+        "tasa de actividad EPH",
+        "EPH tasa de actividad trimestral",
+        "tasas de actividad",
+    ],
+)
+def test_la_tasa_de_actividad_verifica_la_trimestral_de_la_eph(texto: str) -> None:
+    """nueva_10: con «EPH» en el texto, buscar_series no daba ninguna serie
+    trimestral; el modelo leyó la anual (hasta 2025) y una copia guardada que
+    terminaba en el 1.er trimestre de 2026, y lo dio como el último dato. El
+    05-oct pasó lo mismo, con las mismas herramientas."""
+    assert _claves(texto) == ["actividad"]
+    sid = SERIES_CATALOG["actividad"]["ids"][0]
+    assert _api()[sid]["frequency"] == "R/P3M"
+    assert _api()[sid]["time_index_end"] == "2026-04-01"
+
+
+@pytest.mark.parametrize(
+    ("texto", "clave"),
+    [
+        ("actividad económica", "emae"),
+        ("actividad industrial", "actividad_industrial"),
+        ("actividad comercial", "emae_comercio"),
+    ],
+)
+def test_otra_actividad_no_es_la_tasa_de_actividad(texto: str, clave: str) -> None:
+    assert _claves(texto) == [clave]
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "¿Cuánto creció el producto bruto interno de la Argentina en 2025?",
+        "PBI 2025",
+        "crecimiento del PIB",
+        "producto interno bruto",
+    ],
+)
+def test_el_pbi_verifica_el_pib_a_precios_constantes(texto: str) -> None:
+    """nueva_11: la única verificada para «producto bruto interno» era el
+    EMAE, y la primera de la /search, 166.2_PPIB_0_0_3, el PIB a precios
+    corrientes, parado en el 4.º trimestre de 2025. Las tres corridas
+    (05, 06 y 07-oct) la leyeron primero."""
+    assert "pbi" in _claves(texto)
+    sid = SERIES_CATALOG["pbi"]["ids"][0]
+    assert _api()[sid]["units"] == "Millones de pesos a precios de 2004"
+    assert _api()[sid]["frequency"] == "R/P3M"
+
+
+def test_el_pbi_no_saca_al_emae_ni_cambia_lo_del_pipeline_viejo() -> None:
+    # «producto bruto» sigue siendo también del EMAE, y el pipeline viejo,
+    # que toma la primera entrada, sigue en el EMAE.
+    assert _claves("producto bruto interno") == ["emae", "pbi"]
+    assert find_catalog_match("producto bruto interno")["ids"] == ["143.3_NO_PR_2004_A_21"]

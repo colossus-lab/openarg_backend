@@ -34,7 +34,10 @@
 - `buscar_series` compara sin acentos y por palabra completa, y el catálogo
   ya no rotula el EMAE de comercio como "actividad industrial";
 - «inflación mayorista» verifica el IPIM e «inflación Misiones» el IPC del
-  Noreste, no el IPC nacional (prueba de calidad del 06-oct, nueva_13 y 15).
+  Noreste, no el IPC nacional (prueba de calidad del 06-oct, nueva_13 y 15);
+- «tasa de actividad EPH» verifica la trimestral, y «producto bruto interno»
+  el PIB a precios constantes, con cómo sale su crecimiento anual (prueba de
+  calidad del 07-oct, nueva_10 y 11).
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ from tests.unit.series_tiempo_fake import (
     IPC_ID,
     IPC_NORESTE_ID,
     IPIM_ID,
+    PIB_ID,
     POBREZA_GRAN_ROSARIO_ID,
     POBREZA_GRAN_ROSARIO_PUNTUAL_ID,
     POBREZA_ID,
@@ -85,6 +89,7 @@ from tests.unit.series_tiempo_fake import (
     ipc_noreste_real,
     ipc_real,
     ipim_real,
+    pib_real,
     pobreza_con_metadata_atrasada,
     pobreza_gran_rosario_puntual,
     pobreza_gran_rosario_real,
@@ -1236,3 +1241,116 @@ async def test_buscar_series_reservas_ofrece_primero_la_diaria() -> None:
     assert {RESERVAS_ID, "92.2_RESERVAS_IRES_0_0_32_40"} <= _ids(payload)
     # La que llega más lejos va primero; la mensual está parada en abril.
     assert payload["verificadas"][0]["ids"] == ["92.2_RESERVAS_IRES_0_0_32_40"]
+
+
+# ── tasa de actividad y PIB (prueba de calidad del 07-oct, nueva_10 y 11) ──
+
+# Lo que devolvió la /search de la API el 07-oct, en el orden en que vino.
+_SEARCH_ACTIVIDAD_EPH = [
+    {
+        "id": "42.1_EPAT_0_A_27",
+        "title": "eph_puntual_continua_actividad_total",
+        "description": (
+            "Tasa de actividad total. En porcentaje. EPH puntual desde 1982 hasta 2002. EPH "
+            "continua desde 2003 en adelante. Valores anuales."
+        ),
+        "units": "Porcentaje",
+        "frequency": "R/P1Y",
+        "time_index_end": "2025-01-01",
+    },
+    {
+        "id": "303.1_TASA_ASALATAL_0_T_36",
+        "title": "tasa_asalarizacion_aglomerados_interior_pais_total_aglomerados",
+        "description": "Evolución de la tasa de asalarizacion. EPH Continua. Trimestral.Total "
+        "Aglomerados .",
+        "units": "Porcentaje",
+        "frequency": "R/P3M",
+        "time_index_end": "2020-01-01",
+    },
+]
+_SEARCH_PRODUCTO_BRUTO = [
+    {
+        "id": "166.2_PPIB_0_0_3",
+        "title": "producto_interno_bruto",
+        "description": "Producto interno bruto",
+        "units": "Millones de Pesos",
+        "frequency": "R/P3M",
+        "time_index_end": "2025-10-01",
+    },
+    {
+        "id": "226.1_PAGRIC_LES_1970_0_18",
+        "title": "pib_agricola_cereales",
+        "description": "PIB Agrícola. Cereales",
+        "units": "Millones de pesos de 1970",
+        "frequency": "R/P3M",
+        "time_index_end": "1990-10-01",
+    },
+]
+
+
+async def test_tasa_de_actividad_con_eph_verifica_la_trimestral_y_su_ultimo_trimestre() -> None:
+    """nueva_10: «¿Cuál es la tasa de actividad según la última EPH?».
+
+    Con «EPH» en el texto, la /search sólo traía la anual 42.1 (hasta 2025) y
+    ninguna verificada: el 05 y el 07-oct el modelo leyó esa anual y una copia
+    guardada de la trimestral que terminaba en el 1.er trimestre de 2026, y dio
+    48,6 % como el último dato. El 2.º trimestre (48,9 %) ya estaba publicado.
+    """
+    payload = await _buscar("tasa de actividad EPH", found=_SEARCH_ACTIVIDAD_EPH)
+    assert _ids(payload) == {ACTIVIDAD_ID}
+    descripcion = payload["verificadas"][0]["descripcion"]
+    assert "trimestral" in descripcion
+    assert "42.1_EPAT_0_A_27" in descripcion and "último año completo" in descripcion
+
+    serie_actividad, _ = await _run(
+        FakeSeriesApi(tasa(ACTIVIDAD_ID)), {"ids": [ACTIVIDAD_ID], "ultimos": 2}
+    )
+    assert serie_actividad["filas"][-1]["periodo"] == "2026-T2"
+    assert 48.9 in serie_actividad["filas"][-1].values()
+    assert serie_actividad["la_fuente_llega_hasta"] == "2026-04-01"
+
+
+async def test_pbi_verifica_el_pib_real_y_su_crecimiento_anual_da_4_48() -> None:
+    """nueva_11: «¿Cuánto creció el producto bruto interno de la Argentina en 2025?».
+
+    Sin una verificada del PIB, las tres corridas (05, 06 y 07-oct) leyeron
+    primero 166.2_PPIB_0_0_3, el PIB a precios corrientes parado en el 4.º
+    trimestre de 2025 y con el aviso de serie desactualizada; dos de ellas
+    dijeron después que el 4.º trimestre era «preliminar». El 07-oct leyó
+    del PIB real sólo la interanual de cada trimestre y no dio el anual.
+    """
+    payload = await _buscar(
+        "¿Cuánto creció el producto bruto interno de la Argentina en 2025?",
+        found=_SEARCH_PRODUCTO_BRUTO,
+    )
+    assert PIB_ID in _ids(payload)
+    pib = next(v for v in payload["verificadas"] if v["ids"] == [PIB_ID])
+    descripcion = pib["descripcion"]
+    assert "precios constantes" in descripcion
+    assert "frecuencia=year" in descripcion and "representacion=percent_change" in descripcion
+    assert "promedio" in descripcion and "no la suma" in descripcion
+    assert "166.2_PPIB_0_0_3" in descripcion and "precios corrientes" in descripcion
+
+    # Lo que dice la descripción: el crecimiento de cada año, con 2025 entero.
+    anual, _ = await _run(
+        FakeSeriesApi(pib_real()),
+        {"ids": [PIB_ID], "frecuencia": "year", "representacion": "percent_change"},
+    )
+    assert anual["filas"][-1]["periodo"] == "2025"
+    assert 4.48 in anual["filas"][-1].values()
+    assert "El último año completo es 2025" in anual["periodos"]
+    # El PIB de un año es el promedio de sus trimestres (2025: 739.728,7, lo
+    # mismo que la anual 9.1_PP2_2004_A_16); la suma da cuatro veces eso.
+    nivel, _ = await _run(FakeSeriesApi(pib_real()), {"ids": [PIB_ID], "frecuencia": "year"})
+    assert round(next(v for k, v in nivel["filas"][-1].items() if k.startswith("PIB")), 1) == (
+        739728.7
+    )
+
+    # Lo que pidió el 07-oct: la interanual de cada trimestre, donde el anual no está.
+    trimestral, _ = await _run(
+        FakeSeriesApi(pib_real()),
+        {"ids": [PIB_ID], "representacion": "percent_change_a_year_ago"},
+    )
+    valores = [v for f in trimestral["filas"] for k, v in f.items() if k.startswith("PIB")]
+    assert 4.48 not in valores
+    assert {6.12, 6.52, 3.2, 2.18} <= set(valores)
