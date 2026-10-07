@@ -47,6 +47,29 @@ class PgVectorSearchAdapter(IVectorSearch):
     # iterative scan the walk goes on past ef_search until it has this many,
     # up to hnsw.max_scan_tuples (20,000 by default); without it (pgvector
     # before 0.8) one scan stops at ef_search.
+    #
+    # This is the recall/latency knob, and 1000 is a trade, not a free lunch.
+    # Staging, 2026-10-07, 36 real queries, recall against the exact search
+    # counting ties, as served (fall back included, it ran 0 times), and the
+    # walk alone with 8 searches at once (warm cache):
+    #
+    #   candidates        recall@32  recall@40  p95 with 8
+    #   400 (main, prod)  0.904      0.909      63 ms
+    #   1000              0.942      0.943      101-184 ms
+    #   2000              0.949      0.950      237-263 ms
+    #   4000              0.973      0.977      558 ms
+    #   8000              1.000      0.999      938 ms
+    #   exact (#131)      1.0        1.0        2.2 s median (2026-10-05)
+    #
+    # What 1000 misses is in the graph but far along the walk: groups of
+    # datasets with (almost) the same vector (30 Córdoba "Listado de agentes
+    # del Poder Ejecutivo" at 0.663, 28 "Elecciones legislativas Entre Ríos
+    # 2013" at 0.627) and re-embedded chunks, reached after 4000-8000
+    # tuples. Three of the 36 queries lose half or more of their top 32, and
+    # their best score (0.607-0.643) is above _ANN_WEAK_TOP_SCORE, so
+    # ``search_datasets_ann`` serves them as they are. 1000 keeps the most
+    # room under 8 at once (prod has a third more chunks than staging); a
+    # wider walk buys recall with latency, a REINDEX is not measured to help.
     _ANN_CANDIDATES = 1000
     # A best score under this is not trusted and the exact search runs
     # instead. With Cohere v3 an unrelated dataset scores 0.50-0.57 and a
@@ -124,6 +147,11 @@ class PgVectorSearchAdapter(IVectorSearch):
         score is weak. A trapped walk does not come back empty: it comes back
         full of the wrong neighbours with low scores, which is the signal
         checked here.
+
+        What the check does not see: neighbours the walk never reaches while
+        it brings good ones. Those answers are served, so what callers get is
+        not the exact search's answer (recall@40 0.943 against it on staging,
+        2026-10-07; see ``_ANN_CANDIDATES``).
 
         Before pgvector 0.8 there is no iterative scan, and an index scan
         filtered by portal can come back empty for a small portal; with a
