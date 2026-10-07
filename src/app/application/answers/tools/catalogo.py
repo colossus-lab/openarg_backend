@@ -51,9 +51,11 @@ from app.application.consultas.agregar import PedidoAgregado, agregar
 from app.application.consultas.fechas import aviso_lectura_fecha
 from app.application.consultas.filtros import notas_de_filtros
 from app.application.consultas.preparar import (
+    TIMEOUT_CONFIRMAR_S,
     Preparado,
     describir_periodo,
     ejecutar,
+    es_tolerante,
     estadisticas,
     filas_estimadas,
     preparar,
@@ -71,7 +73,7 @@ from app.application.public_catalog import (
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.ports.llm.agent_llm import AgentTool
 from app.domain.ports.sandbox.sql_sandbox import MartInfo, TableProfile
-from app.domain.value_objects.table_reference import bare_name
+from app.domain.value_objects.table_reference import bare_name, quote_qualified
 
 logger = logging.getLogger(__name__)
 
@@ -523,12 +525,13 @@ class DescribirTabla:
         elif estimadas:
             payload["aviso_filas"] = (
                 "El catálogo no tiene la cantidad exacta de filas: filas_estimadas es una "
-                "estimación de la base. Para un total, contalo con calcular (operacion=conteo)."
+                "estimación de la base. Para un total, contalo con calcular (operacion=conteo, "
+                "sin filtros)."
             )
         elif not filas:
             payload["aviso_filas"] = (
                 "El catálogo no tiene la cantidad de filas de esta tabla. Para un total, contalo "
-                "con calcular (operacion=conteo)."
+                "con calcular (operacion=conteo, sin filtros)."
             )
         if periodo.aviso:
             payload["aviso_fecha"] = periodo.aviso
@@ -714,6 +717,29 @@ class ObtenerDatos:
 # ── calcular ───────────────────────────────────────────────
 
 
+async def _filas_de_la_tabla(sandbox: Any, tabla: str) -> tuple[int | None, int | None, str]:
+    """Las filas de toda la tabla: (conteo exacto, estimación de Postgres, SQL del conteo).
+
+    El conteo exacto sólo en las tablas chicas (``es_tolerante``): en una de
+    millones de filas el ``count(*)`` pasaría el tope. Ahí, o si el conteo
+    falla, queda sólo la estimación (None si tampoco la hay).
+    """
+    estimada = filas_estimadas(await estadisticas(sandbox, tabla, []), None)
+    sql = f"SELECT count(*) AS filas_tabla FROM {quote_qualified(tabla)}"
+    if not es_tolerante(estimada):
+        return None, estimada, sql
+    try:
+        result = await ejecutar(sandbox, sql, {}, timeout_seconds=TIMEOUT_CONFIRMAR_S)
+    except Exception:
+        # El cálculo ya está hecho: no se lo pierde por un dato del aviso.
+        logger.warning("calcular: no se pudo contar %s", tabla, exc_info=True)
+        return None, estimada, sql
+    if result.error or not result.rows or result.rows[0].get("filas_tabla") is None:
+        logger.warning("calcular: no se pudo contar %s: %s", tabla, result.error)
+        return None, estimada, sql
+    return int(result.rows[0]["filas_tabla"]), estimada, sql
+
+
 class Calcular:
     status = "Calculando..."
 
@@ -739,8 +765,10 @@ class Calcular:
             "muestra. Las columnas de texto se convierten a número según su formato (argentino "
             "1.234,5 o inglés 1,234.5, decidido con una muestra de la columna); si el formato es "
             "ambiguo, no calcula y lo dice. Cada resultado trae `filas_usadas` (sobre cuántas "
-            "filas se calculó). Si ninguna fila cumple los filtros no hay valor: viene `aviso` "
-            "con los valores que sí existen."
+            "filas se calculó). Un conteo con filtros es una parte de la tabla: trae además "
+            "`total_tabla` (el conteo sin filtros) y no se presenta como el total de la tabla. Si "
+            "ninguna fila cumple los filtros no hay valor: viene `aviso` con los valores que sí "
+            "existen."
         ),
         input_schema={
             "type": "object",
@@ -858,6 +886,7 @@ class Calcular:
             result.metadata["filas_con_valor"] = res.filas_con_valor
         # Contrato de metadatos (lo lee la verificación de cifras).
         result.metadata["truncada"] = res.truncado
+        results = [result]
         payload = {
             **base,
             "columnas": [*req.agrupar_por, "valor", *(["filas_usadas"] if controlado else [])],
@@ -865,10 +894,45 @@ class Calcular:
         }
         if total is not None:
             payload[clave_filas] = total
+        # Un conteo filtrado es una parte de la tabla, y el resultado no lo
+        # decía. Prueba de calidad del 07-oct (nueva_16): con la Tarifa Social
+        # de Mendoza agrupada por PADRON (el mes de alta), el agente filtró
+        # PADRON = 202207 y presentó esas 99.558 filas como el padrón de 2022,
+        # que tiene 110.179. Sólo el conteo sin ponderador: ahí el total de la
+        # tabla es su cantidad de filas.
+        if (
+            req.operacion == "conteo"
+            and not req.ponderar_por
+            and (req.filtros or req.desde or req.hasta)
+            and total
+            and not parcial
+        ):
+            exacto, estimada, sql_total = await _filas_de_la_tabla(sandbox, table.name)
+            if exacto is not None and exacto > total:
+                payload["total_tabla"] = exacto
+                payload["aviso_total"] = (
+                    f"Con los filtros se contaron {total} de las {exacto} filas de la tabla: es "
+                    f"una parte, no el total de la tabla. Si te preguntaron cuántos hay en todo lo "
+                    f"que cubre la tabla, el total es {exacto} (el conteo sin filtros), y su "
+                    f"desglose se pide sin esos filtros. Presentá {total} sólo como lo que cumple "
+                    "los filtros."
+                )
+                # Citable: si el modelo da el total, la cifra tiene respaldo.
+                completo = _data_result(table, [{"valor": exacto}], sql_total, title)
+                completo.metadata["filas_usadas"] = exacto
+                completo.metadata["truncada"] = False
+                results.append(completo)
+            elif exacto is None and estimada and estimada > total:
+                payload["aviso_total"] = (
+                    f"Con los filtros se contaron {total} filas, una parte de la tabla (que tiene "
+                    f"unas {estimada}, según una estimación de la base). Si te preguntaron "
+                    f"cuántos hay en toda la tabla, contalo con calcular sin filtros; {total} es "
+                    "sólo lo que cumple los filtros."
+                )
         if notas:
             payload["notas"] = notas
         return ToolOutcome(
             to_json(payload),
-            results=[result],
+            results=results,
             summary=f"Calculó {what} en {quoted(table.title, 80)}",
         )
