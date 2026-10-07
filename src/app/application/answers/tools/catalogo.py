@@ -46,11 +46,18 @@ from app.application.answers.tools.base import (
     to_json,
 )
 from app.application.catalog.collapse import collapse_hits
-from app.application.catalog.national_prior import national_prior
+from app.application.catalog.national_prior import NATIONAL_PORTALS, national_prior
 from app.application.consultas.agregar import PedidoAgregado, agregar
 from app.application.consultas.fechas import aviso_lectura_fecha
 from app.application.consultas.filtros import notas_de_filtros
-from app.application.consultas.preparar import Preparado, describir_periodo, ejecutar, preparar
+from app.application.consultas.preparar import (
+    Preparado,
+    describir_periodo,
+    ejecutar,
+    estadisticas,
+    filas_estimadas,
+    preparar,
+)
 from app.application.consultas.sugerencias import diagnosticar_vacio
 from app.application.public_catalog import (
     CatalogRequestError,
@@ -88,6 +95,32 @@ _GEO_RE = re.compile(
     r"|nivel_geografico|comuna|barrio|distrito|cod_prov|codprov|id_prov|seccion)",
     re.IGNORECASE,
 )
+# De qué lugar es el dato de una tabla sin columnas geográficas, según el
+# portal provincial o municipal que la publica (`datasets.portal`). El aviso
+# decía "normalmente el total nacional" también acá: en staging, al menos 444
+# tablas de estos portales (contadas sólo entre las que tienen `columns_json`,
+# 06-oct), entre ellas la Tarifa Social Eléctrica de Mendoza (nueva_16).
+_NIVEL_DEL_PORTAL = {
+    "caba": "la Ciudad de Buenos Aires",
+    "legislatura_caba": "la Ciudad de Buenos Aires",
+    "bac": "la Ciudad de Buenos Aires",
+    "buenos_aires_prov": "la provincia de Buenos Aires",
+    "cordoba_prov": "la provincia de Córdoba",
+    "cordoba_estadistica": "la provincia de Córdoba",
+    "mendoza": "la provincia de Mendoza",
+    "entre_rios": "la provincia de Entre Ríos",
+    "neuquen_legislatura": "la provincia de Neuquén",
+    "tucuman": "la provincia de Tucumán",
+    "chaco": "la provincia del Chaco",
+    "misiones": "la provincia de Misiones",
+    "jujuy_dkan": "la provincia de Jujuy",
+    "ciudad_mendoza": "la ciudad de Mendoza",
+    "corrientes": "la ciudad de Corrientes",
+    "rosario_dkan": "la ciudad de Rosario",
+    "acumar": "la cuenca Matanza-Riachuelo",
+}
+# Lo que pone `resolve` cuando la tabla no tiene fuente.
+_DEFAULT_PORTAL = "datos.gob.ar"
 
 
 # ── resolver una tabla ─────────────────────────────────────
@@ -130,7 +163,7 @@ async def resolve(sandbox: Any, requested: str) -> ResolvedTable:
     return ResolvedTable(
         name=table.table_name,
         title=source.title if source else table.table_name,
-        portal=source.portal if source else "datos.gob.ar",
+        portal=source.portal if source else _DEFAULT_PORTAL,
         url=source.url if source else "",
         row_count=table.row_count,
     )
@@ -334,6 +367,37 @@ class BuscarDatos:
 # ── describir_tabla ────────────────────────────────────────
 
 
+def _nivel_del_portal(portal: str) -> str | None:
+    """De qué lugar es una tabla sin columnas geográficas; None si es nacional."""
+    if portal in _NIVEL_DEL_PORTAL:
+        return _NIVEL_DEL_PORTAL[portal]
+    if not portal or portal in NATIONAL_PORTALS or portal in (_MART_PORTAL, _DEFAULT_PORTAL):
+        return None
+    return f"lo que cubre el portal «{portal}»"
+
+
+def _aviso_geografico(portal: str) -> str:
+    nivel = _nivel_del_portal(portal)
+    if nivel is None:
+        # Batería del 02-oct: con el aviso sin la segunda oración, Sonnet y
+        # Haiku explicaban bien que no había dato de Pinamar pero no daban
+        # el total nacional, que la tabla sí tiene.
+        return (
+            "Sin columnas geográficas: el dato es de un solo nivel (normalmente el total "
+            "nacional). No lo presentes como dato de una provincia, partido o ciudad. Si te "
+            "preguntaron por un lugar, decí que no hay dato a ese nivel y DÁ IGUAL la cifra "
+            "nacional, calculándola con calcular (con el ponderador si lo hay) y aclarando "
+            "que es nacional."
+        )
+    return (
+        f"Sin columnas geográficas: el dato es de un solo nivel, normalmente el de quien lo "
+        f"publica ({nivel}). No lo presentes como dato de otro lugar. Si te preguntaron por un "
+        f"lugar más chico (un departamento, una localidad, un barrio), decí que no hay dato a "
+        f"ese nivel y DÁ IGUAL la cifra de {nivel}, calculándola con calcular (con el "
+        "ponderador si lo hay) y aclarando a qué nivel corresponde."
+    )
+
+
 class DescribirTabla:
     status = "Revisando la tabla..."
 
@@ -347,7 +411,8 @@ class DescribirTabla:
             "filas, período cubierto, 5 filas de muestra, la fuente, y señales para no "
             "equivocarse: `ponderador` (si es una encuesta, para contar personas hay que sumar "
             "esa columna, no contar filas), `columnas_geograficas` (si no hay, el dato es de un "
-            "solo nivel —normalmente nacional— y no sirve para una provincia o un partido) y, en "
+            "solo nivel —el de quien lo publica: el país, una provincia o una ciudad— y no "
+            "sirve para un lugar más chico) y, en "
             "las tablas curadas, la descripción y la unidad de cada columna. Usala SIEMPRE antes "
             "de obtener_datos o calcular sobre una tabla nueva."
         ),
@@ -382,13 +447,22 @@ class DescribirTabla:
                 if isinstance(col, dict) and col.get("name") and col.get("description"):
                     described[str(col["name"])] = str(col["description"])[:200]
 
+        # Un `row_count` 0 del catálogo no es una tabla vacía: en staging lo
+        # tienen 18.134 de 31.236 tablas listas con filas (chequeo del 06-oct),
+        # y `"filas": 0` es lo que el modelo leía. Sin conteo, la estimación de
+        # Postgres (`reltuples`), dicha como tal.
+        filas = table.row_count or None
+        estimadas = (
+            None if filas else filas_estimadas(await estadisticas(sandbox, table.name, []), None)
+        )
+
         weights = [c for c in names if _WEIGHT_RE.match(c)]
         geo = [c for c in names if _GEO_RE.search(c)]
         payload: dict[str, Any] = {
             "tabla": table.name,
             "titulo": table.title,
             "fuente": table.portal,
-            "filas": table.row_count,
+            "filas": filas,
             "columnas": [
                 {
                     "nombre": c,
@@ -404,6 +478,17 @@ class DescribirTabla:
             "ponderador": weights[0] if weights else None,
             "columnas_geograficas": geo,
         }
+        if estimadas:
+            payload["filas_estimadas"] = estimadas
+            payload["aviso_filas"] = (
+                "El catálogo no tiene la cantidad exacta de filas: filas_estimadas es una "
+                "estimación de la base. Para un total, contalo con calcular (operacion=conteo)."
+            )
+        elif not filas:
+            payload["aviso_filas"] = (
+                "El catálogo no tiene la cantidad de filas de esta tabla. Para un total, contalo "
+                "con calcular (operacion=conteo)."
+            )
         if periodo.aviso:
             payload["aviso_fecha"] = periodo.aviso
         if sample_result.error:
@@ -417,20 +502,14 @@ class DescribirTabla:
                 "tamaño de la muestra, no la población."
             )
         if not geo:
-            # Batería del 02-oct: con el aviso sin la segunda oración, Sonnet y
-            # Haiku explicaban bien que no había dato de Pinamar pero no daban
-            # el total nacional, que la tabla sí tiene.
-            payload["aviso_geografico"] = (
-                "Sin columnas geográficas: el dato es de un solo nivel (normalmente el total "
-                "nacional). No lo presentes como dato de una provincia, partido o ciudad. Si te "
-                "preguntaron por un lugar, decí que no hay dato a ese nivel y DÁ IGUAL la cifra "
-                "nacional, calculándola con calcular (con el ponderador si lo hay) y aclarando "
-                "que es nacional."
-            )
-        return ToolOutcome(
-            to_json(payload),
-            summary=f"Revisó {quoted(table.title, 80)} ({count(table.row_count, 'fila', 'filas')})",
-        )
+            payload["aviso_geografico"] = _aviso_geografico(table.portal)
+        if filas:
+            tamano = f" ({count(filas, 'fila', 'filas')})"
+        elif estimadas:
+            tamano = f" (unas {count(estimadas, 'fila', 'filas')})"
+        else:
+            tamano = ""
+        return ToolOutcome(to_json(payload), summary=f"Revisó {quoted(table.title, 80)}{tamano}")
 
 
 # ── obtener_datos ──────────────────────────────────────────
