@@ -56,13 +56,16 @@ def _ipc_region(sid: str, api_description: str, region: str, cubre: str, places:
 #   cualquier parte del texto, hacen coincidir la entrada: «inflación Misiones
 #   agosto 2026» es el IPC del Noreste. Se comparan sin acentos y sin
 #   singularizar («misión» no es Misiones); los que también son palabras
-#   comunes van con «en» o «de» delante («precios corrientes», «la inflación
-#   salta»).
+#   comunes van con «en» o «de» delante, o pegados a «inflación» o «IPC»
+#   («inflación Salta»), nunca sueltos («precios corrientes», «¿por qué salta
+#   la inflación?»). ``_NOT_PLACES`` saca los que pegados son un verbo.
 # - ``generic``: la entrada amplia de un tema (el IPC nacional). Se descarta si
 #   las palabras con que coincidió están todas dentro de las de otras entradas
 #   («inflación mayorista» contiene «inflación»): el 06-oct «inflación
 #   mayorista», «IPC GBA» e «inflación Misiones» daban como verificada la
-#   serie del IPC nacional, y la del IPIM o la de la región no aparecía.
+#   serie del IPC nacional, y la del IPIM o la de la región no aparecía. Una
+#   frase que también es suya no la cubre: «costo de vida» es el IPC y también
+#   la canasta básica, y no es más específica.
 # - ``discontinued``: la fuente dejó de actualizar la serie.
 # - ``default_collapse`` / ``default_representation``: sólo los usa el
 #   pipeline viejo (``pipeline/connectors/series.py``).
@@ -153,6 +156,8 @@ SERIES_CATALOG: dict[str, dict] = {
             "formosa",
             "en corrientes",
             "de corrientes",
+            "inflacion corrientes",
+            "ipc corrientes",
         ],
     ),
     "ipc_noroeste": _ipc_region(
@@ -170,6 +175,8 @@ SERIES_CATALOG: dict[str, dict] = {
             "tucuman",
             "en salta",
             "de salta",
+            "inflacion salta",
+            "ipc salta",
         ],
     ),
     "ipc_cuyo": _ipc_region(
@@ -492,6 +499,14 @@ _PLACES_NORMALIZED: list[tuple[tuple[str, ...], str]] = [
     for key, entry in SERIES_CATALOG.items()
     for place in entry.get("places", [])
 ]
+# Un lugar pegado a la palabra del IPC que en realidad es un verbo.
+_NOT_PLACES: list[tuple[str, ...]] = [
+    tuple(_words(text)) for text in ("la inflacion salta", "el ipc salta")
+]
+# Las frases de una entrada ``generic``: en otra entrada no la cubren.
+_GENERIC_PHRASES: set[tuple[str, ...]] = {
+    phrase for phrase, _key, entry in _CATALOG_NORMALIZED if entry.get("generic")
+}
 
 
 def match_catalog(query: str) -> list[dict]:
@@ -501,23 +516,31 @@ def match_catalog(query: str) -> list[dict]:
     pero «emisiones» ya no encuentra la base monetaria ni «cambio climático»
     el tipo de cambio. Una entrada con ``places`` coincide con una palabra del
     IPC y uno de sus lugares en cualquier parte del texto, y la ``generic``
-    se descarta si las palabras con que coincidió están todas en las de otras
-    entradas: «inflación mayorista» es el IPIM y no también el IPC nacional.
-    En el orden del catálogo, sin repetir.
+    se descarta si las palabras con que coincidió están todas en frases de
+    otras entradas que no son suyas: «inflación mayorista» es el IPIM y no
+    también el IPC nacional, y «costo de vida» es los dos, el IPC y la
+    canasta. En el orden del catálogo, sin repetir.
     """
     raw = _words(query)
     words = [_stem(w) for w in raw]
     covered: dict[str, set[int]] = {}
+    # Lo que cada entrada cubre con frases que la genérica no tiene: «costo de
+    # vida» es del IPC y de la canasta, y no descarta al IPC.
+    specific: dict[str, set[int]] = {}
     for phrase, key, _entry in _CATALOG_NORMALIZED:
         if at := _positions(words, phrase):
             covered.setdefault(key, set()).update(at)
+            if phrase not in _GENERIC_PHRASES:
+                specific.setdefault(key, set()).update(at)
     ipc_at = set().union(*(_positions(words, phrase) for phrase in _IPC_WORDS))
     if ipc_at:
+        not_places = set().union(*(_positions(raw, phrase) for phrase in _NOT_PLACES))
         for place, key in _PLACES_NORMALIZED:
-            if at := _positions(raw, place):
+            if (at := _positions(raw, place)) and not at <= not_places:
                 covered.setdefault(key, set()).update(at | ipc_at)
+                specific.setdefault(key, set()).update(at | ipc_at)
     for key in [k for k in covered if SERIES_CATALOG[k].get("generic")]:
-        others = set().union(*(at for k, at in covered.items() if k != key))
+        others = set().union(*(at for k, at in specific.items() if k != key))
         if covered[key] <= others:
             del covered[key]
     return [entry for key, entry in SERIES_CATALOG.items() if key in covered]

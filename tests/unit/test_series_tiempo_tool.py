@@ -682,6 +682,27 @@ async def test_buscar_series_inflacion_de_misiones_es_el_noreste_y_agosto_da_1_7
     assert 1.75 in serie_nea["filas"][0].values()
 
 
+@pytest.mark.parametrize(
+    ("texto", "sid"),
+    [
+        ("inflación Corrientes agosto 2026", IPC_NORESTE_ID),
+        ("inflación Salta agosto 2026", "148.3_INIVELNOA_DICI_M_21"),
+    ],
+)
+async def test_buscar_series_provincia_sin_preposicion_es_su_region(texto: str, sid: str) -> None:
+    """Revisión de #164: nueva_15 está escrita sin preposición a propósito.
+    Corrientes y Salta, que también son palabras comunes, pedían «en» o «de»
+    delante y seguían verificando sólo el IPC nacional."""
+    assert _ids(await _buscar(texto)) == {sid}
+
+
+async def test_buscar_series_costo_de_vida_sigue_verificando_el_ipc() -> None:
+    """Revisión de #164: «costo de vida» es keyword del IPC y de la canasta
+    básica. La regla de la genérica dejaba sólo la Canasta Básica Total
+    (línea de pobreza), y la /search de la API no trae ningún IPC."""
+    assert _ids(await _buscar("costo de vida 2025")) == {IPC_ID, "150.1_LA_POBREZA_0_D_13"}
+
+
 async def test_buscar_series_reservas_ofrece_primero_la_diaria() -> None:
     payload = await _buscar("reservas internacionales del BCRA")
     assert {RESERVAS_ID, "92.2_RESERVAS_IRES_0_0_32_40"} <= _ids(payload)

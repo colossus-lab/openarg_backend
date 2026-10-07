@@ -102,6 +102,7 @@ def test_la_serie_discontinuada_esta_rotulada() -> None:
 def test_el_viejo_sigue_encontrando_lo_de_siempre() -> None:
     """`find_catalog_match` (pipeline viejo) devuelve la primera entrada, como antes."""
     assert find_catalog_match("inflación de agosto")["ids"] == ["148.3_INIVELNAL_DICI_M_26"]
+    assert find_catalog_match("costo de vida")["ids"] == ["148.3_INIVELNAL_DICI_M_26"]
     assert find_catalog_match("balanza comercial 2025")["ids"] == [
         "74.3_IET_0_M_16",
         "74.3_IIT_0_M_25",
@@ -132,6 +133,13 @@ def _claves(texto: str) -> list[str]:
         ("inflación en Corrientes", "ipc_noreste"),
         ("inflación en Jujuy", "ipc_noroeste"),
         ("inflación de Salta", "ipc_noroeste"),
+        # Revisión de #164: nueva_15 está escrita sin preposición, como en un
+        # buscador; Corrientes y Salta, también palabras comunes, sólo
+        # coincidían con «en» o «de» delante.
+        ("inflación Corrientes agosto 2026", "ipc_noreste"),
+        ("IPC Corrientes", "ipc_noreste"),
+        ("inflación Salta agosto 2026", "ipc_noroeste"),
+        ("ipc salta", "ipc_noroeste"),
         ("IPC Cuyo", "ipc_cuyo"),
         ("precios en Mendoza", "ipc_cuyo"),
         ("inflación de la región pampeana", "ipc_pampeana"),
@@ -152,6 +160,10 @@ def test_la_palabra_mas_especifica_excluye_el_ipc_nacional(texto: str, key: str)
         # El nacional pedido por nombre, o junto a otro índice, se queda.
         ("inflación nacional y del NEA", ["inflacion", "ipc_noreste"]),
         ("inflación y precios mayoristas", ["inflacion", "ipim"]),
+        # Revisión de #164: «costo de vida» es keyword del IPC y de la
+        # canasta. La misma frase en otra entrada no es más específica.
+        ("costo de vida", ["inflacion", "canasta_basica"]),
+        ("¿cuánto subió el costo de vida en 2025?", ["inflacion", "canasta_basica"]),
         ("dólar mayorista", ["tipo_cambio"]),
         ("comercio mayorista", ["emae_comercio"]),
         ("exportaciones de Misiones", ["exportaciones"]),
@@ -170,6 +182,10 @@ def test_sin_una_palabra_mas_especifica_el_ipc_nacional_sigue(
         ("inflación en pesos corrientes", "ipc_noreste"),
         ("¿por qué salta la inflación?", "ipc_noroeste"),
         ("qué dijo la misión del FMI sobre la inflación", "ipc_noreste"),
+        # Pegados a la palabra del IPC, pero como verbo o adjetivo.
+        ("¿por qué la inflación salta en diciembre?", "ipc_noroeste"),
+        ("si el IPC salta otra vez", "ipc_noroeste"),
+        ("índice de precios corrientes", "ipc_noreste"),
     ],
 )
 def test_un_lugar_que_tambien_es_palabra_comun_no_trae_la_region(texto: str, region: str) -> None:
