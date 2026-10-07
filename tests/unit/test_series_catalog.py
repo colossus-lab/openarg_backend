@@ -270,3 +270,38 @@ def test_el_pbi_no_saca_al_emae_ni_cambia_lo_del_pipeline_viejo() -> None:
     # que toma la primera entrada, sigue en el EMAE.
     assert _claves("producto bruto interno") == ["emae", "pbi"]
     assert find_catalog_match("producto bruto interno")["ids"] == ["143.3_NO_PR_2004_A_21"]
+
+
+# Revisión de #173: «tasa de actividad» y «pbi» sueltos coinciden también
+# cuando se pregunta por un lugar, un grupo, otro país, el per cápita o un
+# «% del PBI». En staging esas búsquedas no tenían ninguna verificada, y con
+# la nacional verificada arriba, la de Gran Córdoba que la /search traía
+# primero quedaba debajo (07-oct, en vivo). Es la falla de nueva_15 del
+# 06-oct: «inflación Misiones» verificaba el IPC nacional.
+#
+# Lo decidido, mínimo y sin decisión de producto: la entrada sigue
+# coincidiendo y su descripción dice que es el total nacional y para qué no
+# sirve. Sacarla cuando aparece un lugar, «per cápita» o «del PBI» (lo inverso
+# de ``places``) lo decide Lucho; si se toma, cambia la primera aserción.
+@pytest.mark.parametrize(
+    ("texto", "clave", "aviso"),
+    [
+        ("tasa de actividad en Córdoba", "actividad", "provincia"),
+        # «aglomerados urbanos» ya estaba: se pide la frase entera.
+        ("tasa de actividad en GBA", "actividad", "región o aglomerado"),
+        ("tasa de actividad de las mujeres", "actividad", "mujeres"),
+        ("PBI de Córdoba", "pbi", "provincia"),
+        ("PIB de Brasil", "pbi", "otro país"),
+        ("PBI per cápita", "pbi", "per cápita"),
+        ("gasto en educación como porcentaje del PBI", "pbi", "% del PBI"),
+        ("deuda pública en % del PBI", "pbi", "% del PBI"),
+    ],
+)
+def test_la_serie_nacional_avisa_que_no_es_la_de_un_lugar_ni_un_cociente(
+    texto: str, clave: str, aviso: str
+) -> None:
+    assert _claves(texto) == [clave]
+    descripcion = SERIES_CATALOG[clave]["description"]
+    assert "total nacional" in descripcion
+    assert aviso in descripcion
+    assert "usá la de 'series' que mida eso" in descripcion

@@ -449,6 +449,10 @@ SERIES_CATALOG: dict[str, dict] = {
     # 2026, y lo dio como el último dato (el 05-oct, igual). La anual promedia
     # los cuatro trimestres (2025: 48,38). Va al final: el pipeline viejo toma
     # la primera entrada.
+    # «tasa de actividad» coincide también con «tasa de actividad en Córdoba»
+    # (revisión de #173): la descripción dice que es el total nacional, porque
+    # la /search trae primero la de Gran Córdoba y quedaba debajo de esta.
+    # Sacar la entrada cuando aparece un lugar o un grupo lo decide Lucho.
     "actividad": {
         "ids": ["43.2_ECTAT_0_T_33"],
         "description": (
@@ -456,7 +460,10 @@ SERIES_CATALOG: dict[str, dict] = {
             "urbanos), trimestral desde 2003: la población económicamente activa como % de la "
             "población. series_tiempo la devuelve en %: 45.6 es 45,6 % (la API la da como "
             "fracción y se escala). Su último trimestre es el último dato de la EPH; la anual "
-            "42.1_EPAT_0_A_27 promedia los trimestres y llega sólo al último año completo."
+            "42.1_EPAT_0_A_27 promedia los trimestres y llega sólo al último año completo. Es "
+            "el total nacional: no es la de una provincia, región o aglomerado, ni la de un "
+            "grupo (mujeres, varones, una edad); para esos casos no sirve: usá la de 'series' "
+            "que mida eso."
         ),
         "expected_description": {"43.2_ECTAT_0_T_33": "Tasa de actividad total. En porcentaje."},
         "keywords": ["tasa de actividad"],
@@ -470,6 +477,10 @@ SERIES_CATALOG: dict[str, dict] = {
     # 9.1_PP2_2004_A_16. Sumados, el nivel da cuatro veces el PIB (la
     # variación es la misma). Al final, por el pipeline viejo: «producto
     # bruto» sigue siendo primero del EMAE.
+    # «pbi» y «pib» sueltos coinciden también con «PIB de Brasil», «PBI per
+    # cápita» o «gasto en educación como % del PBI» (revisión de #173): la
+    # descripción dice que es el total nacional y para qué no sirve. Sacar la
+    # entrada en esos casos lo decide Lucho.
     "pbi": {
         "ids": ["4.2_OGP_2004_T_17"],
         "description": (
@@ -479,7 +490,10 @@ SERIES_CATALOG: dict[str, dict] = {
             "un año es el promedio de sus trimestres, no la suma. El crecimiento de cada año: "
             "frecuencia=year con representacion=percent_change. La interanual de cada "
             "trimestre: representacion=percent_change_a_year_ago. No es el EMAE (mensual) ni "
-            "166.2_PPIB_0_0_3, que es el PIB a precios corrientes."
+            "166.2_PPIB_0_0_3, que es el PIB a precios corrientes. Es el total nacional de la "
+            "Argentina: no es per cápita, ni el de una provincia o región (el PBG), ni el de "
+            "otro país, ni un cociente como el «% del PBI»; para esos casos no sirve: usá la "
+            "de 'series' que mida eso."
         ),
         "expected_description": {
             "4.2_OGP_2004_T_17": (

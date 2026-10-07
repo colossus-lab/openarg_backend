@@ -1354,3 +1354,71 @@ async def test_pbi_verifica_el_pib_real_y_su_crecimiento_anual_da_4_48() -> None
     valores = [v for f in trimestral["filas"] for k, v in f.items() if k.startswith("PIB")]
     assert 4.48 not in valores
     assert {6.12, 6.52, 3.2, 2.18} <= set(valores)
+
+
+# Lo que devolvió la /search de la API el 07-oct para «tasa de actividad en
+# Córdoba», en el orden en que vino (las tres primeras y la nacional).
+_SEARCH_ACTIVIDAD_CORDOBA = [
+    {
+        "id": "43.1_ECTATGC_0_A_46",
+        "title": "eph_continua_tasa_actividad_total_gran_cordoba",
+        "description": "Tasa de actividad total Gran Cordoba. En porcentaje.",
+        "units": "Porcentaje",
+        "frequency": "R/P1Y",
+        "time_index_end": "2025-01-01",
+    },
+    {
+        "id": "43.2_ECTATGC_0_T_46",
+        "title": "eph_continua_tasa_actividad_total_gran_cordoba",
+        "description": "Tasa de actividad total Gran Cordoba. En porcentaje.",
+        "units": "Porcentaje",
+        "frequency": "R/P3M",
+        "time_index_end": "2026-04-01",
+    },
+    {
+        "id": "obras_12_07_05",
+        "title": "poburb_18a65_tasaactividad_14",
+        "description": "Tasa de actividad (18-65 años) en de hogares urbanos en Córdoba",
+        "units": "Porcentaje",
+        "frequency": "R/P3M",
+        "time_index_end": "2022-01-01",
+    },
+    {
+        "id": ACTIVIDAD_ID,
+        "title": "eph_continua_tasa_actividad_total",
+        "description": "Tasa de actividad total. En porcentaje.",
+        "units": "Porcentaje",
+        "frequency": "R/P3M",
+        "time_index_end": "2026-04-01",
+    },
+]
+
+
+async def test_tasa_de_actividad_de_cordoba_avisa_que_la_verificada_es_la_nacional() -> None:
+    """Revisión de #173: con «tasa de actividad» suelta, «tasa de actividad en
+    Córdoba» verifica la nacional, y la de Gran Córdoba, que la /search trae
+    primero, queda debajo. En staging no había ninguna verificada. Es la falla
+    de nueva_15 del 06-oct («inflación Misiones» verificaba el IPC nacional).
+    """
+    payload = await _buscar("tasa de actividad en Córdoba", found=_SEARCH_ACTIVIDAD_CORDOBA)
+    assert _ids(payload) == {ACTIVIDAD_ID}
+    descripcion = payload["verificadas"][0]["descripcion"]
+    assert "total nacional" in descripcion
+    assert "provincia, región o aglomerado" in descripcion
+    assert "usá la de 'series' que mida eso" in descripcion
+    # La de Gran Córdoba sigue ahí, en el orden de la /search.
+    assert [s["id"] for s in payload["series"][:2]] == [
+        "43.1_ECTATGC_0_A_46",
+        "43.2_ECTATGC_0_T_46",
+    ]
+
+
+async def test_pib_de_otro_pais_avisa_que_la_verificada_es_la_de_la_argentina() -> None:
+    """Revisión de #173: «PIB de Brasil» verificaba el PIB argentino sin decir
+    que no sirve para otro país; la /search trae lo mismo que para
+    «producto bruto» (07-oct, en vivo)."""
+    payload = await _buscar("PIB de Brasil", found=_SEARCH_PRODUCTO_BRUTO)
+    assert _ids(payload) == {PIB_ID}
+    descripcion = payload["verificadas"][0]["descripcion"]
+    assert "total nacional" in descripcion and "otro país" in descripcion
+    assert "usá la de 'series' que mida eso" in descripcion
