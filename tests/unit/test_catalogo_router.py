@@ -522,6 +522,79 @@ async def test_buscar_shows_one_copy_of_a_file_even_when_both_have_rows(
     assert only["archivo"] == "r.csv" and only["formato"] == "CSV"
 
 
+async def test_buscar_keeps_two_sheets_with_the_same_shape_and_other_values(
+    client: AsyncClient, sandbox: FakeSandbox, search: AsyncMock
+) -> None:
+    """H092 (revisión del 05-oct): `sh_isac_2025.xls` tiene el Cuadro 3.1 (serie
+    original) y el 4.1 (desestacionalizada) con la misma forma. Se juntaban por
+    forma y `buscar_datasets` mostraba uno solo."""
+    url = "https://www.indec.gob.ar/ftp/cuadros/economia/sh_isac_2025.xls"
+    title = "INDEC - ISAC — Actividad de la Construcción — Cuadro "
+    search.search_datasets_ann.return_value = [
+        SearchResult("c3.1", title + "3.1", "", "indec", url, "", 0.70),
+        SearchResult("c4.1", title + "4.1", "", "indec", url, "", 0.69),
+    ]
+    cols = ["Período", "Período_2", "Asfalto", "Cales"]
+    sandbox.tables = [
+        CachedTableInfo("raw.cache_indec_isac_cuadro_3_1", "c3.1", 171, cols),
+        CachedTableInfo("raw.cache_indec_isac_cuadro_4_1", "c4.1", 171, cols),
+    ]
+    sandbox.table_fingerprints = AsyncMock(  # type: ignore[attr-defined]
+        return_value={
+            "cache_indec_isac_cuadro_3_1": "171:96674937454929861457",
+            "cache_indec_isac_cuadro_4_1": "171:-94578655270205905329",
+        }
+    )
+
+    r = await client.get("/catalogo/buscar", params={"q": "actividad de la construcción"})
+
+    assert r.status_code == 200, r.text
+    assert [x["titulo"] for x in r.json()["resultados"]] == [title + "3.1", title + "4.1"]
+    sandbox.table_fingerprints.assert_awaited_once_with(  # type: ignore[attr-defined]
+        ["raw.cache_indec_isac_cuadro_3_1", "raw.cache_indec_isac_cuadro_4_1"]
+    )
+
+
+async def test_buscar_shows_every_table_of_a_zip_even_from_another_copy(
+    client: AsyncClient, sandbox: FakeSandbox, search: AsyncMock
+) -> None:
+    """Revisión de #177: en prod, una copia de "igj-2022-semestre-1.zip" trae las
+    entidades y otra, con el mismo título, los administradores. Main mostraba
+    las dos tablas; con sólo las de la copia elegida, los administradores
+    dejaban de aparecer en `buscar_datasets`. La copia cortada de las
+    entidades sigue sin sumarse."""
+    url = (
+        "https://datos.jus.gob.ar/dataset/da045e06/resource/e7ac500b/download/"
+        "igj-2022-semestre-1.zip"
+    )
+    title = "Entidades constituidas en la Inspección General de Justicia"
+    search.search_datasets_ann.return_value = [
+        SearchResult("entidades", title, "", "justicia", url, "", 0.70),
+        SearchResult("administradores", title, "", "datos_gob_ar", url, "", 0.69),
+        SearchResult("cortada", title, "", "datos_gob_ar", url, "", 0.68),
+    ]
+    entidades = ["numero_correlativo", "razon_social", "dada_de_baja", "cuit"]
+    sandbox.tables = [
+        CachedTableInfo("raw.igj_entidades", "entidades", 305_684, entidades),
+        CachedTableInfo(
+            "raw.igj_administradores",
+            "administradores",
+            2_500_000,
+            ["numero_correlativo", "apellido_nombre", "tipo_administrador"],
+        ),
+        CachedTableInfo("raw.igj_entidades_cortada", "cortada", 500_000, entidades),
+    ]
+
+    r = await client.get("/catalogo/buscar", params={"q": "administradores de sociedades"})
+
+    assert r.status_code == 200, r.text
+    [only] = r.json()["resultados"]
+    assert only["tablas"] == [
+        {"tabla": "raw.igj_administradores", "filas": 2_500_000},
+        {"tabla": "raw.igj_entidades", "filas": 305_684},
+    ]
+
+
 async def test_buscar_uses_the_live_version_rows_and_sends_tableless_to_the_bottom(
     client: AsyncClient, sandbox: FakeSandbox, search: AsyncMock
 ) -> None:

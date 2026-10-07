@@ -47,7 +47,7 @@ from app.application.answers.tools.base import (
     str_arg,
     to_json,
 )
-from app.application.catalog.collapse import _ROW_CAPS, collapse_hits
+from app.application.catalog.collapse import _ROW_CAPS, collapse_hits, content_fingerprints
 from app.application.catalog.national_prior import NATIONAL_PORTALS, national_prior
 from app.application.consultas.agregar import PedidoAgregado, agregar
 from app.application.consultas.fechas import (
@@ -321,6 +321,9 @@ class BuscarDatos:
         t_search = time.perf_counter()
         found_tables = await deps.sandbox.find_tables(dataset_ids=[str(h.dataset_id) for h in hits])
         profiles = await deps.sandbox.table_profiles([t.table_name for t in found_tables])
+        # Las hojas de un .xls con la misma forma y otro título se juntan sólo
+        # con el mismo contenido (ISAC 3.1 y 4.1 son series distintas).
+        fingerprints = await content_fingerprints(deps.sandbox, hits, found_tables, profiles)
         # Una entrada por archivo, con la copia de más filas reales y
         # encabezado sano; prioridad chica a lo nacional si no nombra lugar.
         datasets = [
@@ -331,7 +334,13 @@ class BuscarDatos:
                 **({"archivo": c.archivo} if c.archivo else {}),
                 "tablas": [_table_summary(t) for t in c.tables[:_MAX_TABLES_PER_DATASET]],
             }
-            for c in collapse_hits(hits, found_tables, profiles, prior=national_prior(texto))
+            for c in collapse_hits(
+                hits,
+                found_tables,
+                profiles,
+                prior=national_prior(texto),
+                fingerprints=fingerprints,
+            )
             if c.tables
         ][:_MAX_DATASETS]
         logger.info(

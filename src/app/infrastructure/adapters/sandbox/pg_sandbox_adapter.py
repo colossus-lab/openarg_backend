@@ -1217,3 +1217,81 @@ class PgSandboxAdapter(ISQLSandbox):
         return await loop.run_in_executor(
             self._executor, partial(self._table_profiles_sync, list(table_names))
         )
+
+    # ── huella del contenido, para no juntar hojas distintas (búsqueda) ───
+
+    # Order-independent content hash: the row count plus the sum of the first
+    # 64 bits of each row's md5. Same rows (as a multiset) -> same fingerprint,
+    # whatever the physical order. No sort: on staging a 30,475-row INDEC
+    # table takes ~80 ms this way and ~600 ms with an ordered string_agg.
+    # Collector bookkeeping columns (`_source_dataset_id`, `_source_url`...)
+    # differ between copies of the same table, so they are left out.
+    _FINGERPRINT_SQL = (
+        "SELECT CAST(:n{i} AS text) AS name, count(*) AS n, "
+        "COALESCE(sum(('x' || substr(md5({row}), 1, 16))::bit(64)::bigint), 0) AS s "
+        "FROM {table}"
+    )
+    _FINGERPRINT_MAX_TABLES = 40
+    _FINGERPRINT_TIMEOUT_MS = 3000
+
+    @staticmethod
+    def _quote_ident(name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
+    def _table_fingerprints_sync(self, table_names: list[str]) -> dict[str, str]:
+        wanted: dict[str, str] = {}  # quoted name -> bare name
+        for name in table_names:
+            if not name:
+                continue
+            quoted = quote_qualified(name)
+            # Only tables a sandbox query may read (`cache_*` in public, raw).
+            if _validate_sql(f"SELECT 1 FROM {quoted}", built=True):
+                continue
+            wanted.setdefault(quoted, bare_name(name))
+            if len(wanted) >= self._FINGERPRINT_MAX_TABLES:
+                break
+        if not wanted:
+            return {}
+        engine = self._get_engine()
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SET TRANSACTION READ ONLY"))
+                conn.execute(text(f"SET LOCAL statement_timeout = {self._FINGERPRINT_TIMEOUT_MS}"))
+                columns: dict[str, list[str]] = {}
+                for row in conn.execute(
+                    text(
+                        "SELECT q.name, a.attname "
+                        "FROM unnest(CAST(:names AS text[])) AS q(name) "
+                        "JOIN pg_attribute a ON a.attrelid = to_regclass(q.name) "
+                        "WHERE a.attnum > 0 AND NOT a.attisdropped "
+                        "ORDER BY q.name, a.attnum"
+                    ),
+                    {"names": list(wanted)},
+                ).fetchall():
+                    if not str(row.attname).startswith("_"):
+                        columns.setdefault(str(row.name), []).append(str(row.attname))
+                if not columns:
+                    conn.rollback()
+                    return {}
+                parts: list[str] = []
+                params: dict[str, str] = {}
+                for i, (quoted, cols) in enumerate(columns.items()):
+                    row_text = "ROW(" + ", ".join(self._quote_ident(c) for c in cols) + ")::text"
+                    parts.append(self._FINGERPRINT_SQL.format(i=i, row=row_text, table=quoted))
+                    params[f"n{i}"] = quoted
+                rows = conn.execute(text(" UNION ALL ".join(parts)), params).fetchall()
+                conn.rollback()
+        except Exception:
+            # Without a fingerprint two same-shaped sheets stay apart: a
+            # possible duplicate instead of a hidden table.
+            logger.warning("table_fingerprints failed for %d tables", len(wanted), exc_info=True)
+            return {}
+        return {wanted[str(r.name)]: f"{int(r.n)}:{r.s}" for r in rows if str(r.name) in wanted}
+
+    async def table_fingerprints(self, table_names: list[str]) -> dict[str, str]:
+        if not table_names:
+            return {}
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor, partial(self._table_fingerprints_sync, list(table_names))
+        )
