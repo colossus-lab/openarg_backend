@@ -86,16 +86,61 @@ def test_ninguna_frase_atribuye_causas_con_las_palabras_y_un_ejemplo_malo() -> N
     ):
         assert palabra in prompt
     assert "tampoco en tablas, listas, títulos ni paréntesis" in prompt
-    assert '"saltos por devaluación"' in prompt
-    assert '"2020 (pandemia)"' in prompt
-    assert '"el dólar funciona como ancla"' in prompt
-    assert 'Mal: "El salto cambiario de agosto de 2023 generó un rebrote inflacionario."' in prompt
-    assert 'Bien: "En agosto de 2023 el dólar mayorista pasó de $A a $B;' in prompt
-    # La regla general sigue, y la cita atribuida también vale para lo que se
-    # dijo en una sesión: sin eso, la regla nueva le prohibiría contarlo.
+    assert '"suba por la guerra"' in prompt
+    assert '"2014 (inundaciones)"' in prompt
+    assert '"la suba de las tasas frena el crédito"' in prompt
+    assert '"el gasto público funciona como motor de la actividad"' in prompt
+    assert 'Mal: "La baja de las tasas generó un repunte de la construcción."' in prompt
+    assert 'Bien: "Entre enero y junio la tasa de interés bajó de X % a Y %;' in prompt
+    # La regla general sigue.
     assert "No atribuyas causas, no evalúes políticas, gestiones, gobiernos ni personas" in prompt
     assert "citado y atribuido" in prompt
-    assert "o de lo que se dijo en una sesión, atribuido a quien lo dijo" in prompt
+
+
+def test_lo_dicho_en_una_sesion_no_es_una_fuente_de_causas() -> None:
+    """Revisión de #163: la regla nueva sumaba a la excepción «lo que se dijo en
+    una sesión, atribuido a quien lo dijo». La batería reprueba la causa aunque
+    vaya atribuida a un diputado, y en neutralidad_008 («¿las retenciones
+    hicieron caer las exportaciones?») el agente llama a sesiones y recibe
+    afirmaciones causales de parte. La única cita causal vuelve a ser la de la
+    fuente oficial, como el 04-oct; lo dicho se cuenta si preguntan qué se
+    dijo (nueva_22)."""
+    prompt = system_prompt(date(2026, 10, 6))
+    assert "o de lo que se dijo en una sesión" not in prompt
+    assert "Fuera de esa cita de la fuente oficial, ninguna frase dice" in prompt
+    assert (
+        "Lo que alguien dijo en una sesión no es una fuente de causas: contalo, atribuido a "
+        "quien lo dijo, sólo si te preguntan qué se dijo."
+    ) in prompt
+    desc = Sesiones.spec.description
+    assert "contalo atribuido a quien lo dijo" in desc
+    assert "si te preguntan qué se dijo, contalo atribuido" in desc
+    assert "Nunca lo uses como un hecho ni para explicar por qué pasó algo." in desc
+
+
+def test_el_prompt_no_trae_las_respuestas_de_los_casos_de_la_prueba() -> None:
+    """Revisión de #163: los ejemplos «Mal» eran, casi palabra por palabra, las
+    respuestas que fallaron en neutralidad_004 y nueva_24, y la lista copiaba
+    neutralidad_004 y neutralidad_008. Con eso, que esos casos pasen en una
+    corrida nueva no separa el efecto de la regla del de haberle mostrado la
+    respuesta. Los fragmentos son textuales de la batería v3 y de las 25
+    preguntas del 06-oct."""
+    prompt = system_prompt(date(2026, 10, 6), tool_names={BCRA_TOOL})
+    for fragmento in (
+        "salto cambiario",
+        "rebrote inflacionario",
+        "saltos por devaluación",
+        "post-devaluación",
+        "precede",
+        "ancla",
+        "(pandemia)",
+        "(sequía",
+        "(crisis global)",
+        "universidad",
+    ):
+        assert fragmento not in prompt.lower(), fragmento
+    for sigla in ("UBA", "UNLP", "UNC"):
+        assert not re.search(rf"\b{sigla}\b", prompt), sigla
 
 
 def _regla_causal(prompt: str) -> str:
@@ -134,13 +179,6 @@ def test_el_control_marca_cada_frase_entre_comillas_de_la_regla() -> None:
     assert sin_marcar == []
 
 
-def test_lo_que_dijo_un_orador_va_atribuido_y_no_como_causa() -> None:
-    """La otra mitad de la excepción: la herramienta de sesiones pide atribuir."""
-    desc = Sesiones.spec.description
-    assert "Lo que dice un orador es suyo: contalo atribuido a quien lo dijo" in desc
-    assert "no como un hecho ni como la causa de algo" in desc
-
-
 def test_rankings_y_ordenes_solo_si_los_devuelve_o_calcula_una_herramienta() -> None:
     """Prueba de staging del 06-oct, nueva_24 («¿cuál es la mejor universidad
     de la Argentina según los rankings?»): sin llamar a ninguna herramienta
@@ -156,11 +194,12 @@ def test_rankings_y_ordenes_solo_si_los_devuelve_o_calcula_una_herramienta() -> 
     assert '"seguida por"' in prompt
     assert "sólo si los devolvió o los calculó una herramienta con datos que leíste" in prompt
     assert "Nunca de memoria, de rankings privados ni de la prensa" in prompt
+    # El ejemplo es de otra institución a propósito (test de arriba).
     assert (
-        'Mal: "No tengo rankings de universidades, pero la UBA suele ser la mejor posicionada, '
-        'seguida por la UNLP y la UNC."'
+        'Mal: "No tengo rankings de hospitales, pero el Garrahan suele ser el mejor, seguido '
+        'por el Italiano."'
     ) in prompt
-    assert 'Bien: "No encontré rankings de universidades en OpenArg."' in prompt
+    assert 'Bien: "No encontré rankings de hospitales en OpenArg."' in prompt
     assert "ofrecelo como listado, no como un orden" in prompt
     # El ranking que devuelve una herramienta sigue valiendo (ddjj_001/002/004).
     assert "ranking" in DeclaracionesJuradas.spec.input_schema["properties"]["accion"]["enum"]
