@@ -11,6 +11,14 @@ no pide token.
 "Dólar oficial" son las dos referencias del BCRA, con fecha (decisión de
 producto del 04-oct): el minorista promedio vendedor (variable 4) y el
 mayorista de referencia de la Comunicación A 3500 (variable 5).
+
+`variacion` (06-oct): "¿cuánto cambiaron las reservas y la base monetaria
+entre fin de 2025 y fin de agosto de 2026?" mostraba los dos saldos de la base
+y decía "no pude calcular" la variación (+10,46 %). La única herramienta que
+calculaba variaciones era series_tiempo, y su base monetaria está parada en la
+fuente (la mensual 331.1 llega a mayo de 2026 y la diaria 331.2 al 12 de
+junio); el prompt prohíbe la cuenta de cabeza. Se calcula acá, sobre los
+valores del BCRA, como la `variacion` de series_tiempo.
 """
 
 from __future__ import annotations
@@ -30,6 +38,13 @@ from app.application.answers.tools.base import (
     quoted,
     str_arg,
     to_json,
+)
+from app.application.answers.tools.conectores import (
+    _STEP_MONTHS,
+    _leaves_period_open,
+    _pct,
+    _period_bounds,
+    _pick,
 )
 from app.domain.entities.connectors.data_result import DataResult
 from app.domain.exceptions.connector_errors import ConnectorError
@@ -385,6 +400,158 @@ async def _hasta_hoy(
     return result
 
 
+# ── variación entre dos períodos, calculada en código ──────
+
+# Observaciones que se piden por punta. Sin `desde`, el BCRA devuelve de la
+# más nueva a la más vieja hasta `hasta`: la primera ya es la del cierre.
+_POR_PUNTA = 10
+_CALCULO = (
+    "valor_hasta / valor_desde − 1 y valor_hasta − valor_desde, calculados por OpenArg sobre "
+    "los valores publicados por el BCRA"
+)
+
+
+async def _variacion(bcra: Any, keys: list[str], spec: Any, today: date) -> ToolOutcome:
+    """valor[hasta] / valor[desde] − 1 de cada variable, sobre los valores del BCRA.
+
+    Cada punta es el último dato publicado dentro de su período: «fin de
+    2025» (2025, 2025-12 o 2025-12-31) es el 30/12/2025, el último día hábil.
+    Se piden sólo las puntas, no todo el rango, y nunca después de hoy: la
+    UVA, el CER y el ICL se publican por adelantado.
+    """
+    if not isinstance(spec, dict):
+        raise ToolInputError("`variacion` es un objeto {desde, hasta}.")
+    desde = str_arg(spec, "desde", required=True, max_len=10) or ""
+    hasta = str_arg(spec, "hasta", required=True, max_len=10) or ""
+    base, fin = _period_bounds(desde), _period_bounds(hasta)
+    if base is None or fin is None:
+        raise ToolInputError("`desde` y `hasta` son AAAA, AAAA-MM o AAAA-MM-DD.")
+    if base[1] >= fin[0]:
+        raise ToolInputError("`desde` tiene que ser un período anterior a `hasta`.")
+    hoy = today.isoformat()
+    if fin[0] > hoy:
+        raise ToolInputError("`hasta` es un período que todavía no empezó.")
+
+    puntas = [(k, bounds) for k in keys for bounds in (base, fin)]
+    fetched = await asyncio.gather(
+        *(
+            bcra.get_variable(
+                VARIABLES[k].id,
+                None,
+                min(bounds[1], hoy),
+                limit=_POR_PUNTA,
+                title=VARIABLES[k].titulo,
+                plazo_s=_PLAZO_S,
+            )
+            for k, bounds in puntas
+        ),
+        return_exceptions=True,
+    )
+
+    filas: list[dict[str, Any]] = []
+    results: list[DataResult] = []
+    sin_dato: list[str] = []
+    abiertos: list[str] = []
+    failures = 0
+    for i, key in enumerate(keys):
+        var = VARIABLES[key]
+        inicio, final = fetched[2 * i], fetched[2 * i + 1]
+        if isinstance(inicio, BaseException) or isinstance(final, BaseException):
+            # Como en la consulta normal: el BCRA caído no tira abajo a las
+            # demás variables; un error nuestro sí sube.
+            for got in (inicio, final):
+                if isinstance(got, BaseException) and not isinstance(got, ConnectorError):
+                    raise got
+            failures += 1
+            filas.append({"variable": key, "error": "El BCRA no respondió."})
+            continue
+        meta = final.metadata or {}
+        step = _STEP_MONTHS.get(str(meta.get("frecuencia")))
+        p0 = _pick(inicio.records or [], "valor", base, step)
+        p1 = _pick(final.records or [], "valor", fin, step)
+        if p0 is None or p1 is None:
+            periodo, got = (desde, inicio) if p0 is None else (hasta, final)
+            previo = (got.records or [{}])[-1].get("fecha")
+            sin_dato.append(
+                f"{var.corto}: el BCRA no tiene dato para {periodo}"
+                + (f" (el último anterior es del {_fecha_ar(previo)})." if previo else ".")
+            )
+            continue
+        if p0[1] == 0:
+            sin_dato.append(f"{var.corto}: vale 0 en {p0[0]}, no tiene variación porcentual.")
+            continue
+        fila: dict[str, Any] = {
+            "serie": var.titulo,
+            "desde": p0[0],
+            "valor_desde": p0[1],
+            "hasta": p1[0],
+            "valor_hasta": p1[1],
+            "diferencia": round(p1[1] - p0[1], 4),
+            "variacion_pct": _pct(p1[1] / p0[1] - 1),
+        }
+        if _leaves_period_open(p1[0], step, fin[1]):
+            abiertos.append(p1[0])
+        results.append(
+            DataResult(
+                source="bcra",
+                portal_name=final.portal_name,
+                portal_url=final.portal_url,
+                dataset_title=f"Variación entre {p0[0]} y {p1[0]}: {var.titulo}",
+                format="json",
+                records=[fila],
+                metadata={
+                    "total_records": 1,
+                    "description": meta.get("description", ""),
+                    "units": f"variación en %; valores en {var.unidades}",
+                    "calculo": _CALCULO,
+                    # Contrato de frescura: el fin de la fuente es el del
+                    # BCRA, no la punta pedida (un período pasado no es un
+                    # dato atrasado).
+                    "ultima_observacion": p1[0],
+                    "frecuencia": meta.get("frecuencia") or "diaria",
+                    "fecha_fin_fuente": meta.get("fecha_fin_fuente"),
+                    "actualizada_en_fuente": None,
+                    "total_fuente": None,
+                    "truncada": False,
+                    "columnas_porcentaje": ["variacion_pct"],
+                    "oficial": True,
+                },
+            )
+        )
+        filas.append({"variable": key, "unidades": var.unidades, **fila})
+
+    if failures == len(keys):
+        logger.info("variables_bcra: el BCRA no respondió (%s)", ", ".join(keys))
+        return ToolOutcome(_SIN_RESPUESTA, is_error=True)
+    if not results:
+        raise ToolInputError(" ".join(sin_dato))
+    notas = [
+        "Cada punta es el último dato publicado dentro de su período: decí la fecha de cada "
+        "una (`desde` y `hasta`)."
+    ]
+    if abiertos:
+        notas.append(
+            f"El período final ({hasta}) no está completo: se usó el último dato publicado, del "
+            f"{_fecha_ar(max(abiertos))}. Decilo en la respuesta."
+        )
+    if any(VARIABLES[k].porcentaje for k in keys):
+        notas.append(
+            "En una tasa, `diferencia` está en puntos porcentuales y `variacion_pct` es el cambio "
+            "relativo de la tasa."
+        )
+    notas.extend(sin_dato)
+    respuesta: dict[str, Any] = {"aviso": _SIN_RESPUESTA} if failures else {}
+    respuesta.update(fuente=_FUENTE, calculo=_CALCULO, variaciones=filas, nota=" ".join(notas))
+    nombre = (
+        quoted(results[0].dataset_title.split(": ", 1)[-1], 80)
+        if len(results) == 1
+        else count(len(results), "variable", "variables")
+    )
+    return ToolOutcome(
+        to_json(respuesta), results=results, summary=f"Calculó la variación de {nombre} del BCRA"
+    )
+
+
 class VariablesBCRA:
     status = "Consultando al BCRA..."
 
@@ -397,6 +564,8 @@ class VariablesBCRA:
         ]
         if not names:
             return self.status
+        if isinstance(args.get("variacion"), dict):
+            return f"Calculando la variación en el BCRA: {', '.join(names)}"
         return f"Consultando al BCRA: {', '.join(names)}"
 
     spec = AgentTool(
@@ -415,7 +584,11 @@ class VariablesBCRA:
             "el último dato con su fecha, las últimas observaciones y un resumen por mes (o por "
             "año) con cierre, mínimo y máximo; con `desde` el resumen cubre todo el período "
             "(con varias variables y muchos años, el anual muestra los últimos y "
-            "`resumen_desde` dice desde cuál). Para inflación usá las series del INDEC "
+            "`resumen_desde` dice desde cuál). `variacion` calcula en código cuánto cambió cada "
+            "variable entre dos períodos (valor de `hasta` / valor de `desde` − 1, y la "
+            "diferencia), con el último dato publicado de cada período: usala para "
+            "variaciones punta a punta (p. ej. de fin de 2024 a fin de junio de 2025: "
+            "desde=2024-12, hasta=2025-06). Para inflación usá las series del INDEC "
             "(series_tiempo)."
         ),
         input_schema={
@@ -435,6 +608,21 @@ class VariablesBCRA:
                     "maximum": 120,
                     "description": "Cuántas observaciones finales mostrar (por defecto 10).",
                 },
+                "variacion": {
+                    "type": "object",
+                    "description": "Variación entre dos períodos, calculada sobre los valores.",
+                    "properties": {
+                        "desde": {
+                            "type": "string",
+                            "description": "Período base: AAAA, AAAA-MM o AAAA-MM-DD.",
+                        },
+                        "hasta": {
+                            "type": "string",
+                            "description": "Período final: AAAA, AAAA-MM o AAAA-MM-DD.",
+                        },
+                    },
+                    "required": ["desde", "hasta"],
+                },
             },
             "required": ["variables"],
         },
@@ -442,9 +630,12 @@ class VariablesBCRA:
 
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         keys = _keys(args)
+        today = hoy_ar()
+        if args.get("variacion") is not None:
+            # Las puntas salen de `variacion`; `desde`/`hasta` no se usan.
+            return await _variacion(ctx.deps.bcra, keys, args["variacion"], today)
         desde = _date_arg(args, "desde")
         hasta = _date_arg(args, "hasta")
-        today = hoy_ar()
         if desde and desde > today.isoformat():
             raise ToolInputError("`desde` no puede ser una fecha futura.")
         if desde and hasta and desde > hasta:

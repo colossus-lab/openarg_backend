@@ -19,6 +19,28 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://apis.datos.gob.ar/series/api"
 
+_IPC_NACIONAL = "148.3_INIVELNAL_DICI_M_26"
+
+
+def _ipc_region(sid: str, api_description: str, region: str, cubre: str, places: list[str]) -> dict:
+    """El IPC de una región del INDEC, de la misma familia que el nacional (base dic-2016)."""
+    return {
+        "ids": [sid],
+        "description": (
+            f"IPC {region} del INDEC, nivel general, base dic-2016=100 (mensual, desde 2016). "
+            "Con representacion=percent_change da la inflación mensual de la región. Cubre "
+            f"{cubre}. El INDEC no publica el IPC por provincia ni por ciudad: para un lugar de "
+            "la región, esta es la serie más cercana; dala aclarando que es la de la región. El "
+            f"IPC nacional es {_IPC_NACIONAL}."
+        ),
+        "expected_description": {sid: api_description},
+        "keywords": [],
+        "places": places,
+        "default_collapse": "month",
+        "default_representation": "percent_change",
+    }
+
+
 # Catálogo curado de series de la API de Series de Tiempo.
 #
 # - ``ids``: los ids que se piden juntos.
@@ -31,6 +53,20 @@ BASE_URL = "https://apis.datos.gob.ar/series/api"
 #   grabados de la API: cambiar un id tiene que ser deliberado.
 # - ``keywords``: se comparan sin acentos y por palabra completa
 #   (``match_catalog``), nunca como subcadena: "emi" encontraba "emisiones".
+# - ``places``: lugares que, junto a una palabra del IPC (``_IPC_WORDS``) en
+#   cualquier parte del texto, hacen coincidir la entrada: «inflación Misiones
+#   agosto 2026» es el IPC del Noreste. Se comparan sin acentos y sin
+#   singularizar («misión» no es Misiones); los que también son palabras
+#   comunes van con «en» o «de» delante, o pegados a «inflación» o «IPC»
+#   («inflación Salta»), nunca sueltos («precios corrientes», «¿por qué salta
+#   la inflación?»). ``_NOT_PLACES`` saca los que pegados son un verbo.
+# - ``generic``: la entrada amplia de un tema (el IPC nacional). Se descarta si
+#   las palabras con que coincidió están todas dentro de las de otras entradas
+#   («inflación mayorista» contiene «inflación»): el 06-oct «inflación
+#   mayorista», «IPC GBA» e «inflación Misiones» daban como verificada la
+#   serie del IPC nacional, y la del IPIM o la de la región no aparecía. Una
+#   frase que también es suya no la cubre: «costo de vida» es el IPC y también
+#   la canasta básica, y no es más específica.
 # - ``discontinued``: la fuente dejó de actualizar la serie.
 # - ``default_collapse`` / ``default_representation``: sólo los usa el
 #   pipeline viejo (``pipeline/connectors/series.py``).
@@ -56,10 +92,108 @@ SERIES_CATALOG: dict[str, dict] = {
         "expected_description": {
             "148.3_INIVELNAL_DICI_M_26": "IPC. Nivel General Nacional. Base dic 2016. Mensual."
         },
-        "keywords": ["inflacion", "ipc", "precios", "indice de precios", "costo de vida"],
+        "keywords": [
+            "inflacion",
+            "ipc",
+            "precios",
+            "indice de precios",
+            "costo de vida",
+            # Con una región en el mismo texto, el nacional se pidió por nombre.
+            "inflacion nacional",
+            "ipc nacional",
+        ],
+        "generic": True,
         "default_collapse": "month",
         "default_representation": "percent_change",
     },
+    "ipim": {
+        "ids": ["448.1_NIVEL_GENERAL_0_0_13_46"],
+        "description": (
+            "IPIM: Índice de Precios Internos al por Mayor del INDEC, nivel general, base "
+            "dic-2015=100 (mensual, desde 2015). Es la inflación mayorista, no el IPC: con "
+            "representacion=percent_change da la variación % mensual."
+        ),
+        "expected_description": {"448.1_NIVEL_GENERAL_0_0_13_46": "IPIM Nivel general"},
+        "keywords": [
+            "ipim",
+            "inflacion mayorista",
+            "inflacion al por mayor",
+            "precios mayoristas",
+            "precios al por mayor",
+            "indice de precios mayoristas",
+            "indice de precios al por mayor",
+            "indice de precios internos al por mayor",
+        ],
+        "default_collapse": "month",
+        "default_representation": "percent_change",
+    },
+    # Los ids se verificaron contra la metadata de la API el 06-oct: agosto de
+    # 2026 da 1,75 % en el Noreste (el nacional, 1,66 %).
+    "ipc_gba": _ipc_region(
+        "148.3_INIVELGBA_DICI_M_21",
+        "IPC. Nivel General. GBA. Base dic 2016. Mensual.",
+        "del Gran Buenos Aires (GBA)",
+        "la Ciudad de Buenos Aires y los 24 partidos del conurbano",
+        ["gba", "gran buenos aires", "conurbano"],
+    ),
+    "ipc_pampeana": _ipc_region(
+        "148.3_INIVELANA_DICI_M_26",
+        "IPC. Nivel General Región pampeana. Base dic 2016. Mensual.",
+        "de la región Pampeana",
+        "Córdoba, Entre Ríos, La Pampa, Santa Fe y la provincia de Buenos Aires fuera del GBA",
+        ["pampeana", "cordoba", "entre rios", "la pampa", "santa fe"],
+    ),
+    "ipc_noreste": _ipc_region(
+        "148.3_INIVELNEA_DICI_M_21",
+        "IPC. Nivel General Región noreste. Base dic 2016. Mensual.",
+        "de la región Noreste (NEA)",
+        "Chaco, Corrientes, Formosa y Misiones",
+        [
+            "nea",
+            "noreste",
+            "nordeste",
+            "misiones",
+            "chaco",
+            "formosa",
+            "en corrientes",
+            "de corrientes",
+            "inflacion corrientes",
+            "ipc corrientes",
+        ],
+    ),
+    "ipc_noroeste": _ipc_region(
+        "148.3_INIVELNOA_DICI_M_21",
+        "IPC. Nivel General Región noroeste. Base dic 2016. Mensual.",
+        "de la región Noroeste (NOA)",
+        "Catamarca, Jujuy, La Rioja, Salta, Santiago del Estero y Tucumán",
+        [
+            "noa",
+            "noroeste",
+            "catamarca",
+            "jujuy",
+            "la rioja",
+            "santiago del estero",
+            "tucuman",
+            "en salta",
+            "de salta",
+            "inflacion salta",
+            "ipc salta",
+        ],
+    ),
+    "ipc_cuyo": _ipc_region(
+        "148.3_INIVELUYO_DICI_M_22",
+        "IPC. Nivel General Cuyo. Base dic 2016. Mensual.",
+        "de la región Cuyo",
+        "Mendoza, San Juan y San Luis",
+        ["cuyo", "mendoza", "san juan", "san luis"],
+    ),
+    "ipc_patagonia": _ipc_region(
+        "148.3_INIVELNIA_DICI_M_27",
+        "IPC. Nivel General Patagonia. Base dic 2016. Mensual.",
+        "de la región Patagonia",
+        "Chubut, Neuquén, Río Negro, Santa Cruz y Tierra del Fuego",
+        ["patagonia", "chubut", "neuquen", "rio negro", "santa cruz", "tierra del fuego"],
+    ),
     "tipo_cambio": {
         "ids": ["92.2_TIPO_CAMBIION_0_0_21_24"],
         "description": (
@@ -79,7 +213,10 @@ SERIES_CATALOG: dict[str, dict] = {
             "148.3_INIVELNOA_DICI_M_21",
             "145.3_INGCUYUYO_DICI_M_11",
         ],
-        "description": "IPC Regional: Nacional, GBA, NOA, y Cuyo (mensual)",
+        "description": (
+            "IPC Regional: Nacional, GBA, NOA, y Cuyo (mensual). Las seis regiones del INDEC "
+            "(también Pampeana, Noreste y Patagonia) se buscan por su nombre: «IPC Noreste»."
+        ),
         "expected_description": {
             "148.3_INIVELNAL_DICI_M_26": "IPC. Nivel General Nacional. Base dic 2016. Mensual.",
             "103.1_I2N_2016_M_19": "IPC-GBA. Nivel General. Base abr 2016. Mensual",
@@ -328,13 +465,22 @@ def _stem(word: str) -> str:
     return word
 
 
+def _words(text: str) -> list[str]:
+    return _WORD_RE.findall(_strip_accents(text.lower()))
+
+
 def _tokens(text: str) -> list[str]:
-    return [_stem(w) for w in _WORD_RE.findall(_strip_accents(text.lower()))]
+    return [_stem(w) for w in _words(text)]
 
 
-def _contains_phrase(words: list[str], phrase: tuple[str, ...]) -> bool:
+def _positions(words: list[str], phrase: tuple[str, ...]) -> set[int]:
+    """Las posiciones de ``words`` que ocupa ``phrase``, en todas sus apariciones."""
     n = len(phrase)
-    return n > 0 and any(tuple(words[i : i + n]) == phrase for i in range(len(words) - n + 1))
+    found: set[int] = set()
+    for i in range(len(words) - n + 1):
+        if n and tuple(words[i : i + n]) == phrase:
+            found.update(range(i, i + n))
+    return found
 
 
 # Palabras clave tokenizadas una vez, en el orden del catálogo.
@@ -344,22 +490,61 @@ _CATALOG_NORMALIZED: list[tuple[tuple[str, ...], str, dict]] = [
     for kw in entry["keywords"]
 ]
 
+# Cómo se nombra al IPC junto a un lugar (``places``). Sin «costo de vida»,
+# que también es la canasta básica.
+_IPC_WORDS: list[tuple[str, ...]] = [
+    tuple(_tokens(w)) for w in ("inflacion", "ipc", "precios", "indice de precios")
+]
+_PLACES_NORMALIZED: list[tuple[tuple[str, ...], str]] = [
+    (tuple(_words(place)), key)
+    for key, entry in SERIES_CATALOG.items()
+    for place in entry.get("places", [])
+]
+# Un lugar pegado a la palabra del IPC que en realidad es un verbo.
+_NOT_PLACES: list[tuple[str, ...]] = [
+    tuple(_words(text)) for text in ("la inflacion salta", "el ipc salta")
+]
+# Las frases de una entrada ``generic``: en otra entrada no la cubren.
+_GENERIC_PHRASES: set[tuple[str, ...]] = {
+    phrase for phrase, _key, entry in _CATALOG_NORMALIZED if entry.get("generic")
+}
+
 
 def match_catalog(query: str) -> list[dict]:
     """Las entradas del catálogo con alguna palabra clave entera en el texto.
 
     Sin acentos y por palabra completa: «inflación» encuentra la inflación,
     pero «emisiones» ya no encuentra la base monetaria ni «cambio climático»
-    el tipo de cambio. En el orden del catálogo, sin repetir.
+    el tipo de cambio. Una entrada con ``places`` coincide con una palabra del
+    IPC y uno de sus lugares en cualquier parte del texto, y la ``generic``
+    se descarta si las palabras con que coincidió están todas en frases de
+    otras entradas que no son suyas: «inflación mayorista» es el IPIM y no
+    también el IPC nacional, y «costo de vida» es los dos, el IPC y la
+    canasta. En el orden del catálogo, sin repetir.
     """
-    words = _tokens(query)
-    found: list[dict] = []
-    seen: set[str] = set()
-    for phrase, key, entry in _CATALOG_NORMALIZED:
-        if key not in seen and _contains_phrase(words, phrase):
-            seen.add(key)
-            found.append(entry)
-    return found
+    raw = _words(query)
+    words = [_stem(w) for w in raw]
+    covered: dict[str, set[int]] = {}
+    # Lo que cada entrada cubre con frases que la genérica no tiene: «costo de
+    # vida» es del IPC y de la canasta, y no descarta al IPC.
+    specific: dict[str, set[int]] = {}
+    for phrase, key, _entry in _CATALOG_NORMALIZED:
+        if at := _positions(words, phrase):
+            covered.setdefault(key, set()).update(at)
+            if phrase not in _GENERIC_PHRASES:
+                specific.setdefault(key, set()).update(at)
+    ipc_at = set().union(*(_positions(words, phrase) for phrase in _IPC_WORDS))
+    if ipc_at:
+        not_places = set().union(*(_positions(raw, phrase) for phrase in _NOT_PLACES))
+        for place, key in _PLACES_NORMALIZED:
+            if (at := _positions(raw, place)) and not at <= not_places:
+                covered.setdefault(key, set()).update(at | ipc_at)
+                specific.setdefault(key, set()).update(at | ipc_at)
+    for key in [k for k in covered if SERIES_CATALOG[k].get("generic")]:
+        others = set().union(*(at for k, at in specific.items() if k != key))
+        if covered[key] <= others:
+            del covered[key]
+    return [entry for key, entry in SERIES_CATALOG.items() if key in covered]
 
 
 def find_catalog_match(query: str) -> dict | None:
