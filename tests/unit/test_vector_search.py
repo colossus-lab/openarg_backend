@@ -359,11 +359,14 @@ def _scripted_session(
     extversion: str = "0.8.1",
     rows: list | None = None,
     exact_rows: list | None = None,
+    seqscan: str = "on",
+    walk_error: Exception | None = None,
 ) -> AsyncMock:
     """Session double that answers by statement.
 
-    The version lookup gets ``extversion``; the HNSW search (the one with
-    ``LIMIT :candidates``) gets ``rows``; the exact search (grouped over every
+    The version lookup gets ``extversion``; reading ``enable_seqscan`` gets
+    ``seqscan``; the HNSW search (the one with ``LIMIT :candidates``) gets
+    ``rows``, or raises ``walk_error``; the exact search (grouped over every
     chunk) gets ``exact_rows``.
     """
     session = AsyncMock()
@@ -373,7 +376,11 @@ def _scripted_session(
         result = MagicMock()
         if "pg_extension" in sql:
             result.scalar.return_value = extversion
+        elif "current_setting('enable_seqscan')" in sql:
+            result.scalar.return_value = seqscan
         elif "LIMIT :candidates" in sql:
+            if walk_error is not None:
+                raise walk_error
             result.fetchall.return_value = rows or []
         elif "GROUP BY dc.dataset_id" in sql:
             result.fetchall.return_value = exact_rows or []
@@ -399,6 +406,27 @@ def _hnsw_sql(session: AsyncMock) -> tuple[str, dict]:
 
 def _exact_sqls(session: AsyncMock) -> list[tuple[str, dict]]:
     return [(s, p) for s, p in _statements(session) if "GROUP BY dc.dataset_id" in s]
+
+
+def _kind(sql: str) -> str:
+    """A short name for each statement the adapter sends, to check their order."""
+    if "current_setting('enable_seqscan')" in sql:
+        return "lee seqscan"
+    if "set_config('enable_seqscan', 'off', true)" in sql:
+        return "seqscan off"
+    if "set_config('enable_seqscan', :before, true)" in sql:
+        return "seqscan como estaba"
+    if "LIMIT :candidates" in sql:
+        return "recorrido"
+    if "GROUP BY dc.dataset_id" in sql:
+        return "exacta"
+    if "hnsw.ef_search" in sql:
+        return "ef_search"
+    if "hnsw.iterative_scan" in sql:
+        return "iterative"
+    if "pg_extension" in sql:
+        return "versión"
+    return sql
 
 
 # Enough strong hits for any limit used below: the index's answer is trusted.
@@ -430,28 +458,87 @@ class TestSearchDatasetsAnn:
         assert params["limit"] == 20
         assert _exact_sqls(session) == []
 
-    @pytest.mark.parametrize("limit", [5, 16, 20, 40, 500])
-    async def test_ef_search_is_pgvector_ceiling_whatever_the_limit(self, limit):
-        """It was max(200, limit*10): 200 for the MCP (20) and the agent (16).
-        At 200, prod's "salario mínimo vital y móvil" topped at 0.517 with five
-        Córdoba municipalities while the exact search puts SMVM first (0.746)."""
+    @pytest.mark.parametrize("limit", [5, 16, 20, 40, 100, 500])
+    async def test_ef_search_is_300_and_candidates_1000_whatever_the_limit(self, limit):
+        """#131 set 1000, and at 1000 the planner left the index for a parallel
+        seq scan (past ~400 on staging, ~600 on prod): brute force, 2.2 s
+        median with 8 at once on staging. The review asked for 300 or less.
+        The 1000 candidates stay: the iterative scan walks past ef_search to
+        get them, and the MCP asks for up to 100 datasets."""
         session = _scripted_session(rows=[_row(i, 0.7) for i in range(limit)])
         await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=limit)
 
         stmts = _statements(session)
-        assert [p["ef"] for s, p in stmts if "hnsw.ef_search" in s] == ["1000"]
+        assert [p["ef"] for s, p in stmts if "hnsw.ef_search" in s] == ["300"]
         assert _hnsw_sql(session)[1]["candidates"] == 1000
         # Set inside the transaction only, and before the search runs.
         first_set = next(s for s, _ in stmts if "set_config" in s)
         assert "set_config('hnsw.ef_search', :ef, true)" in first_set
 
+    def test_ef_search_stays_under_the_planner_threshold(self):
+        """Even with the walk forced onto the index, a frontier of 1000 is the
+        cost #131 paid for nothing: the recall measured the same at 40."""
+        assert PgVectorSearchAdapter._ANN_EF_SEARCH <= 300
+        assert PgVectorSearchAdapter._ANN_CANDIDATES > PgVectorSearchAdapter._ANN_EF_SEARCH
+
     async def test_iterative_scan_is_on_without_a_portal_too(self):
+        """Without a portal it is what brings candidates 301 to 1000."""
         session = _scripted_session(rows=_GOOD)
         await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
 
         sqls = [s for s, _ in _statements(session)]
         assert any("'hnsw.iterative_scan', 'relaxed_order', true" in s for s in sqls)
         assert ":portal" not in _hnsw_sql(session)[0]
+
+    async def test_the_walk_runs_with_seqscan_off_and_puts_it_back(self):
+        """The planner must not trade the walk for a scan of every chunk
+        (H091), and the rest of the transaction must not inherit that."""
+        session = _scripted_session(rows=_GOOD)
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        kinds = [_kind(s) for s, _ in _statements(session)]
+        assert kinds == [
+            "ef_search",
+            "versión",
+            "iterative",
+            "lee seqscan",
+            "seqscan off",
+            "recorrido",
+            "seqscan como estaba",
+        ]
+        restore = [p for s, p in _statements(session) if _kind(s) == "seqscan como estaba"]
+        assert restore == [{"before": "on"}]
+
+    async def test_seqscan_goes_back_to_what_it_was_not_to_on(self):
+        """A caller that had turned it off for its own transaction keeps it off."""
+        session = _scripted_session(rows=_GOOD, seqscan="off")
+        await PgVectorSearchAdapter(session).search_datasets_hnsw([0.1] * 8, limit=20)
+
+        restore = [p for s, p in _statements(session) if _kind(s) == "seqscan como estaba"]
+        assert restore == [{"before": "off"}]
+
+    async def test_the_exact_search_runs_with_seqscan_back(self):
+        """The exact search reads every chunk: it has to run after the
+        setting is back, or the planner would look for any other way."""
+        trapped = [_row(100 + i, 0.479 - i * 0.001) for i in range(20)]
+        session = _scripted_session(rows=trapped, exact_rows=_GOOD[:20])
+        await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        kinds = [_kind(s) for s, _ in _statements(session)]
+        assert kinds[-3:] == ["recorrido", "seqscan como estaba", "exacta"]
+
+    async def test_a_failed_walk_leaves_the_setting_to_the_rollback(self):
+        """After a failed statement the transaction only accepts a rollback,
+        and the rollback undoes the local setting: restoring it there would
+        hide the real error behind "current transaction is aborted"."""
+        session = _scripted_session(walk_error=RuntimeError("statement timeout"))
+        with pytest.raises(RuntimeError, match="statement timeout"):
+            await PgVectorSearchAdapter(session).search_datasets_ann([0.1] * 8, limit=20)
+
+        kinds = [_kind(s) for s, _ in _statements(session)]
+        assert kinds[-2:] == ["seqscan off", "recorrido"]
+        assert "seqscan como estaba" not in kinds
+        assert "exacta" not in kinds
 
     async def test_portal_filter_goes_inside_the_index_scan(self):
         """Filtering after fetching N neighbours returned nothing for small
@@ -467,6 +554,10 @@ class TestSearchDatasetsAnn:
         nn_cte = sql.split("), best AS (")[0]
         assert "WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)" in nn_cte
         assert params["portal"] == "caba"
+        # Same rule as without a portal: the index or the btree on
+        # dataset_id, never a scan of every chunk.
+        kinds = [_kind(s) for s, _ in stmts]
+        assert kinds[-3:] == ["seqscan off", "recorrido", "seqscan como estaba"]
 
     async def test_weak_best_score_runs_the_exact_search_and_serves_it(self):
         """A trapped walk comes back full, with the wrong neighbours: staging's
@@ -510,6 +601,7 @@ class TestSearchDatasetsAnn:
         assert "ORDER BY dc.embedding <=>" not in flat
         assert "WHERE 1 -" not in flat
         assert not any("enable_indexscan" in s for s, _ in _statements(session))
+        assert not any("enable_seqscan" in s for s, _ in _statements(session))
         assert "WHERE dc.dataset_id IN (SELECT id FROM datasets WHERE portal = :portal)" in flat
         assert (params["portal"], params["limit"], params["min_sim"]) == ("caba", 7, 0.4)
 
@@ -520,7 +612,9 @@ class TestSearchDatasetsAnn:
         )
 
         stmts = _statements(session)
-        assert not any("iterative_scan" in s or "ef_search" in s for s, _ in stmts)
+        assert not any(
+            "iterative_scan" in s or "ef_search" in s or "enable_seqscan" in s for s, _ in stmts
+        )
         [(sql, params)] = _exact_sqls(session)
         assert params["portal"] == "caba"
         assert params["limit"] == 7

@@ -4,14 +4,21 @@ El índice cambia de un día para otro: el SMVM aparecía primero el 03-oct y el
 04-oct ya no (los chunks de ese dataset se habían re-embebido esa tarde), y
 nadie se enteró hasta que una auditoría externa lo buscó a mano. Con
 ``ef_search=200`` el recall@10 contra la exacta llegó a 0 en varias consultas.
-``search_datasets_ann`` ahora recorre con 1000 y cae a la exacta cuando duda,
-pero eso tapa una degradación del índice en vez de avisarla.
+``search_datasets_ann`` recorre el índice y cae a la exacta cuando duda, pero
+eso tapa una degradación del índice en vez de avisarla.
 
 Esto la mide todas las noches: unas 20 consultas fijas, el top 10 del índice
 solo (``search_datasets_hnsw``) contra el de la exacta, y un aviso si el
 promedio baja de 0,95.
 
-Dos detalles que deciden si el canario mide algo:
+Tres detalles que deciden si el canario mide algo:
+
+- **Que el índice sea el índice.** Con ``ef_search=1000`` el planificador
+  dejaba el HNSW y recorría la tabla entera, y el canario comparaba la exacta
+  contra la exacta: 1,0 siempre (revisión del 05-oct, H208). Ahora
+  ``search_datasets_hnsw`` recorre el grafo con el seq scan apagado, así que
+  lo que se mide es el grafo. Con el índice forzado, esas 20 consultas daban
+  0,915 el 05-oct: el aviso sale hasta que se reconstruya el índice.
 
 - **Embeddings de consulta reales.** Cohere embebe la consulta como
   ``search_query`` y los documentos como ``search_document``. Con el vector de

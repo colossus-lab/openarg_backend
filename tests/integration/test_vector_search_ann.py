@@ -8,12 +8,16 @@ ve con un doble en memoria:
 
 - `hnsw.ef_search` (40 por defecto) es el techo de filas de un recorrido del
   índice: sin subirlo, `LIMIT 200` trae 40 chunks.
-- Con filtro de portal, `hnsw.iterative_scan` sigue recorriendo hasta juntar
-  chunks de ese portal. Filtrar después de traer N vecinos dejaba sin
-  resultados a los portales chicos.
+- `hnsw.iterative_scan` sigue recorriendo cuando la primera pasada no
+  alcanza: trae los candidatos que pasan de `ef_search` y, con filtro de
+  portal, los chunks de ese portal. Filtrar después de traer N vecinos
+  dejaba sin resultados a los portales chicos.
 
-Para que el planificador use el índice con tablas chicas se apaga el
-recorrido secuencial, como pasa solo con los 76k chunks de staging.
+Y un tercero que decide si hay recorrido: con `ef_search=1000` el planificador
+cambiaba el índice por un seq scan de toda la tabla en staging y en prod
+(revisión del 05-oct, H091). El adaptador apaga el seq scan sólo para su
+recorrido; acá se prueba con el plan de su propia consulta, sobre una tabla
+chica que el planificador, solo, recorrería entera.
 """
 
 from __future__ import annotations
@@ -150,12 +154,49 @@ async def session(catalog):
     engine = create_async_engine(catalog["url"])
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
-        # 300 rows is a table the planner would scan; on staging's 76k chunks
-        # it picks the index on its own.
+        # 300 rows is a table the planner would scan. The adapter turns the
+        # scan off for its own walk; this is for the queries the tests write.
         await s.execute(text("SELECT set_config('enable_seqscan', 'off', true)"))
         yield s
         await s.rollback()
     await engine.dispose()
+
+
+@pytest.fixture
+async def natural_session(catalog):
+    """A session with the planner as it comes: on 300 rows it scans the table."""
+    engine = create_async_engine(catalog["url"])
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        yield s
+        await s.rollback()
+    await engine.dispose()
+
+
+class _ExplainTheWalk:
+    """Session stand-in: EXPLAINs the index walk right before running it, in
+    the same transaction and with the settings the adapter left for it."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self.walks: list[tuple[str, dict]] = []
+        self.plans: list[str] = []
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        if "LIMIT :candidates" in sql:
+            self.walks.append((sql, dict(params or {})))
+            self.plans.append(await _explain(self._session, sql, params))
+        return await self._session.execute(statement, params)
+
+
+async def _explain(session: AsyncSession, sql: str, params: dict | None) -> str:
+    rows = await session.execute(text("EXPLAIN " + sql), params)
+    return "\n".join(r[0] for r in rows)
+
+
+async def _seqscan(session: AsyncSession) -> str:
+    return (await session.execute(text("SELECT current_setting('enable_seqscan')"))).scalar()
 
 
 def _query(dims: int) -> list[float]:
@@ -177,6 +218,93 @@ async def test_query_plan_uses_the_hnsw_index(catalog, session) -> None:
         )
     )
     assert "ix_dataset_chunks_embedding" in plan
+
+
+async def test_the_adapters_walk_uses_the_index_where_the_planner_would_scan(
+    catalog, natural_session
+) -> None:
+    """The adapter's own statement, with its own ef_search and iterative scan,
+    planned in its own transaction: the HNSW index, not a scan of every chunk.
+
+    On 2026-10-05 the unit tests checked the parameters and this file checked
+    the plan of another query at ef_search=40, while the real one, at 1000,
+    was a parallel seq scan on staging and prod (H091)."""
+    proxy = _ExplainTheWalk(natural_session)
+    hits = await PgVectorSearchAdapter(proxy).search_datasets_hnsw(
+        _query(catalog["dims"]), limit=60
+    )
+
+    [plan] = proxy.plans
+    assert "ix_dataset_chunks_embedding" in plan, plan
+    assert "Seq Scan on dataset_chunks" not in plan, plan
+    assert len(hits) == 60
+    assert proxy.walks[0][1]["candidates"] == PgVectorSearchAdapter._ANN_CANDIDATES
+
+
+async def test_control_left_alone_the_planner_scans_this_table(catalog, natural_session) -> None:
+    """Control for the test above: the same statement and settings, without
+    the adapter turning the scan off, is a seq scan on these 305 chunks. If
+    it were not, the test above would pass without the adapter's help."""
+    proxy = _ExplainTheWalk(natural_session)
+    await PgVectorSearchAdapter(proxy).search_datasets_hnsw(_query(catalog["dims"]), limit=60)
+    [(sql, params)] = proxy.walks
+
+    # ef_search and the iterative scan are still set (they last for the
+    # transaction); enable_seqscan is back on.
+    assert await _seqscan(natural_session) == "on"
+    natural = await _explain(natural_session, sql, params)
+    assert "Seq Scan on dataset_chunks" in natural, natural
+
+
+async def test_with_a_portal_the_walk_does_not_scan_every_chunk_either(
+    catalog, natural_session
+) -> None:
+    """With a portal the planner still chooses between the index and the btree
+    on dataset_id; what it does not get is the scan of the whole table."""
+    proxy = _ExplainTheWalk(natural_session)
+    hits = await PgVectorSearchAdapter(proxy).search_datasets_hnsw(
+        _query(catalog["dims"]), limit=10, portal_filter=catalog["small"]
+    )
+
+    [plan] = proxy.plans
+    assert "Seq Scan on dataset_chunks" not in plan, plan
+    assert {h.dataset_id for h in hits} == set(catalog["small_ids"])
+
+
+async def test_the_walk_leaves_seqscan_as_it_found_it(catalog, session, natural_session) -> None:
+    """Back to what it was, not to "on": the agent shares one transaction
+    across a whole turn, and a caller that turned it off keeps it off."""
+    await PgVectorSearchAdapter(session).search_datasets_hnsw(_query(catalog["dims"]), limit=10)
+    assert await _seqscan(session) == "off"
+
+    await PgVectorSearchAdapter(natural_session).search_datasets_hnsw(
+        _query(catalog["dims"]), limit=10
+    )
+    assert await _seqscan(natural_session) == "on"
+
+
+async def test_candidates_past_ef_search_come_from_the_iterative_scan(
+    catalog, natural_session
+) -> None:
+    """ef_search is 300 and the walk asks for 1000 chunks: past the frontier
+    the iterative scan keeps walking. Without it one scan stops at 300 chunks,
+    all of the big portal, and the small portal's 3 datasets never show up."""
+    version = (
+        await natural_session.execute(
+            text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+        )
+    ).scalar()
+    if tuple(int(p) for p in re.findall(r"\d+", str(version))) < (0, 8):
+        pytest.skip(f"pgvector {version}: sin recorrido iterativo")
+    wanted = set(catalog["big_ids"]) | set(catalog["small_ids"])
+    # Precondition: more datasets than one frontier holds.
+    assert len(wanted) > PgVectorSearchAdapter._ANN_EF_SEARCH
+
+    hits = await PgVectorSearchAdapter(natural_session).search_datasets_hnsw(
+        _query(catalog["dims"]), limit=400, min_similarity=0.40
+    )
+
+    assert wanted <= {h.dataset_id for h in hits}
 
 
 async def test_returns_more_than_the_default_ef_search(catalog, session) -> None:
